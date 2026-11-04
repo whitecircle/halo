@@ -1,16 +1,18 @@
-# vLLM 0.26.0 (CUDA 13) server image for RL rollouts and NCCL weight sync (`make build-vllm`). Over
+# vLLM 0.32.0 (CUDA 13) server image for RL rollouts and NCCL weight sync (`make build-vllm`). Over
 # upstream vllm/vllm-openai it adds the phased weight-sync protocol the trainer drives, the parser
 # plugins, R3 routed-experts capture (`--enable-return-routed-experts`, needs `--moe-backend
 # triton`), the NCCL wheel at uv.lock's exact pin so both ends load one runtime, and the shared EFA
 # userspace. Serving flags and supported families: agent-docs/infrastructure/rollout-servers.md
+# transformers and tokenizers stay at the base image's own (transformers==5.19.0), inside the range vLLM
+# declares, which the build asserts.
 
-ARG VLLM_VERSION=0.26.0
+ARG VLLM_VERSION=0.32.0
 FROM vllm/vllm-openai:v${VLLM_VERSION}
 
 # Static label metadata; the per-build version, date and revision labels are set last.
 LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo vLLM Server"
-LABEL org.opencontainers.image.description="vLLM 0.26.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
+LABEL org.opencontainers.image.description="vLLM 0.32.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
 LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
@@ -18,11 +20,10 @@ LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
 # The Halo-authored patches/plugins under /opt ship under the Halo License.
 COPY LICENSE APACHE-2.0.txt /opt/halo-license/
 
-COPY docker/vllm/patches/patch_vllm_disable_gptoss.sh /tmp/patch_vllm_disable_gptoss.sh
-RUN chmod +x /tmp/patch_vllm_disable_gptoss.sh \
-    && VLLM_PATH=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
-    && /tmp/patch_vllm_disable_gptoss.sh "$VLLM_PATH" \
-    && rm /tmp/patch_vllm_disable_gptoss.sh
+# Source edits to the installed vLLM (docker/vllm/patches/patch_vllm_source.py names each). Every edit
+# asserts its pre- and post-image, failing the build on an upstream change; it stays for `--verify`.
+COPY docker/engine_source_patch.py docker/vllm/patches/patch_vllm_source.py /opt/halo/
+RUN python3 /opt/halo/patch_vllm_source.py
 
 COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
 
@@ -47,116 +48,58 @@ RUN test -f "$VLLM_NCCL_SO_PATH"
 COPY docker/efa/install_efa_userspace.sh /tmp/install_efa_userspace.sh
 RUN /tmp/install_efa_userspace.sh && rm /tmp/install_efa_userspace.sh
 
-# transformers is held on the 5.14 line, one release below the training image: vLLM's Gemma 4 reads
-# that flat config schema.
-RUN pip install --no-cache-dir "transformers>=5.14.1,<5.15.0"
-
-# Pickle shim: the trainer sends ncclUniqueId as src.distributed.nccl._nccl_wrapper's type, which
-# vLLM must unpickle as its own.
-RUN mkdir -p /opt/nccl_compat/src/distributed/nccl \
-    && touch /opt/nccl_compat/src/__init__.py \
-    && touch /opt/nccl_compat/src/distributed/__init__.py \
-    && touch /opt/nccl_compat/src/distributed/nccl/__init__.py \
+# Pickle shim: the trainer sends ncclUniqueId as halo.weight_sync.transport.nccl_library's type,
+# which vLLM must unpickle as its own.
+RUN mkdir -p /opt/nccl_compat/halo/weight_sync/transport \
+    && touch /opt/nccl_compat/halo/__init__.py \
+    && touch /opt/nccl_compat/halo/weight_sync/__init__.py \
+    && touch /opt/nccl_compat/halo/weight_sync/transport/__init__.py \
     && echo 'from vllm.distributed.device_communicators.pynccl_wrapper import *' \
-       > /opt/nccl_compat/src/distributed/nccl/_nccl_wrapper.py
-# All three patches are required: vLLM's layerwise reload puts each layer's tensors on the meta
-# device, so layers that write weights with a direct `param.copy_()` revert on every /update_weights;
-# the re-init patch destroys the NCCL communicator the engine would otherwise leak per trainer
-# connection; and under speculative decoding the drafter's CUDA graph overwrites the hidden states
-# prompt log-probs are read from. `sitecustomize` applies them in the API server and every
-# engine-core worker.
+       > /opt/nccl_compat/halo/weight_sync/transport/nccl_library.py
+# Every patch is required: vLLM's layerwise reload puts each layer's tensors on the meta device, so
+# layers that write weights with a direct `param.copy_()` revert on every /update_weights; the re-init
+# patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects
+# without a clean shutdown; the two thinking-budget patches let the gpt-oss parser force its whole
+# move into the final channel when an analysis channel overruns its budget; and the split top-p guard
+# keeps a budget-forced token from being masked with the rest of its row. The identity patch names them on
+# /server_info, where the trainer refuses a server without them. `sitecustomize` applies them in the API
+# server and every engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
-     docker/vllm/patches/vllm_spec_decode_prompt_logprobs_patch.py \
+     docker/vllm/patches/vllm_reasoning_forced_end_patch.py \
+     docker/vllm/patches/vllm_thinking_budget_completion_patch.py \
+     docker/vllm/patches/vllm_topp_split_guard_patch.py \
+     docker/vllm/patches/vllm_image_identity_patch.py \
      docker/vllm/patches/sitecustomize.py /opt/vllm_patches/
 # No `:${PYTHONPATH:-}` tail: it is unset in the base image, so the suffix would render an empty
 # sys.path entry (the server's CWD) that a stray module could import-shadow.
 ENV PYTHONPATH="/opt/vllm_patches:/opt/nccl_compat"
+# Model Runner V2, pinned: it enforces thinking budgets incrementally and is the only runner R3 capture
+# runs on, and pinned it fails at startup on a feature it lacks instead of falling back to the V1 runner.
+ENV VLLM_USE_V2_MODEL_RUNNER=1
+# Off for RL on a hand-run server too, not only under compose: the GLM parsers' default strict level would put a
+# structural-tag grammar over every tool-bearing request, so the served distribution is no longer the policy's.
+ENV VLLM_ENFORCE_STRICT_TOOL_CALLING=0
 
-RUN python3 -c "import vllm; print(f'vLLM: {vllm.__version__}')" \
-    && python3 -c "from packaging.version import Version; import transformers; v=transformers.__version__; assert Version('5.14.1') <= Version(v) < Version('5.15'), f'transformers {v} is off the pinned 5.14 line — the config-schema parity install did not take'; print(f'Transformers: {v}')" \
-    && python3 /tmp/nccl_pin.py /tmp/uv.lock --verify \
-    && rm /tmp/uv.lock /tmp/nccl_pin.py \
-    && python3 -c "from src.distributed.nccl._nccl_wrapper import ncclUniqueId; from vllm.distributed.device_communicators.pynccl_wrapper import ncclUniqueId as v; assert ncclUniqueId is v; print('ncclUniqueId pickle compat: OK')"
+# Again after the EFA userspace install, which rewrites the loader path.
+RUN python3 /tmp/nccl_pin.py /tmp/uv.lock --verify && rm /tmp/uv.lock /tmp/nccl_pin.py
 
 # Verify configuration compatibility for each supported model family: every family the weight sync
 # admits owes a fixture. Fixtures: docker/vllm/parity/generate.py.
 COPY docker/vllm/parity /tmp/parity
 RUN python3 /tmp/parity/check.py /tmp/parity && rm -rf /tmp/parity
 
-RUN python3 -c "\
-import vllm_layerwise_reload_patch as p; \
-from vllm.model_executor.model_loader.reload import layerwise; \
-assert p._APPLIED, 'sitecustomize hook did not fire on layerwise import'; \
-assert layerwise.restore_layer_on_meta.__module__ == p.__name__, 'restore_layer_on_meta not patched'; \
-assert layerwise.initialize_online_processing.__module__ == p.__name__, 'initialize_online_processing not patched'; \
-print(f'layerwise reload patch: OK (skips {sorted(p.SKIP_LAYER_NAMES)})')"
+# The stack pins, the runtime patches and the weight-sync contracts (docker/vllm/verify_image.py names
+# why each matters): an upstream change fails the build instead of hanging a group or reverting a sync.
+COPY docker/vllm/verify_image.py /tmp/verify_image.py
+RUN python3 /tmp/verify_image.py && rm /tmp/verify_image.py
 
-# Verify that the reload skip list covers each direct-copy layer, by MRO, in this vLLM version:
-# an upstream rename fails the build, not the run.
-RUN python3 -c "\
-import vllm_layerwise_reload_patch as p; \
-from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts; \
-from vllm.model_executor.models.gpt_oss import OAIAttention; \
-from vllm.model_executor.models.gemma4 import Gemma4Router; \
-covered = lambda cls: any(c.__name__ in p.SKIP_LAYER_NAMES for c in cls.__mro__); \
-assert covered(RoutedExperts), 'expert-weight owner RoutedExperts not covered by SKIP_LAYER_NAMES'; \
-assert covered(OAIAttention), 'sinks owner OAIAttention not covered by SKIP_LAYER_NAMES'; \
-assert covered(Gemma4Router), 'Gemma4Router (scale param + root_size buffer) not covered by SKIP_LAYER_NAMES'; \
-print('layerwise skip-list coverage: OK (RoutedExperts + OAIAttention + Gemma4Router)')"
-
-# Verify that reinitialization closes the previous NCCL communicator: unpatched, every trainer
-# connection strands a live one on each engine-core worker until ncclCommInitRank fails.
-RUN python3 -c "\
-import vllm_weight_transfer_reinit_patch as p; \
-from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine as E; \
-assert p._APPLIED, 'sitecustomize hook did not fire on nccl_engine import'; \
-assert getattr(E.init_transfer_engine, p.PATCH_MARKER, False), 'init_transfer_engine not patched'; \
-assert getattr(E.shutdown, p.PATCH_MARKER, False), 'shutdown not patched'; \
-print('weight-transfer re-init patch: OK (communicator destroyed on re-init and on shutdown)')"
-
-# Verify that the spec-decode prompt-log-prob patch took: unpatched, the drafter's CUDA graph
-# overwrites the target hidden states prompt log-probs are read from, and every prompt position comes
-# back garbage. The patch reads the runner's per-request table and the pending state's fields by name.
-RUN python3 -c "\
-import inspect; \
-import vllm_spec_decode_prompt_logprobs_patch as p; \
-from vllm.v1.worker.gpu_model_runner import ExecuteModelState, GPUModelRunner as R; \
-assert p._APPLIED, 'sitecustomize hook did not fire on gpu_model_runner import'; \
-assert getattr(R.sample_tokens, p.PATCH_MARKER, False), 'sample_tokens not patched'; \
-missing = {'scheduler_output', 'hidden_states'} - set(ExecuteModelState._fields); \
-assert not missing, f'ExecuteModelState lost {missing}'; \
-assert 'self.num_prompt_logprobs' in inspect.getsource(R.__init__), 'GPUModelRunner lost num_prompt_logprobs'; \
-print('spec-decode prompt-logprobs patch: OK (sample_tokens wrapped, runner fields present)')"
-
-# Verify both parser plugins during the build: they import vLLM, so no test suite covers them.
-COPY docker/vllm/plugins/verify_gptoss_plugins.py /tmp/verify_gptoss_plugins.py
-RUN python3 /tmp/verify_gptoss_plugins.py /opt && rm /tmp/verify_gptoss_plugins.py
-
-# Verify the engine arguments this deployment requires; a rename fails the build, not the run.
-# (Dataclass fields, since `vllm serve --help` needs a GPU to infer the platform.)
-RUN python3 -c "\
-import dataclasses; \
-from vllm.engine.arg_utils import EngineArgs; \
-names = {f.name for f in dataclasses.fields(EngineArgs)}; \
-missing = {'weight_transfer_config', 'enable_return_routed_experts'} - names; \
-assert not missing, f'EngineArgs lost: {missing}'; \
-from vllm.config.kernel import KernelConfig; \
-knames = {f.name for f in dataclasses.fields(KernelConfig)}; \
-assert 'moe_backend' in knames, 'KernelConfig.moe_backend gone'; \
-print('serve flags: OK')"
-
-# The weight-sync client pauses with `mode=keep` (in-flight requests survive the sync); a renamed
-# or narrowed parameter fails the build, not the run.
-RUN python3 -c "\
-import inspect, typing; \
-from vllm.entrypoints.serve.dev.rlhf.api_router import pause_generation; \
-p = inspect.signature(pause_generation).parameters; \
-assert 'mode' in p, '/pause lost its mode query parameter'; \
-ann = p['mode'].annotation; \
-inner = typing.get_args(ann)[0] if typing.get_origin(ann) is typing.Annotated else ann; \
-assert 'keep' in typing.get_args(inner), f'/pause mode no longer accepts keep: {inner}'; \
-print('/pause mode=keep: OK')"
+# The split top-p guard and both parser plugins with the budget they drive, on the Triton interpreter
+# (no GPU here); they import vLLM, so no test suite covers them.
+COPY docker/vllm/patches/verify_topp_split_guard.py docker/vllm/plugins/verify_gptoss_plugins.py /tmp/
+RUN CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 /tmp/verify_topp_split_guard.py \
+    && CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 /tmp/verify_gptoss_plugins.py /opt \
+    && rm /tmp/verify_topp_split_guard.py /tmp/verify_gptoss_plugins.py
 
 # Dev mode exposes the /pause -> /resume phased endpoints the weight-sync client drives. A
 # deployment must keep those endpoints off any untrusted network.
@@ -170,7 +113,7 @@ CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "tr
 # Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
 # commit above the build steps would re-key their cache. make build-vllm passes all three, and
 # the base's revision label (its engine's commit) is replaced.
-ARG VERSION=1.1.0
+ARG VERSION=1.2.0
 ARG BUILD_DATE
 ARG SOURCE_REVISION=dev
 LABEL org.opencontainers.image.version="${VERSION}"

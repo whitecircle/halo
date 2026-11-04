@@ -20,7 +20,10 @@ import sys
 _PATCHES = {
     "vllm.model_executor.model_loader.reload.layerwise": "vllm_layerwise_reload_patch",
     "vllm.distributed.weight_transfer.nccl_engine": "vllm_weight_transfer_reinit_patch",
-    "vllm.v1.worker.gpu_model_runner": "vllm_spec_decode_prompt_logprobs_patch",
+    "vllm.config.reasoning": "vllm_reasoning_forced_end_patch",
+    "vllm.v1.worker.gpu.sample.thinking_budget": "vllm_thinking_budget_completion_patch",
+    "vllm.v1.sample.ops.topk_topp_triton": "vllm_topp_split_guard_patch",
+    "vllm.envs": "vllm_image_identity_patch",
 }
 
 

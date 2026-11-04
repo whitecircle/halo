@@ -4,9 +4,11 @@ Halo runs inside a Docker image that holds the whole Python stack: PyTorch 2.11
 (CUDA 13), Transformers, TRL, Flash Attention and DeepEP. Don't `pip install`
 Halo on the host; the compiled kernels exist only in the image.
 
-The host needs an NVIDIA driver, Docker with the NVIDIA Container Toolkit, and
-git. The images are x86_64 only, so Grace-based GB200/GB300 hosts (aarch64) need
-an arm64 build, which the Dockerfile does not provide.
+The host needs an NVIDIA driver R580 or newer
+([Docker](../agent-docs/infrastructure/docker.md) ↗), Docker with the NVIDIA
+Container Toolkit, and git. The images are x86_64 only, so Grace-based
+GB200/GB300 hosts (aarch64) need an arm64 build, which the Dockerfile does not
+provide.
 
 ## 1. Clone the repo
 
@@ -44,12 +46,12 @@ Don't skip the retag: this guide, the `make` targets and the compose files use
 the local name. They default to `halo:blackwell`. On Hopper, pass
 `IMAGE=halo:hopper` to `make` and set `TRAIN_IMAGE=halo:hopper` for compose.
 
-- `:blackwell` and `:hopper` track the latest release. `:blackwell-1.1.0` and
-  `:hopper-1.1.0` pin it.
+- `:blackwell` and `:hopper` track the latest release. `:blackwell-1.2.0` and
+  `:hopper-1.2.0` pin it.
 - There is no `latest` tag, so a Hopper host can't pull a Blackwell image by
   mistake.
-- The RL rollout servers are in the same repository, as `:vllm-0.26.0` and
-  `:sglang-0.5.17`, pinned as `:vllm-0.26.0-1.1.0` and `:sglang-0.5.17-1.1.0`.
+- The RL rollout servers are in the same repository, as `:vllm-0.32.0` and
+  `:sglang-0.5.22`, pinned as `:vllm-0.32.0-1.2.0` and `:sglang-0.5.22-1.2.0`.
 
 To build from source instead (no token or registry login):
 
@@ -90,37 +92,24 @@ df -h                             # find the volume with real space
 findmnt -T /mnt -no TARGET,AVAIL  # the filesystem that actually holds /mnt
 ```
 
-Pass that volume to the container through four variables:
-
-- `HF_HOME`: model cache
-- `HF_DATASETS_CACHE`: dataset cache
-- `TMPDIR`: temp files
-- `HALO_DATA_ROOT`: Halo's scratch (S3 dataset cache, profiler output)
-
-The command below assumes the volume is `/mnt`; substitute yours. See
-[Environment variables](environment-variables.md).
+The container takes that volume through four variables: `HF_HOME` (model
+cache), `HF_DATASETS_CACHE` (dataset cache), `TMPDIR` (temp files) and
+`HALO_DATA_ROOT` (Halo's scratch: S3 dataset cache, profiler output).
 
 ## 5. Start a container
 
 From the repo root:
 
 ```bash
+D=/path/to/large-volume   # the volume you checked in step 4
 docker run --rm -it --gpus all \
-  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
-  --cap-add=SYS_PTRACE \
-  --env-file .env \
-  -e HF_HOME=/mnt/hf \
-  -e HF_DATASETS_CACHE=/mnt/hf/datasets \
-  -e TMPDIR=/mnt/tmp \
-  -e HALO_DATA_ROOT=/mnt \
-  -v $(pwd):/workspace \
-  -v /mnt:/mnt \
-  -v ~/.aws:/root/.aws \
-  -w /workspace \
-  halo:blackwell bash
+    --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
+    --cap-add=SYS_PTRACE --env-file .env \
+    -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
+    -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" \
+    -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws -w /workspace \
+    halo:blackwell bash
 ```
-
-About the flags:
 
 - `--ipc=host`, `--shm-size=128g` and the two ulimits are required. NCCL and the
   dataloaders fail without them.
@@ -129,12 +118,10 @@ About the flags:
 - For an RL run, add `--network host` so the trainer can reach a rollout server
   that compose started on the same host.
 - Drop `-v ~/.aws:/root/.aws` unless you read S3 through your AWS profile.
-- The repo is mounted at `/workspace`, so edits on the host show up in the
-  container.
 
 `make train` runs the same command for you, with `--network host` and without
-`--cap-add=SYS_PTRACE`. It mounts the volume named by `HALO_SCRATCH` (default
-`/mnt`):
+`--cap-add=SYS_PTRACE`. It mounts the volume named by `HALO_SCRATCH`, or, when
+that is unset, the local mount other than `/` with the most free space:
 
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8
@@ -162,5 +149,7 @@ for your GPU architecture, or a missing NVIDIA Container Toolkit. See
 [Quickstart](quickstart.md) launches your first run, and
 [Writing a config](configuration.md) shows what to change in it. Image
 internals, the multi-container RL setup and registry publishing are in
-[Docker](../agent-docs/infrastructure/docker.md) ↗ and
-[Installation](../agent-docs/getting-started/installation.md) ↗.
+[Docker](../agent-docs/infrastructure/docker.md) ↗. A build outside the image is
+unsupported; [DeepEP](../agent-docs/infrastructure/deepep.md) ↗ and
+[Flash Attention](../agent-docs/optimization/flash-attention.md) ↗ carry the pins
+it would need.

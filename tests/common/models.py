@@ -1,20 +1,13 @@
-"""Model names, tiny random-init configs and profiling benchmark configs shared by the test suites.
+"""Model names, tiny random-init configs and profiling benchmark configs shared by the test suites. One constant per
+checkpoint, local patched path and tiny config; a test inlining one splits the roster in two."""
 
-One constant per checkpoint a test loads, per local patched-checkpoint path and per tiny config a
-family's branches need. A test that inlines a model name or a tiny config splits the roster in two.
-"""
-
-from src.env import data_path
-
-# Dense Models
+from halo.env import data_path
 
 QWEN3_0_6B = "Qwen/Qwen3-0.6B"
 QWEN3_4B_INSTRUCT = "Qwen/Qwen3-4B-Instruct-2507"
 QWEN3_8B = "Qwen/Qwen3-8B"
 QWEN3_5_2B = "Qwen/Qwen3.5-2B"
 QWEN3_5_9B = "Qwen/Qwen3.5-9B"
-
-# MoE Models
 
 GPT_OSS_20B = "unsloth/gpt-oss-20b-BF16"
 GPT_OSS_120B = "unsloth/gpt-oss-120b-BF16"
@@ -23,6 +16,10 @@ GLM4_FLASH = "zai-org/GLM-4.7-Flash"
 LFM2_24B_A2B = "LiquidAI/LFM2-24B-A2B"
 QWEN3_5_MOE = "Qwen/Qwen3.5-397B-A17B"
 QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
+QWEN3_NEXT_80B_A3B = "Qwen/Qwen3-Next-80B-A3B-Instruct"
+QWEN3_8_FLASH_NEXT = "Qwen/Qwen3.8-Flash-Next"
+NEMOTRON_3_5_SUPER_VL = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
+NEMOTRON_3_5_LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
 QWEN3_5_MOE_122B = "Qwen/Qwen3.5-122B-A10B"
 QWEN3_6_MOE_35B = "Qwen/Qwen3.6-35B-A3B"
 BAILING_MOE_RING_MINI = "inclusionAI/Ring-mini-linear-2.0"
@@ -30,14 +27,13 @@ BAILING_MOE_LING_MINI = "inclusionAI/Ling-mini-2.0"
 BAILING_LING_3_TINY = "inclusionAI/Ling-3.0-tiny"
 GEMMA4_26B_A4B = "google/gemma-4-26B-A4B-it"
 LAGUNA_S_2_1 = "poolside/Laguna-S-2.1"
+LAGUNA_XS_2_1 = "poolside/Laguna-XS-2.1"
 MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
 STEP3P7_FLASH = "stepfun-ai/Step-3.7-Flash"
 
-# Local checkpoints (scripts/before_training/patch_vocab.py output) under the toolkit scratch root;
-# agent-docs/contributing/README.md gives the command that writes each one. A suite defaulting to one
-# skips when the directory is absent.
+# Local patch_vocab.py outputs under the toolkit scratch root; a suite defaulting to one skips when it is absent.
 
 
 def patched_checkpoint_dir(hub_id: str) -> str:
@@ -48,14 +44,10 @@ def patched_checkpoint_dir(hub_id: str) -> str:
 GEMMA4_26B_A4B_PATCHED = patched_checkpoint_dir(GEMMA4_26B_A4B)
 GPT_OSS_20B_PATCHED = patched_checkpoint_dir(GPT_OSS_20B)
 
-# Tiny random-init configs (no hub checkpoint exists at test scale)
+# Tiny random-init configs. hidden_size=256 keeps the DeepEP transport pad (multiple of 256) exact.
 
-# DeepSeek-V4 tiny config exercising every architectural branch: a hash_moe bootstrap layer +
-# top-k (noaux_tc-style e_score_correction_bias) layers, all three attention layer types (sliding /
-# CSA+indexer / HCA), MLA-style q_lora_rank + shared-KV MQA + grouped output projection,
-# sqrtsoftplus scoring, a shared expert, and the clamped SwiGLU (swiglu_limit). MTP stays inert
-# (num_nextn_predict_layers is metadata only). hidden_size=256 keeps the DeepEP transport pad
-# (multiple of 256) exact; tests pairing the config with a real tokenizer override vocab_size.
+# Every architectural branch: hash_moe bootstrap + top-k layers, all three attention layer types, MLA + shared-KV MQA +
+# grouped output projection, sqrtsoftplus scoring, a shared expert, clamped SwiGLU. MTP stays inert.
 TINY_DSV4_CONFIG = {
     "vocab_size": 2048,
     "hidden_size": 256,
@@ -86,12 +78,9 @@ TINY_DSV4_CONFIG = {
     "partial_rotary_factor": 0.25,
 }
 
-# Tiny gpt-oss MoE (GptOssForCausalLM): hidden 256 keeps the DeepEP transport pad
-# (multiple of 256) exact; 8 layers with the family's period-2 layer_types (sliding/full alternation)
-# make the pp2 stage offset (4) a whole number of periods; 8 experts top-2 split evenly at ep2/ep4.
-# router_aux_loss_coef=0 because a PP stage severs the HF aux-loss path (the PP split gate rejects a
-# live coefficient); attention stays eager so the tiny random model needs no FA kernels or sinks
-# handling. tie_word_embeddings is off, since PP rejects tied embeddings.
+# 8 layers with period-2 layer_types make the pp2 offset a whole number of periods; 8 experts top-2 split evenly at
+# ep2/ep4. router_aux_loss_coef=0 and untied since the PP split gate rejects a live coefficient and tied embeddings;
+# eager attention needs no FA kernels or sinks handling.
 TINY_GPTOSS_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 256,
@@ -108,10 +97,8 @@ TINY_GPTOSS_CONFIG = {
     "attn_implementation": "eager",
 }
 
-# Tiny Qwen3-MoE: transformers saves its experts as one module per expert
-# (``experts.{i}.gate_proj.weight``), so a checkpoint written from it is the individual format the
-# lazy loader routes through ExpertFuser, which GptOss's fused layout never reaches. 8 layers so a
-# pp2 split is non-trivial.
+# Saved one module per expert, the individual format the lazy loader routes through ExpertFuser. 8 layers for a real
+# pp2 split.
 TINY_QWEN3_MOE_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 256,
@@ -130,11 +117,8 @@ TINY_QWEN3_MOE_CONFIG = {
     "attn_implementation": "eager",
 }
 
-# Cohere2 MoE (Command A+) tiny config exercising the family's branches: interleaved sliding (RoPE)
-# / full (NoPE) attention, top-k-then-sigmoid selection with top-k renorm, a fused shared expert
-# combined by "average", the parallel attention+MLP residual block, LayerNorm (rms_norm_eps=None),
-# logit scaling, and tied embeddings. hidden_size=256 keeps the DeepEP transport pad (multiple of
-# 256) exact. vocab_size is overridden by tests that pair the config with a real tokenizer.
+# Interleaved sliding (RoPE) / full (NoPE) attention, top-k-then-sigmoid with renorm, a fused shared expert combined by
+# "average", the parallel attention+MLP residual block, LayerNorm (rms_norm_eps=None), logit scaling, tied embeddings.
 TINY_COHERE2_MOE_CONFIG = {
     "vocab_size": 2048,
     "hidden_size": 256,
@@ -157,12 +141,9 @@ TINY_COHERE2_MOE_CONFIG = {
     "tie_word_embeddings": True,
 }
 
-# Tiny Gemma 4 MoE text config at the hub's attention geometry: sliding layers at ``head_dim`` /
-# ``num_key_value_heads``, full-attention layers at ``global_head_dim`` / ``num_global_key_value_heads``
-# under ``attention_k_eq_v`` (google/gemma-4-26B-A4B-it: 256/512 and 8/2). transformers 5.16 folds the
-# two global keys into ``per_layer_config``, so this exercises the export-side flatten the rollout
-# server's transformers 5.14 needs — homogeneous heads make that rewrite a no-op. ``enable_moe_block``
-# is off by default (no experts to wrap without it); the per-layer-input table is shrunk from 262144x256.
+# At the hub's attention geometry (sliding vs full ``head_dim`` and KV heads, under ``attention_k_eq_v``), which
+# transformers 5.20 folds into ``per_layer_config``. ``enable_moe_block`` is off by default: no experts to wrap without
+# it.
 TINY_GEMMA4_MOE_CONFIG = {
     "vocab_size": 128,
     "vocab_size_per_layer_input": 128,
@@ -184,9 +165,8 @@ TINY_GEMMA4_MOE_CONFIG = {
     "moe_intermediate_size": 16,
 }
 
-# Tiny dense Gemma 4 text config with the family's wide global heads (``global_head_dim`` 512, past flash's
-# 256), the shape that resolves ``sdpa`` to the flex-sliding variant; callers add ``layer_types`` (and any
-# geometry they vary).
+# Wide global heads (``global_head_dim`` 512, past flash's 256), the shape that resolves ``sdpa`` to flex-sliding.
+# Callers add ``layer_types``.
 TINY_GEMMA4_WIDE_HEAD_CONFIG = {
     "vocab_size": 256,
     "hidden_size": 128,
@@ -203,9 +183,8 @@ TINY_GEMMA4_WIDE_HEAD_CONFIG = {
     "num_kv_shared_layers": 0,
 }
 
-# Tiny Qwen3.5-MoE text config (the rollout server registers the composite ``qwen3_5_moe`` wrapper and
-# refuses a ``qwen3_5_moe_text`` config): the family's period-4 L,L,L,F GatedDeltaNet/full-attention
-# interleave, a shared expert, 8 experts top-2.
+# Text config, since the rollout server refuses ``qwen3_5_moe_text``: period-4 L,L,L,F interleave, a shared expert, 8
+# experts top-2.
 TINY_QWEN35_MOE_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 128,
@@ -227,10 +206,71 @@ TINY_QWEN35_MOE_CONFIG = {
     "router_aux_loss_coef": 0.0,
     "tie_word_embeddings": False,
 }
+# Qwen3.5-MoE's text fields, which ``Qwen3NextConfig`` spells alike, with the router renormalizing as the 80B-A3B ships
+# it.
+TINY_QWEN3_NEXT_CONFIG = {**TINY_QWEN35_MOE_CONFIG, "norm_topk_prob": True}
+# Cut from the release config: three GatedDeltaNet layers and a QSA layer, four hyper-connection streams, PLE on layer
+# 2 over a 4-part n-gram table, a sigmoid-gated shared expert beside 8 routed (top-3), interleaved M-RoPE. An 8-token
+# ``indexer_budget`` lets a short document cross it.
+TINY_QWEN4_EXP_CONFIG = {
+    "vocab_size": 1024,
+    "hidden_size": 64,
+    "num_hidden_layers": 4,
+    "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "rope_parameters": {
+        "rope_type": "default",
+        "rope_theta": 10000000,
+        "partial_rotary_factor": 0.25,
+        "mrope_section": [3, 3, 2],
+        "mrope_interleaved": True,
+    },
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 16,
+    "linear_value_head_dim": 16,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 6,
+    "num_experts": 8,
+    "num_experts_per_tok": 3,
+    "moe_intermediate_size": 32,
+    "shared_expert_intermediate_size": 32,
+    "norm_topk_prob": True,
+    "hc_count": 4,
+    "hc_lowrank": 16,
+    "ple_layer_ids": [2],
+    "ple_embed_dim": 64,
+    "ngram_size": 3,
+    "heads_per_ngram": 2,
+    "ngram_vocab_size_base": 997,
+    "split_ngram_parts": 4,
+    "indexer_n_heads": 2,
+    "indexer_kv_heads": 1,
+    "indexer_head_dim": 16,
+    "indexer_budget": 8,
+    "indexer_compress_ratio": 4,
+    "eos_token_id": 1,
+    "max_position_embeddings": 4096,
+    "router_aux_loss_coef": 0.0,
+    "tie_word_embeddings": False,
+}
+# A MoE family no EP layer class wraps.
+TINY_MIXTRAL_CONFIG = {
+    "vocab_size": 1024,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "num_local_experts": 4,
+    "num_experts_per_tok": 2,
+    "max_position_embeddings": 512,
+    "router_aux_loss_coef": 0.0,
+    "tie_word_embeddings": False,
+}
 
-# Tiny GLM-4 MoE Lite (GLM-4.7-Flash, ``glm4_moe_lite``): dense first layer + one sparse layer,
-# MLA attention (``kv_lora_rank`` / rope + nope head halves), grouped top-k with one group, one
-# shared expert.
+# GLM-4.7-Flash: dense first layer + one sparse layer, MLA attention, grouped top-k with one group, one shared expert.
 TINY_GLM4_MOE_LITE_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 128,
@@ -256,11 +296,9 @@ TINY_GLM4_MOE_LITE_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny Laguna (``poolside/Laguna-S-2.1``) at the release's period-4 shape: dense first layer + sparse
-# MoE layers, one full-attention layer per period carrying fewer heads than the sliding ones (the
-# family spells that heterogeneity as a plain ``num_attention_heads_per_layer`` list rather than the
-# ``per_layer_config`` fold), per-head gating, and a shared expert on every token. hidden_size=256
-# keeps the DeepEP transport pad (multiple of 256) exact.
+# At the release's period-4 shape: dense first layer + sparse layers, one full-attention layer per period with fewer
+# heads (a plain ``num_attention_heads_per_layer`` list, no ``per_layer_config`` fold), per-head gating, a shared
+# expert on every token.
 TINY_LAGUNA_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 256,
@@ -283,11 +321,16 @@ TINY_LAGUNA_CONFIG = {
     "router_aux_loss_coef": 0.0,
     "tie_word_embeddings": False,
 }
+# The attention pattern repeats every four layers, so a pipeline split in two needs eight to cut on a period boundary.
+TINY_LAGUNA_PP_OVERRIDES = {
+    "num_hidden_layers": 8,
+    "num_attention_heads_per_layer": TINY_LAGUNA_CONFIG["num_attention_heads_per_layer"] * 2,
+    "layer_types": TINY_LAGUNA_CONFIG["layer_types"] * 2,
+    "mlp_layer_types": TINY_LAGUNA_CONFIG["mlp_layer_types"] * 2,
+}
 
-# Tiny LFM-2 MoE (``LiquidAI/LFM2-24B-A2B``): the hybrid short-conv / full-attention stack, the first
-# ``num_dense_layers`` layers dense and the rest sparse, sigmoid routing with the ``expert_bias``
-# selection buffer. hidden_size=256 keeps the DeepEP transport pad (multiple of 256) exact;
-# tie_word_embeddings stays True — the released checkpoints carry no ``lm_head``.
+# Hybrid short-conv / full-attention stack, first layers dense, sigmoid routing with the ``expert_bias`` selection
+# buffer. Tied, since the released checkpoints carry no ``lm_head``.
 TINY_LFM2_MOE_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 256,
@@ -308,11 +351,8 @@ TINY_LFM2_MOE_CONFIG = {
     "tie_word_embeddings": True,
 }
 
-# Tiny Bailing MoE V2 (``inclusionAI/Ling-mini-2.0``): dense first layer + sparse MoE layers, sigmoid
-# group-limited routing (top-1 of 2 groups, then top-2 experts) with the ``expert_bias`` selection
-# buffer, one shared expert. hidden_size=256 keeps the DeepEP transport pad (multiple of 256) exact;
-# the vendor defaults for ``pad_token_id`` / ``eos_token_id`` exceed a tiny vocab. The family is
-# remote-code: its config class comes from the module a checkpoint ships, not from transformers.
+# Dense first layer + sparse layers, sigmoid group-limited routing with the ``expert_bias`` buffer, one shared expert.
+# Vendor pad/eos ids exceed a tiny vocab. Remote-code: the config class comes from the module a checkpoint ships.
 TINY_BAILING_MOE_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 256,
@@ -337,9 +377,25 @@ TINY_BAILING_MOE_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny dense Qwen3.5 (text), the dense roster's ``qwen3_5`` model: 8 layers keep the family's period-4
-# L,L,L,F layer_types pattern intact across a pp2 split (offset 4 = one whole period), so both
-# GatedDeltaNet linear-attention layers and full-attention layers sit on every stage.
+# Ring-mini-linear-2.0: Lightning Attention-2 in layers 0 and 2, softmax attention in 1 and 3.
+TINY_BAILING_RING_CONFIG = {**TINY_BAILING_MOE_CONFIG, "layer_group_size": 2}
+
+# Ling-3.0 with every layer MLA, so a forward shows what its attention mask does alone. ``qk_head_dim`` is derived at
+# config init, so it is set with its parts.
+TINY_BAILING_LING3_MLA_CONFIG = {
+    **TINY_BAILING_MOE_CONFIG,
+    "layer_group_size": 1,
+    "num_key_value_heads": 4,
+    "q_lora_rank": 64,
+    "kv_lora_rank": 64,
+    "qk_nope_head_dim": 32,
+    "qk_rope_head_dim": 16,
+    "qk_head_dim": 48,
+    "v_head_dim": 32,
+    "rope_scaling": {"rope_type": "default", "factor": 1.0, "mscale_all_dim": 0},
+}
+
+# 8 layers keep the period-4 pattern intact across a pp2 split, so both layer kinds sit on every stage.
 TINY_QWEN35_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 128,
@@ -357,9 +413,7 @@ TINY_QWEN35_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny dense Qwen3, the dense roster's ``qwen3`` model: 8 layers so a 2- or 4-stage split is exact and
-# every stage still holds several layers. tie_word_embeddings is off; a test of the embedding/head tie
-# turns it on itself.
+# 8 layers so a 2- or 4-stage split is exact and every stage still holds several.
 TINY_QWEN3_CONFIG = {
     "vocab_size": 1024,
     "hidden_size": 128,
@@ -372,8 +426,29 @@ TINY_QWEN3_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# The tied two-layer Qwen3 the optimizer-resume suite trains, dense or (with the expert fields below)
-# as Qwen3-MoE; the tokenizer it is saved with sets vocab_size.
+# Sliding-window layers: Mistral windows every layer from the config alone, Cohere2 and OLMo 3 alternate sliding and
+# full. Packed rows and padded batches of a few hundred tokens outrun the 64-token window.
+TINY_MISTRAL_SLIDING_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 512,
+    "sliding_window": 64,
+    "pad_token_id": 0,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "tie_word_embeddings": False,
+}
+TINY_ALTERNATING_SLIDING_CONFIG = {
+    **TINY_MISTRAL_SLIDING_CONFIG,
+    "layer_types": ["sliding_attention", "full_attention"],
+}
+
+# The optimizer-resume suite's model, dense or (with the expert fields below) Qwen3-MoE; its tokenizer sets vocab_size.
 TINY_TIED_QWEN3_CONFIG = {
     "hidden_size": 256,
     "intermediate_size": 512,
@@ -392,9 +467,8 @@ TINY_TIED_QWEN3_MOE_FIELDS = {
     "mlp_only_layers": [],
 }
 
-# Tiny dense Granite for the head-transform contract: the forward divides the logits by
-# ``logits_scaling``, so a hidden-state head path that skips it scores 8x sharper logits. Four
-# layers so a pp2 split is exact; untied, since PP rejects tied embeddings.
+# Head-transform contract: the forward divides logits by ``logits_scaling``, so a head path skipping it scores 8x
+# sharper. Four layers for an exact pp2 split; untied since PP rejects tied embeddings.
 TINY_GRANITE_CONFIG = {
     "vocab_size": 256,
     "hidden_size": 64,
@@ -407,8 +481,8 @@ TINY_GRANITE_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny MiniCPM3 (MLA) for the head-transform contract: the forward divides the hidden state by
-# ``hidden_size / dim_model_base`` (64 / 24) before the output embedding. Four layers, untied (PP).
+# Head-transform contract: the forward divides the hidden state by ``hidden_size / dim_model_base`` (64 / 24). Untied
+# (PP).
 TINY_MINICPM3_CONFIG = {
     "vocab_size": 256,
     "hidden_size": 64,
@@ -426,9 +500,8 @@ TINY_MINICPM3_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny Gemma 2 for the head-transform contract: ``final_logit_softcapping`` is small enough for
-# random-init logits to saturate the cap. Four layers so a pp2 cut lands on a whole period of the
-# sliding/full interleave; untied (PP).
+# Head-transform contract: ``final_logit_softcapping`` is small enough for random-init logits to saturate the cap. Four
+# layers cut on a whole period of the sliding/full interleave; untied (PP).
 TINY_GEMMA2_CONFIG = {
     "vocab_size": 256,
     "hidden_size": 64,
@@ -442,9 +515,8 @@ TINY_GEMMA2_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Inkling (Thinking Machines) tiny config. hidden_size=256 keeps the DeepEP transport pad (multiple
-# of 256) exact; n_routed_experts must stay divisible by the EP size under test. The routed/shared
-# joint normalisation needs n_shared_experts > 0 to be exercised at all.
+# n_routed_experts must stay divisible by the EP size under test; the routed/shared joint normalization needs
+# n_shared_experts > 0.
 TINY_INKLING_CONFIG = {
     "hidden_size": 256,
     "num_hidden_layers": 2,
@@ -462,12 +534,12 @@ TINY_INKLING_CONFIG = {
     "sliding_window_size": 32,
     "max_position_embeddings": 256,
 }
+# Sliding layers come every second layer, so a pipeline split in two needs four to cut on a period boundary.
+TINY_INKLING_PP_OVERRIDES = {"num_hidden_layers": 4, "local_layer_ids": [0, 2]}
 
-# Tiny Zaya (Zyphra ZAYA1) for the native-support + load-time patch tests. num_hidden_layers=4 spans
-# both mixer variants (layer 0 carries no EDA state, later layers do) and the CCA convolution whose
-# state crosses packed document boundaries. router_hidden_size instantiates the family's MLP gate,
-# which holds the native balancing_biases buffer and its trailing discard slot, and top-1 over 2
-# experts makes the expected per-token load count exact.
+# 4 layers span both mixer variants (EDA state from layer 1 on) and the CCA conv whose state crosses packed documents.
+# router_hidden_size builds the MLP gate holding ``balancing_biases``; top-1 over 2 experts makes per-token load counts
+# exact.
 TINY_ZAYA_CONFIG = {
     "vocab_size": 512,
     "hidden_size": 64,
@@ -484,12 +556,9 @@ TINY_ZAYA_CONFIG = {
     "use_cache": False,
 }
 
-# GLM-5 Next (GLM-5.3-Flash) tiny text-tower config covering every family branch: dense first layer +
-# sparse MoE layers (default ``mlp_layer_types`` leaves a model this shallow all-dense), the default KDA/DSA
-# interleave (3 linear-attention layers + 1 deepseek-sparse-attention layer with the indexer), sigmoid noaux-tc
-# routing with ``e_score_correction_bias``, one shared expert, clamped SwiGLU and hyper-connections. hidden_size=256
-# keeps the DeepEP transport pad (multiple of 256) exact; config validation requires num_key_value_heads ==
-# num_attention_heads and qk_rope_head_dim 0 (NoPE DSA); pad_token_id None (default 154820 exceeds a tiny vocab).
+# Dense first layer + sparse layers (default ``mlp_layer_types`` leaves this depth all-dense), the KDA/DSA interleave,
+# sigmoid noaux-tc routing, one shared expert, clamped SwiGLU, hyper-connections. Validation requires KV heads == heads
+# and qk_rope_head_dim 0. pad_token_id None: the default 154820 exceeds a tiny vocab.
 TINY_GLM5_CONFIG = {
     "vocab_size": 2048,
     "hidden_size": 256,
@@ -524,9 +593,8 @@ TINY_GLM5_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny vision tower for the glm5_next composite wrapper (the family ships no text-only CausalLM, so
-# every generative test builds ``Glm5NextForConditionalGeneration``). out_hidden_size must equal the
-# text tower's hidden_size, since it is the projector's output width.
+# The family ships no text-only CausalLM. out_hidden_size is the projector's output width, so it equals the text
+# hidden_size.
 TINY_GLM5_VISION_CONFIG = {
     "depth": 2,
     "hidden_size": 32,
@@ -540,12 +608,9 @@ TINY_GLM5_VISION_CONFIG = {
     "spatial_merge_size": 2,
 }
 
-# Step-3.7 (Step-3.7-Flash) tiny text-tower config covering every family branch: dense first layer +
-# sparse MoE layers, per-layer post-activation SwiGLU clamps on the last two MoE layers only
-# (0 = unclamped elsewhere, shared bounds on a separate list), sigmoid routing with the
-# ``e_score_correction_bias`` buffer, non-neutral ``moe_router_scaling_factor``, and a full/sliding
-# attention interleave with a different sliding head count, so a global ``num_attention_heads`` read
-# raises and any path skipping ``per_layer_config`` fails. hidden_size=256 keeps the DeepEP pad exact.
+# Dense first layer + sparse layers, SwiGLU clamps on the last two MoE layers only, sigmoid routing with
+# ``e_score_correction_bias``, non-neutral router scaling, and a differing sliding head count, so a global
+# ``num_attention_heads`` read raises and any path skipping ``per_layer_config`` fails.
 TINY_STEP3P7_CONFIG = {
     "vocab_size": 2048,
     "hidden_size": 256,
@@ -569,11 +634,8 @@ TINY_STEP3P7_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny vision tower for the step3p7 composite wrapper (the family ships no text-only CausalLM, so
-# every generative test builds ``Step3p7ForConditionalGeneration``). No output-width field: the
-# projector maps ``hidden_size * 4`` (two stride-2 downsamplers) to the text hidden_size itself.
-# ``intermediate_size`` is derived from ``mlp_ratio``; the 56/14 grid is 4x4, the smallest the two
-# stride-2 downsamplers accept cleanly.
+# The family ships no text-only CausalLM. The projector maps ``hidden_size * 4`` to the text hidden_size itself; the
+# 56/14 grid is 4x4, the smallest the two stride-2 downsamplers accept.
 TINY_STEP3P7_VISION_CONFIG = {
     "hidden_size": 32,
     "num_hidden_layers": 2,
@@ -584,9 +646,8 @@ TINY_STEP3P7_VISION_CONFIG = {
     "max_position_embeddings": 16,
 }
 
-# Tiny Mistral4 (the text backbone of ``MISTRAL3_119B_MOE``) on the release's code paths: MLA
-# attention, MoE with a shared expert and group routing, YARN rope with llama-4 scaling. 8 Q / 8 KV
-# heads so cp8 and tp8 shard heads evenly; 16 experts split evenly at every EP size up to 8.
+# MLA attention, a shared expert with group routing, YARN rope with llama-4 scaling. 8 Q / 8 KV heads so cp8 and tp8
+# shard evenly; 16 experts split evenly at every EP size up to 8.
 TINY_MISTRAL4_CONFIG = {
     "vocab_size": 512,
     "hidden_size": 128,
@@ -626,10 +687,7 @@ TINY_MISTRAL4_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# Tiny vision towers for the multimodal wrappers an EP family's text tower ships under: SigLIP for
-# Command A+ (``cohere2_vision``), SigLIP-2 for LFM2-VL, Pixtral for Mistral 3, plus the Gemma 4,
-# Qwen3.5/3.6 and Inkling towers. One layer each — the towers carry the checkpoint namespace under
-# test, not compute; an output width is the text tower's hidden size where the config asks for one.
+# One layer each, since the towers carry the checkpoint namespace under test, not compute.
 TINY_SIGLIP_VISION_CONFIG = {
     "hidden_size": 32,
     "intermediate_size": 64,
@@ -670,8 +728,26 @@ TINY_QWEN35_VISION_CONFIG = {
     "num_heads": 2,
     "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"],
 }
-# The upstream scale planner (``plan_out_scales``) rejects most tiny shapes; this one builds a valid
-# 4-layer pixel-shuffle stack.
+# M-RoPE's three sections split head_dim / 2; a one-block vision tower with no deepstack taps.
+TINY_QWEN3_VL_TEXT_CONFIG = {
+    **TINY_QWEN3_CONFIG,
+    "rope_parameters": {"rope_type": "default", "mrope_section": [8, 4, 4]},
+}
+TINY_QWEN3_VL_VISION_CONFIG = {
+    **TINY_QWEN35_VISION_CONFIG,
+    "out_hidden_size": TINY_QWEN3_CONFIG["hidden_size"],
+    "deepstack_visual_indexes": [],
+}
+# Two vision blocks at the release's patch geometry.
+TINY_QWEN4_EXP_VISION_CONFIG = {
+    "depth": 2,
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_heads": 2,
+    "num_position_embeddings": 64,
+    "out_hidden_size": TINY_QWEN4_EXP_CONFIG["hidden_size"],
+}
+# The upstream scale planner (``plan_out_scales``) rejects most tiny shapes; this one builds a valid 4-layer stack.
 TINY_INKLING_VISION_CONFIG = {
     "temporal_patch_size": 2,
     "patch_size": 4,
@@ -680,9 +756,148 @@ TINY_INKLING_VISION_CONFIG = {
     "text_hidden_size": TINY_INKLING_CONFIG["hidden_size"],
 }
 
-# Special Models
+# The heads stay at flash-kernel widths over the release's two KV heads; ``moe_latent_size`` differs from the hidden
+# size, so a layer sizing its wire off the other one fails at its first dispatch.
+TINY_NEMOTRON_H_CONFIG = {
+    "model_type": "nemotron_h",
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 32,
+    "max_position_embeddings": 1024,
+    "layers_block_type": ["mamba", "moe", "attention", "moe", "mamba", "moe"],
+    "mamba_num_heads": 8,
+    "mamba_head_dim": 8,
+    "ssm_state_size": 8,
+    "n_groups": 2,
+    "conv_kernel": 4,
+    "chunk_size": 8,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "n_routed_experts": 8,
+    "num_experts_per_tok": 3,
+    "moe_latent_size": 16,
+    "moe_intermediate_size": 32,
+    "moe_shared_expert_intermediate_size": 48,
+    "routed_scaling_factor": 5.0,
+    "norm_topk_prob": True,
+    "mlp_hidden_act": "relu2",
+    "num_nextn_predict_layers": 1,
+    "time_step_limit": [0.0, float("inf")],
+    "tie_word_embeddings": False,
+}
+# The release's text and vision shape, for tests planning its checkpoint on a meta-device shell. One letter per block:
+# Mamba, MoE (Expert), Attention.
+NEMOTRON_H_RELEASE_BLOCKS = {"M": "mamba", "E": "moe", "A": "attention"}
+NEMOTRON_H_RELEASE_LAYOUT = "MEMEMEMAEMEMEMEMAEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMEMAEMEMEMEMAEMEMEMEME"
+NEMOTRON_H_RELEASE_TEXT_CONFIG = {
+    "model_type": "nemotron_h",
+    "vocab_size": 131072,
+    "hidden_size": 4096,
+    "intermediate_size": 2688,
+    "layers_block_type": [NEMOTRON_H_RELEASE_BLOCKS[block] for block in NEMOTRON_H_RELEASE_LAYOUT],
+    "mamba_num_heads": 128,
+    "mamba_head_dim": 64,
+    "ssm_state_size": 128,
+    "n_groups": 8,
+    "conv_kernel": 4,
+    "chunk_size": 128,
+    "num_attention_heads": 32,
+    "num_key_value_heads": 2,
+    "head_dim": 128,
+    "n_routed_experts": 512,
+    "num_experts_per_tok": 22,
+    "moe_latent_size": 1024,
+    "moe_intermediate_size": 2688,
+    "moe_shared_expert_intermediate_size": 5376,
+    "routed_scaling_factor": 5.0,
+    "norm_topk_prob": True,
+    "mlp_hidden_act": "relu2",
+    "num_nextn_predict_layers": 1,
+    "tie_word_embeddings": False,
+}
+NEMOTRON_H_RELEASE_VISION_CONFIG = {
+    "model_type": "radio",
+    "hidden_size": 1280,
+    "num_hidden_layers": 32,
+    "num_attention_heads": 16,
+    "max_img_size": 2048,
+    "video_temporal_patch_size": 2,
+    "summary_idxs": [0, 1],
+}
+# Its heads at the width FA4 takes, which a GPU row reaches unless it pins another backend.
+TINY_RADIO_VISION_CONFIG = {
+    "model_type": "radio",
+    "hidden_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "max_img_size": 64,
+    "video_temporal_patch_size": 2,
+    "summary_idxs": [0, 1],
+}
+# A composite in the pinned transformers that no family spec claims. The heads stay at flash-kernel widths, its 16:1 GQA
+# keeps the release's ratio, and T = index_block_size * index_topk_blocks stays under a row's length so selection runs (a
+# document within T attends densely).
+TINY_MINIMAX_M3_CONFIG = {
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 16,
+    "shared_intermediate_size": 16,
+    "dense_intermediate_size": 64,
+    "max_position_embeddings": 1024,
+    "num_hidden_layers": 5,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "rotary_dim": 64,
+    "rope_parameters": {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.5},
+    "layer_types": ["minimax_m3_sparse"] * 5,
+    "mlp_layer_types": ["dense"] + ["sparse"] * 4,
+    "num_local_experts": 8,
+    "num_experts_per_tok": 2,
+    "index_n_heads": 4,
+    "index_head_dim": 16,
+    "index_block_size": 8,
+    "index_topk_blocks": 3,
+    "index_local_blocks": 1,
+    "swiglu_alpha": 1.702,
+    "swiglu_limit": 0.5,
+}
+TINY_MINIMAX_M3_VISION_CONFIG = {
+    "hidden_size": 64,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "patch_size": 14,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+}
 
-QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal (Image-Text-to-Text)
+TINY_LLAMA4_TEXT_CONFIG = {
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "intermediate_size_mlp": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 128,
+    "moe_layers": [],
+    "no_rope_layers": [1, 1],
+}
+TINY_LLAMA4_VISION_CONFIG = {
+    "hidden_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "intermediate_size": 128,
+    "vision_output_dim": 64,
+    "image_size": 28,
+    "patch_size": 14,
+    "projector_input_dim": 64,
+    "projector_output_dim": 64,
+}
+
+QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal
 PARAPHRASE_MINILM = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 
 # Checkpoints the CPU tests read only a tokenizer, processor or chat template from
@@ -693,15 +908,12 @@ GEMMA3_4B_IT = "google/gemma-3-4b-it"  # gated: anonymous downloads are refused
 QWEN2_5_VL_3B = "Qwen/Qwen2.5-VL-3B-Instruct"
 QWEN3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
 
-# Snapshots a test pins because hub main can drift the files it reads (a chat template, the set of
-# processor configs) out from under it.
+# Pinned because hub main can drift the files a test reads (a chat template, the set of processor configs).
 PINNED_REVISIONS = {
     QWEN2_5_VL_3B: "66285546d2b821cf421d4f5eb2576359d3770cd3",
     QWEN3_VL_2B: "89644892e4d85e24eaac8bacfd4f463576704203",
     STEP3P7_FLASH: "5f6244077ac62e04eec3f320501ff8c2b293373a",
 }
-
-# Profiling Benchmark Configs
 
 MODEL_CONFIGS = {
     "gpt-oss-20b": {
@@ -722,11 +934,17 @@ MODEL_CONFIGS = {
         "num_experts": 128,
         "top_k": 8,
     },
+    "nemotron-3.5-lightning": {
+        "hf_name": NEMOTRON_3_5_LIGHTNING,
+        "full_params": 31.58e9,
+        "num_experts": 128,
+        "top_k": 6,
+    },
     "glm4-flash": {
         "hf_name": GLM4_FLASH,
         "full_params": 30e9,
-        "num_experts": 32,
-        "top_k": 2,
+        "num_experts": 64,
+        "top_k": 4,
     },
     "qwen3.5-moe": {
         "hf_name": QWEN3_5_MOE,
@@ -745,6 +963,12 @@ MODEL_CONFIGS = {
         "full_params": 122e9,
         "num_experts": 256,
         "top_k": 8,
+    },
+    "qwen3-next-80b-a3b": {
+        "hf_name": QWEN3_NEXT_80B_A3B,
+        "full_params": 79.67e9,
+        "num_experts": 512,
+        "top_k": 10,
     },
     "qwen3-8b": {
         "hf_name": QWEN3_8B,

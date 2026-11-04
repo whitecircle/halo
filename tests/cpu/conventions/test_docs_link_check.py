@@ -1,25 +1,32 @@
 #!/usr/bin/env python
-"""The docs link gate must check heading anchors the way GitHub generates them.
+"""The docs link gate checks heading anchors the way GitHub generates them, and the code its pages cite. The
+expected slugs are the ids GitHub's renderer emits for the same headings."""
 
-``scripts/docs/check_links.sh`` is the only gate on the doc trees' cross-references. A fragment it
-does not validate, or validates against a slug GitHub never produces, passes CI while the link lands
-at the top of the page. The expected slugs below are the ids GitHub's renderer emits for the same
-headings, including a ``{#id}`` attribute, which GitHub renders as heading text.
-
-Run: python tests/cpu/conventions/test_docs_link_check.py
-"""
-
+import re
 import subprocess
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, load_script_module
+from scripts.docs.markdown import parse_markdown
+from scripts.docs.references import PACKAGE
+from tests.common.repo import REPO_ROOT
 
-check_links = load_script_module("scripts/docs/check_links.py")
+_DOC_TREES = ("agent-docs", "human-docs", "skills")
+_SOURCE_TREES = (PACKAGE, "scripts", "tests", "docker")
+_SOURCE_SUFFIXES = (".py", ".sh", ".patch")
+_PRIVATE_NAME_SPAN = re.compile(r"`(_[A-Za-z][A-Za-z0-9_]{3,})(?:\(\))?`")
+# Private names of the libraries and engines the pages discuss, which no first-party file holds.
+_EXTERNAL_PRIVATE_NAMES = frozenset({"_all_gather_base", "_load_w2", "_reduce_scatter_base"})
+
+
+def _private_names_outside(page: str, source: str) -> set[str]:
+    return {
+        name for name in _PRIVATE_NAME_SPAN.findall(page) if name not in _EXTERNAL_PRIVATE_NAMES and name not in source
+    }
 
 
 def _anchors(markdown: str) -> set[str]:
-    return set(check_links.parse_markdown(markdown).anchors)
+    return set(parse_markdown(markdown).anchors)
 
 
 @pytest.mark.parametrize(
@@ -60,7 +67,7 @@ def test_only_rendered_headings_and_explicit_anchors_count():
 
 
 def test_heading_id_attribute_is_refused():
-    document = check_links.parse_markdown("# Title\n\n## Section {#section}\n\n## Uses `{#x}` in code\n")
+    document = parse_markdown("# Title\n\n## Section {#section}\n\n## Uses `{#x}` in code\n")
     assert document.heading_attributes == ((3, "{#section}"),)
 
 
@@ -119,6 +126,62 @@ def test_gate_fails_on_a_missing_target_and_a_heading_id(tmp_path):
     page = tmp_path / "page.md"
     assert f"HEADING ID  {page}:1  {{#section}}" in result.stdout
     assert f"BROKEN  {page}:3  ->  missing.md" in result.stdout
+
+
+def test_code_spans_and_fenced_lines_are_the_code_a_page_names():
+    """A code span may wrap across the lines of its paragraph; a blank line, a heading or a fence ends it."""
+    document = parse_markdown(
+        "# Title with `head code`\n"
+        "Text `one` and `wrapped\nacross` lines.\n"
+        "\n"
+        "```bash\nrun this\n```\n"
+        "An unclosed ` tick\n"
+        "\n"
+        "`after the break`\n"
+    )
+    assert document.code == (
+        (1, "head code"),
+        (2, "one"),
+        (2, "wrapped across"),
+        (6, "run this"),
+        (10, "after the break"),
+    )
+
+
+def test_gate_fails_on_a_stale_path_or_name_in_code(tmp_path):
+    package = PACKAGE
+    page = tmp_path / "page.md"
+    page.write_text(
+        f"Live: `{package}/env.py`, `{package}.env.env_flag`, `examples/<method>/x.yaml`, `<gist>/scripts/x.sh`.\n\n"
+        f"Stale: `{package}/gone.py` and `{package}.env.gone`.\n\n"
+        f"```python\nfrom {package}.env import env_flag, gone_too\n```\n"
+    )
+    result = _run_gate(tmp_path)
+    assert result.returncode == 1
+    assert sorted(line for line in result.stdout.splitlines() if line.startswith("UNRESOLVED")) == [
+        f"UNRESOLVED  {page}:3  {package}.env.gone  ({package}.env has no 'gone')",
+        f"UNRESOLVED  {page}:3  {package}/gone.py  (no such file or directory)",
+        f"UNRESOLVED  {page}:6  from {package}.env import gone_too  ({package}.env has no 'gone_too')",
+    ]
+
+
+def test_every_private_name_a_page_spells_is_in_the_repo():
+    """The gate resolves paths and dotted names, so a bare ``_NAME`` a removal left behind reads as live with nothing
+    behind it."""
+    assert _private_names_outside("`_GONE_DECLARATION` and `_LIVE_ONE()`", "_LIVE_ONE = 1") == {"_GONE_DECLARATION"}
+    source = "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore")
+        for tree in _SOURCE_TREES
+        for path in (REPO_ROOT / tree).rglob("*")
+        if path.suffix in _SOURCE_SUFFIXES
+    )
+    stale = {
+        str(page.relative_to(REPO_ROOT)): names
+        for tree in _DOC_TREES
+        for page in (REPO_ROOT / tree).rglob("*.md")
+        if (names := _private_names_outside(page.read_text(encoding="utf-8"), source))
+    }
+    assert not stale, stale
 
 
 if __name__ == "__main__":

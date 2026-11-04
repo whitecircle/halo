@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""MLA ``kv_a_proj_with_mqa`` keeps its FULL gradient under selective attention TP.
-
-That projection emits ``[kv_lora_rank | qk_rope_head_dim]`` and the two halves need DIFFERENT
-reductions over the TP group. The ``kv_lora_rank`` rows reach ``kv_b_proj`` (colwise), whose
-``Replicate`` input redistribute all-reduces them in backward — already complete, so AVG is
-idempotent. The ``qk_rope_head_dim`` rows bypass ``kv_b_proj``: ``k_rot`` is expanded to this rank's
-LOCAL head count and concatenated into ``key_states``, so it never crosses a DTensor boundary and
-each rank's gradient covers only its own heads — the true gradient is the SUM.
-
-The weight stays a plain replica, so the trainer's replicated bucket (``_sync_tp_replicated_grads``,
-``ReduceOp.AVG``) divides those rope rows by ``tp_size``. Nothing raises: the lora rows stay right,
-the loss curve stays plausible, and the rope projection trains on 1/tp_size of its gradient.
-
-This drives the REAL ``apply_tp_to_attention_only`` on a real Glm4MoeLite across a real 2-rank gloo
-group and compares the AVG-reduced gradient against a single-process, non-TP reference. Without
-``register_mla_rope_grad_reduction`` the rope rows come out ~tp_size x too small and this fails.
-
-    python tests/cpu/parallelism/test_tp_mla_rope_grad.py
-"""
+"""MLA ``kv_a_proj_with_mqa`` keeps its full gradient under selective attention TP. Its rope rows reach only local
+heads, so the true gradient is the SUM; AVG leaves them 1/tp_size too small."""
 
 import copy
 
@@ -28,19 +11,19 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 KV_LORA_RANK = 16
 QK_ROPE_HEAD_DIM = 8
-# Loose enough for fp32 accumulation-order differences between the TP and reference graphs, tight
-# enough that the 1/tp_size defect (relative error ~= 0.5 at tp_size=2) cannot pass.
+# Loose enough for fp32 accumulation-order differences, tight enough that the 1/tp_size defect (~0.5 at tp_size=2)
+# cannot pass.
 TOL = 1e-3
 
 
 def _tiny_mla_model():
-    """Smallest Glm4MoeLite that still exercises MLA + MoE. Seeded, so every rank builds it alike."""
+    """Seeded, so every rank builds it alike."""
     config = AutoConfig.for_model(
         "glm4_moe_lite",
         vocab_size=64,
@@ -72,7 +55,7 @@ def _backward(model, input_ids):
 
 
 def _kv_a_grads(model) -> list[torch.Tensor]:
-    """Per-layer ``kv_a_proj_with_mqa.weight`` grads (local shard if it ever became a DTensor)."""
+    """Local shard if it ever became a DTensor."""
     grads = []
     for layer in model.model.layers:
         grad = layer.self_attn.kv_a_proj_with_mqa.weight.grad
@@ -97,7 +80,7 @@ def _worker(rank: int, out_path: str) -> None:
     for layer_idx, (grad, ref_grad) in enumerate(zip(_kv_a_grads(model), reference, strict=True)):
         if isinstance(model.model.layers[layer_idx].self_attn.kv_a_proj_with_mqa.weight, DTensor):
             failures.append(f"layer {layer_idx}: weight became a DTensor — the AVG bucket would skip it")
-        # Exactly what _sync_tp_replicated_grads does to a plain replicated parameter.
+        # What _sync_tp_replicated_grads does to a plain replicated parameter.
         averaged = grad.clone()
         dist.all_reduce(averaged, op=dist.ReduceOp.AVG)
 
@@ -114,8 +97,7 @@ def _worker(rank: int, out_path: str) -> None:
                     f"{WORLD_SIZE:.4f} means the rank-partial rows were averaged, not summed)"
                 )
 
-    # EVERY rank writes its own verdict: each holds a different column shard, so a defect can
-    # show on one rank alone, and a rank-0-only artifact would report that run as green.
+    # Each rank holds a different column shard, so a defect can show on one rank alone.
     with open(f"{out_path}.{rank}", "w") as fh:
         fh.write("PASS" if not failures else "FAIL: " + "; ".join(failures))
 

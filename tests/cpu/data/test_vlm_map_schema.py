@@ -1,14 +1,7 @@
 #!/usr/bin/env python3
-"""VLM map Arrow-schema stability on mixed datasets + cache-key coverage of captured helpers.
-
-Shard-wise type inference diverges when image rows and text-only rows land in different map worker
-shards (struct vs Json content, null vs Image lists). `vlm_map_features` pins the schema so the
-multiprocess map succeeds for every mix; `_get_closure_fingerprint` must cover closure-captured
-helper functions so editing them invalidates the dataset cache.
-
-Usage:
-    python tests/cpu/data/test_vlm_map_schema.py
-"""
+"""VLM map Arrow-schema stability on mixed datasets: ``vlm_map_features`` pins the schema, since shard-wise
+inference diverges when image and text rows land in different workers. ``_closure_fingerprint`` covers captured
+helpers, so editing one invalidates the cache."""
 
 import importlib.util
 
@@ -17,9 +10,9 @@ import pytest
 from datasets import Dataset
 from PIL import Image
 
-from src.data.pipeline.processing import _get_closure_fingerprint, get_function_identifier
-from src.data.pipeline.row_processors import create_vlm_processor
-from src.data.pipeline.vlm_dataset import vlm_map_features
+from halo.data.pipeline import map_cache_key
+from halo.data.pipeline.map_cache_key import _closure_fingerprint, function_cache_id
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor, vlm_map_features
 
 
 def _image(color: int) -> Image.Image:
@@ -27,7 +20,7 @@ def _image(color: int) -> Image.Image:
 
 
 def _mixed_dataset() -> Dataset:
-    """Image rows first, text-only rows second — clusters modalities into separate map shards."""
+    """Image rows first, text-only rows second, clustering modalities into separate map shards."""
     rows = {
         "texts": (
             [[{"user": f"describe image {i}", "assistant": f"answer {i}"}] for i in range(4)]
@@ -40,7 +33,7 @@ def _mixed_dataset() -> Dataset:
 
 def test_mixed_modality_multiproc_map_with_pinned_features():
     ds = _mixed_dataset()
-    process = create_vlm_processor(conversation_field="texts", images_field="images")
+    process = build_vlm_row_processor(conversation_field="texts", images_field="images")
     out = ds.map(
         process,
         num_proc=2,
@@ -58,23 +51,40 @@ def test_mixed_modality_multiproc_map_with_pinned_features():
     )
 
 
+def _probe_wrapper(tmp_path, module_name: str, helper_body: str):
+    """``wrapper`` calling a module-global ``helper``, loaded under ``module_name`` from a real file: the
+    identifier hashes ``inspect.getsource``, which exec()'d code lacks."""
+    path = tmp_path / f"{module_name.replace('.', '_')}.py"
+    path.write_text(f"def helper(x):\n    return {helper_body}\n\n\ndef wrapper(x):\n    return helper(x)\n")
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.wrapper
+
+
 def test_function_identifier_covers_module_global_helpers(tmp_path):
-    """Editing a module-global helper a map function calls must change the caller's cache identity."""
-
-    def build(helper_body: str, name: str):
-        # Real files on disk: the identifier hashes inspect.getsource, which exec()'d code lacks.
-        path = tmp_path / f"{name}.py"
-        path.write_text(f"def helper(x):\n    return {helper_body}\n\n\ndef wrapper(x):\n    return helper(x)\n")
-        spec = importlib.util.spec_from_file_location(f"src.fake_cache_probe_{name}", path)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return module.wrapper
-
-    id_a = get_function_identifier(build("x + 1", "a"))
-    id_b = get_function_identifier(build("x + 2", "b"))
-    id_a2 = get_function_identifier(build("x + 1", "a2"))
+    root = map_cache_key.__name__.partition(".")[0]
+    id_a = function_cache_id(_probe_wrapper(tmp_path, f"{root}.fake_cache_probe_a", "x + 1"))
+    id_b = function_cache_id(_probe_wrapper(tmp_path, f"{root}.fake_cache_probe_b", "x + 2"))
+    id_a2 = function_cache_id(_probe_wrapper(tmp_path, f"{root}.fake_cache_probe_a2", "x + 1"))
     assert id_a != id_b, "identical wrapper source with a different helper body must not collide"
     assert id_a == id_a2, "the identifier must stay deterministic across rebuilds"
+
+
+def test_helper_fold_follows_the_first_party_prefixes(tmp_path, monkeypatch):
+    """The fold reads the derived prefixes, so a helper under a renamed root is still folded and one outside every
+    first-party root never is."""
+    monkeypatch.setattr(map_cache_key, "_FIRST_PARTY_PREFIXES", ("renamed_pkg.", "scripts."))
+    renamed = [
+        function_cache_id(_probe_wrapper(tmp_path, f"renamed_pkg.fake_cache_probe_{i}", body))
+        for i, body in enumerate(("x + 1", "x + 2"))
+    ]
+    foreign = [
+        function_cache_id(_probe_wrapper(tmp_path, f"thirdparty.fake_cache_probe_{i}", body))
+        for i, body in enumerate(("x + 1", "x + 2"))
+    ]
+    assert renamed[0] != renamed[1], "a helper under the renamed package root was not folded into the key"
+    assert foreign[0] == foreign[1], "a third-party helper's source entered the key"
 
 
 def test_closure_fingerprint_covers_captured_helpers():
@@ -90,8 +100,8 @@ def test_closure_fingerprint_covers_captured_helpers():
     def helper_b(x):
         return x + 2
 
-    fp_a = _get_closure_fingerprint(make(helper_a))
-    fp_b = _get_closure_fingerprint(make(helper_b))
+    fp_a = _closure_fingerprint(make(helper_a))
+    fp_b = _closure_fingerprint(make(helper_b))
     assert fp_a and fp_b, "captured callables must contribute to the fingerprint"
     assert fp_a != fp_b, "editing a captured helper must change the cache fingerprint"
 

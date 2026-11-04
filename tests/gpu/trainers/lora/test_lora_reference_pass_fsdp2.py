@@ -1,26 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: a reference pass under ``disable_adapter()`` leaves FSDP2-sharded LoRA adapters trainable.
+"""A reference pass under ``disable_adapter()`` leaves FSDP2-sharded LoRA adapters trainable.
 
-On-policy RL scores its KL reference inside ``PeftModel.disable_adapter()`` right after an optimizer
-step, when the post-backward reshard has registered the sharded params. peft clears
-``requires_grad`` on the params registered at entry (the sharded ones) and restores it on those
-registered at exit (the unsharded copies the forward leaves behind), and FSDP2 copies the sharded
-flag onto the unsharded param at every unshard. Unless the trainer's wrapper
-(``make_disable_adapter_fsdp2_safe``) reshards before peft's exit, the sharded adapters stay frozen,
-and every micro-step that unshards afresh (the second of each accumulation window) trains without
-them — silently, since gradient checkpointing's input-grad hook keeps the loss attached.
-
-This drives that order through the real SFT trainer on FSDP2 data parallelism: a callback runs a
-no-grad forward inside the trainer's ``disable_adapter()`` after every optimizer step, as TRL's GRPO
-scoring does. Checks:
-
-  1. every step completes with a finite loss, with a reference pass after each;
-  2. every training forward (the gradient-checkpoint recomputes included) sees a trainable adapter;
-  3. after the last reference pass every sharded adapter is trainable.
-
-Usage:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_reference_pass_fsdp2.py
+peft clears ``requires_grad`` on the sharded params at entry and restores it on the unsharded copies at exit, and FSDP2
+copies the sharded flag at each unshard. Unless ``install_fsdp2_safe_disable_adapter`` reshards before peft's exit,
+adapters stay frozen silently, since checkpointing's input-grad hook keeps the loss attached.
 """
 
 import torch
@@ -28,17 +11,18 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.unwrapping import find_peft_model
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import adapter_param_items, load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import adapter_param_items, load_peft_model
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 3
-# Two micro-steps per window: the second unshards afresh after the first one's post-backward reshard.
+# The second micro-step unshards afresh after the first one's post-backward reshard.
 GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 1e-3
 NUM_TRAIN_SAMPLES = 64
@@ -80,7 +64,6 @@ def run(ctx) -> dict:
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
     callback = _ReferencePassAfterStep(dict(tokenizer(REFERENCE_PROMPT, return_tensors="pt").to(ctx.device)))
     trainer = DistributedSFTTrainer(
@@ -102,7 +85,7 @@ def run(ctx) -> dict:
     )
     train_result = trainer.train()
 
-    # Register the sharded params: they carry the flag every unshard copies, and the optimizer's state.
+    # The sharded params carry the flag every unshard copies, and the optimizer's state.
     reshard_fsdp2_modules(trainer.model)
     adapters = adapter_param_items(trainer.model)
     sharded_trainable = [isinstance(p, DTensor) and p.requires_grad for _, p in adapters]

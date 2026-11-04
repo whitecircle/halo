@@ -1,38 +1,21 @@
 #!/usr/bin/env python
-"""
-SFT EP+TP test with FlexAttention and attention sinks validation.
-
-Smoke test: GptOss-20B trains with EP=2, TP=2 with FlexAttention requested, which handles
-attention sinks (unlike SDPA, which silently drops them). The resolved attention implementation is
-logged, not checked, and no loss is compared against a reference.
-
-Checks:
-1. Attention sinks are sharded across TP ranks (64 -> 32 per rank) and not all zeros
-2. On the model: the experts wrapped and split EP-way, the attention parameters TP-sharded
-3. Training completes every step with finite losses and grad norms
-
-Model: unsloth/gpt-oss-20b-BF16 (MoE, 32 experts, 64 attention heads)
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_ep_tp_flex.py
-"""
+"""GptOss-20B trains at EP=2, TP=2 on FlexAttention, whose sinks shard across TP ranks; SDPA would silently drop them.
+Compares no loss against a reference."""
 
 import torch
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import log, training_run_checks
-
-# Configuration
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -45,11 +28,8 @@ BATCH_SIZE = 1
 LEARNING_RATE = 2e-5
 SEED = 42
 
-EXPECTED_TOTAL_HEADS = 64  # GptOss-20B has 64 attention heads
-EXPECTED_LOCAL_HEADS = EXPECTED_TOTAL_HEADS // TP_SIZE  # 32 per TP rank
-
-
-# Main
+EXPECTED_TOTAL_HEADS = 64  # GptOss-20B's attention heads.
+EXPECTED_LOCAL_HEADS = EXPECTED_TOTAL_HEADS // TP_SIZE
 
 
 @gpu_test_main(min_world_size=TP_SIZE, prefix="sft_ep_tp_flex_test")
@@ -61,7 +41,6 @@ def run(ctx):
     log("  Attention: flex_attention (with sinks support)")
     log(f"{'#' * 70}")
 
-    # Download model on rank 0 first
     log("\nEnsuring model is downloaded...")
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
 
@@ -69,13 +48,11 @@ def run(ctx):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # Create datasets
     log("\n--- Creating synthetic datasets ---")
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
     log(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
 
-    # Load model with EP+TP and flex_attention
     log(f"\n--- Loading model with EP={EP_SIZE}, TP={TP_SIZE}, flex_attention ---")
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE, tp_size=TP_SIZE)
     log(f"Config: {parallelism_config.summary()}")
@@ -91,16 +68,13 @@ def run(ctx):
     log(f"GPU mem after load: {torch.cuda.memory_allocated() / 1e9:.1f}GB")
     log(f"Params: {sum(p.numel() for p in model.parameters()) / 1e9:.2f}B")
 
-    # ── Validate attention implementation ──────────────────────────
     log("\n--- Validating attention implementation ---")
     attn_impl = getattr(model.config, "_attn_implementation", None)
     log(f"Model attn_implementation: {attn_impl}")
 
-    # ── Validate sinks sharding ────────────────────────────────────
     log("\n--- Validating sinks sharding ---")
     checks = {}
 
-    # Check that all attention layers have sinks with local size
     sinks_sizes = []
     sinks_values = []
     for layer_idx, layer in enumerate(model.model.layers):
@@ -125,7 +99,7 @@ def run(ctx):
             f"(sizes: {set(sinks_sizes)})"
         )
 
-        # Verify sinks are not all zeros (they were reset to dtype.min, not zero)
+        # They were reset to dtype.min.
         any_nonzero = any(v.abs().max().item() > 0 for v in sinks_values)
         checks["sinks_nonzero"] = any_nonzero
         log(f"  Sinks have values (not all zeros): {'PASS' if any_nonzero else 'FAIL'}")
@@ -134,7 +108,6 @@ def run(ctx):
         checks["sinks_sharded"] = False
         checks["sinks_nonzero"] = False
 
-    # ── Training ───────────────────────────────────────────────────
     sft_config = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
@@ -143,7 +116,7 @@ def run(ctx):
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # Already applied in load_distributed_model
+        use_liger_kernel=False,  # Already applied in load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",
@@ -151,8 +124,6 @@ def run(ctx):
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
     log("\n--- Creating DistributedSFTTrainer ---")

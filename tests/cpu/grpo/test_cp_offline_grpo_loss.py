@@ -1,7 +1,6 @@
 """The CP trainer consumes right-padded labels and raw checkpointed KL scores."""
 
 import datetime
-from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -11,19 +10,19 @@ import torch.distributed as dist
 import torch.distributed.nn.functional as dist_nn
 from torch import nn
 
-from src.data.collators.offline_grpo import (
+from halo.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
     OfflineGRPOCPDataCollatorWithPadding,
 )
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 _KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]
-# CP2 splits each row's loss numerator into one partial sum per rank, so the loss reassociates one fp32
-# addition per row against the full-row oracle (measured within one rounding step); every gradient
-# element is a per-token term over integer token counts and matches the oracle bit for bit.
+# CP2 builds each row's numerator from one partial sum per rank, so the loss reassociates one fp32 addition per row
+# against the full-row oracle (measured within one rounding step). Per-token gradients match bit for bit.
 _CP2_LOSS_RTOL = 2 * torch.finfo(torch.float32).eps
 
 
@@ -59,8 +58,8 @@ def _trainer(logps, *, beta: float, loss_type: str):
     trainer.beta = beta
     trainer.loss_type = loss_type
     trainer.max_completion_length = 4
-    trainer.policy_gradient_formulation = "reinforce"
-    trainer._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer.args = SimpleNamespace(policy_gradient_formulation="reinforce")
+    trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     trainer._cp_chunked_logps = lambda model, ids, mask, labels: (logps, labels[:, 1:])
     return trainer
 
@@ -77,8 +76,7 @@ def test_cp_dispatch_loss_and_gradient_use_only_completion_targets(loss_type, be
     token_loss = -logps * batch["advantage"].unsqueeze(1)
     if beta:
         ref = batch[REF_PER_TOKEN_LOGPS_COLUMN][:, 1:]
-        # The shared offline objective caps the reference-policy log-ratio. The
-        # detached ceiling preserves the policy gradient on capped tokens.
+        # The objective caps the reference log-ratio; the detached ceiling keeps the policy gradient on capped tokens.
         delta = torch.minimum(ref, logps.detach() + KL_LOGRATIO_CLAMP) - logps
         token_loss = token_loss + beta * (delta.exp() - delta - 1)
     weights = batch["group_size"].float().reciprocal()
@@ -156,7 +154,7 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
         for formulation in ("reinforce", "prob_weighted"):
             policy = scores.clone().requires_grad_()
             trainer.loss_type = loss_type
-            trainer.policy_gradient_formulation = formulation
+            trainer.args.policy_gradient_formulation = formulation
             trainer._cp_chunked_logps = lambda model, ids, mask, labels: (
                 policy[:, start:end],
                 labels[:, start + 1 : end + 1],
@@ -172,8 +170,7 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
             expected.backward()
             torch.testing.assert_close(policy.grad, oracle_policy.grad, atol=1e-6, rtol=1e-6)
 
-            # Removing cp_rank from reference slicing means every shard reads rank 0's columns.
-            # Keep scorer ownership correct while changing only the slice's rank.
+            # Without cp_rank in the reference slice every shard would read rank 0's columns; only that rank changes.
             trainer.cp_config.cp_rank = 0
             wrong_loss = trainer._compute_cp_loss_inner(trainer.model, batch)
             trainer.cp_config.cp_rank = rank

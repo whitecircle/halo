@@ -1,25 +1,6 @@
 #!/usr/bin/env python
-"""The optimizer-shard resume reads under the node's load throttle, on every rank.
-
-A resume materializes each rank's shard in host RAM (``torch.load(map_location="cpu")``), and under
-multi-group EP every follower of a replica group additionally reads its writer's shard — the SAME
-file for all of them. Unthrottled, a node peaks at ``local_world_size`` × (own + writer) shards at
-once and one writer's file is opened by one reader per follower (63 of them at ``ep8`` on 512 GPUs).
-The throttle is the toolkit's existing answer to "many ranks reading big files at once", and it is a
-store phase: its participants are the node's local ranks, so entering it from a rank-dependent branch
-would leave a peer waiting out the whole store timeout on a key nobody writes.
-
-Two ranks, real gloo, ``max_concurrent_loading=1``: the reads must not overlap, which is what the
-throttle buys and what an unwrapped ``torch.load`` cannot deliver. A dense model is used on purpose —
-the throttle is entered by every rank, not only the ones with a replica writer to read.
-
-The batches end at different times, so the read's exit joins the world over the store: the rank
-that read first waits there for the last batch, not in the next collective under the process-group
-watchdog (here a 3 s gloo timeout against a 6 s read), and an exception escaping one rank's read
-raises on every rank instead of leaving the peer in that collective.
-
-    python tests/cpu/checkpoint/test_optimizer_shard_read_throttle.py
-"""
+"""The optimizer-shard resume reads under the node's load throttle, on every rank, joining the world over the store
+on exit. Unthrottled, a node peaks at ``local_world_size`` x (own + writer) shards."""
 
 from __future__ import annotations
 
@@ -31,41 +12,23 @@ import pytest
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.context import CheckpointLoadContext
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import make_parallelism_config
 
 WORLD_SIZE = 2
-# The read each rank simulates. Long enough that concurrent reads would overlap unmistakably, short
-# enough to keep the suite fast.
+# Long enough that concurrent reads overlap unmistakably, short enough to keep the suite fast.
 READ_SECONDS = 0.4
 PG_TIMEOUT_SEC = 60
 # Twice the gloo timeout the join test runs under.
 SLOW_READ_SECONDS = 6
 
 
-class _Config:
-    """The one field the store reads off the parallelism config here."""
-
-    max_concurrent_loading = 1
-
-
 def _context(model: nn.Module) -> CheckpointLoadContext:
-    return CheckpointLoadContext(
-        model=model,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=_Config(),
-        is_pp_mode=False,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=True,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=lambda *a, **k: None,
-        super_load_optimizer_and_scheduler=lambda *a, **k: None,
-    )
+    config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=WORLD_SIZE, max_concurrent_loading=1)
+    return load_context(model, config, fsdp_wrapped=True)
 
 
 def _worker(rank: int, tmp_dir: str) -> None:
@@ -80,8 +43,7 @@ def _worker(rank: int, tmp_dir: str) -> None:
 
     store._read_shard = read
     _osd, failure = store._read_local_state(tmp_dir, os.path.join(tmp_dir, "optimizer_shard_00000.pt"))
-    # As ``load`` does: the store server lives in rank 0's process, so no rank may leave while a
-    # peer still has store work (the throttle's own bookkeeping) to do.
+    # The store server lives in rank 0's process, so no rank may leave while a peer has store work.
     dist.barrier()
 
     with open(os.path.join(tmp_dir, f"window_{rank}.txt"), "w") as fh:
@@ -89,7 +51,7 @@ def _worker(rank: int, tmp_dir: str) -> None:
 
 
 def _slow_or_failing_last_batch(rank: int, tmp_dir: str, mode: str) -> None:
-    """Rank 1 reads in the second batch: slowly past the gloo timeout, or raising out of the read."""
+    """Slowly past the gloo timeout, or raising out of the read."""
     store = OptimizerShardStore(_context(nn.Linear(2, 2)))
 
     def read(_path):
@@ -104,7 +66,7 @@ def _slow_or_failing_last_batch(rank: int, tmp_dir: str, mode: str) -> None:
         store._read_local_state(tmp_dir, os.path.join(tmp_dir, "optimizer_shard_00000.pt"))
         dist.barrier()
         outcome = "joined"
-    except Exception as e:  # the verdict file must be written whatever the rank raised
+    except Exception as e:  # The verdict file must be written whatever the rank raised.
         outcome = f"{type(e).__name__}: {e}"
     with open(os.path.join(tmp_dir, f"join_{rank}.txt"), "w") as fh:
         fh.write(outcome)
@@ -142,8 +104,7 @@ def _windows(tmp_path) -> list[tuple[float, float]]:
 
 
 def test_concurrent_ranks_do_not_read_their_shards_at_the_same_time(tmp_path):
-    """``max_concurrent_loading=1`` means one reader per node at a time — the peak this bounds is
-    per-node host RAM, and the fan-in it bounds is the replica writer's single file."""
+    """Bounds per-node host RAM and the fan-in on the replica writer's single file."""
     (first, second) = sorted(_windows(tmp_path))
     assert first[1] <= second[0], (
         f"the two ranks' shard reads overlapped ({first} vs {second}): the resume read is outside "

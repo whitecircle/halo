@@ -1,19 +1,12 @@
 #!/usr/bin/env python
-"""``tests.common.utils.training_run_checks`` grades a finished run the way its GPU callers rely on.
-
-The SFT and LoRA mode suites share this helper and run only on the GPU tiers, so a check that stopped
-failing there would go unnoticed. These pins drive it with a stand-in trainer state and assert each
-verdict flips on the input that should flip it.
-
-Run: python tests/cpu/conventions/test_training_run_checks.py
-"""
+"""``tests.common.training_checks.training_run_checks`` grades a finished run the way its GPU callers rely on."""
 
 import math
 from types import SimpleNamespace
 
 import pytest
 
-from tests.common.utils import LM_TRAINING_LOSS_BAND, training_run_checks
+from tests.common.training_checks import LM_TRAINING_LOSS_BAND, training_run_checks
 
 MAX_STEPS = 3
 STEP_LOSSES = [2.5, 2.1, 1.8]

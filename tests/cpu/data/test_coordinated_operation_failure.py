@@ -1,20 +1,6 @@
-"""A per-rank data-pipeline error must abort every rank with the real cause, not hang the job.
-
-``coordinated_dataset_operation`` runs the map/filter on ONE rank while the others wait. Joining the
-two phases with a bare barrier would leave a raise in ``operation_fn`` stranding the peers there for
-the whole watchdog window — a 20-minute silence for an error a single-rank re-run surfaces in
-seconds — so the join carries the failure instead.
-
-Proven on a real gloo group, with a deliberately short process-group timeout so a regression FAILS
-rather than stalling the suite: (1) both ranks raise, (2) the non-failing rank is told the actual
-cause rather than a timeout, (3) the rank that failed keeps its OWN exception type — the peers take
-the uniform ``RuntimeError``, but ``tokenize_vlm_dataset``'s ``NotImplementedError`` capability
-refusal is a contract, and (4) a failure on a NON-main rank (a torn cache read) propagates the same
-way. The teardown half is pinned too: ``run_training`` enters no teardown collective when the entry
-point raises, so the failing rank exits with its traceback.
-
-    python tests/cpu/data/test_coordinated_operation_failure.py
-"""
+"""A per-rank data-pipeline error aborts every rank with the real cause. ``coordinated_dataset_operation`` runs the
+map on one rank while the others wait, and a bare barrier would strand them for the whole watchdog window. Proven
+on a real gloo group with a short process-group timeout, so a hang fails and does not stall."""
 
 import builtins
 import datetime
@@ -24,8 +10,8 @@ import time
 import pytest
 from datasets import Dataset
 
-from src.data.pipeline.processing import coordinated_dataset_operation
-from src.training import environment
+from halo.data.pipeline.coordinated_map import coordinated_dataset_operation
+from halo.entrypoints import script
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -81,8 +67,7 @@ def _results(tmp_path, failing_rank: int, exc_name: str = "ValueError") -> list[
 
 
 def test_main_rank_failure_aborts_every_rank_with_the_cause(tmp_path):
-    """Rank 0 owns the map; rank 1 waits. Rank 1 must raise, and its message must name the real
-    error — a bare 'barrier timed out' sends the reader hunting the wrong subsystem."""
+    """A bare 'barrier timed out' sends the reader hunting the wrong subsystem."""
     failing_rank = 0
     results = _results(tmp_path, failing_rank=failing_rank)
 
@@ -97,8 +82,7 @@ def test_main_rank_failure_aborts_every_rank_with_the_cause(tmp_path):
 
 
 def test_non_main_rank_failure_also_aborts_every_rank(tmp_path):
-    """The second phase needs the same treatment: only the waiters read the cache back, so a torn or
-    unreadable cache file fails on ranks the writer never hears from."""
+    """Only the waiters read the cache back, so a torn cache file fails on ranks the writer never hears from."""
     failing_rank = 1
     results = _results(tmp_path, failing_rank=failing_rank)
 
@@ -111,8 +95,8 @@ def test_non_main_rank_failure_also_aborts_every_rank(tmp_path):
 
 
 def test_base_exception_in_the_operation_still_aborts_the_peer(tmp_path):
-    """A ``KeyboardInterrupt`` out of the map is the same hang: catching only ``Exception`` would let
-    the interrupted rank exit past the join while its peer waits out the process-group timeout."""
+    """Catching only ``Exception`` lets the interrupted rank exit past the join while its peer waits out the
+    timeout."""
     failing_rank = 0
     results = _results(tmp_path, failing_rank=failing_rank, exc_name="KeyboardInterrupt")
 
@@ -146,9 +130,8 @@ def _slow_map_worker(rank: int, tmp_dir: str) -> None:
 
 
 def test_writer_map_may_outlive_the_process_group_timeout(tmp_path):
-    """The store join must let the writer's map run to completion: joins built on
-    ``all_gather_object`` keep the waiting rank INSIDE the process group for the whole map, so a
-    fresh-cache tokenization past DIST_NCCL_TIMEOUT_MINUTES kills the run blaming the collective."""
+    """Joins on ``all_gather_object`` keep the waiter inside the process group for the whole map, so a fresh-cache
+    tokenization past DIST_NCCL_TIMEOUT_MINUTES would kill the run."""
     run_gloo_ranks(
         _slow_map_worker,
         WORLD_SIZE,
@@ -164,21 +147,19 @@ def test_writer_map_may_outlive_the_process_group_timeout(tmp_path):
 
 def _record_teardown(monkeypatch) -> list[str]:
     torn_down: list[str] = []
-    monkeypatch.setattr(environment, "destroy_all_dispatchers", lambda: torn_down.append("dispatchers"))
-    monkeypatch.setattr(environment.dist, "is_available", lambda: True)
-    monkeypatch.setattr(environment.dist, "is_initialized", lambda: True)
-    monkeypatch.setattr(environment.dist, "destroy_process_group", lambda: torn_down.append("process_group"))
+    monkeypatch.setattr(script, "destroy_all_dispatchers", lambda: torn_down.append("dispatchers"))
+    monkeypatch.setattr(script.dist, "is_available", lambda: True)
+    monkeypatch.setattr(script.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(script.dist, "destroy_process_group", lambda: torn_down.append("process_group"))
     return torn_down
 
 
-def test_run_training_skips_the_collective_teardown_when_main_raises(monkeypatch):
-    """Both teardown halves are collectives (``destroy_all_dispatchers`` opens with a barrier and
-    ``destroy_process_group`` is one). A rank failing mid-step has peers still inside the step's own
-    collective, so entering teardown parks the failed rank in the NCCL watchdog instead of exiting
-    and letting torchrun reap the peers. The exception must propagate with NO teardown call."""
+def test_with_distributed_teardown_skips_the_collective_teardown_when_main_raises(monkeypatch):
+    """Both teardown halves are collectives, and a rank failing mid-step has peers inside the step's own collective,
+    so teardown would park it in the NCCL watchdog."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
         raise ValueError("the real cause")
 
@@ -188,11 +169,11 @@ def test_run_training_skips_the_collective_teardown_when_main_raises(monkeypatch
     assert torn_down == [], f"teardown collectives ran on the failure path: {torn_down}"
 
 
-def test_run_training_tears_down_dispatchers_before_the_process_group_on_success(monkeypatch):
-    """Gin frees a DeepEP buffer through the group communicator, so the order is load-bearing."""
+def test_with_distributed_teardown_tears_down_dispatchers_before_the_process_group_on_success(monkeypatch):
+    """Gin frees a DeepEP buffer through the group communicator, so the order matters."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
         return "done"
 
@@ -200,14 +181,14 @@ def test_run_training_tears_down_dispatchers_before_the_process_group_on_success
     assert torn_down == ["dispatchers", "process_group"]
 
 
-def test_run_training_tears_down_before_an_early_stop_exits(monkeypatch):
-    """Every rank leaves an early-stopped run at the same step, so the teardown collectives meet their peers;
-    skipped, a DeepEP buffer outside the trained model (a reference model's) outlives the process group."""
+def test_with_distributed_teardown_tears_down_before_an_early_stop_exits(monkeypatch):
+    """Every rank leaves an early-stopped run at the same step, so the collectives meet; skipped, a reference
+    model's DeepEP buffer outlives the process group."""
     torn_down = _record_teardown(monkeypatch)
 
-    @environment.run_training
+    @script.with_distributed_teardown
     def main():
-        raise environment.TrainingStoppedEarly("GRPO training stopped early at step 3 of 5.")
+        raise script.EarlyStopExit("GRPO training stopped early at step 3 of 5.")
 
     with pytest.raises(SystemExit, match="stopped early at step 3 of 5"):
         main()

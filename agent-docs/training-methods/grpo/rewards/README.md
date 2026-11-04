@@ -1,6 +1,6 @@
 # Reward Terms
 
-A GRPO reward is a sum of **terms**. Each term names a source of a score in `[0, 1]` and prices it as `weight × score ^ exponent`. Terms are listed under `rewards:` and parsed at config time (`src/rewards/terms.py`), so a bad term fails before any server is contacted.
+A GRPO reward is a sum of **terms**. Each term names a source of a score in `[0, 1]` and prices it as `weight × score ^ exponent`. Terms are listed under `rewards:` and parsed at config time (`halo/rewards/terms.py`), so a bad term fails before any server is contacted.
 
 The [online arm](../online.md#rewards) turns each term into one TRL reward function; the [environment arm](#environment-arm) composes them into the episode reward.
 
@@ -62,7 +62,7 @@ Two configuration faults raise instead of booking an outage: a reward model whos
 
 At launch, rank 0 probes every external term with a one-line sample in the run's exact request shape, so a bad URL, key, model or parameter fails the launch, not every episode. The environment arm probes through the environment's `verify_backend`.
 
-Judge requests retry (`src/inference/openai_client.py`):
+Judge requests retry (`halo/inference/openai_client.py`):
 
 - up to four times, with `request_timeout` bounding each attempt, not the whole call;
 - four more times, at 2, 4, 8 and 16 s, on a reply with no choices that carries a 408, 429, 500, 502, 503 or 504 error code (how OpenRouter reports a rate-limited model).
@@ -95,10 +95,11 @@ One sample serves every external term, each through its own view. It carries:
 - the calls a cut turn never ran (`Message.cut_tool_calls`), which only the judge's `full` and `digest` views show;
 - the final answer and the reference.
 
-Two `BaseEnvironment` hooks fill the episode-specific parts:
+Three `EnvironmentBase` hooks fill the episode-specific parts:
 
 - `_final_answer(trajectory)`: what the episode delivered (the native protocol's `final_response`, ReAct's `Final Answer`, code contests' submitted program as a fenced code block), or `None` (the base) when it delivered none.
 - `_scoring_reference(trajectory)`: the reference, `context["answer"]` by default. `exam_qa` hands the choice letter; code contests hands `None`, so the hidden tests never reach a judge.
+- `_episode_facts(trajectory)`: the episode facts the environment decides itself (declared in `EPISODE_FACTS`), which a judge check names in `unless` to stand exempt under; none in the base. Code contests establishes `failed_with_no_runs_left`.
 
 ### Settlement
 

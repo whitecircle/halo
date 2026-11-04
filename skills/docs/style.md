@@ -28,7 +28,7 @@ code — is padding. Delete it.
   pages fit in 150–300 lines; a page past ~400 is almost always carrying
   redundancy or content that belongs on another page.
 - **Cite sparingly — only where it helps the reader act.** Anchor a claim to a
-  `src/` path, config field, or class name **only when the reader needs to find or
+  `halo/` path, config field, or class name **only when the reader needs to find or
   set that thing**. One or two pointers to the owning code per topic is enough. Do
   not append a path to every sentence, and do not enumerate every method of a
   module — that "Implementation" dump is noise that drifts out of date. Name the
@@ -49,7 +49,10 @@ code — is padding. Delete it.
   to the current fact. Keep a date only when it *identifies* a thing (a version
   pin, a CVE, a checkpoint version). History lives in git, never in `agent-docs/`.
 - **One home per fact.** Each fact lives on exactly one authoritative page. A
-  second page that needs it gets a one-line link, never a copy that will drift.
+  second page that needs it gets a one-line link, never a copy that will drift. A
+  configuration field's type and default are tabled only in
+  `agent-docs/reference/configuration-reference.md`; a feature page explains the
+  behavior and links there (`tests/cpu/conventions/test_docs_restate_no_config_fields.py`).
 - **No deep-dive sprawl.** Keep the unique technical substance; cut the repetition
   and the re-derivation of a point the linked page already makes. A theory page
   makes its argument once, tightly.

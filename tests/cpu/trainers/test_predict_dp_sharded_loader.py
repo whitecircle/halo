@@ -1,22 +1,6 @@
 #!/usr/bin/env python
 """``predict()`` under TP returns every test row exactly once, on a real tp2 x dp2 gloo world.
-
-``predict()`` runs the evaluation gather over ``get_test_dataloader``. The gather keeps one chunk
-per DP replica; HF's own test loader shards by world rank, so TP siblings would draw different
-rows and the scope would keep one sibling's: 7 rows at batch 2 would come back as ``[0, 1, 4, 5]``,
-and 11 rows at batch 3 would fail the cut. The mixin's test loader is the eval loader's DP-sharded body, and a
-loader that bypasses it fails loud on its first batch rather than being gathered off the wrong
-geometry, padded final round or not (8 rows at batch 2 pad nothing, and would come back
-as ``[0, 1, 4, 5]``). The pins: the toolkit test loader returns each row once on every rank; a
-world-sharded loader raises.
-
-An iterable split is accelerate's dispatching loader by default, which slices rank 0's batches by
-global rank whatever DP geometry it is handed: TP siblings would draw different rows. The toolkit loader
-shards it by DP rank instead, so siblings draw the same rows, and refuses an explicit
-``dispatch_batches: true``.
-
-    python tests/cpu/trainers/test_predict_dp_sharded_loader.py
-"""
+HF's loaders split by world rank, so TP siblings would draw different rows and the gather would keep one sibling's."""
 
 import datetime
 from collections import Counter
@@ -29,13 +13,14 @@ from accelerate.data_loader import DataLoaderDispatcher, prepare_data_loader
 from accelerate.utils import DataLoaderConfiguration, gather_object
 from torch.utils.data import DataLoader, IterableDataset, SequentialSampler
 
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin, dp_representative_ranks
+from halo.trainers.dataloaders import DataParallelLoaderMixin, dp_representative_ranks
+from halo.trainers.evaluation import EvaluationMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD, TP = 4, 2
 
 
-class _TpHost(DataParallelDataLoaderMixin):
+class _TpHost(DataParallelLoaderMixin, EvaluationMixin):
     """A tp2 x dp2 rank's loader and gather state; the HF seams the build calls are identities."""
 
     def __init__(self, accelerator, rank: int, batch_size: int):
@@ -43,7 +28,9 @@ class _TpHost(DataParallelDataLoaderMixin):
         self.model = SimpleNamespace(training=False)
         self.data_collator = torch.tensor
         self._dataset_presharded = False
-        self._dp_rank = rank // TP
+        self.parallelism_config = SimpleNamespace(
+            is_cp_mode=False, data_parallel_size=WORLD // TP, get_data_parallel_rank=lambda: rank // TP
+        )
         dp_rank_of = [r // TP for r in range(WORLD)]
         self._dp_metric_gather_scope = (dp_representative_ranks(dp_rank_of), WORLD)
         self.args = SimpleNamespace(
@@ -60,12 +47,6 @@ class _TpHost(DataParallelDataLoaderMixin):
 
     def _needs_custom_dataloader(self):
         return True
-
-    def get_data_parallel_size(self):
-        return WORLD // TP
-
-    def get_data_parallel_rank(self):
-        return self._dp_rank
 
     def _get_collator_with_removed_columns(self, collator, description=None):
         return collator

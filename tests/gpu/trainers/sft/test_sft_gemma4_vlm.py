@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""
-Gemma4 VLM smoke test: one forward + backward with image inputs on the bare EP model (no trainer,
-no FSDP, no optimizer step).
-
-Mirrors test_sft_gemma4_moe.py but feeds image+text inputs through the
-processor instead of pure text. This exercises the vision encoder path
-alongside the EPGemma4MoELayer expert wrapping to confirm the two
-components coexist correctly under EP.
-
-Usage:
-    torchrun --nproc_per_node=2 \\
-        tests/gpu/trainers/sft/test_sft_gemma4_vlm.py
-
-Requirements:
-    - 2-8 B200/B300 GPUs (>=80GB)
-    - DeepEP installed
-    - Local checkpoint at $HALO_DATA_ROOT/models/gemma-4-26B-A4B-it-patched
-      (override via HALO_TEST_GEMMA4_MODEL env var)
-"""
+"""Gemma4 VLM smoke on the bare EP model: one forward + backward with image inputs, the vision path beside
+EPGemma4MoELayer."""
 
 import random
 
@@ -25,14 +8,15 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
+from halo.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = env_str("HALO_TEST_GEMMA4_MODEL", GEMMA4_26B_A4B_PATCHED)
 EP_SIZE_OVERRIDE = env_int("HALO_TEST_EP", None)
@@ -67,7 +51,7 @@ def run(ctx):
         parallelism_config=pc,
         dtype=torch.bfloat16,
         trust_remote_code=True,
-        attn_implementation="sdpa",  # Gemma4 global_head_dim=512 > FA2's 256 limit
+        attn_implementation="sdpa",  # Gemma4 global_head_dim=512 > FA2's 256 limit.
         use_liger_kernel=False,
     )
     log(f"GPU memory after load: {gpu_mem_gb():.1f}GB")
@@ -78,7 +62,6 @@ def run(ctx):
     if not checks["ep_layers_wrapped"]:
         return {"checks": checks}
 
-    # Build a single-image multimodal sample using the processor's chat template.
     img = make_random_image(ctx.rank)
     messages = [
         {
@@ -95,7 +78,6 @@ def run(ctx):
     ]
     templated = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
-    # Processor handles image tokenisation + insertion of <image> placeholders.
     inputs = processor(
         text=[templated],
         images=[img],
@@ -107,7 +89,7 @@ def run(ctx):
     labels = inputs["input_ids"].clone()
     if "attention_mask" in inputs:
         labels[inputs["attention_mask"] == 0] = -100
-    # Mask image tokens out of the loss; only train on text generation.
+    # Train only on text generation.
     for special in ("image_token_id",):
         tok_id = getattr(model.config, special, None)
         if tok_id is not None:
@@ -120,7 +102,7 @@ def run(ctx):
     model.train()
 
     log("Forward pass with image+text...")
-    # pixel_values must match model dtype (bf16 here).
+    # pixel_values must match the model dtype.
     if "pixel_values" in inputs and inputs["pixel_values"].dtype != torch.bfloat16:
         inputs["pixel_values"] = inputs["pixel_values"].to(torch.bfloat16)
 
@@ -135,7 +117,6 @@ def run(ctx):
     log("Backward...")
     out.loss.backward()
 
-    # Validate gradient health.
     nan_grads = []
     finite_count = 0
     for name, p in model.named_parameters():

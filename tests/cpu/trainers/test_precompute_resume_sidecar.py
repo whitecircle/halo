@@ -1,20 +1,6 @@
 #!/usr/bin/env python
 """Precomputed reference log-probs ride every checkpoint and replace the sweep on resume.
-
-TRL runs ``precompute_ref_log_probs`` inside ``__init__`` over ``self.ref_model or self.model``. A
-Path-B resume (EP, CP, TP and the default ``use_grouped_gemm``) builds the policy from the
-checkpoint before the trainer exists, so with no separate reference that sweep scores the TRAINED
-weights: the reference equals the policy and every log-ratio is zero. The mixin persists the swept
-columns into each checkpoint (``reference_logps.pt``) and, handed the resume checkpoint at
-construction, attaches them in place of the sweep once the saved split's row count, token digests
-and reference settings match — or refuses where a sweep would be wrong.
-
-The trainers are the real ``DistributedDPOTrainer`` / ``DistributedKTOTrainer`` over a stub reference
-forward whose values say which weights produced them: ``BASE`` on the saving run, ``TRAINED`` on the
-resumed one (``tests/common/preference_precompute.py``).
-
-    python tests/cpu/trainers/test_precompute_resume_sidecar.py
-"""
+A Path-B resume (EP, CP, TP, default ``use_grouped_gemm``) would sweep the trained weights, zeroing every log-ratio."""
 
 import contextlib
 import datetime
@@ -30,21 +16,23 @@ import pytest
 import torch
 from accelerate import PartialState
 from datasets import Dataset, Features, List, Value, concatenate_datasets
-from trl import DPOConfig, KTOConfig, ModelConfig
+from trl import DPOConfig, KTOConfig
 
-import src.checkpoint.atomic as atomic_mod
-import src.trainers.mixins.reference_logps as precompute_mod
-from src.args.distributed_args import DistributedArguments
-from src.args.dpo_args import DPOScriptArguments
-from src.args.kto_args import KTOScriptArguments
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.distributed import runtime
-from src.trainers.mixins.checkpointing import CheckpointingMixin
-from src.trainers.mixins.reference_logps import token_digest as _token_digest
-from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
-from src.training.environment import detect_resume_checkpoint
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import ScriptRuntime
+import halo.checkpoint.atomic as atomic_mod
+import halo.trainers.reference_logps as precompute_mod
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.configs.preference import DPOScriptArguments, KTOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.run_setup import resume_checkpoint_from_config
+from halo.entrypoints.script import ScriptContext
+from halo.runtime import filesystem
+from halo.runtime.consensus import RankConsensus
+from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.preference.trl_preference import TRLPreferenceMixin
+from halo.trainers.reference_logps import token_digest as _token_digest
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 from tests.common.preference_precompute import (
     BASE,
@@ -64,13 +52,12 @@ PartialState()
 
 # The dataclasses scripts/training/preference/{dpo,kto}.py parse their config into.
 SCRIPT_CONFIGS = {
-    "dpo": (DPOScriptArguments, DPOConfig, ModelConfig, DistributedArguments),
-    "kto": (KTOScriptArguments, KTOConfig, ModelConfig, DistributedArguments),
+    "dpo": (DPOScriptArguments, DPOConfig, ModelArguments, ParallelismArguments),
+    "kto": (KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments),
 }
 
 _REFERENCE_WORLD_SIZE = 2
 _REFERENCE_PG_TIMEOUT = datetime.timedelta(seconds=120)
-# The token digests of the fixture rows as the sidecar schema stores them.
 _SIDECAR_TOKEN_DIGESTS = {
     "dpo": {
         "prompt_ids": "22b7c1ed76f6e7e90ec08c0f1cb911415391eb6198dd44efdaf5050ea7f8e28d",
@@ -92,7 +79,6 @@ def kind(request):
 
 
 def _save_base_run(kind, checkpoint_dir, splits, **trainer_kwargs) -> dict[str, Dataset]:
-    """A fresh run's precompute over ``splits`` (name → dataset), persisted into ``checkpoint_dir``."""
     trainer = precompute_trainer(kind, weights=BASE, **trainer_kwargs)
     prepared = {
         name: trainer._precompute_ref_logps(dataset, name, SWEEP_BATCH_SIZE) for name, dataset in splits.items()
@@ -155,8 +141,7 @@ def test_a_resume_attaches_the_saved_columns_instead_of_sweeping_the_trained_pol
 
 
 def test_a_sidecar_in_the_on_disk_schema_resumes_and_resaves_its_identity_unchanged(kind, tmp_path):
-    """The sidecar is written field by field, its token digests pinned as literals, so the on-disk
-    schema is held to itself rather than to whatever the current writer emits."""
+    """Written field by field with literal digests, so the schema cannot drift with the current writer."""
     columns = (
         {
             "ref_chosen_logps": torch.tensor([-6.0, -12.0, -18.0, -24.0]),
@@ -195,7 +180,7 @@ def test_a_sidecar_in_the_on_disk_schema_resumes_and_resaves_its_identity_unchan
 
 
 def test_a_resumed_dataset_with_a_new_fingerprint_still_restores(kind, tmp_path):
-    """The identity is the token content: a fingerprint re-drawn by an unhashable map must not refuse."""
+    """The identity is the token content, so a fingerprint re-drawn by an unhashable map must not refuse."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     dataset = token_rows(kind)
     dataset._fingerprint = "redrawn-per-process"
@@ -219,10 +204,8 @@ def test_a_policy_built_from_the_checkpoint_without_saved_columns_refuses(kind, 
 
 
 def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
-    """The flags the refusal prints go through the entry script's own parser onto the config that
-    resumed: they must start a fresh run from the base that saves checkpoint-1 and stops, outside
-    the run's own output_dir, whose rotation could otherwise delete the checkpoint being recovered.
-    Anything less and the recovery the refusal names cannot produce the sidecar it asks for."""
+    """The printed flags must start a fresh run from the base that saves checkpoint-1 and stops, outside the run's
+    output_dir, whose rotation could delete the checkpoint being recovered."""
     run_dir = tmp_path / "run"
     resumed_from = run_dir / "checkpoint-7"
     resumed_from.mkdir(parents=True)
@@ -239,12 +222,17 @@ def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
         f"model_name_or_path: base/model\noutput_dir: {run_dir}\nbf16: false\nuse_cpu: true\n"
         f"precompute_ref_log_probs: true\nsave_total_limit: 1\nresume_from_checkpoint: {resumed_from}\n"
     )
-    as_resumed = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), [])[1]
-    assert detect_resume_checkpoint(as_resumed) == str(resumed_from), "premise: the config resumes"
+    parser = HaloArgumentParser(SCRIPT_CONFIGS[kind])
+    as_resumed = parser.parse_dict(parser.load_values([str(config_path)]))[1]
+    assert resume_checkpoint_from_config(as_resumed, overwrite_output_dir=False) == str(resumed_from), (
+        "premise: the config resumes"
+    )
 
-    config = H4ArgumentParser(SCRIPT_CONFIGS[kind]).parse_yaml_and_args(str(config_path), recovery)[1]
+    config = parser.parse_dict(parser.load_values([str(config_path), *recovery]))[1]
 
-    assert detect_resume_checkpoint(config) is None, "the recovery run must start from the base"
+    assert resume_checkpoint_from_config(config, overwrite_output_dir=False) is None, (
+        "the recovery run must start from the base"
+    )
     assert (config.max_steps, config.save_strategy, config.save_steps) == (1, "steps", 1)
     assert config.save_only_model is True
     assert os.path.commonpath([os.path.abspath(config.output_dir), str(run_dir)]) != str(run_dir), (
@@ -258,8 +246,7 @@ def test_the_named_recovery_parses_into_a_fresh_one_step_save(kind, tmp_path):
     ids=["policy_from_base", "separate_reference"],
 )
 def test_a_resume_sweeps_where_the_reference_weights_are_untrained(kind, tmp_path, policy_from_checkpoint, ref_model):
-    """An adapter checkpoint (the policy resumes the base) or a separate reference model: the sweep
-    scores untrained weights, so a checkpoint without the sidecar still resumes."""
+    """An adapter checkpoint or a separate reference sweeps untrained weights, so no sidecar is needed to resume."""
     trainer = precompute_trainer(
         kind, resume_checkpoint=str(tmp_path), policy_from_checkpoint=policy_from_checkpoint, ref_model=ref_model
     )
@@ -291,7 +278,6 @@ def test_saved_columns_for_other_rows_refuse(kind, tmp_path, resumed_rows, reaso
     [("dpo", name) for name in TOKEN_COLUMNS["dpo"]] + [("kto", name) for name in TOKEN_COLUMNS["kto"]],
 )
 def test_every_column_the_reference_reads_is_in_the_digest(tmp_path, kind, bumped):
-    """One changed value in any token-id or label column must refuse the saved split."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     trainer = _resumed(kind, tmp_path)
 
@@ -316,8 +302,8 @@ def test_every_column_the_reference_reads_is_in_the_digest(tmp_path, kind, bumpe
     ids=["dpo_max_length", "dpo_truncation_mode", "dpo_ld_alpha", "kto_max_length"],
 )
 def test_changed_reference_settings_refuse(tmp_path, kind, changed):
-    """The collator truncates at batch time and ``ld_alpha`` reshapes DPO's sums, so a resume that
-    changes either reads other values off the same tokens."""
+    """The collator truncates at batch time and ``ld_alpha`` reshapes DPO's sums, so either change reads other values
+    off the same tokens."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     trainer = _resumed(kind, tmp_path)
     for name, value in changed.items():
@@ -349,11 +335,9 @@ def test_a_reference_mismatch_names_the_data_and_settings_to_resume_with(kind, t
 
 
 def test_a_split_saved_at_the_runs_precision_is_restored(kind, tmp_path):
-    """Every saved split records the precision its log-probs were summed in, and a resume summing at
-    that precision attaches it."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
-    assert saved["settings"]["logprob_precision"] == TRAINERS[kind][0].logprob_precision
+    assert saved["settings"]["logprob_precision"] == TRAINERS[kind][0].LOGPROB_PRECISION
 
     resumed = _resumed(kind, tmp_path)
     resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
@@ -363,9 +347,7 @@ def test_a_split_saved_at_the_runs_precision_is_restored(kind, tmp_path):
 
 @pytest.mark.parametrize("saved_precision", [None, "bfloat16"], ids=["unrecorded", "bfloat16"])
 def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved_precision):
-    """A split whose settings record another log-prob precision, or none, carries that precision's
-    rounding: a resume whose sweep would score the trained weights refuses it and names how to
-    regenerate the file, and any other resume re-sweeps."""
+    """A sweep over trained weights refuses and names how to regenerate the file; any other resume re-sweeps."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)
     settings = saved["train"]["settings"]
@@ -374,7 +356,7 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     else:
         settings["logprob_precision"] = saved_precision
     torch.save(saved, tmp_path / REFERENCE_LOGPS_FILE)
-    precision = TRAINERS[kind][0].logprob_precision
+    precision = TRAINERS[kind][0].LOGPROB_PRECISION
 
     resumed = _resumed(kind, tmp_path)
     with pytest.raises(ValueError, match=f"^Regenerate .* summed at .* this run sums them in {precision}") as raised:
@@ -387,17 +369,6 @@ def test_a_split_summed_at_another_precision_is_not_reused(kind, tmp_path, saved
     assert from_base.compute_ref_log_probs.batches > 0, "the old-precision split was reused, not re-swept"
 
 
-def test_a_trainer_without_a_declared_precision_refuses_before_sweeping(kind):
-    """The precision is every saved split's identity; a trainer that does not declare it would save
-    splits a resume could not tell apart from another precision's."""
-    trainer = precompute_trainer(kind)
-    trainer.logprob_precision = None
-
-    with pytest.raises(NotImplementedError, match="logprob_precision"):
-        trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
-    assert trainer.compute_ref_log_probs.batches == 0
-
-
 @pytest.mark.parametrize(
     ("policy_from_checkpoint", "ref_model"),
     [(False, None), (True, torch.nn.Linear(1, 1))],
@@ -407,9 +378,7 @@ def test_a_trainer_without_a_declared_precision_refuses_before_sweeping(kind):
 def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
     kind, tmp_path, policy_from_checkpoint, ref_model, changed
 ):
-    """Where the sweep scores untrained weights (an adapter or merged-adapter resume builds the
-    policy from the base; a separate reference model), a saved split that does not match the
-    resumed rows or settings is swept afresh: only a sweep over trained weights must refuse."""
+    """Only a sweep over trained weights must refuse; an adapter resume or a separate reference model sweeps afresh."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     trainer = precompute_trainer(
         kind,
@@ -441,8 +410,7 @@ def test_a_mismatched_split_is_swept_where_the_reference_weights_are_untrained(
     ids=["missing_key", "mistyped_rows", "short_columns"],
 )
 def test_a_malformed_saved_split_is_a_mismatch_not_a_crash(kind, tmp_path, corrupt):
-    """A malformed entry must reach the verdict every rank joins: raised on one node's bad copy
-    alone, it would leave the others waiting in the collective that follows."""
+    """Raised on one node's bad copy alone, it would leave the others waiting in the collective that follows."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)
     corrupt(saved["train"])
@@ -456,8 +424,7 @@ def test_a_malformed_saved_split_is_a_mismatch_not_a_crash(kind, tmp_path, corru
 
 
 def test_a_split_the_resumed_run_skips_rides_into_its_checkpoints(kind, tmp_path):
-    """A resume with its eval split switched off still writes that split's saved reference into the
-    checkpoints it makes, so a later resume that turns eval back on restores it rather than refusing."""
+    """A later resume that turns eval back on restores the split instead of refusing."""
     base = _save_base_run(kind, tmp_path / "a", {"train": token_rows(kind), "eval": token_rows(kind, 3)})
     train_only = _resumed(kind, tmp_path / "a")
     train_only._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
@@ -472,8 +439,7 @@ def test_a_split_the_resumed_run_skips_rides_into_its_checkpoints(kind, tmp_path
 
 
 def test_a_kto_resume_that_needs_the_kl_column_the_save_lacks_refuses(tmp_path):
-    """The needed set is derived per run (``calculate_KL``), so a resume under a KL loss cannot be
-    served by a save written under a KL-free one."""
+    """``calculate_KL`` derives the needed set per run, so a KL-free save cannot serve a resume under a KL loss."""
     kl_free = token_rows("kto").remove_columns(["KL_completion_ids"])
     _save_base_run("kto", tmp_path, {"train": kl_free}, calculate_kl=False)
     trainer = _resumed("kto", tmp_path, calculate_kl=True)
@@ -483,8 +449,7 @@ def test_a_kto_resume_that_needs_the_kl_column_the_save_lacks_refuses(tmp_path):
 
 
 def test_a_kto_resume_dropping_the_kl_term_restores_ref_logps(tmp_path):
-    """The reverse direction is served: the saved ``ref_logps`` still belongs to these rows, and the
-    KL completions the save digested are no longer read."""
+    """The saved ``ref_logps`` still belongs to these rows, and the KL completions it digested go unread."""
     base = _save_base_run("kto", tmp_path, {"train": token_rows("kto")}, calculate_kl=True)["train"]
     trainer = _resumed("kto", tmp_path, calculate_kl=False)
 
@@ -498,8 +463,7 @@ def test_a_kto_resume_dropping_the_kl_term_restores_ref_logps(tmp_path):
 
 
 def test_every_split_is_restored_under_its_own_name(kind, tmp_path):
-    """TRL precomputes the train split and each eval dataset by name; a split the save never held
-    refuses under a policy built from the checkpoint."""
+    """TRL precomputes the train split and each eval dataset by name."""
     splits = {"train": token_rows(kind), "eval_a": token_rows(kind, 2), "eval_b": token_rows(kind, 3)}
     base = _save_base_run(kind, tmp_path, splits)
     resumed = _resumed(kind, tmp_path)
@@ -514,10 +478,9 @@ def test_every_split_is_restored_under_its_own_name(kind, tmp_path):
 
 
 def test_a_split_saved_on_some_ranks_only_refuses_without_sweeping(kind, tmp_path, monkeypatch):
-    """A node whose copy differs must stop the whole world before any rank enters the sweep's
-    collectives; the partial verdict comes from the presence consensus."""
+    """A node whose copy differs must stop the whole world before any rank enters the sweep's collectives."""
     _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
-    monkeypatch.setattr(precompute_mod, "rank_consensus", lambda local_ok: (False, True))
+    monkeypatch.setattr(precompute_mod, "rank_consensus", lambda local_ok: RankConsensus(False, True))
     trainer = _resumed(kind, tmp_path)
 
     with pytest.raises(RuntimeError, match="on some ranks only"):
@@ -532,7 +495,7 @@ def test_the_sidecar_is_written_by_the_save_rank_inside_the_fence(kind, tmp_path
     fence: list[tuple[str, bool]] = []
 
     @contextlib.contextmanager
-    def recording_fence():
+    def recording_fence(_what: str):
         fence.append(("enter", path.exists()))
         try:
             yield
@@ -540,13 +503,13 @@ def test_the_sidecar_is_written_by_the_save_rank_inside_the_fence(kind, tmp_path
             fence.append(("exit", path.exists()))
 
     monkeypatch.setattr(precompute_mod, "barrier_on_exit", recording_fence)
-    monkeypatch.setattr(precompute_mod, "fs_aware_save_rank", lambda: False)
+    monkeypatch.setattr(precompute_mod, "is_fs_save_rank", lambda: False)
     trainer._persist_trainer_sidecars(str(tmp_path))
     assert not path.exists(), "a rank that is not its node's save rank wrote the sidecar"
     assert fence == [("enter", False), ("exit", False)], "every rank must enter the fence"
 
     fence.clear()
-    monkeypatch.setattr(precompute_mod, "fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(precompute_mod, "is_fs_save_rank", lambda: True)
     trainer._persist_trainer_sidecars(str(tmp_path))
     assert fence == [("enter", False), ("exit", True)], "the save rank must write inside the fence"
 
@@ -576,7 +539,7 @@ def test_partial_reference_write_does_not_replace_the_complete_sidecar(kind, tmp
         raise OSError("interrupted reference write")
 
     monkeypatch.setattr(precompute_mod.torch, "save", interrupted_save)
-    with pytest.raises(RuntimeError, match="interrupted reference write"):
+    with pytest.raises(OSError, match="interrupted reference write"):
         trainer._persist_trainer_sidecars(str(tmp_path))
     assert path.read_bytes() == complete
     assert not list(tmp_path.glob(f".{REFERENCE_LOGPS_FILE}.*"))
@@ -662,17 +625,17 @@ def test_directory_sync_failure_keeps_the_previous_reference_checkpoint(kind, tm
         original_sync(descriptor)
 
     monkeypatch.setattr(atomic_mod.os, "fsync", failed_directory_sync)
-    with pytest.raises(RuntimeError, match="reference directory sync failed"):
+    with pytest.raises(OSError, match="reference directory sync failed"):
         trainer._persist_trainer_sidecars(str(second))
     assert trainer._reference_immutable_path == str(first / REFERENCE_LOGPS_FILE)
     assert torch.load(first / REFERENCE_LOGPS_FILE, weights_only=True)["train"]["num_rows"] == N_ROWS
 
 
 def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None:
-    runtime.resolve_shared_filesystem_consensus()
+    filesystem.resolve_shared_filesystem_consensus()
     try:
-        assert runtime.is_output_shared_filesystem() is shared
-        assert runtime.fs_aware_save_rank() is (rank == 0 if shared else True)
+        assert filesystem.is_output_shared_filesystem() is shared
+        assert filesystem.is_fs_save_rank() is (rank == 0 if shared else True)
         failing_rank = 0 if shared else 1
         node = "shared" if shared else f"node_{rank}"
         for kind in TRAINERS:
@@ -688,13 +651,16 @@ def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None
             def fail_publish(source, destination):
                 raise OSError(errno.ENOSPC, "reference writer ran out of space")
 
+            # The writer raises its own error, chained under the verdict every peer raises.
+            failing = rank == failing_rank
             with pytest.MonkeyPatch.context() as patch:
-                if rank == failing_rank:
+                if failing:
                     patch.setattr(atomic_mod.os, "replace", fail_publish)
-                with pytest.raises(RuntimeError, match="reference writer ran out of space") as raised:
+                with pytest.raises(OSError if failing else RuntimeError, match="out of space") as raised:
                     trainer._persist_trainer_sidecars(second)
-            assert f"1 of {_REFERENCE_WORLD_SIZE} rank(s)" in str(raised.value)
-            assert f"rank {failing_rank}" in str(raised.value)
+            verdict = str(raised.value.__cause__ if failing else raised.value)
+            assert f"1 of {_REFERENCE_WORLD_SIZE} rank(s)" in verdict
+            assert f"rank {failing_rank}" in verdict
             assert trainer._reference_immutable_path == previous
             assert trainer._reference_saved_generation == saved_generation
 
@@ -704,7 +670,7 @@ def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None
             for name in REFERENCE_COLUMNS[kind]:
                 assert torch.equal(column(restored, name), column(prepared, name))
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
 
 
 @pytest.mark.parametrize("shared", [True, False], ids=["shared_fs", "node_local_fs"])
@@ -766,8 +732,8 @@ def test_two_splits_sharing_a_name_are_refused(kind):
 
 
 def test_a_resume_request_without_the_resume_context_refuses(kind):
-    """A hand-built trainer resumed through ``args`` would sweep before ``train()`` sees the
-    checkpoint; the scripts always pass the context, ``None`` included."""
+    """A hand-built trainer would sweep before ``train()`` sees the checkpoint.
+    The scripts always pass the context, ``None`` included."""
     trainer = precompute_trainer(kind, resume_from_checkpoint="out/checkpoint-7")
     with pytest.raises(ValueError, match="built without resume_checkpoint"):
         trainer._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
@@ -800,7 +766,7 @@ def test_the_token_digest_reads_content_in_row_order():
 
 
 class _RecordingHash:
-    """``hashlib.sha256`` that records the size of every update it takes."""
+    """``hashlib.sha256`` that records the size of every update."""
 
     def __init__(self, sizes: list[int], data: bytes = b""):
         self._hash = hashlib.sha256(data)
@@ -818,8 +784,8 @@ class _RecordingHash:
 
 
 def test_the_token_digest_hashes_in_bounded_chunks(monkeypatch):
-    """Long rows must not widen a whole batch to int64 at once (32k-token rows by the thousand are
-    gigabytes per rank), and the chunking must not change the digest a checkpoint already holds."""
+    """32k-token rows by the thousand widened to int64 at once are gigabytes per rank.
+    The chunking must not change the digest a checkpoint already holds."""
     ids = [list(range(50)), list(range(50, 100))]
     digest = _token_digest(Dataset.from_dict({"ids": ids}), "ids")
     sizes: list[int] = []
@@ -834,12 +800,11 @@ def test_the_token_digest_hashes_in_bounded_chunks(monkeypatch):
 
 
 def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):
-    """The mixin must precede ``DistributedTrainerMixin`` in the bases, or ``CheckpointingMixin``'s
-    empty default shadows the write and no checkpoint carries the columns."""
+    """With the mixin after ``DistributedTrainerMixin``, ``CheckpointingMixin``'s empty default shadows the write."""
     trainer_cls, _ = TRAINERS[kind]
-    assert trainer_cls._persist_trainer_sidecars is PrecomputeRefLogpsRankConsistentMixin._persist_trainer_sidecars
+    assert trainer_cls._persist_trainer_sidecars is TRLPreferenceMixin._persist_trainer_sidecars
     mro = trainer_cls.__mro__
-    assert mro.index(PrecomputeRefLogpsRankConsistentMixin) < mro.index(CheckpointingMixin)
+    assert mro.index(TRLPreferenceMixin) < mro.index(CheckpointingMixin)
 
 
 @pytest.mark.parametrize(
@@ -851,9 +816,9 @@ def test_the_trainers_checkpoint_hook_is_the_precompute_mixins(kind):
     ],
     ids=["fresh", "path_a", "path_b"],
 )
-def test_the_runtime_reports_a_policy_built_from_the_checkpoint(resume_checkpoint, model_source, expected):
-    runtime = ScriptRuntime(None, "ep2", 0, resume_checkpoint, model_source)
-    assert runtime.policy_from_checkpoint is expected
+def test_the_context_reports_a_policy_built_from_the_checkpoint(resume_checkpoint, model_source, expected):
+    context = ScriptContext(None, 0, resume_checkpoint, model_source, None)
+    assert context.policy_from_checkpoint is expected
 
 
 if __name__ == "__main__":

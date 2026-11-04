@@ -7,16 +7,15 @@ trains on text.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No |
+Modes: the Command A+ (Cohere2 MoE) row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
-Only EP8 has run on the full checkpoint. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
+Only EP8 has run on the full checkpoint, on Halo 1.0.0 or earlier. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
 tiny model, so try a short run before a long one.
 
 - **Checkpoint:** `CohereLabs/command-a-plus-05-2026-bf16`, pinned to the revision in the recipe.
-- **GPUs:** eight B300s at EP8, 16 experts per GPU, at 1,024 tokens. Inference in BF16 needs at least
-  four B200s.
+- **GPUs:** eight B300s at EP8, 16 experts per GPU, at 1,024 tokens. The model card asks for four B200s
+  for BF16 inference.
 
 ## Recipes
 
@@ -51,28 +50,30 @@ The GPU tests cover LoRA, expert adapters included, on a tiny model: a merged sa
 
 ### GRPO
 
-Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+Online and async GRPO are not available for this family (see [Limits](#limits)). Offline GRPO trains on
 pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
 ## Settings that matter
 
 - **Sequence length.** `max_length: 1024` peaks at about 255 GiB of the B300's ~268 GiB. That leaves
   DeepEP's buffer room to grow. At 4,096 the allocation fails once a longer batch forces it to grow.
-- **Router balancing.** The recipe sets `moe_balancing: bias_update_transient` with
-  `router_balancing_rate: 1.0e-3`. The model has no usable auxiliary loss and no exportable bias slot,
+- **Router balancing.** The recipe sets `moe_balancing: bias_update_transient` at the default
+  `router_balancing_rate` of 1.0e-3. The model has no usable auxiliary loss and no exportable bias slot,
   so plain `bias_update` raises. Exported checkpoints serve without the transient bias, so near-tied
   expert picks can differ between training and serving. Drop the line to train unbalanced but serve
   exactly what you trained.
 - **Precision.** The experts train in BF16 (`fp32_experts: false`). FP32 masters for 200B of expert
   parameters do not fit.
-- **Pinned settings.** The recipe pins `attn_implementation: flash_attention_2` and the model revision
-  its memory numbers were measured on. It keeps `packing: false` to stay on that measured shape, though
-  text data supports packing.
+- **Pinned settings.** The recipe pins the model revision its memory numbers were measured on and
+  leaves attention to the loader, which picks FA4 on Blackwell. Those numbers come from FA2; the fit on
+  FA4 is computed, not measured. It keeps `packing: false` to stay on that shape, though text data
+  supports packing.
 
 ## Limits
 
 - No online RL. Weight sync for this family has not been validated on either engine, so Halo refuses
   online and async GRPO when it builds the trainer.
+- No pipeline parallelism: Cohere2 MoE is not a registered pipeline family.
 - Serving an export is not tested end to end. The steps below follow from the engines' loaders.
 
 ## Export and serve
@@ -82,9 +83,10 @@ transformers' fused pair.
 
 - **transformers:** load the save with `AutoModelForImageTextToText` and `AutoTokenizer`, or
   `AutoProcessor` for images ([snippet](README.md#smoke-test-a-checkpoint)).
-- **vLLM 0.26.0:** point it at the save. It reads the fused experts. It also requires tied embeddings,
-  which training keeps unless it trained the output head on its own.
-- **SGLang 0.5.17:** run `halo run unfuse-moe-experts` first. SGLang's Cohere2 loader reads one tensor
+- **vLLM 0.32.0:** point it at the save. It reads the fused experts. It ties the output head to the
+  embeddings, so a save whose training untied the head won't load; training keeps them tied unless it
+  trained the output head on its own.
+- **SGLang 0.5.22:** run `halo run unfuse-moe-experts` first. SGLang's Cohere2 loader reads one tensor
   per expert and skips the fused pair without an error. The rewrite gives the hub's exact layout.
 
 ## Reference

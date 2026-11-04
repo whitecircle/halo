@@ -1,27 +1,17 @@
 #!/usr/bin/env python
-"""Offline GRPO's chunked log-prob path and tokenization-level degenerate-group drop.
-
-``use_chunked_grpo_logprobs`` must reproduce the full-logits path exactly — same ``(clamped, unclamped)``
-log-probs, same ``min_log_prob`` negative-advantage clamping, same gradients — while never
-materializing ``[B, T, vocab]`` logits, and must REFUSE an adapter on the output embedding rather
-than silently drop its delta. ``drop_degenerate_groups`` must drop exactly the groups whose
-advantages every method maps to zero (EXACT reward ties or < 2 completions) and nothing else —
-a near-tie trains with full-scale advantages under the rank methods, so dropping it would change the
-objective. These tests FAIL when either path drifts from the full-logits reference.
-
-    python tests/cpu/grpo/test_offline_grpo_chunked_logprobs.py
-"""
+"""Offline GRPO's chunked log-prob path must match the full-logits path without materializing ``[B, T, vocab]`` logits,
+and ``drop_degenerate_groups`` must drop only the groups every method maps to zero advantage."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.trainers.grpo.offline import OfflineGRPOTrainer, tokenize_offline_grpo_rows
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows, verify_degenerate_drop
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 
 SEED = 17
@@ -35,16 +25,16 @@ def _tiny_model():
 
 
 def _stub_trainer(chunked: bool) -> OfflineGRPOTrainer:
-    """The logprob path needs only the routing flag, the temperature, and an unwrap — no full ctor."""
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer._use_chunked_grpo_logprobs = chunked
     trainer.temperature = 1.0
     trainer.accelerator = SimpleNamespace(unwrap_model=lambda m, **kw: m)
+    trainer.args = SimpleNamespace(policy_gradient_formulation="reinforce")
+    trainer.beta = 0.0
     return trainer
 
 
 def _collated_batch(vocab_size: int):
-    """Collator-shaped inputs: prompts left-padded, completions right-padded, one span per row."""
     torch.manual_seed(SEED + 1)
     max_p, max_c = max(PROMPT_LENS), max(COMPLETION_LENS)
     input_ids = torch.zeros(len(PROMPT_LENS), max_p + max_c, dtype=torch.long)
@@ -56,20 +46,20 @@ def _collated_batch(vocab_size: int):
     return input_ids, attention_mask, max_c
 
 
-def _logps(model, chunked, advantages=None, min_log_prob=None):
+def _logps(model, chunked):
     input_ids, attention_mask, logits_to_keep = _collated_batch(model.config.vocab_size)
-    return _stub_trainer(chunked)._get_per_token_logps(
-        model, input_ids, attention_mask, logits_to_keep, advantages=advantages, min_log_prob=min_log_prob
-    )
+    return _stub_trainer(chunked)._get_per_token_logps(model, input_ids, attention_mask, logits_to_keep)
+
+
+def _clamped_logps(model, chunked, advantages, min_log_prob):
+    trainer = _stub_trainer(chunked)
+    _, sample_values = trainer._token_objective(_logps(model, chunked), advantages, None, min_log_prob)
+    return sample_values["logps"], sample_values["logps_unclamped"]
 
 
 def test_chunked_matches_full_path():
     model = _tiny_model()
-    full_clamped, full_unclamped = _logps(model, chunked=False)
-    chunk_clamped, chunk_unclamped = _logps(model, chunked=True)
-    assert full_clamped is full_unclamped  # no clamp configured
-    torch.testing.assert_close(chunk_clamped, full_clamped, atol=1e-4, rtol=1e-4)
-    torch.testing.assert_close(chunk_unclamped, full_unclamped, atol=1e-4, rtol=1e-4)
+    torch.testing.assert_close(_logps(model, chunked=True), _logps(model, chunked=False), atol=1e-4, rtol=1e-4)
 
 
 def test_chunked_min_log_prob_clamp_matches_full_path():
@@ -77,23 +67,21 @@ def test_chunked_min_log_prob_clamp_matches_full_path():
     model = _tiny_model()
     advantages = torch.tensor([1.0, -1.0, -0.5])
     floor = -2.0
-    full_clamped, full_unclamped = _logps(model, chunked=False, advantages=advantages, min_log_prob=floor)
-    chunk_clamped, chunk_unclamped = _logps(model, chunked=True, advantages=advantages, min_log_prob=floor)
+    full_clamped, full_unclamped = _clamped_logps(model, False, advantages, floor)
+    chunk_clamped, chunk_unclamped = _clamped_logps(model, True, advantages, floor)
 
     torch.testing.assert_close(chunk_clamped, full_clamped, atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(chunk_unclamped, full_unclamped, atol=1e-4, rtol=1e-4)
-    assert (chunk_clamped[1:] >= floor).all()  # negative-advantage rows are floored
-    torch.testing.assert_close(chunk_clamped[0], chunk_unclamped[0])  # positive row untouched
+    assert (chunk_clamped[1:] >= floor).all()
+    torch.testing.assert_close(chunk_clamped[0], chunk_unclamped[0])
     assert (chunk_unclamped < floor).any(), "fixture too easy: nothing fell below the floor"
 
 
 def test_chunked_backward_matches_full_path():
-    # Same loss surface: gradients through the head AND the backbone must match the full path.
     grads = {}
     for chunked in (False, True):
         model = _tiny_model()
-        clamped, _ = _logps(model, chunked=chunked)
-        clamped.sum().backward()
+        _logps(model, chunked=chunked).sum().backward()
         grads[chunked] = {
             "lm_head": model.lm_head.weight.grad.clone(),
             "embed": model.model.embed_tokens.weight.grad.clone(),
@@ -107,8 +95,7 @@ def _lora_model(target_modules):
     model = get_peft_model(
         _tiny_model(), LoraConfig(task_type="CAUSAL_LM", r=4, lora_alpha=8, target_modules=target_modules)
     )
-    # lora_B initializes to zero, making adapter-on ≡ adapter-off — a comparison that cannot fail
-    # when the chunked path drops the adapters. Give the deltas real magnitude.
+    # lora_B starts at zero, which makes adapter-on equal adapter-off and the comparison unable to fail.
     for name, param in model.named_parameters():
         if "lora_B" in name:
             param.data.normal_(0, 0.05)
@@ -116,26 +103,22 @@ def _lora_model(target_modules):
 
 
 def test_chunked_matches_full_path_under_peft():
-    # The chunked backbone forward must unwrap PeftModel the way TRL does (adapters stay ACTIVE).
+    # The chunked forward must unwrap PeftModel the way TRL does, with the adapters active.
     model = _lora_model(["q_proj", "v_proj"])
-    full_clamped, _ = _logps(model, chunked=False)
-    chunk_clamped, _ = _logps(model, chunked=True)
-    # Fixture sensitivity: the adapters must actually move the log-probs, else this proves nothing.
-    base_clamped, _ = _logps(_tiny_model(), chunked=False)
-    assert (full_clamped - base_clamped).abs().max() > 1e-3, "LoRA deltas inert; test cannot catch a dropped adapter"
-    torch.testing.assert_close(chunk_clamped, full_clamped, atol=1e-4, rtol=1e-4)
+    full = _logps(model, chunked=False)
+    chunk = _logps(model, chunked=True)
+    base = _logps(_tiny_model(), chunked=False)
+    assert (full - base).abs().max() > 1e-3, "LoRA deltas inert; test cannot catch a dropped adapter"
+    torch.testing.assert_close(chunk, full, atol=1e-4, rtol=1e-4)
 
 
 def test_chunked_rejects_lm_head_adapter():
-    # get_output_embeddings() on an lm_head-targeted LoRA resolves to the BASE linear, so the chunked
-    # matmul would silently drop the adapter delta — the path must refuse, not diverge.
+    # get_output_embeddings() on an lm_head-targeted LoRA resolves to the base linear, so the chunked matmul would drop
+    # the adapter delta.
     model = _lora_model(["q_proj", "lm_head"])
-    _logps(model, chunked=False)  # the full-logits path applies the delta and stays supported
+    _logps(model, chunked=False)  # the full path applies the delta
     with pytest.raises(ValueError, match="output embedding"):
         _logps(model, chunked=True)
-
-
-# --- drop_degenerate_groups at tokenization ---
 
 
 class _OneTokenTokenizer:
@@ -165,9 +148,8 @@ def _groups_batch():
 
 def test_drop_degenerate_groups_drops_exact_ties_and_singletons_only():
     out = tokenize_offline_grpo_rows(_groups_batch(), [0, 1, 2, 3], drop_degenerate_groups=True, **_TOKENIZE_KWARGS)
-    # The exactly-tied and singleton groups vanish; the graded pair AND the near-tie survive — the
-    # rank advantage methods give a near-tie full-scale advantages (quantile_norm: ±0.674), so
-    # dropping it would change the objective, not just save compute.
+    # A near-tie survives because the rank methods give it full-scale advantages (quantile_norm: ±0.674), so dropping
+    # it would change the objective.
     assert out["group_id"] == [0, 0, 3, 3]
     assert out["group_size"] == [2, 2, 2, 2]
     assert len(out["advantage"]) == 4
@@ -178,15 +160,12 @@ def test_drop_degenerate_groups_off_keeps_everything():
     assert out["group_id"] == [0, 0, 1, 1, 1, 2, 3, 3]
 
 
-def test_check_degenerate_drop_refuses_empty_dataset():
-    PartialState()  # the accelerate logger the check reports through needs initialized state
+def test_verify_degenerate_drop_refuses_empty_dataset():
     args = SimpleNamespace(drop_degenerate_groups=True)
     kept = Dataset.from_dict({"group_id": [0, 0]})
-    OfflineGRPOTrainer._check_degenerate_drop(args, kept, num_groups_in=3, what="training")  # survivors: fine
+    verify_degenerate_drop(args, kept, num_groups_in=3, what="training")
     with pytest.raises(ValueError, match="removed every training group"):
-        OfflineGRPOTrainer._check_degenerate_drop(
-            args, Dataset.from_dict({"group_id": []}), num_groups_in=3, what="training"
-        )
+        verify_degenerate_drop(args, Dataset.from_dict({"group_id": []}), num_groups_in=3, what="training")
 
 
 if __name__ == "__main__":

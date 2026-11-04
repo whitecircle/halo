@@ -1,11 +1,5 @@
 #!/usr/bin/env python
-"""Offline-GRPO scoring equivalence on Qwen3 for CP1, CP2 and CP4.
-
-Exercises the production scoring and reduction helpers through real Ulysses attention,
-then applies the toolkit's mean gradient sync explicitly.
-
-Run on four GPUs: torchrun --nproc_per_node=4 tests/gpu/parallelism/cp/test_cp_grpo_scoring.py
-"""
+"""Offline-GRPO scoring equivalence on Qwen3 for CP1, CP2 and CP4, through real Ulysses attention."""
 
 from types import SimpleNamespace
 
@@ -16,14 +10,13 @@ from torch.distributed.fsdp import FSDPModule
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
-from src.distributed.fsdp import reshard_fsdp2_modules, setup_fsdp2_for_dp
-from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.fsdp import apply_fsdp2_for_dp, reshard_fsdp2_modules
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import (
     boundary_loss_negative_control,
     full_row_loss,
@@ -31,9 +24,10 @@ from tests.common.cp_grpo import (
     optimizer_step_agreement,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 SEED = 918
 SEQ = 64
@@ -91,7 +85,7 @@ def _step(model):
 def run(ctx) -> dict:
     if ctx.world_size != 4:
         raise ValueError("this suite compares CP2 and CP4 in one four-GPU launch")
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"CP attention kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; CP1 oracle: flash_attention_2")
     ids, mask, labels, advantages, group_sizes = _batch(ctx.device)
     for tensor in (ids, mask, labels, advantages, group_sizes):
@@ -112,9 +106,11 @@ def run(ctx) -> dict:
 
     checks = {}
     for cp_size in (2, 4):
-        cp_config = CPConfig(cp_size=cp_size, world_size=ctx.world_size, gpus_per_node=ctx.world_size)
-        model = UlyssesCPModelWrapper(_model(ctx.device), cp_config)
-        scorer = ChunkedLogprobsCore()
+        cp_config = CPConfig(
+            cp_size, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size
+        )
+        model = UlyssesModel(_model(ctx.device), cp_config)
+        scorer = LogprobScoringMixin()
         scorer.temperature = 1.0
         scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
         local_logps, shifted_labels = scorer._cp_chunked_logps(model, ids, mask, labels)
@@ -123,7 +119,7 @@ def run(ctx) -> dict:
         hi = lo + shifted_labels.size(1)
         supervised = shifted_labels != LABEL_IGNORE_INDEX
         expected_labels = labels[:, lo + 1 : hi + 1]
-        # The final position of a non-final shard predicts the NEXT shard's first label.
+        # The final position of a non-final shard predicts the next shard's first label.
         if cp_config.cp_rank < cp_size - 1:
             expected_labels = labels[:, lo + 1 : lo + chunk + 1]
         labels_match = bool(torch.equal(shifted_labels, expected_labels))
@@ -166,7 +162,6 @@ def run(ctx) -> dict:
             checks["cp4_drop_boundary_negative_control"] = broken
             log(f"CP4 boundary-only loss error={correct_error:.4g}; dropped-boundary loss error={broken_error:.4g}")
 
-        # Write the synchronized gradients back to the model before the optimizer step.
         for name, param in model.named_parameters():
             if name in cp_gradients:
                 param.grad.copy_(cp_gradients[name].to(param.grad.dtype))
@@ -199,16 +194,16 @@ def run(ctx) -> dict:
         del model, scorer
         cleanup_memory()
 
-    # Production-shaped entry: FSDP2 wraps both decoder layers and the model root. The scorer's
-    # redirection must enter that root, unshard lm_head, and keep it live through the local head
-    # sweep; a bare CP model above cannot detect a missing root-forward redirect.
-    cp_config = CPConfig(cp_size=2, world_size=ctx.world_size, gpus_per_node=ctx.world_size)
-    model = UlyssesCPModelWrapper(_model(ctx.device), cp_config)
+    # FSDP2 wraps layers and root; a bare CP model can't detect a missing root-forward redirect, which must unshard
+    # lm_head for the head sweep.
+    cp_config = CPConfig(2, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size)
+    model = UlyssesModel(_model(ctx.device), cp_config)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
-    setup_fsdp2_for_dp(
+    apply_fsdp2_for_dp(
         model,
         dp_size=ctx.world_size,
-        args=SimpleNamespace(bf16=True, fp16=False, fp32_grad_reduce=True),
+        compute_dtype=torch.bfloat16,
+        fp32_reduce=True,
         reshard_after_forward=False,
     )
     checks["fsdp2_root_wrapped"] = isinstance(model, FSDPModule) and any(
@@ -219,7 +214,7 @@ def run(ctx) -> dict:
     hook = model.model.model.layers[0].register_forward_pre_hook(
         lambda _module, _args: layer_calls.__setitem__("count", layer_calls["count"] + 1)
     )
-    scorer = ChunkedLogprobsCore()
+    scorer = LogprobScoringMixin()
     scorer.temperature = 1.0
     scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
     local_logps, shifted_labels = scorer._cp_chunked_logps(model, ids, mask, labels)

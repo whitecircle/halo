@@ -1,18 +1,5 @@
 #!/usr/bin/env python
-"""What a per-rank EP save owes the tools that read it back.
-
-Three contracts, each of which fails silently when broken:
-
-* the index's ``total_size`` describes the artifact — counted off the tensors actually WRITTEN, so
-  an fp32-master run does not stamp a figure up to 2x the bytes on disk;
-* a per-rank shard is ONE file by construction (the merge reads exactly one per rank), so
-  ``save_max_shard_size`` does not bound it — the save says so instead of appearing to honour it;
-* the shards are unreadable as ordinary weights, and the index is written LAST — so a run killed in
-  that window leaves ``model-*.safetensors`` full of ``.shard_N`` partial tensors with nothing
-  declaring the format, which every after-training tool must refuse rather than read as whole.
-
-    python tests/cpu/checkpoint/test_ep_sharded_save_contract.py
-"""
+"""What a per-rank EP save owes the tools that read it back; each contract fails silently when broken."""
 
 from __future__ import annotations
 
@@ -24,17 +11,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from src.checkpoint import tool_io
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.checkpoint.tool_io import checkpoint_shard_files, reject_sharded_checkpoint, stored_tensor_nbytes
-from src.distributed.checkpoint.ep_save import _save_ep_sharded
+from halo.checkpoint import reading
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.parallel.ep import save_ep_sharded_checkpoint
+from halo.checkpoint.reading import checkpoint_shard_files, header_nbytes, reject_partial_checkpoint
+from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
-
-PartialState()  # the EP save logs through accelerate's logger
 
 NUM_LOCAL_EXPERTS = 2
 HIDDEN = 8
@@ -47,7 +32,7 @@ class _StubConfig(SimpleNamespace):
 
 
 class _StubEPLayer(StubEPLayerBase):
-    """Local expert shards as fp32 params — the shape an fp32-master run holds at save time."""
+    """The shape an fp32-master run holds at save time."""
 
     def __init__(self):
         super().__init__()
@@ -60,10 +45,6 @@ class _StubEPLayer(StubEPLayerBase):
         return [("gate_up_proj", self.gate_up_proj), ("down_proj", self.down_proj)]
 
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False) -> dict:
-        return {}
-
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
         return {}
 
 
@@ -84,32 +65,28 @@ def _shard_files(path) -> list[str]:
 
 
 def test_index_total_size_counts_the_bytes_actually_written(tmp_path):
-    """``metadata.total_size`` is read as the artifact's size. Counting the LIVE parameters instead
-    of the cast ones puts an fp32-master run's figure — up to 2x the bytes on disk — on a bf16
-    checkpoint, and the gathered writer counts what it writes."""
+    """Counting live parameters stamps up to 2x the bytes on disk on a bf16 checkpoint."""
     model = _stub_model()
     live_bytes = sum(p.numel() * p.element_size() for p in model.parameters())
 
-    _save_ep_sharded(model, str(tmp_path))
+    save_ep_sharded_checkpoint(save_context(model, is_save_rank=True), str(tmp_path))
 
     with open(tmp_path / SAFETENSORS_INDEX_FILE) as f:
         index = json.load(f)
     shard = _shard_files(tmp_path)[0]
     with safe_open(str(tmp_path / shard), framework="pt") as reader:
-        on_disk = sum(stored_tensor_nbytes(reader, key) for key in reader.keys())  # noqa: SIM118
+        on_disk = sum(header_nbytes(reader.get_slice(key)) for key in reader.keys())  # noqa: SIM118
 
     assert index["metadata"]["total_size"] == on_disk
     assert on_disk < live_bytes, "premise: fp32 masters were cast down on the way to disk"
 
 
 def test_a_per_rank_shard_is_one_file_and_the_save_says_so(tmp_path, caplog):
-    """``save_max_shard_size`` bounds the gathered/merged artifact, never these: the merge reads one
-    file per rank. Splitting silently would break that reader; honouring it silently would leave the
-    user believing a cap applied. The save writes one file and reports the knob it does not read."""
+    """The merge reads one file per rank, so splitting would break it and silence would imply a cap applied."""
     model = _stub_model()
 
-    with caplog.at_level(logging.INFO, logger="src.distributed.checkpoint.ep_save"):
-        _save_ep_sharded(model, str(tmp_path), max_shard_size="1KB")
+    with caplog.at_level(logging.INFO, logger="halo.checkpoint.parallel.ep"):
+        save_ep_sharded_checkpoint(save_context(model, is_save_rank=True, max_shard_size="1KB"), str(tmp_path))
 
     assert _shard_files(tmp_path) == ["model-00000-of-00001.safetensors"], "one shard per rank, cap or no cap"
     assert any("save_max_shard_size" in record.getMessage() for record in caplog.records), (
@@ -118,7 +95,7 @@ def test_a_per_rank_shard_is_one_file_and_the_save_says_so(tmp_path, caplog):
 
 
 def _indexless_shard_dir(tmp_path) -> str:
-    """The window between the shard writes and the index write: partial tensors, no index."""
+    """The window between the shard writes and the index write."""
     save_file(
         {
             "model.layers.0.mlp.experts.gate_up_proj.shard_0": torch.zeros(2, 4),
@@ -131,36 +108,31 @@ def _indexless_shard_dir(tmp_path) -> str:
 
 
 def test_indexless_per_rank_shards_are_refused(tmp_path):
-    """Without the index nothing declares the format, so ``is_sharded_checkpoint`` reads False and
-    the glob fallback would hand each rank's SLICE to a tool as the whole expert bank — the exact
-    silent expert loss the indexed refusal exists to stop."""
+    """Without the index the glob fallback would hand each rank's slice to a tool as the whole expert bank."""
     checkpoint = _indexless_shard_dir(tmp_path)
 
     with pytest.raises(ValueError, match="merge_ep_shards"):
-        reject_sharded_checkpoint(checkpoint)
+        reject_partial_checkpoint(checkpoint)
     with pytest.raises(ValueError, match="no model.safetensors.index.json"):
         checkpoint_shard_files(checkpoint)
 
 
 def test_an_unreadable_indexless_shard_is_left_to_the_callers_read(tmp_path):
-    """A truncated first shard is not refused here: the caller's own read reports it with its cause."""
+    """The caller's own read reports it with its cause."""
     (tmp_path / "model-00000-of-00002.safetensors").write_bytes(b"x" * 64)
-    reject_sharded_checkpoint(str(tmp_path))
+    reject_partial_checkpoint(str(tmp_path))
 
 
 def test_a_fault_in_the_indexless_peek_raises_instead_of_waving_shards_through(tmp_path, monkeypatch):
-    """Only an unreadable shard skips the peek. Any other error there is a bug in the guard, and
-    swallowing it would pass partial ``.shard_N`` tensors to the tool as whole weights."""
+    """Swallowing a guard bug would pass partial ``.shard_N`` tensors as whole weights."""
     checkpoint = _indexless_shard_dir(tmp_path)
-    monkeypatch.setattr(tool_io, "EP_SHARD_KEY_RE", None)
+    monkeypatch.setattr(reading, "EP_SHARD_KEY_RE", None)
 
     with pytest.raises(AttributeError):
-        reject_sharded_checkpoint(checkpoint)
+        reject_partial_checkpoint(checkpoint)
 
 
 def test_an_indexless_gathered_checkpoint_still_resolves(tmp_path):
-    """Anti-over-rejection: the glob fallback exists for a gathered save written without its index,
-    which carries no ``.shard_N`` keys and must keep working."""
     save_file(
         {"model.embed_tokens.weight": torch.zeros(4, 8)},
         os.path.join(tmp_path, "model-00001-of-00002.safetensors"),

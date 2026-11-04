@@ -1,30 +1,7 @@
 #!/usr/bin/env python
-"""Drift pins: one mechanism each for collection, tier marking, and import resolution.
-
-* No test file may hand-roll pytest collection. Every suite runs under pytest, and a standalone run
-  goes through ``pytest.main`` from the module's ``__main__``. A runner class that collects by hand —
-  a literal list of ``(label, fn)`` pairs, or a ``globals()`` sweep — drops any test missing from its
-  list, and reports failures only as a printed summary pytest never parses.
-  ``tests.common.harness.record_check(checks, name, fn)`` is not that — the banned mechanism is the
-  printed summary, not recording a verdict the harness then returns.
-* A collection of the CPU tier from the repo root never imports a GPU script: everything under
-  ``tests/gpu/`` except the launcher entry points is a torchrun script, and one that acts at import
-  takes the whole session down. Nor does a CPU test or a ``tests/common`` helper reach one, by import
-  or ``load_script_module``, in its own body or in a probe script's source: a fixture both tiers share
-  lives in ``tests/common``.
-* No CPU test file re-declares the ``cpu`` marker: ``tests/conftest.py`` applies it by path to
-  everything under ``tests/cpu/``, so a per-file ``pytestmark`` is a second mechanism for the same
-  selection that only rots when the collector's rule changes.
-* No test file bootstraps ``sys.path`` to the repo root: the images bake ``PYTHONPATH=/workspace``
-  and ``tests/conftest.py`` covers a pytest run, so the insert is dead weight. A ``scripts/`` entry
-  point is loaded through ``tests.common.utils.load_script_module`` instead of a path insert.
-
-The marker and ``sys.path`` pins read the AST, so every spelling of the binding or the call is caught
-and a mention in a docstring or a string is not. The two text-matched spellings are assembled from
-fragments below so these pins do not match themselves and no path has to be exempted.
-
-Run: python tests/cpu/conventions/test_test_conventions.py
-"""
+"""Drift pins for test files: no hand-rolled collection, no CPU-tier reach into a GPU script, no re-declared ``cpu``
+marker, no ``sys.path`` bootstrap. The marker and path pins read the AST; the two text-matched spellings are
+assembled from fragments so these pins do not match themselves."""
 
 import ast
 import functools
@@ -33,13 +10,13 @@ import textwrap
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, probe_findings
+from scripts.docs.references import loaded_module, string_constants
+from tests.common.repo import REPO_ROOT, probe_findings
 from tests.gpu.manifest import LAUNCHER_ENTRYPOINTS
 
 CPU_MAIN_ENTRY = 'if __name__ == "__main__":\n    raise SystemExit(pytest.main([__file__, "-v"]))'
 BANNED_RUNNER = "Test" + "Runner"
 BANNED_SUMMARY = "print_" + "summary("
-# The ``sys.path`` methods that put a directory on the import path.
 SYS_PATH_GROWERS = {"insert", "append", "extend"}
 # The one legitimate insert: the root conftest owns the pytest-run path.
 BOOTSTRAP_EXEMPT = {"tests/conftest.py"}
@@ -60,8 +37,6 @@ GPU_IMPORTABLE = {
     GPU_PACKAGE,
     *(f"{GPU_PACKAGE}.{name.removesuffix('.py')}" for name in GPU_LAUNCHER_MODULES - {"__init__.py"}),
 }
-SCRIPT_LOADER = "load_script_module"
-# Where the CPU tier's code lives: its tests and the helpers they import.
 CPU_TIER_ROOTS = ("tests/cpu", "tests/common")
 
 
@@ -75,7 +50,6 @@ def _tree(path: pathlib.Path) -> ast.Module:
 
 
 def _assignment_targets(node: ast.AST) -> list[ast.expr]:
-    """What a plain, annotated or augmented assignment binds; nothing for any other node."""
     if isinstance(node, ast.Assign):
         return node.targets
     if isinstance(node, ast.AnnAssign | ast.AugAssign):
@@ -146,27 +120,19 @@ def _imported_gpu_scripts(node: ast.AST) -> list[str]:
     ]
 
 
-def _loads_a_gpu_script(node: ast.AST) -> bool:
+def _loads_a_gpu_script(node: ast.AST, constants: dict[str, str]) -> bool:
     """A ``load_script_module`` call, bare or through its module, on a path under ``tests/gpu/``."""
-    if not isinstance(node, ast.Call) or not node.args:
-        return False
-    func = node.func
-    name = func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
-    path = node.args[0]
-    return (
-        name == SCRIPT_LOADER
-        and isinstance(path, ast.Constant)
-        and isinstance(path.value, str)
-        and path.value.startswith(f"{GPU_DIR}/")
-    )
+    loaded = loaded_module(node, constants) if isinstance(node, ast.Call) else None
+    return loaded is not None and loaded.path is not None and loaded.path.startswith(f"{GPU_DIR}/")
 
 
 def _gpu_script_reach_lines(tree: ast.Module) -> list[int]:
     """Lines that import a torchrun script from ``tests/gpu/`` or load one by path, also inside a string
     that parses as the source of a probe script."""
     lines = []
+    constants = string_constants(tree)
     for node in ast.walk(tree):
-        if _imported_gpu_scripts(node) or _loads_a_gpu_script(node):
+        if _imported_gpu_scripts(node) or _loads_a_gpu_script(node, constants):
             lines.append(node.lineno)
         elif (
             isinstance(node, ast.Constant)
@@ -204,10 +170,8 @@ def _hand_listed_test_functions(tree: ast.Module) -> list[int]:
 
 
 def test_every_cpu_test_file_ends_in_its_pytest_main_entry():
-    """A CPU test file runs standalone through ``pytest.main`` from its ``__main__``, spelled one way
-    and placed last: a file without it drops out of the documented ``python tests/cpu/...``
-    invocation, a bare ``pytest.main(...)`` exits 0 on failure, and code after the block is skipped
-    by the standalone run it serves."""
+    """A bare ``pytest.main(...)`` exits 0 on failure, and code after the block is skipped by the standalone run it
+    serves."""
     offenders = sorted(
         str(path.relative_to(REPO_ROOT))
         for path in _test_files()
@@ -243,7 +207,7 @@ def test_no_test_file_hand_lists_its_test_functions():
 
 
 def test_the_runner_list_detector_fires_on_the_banned_shapes():
-    """Anti-vacuity for the pin above: each banned shape is caught, explicit calls are not."""
+    """Each banned shape is caught; explicit calls are not."""
     banned = textwrap.dedent(
         """
         def test_a(): ...
@@ -268,12 +232,8 @@ def test_the_runner_list_detector_fires_on_the_banned_shapes():
 
 
 def test_a_cpu_tier_collection_never_imports_a_gpu_script():
-    """``pytest -m cpu`` from the repo root walks ``tests/gpu/``; only the launcher side may load there.
-
-    Out of process, since the collection under test is a whole pytest session. Everything is
-    deselected by ``-m cpu``, so a clean run ends in ``NO_TESTS_COLLECTED``; anything else (a script
-    exiting at import is an ``INTERNALERROR``, a failed import a collection error) is reported.
-    """
+    """Out of process, since the collection under test is a whole pytest session. A clean run deselects everything
+    and ends in ``NO_TESTS_COLLECTED``."""
     script = textwrap.dedent(
         f"""
         import pathlib, sys
@@ -329,7 +289,7 @@ def test_no_test_bootstraps_the_repo_root_onto_sys_path():
     ]
     assert not offenders, (
         "growing `sys.path` is dead weight: the images bake PYTHONPATH=/workspace and tests/conftest.py "
-        "covers a pytest run. Load a scripts/ entry point with tests.common.utils.load_script_module. "
+        "covers a pytest run. Load a scripts/ entry point with tests.common.repo.load_script_module. "
         "Offenders:\n  " + "\n  ".join(offenders)
     )
 
@@ -388,12 +348,10 @@ def test_the_bootstrap_detector_passes_reads_removals_and_mentions(source):
 
 
 def test_the_conventions_scan_reads_the_whole_suite():
-    """Anti-vacuity: the four pins above pass trivially if the file sweep finds nothing."""
     files = _test_files()
     assert len(files) > 400, f"only {len(files)} test files scanned — the sweep lost its root"
     assert any(path.name == "conftest.py" for path in files)
-    # Every exemption must still name a live file that still uses what it exempts, or it silently
-    # outlives the file it was written for and blesses a path nothing checks.
+    # An exemption must still name a live file that uses what it exempts, or it blesses a path nothing checks.
     for rel in BOOTSTRAP_EXEMPT | SUMMARY_EXEMPT:
         assert (REPO_ROOT / rel).is_file(), f"stale exemption: {rel}"
     for rel in BOOTSTRAP_EXEMPT:
@@ -407,8 +365,8 @@ def test_the_conventions_scan_reads_the_whole_suite():
 
 
 def test_no_cpu_tier_module_reaches_a_gpu_script():
-    """The collection probe above sees what a ``tests/gpu/`` collection imports; this pin reads what the
-    CPU tier itself imports, which a lazy or out-of-process load of a GPU script would slip past."""
+    """The collection probe sees what a ``tests/gpu/`` collection imports; this reads what the CPU tier imports,
+    which a lazy or out-of-process load would slip past."""
     paths = [path for root in CPU_TIER_ROOTS for path in sorted((REPO_ROOT / root).rglob("*.py"))]
     assert len(paths) > 400, f"only {len(paths)} CPU-tier modules scanned — the sweep lost its roots"
     offenders = [
@@ -427,7 +385,7 @@ def test_no_cpu_tier_module_reaches_a_gpu_script():
         f"import {GPU_PACKAGE}.parallelism.ep.test_ep_optimizer_resume",
         f"from {GPU_PACKAGE} import test_suite_helpers",
         f'suite = load_script_module("{GPU_DIR}/trainers/grpo/test_offline_grpo_chunked.py")',
-        f'suite = utils.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
+        f'suite = repo.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
         f'script = """\nfrom {GPU_PACKAGE}.trainers.grpo.test_x import fixture\nprint(fixture())\n"""',
     ],
 )

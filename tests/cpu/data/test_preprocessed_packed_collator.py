@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""Preprocessed PACKED datasets must reach the packing collator: metadata.packed forcing
-sft_config.packing=False BEFORE collator selection lands the TRL default collator and dense
-cross-document attention. The packing collator must also preserve ragged precomputed labels —
-the parent LM collator rebuilds labels from input_ids and silently discards offline completion
-masks.
-
-Usage:
-    python tests/cpu/data/test_preprocessed_packed_collator.py
-"""
+"""Preprocessed packed datasets reach the packing collator, though metadata.packed forces sft_config.packing=False
+before selection, and that collator preserves ragged precomputed labels, which the parent LM collator would
+rebuild from input_ids."""
 
 import json
 import os
@@ -23,8 +17,9 @@ from datasets import Dataset, DatasetDict
 
 PartialState()
 
+from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking, DataCollatorWithPacking
+from halo.data.preprocessed.metadata import load_preprocessed_metadata
 from scripts.training.sft import _prepare_text_data
-from src.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking, DataCollatorWithPacking
 
 PAD = 0
 EOS = 1
@@ -33,7 +28,6 @@ RESP_1, RESP_2 = 10, 11
 
 
 def make_tokenizer(pad_token_id: int = PAD, eos_token_id: int = EOS) -> MagicMock:
-    """Mock tokenizer with the minimal interface the LM collators need."""
     tok = MagicMock()
     tok.pad_token_id = pad_token_id
     tok.eos_token_id = eos_token_id
@@ -114,13 +108,32 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             train_on_completions_only=train_on_completions_only,
             assistant_message_template="<|assistant|>" if train_on_completions_only else None,
             train_on_last_assistant_only=False,
+            tree_packing=False,
+            allow_cross_document_linear_attention=False,
         )
-        sft_config = SimpleNamespace(max_length=64, packing=False, padding_free=False, per_device_train_batch_size=1)
+        sft_config = SimpleNamespace(
+            max_length=64,
+            packing=False,
+            padding_free=False,
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            eval_strategy="no",
+            pad_to_multiple_of=None,
+        )
         model_config = SimpleNamespace(model_name_or_path="stub-model")
         parallelism_config = SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1)
 
+        tokenizer = make_tokenizer()
         _train, _eval, _gen, collator = _prepare_text_data(
-            ds, True, args, sft_config, model_config, make_tokenizer(), parallelism_config, hf_config=None
+            ds,
+            load_preprocessed_metadata(tmp),
+            args,
+            sft_config,
+            model_config,
+            tokenizer,
+            tokenizer,
+            parallelism_config,
+            hf_config=None,
         )
         return collator
     finally:
@@ -128,8 +141,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
 
 
 def test_preprocessed_packed_selects_packing_collator():
-    """metadata.packed must select the packing collator even though sft_config.packing is False
-    for TRL: under the TRL default collator documents attend across pack boundaries."""
+    """Under the TRL default collator documents attend across pack boundaries."""
     collator = _prepare_preprocessed(packed=True)
     assert isinstance(collator, DataCollatorWithPacking), (
         f"packed preprocessed data must get the packing collator, got {type(collator).__name__}"
@@ -140,14 +152,12 @@ def test_preprocessed_packed_selects_packing_collator():
 
 
 def test_preprocessed_unpacked_keeps_default_collator():
-    """Un-packed preprocessed data keeps the default (None → TRL) collator path."""
     assert _prepare_preprocessed(packed=False) is None
 
 
 def test_preprocessed_baked_labels_are_authoritative():
-    """train_on_completions_only must NOT select a re-masking collator for preprocessed data —
-    the labels are baked offline, and runtime re-masking would overwrite them (e.g. a packed
-    chunk whose response marker landed in the previous chunk loses its trained tokens)."""
+    """Runtime re-masking would overwrite baked labels: a packed chunk whose marker landed in the previous chunk
+    loses its trained tokens."""
     collator = _prepare_preprocessed(packed=True, train_on_completions_only=True)
     assert isinstance(collator, DataCollatorWithPacking)
     assert not isinstance(collator, DataCollatorForCompletionOnlyLMWithPacking), (

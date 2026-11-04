@@ -1,39 +1,28 @@
 #!/usr/bin/env python
-"""CPU tests: what a code-contests submission scores, and what the scratchpad says about a missing stdin.
-
-The grade is the judge's accept: 1 when the submitted program passes every hidden test, 0 otherwise, so a
-near miss scores like a wrong answer. Every graded submission after the first pays a flat price; neither
-the price nor the submission budget is stated to the model — a verdict is the grade alone, and the cap
-ends the episode at its last graded submission.
-
-The scratchpad half: a program run on no input (whitespace is none) says so, since one that reads input it
-was not given ends in a parse error, in silence or in a default answer, and the result names the cause so the
-next run is not spent the same way.
-
-Run: python tests/cpu/environments/test_submission_scoring.py  (or pytest)
-"""
+"""What a code-contests submission scores: 1 when it passes every hidden test, else 0; every graded submission after
+the first pays a flat price, stated to the model nowhere. A scratchpad run on no input says so, so the next run
+is not spent the same way."""
 
 import json
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, REWARD_COMPONENTS_KEY
-from src.environments.envs.tasks.coding.code_contests import (
-    NO_STDIN_NOTE,
-    SUBMISSION_PASS_FRACS_KEY,
-    CodeContestsEnvironment,
-)
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
-from src.environments.sandbox.repl import format_sandbox_repl_output
-from src.environments.tools.definitions import NativeToolCall
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.repl import format_sandbox_repl_output
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE
+from halo.environments.tasks.coding.submission_record import FAILED_WITH_NO_RUNS_LEFT, SUBMISSION_PASS_FRACS_KEY
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
+from halo.environments.tools.definitions import NativeToolCall
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox, retired_budget_phrases
 
 PENALTY = 0.2
 PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
-# Four hidden tests whose input is its own index; ``_PassesSandbox`` passes test ``i`` when the
-# submitted "program" contains the digit ``i``, so a program's text is its pass set (submitted as a
-# comment, which compiles as Python).
+# Four hidden tests whose input is its own index; ``_PassesSandbox`` passes test ``i`` when the submitted text contains
+# the digit ``i``, so a program's text is its pass set (submitted as a comment, which compiles as Python).
 TESTS = {"answer": {"tests": [{"input": str(i), "output": "ok"} for i in range(4)]}}
 # The resubmission-price rule no task message states.
 PRICE_RULE = "every resubmission costs part of the score"
@@ -97,9 +86,51 @@ def _step_submit(env, ids, program):
     return env.step(ids, [""], [{"tool_calls": [call]}])[0]
 
 
+@pytest.mark.parametrize(
+    ("turns", "exempt"),
+    [
+        ([["run"], ["submit 0"]], True),  # the one run spent a turn before the only failure
+        ([["submit 0"]], False),  # a run was left when it failed
+        ([["run", "submit 0"]], False),  # the last run spent in the submission's own turn returned nothing to fix from
+        ([["submit 0"], ["run"], ["submit 01"]], False),  # the first failure still had a run
+        ([["run"], ["submit 0"], ["submit 01"]], True),  # every failure after the budget was spent
+        ([["run"], ["submit 0123"]], False),  # no failure to exempt
+    ],
+)
+def test_the_no_runs_left_fact_holds_only_when_every_failed_submission_had_no_run_left(turns, exempt):
+    """The fact a judge check stands exempt under: established by the environment from its own budget
+    counter as each turn begins, so a failure graded after the scratchpad budget was spent is never priced as
+    untested, and a throwaway run beside the submission does not buy the exemption."""
+    env = _env(reasoning_effort_profiles={"high": {"max_submissions": 3, "max_test_calls": 1}})
+    traj = _episode(env)
+    for k, turn in enumerate(turns):
+        calls = [
+            NativeToolCall(id=f"r{k}", name=env.test_tool_name, arguments={"code": "print(1)", "stdin": "1"})
+            if action == "run"
+            else NativeToolCall(
+                id=f"s{k}", name="submit_solution", arguments={"code": f"program = {action.split()[1]!r}"}
+            )
+            for action in turn
+        ]
+        env._execute_tool_calls(calls, traj)
+    assert (FAILED_WITH_NO_RUNS_LEFT in env._scoring_sample(traj).facts) is exempt
+
+
+def test_a_judge_check_exempt_under_a_fact_the_environment_never_establishes_is_refused():
+    judge = {
+        "source": "judge",
+        "name": "audit",
+        "weight": -0.1,
+        "checks": [{"name": "x", "description": "d", "unless": "nope"}],
+    }
+    with pytest.raises(ValueError, match="never establishes"):
+        _env(reward_terms=[{"source": "environment"}, judge])
+    judge["checks"][0]["unless"] = FAILED_WITH_NO_RUNS_LEFT
+    _env(reward_terms=[{"source": "environment"}, judge])
+
+
 def test_a_submission_passing_every_test_ends_the_episode():
-    """Past an accept a resubmission can only lose the solve, so the accept ends the episode the way
-    the submission cap does, completed, with graded submissions still unspent."""
+    """Past an accept a resubmission can only lose the solve, so the accept ends the episode as the cap does."""
     env = _env()
     ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
     first = _step_submit(env, ids, "01")
@@ -177,8 +208,7 @@ def test_every_graded_submission_after_the_first_pays_the_flat_price(programs):
 
 
 def test_the_task_message_states_neither_the_price_nor_the_budget():
-    """Whatever the ladder binds, the task message carries no price rule and no submission count; the
-    price is still charged (``test_every_graded_submission_after_the_first_pays_the_flat_price``)."""
+    """The price is still charged (``test_every_graded_submission_after_the_first_pays_the_flat_price``)."""
     for env in (
         _env(),
         _env(resubmission_penalty=0.0),

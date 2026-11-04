@@ -1,34 +1,26 @@
 #!/usr/bin/env python
-"""The last pipeline stage applies the family's head transform (``src/models/head_transform.py``).
-
-A stage replaces the ``*ForCausalLM`` forward with its own head call, so whatever that forward
-applies around the output embedding — Cohere's ``logit_scale``, Granite's ``logits_scaling``
-division, MiniCPM3's pre-head division, Gemma's softcap — must be applied by the stage too, on the
-logits it returns and inside the fused head loss. Every family either gets its verified transform
-or is refused by the split gate, Cohere's ``logit_scale`` included.
-
-Run: python tests/cpu/parallelism/test_pp_head_transform.py
-"""
+"""The last pipeline stage applies the family's head transform (``halo/models/head_transform.py``), on its logits and
+in the fused head loss. A stage replaces the ``*ForCausalLM`` forward, so undeclared transforms are refused."""
 
 import pytest
 import torch
 import transformers
 
-from src.distributed.pipeline_parallel.losses import causal_lm_token_loss, fused_causal_lm_token_loss
-from src.distributed.pipeline_parallel.split import validate_model_supports_pp
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
+from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
+from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_GEMMA2_CONFIG,
     TINY_GRANITE_CONFIG,
     TINY_MINICPM3_CONFIG,
 )
+from tests.common.pp_fakes import registered_pp_backbones
 
 _BATCH, _SEQ = 2, 16
 
-# Cohere2 MoE untied (PP refuses a tied head) and four layers, so a pp2 cut lands on a whole period of
-# its sliding/full interleave.
+# Untied (PP refuses a tied head) and four layers, so a pp2 cut lands on a whole period of its sliding/full interleave.
 _COHERE2_MOE_PP_CONFIG = {
     **TINY_COHERE2_MOE_CONFIG,
     "num_hidden_layers": 4,
@@ -37,14 +29,21 @@ _COHERE2_MOE_PP_CONFIG = {
     "tie_word_embeddings": False,
 }
 
-# id -> (model class, config class, config): one family per transform kind — a post-head scale, a
-# post-head division, a pre-head division, a softcap.
+# One family per transform kind: post-head scale, post-head division, pre-head division, softcap.
 _FAMILIES = {
     "cohere2_moe": ("Cohere2MoeForCausalLM", "Cohere2MoeConfig", _COHERE2_MOE_PP_CONFIG),
     "granite": ("GraniteForCausalLM", "GraniteConfig", TINY_GRANITE_CONFIG),
     "minicpm3": ("MiniCPM3ForCausalLM", "MiniCPM3Config", TINY_MINICPM3_CONFIG),
     "gemma2": ("Gemma2ForCausalLM", "Gemma2Config", TINY_GEMMA2_CONFIG),
 }
+
+
+@pytest.fixture(autouse=True)
+def _transform_families_registered():
+    """The head-path math under test is family-agnostic; HyperCLOVAX stays unregistered, since its refusal must come
+    first."""
+    with registered_pp_backbones("Cohere2MoeModel", "GraniteModel", "MiniCPM3Model", "Gemma2Model"):
+        yield
 
 
 def _build(family: str) -> torch.nn.Module:
@@ -65,7 +64,7 @@ def _stages(family: str) -> list:
 
 @pytest.mark.parametrize("family", sorted(_FAMILIES))
 def test_last_stage_logits_are_the_family_forward(family):
-    """The stage chain reproduces the unsplit forward's logits, which the bare head does not."""
+    """The bare head does not reproduce these logits."""
     model = _build(family)
     input_ids = _input_ids(model)
     first, last = _stages(family)
@@ -83,8 +82,6 @@ def test_last_stage_logits_are_the_family_forward(family):
 
 @pytest.mark.parametrize("family", sorted(_FAMILIES))
 def test_fused_head_loss_applies_the_transform(family):
-    """The fused last-stage CE and its head-weight gradient equal the unsplit model's, whose forward
-    applies the family's transform before the CE."""
     model = _build(family)
     input_ids = _input_ids(model)
     reference = causal_lm_token_loss(model(input_ids=input_ids, use_cache=False).logits, input_ids)
@@ -103,20 +100,19 @@ def test_fused_head_loss_applies_the_transform(family):
 
 
 def test_cohere_logit_scale_is_applied_rather_than_refused():
-    """Cohere's non-unit ``logit_scale`` passes the PP gate: the stage applies it."""
     model = _build("cohere2_moe")
     assert model.config.logit_scale != 1.0
-    validate_model_supports_pp(model, "none")
+    reject_unsupported_pp_model(model, "none")
     assert resolve_head_transform(model) == HeadTransform(logit_scale=model.config.logit_scale)
 
 
 def test_an_undeclared_head_transform_is_refused_by_the_pp_gate():
-    """HyperCLOVAX multiplies its logits by ``logits_scaling`` and declares nothing: the gate refuses it
-    on every rank, before a stage is built, instead of returning unscaled logits."""
+    """HyperCLOVAX multiplies by ``logits_scaling`` and declares nothing, so returning unscaled logits is the
+    alternative."""
     config = transformers.HyperCLOVAXConfig(**{**TINY_GRANITE_CONFIG, "logits_scaling": 0.5})
     model = transformers.HyperCLOVAXForCausalLM(config)
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path"):
-        validate_model_supports_pp(model, "none")
+        reject_unsupported_pp_model(model, "none")
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path"):
         build_pipeline_stage(model, 0, 2, moe_balancing="none")
 

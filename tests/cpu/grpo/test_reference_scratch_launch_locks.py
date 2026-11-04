@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A launch's offline GRPO reference scratch is removed only once no live launch holds it.
-
-Every rank of a launch maps its scores from ``output_dir/_reference_cache/<launch>/`` for the whole run,
-and on NFS a removed file stays readable only on the host that removed it. Another job on the same
-``output_dir`` — a separate evaluation, a second launch — must therefore never remove a live launch's
-scratch: each launch's writer holds a lock on ``<launch>.lock`` while it runs, and a launch removes only
-the scratch whose lock it can take. Where the mount takes no locks, nothing is removed.
-
-Separate processes, as separate launches are: a lock one process holds is what another must respect.
-
-    python tests/cpu/grpo/test_reference_scratch_launch_locks.py
-"""
+"""A launch's offline GRPO reference scratch is removed only once no live launch holds it, because on NFS a removed
+file stays readable only on the host that removed it. Where the mount takes no locks, nothing is removed."""
 
 import errno
 import fcntl
@@ -19,15 +9,14 @@ import os
 
 import pytest
 
-import src.trainers.grpo.reference_cache as cache_module
-from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+import halo.trainers.grpo.offline.reference_cache as cache_module
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME
 
 # Bounds every wait on a spawned launch: spawn and import, then the step it signals.
 LAUNCH_TIMEOUT_S = 180.0
 
 
 def _launch(output_dir: str, created, release=None, locks_supported: bool = True) -> None:
-    """One launch: create its first cache, record a mapped-file stand-in, report, then run until released."""
     if not locks_supported:
 
         def no_locks(descriptor, operation):
@@ -43,7 +32,6 @@ def _launch(output_dir: str, created, release=None, locks_supported: bool = True
 
 
 def _run_launch(context, output_dir: str, *, locks_supported: bool = True) -> str:
-    """A launch that creates its cache and exits; returns its cache directory."""
     created = context.Queue()
     process = context.Process(target=_launch, args=(output_dir, created, None, locks_supported))
     process.start()

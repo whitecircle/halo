@@ -1,20 +1,7 @@
 #!/usr/bin/env python
 """``disable_adapter()`` under FSDP2 restores the sharded adapters, and reshards only when it must.
-
-peft clears ``requires_grad`` on the adapter params registered at entry and restores it on those
-registered at exit, while FSDP2 swaps the registered params between the sharded DTensors and their
-unsharded copies. A single-rank gloo mesh makes those swaps for real on CPU. The trainer's wrapper
-(``make_disable_adapter_fsdp2_safe``) meets two orders:
-
-- a reference pass that is the first forward after a reshard (online GRPO / SDPG at ``beta > 0``)
-  enters on the sharded params and exits on the unsharded ones. The wrapper reshards before peft's
-  exit, or every sharded adapter (and ``modules_to_save`` copy) stays frozen for the rest of the run;
-- a reference pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same
-  params. Resharding there would make the backward re-gather the whole model once more per
-  micro-step, so the params registered after the pass must be the ones registered before it.
-
-Run: pytest tests/cpu/peft/test_disable_adapter_fsdp2_reshard.py
-"""
+A pass entering on sharded params and exiting on unsharded ones must reshard, or the sharded adapters stay frozen;
+a pass entering and exiting on the same params must not, or the backward re-gathers the whole model per micro-step."""
 
 import pytest
 import torch
@@ -24,15 +11,15 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
-from trl import ModelConfig
 
-from src.distributed.fsdp import (
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.fsdp import (
     IdentityParamSet,
     apply_fsdp2_per_layer,
-    make_disable_adapter_fsdp2_safe,
+    install_fsdp2_safe_disable_adapter,
     reshard_fsdp2_modules,
 )
-from src.distributed.loading.peft_setup import build_peft_config
+from halo.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import TINY_QWEN3_CONFIG
 
 TOKENS = torch.tensor([[6, 7, 8, 9, 10, 11]])
@@ -56,7 +43,7 @@ def sharded_lora(tmp_path, reshard_after_forward, modules_to_save):
     try:
         torch.manual_seed(0)
         model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).train()
-        model_config = ModelConfig(
+        model_config = ModelArguments(
             use_peft=True,
             lora_r=2,
             lora_alpha=4,
@@ -68,7 +55,7 @@ def sharded_lora(tmp_path, reshard_after_forward, modules_to_save):
         apply_fsdp2_per_layer(
             model, init_device_mesh("cpu", (1,)), MixedPrecisionPolicy(), reshard_after_forward, IdentityParamSet()
         )
-        make_disable_adapter_fsdp2_safe(model, model)
+        install_fsdp2_safe_disable_adapter(model, model)
         trained = {name for name, param in model.named_parameters() if param.requires_grad}
         yield model, trained
     finally:

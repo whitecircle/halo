@@ -4,9 +4,9 @@ gradients.
 
 The per-kernel suites pin each kernel against its own reference: ``test_fused_glu.py`` (the GLU
 combines), ``test_moe_permute.py`` (the fused un-permute), ``test_liger_family_kernels.py`` and
-``tests/cpu/kernels/test_native_rms_norm.py`` (each Liger role and norm casting mode). This file checks
+``tests/cpu/model_loading/test_native_rms_norm.py`` (each Liger role and norm casting mode). This file checks
 that nothing breaks where they meet, per family: the family's Liger applier as the loader calls it and
-the EP wrapper with grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute
+the EP layer with grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute
 runs). A family whose wrapper latched the wrong combine, whose packed GLU read the wrong half, or whose
 experts lost a gradient moves the loss or a gradient by far more than the tolerances below.
 
@@ -27,11 +27,17 @@ Two comparisons, both against the stock Hugging Face model built from the same w
   seed, log-decay down to -25 per token): an fp32 chunked backward gets its decay gradient to ~1e-2
   only (``fla``'s and transformers' torch path alike), ``fla`` re-draws that error under any round-off
   change of its inputs, and the parameters reached only through the decay (``A_log``, ``dt_bias``,
-  ``in_proj_a``) move by ~1e-3 in cosine within the stock model itself.
+  ``in_proj_a``) move by ~1e-3 in cosine within the stock model itself. How large that error comes out
+  depends on the autotune config, so every ``fla`` kernel runs its first launchable one
+  (``pin_fla_autotune_first_fit``): a pick timed per launch carries Qwen3-Next's first-layer ``A_log``
+  norm across its bound on some launches.
 * bf16 against the fp32 stock model: the stack's bf16 loss error, and its median per-parameter gradient
   error, must stay within a small multiple of the stock model's own bf16 error, since two correct bf16
   implementations already differ. A per-parameter bound would not hold: the hyper-connection scales of
   DeepSeek-V4 and GLM-5 Next are sums with heavy cancellation, where every bf16 run is noise.
+
+The stock reference is finalized as a loaded model is (``finalize_loaded_model``); the FLA kernel restriction it
+applies is process-wide, so every model below runs under it.
 
 GLM-5 Next's sparse-attention indexer picks KV blocks by a top-k (``index_topk``) that fp32
 reduction-order noise flips on some inputs, which moves a few gradients wholesale. The fixed seed below
@@ -52,38 +58,39 @@ import tempfile
 import torch
 from safetensors.torch import save_file
 
-from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.expert_parallel.config import get_num_experts
-from src.distributed.expert_parallel.layers import roster  # noqa: F401  (registers the EP families)
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.kernels.liger.orchestrator import apply_liger_kernel
-from src.models.loading.config_levels import text_config
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.model_loading.finalization import finalize_loaded_model
+from halo.model_loading.liger.dispatch import apply_liger_kernel
+from halo.models.config_access import text_config
+from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
-from tests.common.harness import gpu_test_main, log, record_check
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
+from tests.common.harness import gpu_test_main, record_check
+from tests.common.numerics import cos_sim, fro_rel_err
 from tests.common.parallelism import single_process_ep_config
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import cos_sim, fro_rel_err
 
 SEED = 0
 BATCH, SEQ = 2, 96
 
-# fp32: fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss.
+# Fused kernels accumulate in another order than eager, and FLCE/Liger CE chunk the loss.
 FP32_LOSS_RTOL = 1e-4
 FP32_GRAD_COS_MIN = 0.9999
 FP32_GRAD_NORM_RTOL = 2e-2
-# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this
-# multiple of it, never past the floor and ceiling below. On the steep-decay GDN layer the stack's deviation
-# measured 0.87x the spread, 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
+# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this multiple of
+# it, within the floor and ceiling below. On the steep-decay GDN layer the stack's deviation measured 0.87x the spread,
+# 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
 ROUNDOFF_PROBES = 8
 ROUNDOFF_SPREAD_MULTIPLE = 4.0
 ROUNDOFF_GRAD_COS_FLOOR = 0.99
 ROUNDOFF_GRAD_NORM_RTOL_CEILING = 5e-2
-# bf16: the stack's error against the fp32 stock model, relative to the stock model's own bf16 error.
-# Across seeds the stack's median gradient error stays within these ratios: a single seed is noisy, a
-# wrong precision or a dropped fp32 accumulation is not.
+# The stack's error against the fp32 stock model, relative to the stock model's own bf16 error, median across seeds: a
+# single seed is noisy, a wrong precision or a dropped fp32 accumulation is not.
 BF16_LOSS_ERROR_RATIO_MAX = 3.0
 BF16_MEDIAN_GRAD_ERROR_RATIO_MAX = 2.0
-BF16_ERROR_FLOOR = 5e-3  # below this both errors are rounding noise and the ratio divides by it
+BF16_ERROR_FLOOR = 5e-3  # Below this both errors are rounding noise and the ratio divides by it.
 
 
 def _norm_rel(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -99,13 +106,8 @@ def _loss_and_grads(model, input_ids) -> tuple[float, dict[str, torch.Tensor]]:
 
 
 def _hf_named_grads(model_type: str, model_cls: type, config, grads: dict[str, torch.Tensor]):
-    """EP-wrapper gradients under the stock model's parameter names.
-
-    The family's own merge maps the wrapper's tensors to the checkpoint layout, and the model class's
-    ``from_pretrained`` then converts that layout to the live one, exactly as a real save and load would
-    (the class itself, so a remote-code family needs no modeling file beside the saved config).
-    Returns the gradients plus the keys the load reported missing and unexpected.
-    """
+    """EP-layer gradients under the stock model's names, through the family's merge and the class's
+    ``from_pretrained``, as a real save and load would, plus the keys the load reported missing and unexpected."""
     merged = post_process_merged_weights(dict(grads), model_type, verbose=False)
     with tempfile.TemporaryDirectory() as directory:
         config.save_pretrained(directory)
@@ -122,15 +124,12 @@ def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
 
 
 def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
-    """The model as the production loader assembles it: the applier's class swaps (already applied),
-    the reference weights, the EP wrapper."""
     model = _stock_model(model_cls, config, state, dtype)
-    patch_moe_model_for_ep(model, single_process_ep_config(get_num_experts(config), use_grouped_gemm=True))
+    apply_ep_layers(model, single_process_ep_config(require_expert_count(config), use_grouped_gemm=True))
     return model
 
 
 def _round_off_probe(model_cls: type, config, state: dict, probe: int):
-    """The fp32 stock model with every parameter moved to an adjacent fp32 value, up or down per element."""
     model = _stock_model(model_cls, config, state, torch.float32)
     generator = torch.Generator().manual_seed(probe)
     with torch.no_grad():
@@ -141,8 +140,7 @@ def _round_off_probe(model_cls: type, config, state: dict, probe: int):
 
 
 def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads: dict) -> dict:
-    """Per parameter, the median move of the stock gradient under :data:`ROUNDOFF_PROBES` one-ulp nudges:
-    ``1 - cos`` and the relative change of its norm. Same kernels and autotuned tiles as the reference."""
+    """Per parameter, the median ``1 - cos`` and relative norm change under :data:`ROUNDOFF_PROBES` one-ulp nudges."""
     moves = {name: [] for name in ref_grads}
     for probe in range(ROUNDOFF_PROBES):
         _, grads = _loss_and_grads(_round_off_probe(model_cls, config, state, probe), input_ids)
@@ -158,14 +156,16 @@ def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads
     }
 
 
-def run_family(model_type: str, seed: int = SEED) -> dict:
-    """The stock fp32 reference and its round-off spread, and the stock bf16 reference, first; then the
-    applier, then the stack in fp32 and bf16."""
+def run_family(ctx, model_type: str, seed: int = SEED) -> dict:
+    """The references run before the applier, then the stack in fp32 and bf16, each fla kernel on its first launchable
+    autotune config."""
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     family = TINY_MOE_FAMILIES[model_type]
     torch.manual_seed(seed)
     reference = tiny_family_model(family).cuda().float()
+    finalize_loaded_model(reference)
+    pin_fla_autotune_first_fit(ctx)
     model_cls, config = type(reference), reference.config
     vocab = text_config(config).vocab_size
     input_ids = torch.randint(0, vocab, (BATCH, SEQ), generator=torch.Generator().manual_seed(seed)).cuda()
@@ -175,11 +175,15 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     ref16_loss, ref16_grads = _loss_and_grads(_stock_model(model_cls, config, state, torch.bfloat16), input_ids)
     del reference
 
-    applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_wrappers=True)
-    result = {"model_type": model_type, "ref_loss": ref_loss, "round_off_spread": spread}
+    applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_layers=True)
+    result = {
+        "model_type": model_type,
+        "ref_loss": ref_loss,
+        "round_off_spread": spread,
+    }
     for label, dtype in (("fp32", torch.float32), ("bf16", torch.bfloat16)):
         model = _stack_model(model_cls, config, state, dtype)
-        layers = find_ep_layers(model)
+        layers = named_ep_layers(model)
         loss, grads = _loss_and_grads(model, input_ids)
         named, not_loaded, unexpected = _hf_named_grads(model_type, model_cls, config, grads)
         missing = sorted((set(ref_grads) - set(named)) | (set(not_loaded) & set(ref_grads)))
@@ -213,7 +217,6 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
 
 
 def _fp32_bounds(spread: dict) -> tuple[float, float]:
-    """A parameter's fp32 ``(cos_min, norm_rtol)``: the fixed bounds, widened to its round-off spread."""
     widened_cos = max(ROUNDOFF_GRAD_COS_FLOOR, 1 - ROUNDOFF_SPREAD_MULTIPLE * spread["one_minus_cos"])
     widened_norm = min(ROUNDOFF_GRAD_NORM_RTOL_CEILING, ROUNDOFF_SPREAD_MULTIPLE * spread["norm_rel"])
     return min(FP32_GRAD_COS_MIN, widened_cos), max(FP32_GRAD_NORM_RTOL, widened_norm)
@@ -259,9 +262,10 @@ def check_family_stack_matches_the_stock_model(model_type: str, result: dict) ->
 def run(ctx) -> dict:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
-    model_type = parser.parse_args().family
+    args = parser.parse_args()
+    model_type = args.family
     checks: dict[str, bool] = {}
-    result = run_family(model_type)
+    result = run_family(ctx, model_type)
     fixed = (FP32_GRAD_COS_MIN, FP32_GRAD_NORM_RTOL)
     widened = {n: _fp32_bounds(s) for n, s in result["round_off_spread"].items() if _fp32_bounds(s) != fixed}
     if widened:

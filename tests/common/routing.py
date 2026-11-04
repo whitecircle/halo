@@ -6,22 +6,20 @@ import io
 import numpy as np
 from torch import nn
 
-from src.distributed.expert_parallel.base_layer import EPGroupLimitedMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from halo.models.moe.family_specs import MoEFamilySpec
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):
-    """Minimal concrete EP layer for exercising the selection helpers without DeepEP/GPU: bypasses
-    ``__init__`` (no dispatcher) and sets exactly the attributes the helpers read.
+    """Minimal EP layer for the selection helpers: no dispatcher, rooted at the class owning group-limited routing, so
+    helpers are what families inherit."""
 
-    Rooted at the class that OWNS the group-limited routing, so the helpers exercised are the ones the
-    families inherit rather than a copy the base happens to also carry.
-    """
+    FAMILY = MoEFamilySpec(model_types=())
 
-    def __init__(self, *, top_k: int, num_experts: int, **attrs):  # noqa: D107 — test double
+    def __init__(self, *, top_k: int, num_experts: int, **attrs):
         nn.Module.__init__(self)
         self.top_k = top_k
         self.num_experts = num_experts
-        self.n_routed_experts = num_experts
         self.n_group = 1
         self.topk_group = 1
         self.norm_topk_prob = True

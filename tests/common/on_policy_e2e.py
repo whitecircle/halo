@@ -1,26 +1,9 @@
-"""The shape every on-policy end-to-end row shares: probe the served policy, move it, check it moved.
-
-Environmental GRPO (:mod:`tests.common.env_grpo_e2e`) and online GRPO / SDPG
-(:mod:`tests.common.online_grpo_e2e`) drive different trainers over different rollout paths but assert
-the same properties about the policy an inference engine serves. This module holds that
-trainer-agnostic half: the served-policy probe, the policy loader, the parallelism verdict, the
-perturbation round (move what the sync must carry, push it, then check an adapter fold left the base
-weights untouched), the sink round the dense delta cannot cover, and the constants those need. Each
-body keeps what differs: its trainer classes, its config, its rollout wiring and the refusals only it
-exercises.
-
-Both phases of a resume row run in one process against one server on the same weight-transfer group
-port: a second ``init_communicator`` after ``close_communicator`` succeeds and its sync lands (on vLLM
-0.26.0). The trainer-side close is what allows that: it aborts an interrupted update, lifts the pause
-so the server generates again, and frees the group port
-(``src/distributed/nccl/clients/vllm.py``), without reaching into the server's engine. The server's
-previous communicator is destroyed by the next ``/init_weight_transfer_engine``, before that call
-builds the new one (``docker/vllm/patches/vllm_weight_transfer_reinit_patch.py``). A leg that never
-closes holds its trainer-side port for the life of the process.
-"""
+"""Trainer-agnostic half of an on-policy e2e row: probe the served policy, move it, check it moved. A resume row's
+phases share one process, server and group port; the trainer-side close is what frees that port."""
 
 import math
 import os
+from dataclasses import dataclass
 
 import requests
 import torch
@@ -28,50 +11,47 @@ from datasets import Dataset
 from safetensors.torch import load_file
 from torch.distributed.tensor import DTensor
 
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
-from tests.common.ep_reference import ep_layers
-from tests.common.peft_helpers import (
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
+from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.unwrapping import strip_peft_adapter_segment
+from tests.common.adapters import (
     LORA_ALPHA,
     LORA_R,
     adapter_param_items,
-    assert_adapters_moved,
+    check_adapters_moved,
     load_peft_model,
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log, max_or_nan, optimizer_state_matches, step_losses
+from tests.common.dp_layout import dp_layout_checks, probe_forward
+from tests.common.ep_reference import ep_layers, named_router_weights
+from tests.common.numerics import max_or_nan
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
-# Greedy, one token, top-k: the assertion is "these numbers moved", so the probe must be the least
-# noisy generation an engine can give. Every supported engine returns this exact shape from
-# /v1/completions.
+# Greedy, one token, top-k: the assertion is that these numbers moved, so the probe must be the least noisy.
 PROBE_PROMPT = "The capital of France is"
 PROBE_LOGPROBS = 5
 PROBE_TIMEOUT_S = 180
 _MODEL_LIST_TIMEOUT_S = 60
 
-# A resume row's shape rather than a budget: the checkpoint needs exactly one step after it, so the
-# resume's own push is the only thing that can have reached the engine before the resumed rollout. A
-# shorter run has no step after the checkpoint; a longer one lets the per-step cadence push again and
-# the served-policy comparison no longer isolates the resume.
+# Exactly one step follows the checkpoint, so the resume's own push is all that reaches the engine before the resumed
+# rollout. A longer run lets the per-step cadence push again and the comparison no longer isolates it.
 RESUME_SAVE_STEP = 2
 RESUME_MAX_STEPS = RESUME_SAVE_STEP + 1
 
-# Full fine-tuning moves the weights themselves; an adapter run moves the zero-init half of the
-# adapter, whose only route into the engine is the sync's fold. Additive there because a freshly
-# trained lora_B can still be small enough that a scale factor moves nothing.
+# Additive on adapters: a freshly trained lora_B can be small enough that a scale factor moves nothing.
 WEIGHT_PERTURBATION = 1.05
 ADAPTER_PERTURBATION = 0.05
-# Attention sinks move by a whole logit: they enter softmax alongside the attention scores, so a
-# change small against those is invisible in the served logprobs the sink round compares.
+# Sinks enter softmax beside the attention scores; a change small against those is invisible in served logprobs.
 SINK_PERTURBATION = 1.0
-# Tokens in the throwaway forward that puts the FSDP2 modules back in their end-of-step state.
-UNSHARD_FORWARD_TOKENS = 8
 
 _QA_PAIRS = (
     ("What is 2 + 2?", "4"),
@@ -82,22 +62,15 @@ _QA_PAIRS = (
 
 
 def qa_dataset(num_samples: int) -> Dataset:
-    """Short arithmetic prompts with their answers.
-
-    One builder for both families: ``prompt`` is what every row generates from, and ``answer`` is what
-    an environment grades against and what SDPG's privileged teacher conditions on; rows that ignore
-    it carry the column unused.
-    """
+    """Short arithmetic prompts with answers; ``answer`` is what an environment grades and SDPG's teacher conditions
+    on."""
     pairs = [_QA_PAIRS[i % len(_QA_PAIRS)] for i in range(num_samples)]
     return Dataset.from_dict({"prompt": [p for p, _ in pairs], "answer": [a for _, a in pairs]})
 
 
 def probe_top_logprobs(server_url: str, model_name: str) -> dict[str, float]:
-    """Top-``PROBE_LOGPROBS`` next-token logprobs for ``PROBE_PROMPT``, greedily, from the server.
-
-    ``model_name`` must be the id the server serves: an engine answers a completions request for a
-    model it does not host with an error rather than the hosted one's logprobs.
-    """
+    """Top-``PROBE_LOGPROBS`` next-token logprobs for ``PROBE_PROMPT``; ``model_name`` must be the id the server
+    serves."""
     response = requests.post(
         f"{server_url}/v1/completions",
         json={
@@ -115,12 +88,7 @@ def probe_top_logprobs(server_url: str, model_name: str) -> dict[str, float]:
 
 
 def served_policy_delta(after: dict[str, float], before: dict[str, float]) -> float:
-    """Largest logprob gap between two probes over the tokens they share; ``inf`` when they share none,
-    NaN when any gap is NaN, so no comparison against it passes.
-
-    Two probes of the same policy are bit-identical, so this is zero for them and a real number
-    otherwise. It is a magnitude to compare against another magnitude, not a tolerance to pass.
-    """
+    """Largest logprob gap over the tokens two probes share; ``inf`` when they share none, NaN when any gap is NaN."""
     shared = after.keys() & before.keys()
     if not shared:
         return float("inf")
@@ -128,20 +96,14 @@ def served_policy_delta(after: dict[str, float], before: dict[str, float]) -> fl
 
 
 def served_policy_moved(after: dict[str, float], before: dict[str, float]) -> bool:
-    """Whether ``after`` probes a different policy from ``before``: both probes finite and not identical.
-
-    A NaN compares unequal to itself, so a probe of an engine serving NaN would otherwise read as moved.
-    """
+    """Whether ``after`` probes a different policy: both finite and not identical, since NaN != NaN would read as
+    moved."""
     finite = all(bool(probe) and all(math.isfinite(v) for v in probe.values()) for probe in (after, before))
     return finite and after != before
 
 
 def record_served_baseline(server_url: str, model_name: str, checks: dict[str, bool]) -> dict[str, float]:
-    """Rank 0 only: the server serves the checkpoint under test, and its probe is reproducible.
-
-    The second probe pins the engine's noise floor at zero, so every later movement check is
-    meaningful.
-    """
+    """Rank 0 only: the server serves the checkpoint under test and its probe is reproducible (noise floor at zero)."""
     served = {
         entry["id"] for entry in requests.get(f"{server_url}/v1/models", timeout=_MODEL_LIST_TIMEOUT_S).json()["data"]
     }
@@ -154,18 +116,43 @@ def record_served_baseline(server_url: str, model_name: str, checks: dict[str, b
     return baseline
 
 
-def fresh_parallelism_config(ep_size: int, tp_size: int = 1, expert_tp_size: int = 1) -> ParallelismConfig:
-    """A fresh config per phase: ``create_ep_config`` caches the ``EPConfig`` it builds, so a resumed
-    phase reusing phase 1's object would rebuild its model against phase 1's expert groups."""
-    return ParallelismConfig(ep_size=ep_size, tp_size=tp_size, expert_tp_size=expert_tp_size)
+@dataclass(frozen=True)
+class PolicyLayout:
+    """The parallel shape an on-policy row trains under; ``gpus_per_node`` simulates NVLink domains of that width (0:
+    the launch's own)."""
+
+    ep_size: int = 1
+    tp_size: int = 1
+    expert_tp_size: int = 1
+    reshard_after_forward: bool = False
+    shard_ep1_experts: bool = True
+    use_hsdp: bool = False
+    gpus_per_node: int = 0
+    fp32_router: bool = False
+    fp32_experts: bool = False
+
+    def config_fields(self) -> dict[str, object]:
+        return {
+            "ep_size": self.ep_size,
+            "tp_size": self.tp_size,
+            "expert_tp_size": self.expert_tp_size,
+            "fsdp_reshard_after_forward": self.reshard_after_forward,
+            "fsdp_shard_ep1_experts": self.shard_ep1_experts,
+            "use_hsdp": self.use_hsdp,
+            "gpus_per_node": self.gpus_per_node,
+            "ep_fp32_router": self.fp32_router,
+            "ep_fp32_experts": self.fp32_experts,
+        }
+
+    def parallelism_config(self) -> ParallelismConfig:
+        """Fresh per phase: ``ep_config`` caches its ``EPConfig``, so a reused object binds a resumed model to phase
+        1's groups."""
+        return ParallelismConfig(**self.config_fields())
 
 
 def expert_lora_under_etp_refusal(expert_tp_size: int) -> str:
-    """``ParallelismConfig``'s refusal of native expert LoRA under expert TP, or ``""`` if it allowed it.
-
-    Built at construction, the only place ``__post_init__`` runs; assigning ``expert_lora`` onto a
-    finished config skips this gate.
-    """
+    """``ParallelismConfig``'s refusal of expert LoRA under expert TP, or ``""``; only construction runs
+    ``__post_init__``."""
     try:
         ParallelismConfig(ep_size=1, expert_tp_size=expert_tp_size, expert_lora=ExpertLoraSpec(LORA_R, LORA_ALPHA))
     except ValueError as e:
@@ -180,25 +167,19 @@ def load_policy(
     *,
     attn_implementation: str | None = None,
     lora_target_modules: list[str] | None = None,
+    trust_remote_code: bool = True,
 ):
-    """Load the policy (plus adapters) through the production path; ``(model, peft_config)``.
-
-    ``weights_source`` is what ``model_name_or_path`` would be on this phase: the base checkpoint, or
-    the resume checkpoint where the EP/CP loader expects the model to be constructed from it.
-    ``attn_implementation`` and ``lora_target_modules`` are the per-family overrides a suite's knobs
-    carry; ``None`` keeps the loader's auto-selection and the checkpoint-derived targets.
-    """
+    """Load the policy and adapters through the production path; returns ``(model, peft_config)``. ``weights_source``
+    is the base checkpoint, or the resume checkpoint where the EP/CP loader constructs from it."""
     if peft is None:
         model, _ = load_distributed_model(
             model_name_or_path=weights_source,
             parallelism_config=parallelism_config,
             dtype=torch.bfloat16,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             attn_implementation=attn_implementation,
-            # On-policy RL trains the policy the engine runs, which serves the checkpoint's pretrained
-            # sinks: the loader's fine-tuning reset would train a different model from the one sampled
-            # and the sync would push neutralized sinks into the server
-            # (agent-docs/models/gpt-oss.md). Inert for families without sinks.
+            # The engine serves pretrained sinks; the fine-tuning reset would train a different model and sync
+            # neutralized sinks.
             reset_sinks=False,
         )
         return model, None
@@ -213,29 +194,23 @@ def load_policy(
     return model, peft_config
 
 
-def parallelism_engaged(trainer, ep_size: int, tp_size: int, expert_tp_size: int) -> bool:
-    """Whether every requested axis is realized on the built model, not merely requested.
-
-    The modes are told apart by what the model is: an ignored size would otherwise let a row re-run
-    the ep1 path and pass. Conjunctive rather than first-match, since a 4-rank row asks for two axes
-    at once (EP+ETP, EP+TP) and grading only the outer one would let the EP half go missing while the
-    row still reported its combination engaged.
-    """
+def parallelism_engaged(trainer, layout: PolicyLayout) -> bool:
+    """Whether every axis ``layout`` requests is realized on the built model; an ignored size would rerun the ep1 path
+    and pass. Conjunctive, since a 4-rank row asks for two axes and the EP half could otherwise go missing."""
     config = trainer.parallelism_config
     realized = []
-    if tp_size > 1:
-        # Toolkit TP shards attention into DTensors; the config alone would not prove it was applied.
+    if layout.tp_size > 1:
+        # The config alone would not prove TP was applied.
         realized.append(config.is_tp_mode and any(isinstance(p.data, DTensor) for p in trainer.model.parameters()))
-    if expert_tp_size > 1:
+    if layout.expert_tp_size > 1:
         # Only the layers' own expert-TP width separates a sharded expert FFN from a replicated one.
         realized.append(
             config.is_expert_tp_mode
-            and any(getattr(layer, "expert_tp_size", 1) == expert_tp_size for layer in ep_layers(trainer.model))
+            and any(getattr(layer, "expert_tp_size", 1) == layout.expert_tp_size for layer in ep_layers(trainer.model))
         )
-    if ep_size > 1:
-        realized.append(trainer._ep_config is not None and trainer._ep_config.ep_size == ep_size)
+    if layout.ep_size > 1:
+        realized.append(trainer._ep_config is not None and trainer._ep_config.ep_size == layout.ep_size)
     if not realized:
-        # ep1 keeps experts in the FSDP2 shard (fsdp_shard_ep1_experts), so they are DTensors.
         return any(isinstance(p.data, DTensor) for p in trainer.model.parameters())
     return all(realized)
 
@@ -247,20 +222,14 @@ def local_view(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def _adapter_b_params(model) -> list[tuple[str, torch.nn.Parameter]]:
-    """Every ``lora_B``: PEFT's attention adapters and the native grouped expert ones alike.
-
-    ``lora_B`` and not ``lora_A``: B is the zero-init half, so a perturbation there cannot be
-    cancelled by an untrained factor on the other side.
-    """
+    """Every ``lora_B``: the zero-init half, so a perturbation cannot be cancelled by an untrained factor on the other
+    side."""
     return [(name, param) for name, param in adapter_param_items(model) if "lora_B" in name]
 
 
 def _perturbation_targets(model, adapter: str | None) -> tuple[str, list[torch.nn.Parameter], int]:
-    """``(stream, tensors to move, how many of that stream they carry)``.
-
-    Handles rather than an in-place walk, because they are taken while the model is resharded and
-    written through after :func:`_unshard_with_a_forward` (see :func:`perturbation_round`).
-    """
+    """``(stream, tensors to move, how many of that stream they carry)``; handles, since the write comes after a probe
+    forward."""
     if adapter is not None:
         adapters = [param for _, param in _adapter_b_params(model)]
         return "adapter", adapters, len(adapters)
@@ -275,9 +244,8 @@ def _perturbation_targets(model, adapter: str | None) -> tuple[str, list[torch.n
 
 
 def _expert_params(model) -> list[torch.nn.Parameter]:
-    """Every EP layer's float expert tensors, through the layers rather than by name: the wrapper
-    registers its fused 3D params as bare attributes (``model.layers.0.mlp.gate_up_proj``), so on most
-    families they carry neither a ``.weight`` suffix nor an ``experts`` path component."""
+    """Every EP layer's float expert tensors, walked by layer: fused 3D params are bare attributes with no ``.weight``
+    or ``experts`` in the name."""
     return [
         param
         for layer in ep_layers(model)
@@ -296,28 +264,10 @@ def _apply_perturbation(targets: list[torch.nn.Parameter], adapter: str | None) 
                 param.add_(ADAPTER_PERTURBATION)
 
 
-def _unshard_with_a_forward(model, device: torch.device) -> None:
-    """One tiny no-grad forward, to leave the FSDP2 modules holding their transient unsharded params.
-
-    That is the state every training step ends in and the state the next step's weight sync reads,
-    and it makes the sync check discriminating: the perturbation is written through handles onto the
-    shards, so a sync that forwards the registered params instead of resharding first ships the
-    pre-perturbation copy and the served policy does not move.
-    """
-    with torch.no_grad():
-        model(input_ids=torch.ones(1, UNSHARD_FORWARD_TOKENS, dtype=torch.long, device=device))
-
-
 def frozen_base_weights(model) -> dict[str, torch.Tensor]:
-    """This rank's copy of the frozen weights an adapter fold must leave bit-identical, compared
-    across the syncs by :func:`~tests.common.weight_sync.moved_parameters`: every PEFT-wrapped base
-    weight (what the fold reads, in whichever layers the targets hit) and the rest of layer 0
-    (expert banks included), rather than a second copy of a full-size policy.
-
-    No served-policy probe can see a fold that wrote into the base, since the engine is meant to
-    receive base+adapter, so the only witness is the trainer's own weights before and after the
-    syncs.
-    """
+    """This rank's frozen weights an adapter fold must leave bit-identical: every PEFT-wrapped base weight and the rest
+    of layer 0. No served-policy probe can see a fold that wrote into the base, so the trainer's own weights are the
+    only witness."""
     return local_parameters(
         model,
         keep=lambda name, param: ("layers.0." in name or ".base_layer." in name)
@@ -333,30 +283,19 @@ def perturbation_round(
     adapter: str | None,
     push,
     checks: dict[str, bool],
-    expert_stream: bool = True,
     check_base_untouched: bool = True,
 ) -> str:
-    """Move what this row's sync must carry, push it with ``push``, and return the stream's name.
-
-    Perturbed rather than trusting training to have moved the weights: a GRPO group whose samples tie
-    has zero advantage and leaves them bit-identical. Handles are taken while the model is resharded;
-    the forward then leaves the FSDP2 modules holding a transient unsharded copy and the write lands
-    on the shards, the state an optimizer step ends in and the one the sync reads after its own
-    reshard. Every rank runs it, since the gathers inside ``push`` are collective.
-
-    ``expert_stream`` says this policy's sync must carry expert tensors, which is where the
-    non-vacuity count goes; a dense policy has none and counts the tensors it does move.
-    ``check_base_untouched`` adds the adapter fold's other half (:func:`frozen_base_weights`).
-    """
+    """Move what this row's sync must carry, push it with ``push``, and return the stream's name. Collective. Perturbed
+    because a GRPO group whose samples tie has zero advantage and leaves the weights bit-identical. The checkpoint
+    config, never the EP layers the count guards, decides whether expert tensors are owed."""
+    expert_stream = has_routed_experts(unwrap(model).config)
     reshard_fsdp2_modules(unwrap(model))
     what, targets, stream_count = _perturbation_targets(model, adapter)
     base = frozen_base_weights(model) if adapter is not None and check_base_untouched else {}
-    _unshard_with_a_forward(model, ctx.device)
+    # The state a training step ends in. A sync that reads the forward's transient unsharded params ships the old copy.
+    probe_forward(model, ctx.device)
     _apply_perturbation(targets, adapter)
-    # Guard on the number that can go missing: a full fine-tune of a MoE policy has to move expert
-    # tensors, and zero of them means no EP wrapper carried any, so the served-policy check would rest
-    # on the dense delta alone. On an adapter run the same holds of the adapters: nothing perturbed
-    # means nothing the fold could carry.
+    # Zero expert tensors or adapters here would leave the served-policy check resting on the dense delta alone.
     counted = stream_count if adapter is not None or expert_stream else len(targets)
     checks[f"{what}_perturbation_engaged"] = counted > 0
     log(f"  perturbed {len(targets)} tensor(s); {what} count {counted}")
@@ -374,9 +313,7 @@ def _push_moves_served_policy(
     ctx, stream: str, *, push, server_url: str, model_name: str, checks: dict[str, bool], check: str
 ) -> None:
     """Push a perturbation of ``stream`` alone and record under ``check`` whether the served logprobs moved.
-
-    Probed on rank 0 around a collective ``push``.
-    """
+    Collective."""
     before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
     push()
     ctx.barrier()
@@ -392,23 +329,17 @@ def _push_moves_served_policy(
 
 
 def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: dict[str, bool]) -> bool:
-    """The expert stream, in a round of its own; returns whether this policy carries one.
-
-    :func:`perturbation_round` moves dense and expert tensors together, so its served-policy check
-    passes on the dense delta alone: an engine loader that drops every expert tensor of the sync (a
-    layout it does not map, a name it skips without a log line) still leaves the policy visibly
-    moved. Only a push that moves nothing but experts shows they landed. Every rank runs it, since
-    ``push`` is collective.
-    """
+    """The expert stream in its own round; returns whether this policy carries one. Collective.
+    :func:`perturbation_round` passes on the dense delta even if an engine drops every expert tensor of the sync."""
     if not ep_layers(model):
         return False
     reshard_fsdp2_modules(unwrap(model))
     experts = _expert_params(model)
-    # Guard: an EP wrapper that stopped exposing its expert params would otherwise skip the round silently.
+    # An EP layer that stopped exposing its expert params would otherwise skip the round silently.
     checks["expert_perturbation_engaged"] = bool(experts)
     if not experts:
         return False
-    _unshard_with_a_forward(model, ctx.device)
+    probe_forward(model, ctx.device)
     _apply_perturbation(experts, None)
     _push_moves_served_policy(
         ctx,
@@ -423,20 +354,12 @@ def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: 
 
 
 def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: dict[str, bool]) -> bool:
-    """GptOss attention sinks, in a round of their own; returns whether this policy carries any.
-
-    The per-head sink logit is a plain 1-D parameter riding the dense stream, and an engine whose
-    layerwise reload does not skip the module that ``copy_``s its weights in place (vLLM's
-    ``OAIAttention``) reverts it without any error. It needs its own round because
-    :func:`perturbation_round` cannot see that: the dense delta moves the served policy whether or not
-    the sinks landed. Inert for a sink-less family, and for reset sinks, which the sync gate refuses
-    because they are not in the stream at all.
-
-    Every rank runs it: ``push`` is collective.
-    """
+    """GptOss attention sinks in their own round; returns whether this policy carries any. Collective. An engine reload
+    that does not skip the module that ``copy_``s in place (vLLM's ``OAIAttention``) reverts sinks with no error, and
+    the dense delta hides it."""
     if not has_live_attention_sinks(model):
         return False
-    # Every write below goes through the registered params, which a preceding push left unsharded.
+    # A preceding push left the registered params unsharded.
     reshard_fsdp2_modules(unwrap(model))
     with torch.no_grad():
         perturbed = 0
@@ -445,8 +368,7 @@ def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: di
                 # Additive: a pretrained sink may sit at zero, where a scale factor changes nothing.
                 param.add_(SINK_PERTURBATION)
                 perturbed += 1
-    # Guard: a live-sinks policy whose sinks left named_parameters() (the FA2 reset) has nothing in
-    # the sync stream to move, which is what the trainer's own sync gate refuses.
+    # A live-sinks policy whose sinks left named_parameters() (the FA2 reset) has nothing in the sync stream to move.
     checks["sink_perturbation_engaged"] = perturbed > 0
     _push_moves_served_policy(
         ctx,
@@ -461,13 +383,8 @@ def sink_round(ctx, model, *, server_url: str, model_name: str, push, checks: di
 
 
 def record_step_losses(trainer, checks: dict[str, bool]) -> tuple[list[float], bool]:
-    """``losses_finite`` over the per-step losses; returns ``(losses, the run had a gradient)``.
-
-    Whether it had one is reported rather than asserted: a GRPO group whose samples all earn the same
-    reward has zero advantage and so a zero gradient, which is routine on a small policy answering
-    easy prompts. It does mean a post-training probe shows nothing, which :func:`perturbation_round`
-    handles by forcing a change of its own.
-    """
+    """``losses_finite`` over the per-step losses; returns ``(losses, the run had a gradient)``. A zero gradient is
+    routine (a tied GRPO group has no advantage), so it is reported with no assert."""
     losses = [float(value) for value in step_losses(trainer)]
     checks["losses_finite"] = bool(losses) and all(math.isfinite(value) for value in losses)
     trained = any(value != 0.0 for value in losses)
@@ -478,45 +395,32 @@ def record_step_losses(trainer, checks: dict[str, bool]) -> tuple[list[float], b
 def record_adapter_training(
     trainer, checks: dict[str, bool], *, before: dict, expert_lora: bool, trained: bool
 ) -> None:
-    """The optimizer stepped the adapters the model forwards through, and they moved. Collective.
-
-    The optimizer has to hold the tensors the model forwards through. It is built from
-    ``model.parameters()``, but FSDP2 swaps a module's registered params between its sharded DTensors
-    and a transient unsharded copy, and an optimizer (or a reader) that captured the wrong side steps
-    orphans, so the adapters never move however large the gradient.
-
-    Movement is asserted only where the run had a gradient: with a tied group nothing moves. The
-    ownership check holds on every run.
-    """
+    """The optimizer stepped the adapters the model forwards through, and they moved. Collective. An optimizer holding
+    the wrong side of FSDP2's param swap steps orphans. Movement is asserted only where the run had a gradient."""
     model = unwrap(trainer.model)
     optimizer_params = {id(p) for group in trainer.optimizer.param_groups for p in group["params"]}
     live_adapters = adapter_param_items(model)
     owned = sum(1 for _, param in live_adapters if id(param) in optimizer_params)
     checks["optimizer_owns_the_live_adapters"] = bool(live_adapters) and owned == len(live_adapters)
-    ok, detail = assert_adapters_moved(before, snapshot_adapters(model, expert_lora=expert_lora))
+    ok, detail = check_adapters_moved(before, snapshot_adapters(model, expert_lora=expert_lora))
     checks["adapters_moved_when_the_run_had_a_gradient"] = ok or not trained
     log(f"  adapters: {detail} (run had a gradient: {trained}); optimizer owns {owned}/{len(live_adapters)}")
 
 
 def logged_lrs(trainer) -> dict[int, float]:
-    """Per-step learning rates from this ``train()`` call's log history."""
     return {int(e["step"]): float(e["learning_rate"]) for e in trainer.state.log_history if "learning_rate" in e}
 
 
 def adapter_file_agreement(restored: dict[str, torch.Tensor], checkpoint: str) -> tuple[int, int, int]:
-    """``(matching, compared, non-zero B)`` for restored adapters against the checkpoint's own file.
-
-    The saved file is the resume's source of truth; comparing against a pre-save in-memory copy
-    would conflate the save's cast with the restore. PEFT drops its active-adapter infix on the way
-    to disk, so the attention keys are matched with it stripped.
-    """
+    """``(matching, compared, non-zero B)`` for restored adapters against the checkpoint's file, the resume's source of
+    truth. PEFT drops its active-adapter infix on disk, so attention keys match with it stripped."""
     path = os.path.join(checkpoint, ADAPTER_SAFETENSORS_FILE)
     if not os.path.isfile(path):
         return 0, 0, 0
     saved = load_file(path)
     matching = compared = 0
     for name, value in restored.items():
-        key = name.replace(".default", "")
+        key = strip_peft_adapter_segment(name)
         if key not in saved:
             continue
         compared += 1
@@ -532,8 +436,7 @@ def record_resume_continuity(
     checks["resume_restored_state_before_the_first_step"] = (
         restored is not None and restored["global_step"] == RESUME_SAVE_STEP
     )
-    # Guard for the line below: a scheduler restarted from zero only lands elsewhere while the
-    # schedule varies over these steps.
+    # A restarted scheduler only lands elsewhere while the schedule varies over these steps.
     checks["resume_schedule_varies_across_steps"] = phase1_lrs.get(RESUME_SAVE_STEP) != phase1_lrs.get(
         RESUME_MAX_STEPS
     )
@@ -542,7 +445,6 @@ def record_resume_continuity(
 
 
 def record_scheduler_restore(checks: dict[str, bool], restored: dict | None) -> None:
-    """The LR scheduler's own counter came back at the step the checkpoint was written on."""
     checks["resume_restored_the_scheduler"] = restored is not None and restored["sched_last_epoch"] == RESUME_SAVE_STEP
 
 
@@ -552,3 +454,38 @@ def record_optimizer_restore(checks: dict[str, bool], saved: dict, restored: dic
     checks["resume_restored_the_optimizer_state"] = ok
     if not ok:
         log(f"  optimizer state was NOT continued: {detail}")
+
+
+def record_parallelism_engaged(ctx, trainer, layout: PolicyLayout, checks: dict) -> None:
+    """Record :func:`parallelism_engaged`; a single process shards nothing, so it has no axis to realize."""
+    if ctx.world_size > 1:
+        checks["parallelism_engaged"] = parallelism_engaged(trainer, layout)
+        log(f"  parallelism engaged: {checks['parallelism_engaged']}")
+
+
+def _fp32_master_checks(model, layout: PolicyLayout) -> dict[str, bool]:
+    """The fp32 masters the layout asks for are still fp32 after the optimizer steps."""
+    checks = {}
+    if layout.fp32_router:
+        routers = named_router_weights(model)
+        checks["router_masters_fp32"] = bool(routers) and all(p.dtype == torch.float32 for _, p in routers)
+    if layout.fp32_experts:
+        experts = [param for layer in ep_layers(model) for _, param in layer.expert_named_params()]
+        checks["expert_masters_fp32"] = bool(experts) and all(p.dtype == torch.float32 for p in experts)
+    if checks:
+        log(f"  fp32 masters: {checks}")
+    return checks
+
+
+def record_dp_layout(ctx, trainer, layout: PolicyLayout, checks: dict) -> None:
+    """The data-parallel half of ``layout``, read off the trained policy (:mod:`tests.common.dp_layout`). Collective;
+    run after ``train()``."""
+    model = unwrap(trainer.model)
+    checks |= dp_layout_checks(
+        model,
+        layout.config_fields(),
+        world_size=ctx.world_size,
+        ep_config=trainer._ep_config,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
+    checks |= _fp32_master_checks(model, layout)

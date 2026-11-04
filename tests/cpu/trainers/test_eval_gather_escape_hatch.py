@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""``evaluate``'s unequal-batch escape hatch: what it neutralizes, what it refuses, what it restores.
-
-When ranks get different eval batch counts (or the count is unmeasurable — an iterable dataset), the
-default eval loop's per-step ``gather_for_metrics`` deadlocks. The escape hatch makes each rank score
-its own shard: ``gather_function`` becomes identity, and so does ``accelerator.pad_across_processes``
-— ``evaluation_loop`` pads logits/labels across processes on a path that never routes through
-``gather_function``.
-
-Two things about that neutralization must hold, and neither is visible from a passing eval:
-
-* **Refusal.** TRL's GRPO entropy threshold (``top_entropy_quantile < 1.0``) pads-and-gathers per
-  prediction step through the SAME accelerator. Identity padding then hands ``all_gather`` ragged
-  tensors and the job SIGABRTs; real padding deadlocks on genuinely unequal counts. There is no
-  working combination, so the branch raises instead of choosing which way to die.
-* **Restoration by deletion.** ``pad_across_processes`` is a CLASS method; the hatch plants an
-  instance attribute over it. Restoring by re-assigning the bound method would pin that shadow
-  permanently — every later gather in the process would silently keep the identity semantics. The
-  attribute has to be *deleted* off ``__dict__``.
-
-The branch warns that the metrics it logs are rank 0's shard, and only a length-less loader
-(``TypeError``) counts as unmeasurable.
-
-Run: ``python tests/cpu/trainers/test_eval_gather_escape_hatch.py`` (or ``pytest -m cpu``).
-"""
+"""``evaluate``'s unequal-batch escape hatch: each rank scores its own shard, as the per-step gather would deadlock.
+TRL's entropy threshold gathers per step: identity padding SIGABRTs and real padding deadlocks, so it is refused."""
 
 from __future__ import annotations
 
@@ -30,15 +8,15 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from accelerate import PartialState
+from datasets import Dataset
 
-import src.trainers.mixins.base as mixin_module
-from src.trainers.mixins.base import DistributedTrainerMixin
+import halo.trainers.evaluation as mixin_module
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
 
-PartialState()  # the mixin logs through accelerate's rank-aware logger
-
-# Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate()
-# returns, so an assert matching it proves the call passed THROUGH the escape hatch unchanged.
+# Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate() returns.
 _MASKING_QUANTILE = 0.8
 _SENTINEL_METRICS = {"eval_loss": 0.5}
 
@@ -46,16 +24,14 @@ _SENTINEL = object()
 
 
 class _Accelerator:
-    """Only the seam under test. ``pad_across_processes`` is defined on the CLASS, which is what
-    makes "restore by deletion" vs "restore by re-assignment" observable at all."""
+    """``pad_across_processes`` is on the class, which makes restore by deletion vs re-assignment observable."""
 
     def pad_across_processes(self, tensor, *args, **kwargs):
         return ("class-padded", tensor)
 
 
 class _InnerTrainer:
-    """Stands in for the TRL/transformers ``Trainer.evaluate`` the mixin delegates to. It records
-    what the two seams did AT THE MOMENT OF THE CALL — after the hatch, before the restore."""
+    """Records what the two seams did at the moment of the call: after the hatch, before the restore."""
 
     def evaluate(self, *args, **kwargs):
         self.observed.append((self.gather_function(_SENTINEL), self.accelerator.pad_across_processes(_SENTINEL)))
@@ -63,7 +39,9 @@ class _InnerTrainer:
 
 
 class _StubTrainer(DistributedTrainerMixin, _InnerTrainer):
-    """Real MRO so the mixin's zero-arg ``super().evaluate()`` resolves; no ``Trainer.__init__``."""
+    """Real MRO so the mixin's zero-arg ``super().evaluate()`` resolves."""
+
+    eval_dataset = None
 
     def __init__(self, *, top_entropy_quantile: float = 1.0, unequal: bool = True):
         self.args = SimpleNamespace(top_entropy_quantile=top_entropy_quantile)
@@ -75,7 +53,7 @@ class _StubTrainer(DistributedTrainerMixin, _InnerTrainer):
     def _needs_custom_accelerator(self) -> bool:
         return True
 
-    def _eval_ranks_have_unequal_batches(self, eval_args, eval_kwargs) -> bool:
+    def _eval_ranks_have_unequal_batches(self, eval_dataset) -> bool:
         return self._unequal
 
 
@@ -85,6 +63,7 @@ def distributed():
     with (
         patch.object(mixin_module.dist, "is_initialized", return_value=True),
         patch.object(mixin_module, "barrier", lambda *args, **kwargs: None),
+        patch.object(mixin_module, "is_global_main_process", return_value=True),
     ):
         yield
 
@@ -100,8 +79,7 @@ def test_entropy_masking_is_refused_on_the_unequal_batch_branch(distributed):
 
 
 def test_the_refusal_fires_before_anything_is_neutralized(distributed):
-    """A raise from inside the ``try`` would leave the swap in place — the ``finally`` only covers
-    what it wraps. Nothing may be touched on the way out."""
+    """A raise from inside the ``try`` would leave the swap in place; the ``finally`` only covers what it wraps."""
     trainer = _StubTrainer(top_entropy_quantile=_MASKING_QUANTILE)
 
     with pytest.raises(ValueError):
@@ -125,8 +103,7 @@ def test_both_seams_are_identity_inside_the_hatch_and_restored_after(distributed
 
 
 def test_the_accelerator_is_restored_by_deleting_the_instance_attribute(distributed):
-    """The behavioural difference from re-assigning the bound method: ``__dict__`` must come out
-    clean, so the class method is what every later caller resolves to."""
+    """Re-assigning the bound method would pin an instance shadow, and later gathers would keep identity semantics."""
     trainer = _StubTrainer()
     trainer.evaluate()
 
@@ -144,8 +121,7 @@ def test_the_hatch_is_unwound_when_the_inner_evaluate_raises(distributed):
 
 
 def test_the_equal_batch_path_never_swaps_either_seam(distributed):
-    """Identity gathering on equal batches would report rank-0's shard as the global metric, so the
-    hatch must stay shut — and with it the refusal, which is only about the hatch."""
+    """Identity gathering on equal batches would report rank 0's shard as the global metric."""
     trainer = _StubTrainer(top_entropy_quantile=_MASKING_QUANTILE, unequal=False)
 
     assert trainer.evaluate() == _SENTINEL_METRICS
@@ -176,14 +152,43 @@ def _raise(exc):
 
 
 def test_only_a_length_less_loader_counts_as_unmeasurable():
-    """``len()`` of an iterable loader is a ``TypeError``; anything else is a bug to surface, not a
-    reason to switch the whole evaluation onto the rank-0-shard path."""
+    """``len()`` of an iterable loader is a ``TypeError``; anything else is a bug to surface."""
     unmeasurable = SimpleNamespace(get_eval_dataloader=lambda dataset: iter(()))
-    assert DistributedTrainerMixin._eval_ranks_have_unequal_batches(unmeasurable, (), {}) is True
+    assert DistributedTrainerMixin._eval_ranks_have_unequal_batches(unmeasurable, None) is True
 
     broken = SimpleNamespace(get_eval_dataloader=lambda dataset: _raise(AttributeError("loader bug")))
     with pytest.raises(AttributeError, match="loader bug"):
-        DistributedTrainerMixin._eval_ranks_have_unequal_batches(broken, (), {})
+        DistributedTrainerMixin._eval_ranks_have_unequal_batches(broken, None)
+
+
+class _ReachedBase:
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        return {"evaluated": eval_dataset}
+
+
+class _OfflineLoaderOrder(GroupedLoaderMixin, EvaluationMixin, DataParallelLoaderMixin, _ReachedBase):
+    """Offline GRPO's real order of these mixins, over a base recording what reached it."""
+
+    eval_dataset = None
+
+    def _needs_custom_accelerator(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("given_as", ["positional", "keyword", "constructor"])
+def test_a_dict_of_splits_reaches_the_base_unmeasured(distributed, given_as):
+    """Nothing can measure a loader over a dict: offline GRPO's loader reads the dict's ``column_names`` and raises on
+    every multi-rank run, the very call its constructor refusal points at."""
+    splits = {"first": Dataset.from_dict({"group_id": [0, 1]}), "second": Dataset.from_dict({"group_id": [2, 3]})}
+    trainer = _OfflineLoaderOrder()
+    if given_as == "positional":
+        metrics = trainer.evaluate(splits)
+    elif given_as == "keyword":
+        metrics = trainer.evaluate(eval_dataset=splits)
+    else:
+        trainer.eval_dataset = splits
+        metrics = trainer.evaluate()
+    assert metrics == {"evaluated": None if given_as == "constructor" else splits}
 
 
 if __name__ == "__main__":

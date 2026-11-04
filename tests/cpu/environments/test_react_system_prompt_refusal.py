@@ -1,26 +1,18 @@
 #!/usr/bin/env python
-"""The ReAct presets refuse ``environment_kwargs.system_prompt`` rather than dropping it.
-
-``react_math`` / ``react_search`` hardcode the system prompt that states the Thought/Action/Final Answer
-format their parser reads, so a configured one cannot apply. Driven through the trainer's own path
-(YAML fields → ``EnvironmentConfig`` → ``to_env_config`` → ``resolve_environment``); an explicit
-``null`` is not a request and still builds the preset with its own prompt.
-
-Usage:
-    python tests/cpu/environments/test_react_system_prompt_refusal.py
-"""
+"""The ReAct presets refuse ``environment_kwargs.system_prompt``: they hardcode the prompt stating the format their
+parser reads. An explicit ``null`` is no request and builds the preset."""
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
-from src.environments.registry import resolve_environment
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.registry import build_environment
 
 _REACT_TYPES = ["react_math", "react_search"]
 
 
 def _resolve(environment_type: str, environment_kwargs: dict):
     config = EnvironmentConfig(environment_type=environment_type, environment_kwargs=environment_kwargs)
-    return resolve_environment(config.environment_type, config.to_env_config())
+    return build_environment(config.environment_type, config.to_env_config())
 
 
 @pytest.mark.parametrize("environment_type", _REACT_TYPES)

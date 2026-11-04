@@ -1,30 +1,14 @@
 #!/usr/bin/env python
-"""CPU tests for Mistral4 packed-document isolation.
-
-``Mistral4Attention.forward`` declares ``position_ids`` as an explicit parameter (the llama-4
-attention scale consumes it) and forwards only ``**kwargs`` to the attention interface — so on a
-flash backend the varlen packed path never sees ``position_ids`` and a packed row runs as one
-dense causal sequence. Every shipped mistral4 config pins FA2 + ``packing: true``, which makes this
-a silent cross-document-attention bug in production recipes.
-
-These tests pin three things with a spy interface (flash kernels cannot run on CPU, but the
-interface *inputs* are the whole question): the defect exists unpatched, the patch delivers
-``position_ids`` to flash interfaces, and the dense path isolates documents behaviorally.
-
-    python tests/cpu/models/test_mistral4_packed_isolation.py
-"""
+"""``Mistral4Attention.forward`` forwards only ``**kwargs`` to the attention interface, so a flash backend runs a
+packed row as one dense sequence. Flash kernels cannot run on CPU, so a spy checks the interface's inputs."""
 
 import pytest
 import torch
 import transformers.models.mistral4.modeling_mistral4 as m4
-from accelerate import PartialState
 from transformers import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import ALL_ATTENTION_FUNCTIONS, Mistral4ForCausalLM
 
-from src.models.patches.attention import patch_mistral4_flash_packed_position_ids
-
-PartialState()  # the patch logs through accelerate's logger, which needs the state initialized
-
+from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 
 SEED = 1234
 
@@ -52,7 +36,7 @@ def _tiny_model() -> Mistral4ForCausalLM:
 
 
 def _packed_inputs(doc_lens: tuple[int, ...], vocab: int = 128, seed: int = 7):
-    """One flattened row of several documents with per-document position_ids — the collator's shape."""
+    """One flattened row with per-document position_ids, the collator's shape."""
     g = torch.Generator().manual_seed(seed)
     input_ids = torch.randint(4, vocab, (1, sum(doc_lens)), generator=g)
     position_ids = torch.cat([torch.arange(n) for n in doc_lens]).unsqueeze(0)
@@ -60,7 +44,7 @@ def _packed_inputs(doc_lens: tuple[int, ...], vocab: int = 128, seed: int = 7):
 
 
 class _SpyInterface:
-    """Records the kwargs each attention call receives, then answers with the module's own eager."""
+    """Records whether each call saw ``position_ids``, then answers with the module's own eager."""
 
     def __init__(self):
         self.saw_position_ids: list[bool] = []
@@ -72,9 +56,6 @@ class _SpyInterface:
 
 
 def test_flash_interface_position_ids_defect_and_patch():
-    """Unpatched: flash interfaces never see position_ids (the packed row degrades to one dense
-    sequence). Patched: every flash call receives them. If a transformers upgrade fixes the model
-    upstream, the UNPATCHED half fails first — the signal to retire the patch."""
     model = _tiny_model()
     input_ids, position_ids = _packed_inputs((5, 4, 3))
 
@@ -107,12 +88,8 @@ def test_flash_interface_position_ids_defect_and_patch():
 
 
 def test_dense_path_isolates_documents():
-    """SDPA/eager mask path: doc B's logits must not move when doc A's content changes.
-
-    Direction matters: doc A precedes doc B, so causality alone already hides doc B from doc A —
-    the leak a broken packed mask produces is doc B attending BACK into doc A. This is the
-    masking_utils packed-mask route (position_ids-derived block-diagonal mask); it pins that the
-    model-level plumbing Mistral4 relies on for dense backends keeps working."""
+    """Doc A precedes doc B, so causality already hides B from A; a broken packed mask lets B attend back into A.
+    Pins the masking_utils packed-mask route Mistral4 relies on for dense backends."""
     model = _tiny_model()
     lens = (6, 5)
     input_ids, position_ids = _packed_inputs(lens)
@@ -124,9 +101,8 @@ def test_dense_path_isolates_documents():
         base = model(input_ids=input_ids, position_ids=position_ids, use_cache=False).logits
         swapped = model(input_ids=variant, position_ids=position_ids, use_cache=False).logits
 
-    # Not exactly 0.0: doc A's tokens change each expert's grouped-GEMM batch composition, which
-    # reorders fp32 reductions for doc B's tokens (~1e-7). A mask leak reads ~1e-1 (see the gpt-oss
-    # defect pin), six orders above this bound.
+    # Doc A's tokens change each expert's grouped-GEMM batch composition, which reorders fp32 reductions for doc B
+    # (~1e-7). A mask leak reads ~1e-1.
     drift = (base[0, lens[0] :] - swapped[0, lens[0] :]).abs().max().item()
     assert drift < 1e-6, f"doc B's logits moved {drift:.2e} when doc A changed — dense packed mask broken"
 

@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: NATIVE grouped-LoRA on EP-distributed MoE EXPERTS (EP=2, GptOss-20B).
-
-Unlike test_lora_ep.py (attention-only PEFT LoRA under EP), this validates LoRA adapters on the
-expert FFNs themselves — grouped A/B tensors built inside the EP layers, applied in the grouped-GEMM
-compute, and gradient-synced/checkpointed via the existing EP machinery. Checks, each of which FAILS
-when a piece of the wiring breaks:
-
-  1. Adapters exist (has_ep_lora) and only ``*_lora_A``/``*_lora_B`` are trainable inside EP layers.
-  2. Init delta == 0: a forward with adapters present is bit-identical to one with them disabled
-     (B initialized to zeros), proving _expert_proj adds exactly the LoRA delta and nothing else.
-  3. After 3 steps: the frozen base experts are byte-unchanged while the adapters moved (B left zero
-     at init, so it MUST become non-zero) — the adapters, not the base, carry the update.
-  4. Save -> reload round-trip: gather adapters, zero the live ones, re-apply the gathered state, and
-     confirm the adapters are restored exactly (gather/load symmetry across the EP group).
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_ep_experts.py
-
-Requirements:
-    - 2x GPUs (>=80GB), DeepEP installed. Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded).
-"""
+"""Native grouped LoRA on EP-distributed MoE experts (EP=2, GptOss-20B): adapters built in the EP layers, applied in
+the grouped-GEMM compute."""
 
 import math
 import os
@@ -32,28 +11,32 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, disable_expert_adapters
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters, gather_ep_lora_adapters, has_ep_lora
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.env import env_int, env_str
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.moe_layer.expert_lora import (
+    disable_expert_adapters,
+    gather_expert_lora_adapters,
+    load_expert_lora_adapters,
+    model_has_expert_lora,
+)
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
-# Model is GptOss-20B by default; the cross-architecture sweep overrides via env (HALO_TEST_MODEL /
-# HALO_TEST_ATTN) to exercise the other storage layouts (fused-GLU, separate-GLU) without new files.
+# The cross-architecture sweep overrides these to exercise the other storage layouts without new files.
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "flex_attention")
-# Parallelism is env-overridable so one file covers EP-only and EP+CP. EP=2 default; the sweep runs ep8
-# (nproc=8) and ep2+cp2 (nproc=4). Any ETP shape refuses expert adapters at config time
+# The sweep runs ep8 (nproc=8) and ep2+cp2 (nproc=4). Any ETP shape refuses expert adapters at config time
 # (``reject_expert_lora_with_expert_tp``).
 EP_SIZE = env_int("HALO_TEST_EP", 2)
 EXPERT_TP_SIZE = env_int("HALO_TEST_ETP", 1)
@@ -61,7 +44,7 @@ CP_SIZE = env_int("HALO_TEST_CP", 1)
 MAX_STEPS = 3
 BATCH_SIZE = 1
 MAX_SEQ_LENGTH = 1024
-LEARNING_RATE = 1e-3  # large so the adapters move clearly in 3 steps
+LEARNING_RATE = 1e-3  # Large so the adapters move clearly in 3 steps.
 LORA_R = 8
 LORA_ALPHA = 16
 NUM_TRAIN_SAMPLES = 32
@@ -69,7 +52,6 @@ SEED = 42
 
 
 def _adapter_param_pairs(model):
-    """(name, param) for every native grouped-LoRA adapter parameter in the model."""
     out = []
     for layer_name, module in model.named_modules():
         if isinstance(module, EPMoELayerBase):
@@ -98,7 +80,7 @@ def run(ctx) -> dict:
 
     log(f"\n[3/8] Loading model with EP={EP_SIZE} + native expert-LoRA spec...")
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE, expert_tp_size=EXPERT_TP_SIZE, cp_size=CP_SIZE)
-    # Mirror the trainer script: attach the spec BEFORE load so EP layers build adapters at init.
+    # Before load, so EP layers build adapters at init.
     parallelism_config.expert_lora = ExpertLoraSpec(
         r=LORA_R, alpha=LORA_ALPHA, projections=frozenset({"gate", "up", "down"})
     )
@@ -115,12 +97,11 @@ def run(ctx) -> dict:
 
     checks = {}
 
-    # --- Check 1: adapters present; only adapters trainable inside EP layers ---
     log("\n[4/8] Checking adapter presence + trainability...")
-    checks["has_expert_lora"] = has_ep_lora(model)
+    checks["has_expert_lora"] = model_has_expert_lora(model)
     adapters = _adapter_param_pairs(model)
     checks["adapters_built"] = len(adapters) > 0
-    log(f"  has_ep_lora={checks['has_expert_lora']}, adapter params={len(adapters)}")
+    log(f"  model_has_expert_lora={checks['has_expert_lora']}, adapter params={len(adapters)}")
 
     non_adapter_trainable = []
     for module in ep_layers(model):
@@ -132,25 +113,22 @@ def run(ctx) -> dict:
     if non_adapter_trainable:
         log(f"  WARNING non-adapter trainable in EP: {non_adapter_trainable[:5]}")
 
-    # init recipe: every B zeros, every A non-zero
     b_all_zero = all(p.detach().abs().sum().item() == 0.0 for n, p in adapters if n.endswith("_lora_B"))
     a_any_nonzero = all(p.detach().abs().sum().item() > 0.0 for n, p in adapters if n.endswith("_lora_A"))
     checks["init_B_zero_A_nonzero"] = b_all_zero and a_any_nonzero
     log(f"  init B==0: {b_all_zero}, init A!=0: {a_any_nonzero}")
 
-    # A must be drawn on PEFT's scale: its 2-D [r, K] kaiming_uniform_(a=sqrt(5)) bound reduces to
-    # 1/sqrt(K). Running that on the 3-D [E, K, r] tensor folds r into fan_in and shrinks the bound
-    # by sqrt(r), so expert and attention adapters would warm up on different scales in one run.
+    # PEFT's scale: its 2-D [r, K] kaiming_uniform_(a=sqrt(5)) bound reduces to 1/sqrt(K). On the 3-D [E, K, r] tensor
+    # r folds into fan_in and shrinks the bound by sqrt(r), so expert and attention adapters would warm up on different
+    # scales.
     a_scales_ok, a_scale_detail = True, []
     for name, param in adapters:
         if not name.endswith("_lora_A"):
             continue
         _, k, r = param.shape
         bound, observed = 1.0 / math.sqrt(k), param.detach().float().abs().max().item()
-        # The two candidate bounds are 1/sqrt(k) and 1/sqrt(k*r) — a factor of sqrt(r) apart. Split
-        # them at 0.7x rather than at the wrong bound itself: these are bf16 draws, and a value one
-        # bf16 ulp above 1/sqrt(k*r) satisfies a strict `> bound/sqrt(r)` test while still being
-        # drawn on the sqrt(r)-shrunk bound.
+        # The candidates 1/sqrt(k) and 1/sqrt(k*r) sit sqrt(r) apart. Split at 0.7x: these are bf16 draws, and one ulp
+        # above 1/sqrt(k*r) satisfies a strict `> bound/sqrt(r)` while still drawn on the shrunk bound.
         in_band = bound * 0.7 < observed <= bound * 1.05
         a_scales_ok &= in_band
         a_scale_detail.append(f"{name}: max={observed:.5f} vs peft_bound={bound:.5f}")
@@ -158,8 +136,8 @@ def run(ctx) -> dict:
     for detail in a_scale_detail:
         log(f"  {detail}")
 
-    # Against the independently computed value, not against spec.scaling — comparing the layer to
-    # the spec it was assigned from would hold whatever the spec computed.
+    # Against the independently computed value: comparing to the spec it was assigned from would hold whatever it
+    # computed.
     spec = parallelism_config.expert_lora
     expected_scaling = LORA_ALPHA / math.sqrt(LORA_R) if spec.use_rslora else LORA_ALPHA / LORA_R
     checks["scaling_matches_spec"] = all(
@@ -167,12 +145,9 @@ def run(ctx) -> dict:
     )
     log(f"  expert_lora_scaling={spec.scaling} (rslora={spec.use_rslora}, expected={expected_scaling})")
 
-    # --- Check 2: init delta == 0 (adapters present vs disabled produce the same output) ---
-    # B is zero-initialized so the LoRA delta is structurally 0; _expert_proj must therefore be a
-    # no-op at init, bit for bit. The forward is deterministic on both expert paths: the grouped
-    # scatter-back is a fixed-order gather-reduce, and the per-expert loop's index_add_ adds each row
-    # once per local expert in a fixed expert order. DeepEP's receive order varies between passes, but
-    # no row's output reads it, so a second adapters-on pass (logged as the noise floor) matches too.
+    # B is zero-init, so _expert_proj must be a no-op at init, bit for bit. DeepEP's receive order varies between
+    # passes, but no row's output reads it: the grouped scatter-back is a fixed-order gather-reduce, the loop adds in
+    # fixed expert order.
     log("\n[5/8] Checking init delta == 0 (bit for bit)...")
     enc = tokenizer(["The quick brown fox jumps over the lazy dog."], return_tensors="pt")
     input_ids = enc["input_ids"].to(ctx.local_rank)
@@ -184,8 +159,8 @@ def run(ctx) -> dict:
 
     with torch.no_grad():
         out_with_a = _fwd()
-        out_with_b = _fwd()  # same config twice → intrinsic nondeterminism noise floor
-        with disable_expert_adapters(model):  # base-only path (the EP ref-pass complement)
+        out_with_b = _fwd()  # Same config twice: the intrinsic nondeterminism noise floor.
+        with disable_expert_adapters(model):  # Base-only path (the EP ref-pass complement).
             out_without = _fwd()
     model.train()
     noise = (out_with_a - out_with_b).abs().max().item()
@@ -193,13 +168,12 @@ def run(ctx) -> dict:
     checks["init_delta_zero"] = torch.equal(out_with_a, out_without)
     log(f"  adapter delta={delta:.3e}, forward noise floor={noise:.3e} (both exactly 0 for a no-op adapter)")
 
-    # --- Snapshot gathered base + adapters before training (collective: all ranks) ---
+    # COLLECTIVE: all ranks.
     log("\n[6/8] Snapshotting gathered base + adapters...")
     sample_layer = ep_layers(model)[0]
     base_before = {k: v.clone() for k, v in sample_layer.gather_expert_state_dict().items()}
-    adapters_before = gather_ep_lora_adapters(model)
+    adapters_before = gather_expert_lora_adapters(model)
 
-    # --- Train ---
     log("\n[7/8] Training (3 steps)...")
     config = SFTConfig(
         output_dir=ctx.output_dir,
@@ -219,7 +193,6 @@ def run(ctx) -> dict:
         remove_unused_columns=False,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,
@@ -234,7 +207,6 @@ def run(ctx) -> dict:
     checks["loss_finite"] = math.isfinite(train_result.training_loss)
     checks["steps_completed"] = train_result.global_step == MAX_STEPS
 
-    # --- Check 3: base unchanged, adapters moved ---
     log("\n--- Validating updates ---")
     unwrapped = extract_model_from_parallel(trainer.model, recursive=True)
     sample_layer_after = ep_layers(unwrapped)[0]
@@ -243,7 +215,7 @@ def run(ctx) -> dict:
     checks["base_frozen"] = base_unchanged
     log(f"  base experts unchanged: {base_unchanged}")
 
-    adapters_after = gather_ep_lora_adapters(unwrapped)
+    adapters_after = gather_expert_lora_adapters(unwrapped)
     moved = sum(1 for k in adapters_before if not torch.equal(adapters_before[k].cpu(), adapters_after[k].cpu()))
     # B started at zero, so the B tensors in particular must have moved.
     b_moved = any(
@@ -253,22 +225,20 @@ def run(ctx) -> dict:
     checks["adapters_moved"] = moved > 0 and b_moved
     log(f"  adapter tensors changed: {moved}/{len(adapters_before)} (B moved: {b_moved})")
 
-    # --- Check 4: gather -> zero -> apply round-trip restores adapters exactly ---
     log("\n[8/8] Save/reload (gather->load) round-trip...")
-    gathered = gather_ep_lora_adapters(unwrapped)
+    gathered = gather_expert_lora_adapters(unwrapped)
     for _, p in _adapter_param_pairs(unwrapped):
         p.data.zero_()
-    apply_ep_lora_adapters(unwrapped, gathered)
-    restored = gather_ep_lora_adapters(unwrapped)
+    load_expert_lora_adapters(unwrapped, gathered)
+    restored = gather_expert_lora_adapters(unwrapped)
     roundtrip_ok = all(torch.equal(gathered[k].cpu(), restored[k].cpu()) for k in gathered)
     checks["roundtrip_restores_adapters"] = roundtrip_ok
     log(f"  gather/load round-trip exact: {roundtrip_ok}")
 
-    # --- Check 5: trainer.save_model() writes a standalone adapter file (save_ep_lora_adapters) ---
     log("\n[+] trainer.save_model() adapter-only write...")
-    apply_ep_lora_adapters(unwrapped, gathered)  # restore the trained adapters (zeroed above)
+    load_expert_lora_adapters(unwrapped, gathered)  # Restore the trained adapters (zeroed above).
     save_dir = os.path.join(ctx.output_dir, "adapter")
-    trainer.save_model(save_dir)  # collective: every rank participates in the gather
+    trainer.save_model(save_dir)  # COLLECTIVE: every rank participates in the gather.
     barrier()
     if ctx.rank == 0:
         adapter_file = os.path.join(save_dir, "adapter_model.safetensors")

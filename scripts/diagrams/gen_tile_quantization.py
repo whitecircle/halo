@@ -113,7 +113,7 @@ ax.set_xlim(0, 8300)
 ax.set_ylim(0, 106)
 
 ax.axhline(100, ls=(0, (5, 4)), color=INK2, lw=1.2, zorder=2)
-ax.text(8250, 101.5, "peak — machine full", ha="right", va="bottom", fontsize=TINY, color=INK2)
+ax.text(8250, 101.5, "peak, machine full", ha="right", va="bottom", fontsize=TINY, color=INK2)
 ax.axvspan(0, 1150, color=AMBER_T, zorder=0)
 
 ax.plot(xs, ys, color=TEAL, lw=2.2, zorder=5, solid_capstyle="round")
@@ -130,7 +130,7 @@ ax.annotate(
     arrowprops={"arrowstyle": "-|>", "color": AMBER, "lw": 1.2, "shrinkA": 2, "shrinkB": 5},
 )
 ax.annotate(
-    "near peak: efficiency ripples as tiles\nrepack across the SMs — not a\ndeep sawtooth",
+    "near peak: efficiency ripples as tiles\nrepack across the SMs, not a\ndeep sawtooth",
     xy=(1984, 69),
     xytext=(3300, 44),
     fontsize=SMALL,
@@ -140,8 +140,8 @@ ax.annotate(
     arrowprops={"arrowstyle": "-|>", "color": INK, "lw": 1.2, "shrinkA": 2, "shrinkB": 5},
 )
 
-ax.set_xlabel("M — output rows (tokens per expert)", fontsize=SMALL, color=INK, labelpad=7)
-ax.set_ylabel("Efficiency — % of this shape's peak", fontsize=SMALL, color=INK, labelpad=7)
+ax.set_xlabel("M, output rows (tokens per expert)", fontsize=SMALL, color=INK, labelpad=7)
+ax.set_ylabel("Efficiency, % of this shape's peak", fontsize=SMALL, color=INK, labelpad=7)
 ax.text(
     0.0,
     1.15,
@@ -177,7 +177,7 @@ ax.text(
 ax.set_yticks([0, 25, 50, 75, 100])
 ax.set_yticklabels(["0", "25%", "50%", "75%", "100%"], fontfamily=MONO)
 ax.set_xticks([0, 2000, 4000, 6000, 8000])
-ax.set_xticklabels(["0", "2000", "4000", "6000", "8000"], fontfamily=MONO)
+ax.set_xticklabels(["0", "2k", "4k", "6k", "8k"], fontfamily=MONO)
 for spine in ("top", "right"):
     ax.spines[spine].set_visible(False)
 ax.tick_params(colors=INK2)

@@ -4,11 +4,11 @@
 # optimizer state adapter-only; confirm free GPU memory with nvidia-smi. See agent-docs/models/step3p7.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
-# --- Model — hub bf16 release; transformers 5.16 drops the 3 trailing MTP layers at load ---
+# --- Model — hub bf16 release; transformers 5.20 drops the 3 trailing MTP layers at load ---
 model_name_or_path: stepfun-ai/Step-3.7-Flash
-# Native step3p7 classes; the repo's remote config (its auto_map, for the serving engines) is one the
-# native class cannot build from. The text run loads the tokenizer: the repo ships no processor config.
-trust_remote_code: false
+# Native step3p7 classes, trust_remote_code off: the repo's remote config (its auto_map, for the serving
+# engines) is one the native class cannot build from. The text run loads the tokenizer: the repo ships no
+# processor config.
 # Upstream declares no flash support (_supports_flash_attn = False); SDPA is the fast backend.
 attn_implementation: sdpa
 # Native gate.e_score_correction_bias buffer (hub key moe.router_bias) — auto resolves here too;
@@ -23,15 +23,12 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 288 routed experts -> 36/rank; one dispatch group on 8 GPUs
-save_sharded_ep: false                # consolidate expert shards into a single checkpoint
 fp32_grad_reduce: true                # tighter gradient reduction; LoRA-cheap (adapter grads only)
 
 # --- LoRA — attention via PEFT; gate_up_proj/down_proj peel to native EP grouped expert-LoRA ---
 use_peft: true
 lora_r: 32
 lora_alpha: 64                        # scaling = alpha/r = 2
-lora_dropout: 0.05
-lora_task_type: CAUSAL_LM
 lora_target_modules:
 # Attention (all 45 layers): projections plus the per-head sigmoid gate g_proj
 - q_proj
@@ -41,7 +38,7 @@ lora_target_modules:
 - g_proj
 # Routed experts (288 x 42 layers, fused storage): peeled by split_expert_lora_targets to grouped
 # adapters inside the EP layers. The 3 dense leading layers, the shared experts (inside the EP
-# wrapper — no LoRA route) and the router gate stay frozen.
+# layer — no LoRA route) and the router gate stay frozen.
 - gate_up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF
@@ -60,17 +57,13 @@ per_device_train_batch_size: 1        # SDPA takes no cu_seqlens — batch>1 fla
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 1.0e-04                # the generic LoRA SFT start (agent-docs/optimization/peft.md)
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300
@@ -90,4 +83,3 @@ dataloader_num_workers: 2
 # pad token, and the chat template (reasoning_effort variable, forced <think> generation prompt).
 # The 128896-row embedding is wider than the 128815-entry tokenizer by design; do not resize.
 assistant_message_template: "<|im_start|>assistant"
-train_on_completions_only: true

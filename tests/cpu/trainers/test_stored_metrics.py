@@ -1,27 +1,18 @@
 #!/usr/bin/env python
-"""StoredMetricsMixin: accumulation + log-time drain (floats and detached 0-dim tensors).
-
-The mixin buffers per-microbatch metrics and folds their row-weighted mean into ``logs`` once per
-``log`` call. Values may be plain floats or detached 0-dim tensors (the buffered-drain path that
-avoids a host sync per microbatch — teacher distillation stores tensors); both must produce
-identical logged values and the buffer must clear after the flush.
-
-On a multi-rank run the bucket is rank-local, so ``log`` reduces it over the world: every rank logs
-the world mean, never rank 0's own (a sampling bias, and a split ``should_save`` verdict when
-``metric_for_best_model`` names one of them), and ranks storing different key sets raise together
-instead of pairing one rank's sums with another's names.
-
-    python tests/cpu/trainers/test_stored_metrics.py
-"""
+"""StoredMetricsMixin buffers per-microbatch metrics and folds their row-weighted mean into ``logs`` once per ``log``.
+The bucket is rank-local, so ``log`` reduces it over the world; rank 0's own would be a sampling bias."""
 
 import datetime
 import json
 import math
+from contextlib import ExitStack
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 
-from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -53,8 +44,7 @@ def test_float_metrics_mean_flushed_and_cleared():
 
 
 def test_tensor_metrics_drain_identically_to_item():
-    # Detached 0-dim tensors (incl. bf16, as the losses come off a bf16 forward) must log the same
-    # value the eager `.item()` path produced.
+    # Detached 0-dim tensors, bf16 included, must log the value the eager `.item()` path produced.
     t = _Trainer()
     values = [torch.tensor(1.25, dtype=torch.bfloat16), torch.tensor(2.75, dtype=torch.bfloat16)]
     for v in values:
@@ -63,6 +53,16 @@ def test_tensor_metrics_drain_identically_to_item():
     t.log(logs)
     expected = torch.tensor([v.item() for v in values]).mean().item()
     assert logs["distillation_loss"] == pytest.approx(expected)
+
+
+def test_the_fold_keeps_float64_precision():
+    """Rows times a float64 value sum on the host in float64: an fp32 fold would round 1 + 1e-10 to 1."""
+    t = _Trainer()
+    t.store_metrics({"m": 1.0 + 1e-10}, rows=3)
+    t.store_metrics({"m": torch.tensor(1.0 + 1e-10, dtype=torch.float64)})
+    logs = {"loss": 0.1}
+    t.log(logs)
+    assert logs["m"] == pytest.approx(1.0 + 1e-10, rel=1e-14, abs=0)
 
 
 def test_train_eval_buffers_are_separate():
@@ -80,8 +80,7 @@ def test_train_eval_buffers_are_separate():
 
 
 def test_rows_weight_the_mean_and_an_empty_entry_adds_nothing():
-    """A value is a mean over ``rows`` real rows; a batch of eval padding alone passes ``rows=0``,
-    and its value (NaN, a mean over nothing) must not reach the logged number."""
+    """A batch of eval padding alone passes ``rows=0``, and its NaN (a mean over nothing) must not reach the log."""
     t = _Trainer()
     t.store_metrics({"m": 1.0}, rows=3)
     t.store_metrics({"m": torch.tensor(5.0)}, rows=torch.tensor(1))
@@ -127,13 +126,22 @@ _WORLD_MEAN = (1.0 + 1.0 + 5.0 * 2) / (1 + 1 + 2)
 
 
 def _world_mean_worker(rank: int, out: str) -> None:
+    """Two eval logs of the same entries: the first agrees the keys, the second reduces over them."""
     t = _Trainer()
-    for value, rows in _RANK_ENTRIES[rank]:
-        t.store_metrics({"m": value, "eval_n": float(rank)}, train_eval="eval", rows=rows)
-    logs = {"eval_loss": 0.1}
-    t.log(logs)
+    windows = []
+    for _ in range(2):
+        for value, rows in _RANK_ENTRIES[rank]:
+            t.store_metrics({"m": value, "eval_n": float(rank)}, train_eval="eval", rows=rows)
+        logs = {"eval_loss": 0.1}
+        with ExitStack() as stack:
+            names = ("all_reduce", "all_gather_object")
+            counted = {
+                name: stack.enter_context(patch.object(dist, name, wraps=getattr(dist, name))) for name in names
+            }
+            t.log(logs)
+        windows.append({**logs, "collectives": {name: mock.call_count for name, mock in counted.items()}})
     with open(f"{out}.{rank}", "w") as fh:
-        json.dump(logs, fh)
+        json.dump(windows, fh)
 
 
 def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
@@ -141,9 +149,13 @@ def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
     run_gloo_ranks(_world_mean_worker, 2, out)
     for rank in range(2):
         with open(f"{out}.{rank}") as fh:
-            logs = json.load(fh)
-        assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
-        assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must not gain a second prefix"
+            first, steady = json.load(fh)
+        for logs in (first, steady):
+            assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
+            assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must gain one prefix"
+        # The first log learns the keys in one object gather; every later one is a single all-reduce.
+        assert first["collectives"] == {"all_reduce": 2, "all_gather_object": 1}, f"rank {rank}"
+        assert steady["collectives"] == {"all_reduce": 1, "all_gather_object": 0}, f"rank {rank}"
 
 
 def _mismatch_worker(rank: int, out: str) -> None:
@@ -169,8 +181,7 @@ def test_a_key_set_mismatch_raises_on_every_rank_instead_of_hanging(tmp_path):
 
 
 def _empty_rank_worker(rank: int, out: str, entries: dict[int, tuple[float, int]]) -> None:
-    """A rank absent from ``entries`` ran no eval batch (more ranks than batches with even_batches
-    off): it stores nothing and must learn the keys from a rank that did."""
+    """A rank absent from ``entries`` ran no eval batch (more ranks than batches with even_batches off)."""
     t = _Trainer()
     if rank in entries:
         value, rows = entries[rank]

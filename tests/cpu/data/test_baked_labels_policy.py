@@ -1,24 +1,19 @@
 #!/usr/bin/env python3
-"""Baked-labels correctness across the offline/runtime seam.
-
-1. Flattening completion mask must detect spans in INPUT_IDS, not labels — precomputed labels
-   with the response marker baked to -100 match nothing, silently zeroing the loss.
-2. Offline preprocessing must bake the COLLATOR span policy — baked labels have to equal what
-   :func:`mask_batch_to_completion_spans` (the runtime collator source of truth) produces, else
-   preprocessed and runtime training compute different losses on the same rows.
-
-Usage:
-    python tests/cpu/data/test_baked_labels_policy.py
-"""
+"""Baked-labels correctness across the offline/runtime seam: the flattening mask finds spans in input_ids, and the
+offline bake uses the collator span policy, so preprocessed and runtime training compute the same loss."""
 
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from src.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
-from src.data.pipeline.preprocessing import _completion_only_labels
-from src.data.spans import COLLATOR_SPAN_POLICY, build_completion_only_labels, mask_batch_to_completion_spans
+from halo.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
+from halo.data.completion_spans import (
+    PADDED_SPAN_POLICY,
+    build_training_labels,
+    mask_batch_to_completion_spans,
+)
+from halo.data.preprocessed.tokenization import _completion_only_labels
 
 PAD = 0
 EOS = 1
@@ -38,12 +33,10 @@ def make_tokenizer() -> MagicMock:
 
 
 def test_flattening_mask_finds_spans_in_input_ids_when_labels_masked():
-    """Labels with the marker baked to -100 (offline-masked rows) must still yield spans: a span
-    search over labels finds nothing there and zeroes the loss silently."""
+    """A span search over labels with the marker baked to -100 finds nothing and zeroes the loss silently."""
     collator = DataCollatorWithFlatteningAndCompletionMask(
         tokenizer=make_tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
-        return_flash_attn_kwargs=True,
     )
     features = [
         {
@@ -60,11 +53,9 @@ def test_flattening_mask_finds_spans_in_input_ids_when_labels_masked():
 
 
 def test_flattening_mask_unchanged_when_labels_are_input_copy():
-    """Sanity: labels==input_ids (the non-baked path) trains marker..EOS and masks the rest."""
     collator = DataCollatorWithFlatteningAndCompletionMask(
         tokenizer=make_tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
-        return_flash_attn_kwargs=True,
     )
     ids = [20, RESP_1, RESP_2, 30, EOS, 21]
     batch = collator([{"input_ids": ids}])
@@ -80,7 +71,6 @@ def _runtime_collator_labels(input_ids: list[int]) -> list[int]:
         {"input_ids": ids, "labels": ids.clone()},
         TEMPLATE_IDS,
         frozenset({EOS}),
-        ignore_index=IGNORE,
         train_on_last_assistant_only=False,
         response_prompt_template="<resp>",
         tokenizer=None,
@@ -96,7 +86,6 @@ def _runtime_collator_labels(input_ids: list[int]) -> list[int]:
         [20, RESP_1, RESP_2, 30, 31, EOS, 40],
         # Terminator-less final turn: a no-op span, never a fallback that unmasks to the row end.
         [20, RESP_1, RESP_2, 30, EOS, 21, RESP_1, RESP_2, 50],
-        # No marker at all: everything masked.
         [20, 21, 22, EOS],
     ],
 )
@@ -114,8 +103,7 @@ def test_offline_baked_labels_match_runtime_collator(input_ids):
 
 
 def test_offline_baked_labels_marker_trained():
-    """Direct pin of the policy switch: baked labels train the marker tokens (collator policy)
-    rather than masking them (the self-distill baking policy)."""
+    """Collator policy; the self-distill baking policy masks the marker."""
     input_ids = [20, RESP_1, RESP_2, 30, EOS]
     baked = _completion_only_labels(
         input_ids,
@@ -144,27 +132,23 @@ def test_offline_baked_labels_extra_ignore_ids_masked():
 @pytest.mark.parametrize(
     "input_ids",
     [
-        # Image token INSIDE the completion span — the position a span refill hands back.
+        # Image token inside the completion span, the position a span refill hands back.
         [20, RESP_1, RESP_2, IMAGE_TOK, 30, EOS],
         # Image tokens both outside every span (user turn) and inside one.
         [IMAGE_TOK, 20, RESP_1, RESP_2, 30, IMAGE_TOK, EOS, 21],
     ],
 )
 def test_runtime_label_builder_matches_offline_bake_with_extras(input_ids):
-    """Same row, same policy, same extras: the runtime builder and the offline bake agree.
-
-    Both apply ``extra_ignore_token_ids`` after the span refill; applying them first re-trains every
-    extra id that falls inside a completion span, so the two paths would compute different losses on
-    the same rows.
-    """
-    runtime = build_completion_only_labels(
+    """Both apply ``extra_ignore_token_ids`` after the span refill; applying them first re-trains every extra id
+    inside a completion span."""
+    runtime = build_training_labels(
         torch.tensor([input_ids]),
         make_tokenizer(),
         response_prompt_template="<resp>",
         train_on_completions_only=True,
         extra_ignore_token_ids=(IMAGE_TOK,),
         eos_token_ids=frozenset({EOS}),
-        span_policy=COLLATOR_SPAN_POLICY,
+        span_policy=PADDED_SPAN_POLICY,
     )[0].tolist()
     baked = _completion_only_labels(
         input_ids,

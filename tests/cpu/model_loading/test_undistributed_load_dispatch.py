@@ -1,0 +1,82 @@
+#!/usr/bin/env python
+"""The undistributed load path, and what decides whether it wraps MoE experts. Wrapping a dense model patches zero MoE
+layers after the whole load; skipping leaves the stock loop while the run pays the Liger force-off."""
+
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+import torch
+import torch.nn as nn
+from transformers import CONFIG_MAPPING
+
+import halo.model_loading.parallel.loader as model_loading
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.moe.config_fields import has_routed_experts
+from tests.common.parallelism import make_parallelism_config
+
+_PC_MOD = "halo.distributed.parallelism_config"
+
+
+def _pc(**kwargs) -> ParallelismConfig:
+    with patch(f"{_PC_MOD}.validate_nvlink_domain_against_fabric"):
+        return make_parallelism_config(world_size=8, gpus_per_node=8, **kwargs)
+
+
+def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
+    """The weight load is stubbed; returns the EP configs the EP layers got."""
+    wrapped: list = []
+    loaded = nn.Linear(2, 2)
+
+    config = CONFIG_MAPPING[model_type]()
+    with (
+        patch.object(model_loading, "get_local_rank", return_value=0),
+        patch.object(model_loading, "load_whole_model", return_value=loaded),
+        patch.object(model_loading, "apply_ep_layers", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
+    ):
+        model = model_loading._dispatch_model_loading(
+            ModelSource("stub/checkpoint", None, "stub/checkpoint"),
+            pc,
+            SimpleNamespace(),
+            config,
+            torch.bfloat16,
+            attn_implementation="sdpa",
+            trust_remote_code=False,
+            quantization_config=None,
+            preserve_checkpoint_precision=False,
+            wraps_experts=pc.needs_ep_layers and has_routed_experts(config),
+            init_from_scratch=False,
+            model_kwargs={},
+        )
+
+    assert model is loaded, "the undistributed path must return the loaded model itself"
+    return wrapped
+
+
+def test_a_moe_gets_the_expert_wrappers_without_any_expert_distribution():
+    """This puts experts under grouped GEMM and, with ``fsdp_shard_ep1_experts``, FSDP's reduce-scatter."""
+    pc = _pc(use_grouped_gemm=True)
+    assert pc.ep_size == 1 and pc.needs_ep_layers and pc.fsdp_shard_ep1_experts, "premise"
+
+    wrapped = _dispatch(pc, "qwen3_moe")
+
+    assert len(wrapped) == 1
+    assert wrapped[0].ep_size == 1, "an ep1 wrapper distributes nothing"
+
+
+def test_a_dense_model_is_never_wrapped_even_with_grouped_gemm_requested():
+    """``use_grouped_gemm`` is a default; a dense model reaching ``apply_ep_layers`` patches zero layers and raises."""
+    assert _dispatch(_pc(use_grouped_gemm=True), "llama") == []
+
+
+def test_the_wrappers_are_off_when_the_run_turns_grouped_gemm_off():
+    """The knob is the whole gate at ``ep_size == 1``."""
+    pc = _pc(use_grouped_gemm=False)
+    assert not pc.needs_ep_layers, "premise"
+
+    assert _dispatch(pc, "qwen3_moe") == []
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

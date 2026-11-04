@@ -16,10 +16,12 @@
   - "model_identity": A string that optionally describes the model identity.
   - "reasoning_effort": A string that describes the reasoning effort, defaults to "medium".
 
-  Sole deviation from upstream: tool/parameter `description` rendering is guarded
+  Two deviations from upstream. Tool/parameter `description` rendering is guarded
   with `is defined` so a tool whose params omit a description does not raise
   `'dict object' has no attribute 'description'` (the upstream template renders it
-  unconditionally). Output is byte-identical whenever descriptions are present.
+  unconditionally). A tool call's string `arguments` render verbatim, where upstream's
+  `tojson` double-encodes them. Output is byte-identical whenever descriptions are
+  present and `arguments` are a mapping.
  #}
 
 {#- Tool Definition Rendering ============================================== #}

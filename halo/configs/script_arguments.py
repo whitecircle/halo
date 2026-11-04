@@ -1,0 +1,507 @@
+"""The arguments training scripts share: ``ModelArguments``, ``CommonScriptArguments`` and the field bundles several
+script-argument and trainer-config dataclasses mix in."""
+
+from dataclasses import dataclass, field
+from typing import Any, ClassVar, Literal
+
+from huggingface_hub.serialization._base import parse_size_to_int
+from trl import ModelConfig
+
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.config_validation import (
+    ValidatedConfig,
+    differs_from_default,
+    present,
+    reject_non_default_args,
+    require_finite,
+    require_int,
+)
+from halo.configs.parser import is_null_string
+from halo.env import torch_trace_dir
+from halo.model_loading.tokenizer_backend import TokenizerBackend
+from halo.models.moe.balancing import BalancingMode
+
+_DEFAULT_PROJECT = "default-project"
+
+DEFAULT_ANSWER_FIELD = "answer"
+
+# Optimizer steps in a row whose gradient norm may be non-finite (each skipped) before the run raises.
+DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS = 3
+
+# Characters a regex spells and a module path does not; PEFT compares a target list's entries to paths verbatim.
+_REGEX_ONLY_CHARACTERS = frozenset("\\*+?()[]{}|^$")
+
+
+@dataclass
+class CheckpointArguments:
+    overwrite_output_dir: bool = field(
+        default=False,
+        metadata={
+            "help": "Allow starting a run in a non-empty output_dir. Off by default so a fresh run "
+            "cannot silently interleave its checkpoints with an existing one's."
+        },
+    )
+    save_sharded_ep: bool = field(
+        default=False,
+        metadata={
+            "help": "Save EP checkpoints as per-rank expert shards written in parallel instead of the gathered HF "
+            "checkpoint from_pretrained loads. Nothing loads the shards until "
+            "scripts/after_training/merge_ep_shards.py merges them; the merged directory resumes exactly, "
+            "optimizer included, on the save's topology. "
+            "See agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp."
+        },
+    )
+    save_max_shard_size: str = field(
+        default=DEFAULT_MAX_SHARD_SIZE,
+        metadata={
+            "help": "Largest safetensors shard the gathered EP/TP/FSDP2/CP saves write, like '5GB'; HF's own "
+            "save_pretrained keeps its default. A sharded EP save writes one file per rank regardless, and "
+            "merge_ep_shards.py sizes its output by its own --max_shard_size."
+        },
+    )
+    allow_optimizer_warm_restart: bool = field(
+        default=False,
+        metadata={
+            "help": "On resume, continue with a freshly initialized optimizer (weights, step and LR schedule still "
+            "resume) when restoring this topology's optimizer shards fails on a rank, or the checkpoint holds an "
+            "interrupted save's optimizer state. Off, both raise on every rank, since a warm restart resets the "
+            "optimizer moments mid-run. "
+            "See agent-docs/reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun."
+        },
+    )
+
+
+@dataclass
+class ModelLoadArguments:
+    text_only_model: bool = field(
+        default=False,
+        metadata={
+            "help": "Load a multimodal checkpoint through its text-only CausalLM class (Qwen3.5/3.6: "
+            "Qwen3_5MoeForCausalLM), dropping the vision tower and, unless mtp_loss_weight trains it, any MTP tail from "
+            "the build and the export. For text-only datasets. "
+            "See agent-docs/reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags."
+        },
+    )
+    reset_sinks: bool = field(
+        default=True,
+        metadata={
+            "help": "GptOss only: true neutralizes the attention sinks for fine-tuning; false keeps the pretrained "
+            "sinks live and frozen, the on-policy RL setting, which needs a sink-carrying attention implementation "
+            "and no context parallelism. See agent-docs/models/gpt-oss.md#attention-sinks."
+        },
+    )
+    train_sinks: bool = field(
+        default=False,
+        metadata={
+            "help": "GptOss only: train the live sinks (requires reset_sinks: false) under full fine-tuning with "
+            "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs, weight-sync RL and a model "
+            "without sinks. "
+            "See agent-docs/models/gpt-oss.md#attention-sinks."
+        },
+    )
+
+
+@dataclass
+class ModelArguments(ModelConfig):
+    """TRL's ``ModelConfig`` with ``trust_remote_code``, which TRL moved onto its own trainer configs; a YAML key
+    shared with a TRL config reaches both dataclasses. ``lora_target_modules`` keeps its form: a list names modules at
+    any length, a string is PEFT's own (``all-linear`` or a regex fullmatched against each full module path)."""
+
+    trust_remote_code: bool = field(
+        default=False,
+        metadata={"help": "Trust the checkpoint's remote modeling and tokenizer code when loading it."},
+    )
+
+    def __post_init__(self):
+        targets = self.lora_target_modules
+        super().__post_init__()
+        if not isinstance(targets, (list, tuple)):
+            return
+        patterns = [target for target in targets if _REGEX_ONLY_CHARACTERS & set(str(target))]
+        if patterns:
+            raise ValueError(
+                f"lora_target_modules entries {patterns} are regexes, but a list names modules: PEFT compares each "
+                f"entry to module paths verbatim, so they would match nothing. Give a regex as a bare string in the "
+                f"YAML (lora_target_modules: '<regex>'), matched against each full module path, or list the "
+                f"module names."
+            )
+        # TRL collapses a one-entry list to its bare entry, which PEFT reads as a regex: `[o_proj]` adapts nothing.
+        self.lora_target_modules = list(targets)
+
+
+@dataclass
+class TorchProfilerArguments(ValidatedConfig):
+    enable_torch_profiler: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable TorchProfilerCallback: per-rank Chrome traces, flame-graph stacks, an optional memory "
+            "timeline and a top-ops table over a short window of steps. Off by default for the overhead of its "
+            "active window. See agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace."
+        },
+    )
+    profiler_output_dir: str = field(
+        default_factory=torch_trace_dir,
+        metadata={"help": "Output directory for torch.profiler artifacts (defaults under HALO_DATA_ROOT)."},
+    )
+    profiler_wait: int = field(
+        default=5, metadata={"help": "torch.profiler schedule: steps to skip before profiling."}
+    )
+    profiler_warmup: int = field(
+        default=1, metadata={"help": "torch.profiler schedule: warmup steps before recording."}
+    )
+    profiler_active: int = field(
+        default=3, metadata={"help": "torch.profiler schedule: number of steps recorded into the trace."}
+    )
+    profiler_ranks: str = field(
+        default="0",
+        metadata={
+            "help": "Which global ranks profile: '0', 'all' or a comma list like '0,8'. "
+            "Use 'all' to capture every rank when diagnosing rank skew or stragglers."
+        },
+    )
+    profiler_record_memory_snapshot: bool = field(
+        default=False,
+        metadata={
+            "help": "Also record CUDA allocation history over the profiler's active window and dump a "
+            ".pickle for https://pytorch.org/memory_viz (allocation timeline + flame graph)."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        # torch.profiler.schedule's own bounds.
+        require_int(owner, ge=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
+        require_int(owner, ge=1, profiler_active=self.profiler_active)
+        if not self.enable_torch_profiler:
+            reject_non_default_args(
+                "A run with enable_torch_profiler off",
+                self,
+                "profiler_output_dir",
+                "profiler_wait",
+                "profiler_warmup",
+                "profiler_active",
+                "profiler_ranks",
+                "profiler_record_memory_snapshot",
+            )
+
+
+@dataclass
+class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLoadArguments):
+    # The tracking project a run lands in when the config names none, declared per script class.
+    PROJECT_NAME: ClassVar[str] = _DEFAULT_PROJECT
+
+    dataset: str | list[str] = field(
+        default="/path/to/dataset",
+        metadata={
+            "help": "Dataset source: an `org/name[:config][@split]` hub id, an `s3://` URI, a "
+            "directory written by `save_to_disk`, or a single .jsonl/.json/.parquet/.arrow/.csv "
+            "file. Can be a list of any of these."
+        },
+    )
+    # Annotated `float` though a YAML list is supported: HfArgumentParser builds only `Optional[X]` unions, and
+    # `parse_dict` assigns a list uncoerced.
+    dataset_ratio: float | None = field(
+        default=None,
+        metadata={
+            "help": "How much of each dataset to take, between 0 and 1. A single value applies to "
+            "every dataset; a YAML list gives one ratio per entry in `dataset`."
+        },
+    )
+    test_size: float | None = field(
+        default=None,
+        metadata={
+            "help": "Test split proportion, like 0.05; unset keeps the dataset's own split. Set on a dataset that "
+            "already has a test split, it concatenates the two and re-splits, and it is ignored (warned) on a "
+            "sharded or pre-processed dataset."
+        },
+    )
+    project_name: str = field(
+        default=_DEFAULT_PROJECT,
+        metadata={
+            "help": "Name of logging project (wandb or clearml). Becomes WANDB_PROJECT / "
+            "CLEARML_PROJECT; leave it out to take the per-script default rather than nulling it."
+        },
+    )
+    pad_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's pad token."})
+    bos_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's bos token."})
+    eos_token: str | None = field(default=None, metadata={"help": "Override for the tokenizer's eos token."})
+    chat_template: str | None = field(
+        default=None,
+        metadata={
+            "help": "Chat template: a path to a .jinja/.jinja2/.j2 file, or the template string itself. Unset uses "
+            "the tokenizer's own template."
+        },
+    )
+    force_chat_template: bool = field(
+        default=False,
+        metadata={
+            "help": "Replace the tokenizer's own template with chat_template, which it needs: a chat_template that "
+            "differs from a shipped one raises without this flag."
+        },
+    )
+    added_special_tokens: list[str] | None = field(
+        default=None, metadata={"help": "Special tokens added to the tokenizer's existing extra-special set."}
+    )
+    tokenizer_backend: TokenizerBackend = field(
+        default="hf",
+        metadata={
+            "help": "Text→ids backend: 'hf' or 'gigatoken' (optional extra; token IDs verified identical at startup)."
+        },
+    )
+    tools_field: str | None = field(
+        default=None,
+        metadata={
+            "help": "Dataset column holding tool definitions (a list of dicts or a JSON string) passed to "
+            "apply_chat_template. Scripts that don't render chat templates from rows reject it up front."
+        },
+    )
+    unfreeze_layers_patterns: list[str] | None = field(
+        default=None,
+        metadata={
+            "help": "Freeze the whole model, then unfreeze the modules whose full names match these fnmatch patterns."
+        },
+    )
+    freeze_layers_patterns: list[str] | None = field(
+        default=None,
+        metadata={
+            "help": "Freeze the parameters whose full names match these fnmatch patterns, applied after unfreezing."
+        },
+    )
+    gradient_checkpointing_plan: Literal["off", "auto"] = field(
+        default="off",
+        metadata={
+            "help": "auto: measure one fully checkpointed step, then checkpoint only every k-th text decoder layer "
+            "(or none) while the predicted peak fits the device memory budget, one plan for every rank; a "
+            "relaunch into the same output_dir after an unfinished run checkpoints at least one step more. Packed "
+            "SFT rows only; refused under PP, torch_compile, auto_find_batch_size, RL rollouts, multimodal rows, "
+            "activation offload, an explicit every_n_layers, model-level checkpointing or gradient_checkpointing "
+            "off. "
+            "See agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback."
+        },
+    )
+    enable_efficiency_metrics: bool = field(
+        default=False,
+        metadata={
+            "help": "Enable EfficiencyCallback (step time, tokens/s, MFU/S-MFU, peak memory), which sets "
+            "include_num_input_tokens_seen='all'. Off by default: MFU is misleading on trainers that forward "
+            "several sequences per step (DPO, SMPO, reward, distillation). "
+            "See agent-docs/training-methods/callbacks.md#efficiencycallback."
+        },
+    )
+    enable_moe_metrics: bool = field(
+        default=True,
+        metadata={
+            "help": "Enable MoEMetricsCallback (per-expert load, dead-expert fraction, first/last-layer skew); a "
+            "no-op on dense models. It turns on output_router_logits only under moe_balancing: aux_loss, and is not "
+            "wired under a bias balancing mode (whose callback logs the load) or pipeline parallelism. "
+            "See agent-docs/training-methods/callbacks.md#moemetricscallback."
+        },
+    )
+    num_full_model_params: float | None = field(
+        default=None,
+        metadata={
+            "help": "Total parameter count across all EP/TP ranks; EfficiencyCallback then reports distributed "
+            "efficiency = params_ratio × MFU. Needs enable_efficiency_metrics. Leave unset on data-parallel runs, "
+            "whose local count is the whole model."
+        },
+    )
+    report_mfu_diagnostics: bool = field(
+        default=False,
+        metadata={
+            "help": "Add MFU, S-MFU and achieved TFLOPS to the headline training log. Needs "
+            "enable_efficiency_metrics, whose callback computes them every step either way. Off by default: "
+            "tokens/s/GPU is the reported throughput metric, and MFU is misleading across GPUs, dtypes and MoE models. "
+            "See agent-docs/reference/configuration-reference.md#commonscriptarguments."
+        },
+    )
+    log_decoded_samples: bool = field(
+        default=False,
+        metadata={
+            "help": "Write the first few decoded training/eval samples (input_ids decoded with "
+            "skip_special_tokens=False) to <output_dir>/log/{train,eval,...}_sample.txt. Off by "
+            "default; useful for eyeballing exactly what the model sees after templating/packing."
+        },
+    )
+    save_completions: bool = field(
+        default=True,
+        metadata={
+            "help": "GRPO family: write each step's rollout completions and trajectories under "
+            "<output_dir>/completions/ (completions_<step>.parquet online, one part per rank in completions_<step>/ "
+            "for async GRPO), plus a wandb completions table. Independent of "
+            "TRL's console-only log_completions; ignored by trainers that do not generate. "
+            "See agent-docs/training-methods/async-grpo/monitoring.md#saved-trajectories."
+        },
+    )
+    moe_balancing: BalancingMode = field(
+        default="auto",
+        metadata={
+            "help": "MoE router balancing: 'auto' (resolved per model), 'bias_update' (DeepSeek-V3 sign update into "
+            "the family's own checkpoint slot), 'bias_update_transient' (the same update in a side-buffer no export "
+            "carries), 'aux_loss' (the model's aux loss at router_aux_loss_coef) or 'none'. Both bias modes are "
+            "downgraded to 'none' on the weight-sync RL scripts. "
+            "See agent-docs/training-methods/callbacks.md#moe-balancing-modes."
+        },
+    )
+    router_balancing_rate: float = field(
+        default=1.0e-3,
+        metadata={
+            "help": "Sign-step magnitude (gamma) of BalancingBiasCallback under a bias_update mode; the "
+            "DeepSeek-V3 paper used 1e-3. Refused with an explicit moe_balancing: none or aux_loss. Not read where "
+            "'auto' resolves to another mode, or on the weight-sync RL scripts."
+        },
+    )
+    max_consecutive_nonfinite_steps: int = field(
+        default=DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS,
+        metadata={
+            "help": "An optimizer step whose global gradient norm is NaN or inf is never applied: its gradients are "
+            "discarded, weights and optimizer moments stay as they were, and the step counter and LR schedule "
+            "advance. This many such steps in a row are skipped with a warning; the next one raises, as does a "
+            "non-finite step whose weights are already non-finite. Under AdamWBF16 or Muon the warning and both "
+            "raises come at the late read of the verdict, before the next step's update. 0 raises at the first. "
+            "See agent-docs/reference/trainer-architecture.md#non-finite-steps."
+        },
+    )
+
+    def __post_init__(self):
+        if self.project_name == _DEFAULT_PROJECT:
+            self.project_name = self.PROJECT_NAME
+        super().__post_init__()
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        # A YAML null would reach os.environ as None and raise later; annotated ``str``, so the parser leaves a CLI
+        # null spelling as literal text.
+        project = self.project_name
+        if not isinstance(project, str) or not project.strip() or is_null_string(project):
+            raise ValueError(
+                f"project_name must be a non-empty string and not a null spelling (it becomes "
+                f"WANDB_PROJECT / CLEARML_PROJECT), got {project!r}. Omit the key — from the YAML "
+                f"and the command line alike — to take this script's own default."
+            )
+        owner = type(self).__name__
+        # One ratio per dataset when a list: 0 empties a dataset and above 1 cannot be drawn without replacement.
+        if self.dataset_ratio is not None:
+            for ratio in self.dataset_ratio if isinstance(self.dataset_ratio, list) else [self.dataset_ratio]:
+                require_finite(owner, gt=0, le=1, dataset_ratio=ratio)
+        # The proportion train_test_split re-splits at; an int there would be a row count.
+        require_finite(owner, gt=0, lt=1, why=" (a proportion)", **present(test_size=self.test_size))
+        require_finite(owner, gt=0, **present(num_full_model_params=self.num_full_model_params))
+        require_finite(owner, gt=0, router_balancing_rate=self.router_balancing_rate)
+        require_int(owner, ge=0, max_consecutive_nonfinite_steps=self.max_consecutive_nonfinite_steps)
+        if self.force_chat_template and not self.chat_template:
+            raise ValueError(f"{owner}: force_chat_template: true has no chat_template to apply. Set one, or drop it.")
+        self._reject_unusable_shard_size()
+        if not self.enable_efficiency_metrics:
+            reject_non_default_args(
+                "A run with enable_efficiency_metrics off", self, "num_full_model_params", "report_mfu_diagnostics"
+            )
+        # Under 'auto' the rate stays legal: the mode it feeds is decided per model, at the load.
+        if self.moe_balancing in ("none", "aux_loss") and differs_from_default(self, "router_balancing_rate"):
+            raise ValueError(
+                f"router_balancing_rate={self.router_balancing_rate} has no effect under moe_balancing: "
+                f"{self.moe_balancing}: only the bias_update modes take a sign step. Remove it, or set a bias mode."
+            )
+
+    def _reject_unusable_shard_size(self) -> None:
+        """Otherwise the first save raises, after the run has trained up to it."""
+        size = self.save_max_shard_size
+        try:
+            usable = parse_size_to_int(size) > 0
+        except (AttributeError, ValueError):
+            usable = False
+        if not usable:
+            raise ValueError(f"save_max_shard_size must be a positive size like '5GB', got {size!r}")
+
+
+@dataclass
+class GenerationEvalArguments(ValidatedConfig):
+    generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
+    num_eval_examples: int = field(
+        default=50, metadata={"help": "Examples to generate per evaluation; needs generate_eval_examples."}
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, num_eval_examples=self.num_eval_examples)
+        if not self.generate_eval_examples:
+            reject_non_default_args("A run with generate_eval_examples off", self, "num_eval_examples")
+
+
+@dataclass
+class DatasetNumProcArguments(ValidatedConfig):
+    """Worker count of trainer configs that map their own data, read through ``resolve_map_num_proc``."""
+
+    dataset_num_proc: int | None = field(
+        default=None,
+        metadata={
+            "help": "Worker processes for dataset preprocessing (map/filter). Unset means the toolkit "
+            "default (HALO_DATASET_NUM_PROC, else three quarters of the usable CPUs, at most 64), not one worker."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, **present(dataset_num_proc=self.dataset_num_proc))
+
+
+@dataclass
+class ModelInitKwargsArguments:
+    """``model_init_kwargs`` of the trainer configs whose trainer also takes the model as a path string."""
+
+    model_init_kwargs: dict[str, Any] | None = field(
+        default=None,
+        metadata={
+            "help": "Model-config overrides on every entry-script path: written onto the loaded "
+            "config's fields before the load, raising on a key that config does not declare and "
+            "on dtype/torch_dtype. Model-loading kwargs only where a trainer is constructed "
+            "programmatically with the model as a path string."
+        },
+    )
+
+
+@dataclass
+class VisionTrainingArguments(ValidatedConfig):
+    """The image-run options of the scripts with a vision path."""
+
+    freeze_vision_tower: bool = field(
+        default=False,
+        metadata={
+            "help": "Freeze a multimodal checkpoint's vision and audio towers and their projectors, training the text "
+            "tower on image data. Refused with adapters, which freeze the base already, and on a checkpoint with no "
+            "tower."
+        },
+    )
+    min_pixels: int | None = field(
+        default=None,
+        metadata={"help": "Image run: floor on the pixels per image, for a processor that resizes by pixel count."},
+    )
+    max_pixels: int | None = field(
+        default=None,
+        metadata={
+            "help": "Image run: cap on the pixels per image, for a processor that resizes by pixel count; it bounds "
+            "the tokens each image costs. Exported with the processor."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, **present(min_pixels=self.min_pixels, max_pixels=self.max_pixels))
+        if self.min_pixels is not None and self.max_pixels is not None and self.min_pixels > self.max_pixels:
+            raise ValueError(f"min_pixels={self.min_pixels} is over max_pixels={self.max_pixels}.")
+
+
+@dataclass
+class CrossDocumentLinearAttentionArguments:
+    """The opt-in of configs whose multi-document rows (``packing``, ``padding_free``) are refused on sequence mixers
+    no document boundary reaches."""
+
+    allow_cross_document_linear_attention: bool = field(
+        default=False,
+        metadata={
+            "help": "Train multi-document rows (packing, padding_free) on a model whose linear-attention layers or "
+            "other sequence mixers receive no document boundary (Ring's Lightning Attention-2, Inkling's short "
+            "convolutions): their state then carries from each document of a row into the next. Off, such a run "
+            "is refused."
+        },
+    )

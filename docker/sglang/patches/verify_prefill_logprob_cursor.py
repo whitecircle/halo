@@ -35,7 +35,11 @@ LIVE_BLOCK = [-31.0, -32.0, -33.0]
 
 def _rescore_req(rid: str, prompt: list[int], completion: list[int]) -> Req:
     """Shaped like the trainer's re-score: prefill-only, input log-probs from the last prompt token."""
-    req = Req(rid, "", array("q", prompt + completion), SamplingParams(max_new_tokens=0), return_logprob=True)
+    # The engine normalizes every request's sampling params on admission, and the finish check reads
+    # the stop-string lists that fills in.
+    params = SamplingParams(max_new_tokens=0)
+    params.normalize(None)
+    req = Req(rid, "", array("q", prompt + completion), params, return_logprob=True)
     req.logprob_start_len = len(prompt) - 1
     return req
 
@@ -47,7 +51,6 @@ def _processor() -> SchedulerBatchResultProcessor:
         disaggregation_mode=None,
         enable_overlap=False,
         enable_overlap_mlx=False,
-        server_args=SimpleNamespace(return_hidden_states_mode=None, enable_return_hidden_states=False),
         model_config=model_config,
         token_to_kv_pool_allocator=Mock(),
         tree_cache=None,
@@ -60,6 +63,7 @@ def _processor() -> SchedulerBatchResultProcessor:
         model_worker=Mock(),
         logprob_result_processor=SchedulerLogprobResultProcessor(model_config=model_config),
         output_streamer=Mock(),
+        beam_coordinator=None,
         abort_request=Mock(),
     )
 

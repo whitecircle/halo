@@ -1,25 +1,13 @@
-"""A local path classified as a data FILE must actually load.
-
-``parse_dataset_source`` classifies ``.jsonl/.json/.parquet/.arrow/.csv`` as a local source, the
-``dataset`` help advertises the form, and the rejection-sampling scripts emit ``.jsonl``. Routing
-every local path through ``load_from_disk``, which reads only a ``save_to_disk`` DIRECTORY, leaves
-the one form the toolkit's own tooling produces unreadable.
-
-These tests pin both halves of the contract: a data file loads and keeps its rows, and a directory
-still loads through ``load_from_disk``. Deleting the file-builder branch fails the first three.
-"""
+"""A local path classified as a data file loads, the form the rejection-sampling scripts emit; a
+``load_from_disk``-only route reads just ``save_to_disk`` directories."""
 
 import json
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset
 
-from src.data.sources.loading import load_dataset_from_source
-from src.data.sources.paths import parse_dataset_source
-
-PartialState()  # the loader logs through accelerate, which refuses to log without it
-
+from halo.data.sources.loading import load_dataset_from_source
+from halo.data.sources.paths import parse_dataset_source
 
 ROWS = [{"prompt": "a", "label": 0}, {"prompt": "b", "label": 1}, {"prompt": "c", "label": 2}]
 
@@ -63,7 +51,7 @@ def test_saved_directory_still_loads_through_load_from_disk(tmp_path):
 
 
 def test_a_missing_data_file_raises_a_named_error(tmp_path):
-    """Fail loud, and say which forms are legal — a silent empty dataset trains on nothing."""
+    """Fail loud and say which forms are legal: a silent empty dataset trains on nothing."""
     with pytest.raises(FileNotFoundError, match="save_to_disk"):
         load_dataset_from_source(str(tmp_path / "absent.jsonl"))
 

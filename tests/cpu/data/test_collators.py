@@ -1,34 +1,23 @@
 #!/usr/bin/env python3
-"""
-Tests for data collators: completion masking, packing, flattening.
-
-Focuses on verifying train_on_last_assistant_only behavior across all collator
-code paths (packed vs non-packed, standard vs flattening).
-
-Usage:
-    python tests/cpu/data/test_collators.py
-"""
-
 import warnings
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlattening,
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from src.data.spans import (
-    build_completion_only_labels,
+from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
+from halo.data.completion_spans import (
+    build_training_labels,
     filter_eos_after_responses,
     find_terminator_positions,
-    resolve_eos_token_ids,
-    tokenize_response_template,
 )
+from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 
 PAD = 0
 EOS = 1
@@ -46,7 +35,6 @@ def make_tokenizer(
     eos_token_id: int = EOS,
     response_template_ids: list[int] | None = None,
 ) -> MagicMock:
-    """Create a mock tokenizer with the minimal interface collators need."""
     tok = MagicMock()
     tok.pad_token_id = pad_token_id
     tok.eos_token_id = eos_token_id
@@ -86,15 +74,7 @@ def make_tokenizer(
 
 
 def make_two_turn_ids():
-    """Create input_ids for a 2-turn conversation.
-
-    Structure:
-      [USER_A, USER_B, RESP_1, RESP_2, ASST_A, ASST_B, EOS,
-       USER_C, RESP_1, RESP_2, ASST_C, ASST_D, EOS]
-
-    Turn 1 assistant tokens: ASST_A, ASST_B (indices 4-5)
-    Turn 2 assistant tokens: ASST_C, ASST_D (indices 10-11)
-    """
+    """A 2-turn conversation; assistant tokens at indices 4-5 and 10-11."""
     return [
         USER_A,
         USER_B,
@@ -113,14 +93,12 @@ def make_two_turn_ids():
 
 
 def get_unmasked_positions(labels):
-    """Return sorted list of positions where label != -100."""
     if isinstance(labels, torch.Tensor):
         labels = labels.tolist()
     return sorted(i for i, v in enumerate(labels) if v != IGNORE)
 
 
 def test_completion_only_all_turns():
-    """All assistant turns should be unmasked when train_on_last_assistant_only=False."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -143,7 +121,6 @@ def test_completion_only_all_turns():
 
 
 def test_completion_only_last_turn_only():
-    """Only last assistant turn should be unmasked when train_on_last_assistant_only=True."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -164,7 +141,6 @@ def test_completion_only_last_turn_only():
 
 
 def test_packing_completion_packed_all_turns():
-    """Packed data: all assistant turns unmasked when train_on_last_assistant_only=False."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -195,7 +171,6 @@ def test_packing_completion_packed_all_turns():
 
 
 def test_packing_completion_packed_last_turn_only():
-    """Packed data: only last assistant per conversation when train_on_last_assistant_only=True."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -228,11 +203,8 @@ def test_packing_completion_packed_last_turn_only():
 
 
 def test_packing_completion_nonpacked_last_turn_only():
-    """Non-packed path: only last turn when train_on_last_assistant_only=True.
-
-    The non-packed route masks through ``mask_batch_to_completion_spans``; dropping
-    train_on_last_assistant_only there would train turn 1.
-    """
+    """The non-packed route masks through ``mask_batch_to_completion_spans``; dropping the flag there would train
+    turn 1."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -253,14 +225,8 @@ def test_packing_completion_nonpacked_last_turn_only():
 
 
 def test_packing_completion_nonpacked_pad_equals_eos():
-    """Non-packed path with pad_token_id == eos_token_id: the assistant tokens AND the
-    turn-ending EOS must still be trained — not masked away to a zero-loss instance.
-
-    The parent LM collator masks pad positions (which share the EOS id here) to -100 first, so a
-    mask searching the *labels* tensor would never find the EOS: the "missing template/EOS" branch
-    would fire and mask the whole sequence (zero tokens trained). Detection and the unmasked copy
-    must come from ``input_ids`` (``mask_batch_to_completion_spans``), which is immune to that masking.
-    """
+    """The parent LM collator masks pad positions (the EOS id here), so a mask searching labels finds no EOS and
+    trains zero tokens. Detection must come from ``input_ids``."""
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -282,17 +248,9 @@ def test_packing_completion_nonpacked_pad_equals_eos():
 
 
 def test_packing_completion_packed_pad_equals_eos():
-    """PACKED path with pad_token_id == eos_token_id: each document's turn-ending EOS must be
-    trained, not masked away.
-
-    ``_mask_sequence`` (the packed path) detects the template/EOS on input_ids and copies the span
-    from ``labels`` (so a doc-boundary mask survives), then restores the turn-ending EOS from
-    input_ids. When pad_token_id == eos_token_id the parent ``DataCollatorForLanguageModeling``
-    masks every EOS-valued position (incl. the real turn-ending EOS) to -100, so a labels copy
-    without that restore drops the EOS — teaching the model not to stop at turn boundaries. The
-    discriminating assertions below are the EOS positions (5 and 10): without the restore they are
-    masked; assistant content tokens (not EOS-valued) stay unmasked either way.
-    """
+    """``_mask_sequence`` detects on input_ids and copies the span from labels, where the parent collator masked
+    every EOS-valued position, then restores the turn-ending EOS. The discriminating assertions are the EOS
+    positions (5 and 10)."""
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -324,12 +282,8 @@ def test_packing_completion_packed_pad_equals_eos():
 
 
 def test_packing_completion_consistency():
-    """Packed and non-packed paths must agree on which assistant CONTENT tokens are masked.
-
-    Template-token inclusion is pinned by test_template_tokens_included_in_training; here we only
-    check that the assistant content tokens are consistently masked/unmasked when
-    train_on_last_assistant_only is toggled.
-    """
+    """Template-token inclusion is pinned by test_template_tokens_included_in_training; this checks the assistant
+    content tokens."""
     tok = make_tokenizer()
 
     turn1_content = {4, 5}
@@ -389,7 +343,6 @@ def test_packing_completion_consistency():
 
 
 def test_packing_position_ids():
-    """Packed data should have position_ids that reset per conversation."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -413,7 +366,6 @@ def test_packing_position_ids():
 
 
 def test_packing_nonpacked_no_position_ids():
-    """Non-packed data should NOT have position_ids (model computes them internally)."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -428,11 +380,8 @@ def test_packing_nonpacked_no_position_ids():
 
 
 def test_base_packing_collator_restores_eos_labels_when_pad_equals_eos():
-    """Base DataCollatorWithPacking, NON-packed raw-labels batch, pad == eos: the parent LM collator
-    masks every pad-valued label — including the real turn-ending EOS — so the torch_call wiring
-    through restore_eos_labels_when_pad_equals_eos must bring it back at real-token positions while
-    true padding stays masked. Drop-the-branch regression, distinct from the completion-masking and
-    CP-collator pad==eos tests."""
+    """Through the torch_call wiring of collate_preserving_precomputed_labels: the real turn-ending EOS comes back
+    at real-token positions while true padding stays masked."""
     tok = make_tokenizer(pad_token_id=EOS, eos_token_id=EOS)
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -450,7 +399,6 @@ def test_base_packing_collator_restores_eos_labels_when_pad_equals_eos():
 
 
 def test_flattening_basic():
-    """Basic flattening: multiple examples concatenated, first label gets separator."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlattening(tokenizer=tok)
 
@@ -469,7 +417,6 @@ def test_flattening_basic():
 
 
 def test_flattening_position_ids():
-    """Flattening: position_ids should reset per sequence."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlattening(tokenizer=tok)
 
@@ -483,9 +430,8 @@ def test_flattening_position_ids():
 
 
 def test_flattening_cu_seq_lens():
-    """Flattening: cu_seq_lens should track cumulative lengths."""
     tok = make_tokenizer()
-    collator = DataCollatorWithFlattening(tokenizer=tok, return_flash_attn_kwargs=True)
+    collator = DataCollatorWithFlattening(tokenizer=tok)
 
     ex1 = {"input_ids": [USER_A, ASST_A], "labels": [USER_A, ASST_A]}
     ex2 = {"input_ids": [USER_B, ASST_B, EOS], "labels": [USER_B, ASST_B, EOS]}
@@ -498,7 +444,6 @@ def test_flattening_cu_seq_lens():
 
 
 def test_packing_boundary_labels_masked():
-    """Packed data: labels at position_ids==0 must be -100 to prevent cross-doc predictions."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -532,11 +477,8 @@ def test_packing_boundary_labels_masked():
 
 
 def test_packing_boundary_labels_with_padding():
-    """Boundary masking works with different-length examples (padding in batch).
-
-    A B>1 packed batch flattens to [1, total real tokens]: example 1 occupies the row directly
-    after example 0, its pad tail dropped by the flatten.
-    """
+    """A B>1 packed batch flattens to [1, total real tokens]: example 1 follows example 0 directly, its pad tail
+    dropped."""
     tok = make_tokenizer()
     collator = DataCollatorWithPacking(tokenizer=tok)
 
@@ -573,7 +515,6 @@ def test_packing_boundary_labels_with_padding():
 
 
 def test_packing_completion_boundary_labels_masked():
-    """Completion-only packing: boundaries must be -100 even in response regions."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -596,13 +537,61 @@ def test_packing_completion_boundary_labels_masked():
 
     labels = batch["labels"][0].tolist()
     assert labels[0] == IGNORE, f"First doc boundary not masked: {labels}"
-    # Index 5 is doc2's start AND a response-template token — boundary masking must still win.
+    # Index 5 is doc2's start and a response-template token; boundary masking must still win.
     assert labels[5] == IGNORE, f"Second doc boundary not masked despite being response token: {labels}"
     print("  PASS: test_packing_completion_boundary_labels_masked")
 
 
+def test_a_pad_valued_completion_token_trains_on_the_packed_route_as_on_the_padded_one():
+    tok = make_tokenizer()
+    conversation = [USER_A, RESP_1, RESP_2, ASST_A, PAD, ASST_B, EOS]
+    second = [USER_B, RESP_1, RESP_2, ASST_C, EOS]
+    packed = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = packed.torch_call([{"input_ids": conversation + second, "seq_lengths": [len(conversation), len(second)]}])
+    labels = batch["labels"][0].tolist()
+
+    padded = DataCollatorForCompletionOnlyLM(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    padded_labels = padded.torch_call([{"input_ids": conversation, "attention_mask": [1] * len(conversation)}])
+    padded_row = padded_labels["labels"][0].tolist()
+    assert padded_row[4] == PAD, "the premise: the padded route trains it"
+    assert labels[: len(conversation)] == padded_row
+    assert labels[len(conversation) :] == [IGNORE, RESP_1, RESP_2, ASST_C, EOS]
+
+
+def test_a_pad_valued_token_outside_a_span_stays_masked():
+    tok = make_tokenizer()
+    in_prompt = [USER_A, PAD, RESP_1, RESP_2, ASST_B, EOS]
+    collator = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = collator.torch_call([{"input_ids": in_prompt, "seq_lengths": [len(in_prompt)]}])
+    assert batch["labels"][0].tolist()[:2] == [IGNORE, IGNORE]
+
+
+def test_a_pad_valued_token_opening_a_document_keeps_the_boundary_mask():
+    """A marker starting with the pad id puts position 0 inside the span, where the causal shift has nothing to read."""
+    tok = make_tokenizer(response_template_ids=[PAD, RESP_2])
+    ids = [PAD, RESP_2, ASST_A, EOS]
+    collator = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=[PAD, RESP_2], tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = collator.torch_call([{"input_ids": ids, "seq_lengths": [len(ids)]}])
+    assert batch["labels"][0].tolist() == [IGNORE, RESP_2, ASST_A, EOS]
+
+
+def test_the_full_sequence_packed_route_keeps_masking_pad_valued_labels():
+    """The padded full-sequence route masks them too, as a pad there cannot be told from a real token."""
+    tok = make_tokenizer()
+    ids = [USER_A, ASST_A, PAD, ASST_B, EOS]
+    batch = DataCollatorWithPacking(tokenizer=tok).torch_call([{"input_ids": ids, "seq_lengths": [len(ids)]}])
+    assert batch["labels"][0].tolist() == [IGNORE, ASST_A, IGNORE, ASST_B, EOS]
+
+
 def test_flattening_boundary_labels_masked():
-    """Flattening collator: first label of each sequence must be separator (-100)."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlattening(tokenizer=tok)
 
@@ -622,7 +611,6 @@ def test_flattening_boundary_labels_masked():
 
 
 def test_flattening_completion_boundary_labels_masked():
-    """Flattening + completion masking: boundaries must be -100."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -645,19 +633,14 @@ def test_flattening_completion_boundary_labels_masked():
 
 
 def test_all_collators_no_cross_doc_training_signal():
-    """No collator should produce a valid shifted label that crosses a document boundary.
-
-    Simulates the causal shift (logits[:-1] vs labels[1:]) and checks that for every
-    position where shift_labels != -100, both logits[i] and labels[i+1] belong to the
-    same document.
-    """
+    """Simulates the causal shift (logits[:-1] vs labels[1:]): wherever shift_labels != -100, both sides belong to
+    one document."""
     tok = make_tokenizer()
 
     doc1 = [USER_A, USER_B, ASST_A, EOS]
     doc2 = [USER_C, ASST_B, ASST_C, EOS]
 
     def get_doc_boundaries(pos_ids_list):
-        """Return list of document indices per position from position_ids."""
         doc_idx = 0
         doc_map = []
         for i, p in enumerate(pos_ids_list):
@@ -680,8 +663,7 @@ def test_all_collators_no_cross_doc_training_signal():
     doc_map = get_doc_boundaries(pos_ids_pack)
 
     shift_labels = labels_pack[1:]
-    # Anchor: every check below is guarded by `sl != IGNORE`, so an all-masked batch — the collator
-    # bug that trains on nothing — would satisfy the loop without entering it once.
+    # Every check below is guarded by ``sl != IGNORE``, so an all-masked batch would pass without entering the loop.
     assert any(sl != IGNORE for sl in shift_labels), f"DataCollatorWithPacking masked everything: {labels_pack}"
     for i, sl in enumerate(shift_labels):
         if sl != IGNORE:
@@ -715,7 +697,6 @@ def test_all_collators_no_cross_doc_training_signal():
 
 
 def test_missing_template_warns():
-    """Collator should warn when response template is not found."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -736,12 +717,8 @@ def test_missing_template_warns():
 
 
 def test_missing_template_warning_is_length_bounded():
-    """The mismatch warning must stay bounded on a long row.
-
-    A wrong assistant_message_template misses on EVERY row of EVERY batch, so an unbounded
-    ``tokenizer.decode(input_ids)`` in the message means a full-sequence decode plus a
-    max_length-sized log line per row — at 32k context that floods the log and dominates step time.
-    """
+    """A wrong template misses on every row, so an unbounded ``tokenizer.decode`` means a full-sequence decode and a
+    max_length-sized log line per row."""
     tok = make_tokenizer()
     # Real decode, so the assertion measures the message the collator actually builds.
     tok.decode.side_effect = lambda ids, **kwargs: " ".join(f"tok{int(i)}" for i in ids)
@@ -766,13 +743,8 @@ def test_missing_template_warning_is_length_bounded():
 
 
 def test_packing_completion_template_at_boundary():
-    """Packed doc starting with response template: assistant tokens must still be unmasked.
-
-    _mask_sequence detects the response template in input_ids, not in
-    boundary-masked labels. _handle_packing sets labels=-100 at
-    position_ids==0, so a template starting at a document boundary is invisible
-    in labels, silently dropping the entire document's response from training.
-    """
+    """The packing collator sets labels=-100 at position_ids==0, so a template at a document boundary is invisible
+    in labels; ``_mask_sequence`` detects it in input_ids."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -809,7 +781,6 @@ def test_packing_completion_template_at_boundary():
 
 
 def test_three_turns_last_only():
-    """3-turn conversation: only last turn unmasked with train_on_last_assistant_only=True."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -847,11 +818,7 @@ def test_three_turns_last_only():
 
 
 def test_template_tokens_included_in_training():
-    """Response template tokens themselves must be included in the unmasked region.
-
-    All three completion-only collators should unmask from the template start
-    (inclusive) through the EOS (inclusive).
-    """
+    """All three completion-only collators unmask from the template start through the EOS, inclusive."""
     tok = make_tokenizer()
     ids = [USER_A, RESP_1, RESP_2, ASST_A, EOS]
 
@@ -899,7 +866,6 @@ def test_template_tokens_included_in_training():
 
 
 def test_eos_included_in_training():
-    """EOS token must be included in the unmasked region for all completion collators."""
     tok = make_tokenizer()
     ids = [USER_A, RESP_1, RESP_2, ASST_A, EOS]
 
@@ -943,11 +909,6 @@ def test_eos_included_in_training():
 
 
 def test_exact_labels_completion_only():
-    """Verify exact label values for DataCollatorForCompletionOnlyLM.
-
-    input:  [USER_A, USER_B, RESP_1, RESP_2, ASST_A, ASST_B, EOS]
-    expect: [-100,   -100,   RESP_1, RESP_2, ASST_A, ASST_B, EOS]
-    """
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -963,10 +924,7 @@ def test_exact_labels_completion_only():
 
 
 def test_empty_response():
-    """Response template immediately followed by EOS (no content tokens).
-
-    All completion collators should still unmask the template + EOS.
-    """
+    """All completion collators still unmask the template + EOS."""
     tok = make_tokenizer()
     ids = [USER_A, RESP_1, RESP_2, EOS]
 
@@ -1008,14 +966,10 @@ def test_empty_response():
 
 
 def test_truncated_response_no_eos():
-    """Response template at end of sequence with no following EOS.
-
-    Both packed routes (``_mask_sequence`` and the flattening collator) take PACKED_SPAN_POLICY,
-    whose end-of-sequence fallback trains template+content through the row end.
-    """
+    """Both packed routes take PACKED_SPAN_POLICY, whose end-of-sequence fallback trains template+content through
+    the row end."""
     tok = make_tokenizer()
 
-    # Both paths fall back to len-1 as the EOS position when no EOS is present.
     c_pack = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
         tokenizer=tok,
@@ -1049,7 +1003,6 @@ def test_truncated_response_no_eos():
 
 
 def test_multi_example_batch_completion_only():
-    """Multiple examples in the same batch — each masked independently."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1081,7 +1034,6 @@ def test_multi_example_batch_completion_only():
 
 
 def test_multi_example_batch_last_only():
-    """Multi-example batch with last_only: each example's last turn masked independently."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1110,7 +1062,6 @@ def test_multi_example_batch_last_only():
 
 
 def test_flattening_multi_example_multi_turn():
-    """Flattening with multiple multi-turn examples — each example independently masked."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1148,7 +1099,6 @@ def test_flattening_multi_example_multi_turn():
 
 
 def test_flattening_multi_example_last_only():
-    """Flattening last_only: each example applies last-only independently."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1180,8 +1130,8 @@ def test_flattening_multi_example_last_only():
 
 
 def test_mixed_packed_nonpacked_batch():
-    """Batch with one packed example and one non-packed example flattens to [1, total]:
-    the non-packed row is appended after the packed one, both masked per-row pre-flattening."""
+    """One packed and one non-packed example flatten to [1, total], the non-packed row appended, both masked per row
+    before flattening."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1229,7 +1179,6 @@ def test_mixed_packed_nonpacked_batch():
 
 
 def test_three_packed_documents():
-    """Three documents packed into a single example."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1261,7 +1210,6 @@ def test_three_packed_documents():
 
 
 def test_three_packed_documents_last_only():
-    """Three packed docs, each multi-turn. last_only applies per-document."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1307,7 +1255,6 @@ def test_three_packed_documents_last_only():
 
 
 def test_packing_completion_template_at_boundary_last_only():
-    """Template at boundary + last_only: assistant tokens must still be found."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1350,7 +1297,6 @@ def test_packing_completion_template_at_boundary_last_only():
 
 
 def test_user_tokens_never_unmasked():
-    """Exhaustive check: user/system tokens must always be masked across all collators."""
     tok = make_tokenizer()
     ids = [USER_A, USER_B, USER_C, RESP_1, RESP_2, ASST_A, ASST_B, EOS]
     user_positions = {0, 1, 2}
@@ -1395,11 +1341,6 @@ def test_user_tokens_never_unmasked():
 
 
 def test_no_cross_doc_signal_completion_packed():
-    """Completion-only packed collator must also prevent cross-doc training signal.
-
-    Extends test_all_collators_no_cross_doc_training_signal to
-    DataCollatorForCompletionOnlyLMWithPacking.
-    """
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1429,10 +1370,9 @@ def test_no_cross_doc_signal_completion_packed():
             doc_idx += 1
         doc_map.append(doc_idx)
 
-    # Causal shift: logits[i] predicts labels[i+1].
     shift_labels = labels[1:]
-    # Anchor: the cross-doc check below only runs on unmasked positions, so a collator that masked
-    # every label — training on nothing — would pass without entering the loop.
+    # The cross-doc check runs only on unmasked positions, so a collator masking every label would pass without
+    # entering the loop.
     assert any(sl != IGNORE for sl in shift_labels), f"completion-packed collator masked everything: {labels}"
     for i, sl in enumerate(shift_labels):
         if sl != IGNORE:
@@ -1445,7 +1385,6 @@ def test_no_cross_doc_signal_completion_packed():
 
 
 def test_flattening_completion_no_cross_doc_signal():
-    """Flattening completion collator must prevent cross-doc training signal."""
     tok = make_tokenizer()
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1491,7 +1430,6 @@ def test_tokenize_response_template_passthrough_ids():
 
 
 def test_tokenize_response_template_encodes_string():
-    """A string template is encoded via the tokenizer (no special tokens)."""
     tok = make_tokenizer(response_template_ids=[10, 11])
     out = tokenize_response_template("<resp>", tok)
     assert out == [10, 11]
@@ -1513,15 +1451,13 @@ def test_filter_eos_after_responses_nearest_following():
 
 
 def test_filter_eos_after_responses_no_following_eos_returns_sentinel():
-    """A response start with no EOS strictly after it returns -1 (an empty unmask span) rather than
-    borrowing another turn's EOS (which would unmask non-assistant tokens)."""
+    """Returns -1 (an empty span) and does not borrow another turn's EOS, which would unmask non-assistant tokens."""
     assert filter_eos_after_responses([8], [5]) == [-1]
 
 
 def test_filter_eos_does_not_cross_into_next_response():
-    """Span-leak regression: a turn missing its own EOS must NOT borrow a LATER turn's EOS — the
-    search is bounded by the next response start, so an unterminated turn returns -1."""
-    # Turn 1 (start 2) must not bind to turn 2's EOS (12) — that span covers the user message.
+    """The search is bounded by the next response start, so an unterminated turn returns -1."""
+    # Turn 1 (start 2) must not bind to turn 2's EOS (12), whose span covers the user message.
     assert filter_eos_after_responses([2, 8], [12]) == [-1, 12]
     assert filter_eos_after_responses([2, 8], [6, 12]) == [6, 12]
     # A user-turn EOS (8) between the two assistant turns must not be mis-assigned.
@@ -1529,14 +1465,11 @@ def test_filter_eos_does_not_cross_into_next_response():
 
 
 def test_filter_eos_after_responses_empty_inputs():
-    """No starts or no EOS positions → empty result."""
     assert filter_eos_after_responses([], [5]) == []
-    assert filter_eos_after_responses([2], []) == []
+    assert filter_eos_after_responses([2, 8], []) == [-1, -1], "every start pairs with an end"
 
 
 def test_completion_only_unterminated_turn_does_not_leak_into_user_message():
-    """End-to-end span-leak regression: a mid-conversation assistant turn missing its EOS must NOT
-    unmask the following user message by binding its start to a later turn's EOS."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1554,9 +1487,8 @@ def test_completion_only_unterminated_turn_does_not_leak_into_user_message():
     print("  PASS: test_completion_only_unterminated_turn_does_not_leak_into_user_message")
 
 
-def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
-    """When pad_token_id == eos_token_id, masking must use the attention_mask, not the token value —
-    otherwise every REAL eos is erased to -100 and the model never learns to stop."""
+def test_build_training_labels_preserves_eos_when_pad_equals_eos():
+    """Masking must use the attention_mask, or every real eos is erased to -100 and the model never learns to stop."""
     tok = MagicMock()
     tok.pad_token_id = 1
     tok.eos_token_id = 1  # pad == eos (Qwen default)
@@ -1565,26 +1497,26 @@ def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
     input_ids = torch.tensor([[5, 6, 1, 1, 1]])
     attention_mask = torch.tensor([[1, 1, 1, 0, 0]])
 
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         input_ids, tok, response_prompt_template=None, train_on_completions_only=False, attention_mask=attention_mask
     )
     assert labels[0, 2].item() == 1, "real EOS was erased despite attention_mask=1"
     assert labels[0, 3].item() == IGNORE and labels[0, 4].item() == IGNORE, "padding not masked"
 
-    # Without an attention_mask the value-based fallback DOES erase the real eos — that path is
-    # reachable only for unpadded single examples.
-    labels_fallback = build_completion_only_labels(
+    # Without an attention_mask the value-based fallback erases the real eos; that path is reachable only for unpadded
+    # single examples.
+    labels_fallback = build_training_labels(
         input_ids, tok, response_prompt_template=None, train_on_completions_only=False
     )
     assert labels_fallback[0, 2].item() == IGNORE
-    print("  PASS: test_build_completion_only_labels_preserves_eos_when_pad_equals_eos")
+    print("  PASS: test_build_training_labels_preserves_eos_when_pad_equals_eos")
 
 
-# GLM-style markers: tokenizer.eos_token_id (<|endoftext|>) NEVER appears mid-conversation; turns end
-# at role markers the model lists in config.eos_token_id instead.
+# GLM-style markers: tokenizer.eos_token_id never appears mid-conversation; turns end at role markers in
+# config.eos_token_id.
 GLM_ENDOFTEXT = 1  # absent from multi-turn sequences
-GLM_USER_MARK = 2  # <|user|> — ends an assistant turn that produced a final answer
-GLM_OBS_MARK = 3  # <|observation|> — ends an assistant turn that produced a tool call
+GLM_USER_MARK = 2  # <|user|> ends an assistant turn that produced a final answer
+GLM_OBS_MARK = 3  # <|observation|> ends an assistant turn that produced a tool call
 GLM_EOS_SET = frozenset({GLM_ENDOFTEXT, GLM_USER_MARK, GLM_OBS_MARK})
 
 
@@ -1597,14 +1529,13 @@ class _FakeConfig:
 
 
 def test_resolve_eos_token_ids_folds_config_list():
-    """The config's eos_token_id LIST plus the tokenizer's eos become terminators; a distinct
-    pad token does NOT (it would close unterminated spans at the first trailing pad)."""
+    """The config's eos list plus the tokenizer's eos become terminators; a distinct pad would close unterminated
+    spans at the first trailing pad."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=1)
     assert resolve_eos_token_ids(tok, _FakeConfig(eos_token_id=[1, 2, 3])) == frozenset({1, 2, 3})
 
 
 def test_resolve_eos_token_ids_single_int_config():
-    """A scalar config eos_token_id is folded in (not just lists)."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=1)
     assert resolve_eos_token_ids(tok, _FakeConfig(eos_token_id=7)) == frozenset({1, 7})
 
@@ -1617,7 +1548,6 @@ def test_resolve_eos_token_ids_reads_text_config():
 
 
 def test_resolve_eos_token_ids_tokenizer_only():
-    """No model_config → tokenizer eos only (never the distinct pad)."""
     tok = make_tokenizer(pad_token_id=5, eos_token_id=9)
     assert resolve_eos_token_ids(tok, None) == frozenset({9})
 
@@ -1629,12 +1559,8 @@ def test_resolve_eos_token_ids_pad_equals_eos_still_terminates():
 
 
 def test_last_only_unterminated_final_turn_warns_and_masks():
-    """train_on_last_assistant_only + a terminator-less FINAL turn: the surviving span is a single
-    -1 no-op, so the row trains ZERO tokens — that must WARN, not silently all-mask.
-
-    The missing-template warning does not cover this row (response_starts is non-empty), so
-    without the no-terminator warning the loss-0 row is invisible.
-    """
+    """The surviving span is a single -1 no-op and the missing-template warning does not cover the row, so without
+    this warning the loss-0 row is invisible."""
     tok = make_tokenizer()
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1657,8 +1583,7 @@ def test_last_only_unterminated_final_turn_warns_and_masks():
 
 
 def test_completion_only_unterminated_right_padded_row_never_trains_on_pad():
-    """A right-padded row whose assistant turn has NO recognized terminator must fall to the
-    warn-and-mask path — not close its span at the first trailing pad and train on a pad target."""
+    """The row falls to the warn-and-mask path and does not close its span at the first trailing pad."""
     tok = make_tokenizer()  # pad and eos distinct
     collator = DataCollatorForCompletionOnlyLM(response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok)
     short_row = [USER_A, RESP_1, RESP_2, ASST_A]  # template present, no EOS anywhere
@@ -1675,15 +1600,14 @@ def test_completion_only_unterminated_right_padded_row_never_trains_on_pad():
     pad_positions = batch["input_ids"][0] == PAD
     assert (short_labels[pad_positions] == IGNORE).all(), f"trained on pad: {short_labels.tolist()}"
     assert (short_labels == IGNORE).all(), f"unterminated turn must be fully masked: {short_labels.tolist()}"
-    # The template DID match, so the warning must blame the missing terminator — telling the user to
-    # fix a response key that is already correct sends them to change the one setting that is right.
+    # The template matched, so the warning blames the missing terminator; naming the response key sends the user to
+    # change the one setting that is right.
     messages = [str(w.message) for w in caught]
     assert any("matched but no completion span has a terminator" in m for m in messages), messages
     assert not any("Could not find response key" in m for m in messages), messages
 
 
 def test_find_terminator_positions():
-    """Returns every position whose token is in the terminator set (list or tensor input)."""
     seq = [5, 1, 6, 2, 7, 3, 8]
     assert find_terminator_positions(seq, frozenset({1, 2, 3})) == [1, 3, 5]
     assert find_terminator_positions(torch.tensor(seq), frozenset({2})) == [3]
@@ -1691,11 +1615,7 @@ def test_find_terminator_positions():
 
 
 def _glm_agent_trace():
-    """A GLM-style agent trace with NO <|endoftext|>: turn 1 ends at <|observation|> (tool call), turn 2
-    ends at <|user|> (final answer).
-
-    idx: 0      1      | 2      3      4     | 5         6      | 7      8      9      10     | 11
-    """
+    """A GLM-style agent trace with no <|endoftext|>: turn 1 ends at <|observation|>, turn 2 at <|user|>."""
     return [
         USER_A,
         USER_B,
@@ -1713,9 +1633,8 @@ def _glm_agent_trace():
 
 
 def test_completion_only_stops_at_config_eos_markers():
-    """End-to-end: with the config eos set, each assistant turn ends at its role marker (inclusive),
-    while user/observation content stays masked — even though tokenizer.eos_token_id is absent. A
-    single-eos search trains ZERO tokens on this sequence (whole instance masked; see the control below)."""
+    """Each turn ends at its role marker (inclusive) while user and observation content stays masked; a single-eos
+    search trains zero tokens here."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1734,8 +1653,7 @@ def test_completion_only_stops_at_config_eos_markers():
 
 
 def test_completion_only_single_eos_search_masks_everything():
-    """Negative control: searching for ONLY tokenizer.eos_token_id (absent here) finds no turn end,
-    so the whole instance is masked — the GLM trace genuinely needs the config eos set."""
+    """Only the config eos set finds the turn ends on a GLM trace."""
     tok = make_tokenizer(pad_token_id=99, eos_token_id=GLM_ENDOFTEXT)  # pad distinct and absent too
     collator = DataCollatorForCompletionOnlyLM(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1752,7 +1670,6 @@ def test_completion_only_single_eos_search_masks_everything():
 
 
 def test_packing_completion_stops_at_config_eos_markers():
-    """Packed path (DataCollatorForCompletionOnlyLMWithPacking) ends each turn at its role marker."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1781,7 +1698,6 @@ def test_packing_completion_stops_at_config_eos_markers():
 
 
 def test_flattening_completion_stops_at_config_eos_markers():
-    """Padding-free flattening path ends each turn at its role marker."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     collator = DataCollatorWithFlatteningAndCompletionMask(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
@@ -1797,13 +1713,12 @@ def test_flattening_completion_stops_at_config_eos_markers():
     print("  PASS: test_flattening_completion_stops_at_config_eos_markers")
 
 
-def test_build_completion_only_labels_stops_at_config_eos_markers():
-    """The shared label builder (preprocessing + self-distill + VLM) ends each turn at a role marker.
-    Note: it trains AFTER the marker (not the template tokens), so turn 1 = 4..5, turn 2 = 9..11."""
+def test_build_training_labels_stops_at_config_eos_markers():
+    """The shared label builder trains after the marker, so turn 1 = 4..5, turn 2 = 9..11."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     tok.encode.return_value = RESPONSE_TEMPLATE_IDS
     ids = torch.tensor([_glm_agent_trace()])
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         ids,
         tok,
         response_prompt_template="<|assistant|>",
@@ -1814,12 +1729,11 @@ def test_build_completion_only_labels_stops_at_config_eos_markers():
     assert {4, 5} <= unmasked, f"turn 1 content not trained: {sorted(unmasked)}"
     assert {9, 10, 11} <= unmasked, f"turn 2 content not trained: {sorted(unmasked)}"
     assert unmasked.isdisjoint({0, 1, 6}), f"non-assistant tokens leaked: {sorted(unmasked)}"
-    print("  PASS: test_build_completion_only_labels_stops_at_config_eos_markers")
+    print("  PASS: test_build_training_labels_stops_at_config_eos_markers")
 
 
 def test_flattening_completion_collator_refuses_a_missing_marker():
-    """Without a response marker the completion-mask collator would train on every token while its
-    name promises completion-only loss; construction must refuse instead."""
+    """Without a marker the collator would train on every token while its name promises completion-only loss."""
     with pytest.raises(ValueError, match="requires assistant_message_template"):
         DataCollatorWithFlatteningAndCompletionMask(response_prompt_template=None, tokenizer=make_tokenizer())
 

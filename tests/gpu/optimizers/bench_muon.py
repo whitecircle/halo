@@ -1,15 +1,5 @@
 #!/usr/bin/env python
-"""
-Benchmark: Muon (Newton-Schulz) vs AdamW vs AdamWBF16 vs FlashAdamW convergence and step time.
-
-Compares optimizers on the same model/data across two dimensions:
-1. Convergence: final loss and loss reduction after N steps
-2. Performance: optimizer step time and peak GPU memory
-
-Usage (single GPU, no torchrun needed):
-    python tests/gpu/optimizers/bench_muon.py
-    python tests/gpu/optimizers/bench_muon.py --hidden 1024 --layers 6 --steps 200
-"""
+"""Muon vs AdamW vs AdamWBF16 vs FlashAdamW: convergence, step time and peak GPU memory. Runs without torchrun."""
 
 import argparse
 import copy
@@ -19,16 +9,12 @@ import time
 import torch
 import torch.nn as nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
-
-# ─── Model ───────────────────────────────────────────────────────────────────
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 
 
 class TransformerFFN(nn.Module):
-    """Stacked FFN blocks resembling transformer MLP layers."""
-
     def __init__(self, hidden: int, intermediate: int, num_layers: int):
         super().__init__()
         self.layers = nn.ModuleList()
@@ -54,9 +40,6 @@ class TransformerFFN(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-
 def create_model(hidden, intermediate, num_layers, device="cuda"):
     torch.manual_seed(42)
     model = TransformerFFN(hidden, intermediate, num_layers)
@@ -64,45 +47,34 @@ def create_model(hidden, intermediate, num_layers, device="cuda"):
 
 
 def make_optimizers(model, lr):
-    """Return dict of {name: optimizer} for all competitors."""
     torch.manual_seed(42)
     optimizers = {}
 
-    # AdamW (fused)
     m = create_model_copy(model)
     optimizers["AdamW (fused)"] = (m, torch.optim.AdamW(m.parameters(), lr=lr, fused=True))
 
-    # AdamWBF16 (stochastic rounding)
     m = create_model_copy(model)
     optimizers["AdamWBF16 (SR)"] = (m, AdamWBF16(m.named_parameters(), lr=lr))
 
-    # Muon
     m = create_model_copy(model)
-    optimizers["Muon (GNS)"] = (m, create_muon_optimizer(m, lr=lr))
+    optimizers["Muon (GNS)"] = (m, build_muon_optimizer(m, lr=lr))
 
-    # Muon (standard NS)
     m = create_model_copy(model)
-    optimizers["Muon (std NS)"] = (m, create_muon_optimizer(m, lr=lr, ns_algorithm="standard_newton_schulz"))
+    optimizers["Muon (std NS)"] = (m, build_muon_optimizer(m, lr=lr, ns_algorithm="standard_newton_schulz"))
 
-    # FlashAdamW (quantized states + 24-bit master weights)
+    # Quantized states + 24-bit master weights.
     m = create_model_copy(model)
-    optimizers["FlashAdamW"] = (m, create_flash_adamw_optimizer(m, lr=lr))
+    optimizers["FlashAdamW"] = (m, build_flash_adamw_optimizer(m, lr=lr))
 
     return optimizers
 
 
 def create_model_copy(model):
-    """Deep copy model on same device with same init weights."""
     return copy.deepcopy(model)
 
 
-# ─── Convergence benchmark ──────────────────────────────────────────────────
-
-
 def bench_convergence(optimizers, hidden, batch, seq_len, num_steps):
-    """Run training for each optimizer and collect loss curves."""
     device = "cuda"
-    # Same data for all optimizers
     torch.manual_seed(123)
     x = torch.randn(batch, seq_len, hidden, device=device, dtype=torch.bfloat16)
     y = torch.randn(batch, seq_len, hidden, device=device, dtype=torch.bfloat16)
@@ -118,18 +90,13 @@ def bench_convergence(optimizers, hidden, batch, seq_len, num_steps):
             opt.step()
             losses.append(loss.item())
         results[name] = losses
-        # Cleanup grads
         for p in model.parameters():
             p.grad = None
 
     return results
 
 
-# ─── Step time benchmark ────────────────────────────────────────────────────
-
-
 def bench_step_time(optimizers, hidden, batch, seq_len, warmup=5, timed=20):
-    """Measure optimizer step time (forward+backward+step)."""
     device = "cuda"
 
     results = {}
@@ -138,7 +105,6 @@ def bench_step_time(optimizers, hidden, batch, seq_len, warmup=5, timed=20):
         x = torch.randn(batch, seq_len, hidden, device=device, dtype=torch.bfloat16)
         y = torch.randn(batch, seq_len, hidden, device=device, dtype=torch.bfloat16)
 
-        # Warmup
         for _ in range(warmup):
             opt.zero_grad()
             loss = nn.functional.mse_loss(model(x).float(), y.float())
@@ -146,7 +112,6 @@ def bench_step_time(optimizers, hidden, batch, seq_len, warmup=5, timed=20):
             opt.step()
         torch.cuda.synchronize()
 
-        # Timed: full step (fwd + bwd + optim)
         times_full = []
         times_optim = []
         for _ in range(timed):
@@ -172,7 +137,6 @@ def bench_step_time(optimizers, hidden, batch, seq_len, warmup=5, timed=20):
             "optim_ms": sorted(times_optim),
         }
 
-        # Cleanup
         for p in model.parameters():
             p.grad = None
         gc.collect()
@@ -181,11 +145,7 @@ def bench_step_time(optimizers, hidden, batch, seq_len, warmup=5, timed=20):
     return results
 
 
-# ─── Memory benchmark ───────────────────────────────────────────────────────
-
-
 def bench_memory(model_template, hidden, intermediate, num_layers, lr, batch, seq_len):
-    """Measure peak GPU memory for each optimizer."""
     results = {}
 
     for opt_name in ["AdamW (fused)", "AdamWBF16 (SR)", "Muon (GNS)", "FlashAdamW"]:
@@ -199,14 +159,14 @@ def bench_memory(model_template, hidden, intermediate, num_layers, lr, batch, se
         elif opt_name == "AdamWBF16 (SR)":
             opt = AdamWBF16(m.named_parameters(), lr=lr)
         elif opt_name == "FlashAdamW":
-            opt = create_flash_adamw_optimizer(m, lr=lr)
+            opt = build_flash_adamw_optimizer(m, lr=lr)
         else:
-            opt = create_muon_optimizer(m, lr=lr)
+            opt = build_muon_optimizer(m, lr=lr)
 
         x = torch.randn(batch, seq_len, hidden, device="cuda", dtype=torch.bfloat16)
         y = torch.randn_like(x)
 
-        # 3 steps to fully initialize states
+        # 3 steps to fully initialize states.
         for _ in range(3):
             opt.zero_grad()
             loss = nn.functional.mse_loss(m(x).float(), y.float())
@@ -223,11 +183,7 @@ def bench_memory(model_template, hidden, intermediate, num_layers, lr, batch, se
     return results
 
 
-# ─── Table printer ──────────────────────────────────────────────────────────
-
-
 def print_table(headers, rows, col_widths=None):
-    """Print a formatted ASCII table."""
     if col_widths is None:
         col_widths = [max(len(str(h)), max(len(str(r[i])) for r in rows)) + 2 for i, h in enumerate(headers)]
 
@@ -239,9 +195,6 @@ def print_table(headers, rows, col_widths=None):
     for row in rows:
         line = "".join(str(c).ljust(w) for c, w in zip(row, col_widths, strict=False))
         print(f"  {line}")
-
-
-# ─── Main ────────────────────────────────────────────────────────────────────
 
 
 def main():
@@ -268,7 +221,6 @@ def main():
     print(f"Data:       batch={args.batch}, seq={args.seq_len}, steps={args.steps}, lr={args.lr}")
     print()
 
-    # ── 1. Convergence ──────────────────────────────────────────────
     print("=" * 70)
     print("CONVERGENCE BENCHMARK")
     print("=" * 70)
@@ -301,13 +253,12 @@ def main():
         col_widths=[20, 12, 12, 12, 12, 12],
     )
 
-    # ── 2. Step time ────────────────────────────────────────────────
     print()
     print("=" * 70)
     print("STEP TIME BENCHMARK")
     print("=" * 70)
 
-    # Recreate optimizers (convergence run consumed them)
+    # The convergence run consumed them.
     del optimizers
     gc.collect()
     torch.cuda.empty_cache()
@@ -340,7 +291,6 @@ def main():
     )
     print("  (all times in ms)")
 
-    # ── 3. Memory ───────────────────────────────────────────────────
     print()
     print("=" * 70)
     print("PEAK MEMORY BENCHMARK")
@@ -368,23 +318,19 @@ def main():
         col_widths=[20, 12, 12],
     )
 
-    # ── 4. Summary ──────────────────────────────────────────────────
     print()
     print("=" * 70)
     print("SUMMARY")
     print("=" * 70)
 
-    # Find best convergence
     best_name = min(convergence, key=lambda n: convergence[n][-1])
     best_loss = convergence[best_name][-1]
     print(f"  Best final loss:   {best_name} ({best_loss:.4f})")
 
-    # Find fastest full step
     fastest_name = min(timing, key=lambda n: timing[n]["full_ms"][len(timing[n]["full_ms"]) // 2])
     fastest_ms = timing[fastest_name]["full_ms"][len(timing[fastest_name]["full_ms"]) // 2]
     print(f"  Fastest full step: {fastest_name} ({fastest_ms:.1f} ms)")
 
-    # Find lowest memory
     lowest_mem_name = min(memory, key=lambda n: memory[n])
     print(f"  Lowest memory:     {lowest_mem_name} ({memory[lowest_mem_name]:.0f} MB)")
 

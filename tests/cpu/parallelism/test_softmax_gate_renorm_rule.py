@@ -1,21 +1,13 @@
 #!/usr/bin/env python
-"""The Qwen-style EP gate weights take their top-k renorm rule from the family, never from a default.
-
-``_softmax_gate_weights_at`` (routing replay, balancing-bias reweighting) renormalizes the selected
-softmax weights or not. Qwen3's router carries the rule as a configurable, default-off
-``norm_topk_prob``; Qwen3.5's router has no such attribute and always renormalizes. A default for a
-missing attribute would turn an upstream rename on Qwen3 into silently renormalized weights, so the
-Qwen3 layer reads the attribute outright and a missing one raises.
-
-    python tests/cpu/parallelism/test_softmax_gate_renorm_rule.py
-"""
+"""The Qwen-style EP gate weights take their top-k renorm rule from the family.
+A default for a missing ``norm_topk_prob`` would turn an upstream rename into silently renormalized weights."""
 
 import pytest
 import torch
 from torch import nn
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 
 TOKENS, EXPERTS, TOP_K, HIDDEN = 6, 8, 2, 16
 

@@ -2,7 +2,7 @@
 
 Kahneman-Tversky Optimization trains on **unpaired** binary feedback: each row is one completion labeled desirable or not. Use it for thumbs-up/down labels rather than preference pairs; for chosen/rejected pairs use [DPO](dpo.md) or [SMPO](smpo.md), for several scored completions per prompt [Offline GRPO](../grpo/offline.md).
 
-Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware. TRL's fused KTO-Liger loss is disabled at construction (it is broken in TRL 1.6); Liger kernels still apply at the model level.
+Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (text or VLM). EP, TP, ETP and PP apply; CP does not — TRL's loss path is not CP-aware. TRL's `use_liger_kernel` is turned off at construction: it selects TRL's chunked log-prob path, which refuses the router aux loss. Liger kernels still apply at the model level.
 
 ## Dataset
 
@@ -30,16 +30,13 @@ gradient_checkpointing: true
 output_dir: checkpoints/kto-qwen3.5-9b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `beta` | `0.1` | Deviation allowed from the reference |
-| `desirable_weight` / `undesirable_weight` | `1.0` / `1.0` | Re-weight the two classes when the label counts are skewed |
-| `loss_type` | `kto` | Or `apo_zero_unpaired`, which carries no KL term |
-| `max_length` | `1024` | Truncates prompt + completion, keeping the start |
+`beta` bounds the deviation from the reference, `desirable_weight` / `undesirable_weight` re-weight the two classes when the label counts are skewed, `loss_type: apo_zero_unpaired` carries no KL term, and `max_length` truncates prompt + completion keeping the start. Types and defaults: [KTOConfig](../../reference/configuration-reference.md#ktoconfig--distributedktotrainer).
 
 The default `kto` loss builds each row's KL completion from its neighbors in a fixed-order batch, so TRL raises at `per_device_train_batch_size: 1` and at any `train_sampling_strategy` other than the default `sequential`. Only `apo_zero_unpaired` is exempt. KTO has no prompt cap, so an over-long prompt eats its own completion.
 
 The reference model follows DPO's rules — PEFT, precompute under EP/TP, or a frozen copy, which under EP/TP is a whole dense replica per rank (warned) ([DPO — Reference model](dpo.md#reference-model)) — and so does a precompute resume ([DPO — Resuming a precompute run](dpo.md#resuming-a-precompute-run)). The policy, reference and KL sequence log-probs the trainer computes are summed in fp32; reference columns a dataset supplies keep their own precision ([DPO — Log-prob precision](dpo.md#log-prob-precision)). Under the default `kto` loss the saved digest covers the KL completions, which are built per `per_device_train_batch_size`, so a resume that changes it raises when the policy was built from the checkpoint and no separate reference exists. Any other resume (an adapter or merge-on-save checkpoint, a frozen reference copy) sweeps instead.
+
+Under pipeline parallelism KTO runs only `loss_type: apo_zero_unpaired` (the default `kto` needs a world-global KL baseline no microbatch can compute), text-only, with `precompute_ref_log_probs: true` and a `ref_logps` column already in the train and every eval split; a live `ref_model` and `compute_metrics` are refused ([Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 ## Launch
 
@@ -48,11 +45,11 @@ torchrun --nproc_per_node=8 scripts/training/preference/kto.py \
     examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
 ```
 
-`halo launch kto <config> --nproc 8` builds the same line. That recipe is dense, so it runs plain FSDP2 data parallel; add `--expert_parallel_size=8` on an MoE checkpoint. Like the other padded-batch scripts, `kto.py` defaults `attn_implementation` to `sdpa` under `reset_sinks: true` ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
+`halo launch kto <config> --nproc 8` builds the same line. That recipe is dense, so it runs plain FSDP2 data parallel; add `--expert_parallel_size=8` on an MoE checkpoint. Like the other padded-batch scripts, `kto.py` gives an unset `attn_implementation` the padded-batch default under `reset_sinks: true`: the loader's own pick on Blackwell (SDPA for a remote-code checkpoint, FA2 for a softcapped policy), SDPA elsewhere ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
 
 ## Vision-language
 
-Add an `images`/`image` column — or name one with `images_field` — to train a VLM checkpoint on `{prompt, completion, label, images}` rows. Text-only data on a multimodal checkpoint stays on the text path.
+Add an `images`/`image` column — or name one with `images_field` — to train a VLM checkpoint on `{prompt, completion, label, images}` rows, except on a family declaring `refuses_trl_image_rows` (Nemotron-H), refused before the load. Text-only data on a multimodal checkpoint stays on the text path. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
 
 A dataset that embeds `{"type": "image"}` parts in its messages while shipping no image column is refused: TRL would template them as text, expanding each part into pixel-less placeholder tokens. Move the images into an `images` column, or drop the parts.
 
@@ -65,7 +62,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/kto.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu`, plus `tests/gpu/trainers/preference/test_kto.py` and `test_kto_fsdp_multi_gpu.py`.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu`, plus `tests/gpu/trainers/preference/test_kto.py`, `test_kto_fsdp_multi_gpu.py` and, for pipeline parallelism on precomputed reference log-probs, `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer kto` and `test_pp_trainer_checkpoints.py --trainer kto` (save, exact resume, export).
 
 ## What to watch
 

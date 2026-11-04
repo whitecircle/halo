@@ -2,7 +2,7 @@
 
 One figure per path, drawn on the same grid so the pair reads as a before/after: the standard
 path shards batches by **global rank** (one distinct batch per rank), the custom path by **DP
-rank** (the ranks of a TP/CP/ETP group read the same batch). The worked
+rank** (the ranks of a TP/CP/ETP group, and a pipeline chain, read the same batch). The worked
 shape is world 16 with `tp_size=2` → `data_parallel_size = 8`.
 """
 
@@ -12,8 +12,8 @@ W, H = 11.6, 5.7
 
 GATE_Y, GATE_H = 4.40, card_height(1)
 STAGE_Y, STAGE_H = 2.94, card_height(2)
-STAGE_W, STAGE_XS = 2.6, (0.3, 3.15, 6.0, 8.85)
 STRIP_X, STRIP_W = 0.3, 10.9
+STAGE_XS, STAGE_W = columns(STRIP_W + 2 * STRIP_X, 4, STRIP_X, 0.25)
 RANK_Y, BATCH_Y, ROW_H = 1.80, 1.18, 0.5
 RANKS, CELL_GAP = 16, 0.1
 # The strip is its own page: the cells span STRIP_W with no margin, offset by STRIP_X.
@@ -60,7 +60,7 @@ def panel(name, head, sub, gate_title, gate_note, stages, batches, strip_caption
         STRIP_W,
         GATE_H,
         gate_title,
-        [f"{GATE_FLAGS}   {gate_note}"],
+        [f"{GATE_FLAGS}: {gate_note}"],
         color=VIOLET,
         mono_lines=True,
     )
@@ -81,7 +81,7 @@ panel(
     "Standard dataloader path",
     "world 16 · DDP / FSDP / EP-only · dp = world = 16",
     "_needs_custom_dataloader() → False",
-    "— neither holds",
+    "neither holds",
     [
         ("Trainer (HF / TRL)", ["get_train_dataloader()", "accelerator.prepare(dl)"], SLATE),
         SAMPLER,
@@ -89,16 +89,16 @@ panel(
         ("Batch sharding", ["BatchSamplerShard", "idx % 16 == rank"], BLUE),
     ],
     standard_batches,
-    "What each rank reads — 16 distinct batches per step",
+    "What each rank reads: 16 distinct batches per step",
     "EP stays on this path: DeepEP returns every token to its origin rank, so EP never reduces data_parallel_size.",
 )
 
 panel(
     "dataloader_custom",
     "Custom dataloader path",
-    "tp 2 · dp = world / max(cp, tp, etp) = 16 / 2 = 8",
+    "tp 2 · dp = world / (pp × max(cp, tp, etp)) = 16 / 2 = 8",
     "_needs_custom_dataloader() → True",
-    "— either holds",
+    "either holds",
     [
         ("Trainer (toolkit)", ["get_train_dataloader()", "_prepare_dataloader(dl)"], SLATE),
         SAMPLER,
@@ -106,7 +106,7 @@ panel(
         ("Batch sharding", ["BatchSamplerShard", "idx % 8 == dp_rank"], BLUE),
     ],
     custom_batches,
-    "What each rank reads — 8 distinct batches, one per TP group",
-    "dp_rank = rank // max(tp, cp) (ETP partners share their dispatch rank);"
+    "What each rank reads: 8 distinct batches, one per TP group",
+    "dp_rank = stage-local rank // max(tp, cp); ETP partners share their dispatch rank;"
     " a pre-sharded dataset passes num_processes = 1.",
 )

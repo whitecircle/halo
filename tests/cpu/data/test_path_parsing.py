@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
-"""
-Tests for dataset path parsing and source detection.
-
-These tests verify the path parsing utilities that distinguish between
-S3 URIs, HuggingFace Hub IDs, and local paths.
-
-Usage:
-    python tests/cpu/data/test_path_parsing.py
-"""
-
 import pytest
 
-from src.data.sources.paths import (
+from halo.data.sources.paths import (
     hub_repo_id,
     parse_dataset_destination,
     parse_dataset_source,
@@ -21,7 +11,6 @@ from src.data.sources.paths import (
 
 
 def test_parse_s3_uri():
-    """Test S3 URI parsing."""
     print("Testing parse_s3_uri...")
 
     bucket, key = parse_s3_uri("s3://my-bucket/path/to/data")
@@ -54,7 +43,6 @@ def test_parse_s3_uri():
 
 
 def test_parse_dataset_source_s3():
-    """Test S3 source detection."""
     print("Testing parse_dataset_source (S3)...")
 
     source, bucket, key = parse_dataset_source("s3://my-bucket/path/to/data")
@@ -71,7 +59,6 @@ def test_parse_dataset_source_s3():
 
 
 def test_parse_dataset_source_hf_hub():
-    """Test HuggingFace Hub source detection."""
     print("Testing parse_dataset_source (HF Hub)...")
 
     source, bucket, key = parse_dataset_source("HuggingFaceH4/ultrachat_200k")
@@ -98,7 +85,6 @@ def test_parse_dataset_source_hf_hub():
 
 
 def test_parse_dataset_source_local():
-    """Test local path source detection."""
     print("Testing parse_dataset_source (local)...")
 
     source, bucket, key = parse_dataset_source("/path/to/dataset")
@@ -130,16 +116,15 @@ def test_parse_dataset_source_local():
 
 
 def test_parse_dataset_destination_bare_path_is_local():
-    """OUTPUT classification must never guess the Hub: a relative path that happens to look like
-    'org/name' (e.g. --output preprocessed/my_dataset) is a local directory, not an upload target.
-    The input-side parse_dataset_source keeps its Hub guess — reads are harmless, writes are not."""
+    """A relative path shaped like 'org/name' is a local directory, never an upload target; the input-side parser
+    keeps its Hub guess, since reads are harmless."""
     for path in ("preprocessed/my_dataset", "a/b", "dataset", "out/dir/deep"):
         dest, bucket, key = parse_dataset_destination(path)
         assert dest == "local", f"{path!r} classified {dest!r}; outputs must default to local"
         assert bucket is None
         assert key == path
 
-    # The same bare "a/b" IS hf_hub on the input side — the two classifiers intentionally differ.
+    # The same bare path is hf_hub on the input side; the two classifiers differ on purpose.
     assert parse_dataset_source("a/b")[0] == "hf_hub"
 
 
@@ -156,8 +141,8 @@ def test_parse_dataset_destination_explicit_schemes():
 
 
 def test_parse_hub_spec_config_then_split():
-    """``org/name[:config][@split]``: ``@`` selects the split and ``:`` the config, in that order —
-    a parser that split on ``:`` first would read ``name:cfg@train`` as config ``cfg@train``."""
+    """``@`` selects the split and ``:`` the config, in that order; splitting on ``:`` first reads
+    ``name:cfg@train`` as config ``cfg@train``."""
     assert parse_hub_spec("org/name") == ("org/name", None, None)
     assert parse_hub_spec("org/name@train") == ("org/name", None, "train")
     assert parse_hub_spec("org/name:cfg") == ("org/name", "cfg", None)

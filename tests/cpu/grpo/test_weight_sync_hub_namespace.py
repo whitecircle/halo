@@ -1,37 +1,29 @@
 #!/usr/bin/env python
-"""A hub-namespace family's weight sync must forward exactly what its hub checkpoint carries.
-
-Step-3.7's live module tree exists only behind transformers' from_pretrained-side conversion
-(``model.language_model.layers.*.mlp.experts.gate_up_proj`` fused; the vision tower's split,
-RoPE-permuted q/k/v), while vLLM 0.26.0 loads the HUB namespace (``model.layers.*.moe.gate_proj`` /
-``up_proj`` stacks, ``share_expert.*``, ``vision_model.transformer.resblocks.*.attn.in_proj_weight``)
-and silently drops every name it does not map. The sync therefore runs the same save-side revert the
-gathered EP save applies (``gathered_export_conversions``). The oracle is transformers' own
-``save_pretrained``: the forwarded keys must equal the on-disk keys — minus the router's frozen
-selection-bias buffer, which the parameter-only payload never carries — and every forwarded tensor
-must equal the on-disk one, so a rename that moved the wrong payload, a split on the wrong axis, or
-an un-permuted q/k/v fusion all fail here. Pinned on both sync paths: the wrapper-less tree (the
-registry resolves the family off ``config.model_type``) and an EP-wrapped tree (the expert gather).
-
-Run: ``python tests/cpu/grpo/test_weight_sync_hub_namespace.py`` (or ``pytest -m cpu``).
-"""
+"""A hub-namespace family's (Step-3.7) weight sync must forward exactly what its hub checkpoint carries, since vLLM
+silently drops every name it does not map. The oracle is transformers' own ``save_pretrained``."""
 
 from __future__ import annotations
+
+import json
 
 import pytest
 import torch
 import torch.nn as nn
+from accelerate import init_empty_weights
 from peft import LoraConfig, get_peft_model
 from transformers.core_model_loading import revert_weight_conversion
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.models.structure import persistent_buffers
-from src.trainers.grpo.rollout import weight_sync
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.models.param_roles import persistent_buffers
+from halo.runtime.consensus import DeferredRankFailure
+from halo.trainers.grpo.rollout import weight_push
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
-from tests.common.utils import safetensors_state_dict
+from tests.common.repo import REPO_ROOT
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _NUM_EXPERTS = TINY_STEP3P7_CONFIG["n_routed_experts"]
@@ -48,11 +40,8 @@ def _tiny_step3p7() -> Step3p7ForConditionalGeneration:
 
 
 def _ep_stub(block: nn.Module) -> EPStep3p7MoELayer:
-    """An instance of the real wrapper class (its contract flags included) over a stock block's
-    tensors, built without the EP process groups: experts held directly on the wrapper as the real
-    one holds them, router and shared expert adopted by reference, and a gather that returns the
-    fused F.linear layout the base gather produces. An INSTANCE, not a subclass — a subclass would
-    join the EP family registry (a subclass walk) for every test collected in the same session."""
+    """An instance of the real wrapper class over a stock block's tensors, built without the EP process groups. An
+    instance, since a subclass would join the EP family registry for every test in the session."""
     layer = object.__new__(EPStep3p7MoELayer)
     nn.Module.__init__(layer)
     layer._expert_lora_attrs = frozenset()
@@ -88,7 +77,7 @@ class _RecordingSender:
         assert name not in self.sent, f"{name} forwarded twice"
         self.sent[name] = weights
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 
@@ -99,7 +88,7 @@ def _sync(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _unsynced_buffer_keys(model: Step3p7ForConditionalGeneration) -> set[str]:
-    """Hub keys of the persistent buffers — the only on-disk tensors a parameter payload omits."""
+    """Hub keys of the persistent buffers, the only on-disk tensors a parameter payload omits."""
     return set(revert_weight_conversion(model, dict(persistent_buffers(model))))
 
 
@@ -115,14 +104,13 @@ def _assert_sync_equals_checkpoint(sent: dict[str, torch.Tensor], on_disk: dict[
 
 @pytest.fixture
 def on_disk(tmp_path):
-    """``save_pretrained`` of the seed-0 tiny model — the hub layout, from transformers itself."""
+    """``save_pretrained`` of the seed-0 tiny model: the hub layout, from transformers itself."""
     _tiny_step3p7().save_pretrained(tmp_path)
     return safetensors_state_dict(tmp_path)
 
 
 def test_wrapperless_sync_forwards_the_hub_checkpoint(on_disk):
-    """``use_grouped_gemm: false`` at ``ep_size: 1`` leaves the stock tree; the family still resolves
-    off the registry and the fused stock experts go through the dense path's held split."""
+    """``use_grouped_gemm: false`` at ``ep_size: 1`` leaves the stock tree; the family resolves off the registry."""
     model = _tiny_step3p7()
     _assert_sync_equals_checkpoint(_sync(model), on_disk, model)
 
@@ -134,32 +122,68 @@ def test_ep_wrapped_sync_forwards_the_hub_checkpoint(on_disk):
 
 
 def test_peft_sync_forwards_base_names_in_the_hub_namespace(on_disk):
-    """PEFT names are normalized BEFORE the revert (its patterns anchor on the base tree); the
-    zero-initialized adapter merges to the base weight, so the merged q_proj equals the checkpoint."""
+    """PEFT names are normalized before the revert, whose patterns anchor on the base tree; the zero-initialized
+    adapter merges to the base weight, so the merged q_proj equals the checkpoint."""
     model = get_peft_model(_ep_wrapped(_tiny_step3p7()), LoraConfig(r=2, target_modules=["q_proj"]))
     sent = _sync(model)
     assert not any("lora" in key for key in sent)
     _assert_sync_equals_checkpoint(sent, on_disk, model.get_base_model())
 
 
-def test_the_held_converter_tensors_are_bounded_on_the_forwarding_rank(monkeypatch):
-    """A tensor a many-to-one reverse converter claims is HELD until its sources are complete — on
-    the forwarding rank's GPU, beside the gather that produced it.
+def test_the_dense_tensors_a_converter_holds_are_bounded_on_the_forwarding_rank(monkeypatch):
+    """A dense tensor a many-to-one reverse converter claims is held until its sources are complete, on the forwarding
+    rank's GPU, as a copy nothing else keeps. A converter claiming a per-decoder-layer tensor would hold a whole stack
+    there, unseen until the host OOMs."""
+    monkeypatch.setattr(weight_push, "WEIGHT_SYNC_CHUNK_BYTES", 512)
 
-    Bounded and refused by name: the shipped claims are megabytes, but a family whose converter
-    claims a per-decoder-layer tensor would hold the whole stack on that one rank, which is the
-    1x-model rank-local allocation the streamed sync exists to avoid. Silently, since the held set
-    is invisible until the host OOMs.
-    """
-    monkeypatch.setattr(weight_sync, "_HELD_CONVERTER_BUDGET_BYTES", 512)
-
-    with pytest.raises(RuntimeError, match="reverse WeightConverter"):
+    with pytest.raises(RuntimeError, match="reverse WeightConverter") as refused:
         _sync(_ep_wrapped(_tiny_step3p7()))
+    assert "vision" in str(refused.value), "the bound fired on something other than the vision q/k/v it guards"
+
+
+def test_the_expert_stacks_stay_outside_the_held_bound(monkeypatch):
+    """The gather already holds them and each layer flushes, so a bound at any size must reach the expert stacks whole.
+    Only the vision q/k/v that follow may raise, which shows the bound is still armed."""
+    monkeypatch.setattr(weight_push, "WEIGHT_SYNC_CHUNK_BYTES", 1)
+    sender = _RecordingSender()
+    with pytest.raises(RuntimeError, match="vision"):
+        gather_and_send_weights(_ep_wrapped(_tiny_step3p7()), sender)
+    for i in _SPARSE_LAYERS:
+        for proj in ("gate_proj", "up_proj", "down_proj"):
+            assert f"model.layers.{i}.moe.{proj}.weight" in sender.sent
+
+
+def test_the_release_shape_goes_through_the_expert_path():
+    """288 experts × 1280 × 4096 is a 5.6 GiB fused bank per layer: the first push of the real checkpoint raised on the
+    first expert layer on every rank, past the 198B load. Meta tensors of the real shapes, the real forwarder."""
+    raw = json.loads((REPO_ROOT / "docker/vllm/parity/fixtures/step3p7/config.json").read_text())
+    config = Step3p7Config(**{k: v for k, v in raw.items() if k not in ("architectures", "auto_map", "model_type")})
+    with init_empty_weights():
+        model = Step3p7ForConditionalGeneration(config).to(torch.bfloat16)
+    text = config.text_config
+    sparse = [i for i, kind in enumerate(text.mlp_layer_types) if kind == "sparse"]
+    for i in sparse:
+        layer = model.model.language_model.layers[i]
+        layer.mlp = _ep_stub(layer.mlp)
+    ep_layers = dict(named_ep_layers(model))
+    guard = DeferredRankFailure("release-shape push")
+    sender = _RecordingSender()
+    forwarder = weight_push._HubForwarder(sender, model, ep_layers, None, guard)
+    weight_push._send_ep_expert_weights(ep_layers, forwarder, guard)
+
+    assert guard.reason is None, guard.reason
+    assert next(iter(ep_layers.values())).gate_up_proj.nbytes > weight_push.WEIGHT_SYNC_CHUNK_BYTES
+    for i in sparse:
+        for proj, shape in (
+            ("gate_proj", (text.moe_num_experts, text.moe_intermediate_size, text.hidden_size)),
+            ("up_proj", (text.moe_num_experts, text.moe_intermediate_size, text.hidden_size)),
+            ("down_proj", (text.moe_num_experts, text.hidden_size, text.moe_intermediate_size)),
+        ):
+            assert sender.sent[f"model.layers.{i}.moe.{proj}.weight"].shape == shape
 
 
 def test_hub_layouts_not_module_layouts():
-    """The load-bearing conversions, named: the split expert stacks, the shared expert's hub spelling,
-    the fused vision q/k/v, and no module-tree spelling anywhere in the payload."""
+    """The split expert stacks, the shared expert's hub spelling, the fused vision q/k/v, no module-tree spelling."""
     sent = _sync(_ep_wrapped(_tiny_step3p7()))
     for i in _SPARSE_LAYERS:
         for proj in ("gate_proj", "up_proj"):

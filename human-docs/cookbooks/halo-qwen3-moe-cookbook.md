@@ -6,12 +6,10 @@ the reference MoE family.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM, SGLang |
+Modes: the Qwen3 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
-- **Checkpoint:** `Qwen/Qwen3-30B-A3B-Instruct-2507`, pinned below. The larger
-  `Qwen/Qwen3-235B-A22B-Instruct-2507` trains at `--expert_parallel_size=8`.
+- **Checkpoint:** `Qwen/Qwen3-30B-A3B-Instruct-2507`, pinned below.
 - **GPUs:** four at EP4, 32 experts per GPU.
 
 ## Recipes
@@ -43,15 +41,12 @@ max_length: 8192
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
 num_train_epochs: 1.0
 
-save_strategy: steps
 save_steps: 1000
 save_total_limit: 1
 save_only_model: true
@@ -86,8 +81,8 @@ halo launch sft qwen3-moe-sft.yaml -n 4 \
   --output_dir=/data/checkpoints/qwen3-30b-a3b-lora
 ```
 
-Add `gate_proj,up_proj,down_proj` to adapt the experts as well. Under EP they train as grouped expert
-adapters.
+To adapt the experts as well, add `gate_proj,up_proj,down_proj` and `--merge_expert_lora_on_save=true`.
+Under EP they train as grouped expert adapters, which no tool merges afterwards.
 
 ### GRPO
 
@@ -106,7 +101,7 @@ launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml qwen3-moe-grpo.yaml
-CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2 \
+CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental qwen3-moe-grpo.yaml -n 2 \
   --model_name_or_path=/data/checkpoints/qwen3-30b-a3b-sft \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/qwen3-30b-a3b-grpo
@@ -114,7 +109,7 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo qwen3-moe-grpo.yaml -n 2
 
 Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. On SGLang, add
 `--rollout_backend=sglang --rollout_server_url=http://localhost:30000` and start the server with
-`SGLANG_ENABLE_R3=1`.
+`SGLANG_ENABLE_R3=1 SGLANG_TOOL_PARSER=qwen25`.
 
 ## Settings that matter
 
@@ -123,18 +118,25 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 - **Router balancing.** `aux_loss` uses the checkpoint's `router_aux_loss_coef` (0.001). The router has no
   bias slot, so `bias_update` raises. `bias_update_transient` balances training only, and exported
   checkpoints serve without the bias.
-- **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser.
+- **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser. On SGLang, set
+  `SGLANG_TOOL_PARSER=qwen25`: the default `auto` cannot read the 2507 chat template and turns the parser off
+  with one log line, which the trainer refuses at startup on a tool-using environment
+  ([Tool parsers on SGLang](../../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
 
 ## Limits
 
-Qwen3 MoE has no family-specific limits. The general ones apply: LoRA is refused under TP and EP+TP,
-and expert adapters are refused once `expert_tensor_parallel_size > 1`.
+- Pipeline parallelism passes tiny-model GPU tests and a 20-step Qwen3-30B-A3B run at `pp2` × `ep4`, and
+  needs `moe_balancing: none`, since the stage split drops the aux loss and the router has no bias slot.
+- The general limits apply: LoRA is refused under TP and EP+TP, and expert adapters are refused once
+  `expert_tensor_parallel_size > 1`.
 
 ## Export and serve
 
 The gathered save writes the hub's per-expert layout, which transformers, vLLM and SGLang read
 directly. Smoke-test it with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)).
-Serve it from the [host](README.md#serve-from-the-host) with SGLang on port 30000:
+Both pinned engines have served the hub checkpoint and taken its weight sync, but neither has served a
+trained Qwen3-30B-A3B export, so check the first one you serve. Serve it from the
+[host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \
@@ -143,6 +145,6 @@ SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \
 
 ## Reference
 
-- [Qwen3 model notes](../../agent-docs/models/qwen3.md) ↗: the EP, CP and TP wrappers, balancing
+- [Qwen3 model notes](../../agent-docs/models/qwen3.md) ↗: the EP layer, CP and TP, balancing
 - [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
 - [Model card](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507)

@@ -18,13 +18,12 @@ import yaml
 from huggingface_hub import snapshot_download
 
 from tests.common import models
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 ALLOW_PATTERNS = ["*.json", "*.jinja", "*.txt", "*.model", "*.py", "*.tiktoken"]
-# The Hub refuses these to an anonymous client, so the seed leaves them out and their tests skip. A
-# repo that stops being gated leaves this set, or its tests go on skipping where they could run.
+# The Hub refuses these to an anonymous client, so the seed leaves them out and their tests skip.
 GATED_REPOS = frozenset({models.GEMMA3_4B_IT})
-# ``namespace/name``; an absolute path or a deeper directory tree never matches.
+# ``namespace/name``; an absolute path or a deeper tree never matches.
 _HUB_ID = re.compile(r"[A-Za-z0-9][\w.-]*/[\w.-]+")
 
 
@@ -38,11 +37,8 @@ def _example_configs() -> tuple[dict, ...]:
 
 @functools.cache
 def local_output_roots() -> frozenset[str]:
-    """The top-level directories the example runs write into (``output_dir``).
-
-    A later stage trains the checkpoint an earlier one wrote, so ``checkpoints/<run>`` is a local
-    path with the shape of a Hub id and must not be fetched from the Hub.
-    """
+    """The top-level dirs example runs write into; ``checkpoints/<run>`` is a local path shaped like a Hub id and must
+    not be fetched."""
     return frozenset(
         Path(config["output_dir"]).parts[0]
         for config in _example_configs()
@@ -51,7 +47,6 @@ def local_output_roots() -> frozenset[str]:
 
 
 def is_hub_repo(reference: str) -> bool:
-    """Whether ``reference`` names a Hub repo rather than a local checkpoint."""
     return (
         bool(_HUB_ID.fullmatch(reference))
         and reference.split("/", 1)[0] not in local_output_roots()
@@ -60,13 +55,11 @@ def is_hub_repo(reference: str) -> bool:
 
 
 def example_repos() -> set[str]:
-    """The Hub ids the shipped example configs train."""
     references = (config.get("model_name_or_path") for config in _example_configs())
     return {ref for ref in references if isinstance(ref, str) and is_hub_repo(ref)}
 
 
 def roster_repos() -> set[str]:
-    """The Hub ids :mod:`tests.common.models` names."""
     return {
         value
         for name, value in vars(models).items()
@@ -74,8 +67,8 @@ def roster_repos() -> set[str]:
     }
 
 
-def seed() -> list[tuple[str, str | None]]:
-    """Every ``(repo, revision)`` to fetch; ``None`` is the repo's main."""
+def seed_repos() -> list[tuple[str, str | None]]:
+    """Every ``(repo, revision)`` to fetch; None is the repo's main."""
     latest = sorted((example_repos() | roster_repos()) - GATED_REPOS)
     return [(repo, None) for repo in latest] + sorted(models.PINNED_REVISIONS.items())
 
@@ -83,7 +76,7 @@ def seed() -> list[tuple[str, str | None]]:
 def download() -> None:
     """Fetch the whole seed, then exit naming every repo that could not be fetched."""
     failures = []
-    for repo, revision in seed():
+    for repo, revision in seed_repos():
         try:
             snapshot_download(repo, revision=revision, allow_patterns=ALLOW_PATTERNS)
         except Exception as e:
@@ -96,7 +89,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     parser.add_argument("--list", action="store_true", help="print the seed instead of downloading it")
     if parser.parse_args().list:
-        for repo, revision in seed():
+        for repo, revision in seed_repos():
             print(repo if revision is None else f"{repo}@{revision}")
     else:
         download()

@@ -1,11 +1,6 @@
-"""CPU tests for stale cache publish-temp cleanup (crashed-writer orphans).
-
-The S3 dataset cache and the sharded-dataset shard cache publish downloads via a unique
-``<cache_path>.tmp-<uuid>`` dir + atomic rename. A writer that dies between ``save_to_disk`` and the
-rename leaks its temp dir forever. ``_cleanup_stale_publish_tmp_dirs`` reclaims those at publish time:
-only siblings matching the exact temp pattern AND older than the age threshold are removed — a fresh
-temp dir may belong to a live writer and must be kept.
-"""
+"""``_cleanup_stale_publish_tmp_dirs`` reclaims a crashed writer's ``<cache_path>.tmp-<uuid>`` dir at publish time:
+only siblings matching the exact pattern and older than the threshold, since a fresh one may belong to a live
+writer."""
 
 import hashlib
 import os
@@ -16,10 +11,11 @@ from unittest.mock import MagicMock, patch
 import pytest
 from datasets import Dataset
 
-from src.data.shard_index import ShardInfo
-from src.data.sources.dataset_cache import _cleanup_stale_publish_tmp_dirs, _write_download_marker
-from src.data.sources.s3_client import S3Client
-from src.data.sources.sharded_dataset import ShardedDatasetLoader
+from halo.data.preprocessed.shard_index import ShardInfo
+from halo.data.sources import s3_dataset_store
+from halo.data.sources.dataset_cache import _cleanup_stale_publish_tmp_dirs, _write_download_marker
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 _DAY = 24 * 60 * 60
 
@@ -48,8 +44,7 @@ def test_stale_temp_dir_removed_fresh_kept(tmp_path):
 
 
 def test_non_matching_names_kept(tmp_path):
-    """Only the exact ``<basename>.tmp-<32 hex>`` pattern is eligible — never the published cache,
-    other bases, or malformed temp names."""
+    """Only ``<basename>.tmp-<32 hex>`` is eligible, never the published cache, other bases or malformed names."""
     cache_path = os.path.join(tmp_path, "dataset")
     published = _make_tmp_dir(cache_path, age_seconds=2 * _DAY, name=cache_path)
     other_base = _make_tmp_dir(cache_path, age_seconds=2 * _DAY, name=f"{cache_path}_v2.tmp-{uuid.uuid4().hex}")
@@ -64,7 +59,6 @@ def test_non_matching_names_kept(tmp_path):
 
 
 def test_stale_matching_file_kept(tmp_path):
-    """The pattern targets directories; a stray matching FILE is left alone."""
     cache_path = os.path.join(tmp_path, "dataset")
     file_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
     with open(file_path, "w") as f:
@@ -90,11 +84,8 @@ def test_custom_age_threshold(tmp_path):
     assert not os.path.exists(temp)
 
 
-# Both cache loaders reclaim orphans while holding their publish lock.
-
-
 def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
-    """S3Client.load_dataset removes a crashed writer's stale temp sibling even on a cache hit."""
+    """``s3_dataset_store.load_s3_dataset`` removes a crashed writer's stale temp sibling even on a cache hit."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     client.exists = MagicMock(return_value=True)
@@ -108,17 +99,16 @@ def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
     stale = _make_tmp_dir(cache_path, age_seconds=2 * _DAY)
     fresh = _make_tmp_dir(cache_path, age_seconds=60)
 
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch("src.data.sources.s3_client.load_from_disk", return_value=ds):
-            client.load_dataset("my/dataset")
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
+        with patch("halo.data.sources.s3_dataset_store.load_from_disk", return_value=ds):
+            s3_dataset_store.load_s3_dataset(client, "my/dataset")
 
     assert not os.path.exists(stale)
     assert os.path.exists(fresh)
 
 
 def test_sharded_shard_load_reclaims_stale_temp(tmp_path, monkeypatch):
-    """ShardedDatasetLoader._load_shard_from_s3 removes a crashed writer's stale temp sibling."""
-    loader = ShardedDatasetLoader("s3://test-bucket/prepped", global_rank=0, world_size=1)
+    loader = ShardedDatasetLoader("s3://test-bucket/prepped", dp_rank=0, dp_size=1)
     monkeypatch.setattr(ShardedDatasetLoader, "_shard_fingerprint", lambda self, uri: None)
 
     shard = ShardInfo(id=0, path="train/shard_00000", num_examples=1)
@@ -131,12 +121,12 @@ def test_sharded_shard_load_reclaims_stale_temp(tmp_path, monkeypatch):
     stale = _make_tmp_dir(cache_path, age_seconds=2 * _DAY)
     fresh = _make_tmp_dir(cache_path, age_seconds=60)
 
-    monkeypatch.setattr("src.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path))
-    with patch("src.data.sources.sharded_dataset.load_from_disk", return_value=ds) as mock_load:
+    monkeypatch.setattr("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(tmp_path))
+    with patch("halo.data.sources.sharded_dataset.load_from_disk", return_value=ds) as mock_load:
         loaded = loader._load_shard_from_s3(shard)
 
     assert len(loaded) == 1
-    assert mock_load.call_args[0][0] == cache_path  # served from the local cache
+    assert mock_load.call_args[0][0] == cache_path
     assert not os.path.exists(stale)
     assert os.path.exists(fresh)
 

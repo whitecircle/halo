@@ -1,22 +1,6 @@
-"""Collision-free port allocation for tests that bind a listener.
-
-The GPU launcher (``tests/gpu/conftest.py``) passes :func:`free_port` to ``torchrun`` as
-``--master_port``; the CPU tests that spawn gloo ranks or start a server take their port from it the
-same way. A hardcoded port races every other launch on the host into ``[Errno 98] Address already in
-use``.
-
-A port is probed free, released, then bound again by its consumer, so something else can take it in
-between. Two properties close that window:
-
-* The pool lies below the kernel's ephemeral range. The kernel never picks a pool port for a
-  ``bind(0)`` or for the local end of an outbound connection (a gloo pair, a TCPStore client, an
-  HTTP request), so only an explicit bind can take one.
-* Each pytest-xdist worker allocates from its own slice of the pool, so concurrent workers never hand
-  out the same port. A worker xdist restarts after a crash shares a live worker's slice.
-
-The scan starts at a random offset within the slice, so two sessions sharing one network namespace
-(the GPU tiers run on the host network, each as PID 1 of its container) rarely draw the same port.
-"""
+"""Collision-free port allocation for tests that bind a listener; a hardcoded port races every other launch on the
+host. The pool lies below the kernel's ephemeral range, so only an explicit bind can take a port. Each xdist worker has
+its own slice, and the scan starts at a random offset, so sessions sharing a network namespace rarely collide."""
 
 import os
 import secrets
@@ -27,12 +11,11 @@ from pathlib import Path
 POOL_FLOOR = 20000
 _EPHEMERAL_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 
-# Ports already handed out in this process; never re-issued within a session.
+# Never re-issued within a session.
 _ISSUED: set[int] = set()
 
 
 def ephemeral_floor() -> int:
-    """The lowest port the kernel assigns on its own."""
     return int(_EPHEMERAL_RANGE.read_text().split()[0])
 
 

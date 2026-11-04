@@ -1,26 +1,18 @@
 #!/usr/bin/env python
-"""Test: DistributedDPOTrainer on a VLM (Qwen3-VL-2B) — single-GPU vision-DPO smoke.
-
-Under TRL 1.6, passing a processor as processing_class flips TRL into vision mode (_is_vlm) and an
-images-bearing preference dataset auto-selects TRL's DataCollatorForVisionPreference, threading
-pixel_values to the model. Asserts the trainer enters VLM mode and training completes every step
-with a finite loss. It does not compare the loss to a reference.
-
-Run:
-    torchrun --nproc_per_node=1 tests/gpu/trainers/preference/test_dpo_vlm.py
-"""
+"""DistributedDPOTrainer on Qwen3-VL-2B, a single-GPU vision smoke through TRL 1.14's ``_is_vlm`` path. Compares no
+loss against a reference."""
 
 import torch
 from peft import LoraConfig
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import DPOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16
@@ -61,10 +53,9 @@ def run(ctx) -> dict:
         max_length=1024,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
-    # PEFT reference so no second full model copy is needed for the smoke.
+    # PEFT reference, so the smoke needs no second full model copy.
     trainer = DistributedDPOTrainer(
         model,
         args=config,

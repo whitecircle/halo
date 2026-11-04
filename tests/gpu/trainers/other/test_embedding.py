@@ -1,19 +1,8 @@
 #!/usr/bin/env python
-"""
-Test suite for EmbeddingTrainer.
+"""EmbeddingTrainer on MNRL and CoSENT losses, LoRA, and save round trips, on MiniLM for speed.
 
-Tests multiple loss types (MNRL, CoSENT) as well as capability checks.
-Uses sentence-transformers/paraphrase-MiniLM-L3-v2 for speed; production
-workloads use Qwen/Qwen3-Embedding-0.6B.
-
-Every leg runs collectives (``dist.barrier``, ``gather_saveable_tensors``, ``trainer.train``), so a
-failure must end the process rather than fall through to the next leg: a rank that swallowed its own
-exception would enter the NEXT leg's collective while its peer is still in the previous one and hang
-until the NCCL timeout. :func:`gpu_test_main` owns that — a raise is a reported failure and an exit.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_embedding.py
+Every leg runs collectives, so a failure must end the process: a rank that swallowed its exception would enter the next
+leg's collective while its peer is in the previous one and hang until the NCCL timeout.
 """
 
 import os
@@ -25,51 +14,45 @@ from peft import LoraConfig, TaskType, inject_adapter_in_model
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
-from src.checkpoint.format import save_dtype_caster
-from src.configs.embedding_config import EmbeddingConfig
-from src.distributed.checkpoint.write import gather_saveable_tensors
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.embedding.trainer import EmbeddingTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.models import PARAPHRASE_MINILM
-from tests.common.peft_helpers import (
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors
+from halo.checkpoint.writing import save_dtype_caster
+from halo.configs.embedding import EmbeddingConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.embedding.trainer import EmbeddingTrainer
+from tests.common.adapters import (
+    check_adapters_moved,
+    check_only_adapters_trainable,
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.models import PARAPHRASE_MINILM
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = PARAPHRASE_MINILM
 NUM_TRAIN_STEPS = 10
 BATCH_SIZE = 4
-# deliberately not ST's own default (20.0) — only a differing value can tell a wired scale from an unwired one
+# Differs from ST's default (20.0), so a wired scale can be told from an unwired one.
 LOSS_SCALE = 30.0
-# finite losses alone pass even when the optimizer never reaches the encoder; require real movement
+# Finite losses alone pass even when the optimizer never reaches the encoder.
 MIN_LOSS_DROP = 0.25
 
-LORA_TARGET_MODULES = ["query", "value"]  # MiniLM is BERT-arch (query/key/value projections)
+LORA_TARGET_MODULES = ["query", "value"]  # MiniLM is BERT-arch.
 
 
 def create_pairs_dataset(num_samples: int = 64) -> Dataset:
-    """Create synthetic positive-pairs dataset for MNRL loss.
-
-    Each sample contains an ``anchor`` question and a ``positive`` answer. Rows differ ONLY by the
-    country index and share every other token, so the in-batch negatives are genuinely confusable and
-    the MNRL loss stays O(1) instead of collapsing to ~0, leaving it room to drop.
-    """
+    """Rows differ only by the country index, so in-batch negatives are confusable and MNRL stays O(1), with room to
+    drop."""
     anchors = [f"What is the capital of country {i}?" for i in range(num_samples)]
     positives = [f"It is a large city located in country {i}." for i in range(num_samples)]
     return Dataset.from_dict({"anchor": anchors, "positive": positives})
 
 
 def create_scored_pairs_dataset(num_samples: int = 64) -> Dataset:
-    """Create synthetic scored-pairs dataset for CoSENT loss.
-
-    Even-indexed samples are the same fact restated (score=1.0); odd-indexed samples are the same
-    sentence about a DIFFERENT index (score=0.0). Both levels share their wording, so the cosine
-    similarities are not saturated and the CoSENT ranking hinge stays O(1), leaving it room to drop.
-    """
+    """Both score levels share their wording, so cosines don't saturate and the CoSENT hinge stays O(1), with room to
+    drop."""
     sentence1 = [f"Country {i} has a large capital city." for i in range(num_samples)]
     sentence2 = [f"The capital city of country {i if i % 2 == 0 else i + 1} is large." for i in range(num_samples)]
     scores = [1.0 if i % 2 == 0 else 0.0 for i in range(num_samples)]
@@ -77,7 +60,6 @@ def create_scored_pairs_dataset(num_samples: int = 64) -> Dataset:
 
 
 def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
-    """The common EmbeddingConfig; ``fsdp=""`` because the mixin owns FSDP wrapping."""
     kwargs = {
         "output_dir": output_dir,
         "max_steps": NUM_TRAIN_STEPS,
@@ -94,17 +76,13 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
         "loss_type": "mnrl",
         "max_length": 128,
         "dataloader_drop_last": True,
-        "fsdp": "",
         **overrides,
     }
     return EmbeddingConfig(**kwargs)
 
 
 def lora_model() -> SentenceTransformer:
-    """A SentenceTransformer with LoRA added in place through ``inject_adapter_in_model``, the call the
-    embedding script makes (not ``ST.add_adapter``, whose transformers adapter API needs peft>=0.19.1);
-    only the adapters stay trainable.
-    """
+    """LoRA added through ``inject_adapter_in_model``, the script's call: ``ST.add_adapter`` needs peft>=0.19.1."""
     model = SentenceTransformer(MODEL_NAME)
     inject_adapter_in_model(
         LoraConfig(r=8, lora_alpha=16, target_modules=LORA_TARGET_MODULES, task_type=TaskType.FEATURE_EXTRACTION),
@@ -115,24 +93,21 @@ def lora_model() -> SentenceTransformer:
     return model
 
 
+def _gathered(model) -> dict[str, torch.Tensor]:
+    """COLLECTIVE: every tensor a gathered save writes, full and on host, before the save's casts."""
+    return {key: tensor for chunk in chunked_saveable_tensors(model, retain=True) for key, tensor in chunk.items()}
+
+
 def check_capability_flags() -> bool:
-    """Verify parallelism capability flags on EmbeddingTrainer."""
     log("Check: capability flags (CP unsupported)")
 
-    assert hasattr(EmbeddingTrainer, "_supports_cp"), "Missing _supports_cp"
-    assert EmbeddingTrainer._supports_cp is False, "_supports_cp should be False"
+    assert EmbeddingTrainer.SUPPORTS_CP is False, "SUPPORTS_CP should be False"
     return True
 
 
 def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Dataset) -> bool:
-    """Train one loss type: halo's configured ``loss_scale`` must reach the loss, and the loss must
-    actually come down.
-
-    The loss arithmetic itself is sentence-transformers'; what halo owns is ``create_loss`` — the
-    registry lookup and the ``scale`` forwarding — so that is pinned directly against a value chosen
-    to differ from the library default. A single ``isfinite`` assertion would pass on an unwired
-    scale and on a run whose loss never moved.
-    """
+    """Halo owns ``build_embedding_loss``, so the configured ``loss_scale`` must reach the loss, and the loss must come
+    down."""
     log(f"Check: training with {loss_type}")
 
     trainer = EmbeddingTrainer(
@@ -151,7 +126,7 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
 
     assert not trainer.parallelism_config.has_custom_parallelism, "this leg runs plain data parallelism"
 
-    # halo's create_loss is what forwards config.loss_scale; an unwired scale silently uses 20.0.
+    # An unwired scale silently uses 20.0.
     assert trainer.loss.scale == LOSS_SCALE, (
         f"configured loss_scale {LOSS_SCALE} did not reach the loss object (got {trainer.loss.scale})"
     )
@@ -172,15 +147,11 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
 
 
 def check_training_lora(ctx) -> bool:
-    """Train a SentenceTransformer with LoRA adapters injected in place.
-
-    Validates the embedding PEFT wiring: inject + freeze leaves only adapters trainable, and
-    they move under MNRL training. (Embedding LoRA is plain LoRA — no 4-bit QLoRA on the ST loader.)
-    """
+    """Inject + freeze leaves only adapters trainable, and they move under MNRL. Embedding LoRA has no 4-bit QLoRA."""
     log("Check: training with LoRA adapters")
 
     model = lora_model()
-    ok, detail = assert_only_adapters_trainable(model)
+    ok, detail = check_only_adapters_trainable(model)
     log(f"  [trainable] {detail}")
     if not ok:
         return False
@@ -197,21 +168,15 @@ def check_training_lora(ctx) -> bool:
     assert torch.isfinite(torch.tensor(result.training_loss)), f"non-finite loss {result.training_loss}"
 
     after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
-    ok, detail = assert_adapters_moved(before, after)
+    ok, detail = check_adapters_moved(before, after)
     log(f"  [moved] {detail}")
     cleanup_memory()
     return ok
 
 
 def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
-    """FSDP2 (torchrun DP) save must gather DTensors into a full, reloadable ST checkpoint.
-
-    The trainer FSDP2-wraps the backbone under torchrun DP, so its params are DTensors. A naive
-    delegation to SentenceTransformerTrainer.save_model would write them un-gathered (half-width,
-    unloadable). Train a few steps, save, reload with ``SentenceTransformer(path)``, and assert the
-    reloaded backbone matches the gathered trained weights at FULL shape (the shard discriminator)
-    and encodes finite embeddings.
-    """
+    """Under torchrun DP the params are DTensors, so a naive delegation to SentenceTransformerTrainer.save_model writes
+    them un-gathered (half-width, unloadable). The reload must match at full shape."""
     log("Check: FSDP2 save roundtrip")
 
     output_dir = os.path.join(shared_dir, "fsdp2_save")
@@ -221,14 +186,14 @@ def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
         train_dataset=create_pairs_dataset(64),
         parallelism_config=ParallelismConfig(),
     )
-    # vacuous unless the mixin-managed FSDP2 path is actually hit
+    # Vacuous unless the mixin-managed FSDP2 path is hit.
     assert trainer._fsdp_wrapped, "expected mixin-managed FSDP2 under torchrun DP"
     ctx.barrier()
     trainer.train()
 
-    # collective — must run on ALL ranks
-    ref_sd = gather_saveable_tensors(trainer._get_unwrapped_model(), retain=True)
-    cast_expected = save_dtype_caster(trainer._get_unwrapped_model())
+    # COLLECTIVE
+    ref_sd = _gathered(trainer._backbone_model())
+    cast_expected = save_dtype_caster(trainer._backbone_model())
 
     trainer.save_model(output_dir)
     ctx.barrier()
@@ -245,9 +210,8 @@ def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
                 log(f"  FAIL: {name} shape {tuple(rl_sd[name].shape)} != full {tuple(ref.shape)} (sharded save)")
                 ok = False
                 break
-            # The export carries the toolkit save dtype (bf16 except norms / fp32-pinned tensors), so
-            # the reload must equal the caster's view of the gathered weight exactly — a looser
-            # tolerance would also pass a half-gathered or wrong-tensor write.
+            # The export carries the toolkit save dtype, so the reload must equal the caster's view exactly; a looser
+            # tolerance would pass a half-gathered or wrong-tensor write.
             expected = cast_expected(name, ref).float().cpu()
             if not torch.equal(rl_sd[name].float().cpu(), expected):
                 log(
@@ -266,15 +230,8 @@ def check_save_roundtrip_fsdp2(ctx, shared_dir: str) -> bool:
 
 
 def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
-    """A LoRA-injected embedding checkpoint must save MERGED, plain, and reloadable.
-
-    The script injects LoRA in place (the model stays a SentenceTransformer, not a PeftModel), so a
-    naive save writes ``base_layer``/``lora_*`` keys that reload as RANDOM base weights. Train LoRA,
-    save, reload with ``SentenceTransformer(path)`` and assert: (1) a target projection reloads as
-    ``base + scaling*(B @ A)`` — the trained merge, neither the original base nor random; (2) no
-    ``base_layer``/``lora_*`` keys survive. Fails on a plain save (target weight missing →
-    reinitialized).
-    """
+    """LoRA is injected in place (no PeftModel), so a naive save writes ``base_layer``/``lora_*`` keys that reload as
+    random base weights. A target must reload as ``base + scaling*(B @ A)`` with no such keys left."""
     log("Check: LoRA save roundtrip (merge-on-save)")
 
     output_dir = os.path.join(shared_dir, "lora_save")
@@ -285,12 +242,12 @@ def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
         parallelism_config=ParallelismConfig(),
     )
     ctx.barrier()
-    trainer.train()  # lora_B starts at 0; training makes the delta (and the merge) non-trivial
+    trainer.train()  # lora_B starts at 0; training makes the merge non-trivial.
 
-    # collective gather — must run on ALL ranks
-    backbone = trainer._get_unwrapped_model()
+    # COLLECTIVE
+    backbone = trainer._backbone_model()
     scaling = next(module.scaling["default"] for module in backbone.modules() if isinstance(module, LoraLayer))
-    full = gather_saveable_tensors(backbone, retain=True)
+    full = _gathered(backbone)
     target = next(
         k[: -len(".base_layer.weight")]
         for k in full
@@ -332,7 +289,7 @@ def check_lora_save_roundtrip(ctx, shared_dir: str) -> bool:
 
 
 def broadcast_verdict(ctx, ok: bool) -> bool:
-    """Agree world-wide on a rank-0-only verdict — collective, every rank must call it."""
+    """COLLECTIVE. Agree world-wide on a rank-0-only verdict."""
     verdict = torch.tensor([1 if ok else 0], device=ctx.device, dtype=torch.int32)
     dist.broadcast(verdict, src=0)
     return verdict.item() == 1
@@ -342,7 +299,7 @@ def broadcast_verdict(ctx, ok: bool) -> bool:
 def run(ctx):
     log(f"Model: {MODEL_NAME}  Steps: {NUM_TRAIN_STEPS}  Batch size: {BATCH_SIZE}")
 
-    # rank 0's dir, so a rank-0 reload sees whichever rank the save strategy elects
+    # Rank 0's dir, so a rank-0 reload sees whichever rank the save strategy elects.
     dirs = [ctx.output_dir]
     dist.broadcast_object_list(dirs, src=0)
     shared_dir = dirs[0]

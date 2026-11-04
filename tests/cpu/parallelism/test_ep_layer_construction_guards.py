@@ -1,60 +1,50 @@
 #!/usr/bin/env python
-"""CPU tests for EP-layer construction seams (real layer construction, no GPU/DeepEP).
-
-Covers, against REAL family ``__init__`` runs (``EPConfig(ep_size=1)`` single-process mode, noop
-dispatcher):
-
-* every routing-replay-capable family sets ``self.top_k`` at construction — Qwen3 / Qwen3.5 /
-  Bailing read it in ``_gate_weights_at`` / feed :class:`RoutingReplayInjector.top_k`, so a missing
-  attribute is an ``AttributeError`` mid-RL-step;
-* :class:`RoutingReplayInjector` REJECTS a layer without ``top_k`` at construction (clear error
-  instead of the mid-step crash);
-* full-finetune trainable params are covered by ``synced_trainable_param_ids`` for every constructed
-  family (the mixin's unsynced-param guard must not fire on stock full-FT);
-* ``_upcast_experts_to_fp32`` preserves ``requires_grad`` (an expert-LoRA-frozen base must stay
-  frozen through the fp32 rebuild) and SKIPS the upcast in the FSDP-managed ep1 state
-  (``fsdp_shard_ep1_experts`` at ``ep_group_size==1``), where FSDP2's bf16 policy would silently
-  degrade it anyway;
-* ``EPExpertGatherMixin.__init_subclass__`` rejects a family declaring BOTH ``_PER_EXPERT_UNFUSED_KEYS``
-  and its own ``gather_expert_state_dict`` (the attribute would be silently ignored);
-* LFM2 is a :class:`EPSharedExpertsMoELayerBase` with ``shared_experts=None`` and empty
-  ``replicated_named_params`` — its forward (the shared base path) matches a dense reference;
-* dispatcher construction logs on the main process only — every layer builds its own dispatcher, so
-  an ungated line is one per MoE layer per rank.
-
-Run: ``python tests/cpu/parallelism/test_ep_layer_construction_guards.py`` (or ``pytest -m cpu``).
-"""
+"""EP-layer construction seams against real family ``__init__`` runs, ``EPConfig(ep_size=1)`` single-process with a
+noop dispatcher."""
 
 from __future__ import annotations
 
 import logging
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 
-from src.distributed.expert_parallel import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase, EPSharedExpertsMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from halo.models.moe.family_specs import find_moe_family_spec
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from tests.common.parallelism import single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
+_SHARED_EXPERT_LAYERS = sorted(
+    {cls for cls in MOE_LAYER_MAP.values() if cls.FAMILY.shared_expert_attrs}, key=lambda cls: cls.__name__
+)
+# Upstream builds these only under a config flag (LFM-2 never), so an absent module there is a configuration.
+_CONDITIONAL_SHARED_EXPERT = (EPBailingMoELayer, EPCohere2MoELayer, EPLfm2MoELayer)
 
-def _ep_config(fsdp_shard_ep1_experts: bool = False) -> EPConfig:
-    # use_grouped_gemm off: keeps the per-expert loop path so the forward runs on CPU even when
-    # the dev box exposes a CUDA device to the test process.
+
+def _ep_config(experts_fsdp_managed: bool = False) -> EPConfig:
+    # Keeps the per-expert loop so the forward runs on CPU even when the dev box exposes a CUDA device.
     cfg = EPConfig(
         ep_size=1,
-        world_size=1,
-        gpus_per_node=1,
-        fsdp_shard_ep1_experts=fsdp_shard_ep1_experts,
+        stage_world_size=1,
+        nvlink_domain_size=1,
+        experts_fsdp_managed=experts_fsdp_managed,
         use_grouped_gemm=False,
     )
     cfg.finalize_expert_assignment(E)
@@ -62,7 +52,7 @@ def _ep_config(fsdp_shard_ep1_experts: bool = False) -> EPConfig:
 
 
 class _Gate(nn.Module):
-    """Router stub: ``weight [E, H]`` (hidden read from shape[1]) + ``top_k``."""
+    """Hidden is read from shape[1]."""
 
     def __init__(self):
         super().__init__()
@@ -76,6 +66,7 @@ class _FusedExperts(nn.Module):
         super().__init__()
         self.gate_up_proj = nn.Parameter(torch.randn(E, 2 * M, H))
         self.down_proj = nn.Parameter(torch.randn(E, H, M))
+        self.act_fn = F.silu
 
 
 class _Qwen3Block(nn.Module):
@@ -91,8 +82,8 @@ class _Qwen35Block(nn.Module):
         super().__init__()
         self.gate = _Gate()
         self.experts = _FusedExperts()
-        self.shared_expert = None
-        self.shared_expert_gate = None
+        self.shared_expert = nn.Identity()
+        self.shared_expert_gate = nn.Linear(H, 1, bias=False)
 
 
 class _BailingGate(nn.Module):
@@ -110,6 +101,7 @@ class _BailingExpert(nn.Module):
         self.gate_proj = nn.Linear(H, M, bias=False)
         self.up_proj = nn.Linear(H, M, bias=False)
         self.down_proj = nn.Linear(M, H, bias=False)
+        self.act_fn = F.silu
 
 
 class _BailingBlock(nn.Module):
@@ -157,8 +149,7 @@ class _DeepseekV4Gate(nn.Module):
 
 
 class _DeepseekV4Experts(nn.Module):
-    """DeepSeek-V4 fused experts. ``missing`` drops one attribute the container always declares —
-    the layout drift a transformers rename would produce."""
+    """``missing`` drops one attribute, the layout drift a transformers rename would produce."""
 
     def __init__(self, missing: str | None = None):
         super().__init__()
@@ -176,8 +167,69 @@ class _DeepseekV4Block(nn.Module):
         super().__init__()
         self.gate = _DeepseekV4Gate()
         self.experts = _DeepseekV4Experts(missing)
-        self.shared_experts = None
+        self.shared_experts = nn.Identity()
         self.is_hash = False
+
+
+def _tiny_block_with_renamed_shared_expert(wrapper) -> tuple[nn.Module, list[str]]:
+    """The family's real tiny block with each shared-expert spelling it builds moved to a new name; the spellings."""
+    family = next(name for name in TINY_MOE_FAMILIES if find_moe_family_spec(name) is wrapper.FAMILY)
+    _path, block = ep_claimed_blocks(tiny_family_model(TINY_MOE_FAMILIES[family]))[0]
+    built = [attr for attr in wrapper.FAMILY.shared_expert_attrs if getattr(block, attr, None) is not None]
+    for attr in built:
+        block.add_module(f"{attr}_renamed", getattr(block, attr))
+        delattr(block, attr)
+    return block, built
+
+
+@pytest.mark.parametrize("wrapper", _SHARED_EXPERT_LAYERS, ids=lambda cls: cls.__name__)
+def test_a_renamed_shared_expert_raises_where_upstream_always_builds_it(wrapper, monkeypatch):
+    """Adopting nothing drops the FFN from every output with no shape, dtype or key changing."""
+    block, built = _tiny_block_with_renamed_shared_expert(wrapper)
+    config = single_process_ep_config(wrapper.detect_num_experts(block))
+    if wrapper not in _CONDITIONAL_SHARED_EXPERT:
+        assert built, f"{wrapper.__name__}: the tiny block builds no shared expert to rename"
+        with pytest.raises(AttributeError, match="renamed it upstream"):
+            wrapper(block, config)
+        # The flag is what raises: without it the same block adopts an empty slot and trains on.
+        monkeypatch.setattr(wrapper, "_SHARED_EXPERT_REQUIRED", False)
+    layer = wrapper(block, config)
+    assert getattr(layer, layer._shared_expert_attr) is None
+
+
+def test_a_renamed_shared_expert_gate_raises():
+    """Upstream always builds it, and without it the shared leg would run at full strength on every token."""
+    block = _Qwen35Block()
+    del block.shared_expert_gate
+    with pytest.raises(AttributeError, match="shared_expert_gate"):
+        EPQwen3_5MoELayer(block, _ep_config())
+
+
+def test_the_shared_expert_output_is_scaled_by_its_gate():
+    torch.manual_seed(0)
+    block = _Qwen35Block()
+    layer = EPQwen3_5MoELayer(block, _ep_config())
+    hidden = torch.randn(2, H)
+    expected = hidden * torch.sigmoid(block.shared_expert_gate(hidden))
+    assert torch.equal(layer._shared_expert_output(hidden), expected)
+
+
+def test_an_expert_activation_nothing_names_raises():
+    """A default would train another non-linearity with no shape, dtype or key changing."""
+    block = _Qwen3Block()
+    del block.experts.act_fn
+    with pytest.raises(AttributeError, match="names the expert activation"):
+        EPQwen3MoELayer(block, _ep_config())
+
+
+def test_the_expert_activation_reads_the_container_then_the_block_then_its_config():
+    block = _Qwen3Block()
+    block.hidden_act, block.config = "gelu", SimpleNamespace(hidden_act="relu")
+    assert EPQwen3MoELayer(block, _ep_config()).act_fn is F.silu
+    del block.experts.act_fn
+    assert isinstance(EPQwen3MoELayer(block, _ep_config()).act_fn, type(ACT2FN["gelu"]))
+    del block.hidden_act
+    assert isinstance(EPQwen3MoELayer(block, _ep_config()).act_fn, type(ACT2FN["relu"]))
 
 
 def _build_all(fsdp_shard_ep1_experts: bool = False):
@@ -189,17 +241,12 @@ def _build_all(fsdp_shard_ep1_experts: bool = False):
         EPBailingMoELayer(_BailingBlock(), cfg),
         EPLfm2MoELayer(_Lfm2Block(), cfg),
     ]
-    # _to_device targets CUDA when the dev box exposes one; this is a CPU test.
+    # Construction places the layers on CUDA when the dev box exposes one.
     return [layer.cpu() for layer in layers]
 
 
 def test_dispatcher_construction_logs_only_on_the_main_process(monkeypatch, caplog):
-    """Every MoE layer builds its own dispatcher, so a per-rank INFO here is per LAYER per rank.
-
-    A 92-layer MoE at 512 ranks opens with ~47k identical lines, burying the diagnostics that
-    matter. The construction lines are identical on every rank of a group, so the main process is
-    the one that prints them.
-    """
+    """A 92-layer MoE at 512 ranks would open with ~47k identical lines."""
     caplog.set_level(logging.INFO, logger=dispatcher_mod.__name__)
     monkeypatch.setattr(dispatcher_mod, "is_global_main_process", lambda: False)
 
@@ -216,10 +263,9 @@ def test_dispatcher_construction_logs_only_on_the_main_process(monkeypatch, capl
 
 
 def test_replay_capable_families_set_top_k_at_construction():
-    """Qwen3 / Qwen3.5 / Bailing / LFM2 must set self.top_k in __init__ — Bailing reads it in
-    _gate_weights_at on the first replayed forward, and the injector sizes the mask from it."""
+    """Bailing reads it in _gate_weights_at on the first replayed forward, and the injector sizes the mask from it."""
     for layer in _build_all():
-        assert layer._supports_routing_replay, f"{type(layer).__name__} unexpectedly opted out of replay"
+        assert layer.FAMILY.supports_routing_replay, f"{type(layer).__name__} unexpectedly opted out of replay"
         assert hasattr(layer, "top_k"), f"{type(layer).__name__} never set top_k"
         assert int(layer.top_k) == K
 
@@ -233,8 +279,7 @@ def test_injector_reads_top_k_from_constructed_layers():
 
 
 def test_injector_rejects_layer_without_top_k():
-    """A replay-capable layer that never set top_k must be rejected at injector construction with a
-    clear error, not crash mid-step."""
+    """Otherwise it crashes mid-step."""
     layer = _build_all()[0]
     del layer.top_k
     with pytest.raises(AttributeError, match="top_k"):
@@ -242,9 +287,7 @@ def test_injector_rejects_layer_without_top_k():
 
 
 def test_full_finetune_trainable_params_all_synced():
-    """Every trainable param of a stock full-FT family layer must be in synced_trainable_param_ids
-    (the in-backward hook path, fsdp_shard_ep1_experts=False) — else the mixin's unsynced-param
-    guard would reject stock full-finetune runs."""
+    """Else the mixin's unsynced-param guard would reject stock full-finetune runs."""
     for layer in _build_all(fsdp_shard_ep1_experts=False):
         synced = layer.synced_trainable_param_ids()
         offenders = [n for n, p in layer.named_parameters() if p.requires_grad and id(p) not in synced]
@@ -252,92 +295,34 @@ def test_full_finetune_trainable_params_all_synced():
 
 
 def test_expert_fp32_upcast_preserves_frozen_requires_grad():
-    """A frozen expert base (expert-LoRA freezes it before the upcast runs) must STAY frozen through
-    the fp32 nn.Parameter rebuild — the default requires_grad=True would silently train the base."""
+    """The default requires_grad=True would silently train the frozen base."""
     torch.manual_seed(0)
-    cfg = _ep_config(fsdp_shard_ep1_experts=False)
+    cfg = _ep_config(experts_fsdp_managed=False)
     cfg.fp32_experts = True
     layer = EPQwen3MoELayer(_Qwen3Block(), cfg)
     assert layer.gate_proj.dtype == torch.float32
 
     layer.gate_proj.requires_grad_(False)
     layer.up_proj.requires_grad_(True)
-    layer._upcast_experts_to_fp32(layer.expert_named_params())
+    layer._upcast_experts_to_fp32()
     assert layer.gate_proj.dtype == torch.float32
     assert layer.gate_proj.requires_grad is False, "frozen expert base re-enabled by the fp32 upcast"
     assert layer.up_proj.requires_grad is True, "trainable expert param frozen by the fp32 upcast"
 
 
 def test_expert_fp32_upcast_skipped_when_fsdp_manages_ep1_experts():
-    """fsdp_shard_ep1_experts at ep_group_size==1: FSDP2's bf16 param_dtype policy casts the experts
-    for compute anyway, so the upcast is skipped (logged) instead of silently degrading."""
+    """FSDP2's bf16 param_dtype policy casts the experts anyway, so the upcast is skipped instead of silently
+    degrading."""
     torch.manual_seed(0)
-    cfg = _ep_config(fsdp_shard_ep1_experts=True)
+    cfg = _ep_config(experts_fsdp_managed=True)
     cfg.fp32_experts = True
     layer = EPQwen3MoELayer(_Qwen3Block(), cfg)
     assert layer.gate_proj.dtype == torch.float32 or layer.gate_proj.dtype == torch.get_default_dtype()
-    # Stub weights are fp32 already; prove the skip with a bf16 param instead.
+    # Stub weights are fp32 already, so a bf16 param proves the skip.
     layer.down_proj = nn.Parameter(layer.down_proj.data.to(torch.bfloat16), requires_grad=False)
-    layer._upcast_experts_to_fp32(layer.expert_named_params())
+    layer._upcast_experts_to_fp32()
     assert layer.down_proj.dtype == torch.bfloat16, "ep1 FSDP-managed experts must not be upcast"
     assert layer.down_proj.requires_grad is False
-
-
-def test_init_subclass_rejects_unfused_keys_with_gather_override():
-    with pytest.raises(TypeError, match="_PER_EXPERT_UNFUSED_KEYS"):
-
-        class _Bad(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
-
-            def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
-
-
-def test_init_subclass_allows_each_alone():
-    class _KeysOnly(EPMoELayerBase):
-        _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
-
-        def forward(self, hidden_states, **kwargs):
-            return hidden_states
-
-    class _GatherOnly(EPMoELayerBase):
-        def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-            return {}
-
-        @classmethod
-        def merge_shards_to_hf(cls, prefix, params):
-            return {}
-
-        def forward(self, hidden_states, **kwargs):
-            return hidden_states
-
-    assert _KeysOnly is not None and _GatherOnly is not None
-
-
-def test_init_subclass_requires_gather_and_merge_to_be_overridden_together():
-    """The merge is the inverse of the gather: a custom gather with the BASE merge would write a
-    sharded checkpoint whose expert layout silently differs from the family's own gathered save."""
-    with pytest.raises(TypeError, match="merge_shards_to_hf"):
-
-        class _GatherWithoutMerge(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
-
-    with pytest.raises(TypeError, match="gather_expert_state_dict"):
-
-        class _MergeWithoutGather(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            @classmethod
-            def merge_shards_to_hf(cls, prefix, params):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
 
 
 def test_lfm2_is_shared_experts_base_with_none_shared():
@@ -345,13 +330,11 @@ def test_lfm2_is_shared_experts_base_with_none_shared():
     assert isinstance(layer, EPSharedExpertsMoELayerBase)
     assert layer.shared_experts is None
     assert layer.replicated_named_params() == []
-    # The forward must come from the shared base, not a family duplicate.
+    # The forward must come from the shared base.
     assert "forward" not in vars(EPLfm2MoELayer), "LFM2 re-grew a duplicated forward"
 
 
 def test_lfm2_forward_matches_dense_reference():
-    """The inherited shared-base forward (shared_experts=None) must equal a dense per-token
-    reference of LFM2's sigmoid routing + SwiGLU experts."""
     torch.manual_seed(1)
     layer = _build_all()[3]
     layer.eval()
@@ -365,8 +348,8 @@ def test_lfm2_forward_matches_dense_reference():
         topw, topi = torch.topk(scores, k=K, dim=-1)
         topw = topw / (topw.sum(dim=-1, keepdim=True) + 1e-6)
         ref = torch.zeros_like(flat)
-        gate_up = layer.gate_up_proj.data  # [E, H, 2M] matmul convention
-        down = layer.down_proj.data  # [E, M, H]
+        gate_up = layer.gate_up_proj.data  # [E, H, 2M] matmul convention.
+        down = layer.down_proj.data
         for t in range(flat.shape[0]):
             for j in range(K):
                 e = int(topi[t, j])
@@ -389,15 +372,8 @@ def test_deepseek_v4_takes_the_activation_and_limit_from_the_experts_container()
 
 @pytest.mark.parametrize("missing", ("limit", "act_fn"))
 def test_deepseek_v4_rejects_experts_missing_an_activation_attribute(missing):
-    """A default substituted for a missing attribute is a silent numerics change, not a fallback.
-
-    ``limit`` is ``config.swiglu_limit`` and clamps both GLU halves of every expert; ``act_fn`` is
-    ``config.hidden_act`` and additionally decides whether ``_fused_glu_mul`` latches the compiled
-    SiLU-only combine. Standing a literal in for either — the layout drift a transformers rename
-    would cause — trains the model against a different activation than the checkpoint was built
-    with, and nothing says so. GptOss reads ``experts.alpha`` / ``experts.limit`` directly for the
-    same reason.
-    """
+    """``limit`` clamps both GLU halves and ``act_fn`` decides the compiled combine, so a stand-in literal trains a
+    different activation silently."""
     with pytest.raises(AttributeError, match=missing):
         EPDeepseekV4MoELayer(_DeepseekV4Block(missing), _ep_config())
 

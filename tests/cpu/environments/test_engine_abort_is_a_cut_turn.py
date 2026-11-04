@@ -1,24 +1,21 @@
-"""An engine-aborted generation (vLLM finish reason ``abort``: a pause in abort mode, an engine restart)
-must be recorded like a length cut — a truncated turn the trainer never trains as a natural stop — and
-not as an ordinary completed turn. A fragment scored as a natural termination teaches the policy to end
-its reasoning wherever the engine happened to stop it.
-
-    python tests/cpu/environments/test_engine_abort_is_a_cut_turn.py
-"""
+"""An engine-aborted generation (vLLM finish reason ``abort``) is recorded like a length cut, which the trainer
+never trains as a natural stop; a fragment scored as one teaches the policy to end its reasoning wherever the
+engine stopped it."""
 
 from types import SimpleNamespace
 
 import pytest
 
-from src.environments.base import BaseEnvironment, Message, Trajectory
-from src.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.messages import Message, Trajectory
+from halo.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 
 def _record_turn(finish_reason: str | None) -> Message:
     env = SimpleNamespace(max_tool_calls_per_turn=None)
     trajectory = Trajectory()
     trajectory.add_message(Message.user("q"))
-    BaseEnvironment._add_action_message(env, trajectory, "partial reasoning", {"finish_reason": finish_reason})
+    EnvironmentBase._add_action_message(env, trajectory, "partial reasoning", {"finish_reason": finish_reason})
     return trajectory.messages[-1]
 
 

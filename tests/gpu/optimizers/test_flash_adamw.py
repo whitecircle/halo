@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: FlashAdamW optimizer (quantized states + master weights).
-
-Verifies that create_flash_adamw_optimizer:
-1. Creates a valid FlashAdamW instance with correct param groups
-2. Achieves loss descent on a simple regression task
-3. Routes exactly the named decay parameters into the decay group, the rest into the no-decay one
-4. Uses less memory than standard AdamW
-
-Usage (single GPU):
-    torchrun --nproc_per_node=1 tests/gpu/optimizers/test_flash_adamw.py
-"""
+"""build_flash_adamw_optimizer: param groups, loss descent, decay-name routing, memory below AdamW, and an exact state
+round trip."""
 
 import copy
 import gc
@@ -19,11 +9,9 @@ import math
 import torch
 import torch.nn as nn
 
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import assert_optimizer_state_bit_exact
-
-# ─── Models ──────────────────────────────────────────────────────────────────
+from tests.common.optimizer_state import assert_optimizer_state_bit_exact
 
 HIDDEN = 256
 BATCH = 32
@@ -32,8 +20,6 @@ NUM_STEPS = 50
 
 
 class FFNModel(nn.Module):
-    """Small FFN with both 2D (Linear.weight) and 1D (bias, LayerNorm) params."""
-
     def __init__(self, hidden=HIDDEN, layers=3):
         super().__init__()
         blocks = []
@@ -63,14 +49,10 @@ def run_training(model, optimizer, num_steps=NUM_STEPS, hidden=HIDDEN):
     return losses
 
 
-# ─── Tests ───────────────────────────────────────────────────────────────────
-
-
 def test_creates_optimizer():
-    """FlashAdamW should be created with correct param groups."""
     print("TEST 1: Optimizer creation")
     model = FFNModel().to(device="cuda", dtype=torch.bfloat16)
-    optimizer = create_flash_adamw_optimizer(model, lr=1e-3)
+    optimizer = build_flash_adamw_optimizer(model, lr=1e-3)
 
     total_opt_params = sum(len(g["params"]) for g in optimizer.param_groups)
     total_model_params = sum(1 for p in model.parameters() if p.requires_grad)
@@ -82,11 +64,10 @@ def test_creates_optimizer():
 
 
 def test_loss_descends():
-    """FlashAdamW should decrease loss on a regression task."""
     print("\nTEST 2: Loss descent")
     torch.manual_seed(42)
     model = FFNModel().to(device="cuda", dtype=torch.bfloat16)
-    optimizer = create_flash_adamw_optimizer(model, lr=1e-3)
+    optimizer = build_flash_adamw_optimizer(model, lr=1e-3)
 
     losses = run_training(model, optimizer, num_steps=100)
 
@@ -104,7 +85,7 @@ def test_decay_parameter_names():
     model = FFNModel(hidden=64, layers=1).to(device="cuda", dtype=torch.bfloat16)
     decay_names = {n for n, _ in model.named_parameters() if "weight" in n and "norm" not in n}
 
-    optimizer = create_flash_adamw_optimizer(
+    optimizer = build_flash_adamw_optimizer(
         model,
         lr=1e-3,
         weight_decay=0.1,
@@ -125,13 +106,11 @@ def test_decay_parameter_names():
         "no-decay group is not the complement of the named decay params"
     )
 
-    # Run a few steps to make sure it doesn't crash
     run_training(model, optimizer, num_steps=5, hidden=64)
     print("  PASSED")
 
 
 def test_memory_savings():
-    """FlashAdamW should use less peak memory than standard AdamW on a realistic model."""
     print("\nTEST 4: Memory savings vs AdamW")
     hidden = 2048
     intermediate = 4 * hidden
@@ -182,9 +161,9 @@ def test_memory_savings():
         torch.cuda.empty_cache()
         return peak
 
-    # Warmup FlashAdamW Triton kernels on a tiny model first
+    # Warms the FlashAdamW Triton kernels on a tiny model first.
     m_warmup = nn.Linear(64, 64, bias=False).to(device="cuda", dtype=torch.bfloat16)
-    opt_warmup = create_flash_adamw_optimizer(m_warmup, lr=1e-3)
+    opt_warmup = build_flash_adamw_optimizer(m_warmup, lr=1e-3)
     x_w = torch.randn(2, 64, device="cuda", dtype=torch.bfloat16)
     opt_warmup.zero_grad()
     m_warmup(x_w).sum().backward()
@@ -194,7 +173,7 @@ def test_memory_savings():
     torch.cuda.empty_cache()
 
     adamw_peak = measure_peak(lambda m: torch.optim.AdamW(m.parameters(), lr=1e-3, fused=True))
-    flash_peak = measure_peak(lambda m: create_flash_adamw_optimizer(m, lr=1e-3))
+    flash_peak = measure_peak(lambda m: build_flash_adamw_optimizer(m, lr=1e-3))
 
     savings = (adamw_peak - flash_peak) / adamw_peak * 100
     print(f"  AdamW peak: {adamw_peak:.0f} MB, FlashAdamW peak: {flash_peak:.0f} MB ({savings:+.1f}%)")
@@ -205,20 +184,18 @@ def test_memory_savings():
 
 
 def test_state_dict_roundtrip():
-    """Train k steps -> deepcopy state_dict -> fresh model+optimizer -> load: every state tensor
-    (quantized moments, scales, error_bits, step) bit-exact vs the snapshot, and a post-load step
-    still moves weights. A load that drops, casts, or re-quantizes state warm-restarts silently —
-    exactly what the bit-exact comparison exists to catch."""
+    """A load that drops, casts or re-quantizes state warm-restarts silently, which the bit-exact comparison
+    catches."""
     print("\nTEST 5: state_dict round-trip")
     torch.manual_seed(42)
     model = FFNModel().to(device="cuda", dtype=torch.bfloat16)
-    optimizer = create_flash_adamw_optimizer(model, lr=1e-3)
+    optimizer = build_flash_adamw_optimizer(model, lr=1e-3)
     run_training(model, optimizer, num_steps=5)
     saved = copy.deepcopy(optimizer.state_dict())
 
     torch.manual_seed(7)
     model2 = FFNModel().to(device="cuda", dtype=torch.bfloat16)
-    optimizer2 = create_flash_adamw_optimizer(model2, lr=1e-3)
+    optimizer2 = build_flash_adamw_optimizer(model2, lr=1e-3)
     optimizer2.load_state_dict(copy.deepcopy(saved))
     assert_optimizer_state_bit_exact(saved, optimizer2.state_dict())
 
@@ -227,9 +204,6 @@ def test_state_dict_roundtrip():
     moved = any(not torch.equal(b, p.detach()) for b, p in zip(before, model2.parameters(), strict=False))
     assert moved, "post-load step did not move any weight"
     print("  PASSED")
-
-
-# ─── Main ────────────────────────────────────────────────────────────────────
 
 
 @gpu_test_main(exact_world_size=1, prefix="flash_adamw", partial_state=False)

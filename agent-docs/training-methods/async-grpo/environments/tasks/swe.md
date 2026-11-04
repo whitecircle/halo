@@ -1,6 +1,6 @@
 # SWE Environment
 
-`SweEnvironment` (`src/environments/envs/tasks/coding/swe.py`, registry name `swe`) trains an edit-run-test loop over a workspace that persists across turns. It speaks native tool calls, so the server needs the family's tool-call parser ([Tool calls](../../episodes.md#tool-calls)).
+`SweEnvironment` (`halo/environments/tasks/coding/swe.py`, registry name `swe`) trains an edit-run-test loop over a workspace that persists across turns. It speaks native tool calls, so the server needs the family's tool-call parser ([Tool calls](../../episodes.md#tool-calls)).
 
 - No third-party agent scaffold (SWE-agent, mini-SWE-agent, OpenHands, opencode) is wired in: the model gets the tools below and nothing else.
 - Each episode gets its own sandbox session, so one instance serves concurrent rollouts.
@@ -19,10 +19,10 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `language` | `python` | What `run_code` runs; `cpp` and `c` need a compiling backend |
-| `code_timeout` | `15.0` s | Wall-clock cap per `run_code` / `run_bash_command` call |
+| `code_timeout` | `15.0` s | Wall-clock cap per `run_code` / `run_bash_command` call; finite, above 0 |
 | `sandbox_backend` / `sandbox_url` | unset | Else `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then local |
 
-`max_turns` defaults to 20 ([common knobs](../README.md#common-knobs)). Reward knobs are the [native protocol's](../protocols/native-tool-use.md#configuration).
+`max_turns` defaults to the class's own budget ([registry](../README.md#registry)). Reward knobs are the [native protocol's](../protocols/native-tool-use.md#configuration).
 
 ## Tools
 
@@ -57,7 +57,7 @@ An episode that never completed grades 0. A completed one is graded by the first
 
 There is no completion fallback:
 
-- Without a `test_function`, `requires_answer` defaults on: the trainer and `run_env.py` refuse a dataset with no `answer` column, and the playground an empty Expected Answer box.
+- Without a `test_function`, `requires_answer` defaults on: the trainer and `eval_env.py` refuse a dataset with no `answer` column, and the playground an empty Expected Answer box.
 - `requires_answer: false` without a `test_function` raises at construction.
 - A row carrying neither raises at grading.
 - A judge-only reward (no `environment` term) takes no grade from the environment, so it needs neither, and a null `answer` or a raising `test_function` voids nothing.
@@ -71,7 +71,7 @@ The `environment` term prices the grade as `reward/objective` ([Reward Terms](..
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py --env_type swe \
+python scripts/environments/inference/eval_env.py --env_type swe \
     --dataset <hub-id-or-dir> --base_url http://localhost:8000/v1 \
     --model <served-name> --num_examples 20
 ```
@@ -80,7 +80,7 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 
 ## From Python
 
-`test_function` (grades the finished trajectory) and `extra_tools` (a registry merged in) are Python objects, so only the constructor sets them:
+`test_function` (grades the finished trajectory) and `extra_tools` (a registry merged in) are Python objects, so only the constructor sets them; a `test_function` that is no callable, a YAML string included, raises:
 
 ```python
 env = SweEnvironment(language="python", test_function=my_test_fn, extra_tools=my_tools)

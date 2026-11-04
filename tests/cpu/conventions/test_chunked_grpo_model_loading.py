@@ -3,7 +3,7 @@
 
 import pytest
 
-from tests.common.utils import probe_findings
+from tests.common.repo import probe_findings
 
 
 def test_qk_norms_match_after_late_trainer_patch_and_reload():

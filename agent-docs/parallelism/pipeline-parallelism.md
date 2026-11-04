@@ -1,71 +1,614 @@
 # Pipeline Parallelism
 
-**Status: not yet available in this release.** The pipeline-parallel seams ship — the config
-surface, the rank math, the trainer gates, and the stage/split/loss/checkpoint contracts — but the
-schedule engine that would drive microbatches through the stages does not.
-`pipeline_parallel_size > 1` is rejected at config time, with a pointer to this page.
+PP splits a model's decoder layers into contiguous **stages**, each owning a rank block. It is the
+outermost parallelism dimension and the only one designed to cross NVLink domains: the only traffic
+leaving a domain is the pipeline's point-to-point boundary activations. Between machines on a fast link it
+is not a speedup for a model that fits on one machine ([measured](#measured-throughput)).
 
-PP would split a model's decoder layers into contiguous **stages**, each owning a rank block, as
-the outermost parallelism dimension and the only one designed to cross NVLink domains — the only
-traffic leaving a domain being the pipeline's point-to-point boundary activations. The bandwidth
+**The expert axes are the only other sharding PP composes with: EP, or pure ETP, never both.**
+FSDP2 data parallelism runs inside each stage. Every other pairing is refused by the
+[capability matrix](README.md#supported-combinations). The bubble arithmetic and the bandwidth
 argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline-parallelism-the-bubble-and-the-boundary).
 
-## What ships today
+## Why PP is the cross-node dimension
 
-- **Config surface.** `ParallelismConfig` declares `pp_size`, `pp_schedule` (`1f1b` / `gpipe`),
-  `pp_microbatches`, and `pp_split`, mirrored from the CLI as `pipeline_parallel_size`,
-  `pipeline_schedule`, `pipeline_microbatches`, `pipeline_split`. At `pp_size == 1` (the default
-  and the only value a production run accepts) setting any PP-only knob is rejected, so a config
-  cannot carry silently ignored fields.
-- **Rank math and topology rules.** The stage-scoped coordinates (`stage_world_size`, `pp_rank`,
-  `stage_base_rank`, `stage_local_rank`) are the base every other axis (EP/CP/TP/ETP) computes its
-  groups from; at `pp_size == 1` they equal the world values. Validation pins stage boundaries to
-  NVLink-domain boundaries and rejects single-rank stages. The
-  [capability-matrix allowlist](README.md#supported-combinations) admits PP alone, PP+EP and PP+ETP;
-  every other axis combination (PP+TP, PP+CP, PP+EP+ETP, …) is refused with the breaking mechanism
-  named in the error. `_validate_pipeline_parallel` separately refuses the PP-incompatible knobs
-  (HSDP, expert LoRA, ZeRO-3, non-`bf16` low precision). These validators fire only on a directly
-  constructed `ParallelismConfig`: the production entry rejects every `pp_size > 1` before they run
-  ([below](#what-does-not-ship)).
-- **Trainer gates.** `_supports_pp` is declare-to-enable per trainer (like `_supports_cp`), and
-  `src/trainers/mixins/pp_gates.py` is the shared rejection vocabulary (PEFT, live reference
-  models, `compute_metrics`, activation offloading, precomputed-reference-column requirements);
-  `PipelineTrainerMixin` (`src/trainers/mixins/pipeline.py`) is the trainer-side seam and stays
-  inert at `pp_size == 1`.
-- **Stage, split, and loss seams.** `src/distributed/pipeline_parallel/` holds the stage module and
-  stage↔global naming contract (`stage.py`), the per-family `PPModelSpec` registry with the
-  layer-partition math and the model-structure gates — tied embeddings, live MTP tail layers,
-  `layer_types`-period split offsets, a head path the last stage cannot reproduce (`split.py`) —
-  the mid-chain stream forwards for the hyper-connection families, whose inter-layer activation is
-  the `hc_mult`-widened `[batch, seq, hc_mult, hidden]` stream (DeepSeek-V4, GLM-5 Next — `stage_adapters.py`), the
-  pure-tensor loss/label helpers and the `PPLossAdapter` contract (`losses.py`), the group
-  constructors (`groups.py`), and the stage-aware safetensors lazy loader (`lazy_loader.py`). The
-  batch contract (`PP_BATCH_PAD_VALUES` in `runtime.py`) pins the keys and pad values a pipeline
-  consumes.
-- **Head transform.** The last stage applies what the family's `*ForCausalLM.forward` does around
-  `lm_head` — Cohere's `logit_scale`, Gemma's softcap, Inkling's μP division and vocabulary cut — to
-  the logits it returns and inside the fused head loss. It is the transform the chunked GRPO
-  log-probs apply, verified against the family's forward (`src/models/head_transform.py`); a family
-  whose forward it does not reproduce is refused by the split gate on every rank.
-- **Checkpoint seam.** `save_pp_checkpoint` (`src/distributed/checkpoint/save.py`) defines the PP
-  checkpoint layout: one complete-tensor safetensors shard per stage under the unsplit model's
-  global names plus a merged standard HF index, loadable via plain `from_pretrained`; the
-  writer-set and axis guards (`is_pp_shard_writer`, `reject_unhandled_pp_axes`) ship with it.
+Per-step traffic that crosses RDMA, by mode:
 
-## What does not ship
+| Mode | What crosses | Volume |
+|---|---|---|
+| FSDP2 1D full-shard | per-shard-group param all-gather + grad reduce-scatter | ~2–3× param bytes |
+| HSDP | one gradient all-reduce | ~1× param bytes, plus a param replica per domain |
+| EP `ep_scope=global` | DeepEP dispatch/combine | sparse token bytes per MoE layer |
+| TP / CP | **forbidden cross-node** | — |
+| **PP** | **boundary activations, point-to-point** | `B·S·H` per microbatch per stage edge (`× hc_mult` / `× hc_count` for the hyper-connection families — [cost below](#boundary-cost)) |
 
-`PipelineRuntime` (`src/distributed/pipeline_parallel/runtime.py`) — the seam over
-`torch.distributed.pipelining` that would own the schedule, the microbatched step, and the
-forward-only pass — raises `NotImplementedError` on construction. Because
-`parallelism_config_from_args` (`src/training/parallelism_args.py`) rejects
-`pipeline_parallel_size > 1` at the single production entry point, before any rank math or model
-loading, no production path reaches it. A trainer without `_supports_pp` is refused there first, by
-its own gate (`<Trainer> does not support Pipeline Parallelism (PP)`); every other trainer by the
-release gate. No PP run is launchable.
+When that trade pays, and when it does not (inside one domain, or on an NVL72 rack):
+[When pipeline parallelism is worth it](README.md#when-pipeline-parallelism-is-worth-it).
 
-## Sharding large models today
+## Launching
 
-Shard with the available axes: [Expert Parallelism](expert-parallelism.md) (orthogonal to DP, the workhorse for
-MoE), [Tensor Parallelism](tensor-parallelism.md), [Context Parallelism](context-parallelism.md)
-for long sequences, and their supported combinations — see the [Parallelism overview](README.md) and
-[Multi-Node](multi-node.md) for topology guidance.
+Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`: SFT, SMPO, DPO,
+KTO, offline GRPO, Bradley-Terry reward and classification
+([Trainer support](#trainer-support)). Any other script refuses it before a model loads with
+`<Trainer> does not support Pipeline Parallelism (PP): <its PP_REFUSAL>`. The model's backbone must be
+registered ([Model support](#model-support)); any other is refused by name on the meta shell, on every
+rank, before a weight is read.
+
+Launch one `torchrun` per node (`halo launch` is single-node). Every stage is a whole number of NVLink
+domains holding at least two ranks, so a run spans at least two domains — two nodes at the default
+domain sizing. Two recipes ship, both one stage per node on 2 × 8 GPUs:
+
+| Recipe | Shape |
+|---|---|
+| `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml` | Qwen3-8B, `pp2`, FSDP2 inside each stage |
+| `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` | gpt-oss-20b, `pp2` × `ep8`, `moe_balancing: bias_update` |
+
+A per-node output filesystem leaves each node only its own stage's parts; merge the node
+directories with `scripts/after_training/merge_pp_stages.py` before `from_pretrained`
+([Per-node export](#per-node-export)).
+
+## Rank layout
+
+PP carves the world first; every other mode runs unchanged inside one stage:
+
+```text
+stage_world_size = world_size / pipeline_parallel_size
+pp_rank          = global_rank // stage_world_size
+```
+
+A **pipeline chain** is the set of ranks holding the same intra-stage position across every stage.
+Chain members are `stage_world_size` apart, share a data-parallel coordinate, and consume the same
+batch — stage 0 reads `input_ids`, the last stage reads `labels`. The trainer's dataloader shards by
+the stage-local DP rank, never the global rank.
+
+**Stage boundaries fall on NVLink-domain boundaries** (`stage_world_size % nvlink_domain_size == 0`,
+enforced at config time). Every EP/TP/ETP/CP group is a domain-local rank block, so this keeps them
+strictly inside one stage. `pp_size` must therefore divide the domain count: `pp2` on one 8-GPU node
+leaves `stage_world_size = 4` and is rejected at the default domain sizing. Single-rank stages are
+rejected too (the stage FSDP wrap assumes DP ≥ 2).
+
+## Configuration
+
+The four knobs (`pipeline_parallel_size`, `pipeline_microbatches`, `pipeline_schedule`,
+`pipeline_split`), their defaults and constraints:
+[Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig).
+How they interact with the trainer's batch settings:
+
+- The microbatches **are** the gradient accumulation: an unset `pipeline_microbatches` takes
+  `gradient_accumulation_steps`, setting both raises, and the trainer then runs with
+  `gradient_accumulation_steps=1`. Under `1f1b` a count below `pp_size` is raised to it, with a warning.
+- `per_device_train_batch_size` is the chain's rows per optimizer step, split into the microbatches,
+  so it must be a multiple of their count (the recipes run 8 rows in 8 microbatches).
+- `data_parallel_size` is divided by `pipeline_parallel_size`: a whole chain consumes one batch.
+- A `pipeline_split` sums to the layer count with boundaries on the `layer_types` period
+  ([Split-offset constraint](#split-offset-constraint)).
+- `max_length` must be set: the pipeline freezes its P2P shapes on the first step and pads every batch
+  to it. Offline GRPO has no such key and pads to `max_prompt_length + max_completion_length` (both
+  required). A `max_length` at the model's context window is
+  warned, since every row then pays full-window compute. The train dataloader runs with
+  `drop_last=True`, forced and logged when the config leaves it off.
+
+**Microbatch count sizes the bubble.** Below `4 × pp_size` microbatches the trainer warns: at
+`2 × pp_size` the 1F1B bubble `(pp − 1)/(m + pp − 1)` is a fifth of the step at `pp_size = 2` and grows
+toward a third with `pp_size`. Plan for `9 × (pp_size − 1)` microbatches to hold it at 10%.
+
+**Raising `pp_size` does not shrink the bubble.** With one row per microbatch (what packing requires)
+and no ETP, the count is `m = T × pp_size` for `T = global_batch_tokens / (world_size × max_length)`,
+so the 1F1B bubble `(pp − 1)/(m + pp − 1)` *rises* with `pp_size`, toward `1/(1 + T)`. The global
+batch you accept sets the bubble, not the stage count: at world 512, `max_length` 8192, `pp8`, a
+4.2M-token step is `m = 8` and a **47%** bubble; 10% needs `m = 63`, ~33M tokens per step. Only an
+interleaved (virtual-stage) schedule changes this, and none is wired.
+
+**Stage partition.** The default split is **head-weighted**: the last stage carries the `lm_head`
+matmul + CE (for Qwen3-8B, ~3 decoder layers' worth of compute), so its layer budget shrinks by that
+cost, snapped to the `layer_types` period, and the earlier stages absorb the difference. Any
+partition is gradient-exact; only throughput changes. The chosen partition is logged at startup.
+
+## Model support
+
+A stage is the **real backbone** with its layer list sliced, the final norm neutralized on non-last
+stages, the input embedding (found through `get_input_embeddings`, with any norm it carries) dropped
+off non-first stages, and non-first stages driven through `inputs_embeds`, so each family's rotary
+embeddings, mask construction, `layer_types` handling and EP layers are inherited.
+
+Families are registered in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`), one
+`PPFamilySpec` per family keyed by its backbone class. A spec with `validated=True` is registered: its
+stages reproduce the unsplit model on the pipeline GPU tier, and
+`tests/cpu/conventions/test_pp_family_roster.py` holds every such family to a GPU row that runs it, a
+MoE one also with its experts distributed. A spec with a `refusal` is refused with its reason, and a
+backbone no spec registers is refused by name —
+`<Backbone> is not registered for pipeline parallelism (PP_FAMILY_SPECS); registered: ...`.
+`reject_unsupported_pp_structure` (`model_rules.py`) checks, in order, the decoder-layer list, the
+family refusal, the tie gate, the head transform, live MTP layers and the registration, so a tied or
+MTP-carrying checkpoint names that reason first.
+
+| Family (backbone) | Verdict | Constraint |
+|---|---|---|
+| Qwen3 dense (`Qwen3Model`) | registered | period = `layer_types` pattern when sliding is enabled. 0.6B, 1.7B and 4B ship `tie_word_embeddings=True` and are refused by the tie gate; 8B and up are untied |
+| Qwen3.5 / 3.6 dense and MoE text towers (`Qwen3_5TextModel`, `Qwen3_5MoeTextModel`) | registered | period 4 (`L,L,L,F`), so `pp_size` ≤ 8 for a 32-layer checkpoint, 10 for 40 layers. Qwen3.5-2B and 4B ship `tie_word_embeddings=True` and are refused by the tie gate; 9B, 35B-A3B and Qwen3.6-35B-A3B are untied. `text_only_model: true` for the shipped multimodal checkpoints; packed rows keep their documents apart on the markers each stage rebuilds ([Packing](#packing)); the family has no exportable bias slot and `aux_loss` is severed, so balance with `none` |
+| GPT-OSS 20b / 120b (`GptOssModel`) | registered | period 2, so `pp_size` ≤ 12 for 20b (24 layers), 18 for 120b (36 layers). `bias_update` or `none` balancing |
+| Qwen3 MoE (`Qwen3MoeModel`) | registered | any split offset (no `layer_types`). The family has no exportable bias slot and `aux_loss` is severed, so balance with `none`: `auto` resolves to `aux_loss` and is refused at the hub's `router_aux_loss_coef: 0.001` |
+| GLM-4 MoE Lite (`Glm4MoeLiteModel`) | registered | any split offset; layer 0 is dense. `auto` resolves to `bias_update` on the EP layers (`gate.e_score_correction_bias`). The hub's `num_nextn_predict_layers: 1` is metadata and passes |
+| Laguna S / XS 2.1 (`LagunaModel`) | registered | period-4 `full,s,s,s` list, so `pp_size` ≤ 12 for S (48 layers), 10 for XS (40 layers). `auto` resolves to `aux_loss`, which the released `router_aux_loss_coef: 0.0` leaves off; `bias_update` balances and exports through `experts.e_score_correction_bias` |
+| Inkling (`InklingTextModel`) | registered | period 6 (5 sliding : 1 full), so `pp_size` ≤ 7 for Inkling-Small (42 layers). `auto` resolves to `bias_update` on the EP layers; packing is refused ([Packing](#packing)). The shipped composite `InklingForConditionalGeneration` trains text-only, as Step-3.7's does |
+| Step-3.7 Flash text tower (`Step3p7TextModel`) | registered | period-4 `full,s,s,s` list ([split offsets](#split-offset-constraint)). The family ships only the composite `Step3p7ForConditionalGeneration`; a text-only run of it is admitted (tower and projector re-emitted in every checkpoint), image data is refused. The hub's `num_nextn_predict_layers: 3` is metadata and passes. `auto` resolves to `bias_update` on the EP layers |
+| DeepSeek-V4 (`DeepseekV4Model`) | registered | hyper-connection boundary, any split offset. Every `hash_moe` layer (`mlp_layer_types`, the first 3 by default) must sit on stage 0 — its `tid2eid` router reads `input_ids`, which only stage 0 has. `bias_update` or `none` balancing; eager attention only (family); offline GRPO takes one row per batch ([Row positions](../training-methods/grpo/offline.md#row-positions)) |
+| GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does; packing is refused ([Packing](#packing)). `auto` resolves to `aux_loss` and is refused at a live `router_aux_loss_coef`; `bias_update` balances and exports through `gate.e_score_correction_bias` |
+| Qwen3.8-Flash-Next text tower (`Qwen4ExpTextModel`) | registered | hyper-connection boundary, any split offset; later stages take the token ids their PLE layers read ([Token ids on later stages](#token-ids-on-later-stages)), and each stage saves its own n-gram tables ([Checkpoints and resume](#checkpoints-and-resume)). `text_only_model: true`, or the composite text-only; full fine-tuning with `moe_balancing: none` ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#pipeline-parallelism)) |
+| Nemotron-H text class (`NemotronHModel`) | registered | any split offset, as its blocks follow no period and each reads its mask by its own `block_type`; without a cache every Mamba layer scans from a zero state. `text_only_model: true`, since the composite keeps its head below its root and is refused. `auto` resolves to `bias_update` on the EP layers. The hub's `num_nextn_predict_layers: 1` is metadata and passes |
+| Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
+| Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
+| Any other backbone (Bailing, Mistral 4, LFM-2, Cohere2 MoE, Qwen3-Next, …) | not registered | refused by name |
+
+Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second
+cross-stage stream. Live means built — the decoder list is longer than `num_hidden_layers` — so an MTP
+count the native families ship as checkpoint metadata (`num_nextn_predict_layers`,
+`mtp_num_hidden_layers`, `num_mtp_layers`; transformers drops those weights at load) passes.
+
+**Hyper-connection families** carry the widened residual between layers: DeepSeek-V4 and GLM-5 Next a
+`[batch, seq, hc_mult, hidden]` stream collapsed by `hc_head`, Qwen3.8-Flash-Next a flat
+`[batch, seq, hc_count * hidden]` one collapsed by `hyper_connection_mixer` (its only post-layers module, declared
+as its final norm). Each spec neutralizes the collapse off the last stage like the norm, and binds a mid-chain
+forward that feeds the received stream to the layer loop instead of re-widening it, refusing anything but the
+full stream. All three select per-layer inputs by the layer's own attributes (`layer_types_rebase_safe`), so any
+split offset is exact.
+
+### Token ids on later stages
+
+A family whose layers re-read the token ids mid-network declares the backbone kwarg it takes them under
+(`PPFamilySpec.token_ids_kwarg`): Qwen3.8-Flash-Next's per-layer embeddings (PLE) look their n-grams up from
+`ple_input_ids`. Every rank of a chain already holds the batch, so the runner hands the non-first stages of such a
+family the microbatch's `input_ids` as a `token_ids` kwarg, split with the rows, and nothing crosses a boundary;
+a stage that should take them and gets none raises. DeepSeek-V4 declares none: its `hash_moe` layers stay on
+stage 0.
+
+### Boundary cost
+
+One bf16 tensor crosses each stage edge per microbatch per direction (the activation forward, its
+gradient back) and nothing else: masks, `position_ids` and `labels` are re-sliced on every rank from
+the batch it already holds, and shape inference exchanges meta tensors once.
+
+| Boundary | bytes/token, one direction | 32k-token microbatch, one crossing | NVLink (400 GB/s) | EFA share (50 GB/s) |
+|---|---:|---:|---:|---:|
+| plain residual, `H=4096` | 8 KiB | 256 MiB | 0.7 ms | 5.4 ms |
+| hyper-connection stream, `H=4096, hc_mult=4` (GLM-5.3-Flash, DeepSeek-V4-Flash) | 32 KiB | 1 GiB | 2.7 ms | 21 ms |
+| hyper-connection stream, `H=2560, hc_count=4` (Qwen3.8-Flash-Next) | 20 KiB | 640 MiB | 1.7 ms | 13 ms |
+
+Forward plus backward doubles each cell; `1f1b` waits on every P2P batch before the dependent
+compute, so those figures are exposed, not overlapped. torch keeps `2 × pipeline_microbatches`
+boundary buffers per mid-chain stage for the life of the run: 16 GiB at 8 microbatches of 32k tokens
+on the `hc_mult=4` stream (4 GiB for a plain residual). Only `pipeline_parallel_size` changes the
+traffic; the cut position does not.
+
+Measured between two B300 nodes over EFA, NCCL send/recv from each rank to its peer on the other node
+moves 92.8 GB/s per GPU pair at 256 MiB and 96.2 GB/s at 1 GiB, and keeps that rate with all eight pairs
+sending at once (776 GB/s in total). That is about twice the EFA column, so the two crossings above take
+2.9 ms and 11.2 ms there.
+
+### Split-offset constraint
+
+GptOss, Qwen3, Qwen3.5/3.6, Step-3.7, Laguna and Inkling select each layer's attention mask by *position in the
+layer list*. A stage starting off a whole number of `layer_types` periods would give sliding-window layers a
+full causal mask, so `validate_partition` (`partition.py`) raises at split time, on every rank; the
+hyper-connection families (`layer_types_rebase_safe`) are exempt. The period is the
+smallest shift `p` with `layer_types[p:] == layer_types[:-p]`, so a ragged list (Step-3.7-Flash: 45
+layers = 11 whole `full,s,s,s` periods plus one) still has period 4.
+
+That caps the stage count at `pp_size <= num_layers // period`. The default splitter snaps every
+boundary to the period and leaves the ragged tail on the last stage (45 layers at period 4, pp2 →
+`[24, 21]`); a **manual** `pipeline_split` gets no such help: at 60 layers a hand-written `[30, 30]`
+is rejected where the default `[32, 28]` passes.
+
+## PP + EP (MoE)
+
+EP dispatch/combine stays inside each stage — the EP groups carry the stage's rank offset — while
+only P2P activations cross stages. This is the cross-node shape for a large MoE.
+
+- **Every stage must carry at least one MoE layer** at `ep_group_size > 1` (EP and PP+ETP): a dense
+  stage runs a different collective program than its MoE peers and deadlocks at the gradient norm,
+  so such a partition raises at setup. Choose a `pipeline_parallel_size` or `pipeline_split` that
+  reaches the MoE layers on every stage.
+- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
+  stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
+  rejected under PP.
+- EP gradient sync runs in one deferred post-backward sweep (`EPConfig.sweep_reduces_across_replicas`), since
+  per-backward hooks would fire on every microbatch and re-scale grads already synced. The sweep is
+  off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
+  syncs the experts. Router and replicated averages reduce over the stage's rank block, never the
+  world.
+- The gradient norm is exact and rank-uniform: one world all-reduce of each rank's local squared
+  norm where every stage parameter is a DTensor; otherwise stage-scoped reduces, then one sum across
+  the pipeline chain.
+- Router balancing: `bias_update` works on a family whose EP layers export the bias (the counter
+  all-reduce is stage-scoped), and `bias_update_transient` is refused; the HF **aux-loss path is
+  severed** by the split, so `aux_loss` with a live `router_aux_loss_coef` is rejected at split time,
+  the refusal naming `bias_update` only where it exports. `MoEMetricsCallback` is skipped under PP.
+- Gradient checkpointing works: the recompute replays each frame's DeepEP dispatch/combine instead of
+  issuing a second one, so it composes with the schedule's in-flight microbatches
+  ([EP checkpoint scope](expert-parallelism.md#gradient-checkpoint-dispatch-replay)). The DeepEP
+  capacity generation is registered on `PipelineStageModule`, so every microbatch sizes its own
+  dispatch.
+- Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
+  both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
+  sum once), and every other registered MoE family against its unsplit ep1 twin through the real
+  trainer at `ep2` (`test_pp_family_vs_reference.py`). One released checkpoint has run the split as a correctness
+  smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
+  relative loss gap 3.4e-4, largest 1.16e-3), as two `torchrun` agents on one host.
+
+## PP + ETP (MoE)
+
+Pure expert-tensor parallelism (`expert_parallel_size: 1`, `expert_tensor_parallel_size: k`) inside
+each stage: every rank holds every expert, sharded `k`-way along the FFN intermediate dim, and
+`SumAcrossGroup` sums the partners' outputs in token space. The stage keeps `stage_world_size / k`
+data-parallel replicas.
+
+- ETP partners hold shards of one expert and consume the same batch, so they are **not** DP
+  replicas: the deferred sweep divides the expert leg by `stage_world_size / expert_tp_size`.
+- The ETP all-reduce is model math inside the forward/backward and is not deferred — safe only
+  because `ep_size == 1` leaves no DeepEP combine to interleave with. Adding EP on top is rejected.
+- The equivalence gate (`tests/gpu/parallelism/pp/test_pp_etp_vs_unsplit.py`) runs in **fp32**: ETP
+  reorders the summation producing each expert's output, which in bf16 flips near-tied top-k picks
+  with no sync bug present. Save, export (each expert whole, under global layer names) and exact
+  resume are covered on GPU (`test_pp_ep_resume.py --mode etp2`) and on CPU
+  (`tests/cpu/checkpoint/test_pp_sharded_save_roundtrip.py`).
+
+## Rejected combinations
+
+The first five are refused by the [capability-matrix allowlist](README.md#supported-combinations)
+before any rank math; the rest by their own gate.
+
+| Combination | Why |
+|---|---|
+| PP + TP | transformers reconciles a `replicated_with_grad_allreduce` plan entry (Qwen3 `q_norm`/`k_norm`) with a per-backward all-reduce hook the schedule disables on non-final microbatches, so the hook re-reduces accumulated history. |
+| PP + CP | The pipeline loss normalizer is stage-wide with no cancelling `× cp_size`, so every gradient comes out `cp_size×` too small, silently. |
+| PP + EP + TP | The deferred expert sweep needs FSDP to shard non-expert params over the EP group, while EP+TP shards them over the 2-D `(dp, tp)` mesh. |
+| PP + EP + CP | The deferred sweep's divisor counts every stage rank as a distinct DP replica; CP ranks are not, so every expert gradient comes out `cp_size×` too small. |
+| PP + EP + ETP | The expert-TP all-reduce cannot be deferred, so at `ep_size > 1` it interleaves with the DeepEP combine of the same backward in an order not guaranteed to agree across ranks ([PP + ETP](#pp--etp-moe)). |
+| PP + HSDP | HSDP's 2-D mesh is built over the whole world and cannot be restricted to a stage's rank block. |
+| PP + `fsdp_reshard_after_forward` / `fsdp_reshard_after_backward: false` | The schedule pins each stage unsharded across the backward and drives FSDP's post-backward itself. |
+| PP + tied embeddings | Stage 0's embedding and the last stage's head diverge from step 1; refused by the structure gate at load, since config validation cannot see the model. A composite loaded through its text class is judged on what either config level declares, and its stage config saves that tie. |
+| PP + an unregistered or refused family | Refused by the structure gate on the meta shell ([Model support](#model-support)). |
+| PP + PEFT / expert LoRA | The adapter save writes stage-local layer indices from one stage, the PP resume restores no adapter, and `layers_to_transform` / `all-linear` resolve against re-based layers. A model passed already PEFT-wrapped (a `PeftModel`, or tuner layers injected in place) is refused at the split as well: the split drops the `PeftModel` (and any prompt encoder on it) and keeps only the tuner layers inside the backbone, so no adapter is saved and the stage parts carry `base_model.model.*` / `.base_layer` names `from_pretrained` cannot load. |
+| PP + `save_sharded_ep` | The per-rank partial format carries no stage layer offset, so shards from different stages would collide. |
+| PP + `push_to_hub` on per-node output storage across nodes | The Trainer uploads from global rank 0, whose node lacks the other stages' parts. Upload from a shared output directory, or from the [merged](#per-node-export) one. |
+| PP + `torch_compile` | The schedule captures the stage module at setup, so a compiled wrapper installed afterwards never runs. |
+| PP + reentrant GC | Reentrant checkpoint runs its forward under `no_grad`, so FSDP2 skips pre-backward hook registration. `use_reentrant: false` is supported; `every_n_layers` counts from each stage's first local layer. |
+| PP + `optim: muon` / `flash_adamw` | The stage-local optimizer build and the per-stage optimizer shards a resume restores are validated with the AdamW family only. |
+| PP + `moe_balancing: bias_update_transient` | The transient side-buffer is a plain attribute the stage split and the PP resume never carry. |
+| PP + `lowp_precision` other than `bf16` | `lowp_keep_first_blocks`/`lowp_keep_last_blocks` would apply to every stage's own ends instead of the network's. |
+| PP + `init_from_scratch` | The stage loader has no checkpoint to stream, so every rank would build the whole model. |
+| PP + quantized (QLoRA) loading | The stage loader materializes plain weights, never bitsandbytes `Params4bit`, and the stage's FSDP2 wrap cannot shard `Params4bit` either. The adapter QLoRA trains is PEFT, refused above. |
+| PP + `accelerate launch` | Accelerate owns the FSDP/DDP wrap the pipeline replaces. Launch with `torchrun`. |
+| PP + padding-free collators | Their flattened width varies per batch while the P2P buffers are frozen, and the single row cannot be microbatched. Use [packing](#packing). |
+| PP + `activation_offloading` | TRL implements it by wrapping `training_step`, which the PP schedule never calls. |
+| PP + image-bearing VLM training | The vision tower and projector sit in no stage. Refused on image evidence (a dataset image column, embedded image parts, or a collator declaring image columns); a text-only run of a composite checkpoint is admitted and re-emits the tower unchanged, and `text_only_model: true` drops it from the build. |
+| PP + layer-indexed `freeze_layers_patterns` / `unfreeze_layers_patterns` | Each stage's layers are re-based to index 0, so a global index selects the wrong layer ([Configuration](../reference/configuration-reference.md#commonscriptarguments)). |
+| PP + a stage that is not a whole number of NVLink domains, or a one-rank stage | Every intra-stage group must stay inside one stage, and the stage FSDP wrap assumes DP ≥ 2 ([Rank layout](#rank-layout)). |
+| PP + `fsdp_defer_grad_sync`, or `fsdp_shard_ep1_experts: false` where EP layers meet `ep_group_size == 1` | The schedule already reduces once per step; with ep1 experts unsharded, a MoE stage and a dense stage run different collective programs and deadlock at the gradient norm ([PP + EP](#pp--ep-moe)). |
+| PP-only knobs at `pipeline_parallel_size: 1`; `pipeline_microbatches` with `gradient_accumulation_steps > 1`; a `per_device_train_batch_size` the microbatch count does not divide; an unset `max_length` | Nothing reads the knobs there; the microbatches are the accumulation and split the per-device batch; the P2P shapes freeze at `max_length` ([Configuration](#configuration)). |
+| PP + live MTP tail layers, or a head transform the last stage cannot reproduce | MTP re-embeds `input_ids` mid-backbone ([Model support](#model-support)); the last stage applies the family's head path itself ([Fused head](#fused-head-and-loss-on-the-last-stage)). |
+| PP + `aux_loss` with a live `router_aux_loss_coef`, or a stage with no MoE layer at `ep_group_size > 1` | The split severs the aux-loss path; a dense stage runs a different collective program than its MoE peers and deadlocks ([PP + EP](#pp--ep-moe)). |
+| PP + `compute_metrics` on DPO, KTO or offline GRPO, or an eval batch size other than the train one | No pipeline reproduces their prediction convention; the P2P shapes are frozen ([Evaluation](#evaluation)). |
+| PP + DPO/KTO with positional `model`/`args`, a live `ref_model`, or reference log-probs not precomputed | The PP reference contract is precompute-only ([Trainer support](#trainer-support)). |
+| PP + `packing` on a model whose conv / linear-attention layers read no boundary at all (GLM-5 Next and Inkling in the roster), on GatedDeltaNet layers without their segment-aware kernels, or with more than one packed row per microbatch | No marker reaches those layers, the torch fallbacks drop the markers, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
+
+## Fused head and loss on the last stage
+
+The last stage folds `lm_head` and cross-entropy into its forward and returns the summed loss, so the
+`[microbatch, seq, vocab]` logits plane and its gradient are never materialized. The head runs over
+token chunks of `max(1, 128M // vocab_size)` rows (`logit_chunk_rows`), each under a non-reentrant
+checkpoint. At `V=201088`, `S=8192` and one microbatch row that drops 3.29 GB of bf16 logits plus as
+much logit gradient; the loss and activation gradients are unchanged, while the head weight's gradient
+is reassociated per chunk (~7e-7 relative in fp32, ~1e-2 in bf16).
+
+On by default; `HALO_PP_FUSED_HEAD_LOSS=0` restores the logits path. `PipelineLossAdapter.stage_loss`
+fuses only the causal-LM CE with raw-logit predictions (the default `causal_lm_token_loss`, no
+`predictions_fn`) — **SFT alone**; every other trainer declares its own token loss. The forward-only
+pass that serves `compute_metrics` un-fuses and returns real logits. The gate
+(`tests/gpu/parallelism/pp/test_pp_fused_head_loss.py`, pp2×dp2, tiny Qwen3, fp32, seq 1024, vocab
+65536, with and without GC) holds loss within `1e-6` relative and every gradient within `1e-5`, at
+last-stage peak memory **1045.9 → 470.9 MiB**.
+
+The last stage applies what the family's `*ForCausalLM.forward` does around `lm_head` — Cohere's
+`logit_scale`, Gemma's softcap, Granite's division — to the logits it returns and inside the fused
+loss: the transform the chunked GRPO log-probs apply, verified against the family's forward
+(`halo/models/head_transform.py`). A family whose forward it does not reproduce is refused on every
+rank.
+
+## Attention, masks, and checkpointing
+
+- **Padding masks are exact.** Mask construction reads only `inputs_embeds`, the 2D mask and
+  `position_ids`, so a mid-stage forward builds a bitwise identical mask (equivalence-gated on ragged
+  right-padded batches under eager, SDPA and FA4 varlen).
+- **FA4** kernels are pre-warmed by the loader before the split, so no mid-schedule JIT stall.
+- **Liger `cross_entropy` and `fused_linear_cross_entropy` are force-disabled** under PP: a stage
+  forward runs without labels, so FLCE would claim a saving it does not deliver, and `cross_entropy`
+  rebinds `F.cross_entropy` process-wide under the last-stage loss. The stage loss chunks its own
+  fp32 CE ([Liger](../optimization/liger-kernels.md)).
+- **Gradient checkpointing** (non-reentrant) is grad-exact: the per-microbatch phase holds FSDP's
+  reduction off, so recompute cannot trigger a premature reduce-scatter.
+- **The stage holds its unsharded gradient across the microbatch loop.** The schedule reduce-scatters
+  once per step, so each rank keeps a full gradient of its stage's FSDP-managed parameters until
+  then: 2 B/param in bf16, 4 B/param under `fp32_grad_reduce` or `fp32_non_ep_params` (warned at
+  config time).
+- **Turn GC off where memory allows**, dense or with EP. A microbatch's activations are already `1/m`
+  of a step. TRL's `SFTConfig` turns `gradient_checkpointing` on by default; both shipped recipes set
+  it off ([Measured throughput](#measured-throughput)).
+
+## Measured throughput
+
+Between machines on a fast link, PP is not a speedup for a model that fits on one machine: it runs 4.0% below `dp16` on Qwen3-8B and 15.9% below `ep8` with DP on gpt-oss-20b. It leads where the alternative sends attention or experts across the link, where the link is slow, and where a model's experts and optimizer state do not fit on one machine. On one machine it gains only with EP, by halving the dispatch group.
+
+Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per arm. The arms of a block train the same rows at the same tokens per GPU per step. Peaks are allocated GiB, the highest rank of each stage. Every gpt-oss row runs grouped GEMM and `moe_balancing: bias_update`, and the Qwen3-8B and gpt-oss rows run packed `HuggingFaceH4/ultrachat_200k`.
+
+**A logged PP rate counts padding.** `num_input_tokens_seen` counts every row of a PP batch at `max_length`, so the rate `EfficiencyCallback` logs from it reads high: 17,709 for the 17,608 below, 15,820 for 15,715, and 2,556 for GLM-5.3-Flash's 2,423. The PP rates on this page divide the attended tokens of the matching non-PP arm, on the same rows, by PP's step time. To compare a PP run with another layout, compare step times at equal tokens.
+
+![Tokens/s/GPU on B300. Two 8-GPU machines on a fast link: Qwen3-8B pp2 × dp8 at 17,608 is 4.0% below dp16 and 1.63× dp8 × tp2; gpt-oss-20b pp2 × ep8 at 15,715 is 15.9% below ep8 with DP and 3.82× ep16. Forced onto plain TCP sockets, pp2 × dp8 holds 15,414 where dp16 falls to 1,117. One machine: pp2 × dp4 is 8.5% below dp8, and pp2 × ep4 is 9.2% above ep8. GLM-5.3-Flash full fine-tune: pp2 × ep8 at 2,423 is 1.61× ep16, and ep8 with DP runs out of memory](../assets/benchmarks/pp_throughput.png)
+
+**Two 8-GPU machines, fast link** (EFA, one stage per machine), `max_length` 4096 on Qwen3-8B and 8192 on gpt-oss-20b, m=8 (a 1/9 bubble), median of 10 steps:
+
+| Model | Layout | GC off | Peak | GC on | Peak |
+|---|---|---:|---:|---:|---:|
+| Qwen3-8B | `dp16` | 18,337 | 42.2 | 15,000 | 24.5 |
+| | `pp2 × dp8` | **17,608** | 41.3 / 28.6 | **14,810** | 22.1 / 20.7 |
+| | `dp8 × tp2` | 10,780 | 31.0 | 6,663 | 20.5 |
+| gpt-oss-20b | `ep8` with DP | 18,685 | 63.1 | 14,932 | 39.0 |
+| | `pp2 × ep8` | **15,715** | 53.3 / 28.5 | **12,796** | 25.9 / 18.0 |
+| | `ep16` global | 4,115 | 60.9 | 3,806 | 31.1 |
+
+- Against DP, with any experts local, PP runs 4.0% and 1.3% below `dp16`, GC off then on, and 15.9% and 14.3% below `ep8` with DP.
+- Against the layouts that cross the link it leads: 1.63× and 2.22× over `dp8 × tp2`, 3.82× and 3.36× over `ep16`, whose dispatch crosses it in every MoE layer. Both PP rates repeat within 0.4%.
+- PP's memory saving falls on its last stage: 0.68× the DP row's peak on Qwen3-8B and 0.45× on gpt-oss-20b, GC off. The first stage holds 0.98× and 0.84×.
+- GC off raises PP's own rate 18.9% on Qwen3-8B and 22.8% on gpt-oss-20b, for 1.9× and 2.1× the allocated peak. The whole-device peaks are 49.2 GiB on stage 0 and 35.7 GiB on stage 1 for Qwen3-8B, 70.4 and 40.8 GiB for gpt-oss-20b.
+
+**A slow link.** The same two machines forced onto plain TCP sockets, Qwen3-8B, GC off: `pp2 × dp8` holds 15,414, 0.875× its fast-link rate, while `dp16` falls to 1,117, 0.061× of its own. PP leads by 13.8×.
+
+**A model that does not fit on one machine's expert group.** GLM-5.3-Flash full fine-tune, two 8-GPU machines, GC on, m=8, one padded row of about 7,750 tokens per microbatch, stages of 24 and 21 layers: `pp2 × ep8` runs 2,423 at 12.82 s a step, 1.61× the 1,504 at 20.63 s of `ep16` global, at 218.7 / 197.9 GiB against 214.1. On torch's general attention kernel and upstream's hyper-connections the same arms read about 1,060 and 913, a 1.16× lead ([GLM-5 Next → Throughput](../models/glm5-next.md#throughput)). `ep8` with DP runs out of memory in the first optimizer step: at 40.2B trainable per rank, AdamWBF16's state takes the allocation to 243–250 GiB of 267.7.
+
+**Qwen3.5 and 3.6, which fit either way.** The text tower through its class, two 8-GPU machines, `max_length` 8192, packed, m=8, `moe_balancing: none`, median of steps 4–13 on the same rows. Qwen3.5-35B-A3B with GC off: `pp2 × ep8` attends 15,306 tok/s/GPU against 15,758 for `ep8` + DP (0.97×), at 126.7 / 62.7 GiB against 148.7. With GC on: 12,202 against 12,994 (0.94×), at 59.5 / 39.1 GiB against 91.0. Qwen3.6-35B-A3B with GC off: 15,202 against 15,698 (0.97×), at 126.5 / 63.0 GiB against 149.0. PP costs 3 to 6% here and pays in memory, the far stage most. A one-step save merged with `merge_pp_stages.py`, took its tower back with `reattach_vision_tower.py` and loaded as the composite with no key missing or unexpected.
+
+**Two more text towers, on GC.** `pp2 × ep8` at m=8 on Qwen3.8-Flash-Next and Nemotron 3.5 Super VL runs out of memory in the first step with GC off, at about 260 of 267.7 GiB with eight full graphs live on a stage. With GC on, 13 steps ran at 16.89 and 13.69 s a step, 1,940 and 2,394 tok/s/GPU as logged, which counts padding, at 115.7 / 78.2 and 100.9 / 96.8 GiB.
+
+**One 8-GPU machine**, GC off, `max_length` 8192, 524k tokens (64 rows) per step, m=16 (a 1/17 bubble), median of steps 6–15. A single `torchrun` refuses an NVLink domain smaller than its node (`nvlink_domain_size` must be a multiple of `gpus_per_node`), so the `pp2` rows run two `torchrun` agents in one container, `--nnodes=2 --nproc_per_node=4` with `--node_rank=0` on `CUDA_VISIBLE_DEVICES=0,1,2,3` and `--node_rank=1` on `4,5,6,7`: each agent is a 4-GPU node to the toolkit, and each half is one stage. The traffic between the halves stays inside the host, over NCCL shared memory, so these rows price the schedule and the narrower groups, not an inter-node link. The `dp8` and `ep8` rows run one agent on the host's 8-GPU domain.
+
+| Model | Layout | tok/s/GPU | Peak |
+|---|---|---:|---:|
+| Qwen3-8B | `dp8` | 21,359 | 68.5 |
+| | `pp2 × dp4` | **19,537** | 66.3 / 40.4 |
+| gpt-oss-20b | `ep8` | 19,989 | 63.1 |
+| | `pp2 × ep4` | **21,836** | 62.6 / 36.5 |
+
+- Dense: `pp2 × dp4` runs 8.5% below `dp8`, with nothing to offset the bubble.
+- With EP: `pp2 × ep4` runs 9.2% above `ep8`: halving the dispatch group cuts the DeepEP cost by more than the bubble adds. Both gpt-oss rates still rise over that window, so read the gap as a median of one run each.
+
+## Packing
+
+`packing: true` composes with PP and is the way to avoid full-window compute on short rows: PP pads
+every batch to `max_length`. Each stage rebuilds the segment markers a model's conv / linear-attention layers
+read (`segment_markers_for`: `seq_idx` for GatedDeltaNet, LFM-2 ShortConv and Nemotron-H's Mamba, `cu_seq_lens` for
+the delta rule) from its microbatch's `position_ids`, as the packing collator builds them for a flattened row, so
+Qwen3.5 / 3.6, Qwen3.8-Flash-Next and Nemotron-H keep each document of a packed row apart; GatedDeltaNet needs its segment-aware kernels for it,
+as off PP. Packing is refused, whatever `allow_cross_document_linear_attention` says, where the layers read no
+boundary at all (`find_unmarked_sequence_mixer`: KDA, Lightning Attention-2, Inkling's short convolutions), whose
+state would carry from each document into the next. In the roster that is GLM-5 Next and Inkling, whose padded
+rows hold one document each and still run; DeepSeek-V4 refuses multi-document rows on every path
+([Document isolation](../data/collators.md#document-isolation-under-packing)).
+`reject_pipeline_packed_rows` (`halo/models/segment_markers.py`) holds the rule; the collator factory
+applies it when PP keeps the packed rows, and `reject_pp_collator` again to the trainer's final collator,
+whatever built it.
+
+Under PP the packing collator keeps its `[B, L]` rows instead of flattening to `[1, B*L]`: the
+schedule splits dim 0 into microbatches, so **the microbatch split is the flattening**, and each
+microbatch reaches the stage as `[1, max_length]`. One requirement, enforced at setup:
+
+```yaml
+packing: true
+per_device_train_batch_size: 4    # must equal the microbatch count
+pipeline_microbatches: 4
+```
+
+A microbatch carrying more than one packed row leaks attention across documents under FlashAttention,
+which derives `cu_seqlens` from `position_ids` only at batch size 1 (~1.9 nats of logprob error); the
+gate does not vary by backend ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+The trailing pad region is inert: its positions restart at 0 every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens,
+so it forms a few segments of its own with ignored labels.
+
+Each stage builds those markers once per microbatch from one host read of the row
+(`PipelineStageModule._segment_kwargs` in `halo/distributed/pipeline_parallel/stage.py`), and on a flash backend
+the varlen set with them: `cu_seq_lens_q/k` and the longest segment as a host-int `max_length_q/k`. The schedule
+splits only batch-dim tensors, so the markers the packing collator builds for a flattened row cannot ride in with
+the batch; without the varlen set every attention layer derives it from `position_ids` again, three host syncs
+per layer and again in the recompute. A masked or one-document microbatch gets none, nor does a non-flash
+backend on a family without markers.
+
+## Per-step metrics
+
+Only the last stage computes the loss, while HF logs from global rank 0 on the first stage, so the
+trainer broadcasts the last stage's per-step scalars down the chain (one fp32 vector per step,
+`PipelineLossAdapter.metrics_fn`); every chain rank logs the same values.
+
+## Evaluation
+
+Evaluation runs through the schedule on every PP trainer: `eval_loss` reports normally and every rank
+logs the identical broadcast value. Without `compute_metrics` the schedule computes its own
+microbatched loss; with it, one forward-only pass yields the last stage's merged output, from which
+both the loss and the predictions derive. A forward-only drive skips the schedule's trailing gradient
+reduction, so evaluation does not reshard the stage per batch.
+
+`compute_metrics` is served where a pipeline can reproduce the trainer's prediction convention and
+**rejected at construction** elsewhere:
+
+| Trainer | Under PP | Prediction |
+|---|---|---|
+| SFT | served | whatever `preprocess_logits_for_metrics` returns, hoisted onto the last stage (required) |
+| Classification | served | pooled `[B, num_labels]` |
+| Reward (BT) | served | `[pairs, 2]` chosen/rejected scores |
+| SMPO | served | `[pairs, 2]` chosen/rejected rewards |
+| DPO | rejected | TRL hands metrics the raw plane of the `[chosen ⧺ rejected]` concat; PP rows are interleaved |
+| KTO | rejected | TRL's convention is the raw plane, `[rows, max_length, vocab]` broadcast to every chain rank |
+| Offline GRPO | rejected | its `prediction_step` returns no predictions in any mode |
+
+- `per_device_eval_batch_size == per_device_train_batch_size` whenever the run evaluates, since the
+  P2P shapes are frozen. Partial final batches are row-padded with all-ignore rows contributing 0,
+  then trimmed before scoring.
+- SFT's `preprocess_logits_for_metrics` runs on the last stage before the broadcast, so it must be
+  row-independent (argmax and top-k are); SFT `compute_metrics` without it is refused.
+- The evaluation gather is scoped to the data-parallel replicas, since every chain rank returns the
+  same predictions.
+- DPO and KTO require their precomputed reference columns in the eval dataset too.
+
+## Loading
+
+Loading is **stage-aware**: each rank builds the whole model shell on the meta device, plans the
+checkpoint against that key space, keeps only the plans for its stage's decoder layers — re-basing
+`layers.5` on disk to `layers.1` on a stage starting at layer 4 — and streams exactly those tensors
+from safetensors (`load_pp_stage_model`, `halo/model_loading/parallel/pp.py`, narrowing the
+whole-model plan through `StageKeyFilter`). Peak
+per-rank load memory is
+
+```text
+P_ne_layers / pp_size + embeddings + final norm + head        (+ the EP expert slice / ep_size)
+```
+
+Embeddings, the final norm and the head are materialized on every stage and dropped by
+`build_pipeline_stage` right after. PP+EP composes as a filter: the PP layer filter narrows the EP
+planner's output.
+
+The structure gate runs on the meta shell before any weight is read and before the loader's first
+cross-rank verdict, so an unregistered family, a refused one or a tied checkpoint fails every rank
+alike. The coverage gate raises if any parameter or persistent buffer is left on the meta device, or
+a re-based key names nothing on the sliced stage; both verdicts are stage-local, so they are joined
+and raised on every rank. State the checkpoint does not carry (a `score` head on a base LM) follows
+the EP lazy loader's random-init policy ([EP → Model loading](expert-parallelism.md#model-loading)).
+
+The stage loader reads configured FP32 masters (`fp32_non_ep_params`, `fp32_router`, `fp32_experts`)
+at FP32 ([Load precision](../models/README.md#load-precision)). PP **requires a safetensors
+checkpoint**; `init_from_scratch`, QLoRA loading and `lowp_precision != bf16` are rejected. The stage
+load runs on every rank at once; `max_concurrent_loading` does not apply
+([Multi-Node → Model loading](multi-node.md#model-loading)).
+
+## Checkpoints and resume
+
+`save_pp_checkpoint` (`halo/checkpoint/parallel/pp.py`) writes one complete-tensor part set per stage
+under the unsplit model's hub names plus a merged standard index, so a directory on a shared output
+filesystem loads with plain `from_pretrained` and serves like an EP-gathered save. The layout, the
+name revert and the index exchange: [Checkpoints → What lands on disk](../reference/checkpoints.md#what-lands-on-disk--four-layouts).
+The input embedding, with any norm it carries, lives on stage 0 alone, so no two stages write it. A stage holding
+an external table (Qwen3.8-Flash-Next's n-gram tables) writes it beside its parts under the unsplit model's names,
+in files under its own part prefix, and the stage-aware loader attaches it by those names, so a resume reads each
+stage's table from its own files.
+
+The **writer set** follows the output filesystem (`DIST_OUTPUT_SHARED_FILESYSTEM`, falling back to
+the `DIST_SHARED_FILESYSTEM` umbrella):
+
+| Artifact | Shared output FS | Per-node output FS |
+|---|---|---|
+| Stage parts `model-ppSSSSS-of-PPPPP-*.safetensors`, with the stage's [external tables](../reference/checkpoints.md#external-tables) as `model-ppSSSSS-of-PPPPP-tableNN-*` | one rank per stage (`stage_local_rank == 0`) | one rank per stage per **node** (`is_pp_shard_writer`) |
+| Index, `config.json`, tokenizer, a text-only run's untouched vision tower (`model-wrapper-*`) | global rank 0 | one rank per node; the index is the full one |
+| `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
+| `optimizer_shard_<rank>.pt`, `rng_state_<rank>.pth` | every rank | every rank, on its own node |
+
+Because the parts carry the unsplit model's names, the **weights are topology-independent**: a
+complete directory resumes onto a different `pp_size`. The **optimizer** shards are stage-local:
+their restore is gated on the topology fingerprint and `pp_stage_partition` (both in
+`optimizer_meta.pt`), and any drift raises. PP+EP loads its expert weights only at construction, so
+resume through the training scripts, which repoint the load at the checkpoint
+([Resume by parallelism mode](../reference/checkpoints.md#resume-by-parallelism-mode)).
+
+Every PP trainer's save, resume and export runs on GPU through the real trainer, on one host. SFT
+resumes in `tests/gpu/parallelism/pp/test_pp_resume.py` (dense `pp2`), exports in
+`test_pp_sft_trainer_e2e.py`, and does both with experts in `test_pp_ep_resume.py` (gpt-oss `pp2 × ep2`
+and `pp2 × etp2`); on per-node storage its checkpoint is also merged with `merge_pp_stages.py` and resumed
+from the merge, and the Qwen3-8B recipe saved, resumed, merged and loaded with `from_pretrained` on two
+nodes ([Verified topologies](multi-node.md#verified-topologies)). The other trainers run in
+`test_pp_trainer_checkpoints.py`, one row per trainer and two for offline GRPO (with and without the KL
+reference that rides each checkpoint as `reference_logps.pt`); each resume there restores the optimizer
+bit for bit and replays the unbroken run.
+
+### Per-node export
+
+On per-node output storage each node's directory holds the full index but only the parts of the
+stages it ran, plus the wrapper parts, and only its own ranks' optimizer shards and RNG states. It
+resumes only the topology and rank placement that wrote it; a node asked for another stage's layers
+fails on every rank, naming the placement, and every after-training tool refuses the directory, naming
+its absent parts. To export, or to resume from one directory, copy each node's directory onto one host
+and merge:
+
+```bash
+python scripts/after_training/merge_pp_stages.py \
+    --input_dir /copies/node0/checkpoint-500 /copies/node1/checkpoint-500 \
+    --output_dir /models/merged
+```
+
+The inputs must carry identical indexes that name stage parts, so an ordinary checkpoint is refused, and
+one `global_step`, since two steps of a run share an index and an optimizer meta and only
+`trainer_state.json` tells them apart. Each part, a stage's table files included, comes from the first input
+holding it; every
+input's optimizer shards, RNG and prefetch states come along with one `optimizer_meta.pt`, hard-linked
+when the output is on their filesystem (so the optimizer state is not stored twice) and copied with
+their mode otherwise, and the config, tokenizer, trainer state and scheduler come from the first input.
+A part no input holds, metas or steps that differ, a node with no trainer state beside one that has it, a
+per-rank file held at two sizes or a rank whose shard no input holds is refused before the first write; the
+index lands last. The merged directory loads with
+`from_pretrained`, uploads like a shared-filesystem save, and resumes exactly on the save's topology.
+A linked file outlives its input's deletion, and a later training save into either directory replaces it
+rather than writing through the link
+([Checkpoints & Resume](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)).
+
+## Constraints inherited from `torch.distributed.pipelining`
+
+- **Fixed shapes.** Input shapes freeze on the first step; a later shape raises
+  `PipeliningShapeError`. The trainer pads every batch to `max_length`.
+- **Bare tensors only.** Every stage returns a tensor. Per-example side tensors (advantages,
+  reference log-probs, pool positions) ride the runner's dict-target side channel, split in lockstep
+  with the rows.
+- **Microbatch invariance.** Per-microbatch losses must **sum** to the full-batch loss, so a
+  whole-batch denominator is passed as a step-level normalizer.
+- `PipelineRunner` drives torch's **private** FSDP2 and schedule members, so construction asserts
+  their presence: a torch upgrade that renames one raises immediately, naming PP as needing
+  re-validation.
+
+## Trainer support
+
+PP is declare-to-enable per trainer (like `SUPPORTS_CP`): `PP_REFUSAL` is the mechanism a refusing
+trainer's error names, `None` where PP is supported. An enabled trainer declares its
+pipeline-loss contract as a `PipelineLossAdapter` (`_pp_loss_adapter()`,
+`halo/trainers/parallelism/pipeline_loss_adapter.py`). `_configure_pipeline_parallel` calls
+`_pp_loss_adapter()` once, before anything reads the adapter, so an adapter builder may seed the
+per-step state its loss closes over.
+
+The refusals are pure functions in `halo/trainers/parallelism/pipeline_rules.py`. The training-argument,
+PEFT and multimodal gates run before the stage split, with each trainer's own
+`_reject_unsupported_pp_options` (DPO and KTO: keyword `model`/`args`, no live `ref_model`, the
+precompute-only reference, `compute_metrics`); the collator, pad-token and EP-coverage gates run after
+`super().__init__`. The rank-local verdicts (image evidence, a stage with no EP layer) are joined
+across ranks.
+
+Which trainers enable PP: [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The enabled trainers' pipeline-loss contracts:
+
+| Trainer | Contract notes |
+|---|---|
+| SFT | canonical causal-LM |
+| SMPO | interleaved pairs; percentile clips stay rejected (batch-global quantiles are not microbatch-decomposable) |
+| Reward (BT) | interleaved pairs over scores pooled in the loss; needs `num_labels: 1`, and a `margin` column in the train dataset or in no batch |
+| Classification | every loss variant; single-label needs `num_labels >= 2`; `predictions_fn` broadcasts pooled `[B, num_labels]` |
+| DPO | precompute-only: reference log-probs as dataset columns; limits: [DPO](../training-methods/preference/dpo.md) |
+| KTO | `apo_zero_unpaired` only: KL-free, per-row decomposable, precompute-only; the default `kto` loss needs a world-global KL baseline |
+| Offline GRPO | all three loss types and both PG formulations; `max_prompt_length` + `max_completion_length` required. `kl_beta > 0` scores the reference once at construction by a forward-only sweep through the pipeline and ships it per completion token as a dataset column (sized, indexable, unsharded datasets); the scores ride every checkpoint (`reference_logps.pt`) |
+
+A refusing trainer's error names its `PP_REFUSAL`: embedding (the in-batch similarity matrix *is* the
+loss), SDPG (a second, differently-shaped same-model forward), online and async GRPO (the weight sync
+sends the full `named_parameters()` from one rank set, which no PP rank holds), teacher and self
+distillation (a second forward per microbatch through a distinct frozen teacher).
+
+## Code map
+
+`halo/distributed/pipeline_parallel/`: `families.py` (the family specs and the hyper-connection
+stream forwards), `model_rules.py` (the structure and run-settings gates), `partition.py` (the split
+and `validate_partition`), `stage.py` (`build_pipeline_stage` and the stage↔global naming),
+`stage_losses.py`, `groups.py` (chain and stage groups) and `runner.py` (`PipelineRunner` over torch's
+`Schedule1F1B` / `ScheduleGPipe`). The stage-aware loader is `halo/model_loading/parallel/pp.py`; the
+trainer side is `PipelineTrainerMixin` (`halo/trainers/parallelism/pipeline_trainer.py`, inert at
+`pp_size == 1`), `pipeline_rules.py`, `pipeline_loss_adapter.py` and the stage clip in
+`grad_clipping.py`.

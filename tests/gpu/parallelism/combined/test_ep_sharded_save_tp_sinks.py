@@ -1,24 +1,9 @@
 #!/usr/bin/env python
-"""
-Sharded EP save under TP must write COMPLETE attention sinks (GptOss).
+"""The sharded EP save under TP writes complete GptOss attention sinks, hand-sliced per rank since they can't be
+DTensors.
 
-GptOss sinks cannot be DTensors (the forward concatenates them with already-sharded logits), so
-under TP ``shard_sinks_param`` slices them by hand into this rank's head range and registers the
-suffix on ``model._tp_sharded_non_dtensor``. The gathered EP save all-gathers that registry; the
-sharded EP save (``save_sharded_ep=True``, i.e. EP+TP) must do the same rather than fall through to
-the plain non-expert branch, which writes rank 0's HALF of the tensor under the full-tensor key.
-Nothing downstream can repair that: ``merge_ep_shards.py`` passes non-rank-suffixed keys straight
-through, so the merged checkpoint carries a truncated ``self_attn.sinks``.
-
-On 2 GPUs this builds a tiny real ``GptOssForCausalLM``, applies the real TP sink sharding over a
-real 2-rank ``tp`` mesh, saves with ``save_ep_model(sharded=True)``, and asserts the written shard
-holds every head's sink at its pre-shard value. (No EP layers are needed — the sinks travel the
-non-expert path either way, which is the seam under test; that keeps this hermetic: no model
-download, no DeepEP.)
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/combined/test_ep_sharded_save_tp_sinks.py
+Falling through to the plain non-expert branch writes rank 0's half under the full key, and ``merge_ep_shards.py``
+passes it through truncated. No EP layers needed: sinks travel the non-expert path.
 """
 
 import json
@@ -32,11 +17,12 @@ from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.checkpoint.ep_save import save_ep_model
-from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from halo.checkpoint.parallel.ep import save_ep_sharded_checkpoint
+from halo.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
+from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 NUM_LAYERS = 2
 NUM_HEADS = 4
@@ -61,12 +47,11 @@ def _tiny_gpt_oss(device: torch.device) -> GptOssForCausalLM:
 
 
 def _full_sinks(layer_idx: int, device: torch.device) -> torch.Tensor:
-    """Distinct per head AND per layer, so a truncated or wrong-layer write is visible."""
+    """Distinct per head and per layer, so a truncated or wrong-layer write is visible."""
     return (torch.arange(NUM_HEADS, device=device, dtype=torch.bfloat16) + 1) * (layer_idx + 1)
 
 
 def _check_saved_sinks(save_dir: str, world_size: int, expected: dict) -> list[str]:
-    """Every expected sink key must be in rank 0's shard + the index, at FULL head width and value."""
     shard = load_file(os.path.join(save_dir, f"model-{0:05d}-of-{world_size:05d}.safetensors"))
     weight_map = json.loads(Path(save_dir, "model.safetensors.index.json").read_text())["weight_map"]
     problems = []
@@ -109,12 +94,11 @@ def run(ctx) -> dict:
         shutil.rmtree(save_dir, ignore_errors=True)
     ctx.barrier()
 
-    save_ep_model(model, save_dir, sharded=True)
+    save_ep_sharded_checkpoint(save_context(model), save_dir)
     ctx.barrier()
 
-    # Only rank 0 writes the non-expert params, so only it can check them. Verdict travels back
-    # to every rank as data (never as a rank-0-only raise): an early exit there would strand the
-    # peers in the next collective, turning a failed assertion into a hang.
+    # Only rank 0 writes the non-expert params. The verdict travels as data: an early rank-0 exit strands peers in the
+    # next collective.
     problems = _check_saved_sinks(save_dir, ctx.world_size, expected) if ctx.rank == 0 else None
     verdict = [problems]
     dist.broadcast_object_list(verdict, src=0)

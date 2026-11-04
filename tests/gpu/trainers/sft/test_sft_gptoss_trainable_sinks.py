@@ -1,20 +1,8 @@
 #!/usr/bin/env python
-"""Trainable GptOss attention sinks (``train_sinks``) train end-to-end under FA4.
+"""Trainable GptOss sinks (``train_sinks``) train end to end under FA4, through the wrap and into the optimizer.
 
-The kernel-level exactness of the FA4 rescale is pinned by ``tests/gpu/kernels/test_fa4_trainable_sink_rescale.py``;
-this test pins the trainer path: the loader stamps ``SinksPolicy.TRAINABLE``, the sinks stay trainable
-through the parallelism wrap, EVERY layer's sinks receive a non-zero gradient at the optimizer step,
-the optimizer moves them, and the loss and grad norms stay finite. Modes: plain FSDP2 (``--mode fsdp``,
-sinks DP-sharded as DTensors), TP=2 (``--mode tp``, sinks hand-sliced plain tensors gathered through
-the TP seam), EP=2 (``--mode ep``, sinks FSDP-managed next to EP-ignored experts). Packing is on so the
-varlen kernel runs; the dense kernel path is covered by the kernel test.
-
-The gradient is probed directly rather than inferred from movement: the sinks are bf16 parameters
-under stochastic rounding, and a few steps at a small learning rate move only a fraction of them
-(the update is far below one bf16 ULP), so "every layer moved" would be flaky by construction.
-
-Fails if: the policy is not stamped, the sinks are frozen or dropped from the optimizer by any wrap,
-the FA4 rescale stops delivering a sink gradient in any layer, or training diverges.
+The gradient is probed directly: bf16 sinks under stochastic rounding at a small LR move only a fraction, far below one
+ULP, so "every layer moved" would be flaky.
 """
 
 import argparse
@@ -25,18 +13,19 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import materialize_dtensor
-from src.distributed.tensor_parallel.state_dict import iter_tp_sharded_non_dtensor_full
-from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 MODE_CONFIGS = {"fsdp": {}, "tp": {"tp_size": 2}, "ep": {"ep_size": 2}}
@@ -67,9 +56,9 @@ class SinkGradProbe(TrainerCallback):
 
 
 def _full_sinks(model) -> dict[str, torch.Tensor]:
-    """Every layer's full sink vector on this rank — DTensor shards materialized, TP hand-slices gathered."""
+    """Every layer's full sink vector on this rank: DTensor shards materialized, TP hand-slices gathered."""
     full = {}
-    tp_gathered = dict(iter_tp_sharded_non_dtensor_full(model))
+    tp_gathered = dict(iter_hand_sliced_full(model))
     for name, param in model.named_parameters():
         if not name.endswith("self_attn.sinks"):
             continue
@@ -92,7 +81,7 @@ def run(ctx) -> dict:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
 
-    parallelism_config = ParallelismConfig(use_grouped_gemm=has_grouped_mm(), **MODE_CONFIGS[mode])
+    parallelism_config = ParallelismConfig(use_grouped_gemm=supports_grouped_mm(), **MODE_CONFIGS[mode])
     model, _ = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=parallelism_config,
@@ -126,7 +115,6 @@ def run(ctx) -> dict:
             max_length=MAX_SEQ_LENGTH,
             dataloader_drop_last=True,
             dataloader_num_workers=0,
-            fsdp="",
         ),
         train_dataset=train_dataset,
         processing_class=tokenizer,
@@ -144,8 +132,7 @@ def run(ctx) -> dict:
     checks |= training_run_checks(train_result, trainer, NUM_TRAIN_STEPS, grad_norms=True)
     losses = step_losses(trainer)
 
-    # Every rank holds a slice of every layer's sinks (DTensor shard or TP head range): sum the
-    # per-layer gradient mass over the world before judging, in one fixed name order.
+    # Every rank holds a slice of every layer's sinks: sum the gradient mass over the world, in one fixed name order.
     names = sorted(before)
     mass = torch.tensor([probe.grad_mass.get(name, 0.0) for name in names], device=ctx.device)
     dist.all_reduce(mass)

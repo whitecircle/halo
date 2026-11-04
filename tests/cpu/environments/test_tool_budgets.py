@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""Per-tool episode budgets and effort profiles are protocol- and base-level features.
-
-Every native or ReAct env can cap calls per tool per episode (``tool_budgets``): the protocol admits
-a call — binds its arguments, checks the episode's cap, counts it — before the handler runs, so a call
-the handler could never run or one past the cap is refused as a tool error without spending the
-budget, and a one-call cap cannot be double-spent by two calls in one turn. Under the native protocol a
-turn whose every call was refused ran nothing: it is flagged untrainable like a turn of unknown tools, so the
-next turn retries on the recovery reserve; a call to a tool a cap of 0 disables is an error but no refusal.
-Every env binds an
-effort profile at reset: the thinking budget is the base key; a task adds its own through
-``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``. A refusal states the fact, never the cap:
-what an episode may do is the chat template's and the engine's to control, not a number the model reads.
-
-Run: python tests/cpu/environments/test_tool_budgets.py  (or pytest)
-"""
+"""Per-tool episode budgets and effort profiles at the protocol and base level. A call is admitted (arguments bound,
+cap checked, counted) before the handler runs, so a refused one spends nothing and a one-call cap cannot be
+double-spent. A refusal states the fact, never the cap."""
 
 import asyncio
 import json
@@ -21,11 +9,11 @@ import re
 
 import pytest
 
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.episode import recovering_turn
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.registry import build_environment
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 # The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.
 _ECHO_SPENT = "Error: Not executed: this task's budget for echo is spent."
@@ -67,6 +55,10 @@ def _flags(traj):
     return [m.calls_rejected for m in traj.messages if m.role == "assistant"]
 
 
+def _untrainable(traj):
+    return [m.untrainable for m in traj.messages if m.role == "assistant"]
+
+
 def _step(env, ids, *calls):
     """One turn of ``calls`` through the protocol's step, sync or async by the environment's class."""
     contexts = [{"tool_calls": list(calls)}]
@@ -91,6 +83,22 @@ def test_native_budget_refuses_past_the_cap_and_counts_only_admitted_calls():
     assert observations[3] == "pong"
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1, "ping": 1}
     assert traj.total_reward == pytest.approx(-0.2), "two refusals charged as tool errors; admitted calls pay 0"
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "codeforces"])
+def test_code_contests_refuse_budgets_their_own_knobs_would_overwrite(env_type):
+    with pytest.raises(ValueError, match="from max_submissions and max_test_calls"):
+        build_environment(env_type, {"sandbox_backend": "local", "tool_budgets": {"submit_solution": 1}})
+
+
+@pytest.mark.parametrize("unset", [None, {}], ids=["null", "empty"])
+def test_code_contests_stamp_their_own_knobs_with_no_tool_budgets_stated(unset):
+    env = build_environment(
+        "code_contests",
+        {"sandbox_backend": "local", "tool_budgets": unset, "max_submissions": 3, "max_test_calls": 4},
+    )
+    _, (step,) = env.reset(["solve"], [{"answer": [{"input": "", "output": ""}]}])
+    assert step.trajectory.info[EPISODE_TOOL_BUDGETS_KEY] == {env.test_tool_name: 4, "submit_solution": 3}
 
 
 def test_tool_budgets_must_name_registered_tools_with_non_negative_int_caps():
@@ -155,45 +163,42 @@ def test_an_enum_argument_outside_the_schema_is_refused_unspent():
     ids=["missing-argument", "undeclared-argument", "list-for-a-string"],
 )
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers(call):
-    """A call whose arguments do not bind ran nothing and spent nothing: a turn of nothing else is flagged
-    like one that named no tool, so it is never rewarded and the next turn retries on the recovery reserve.
-    Its reply and its tool-error price are the ones it always had."""
+    """A call whose arguments do not bind ran nothing: a turn of nothing else is flagged like one naming no tool,
+    never rewarded, and the next turn trains."""
     env = NativeToolUseEnvironment(tool_registry=_registry(), tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, call)
     traj = step.trajectory
-    assert _flags(traj) == [True] and recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [True]
     assert _observations(traj)[0].startswith("Error: echo: ")
     assert step.reward == pytest.approx(-0.1) and traj.info[TOOL_CALL_COUNTS_KEY] == {}
     step = _step(env, ids, _call("b", "echo", code="x"))
-    assert _flags(step.trajectory) == [True, False] and not recovering_turn(step.trajectory)
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [True, False]
 
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_past_their_budget_is_flagged(cls):
-    """A call refused over its tool's episode cap ran nothing: a turn of nothing else is flagged and the next
-    turn recovers, the refusal text and price unchanged."""
+    """Refused over its cap it ran nothing, so a turn of nothing else is flagged; text and price unchanged."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     assert _flags(_step(env, ids, _call("a", "echo", code="x")).trajectory) == [False]
     step = _step(env, ids, _call("b", "echo", code="y"), _call("c", "echo", code="z"))
     traj = step.trajectory
-    assert _flags(traj) == [False, True] and recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [False, True]
     assert _observations(traj)[1:] == [_ECHO_SPENT, _ECHO_SPENT]
     assert step.reward == pytest.approx(-0.2) and traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
 
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
 def test_a_turn_of_only_calls_to_a_disabled_tool_is_an_error_and_not_flagged(cls):
-    """A cap of 0 disables the tool: a call to it gets the spent-budget reply and price, but the run offered no
-    budget to lose, so it is no refusal: the turn stays unflagged and the next one gets no recovery reserve."""
+    """A cap of 0 disables the tool: the run offered no budget to lose, so the turn stays unflagged."""
     env = cls(tool_registry=_registry(), tool_budgets={"echo": 0}, tool_error_penalty=0.1, tool_success_reward=0.0)
     ids, _ = env.reset(["t"])
     step = _step(env, ids, _call("a", "echo", code="x"), _call("b", "echo", code="y"))
     traj = step.trajectory
     assert _observations(traj) == [_ECHO_SPENT, _ECHO_SPENT]
     assert step.reward == pytest.approx(-0.2) and traj.info[TOOL_CALL_COUNTS_KEY] == {}
-    assert _flags(traj) == [False] and not recovering_turn(traj)
+    assert _flags(traj) == _untrainable(traj) == [False]
 
 
 def test_a_refused_call_beside_one_that_ran_leaves_the_turn_trainable():
@@ -201,7 +206,7 @@ def test_a_refused_call_beside_one_that_ran_leaves_the_turn_trainable():
     ids, _ = env.reset(["t"])
     step = _step(env, ids, _call("a", "echo", code="x"), _call("b", "echo"), _call("c", "ping"))
     assert _observations(step.trajectory)[2] == "pong"
-    assert _flags(step.trajectory) == [False] and not recovering_turn(step.trajectory)
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [False]
 
 
 async def test_two_calls_in_one_async_turn_cannot_double_spend_a_one_call_cap():
@@ -216,7 +221,7 @@ async def test_two_calls_in_one_async_turn_cannot_double_spend_a_one_call_cap():
 
 
 def test_react_budget_refuses_past_the_cap():
-    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, require_thought=False)
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, no_thought_penalty=0.0)
     ids, _ = env.reset(["t"])
     for _ in range(2):
         env.step(ids, ['Thought: go\nAction: echo(code="x")'])
@@ -225,11 +230,30 @@ def test_react_budget_refuses_past_the_cap():
     assert observations[0] == "echo:x"
     assert observations[1] == _ECHO_SPENT
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1}
+    assert _flags(traj) == _untrainable(traj) == [False, True], "a refused turn is never reinforced, as under native"
     with pytest.raises(ValueError, match="tool_budgets"):
         ReActEnvironment(tool_registry=_registry(), tool_budgets={"nope": 1})
 
 
-# --- effort profiles on the base ---
+@pytest.mark.parametrize(
+    "action", ['echo(mode="fast")', "echo", 'echo(code=["x"])'], ids=["undeclared", "missing", "list-for-a-string"]
+)
+def test_a_react_action_whose_arguments_do_not_bind_is_flagged_and_unspent(action):
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, tool_error_penalty=0.1)
+    ids, _ = env.reset(["t"])
+    step = env.step(ids, [f"Thought: go\nAction: {action}"])[0]
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [True]
+    assert _react_observations(step.trajectory)[0].startswith("Error: echo: ")
+    assert step.reward == pytest.approx(env.thought_reward - 0.1) and step.info[TOOL_CALL_COUNTS_KEY] == {}
+
+
+def test_a_react_action_on_a_disabled_tool_is_an_error_and_not_flagged():
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 0}, tool_error_penalty=0.1)
+    ids, _ = env.reset(["t"])
+    step = env.step(ids, ['Thought: go\nAction: echo(code="x")'])[0]
+    assert _react_observations(step.trajectory) == [_ECHO_SPENT]
+    assert _flags(step.trajectory) == _untrainable(step.trajectory) == [False]
+    assert step.reward == pytest.approx(env.thought_reward - 0.1)
 
 
 def test_base_profiles_bind_the_thinking_budget_per_level():
@@ -245,7 +269,9 @@ def test_base_profiles_bind_the_thinking_budget_per_level():
 def test_base_rejects_non_finite_and_non_numeric_profile_values():
     """NaN passes a plain minimum check and would reach the engine as a thinking budget."""
     for bad in (float("nan"), float("inf"), True, "0.05", None):
-        with pytest.raises(ValueError, match="thinking_tokens for effort 'low' must be a finite number"):
+        with pytest.raises(
+            ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got"
+        ):
             NativeToolUseEnvironment(
                 tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": bad}}
             )
@@ -264,7 +290,9 @@ def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
     assert (env.thinking_budget_for_effort("high"), env.thinking_budget_enforced("high")) == (2048, False)
     assert env.thinking_budget_enforced("medium") is True, "a budget is enforced unless its profile says otherwise"
     for bad in (0, 1, "false", None):
-        with pytest.raises(ValueError, match="enforce_thinking_cap for effort 'high' must be true or false"):
+        with pytest.raises(
+            ValueError, match=r"reasoning_effort_profiles\['high'\]: enforce_thinking_cap must be true or false"
+        ):
             NativeToolUseEnvironment(
                 tool_registry=_registry(),
                 reasoning_effort_profiles={"high": {"thinking_tokens": 2048, "enforce_thinking_cap": bad}},
@@ -279,7 +307,9 @@ def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
 
 def test_base_rejects_a_fractional_count_budget():
     """A cap of 1.5 calls admits two; the registry's int minimum marks the key a count."""
-    with pytest.raises(ValueError, match="thinking_tokens for effort 'low' is a count"):
+    with pytest.raises(
+        ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got 1.5"
+    ):
         NativeToolUseEnvironment(
             tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": 1.5}}
         )
@@ -325,18 +355,19 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
     class _Task(NativeToolUseEnvironment):
         EFFORT_PROFILE_KEY_MINIMA = {"max_probes": 0}
 
-        def _apply_effort_profile(self, trajectory, level, profile):
-            trajectory.info["seen"] = (level, dict(profile))
+        def _apply_effort_profile(self, trajectory, profile):
+            trajectory.info["seen"] = dict(profile)
 
-    assert _Task.effort_profile_key_minima() == {"thinking_tokens": 1, "max_probes": 0}
+    with pytest.raises(ValueError, match=r"allowed: \['enforce_thinking_cap', 'max_probes', 'thinking_tokens'\]"):
+        _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_submissions": 1}})
     env = _Task(
         tool_registry=_registry(), reasoning_effort="medium", reasoning_effort_profiles={"medium": {"max_probes": 2}}
     )
     ids, _ = env.reset(["t"])
-    assert env.get_trajectories(ids)[0].info["seen"] == ("medium", {"max_probes": 2})
+    assert env.get_trajectories(ids)[0].info["seen"] == {"max_probes": 2}
     ids, _ = env.reset(["t"], [{"reasoning_effort": "random"}])
-    assert env.get_trajectories(ids)[0].info["seen"] == (None, {}), "an undetermined level binds an empty profile"
-    with pytest.raises(ValueError, match="max_probes for effort 'low' must be >= 0"):
+    assert env.get_trajectories(ids)[0].info["seen"] == {}, "an undetermined level binds an empty profile"
+    with pytest.raises(ValueError, match=r"reasoning_effort_profiles\['low'\]: max_probes must be an integer >= 0"):
         _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_probes": -1}})
 
 

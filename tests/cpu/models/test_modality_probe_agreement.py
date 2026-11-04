@@ -1,12 +1,5 @@
-"""The checkpoint modality probe is agreed across ranks, and a split verdict fails every rank.
-
-A rank that cannot read the checkpoint config (its node lacks the source) decides text-vs-multimodal
-off the name heuristic, which can disagree with the config its peers read. The ranks would then build
-different model classes and enter different store phases, which surfaces only as a coordination
-timeout. The probe joins its verdict instead and raises on every rank, naming the cause.
-
-    python tests/cpu/models/test_modality_probe_agreement.py
-"""
+"""The checkpoint modality probe is agreed across ranks. A split verdict would build different model classes and
+surface only as a coordination timeout, so it raises on every rank, naming the cause."""
 
 import json
 import os
@@ -14,7 +7,7 @@ import os
 import pytest
 from transformers import AutoConfig, Qwen3Config
 
-import src.models.modality as modality
+from halo.model_loading.parallel.model_source import probe_checkpoint
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -23,13 +16,13 @@ _RANKS = 2
 
 def _probe_on_rank(rank: int, checkpoint: str, unreadable_rank: int | None, outcome_dir: str) -> None:
     if rank == unreadable_rank:
-        # This rank's node does not hold the source: the config read fails, the name decides.
+        # The config read fails here, so the name decides.
         def missing(*_args, **_kwargs):
             raise OSError(f"{checkpoint} is not on this node")
 
         AutoConfig.from_pretrained = missing
     try:
-        _config, verdict = modality.probe_checkpoint(checkpoint)
+        _config, verdict = probe_checkpoint(checkpoint)
         outcome = {"verdict": verdict}
     except RuntimeError as exc:
         outcome = {"error": str(exc)}
@@ -48,15 +41,13 @@ def _run(checkpoint: str, unreadable_rank: int | None, outcome_dir: str) -> list
 
 @pytest.fixture
 def text_only_checkpoint_with_a_vlm_name(tmp_path):
-    """A registered text-only config under a name the heuristic reads as multimodal."""
     checkpoint = tmp_path / "tiny-qwen3-vl"
     Qwen3Config(**TINY_QWEN3_CONFIG).save_pretrained(checkpoint)
     return str(checkpoint)
 
 
 def test_every_rank_reading_the_config_agrees(text_only_checkpoint_with_a_vlm_name, tmp_path):
-    """Anti-vacuity: the join passes a uniform verdict through, here the config's text-only answer
-    over the name's multimodal hint."""
+    """The join passes a uniform verdict: the config's text-only answer over the name's multimodal hint."""
     outcomes = _run(text_only_checkpoint_with_a_vlm_name, None, str(tmp_path))
     assert outcomes == [{"verdict": False}] * _RANKS
 

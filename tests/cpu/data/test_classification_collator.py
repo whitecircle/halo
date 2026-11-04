@@ -1,27 +1,18 @@
 #!/usr/bin/env python3
-"""The classification collator pads only model inputs, ignoring leftover source columns.
-
-The classification pipeline tokenizes rows in place and
-:class:`~src.configs.classification_config.ClassificationConfig` defaults ``remove_unused_columns``
-to False, so the raw ``text`` / string-label columns stay on the dataset and reach the collator.
-``tokenizer.pad`` cannot tensorize a string, so an unfiltered ``DataCollatorWithPadding`` dies on
-the first batch — this pins that the trainer's default collator drops them.
-
-Run: python tests/cpu/data/test_classification_collator.py
-Requires the Qwen3 tokenizer in the HF cache (offline-friendly).
-"""
+"""The classification collator pads only model inputs: ``remove_unused_columns`` defaults to False, so raw ``text``
+and string-label columns reach it, and ``tokenizer.pad`` cannot tensorize a string. Requires the Qwen3 tokenizer
+in the HF cache."""
 
 import pytest
 import torch
 
-from src.data.collators.classification import ClassificationDataCollatorWithPadding
+from halo.data.collators.classification import ClassificationDataCollatorWithPadding
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
 
 def _features(tokenizer):
-    """Two rows shaped like the classification map output: tokenized inputs + the untouched
-    source columns the map leaves behind."""
+    """Two rows as the classification map leaves them: tokenized inputs plus the source columns."""
     rows = []
     for text, label in [("the first sentence", 0), ("a much longer second sentence here", 1)]:
         tokenized = tokenizer(text)

@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""The vLLM weight sync must run under expert TP for a plain full fine-tune, and reassemble the shards.
+"""The vLLM weight sync runs under expert TP for a plain full fine-tune and reassembles the shards.
 
-``_send_ep_expert_weights`` gathers with ``merge_lora=True`` unconditionally — it cannot know which
-layers hold native grouped adapters, and the fold is a no-op on an adapter-less weight. A
-``_reject_merge_lora_under_expert_tp`` keyed on that flag ALONE kills every vLLM-syncing GRPO run at
-``expert_tp_size > 1``, PEFT or not. The other registered weight-sync tests all run at
-``expert_tp_size == 1``, where neither the guard nor the ETP gather is reached.
-
-What this pins at ``ep_size=1`` / ``expert_tp_size=2`` (pure ETP), on a tiny gpt-oss MoE:
-
-  * **the sync completes** with no adapters anywhere;
-  * **the ETP shards are reassembled**, bitwise, against an un-EP-patched copy of the same seeded
-    weights. Under expert TP each rank holds only ``intermediate / expert_tp_size`` of every expert,
-    so a sync that shipped this rank's slice under the full-tensor name would keep the served policy
-    permanently stale in exactly half its expert FFN — right shapes are not enough, hence the value
-    comparison. Anti-vacuity: the reference's experts must be pairwise distinct.
-
-The adapter-present direction (which must still raise) needs no GPU and is pinned on the CPU tier in
-``tests/cpu/grpo/test_weight_sync_expert_tp_guard.py``.
-
-Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_etp_weight_sync.py
+``_send_ep_expert_weights`` always gathers with ``merge_lora=True``, so a refusal keyed on that flag kills every
+vLLM-syncing GRPO run at ``expert_tp_size > 1``. Shipping this rank's slice under the full name keeps half the FFN
+stale with right shapes.
 """
 
 import sys
@@ -27,11 +11,12 @@ import sys
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
-from tests.common.harness import gpu_test_main, log
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.rank_log import log
 from tests.common.weight_sync import RecordingSender
 
 ETP_SIZE = 2
@@ -51,15 +36,14 @@ def run(ctx):
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=1, expert_tp_size=ETP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.create_ep_config())
-    create_ep_buffers(model)
+    apply_ep_layers(model, config.ep_config())
 
     etp_layers = [m for m in model.modules() if getattr(m, "expert_tp_size", 1) > 1]
     checks["layers_really_expert_tp_sharded"] = len(etp_layers) == N_LAYERS
-    # The whole point: this run holds no adapter, so the gather has nothing to fold.
+    # This run holds no adapter, so the gather has nothing to fold.
     checks["no_expert_lora_present"] = bool(etp_layers) and not any(m.has_expert_lora for m in etp_layers)
 
-    # The un-patched ground truth: same seeded init, never sharded.
+    # Same seeded init, never sharded.
     reference = {
         name: param.detach().float().cpu()
         for name, param in build_model().named_parameters()

@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for Bailing bias-update balancing through the gate's native ``expert_bias``.
-
-Bailing's EP wrapper delegates routing to the hub gate, so instead of the base's side-buffer it
-adopts the gate's own persistent ``expert_bias`` (``topk_method: noaux_tc``) as the balancing buffer.
-The adoption contract shared with every other native-slot family — identity, the fp32 upcast, the
-export key, buffer-not-Parameter, idempotence — is pinned once for the whole roster in
-``tests/cpu/parallelism/test_native_bias_balancing_adoption.py``. What lives here is what is
-Bailing's own: the class declarations that make ``auto`` resolve the family to ``bias_update``, the
-expert-load recording its routing feeds, and the round trip from a real
-``RouterBiasBalancingCallback`` step into the gate buffer.
-
-    python tests/cpu/models/test_bailing_bias_balancing.py
-"""
+"""Bailing bias balancing through the gate's native ``expert_bias``. The shared adoption contract is pinned in
+``tests/cpu/parallelism/test_native_bias_balancing_adoption.py``."""
 
 from types import SimpleNamespace
 
@@ -19,9 +8,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.models.moe_balancing import resolve_balancing_mode
+from halo.callbacks.balancing import BalancingBiasCallback
+from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from halo.models.moe.balancing import resolve_balancing_mode
 
 NUM_EXPERTS = 8
 # The hub slot's dtype: adoption has to upcast it, so a fp32 fixture would hide that step.
@@ -29,15 +18,12 @@ SLOT_DTYPE = torch.bfloat16
 
 
 class _FakeBailingGate(nn.Module):
-    """The one contract the wrapper's balancing rides on: a persistent ``expert_bias`` buffer."""
-
     def __init__(self):
         super().__init__()
         self.register_buffer("expert_bias", torch.zeros(NUM_EXPERTS, dtype=SLOT_DTYPE))
 
 
 def _bare_layer() -> EPBailingMoELayer:
-    """An EPBailingMoELayer skeleton without EP process-group state (CPU unit tests)."""
     layer = object.__new__(EPBailingMoELayer)
     nn.Module.__init__(layer)
     layer.gate = _FakeBailingGate()
@@ -52,23 +38,20 @@ class _Shell(nn.Module):
 
 
 def test_class_declarations():
-    assert EPBailingMoELayer._supports_bias_balancing
-    # The wrapper returns a bare tensor where the hub block returns (hidden, router_logits), so
-    # router logits never reach the outputs — what lets `auto` resolve the family to bias_update.
-    assert EPBailingMoELayer._ep_severs_aux_loss
+    assert EPBailingMoELayer.SUPPORTS_BIAS_BALANCING
+    # The wrapper returns a bare tensor, so router logits never reach the outputs and `auto` resolves to bias_update.
+    assert EPBailingMoELayer.SEVERS_AUX_LOSS
 
 
 def test_the_expert_load_hook_is_a_no_op_until_balancing_is_enabled():
-    """Bailing's routing calls the hook unconditionally, so an unbalanced run must leave no counter
-    behind — the slot's presence is what ``iter_balancing_routers`` keys on."""
+    """Routing calls the hook unconditionally, and the slot's presence is what ``iter_balancing_routers`` keys on."""
     layer = _bare_layer()
     layer._record_expert_load(torch.zeros((4, 2), dtype=torch.int64))
     assert not hasattr(layer, "expert_load_counter")
 
 
 def test_property_tracks_buffer_re_registration():
-    """``.to()``/dtype casts re-register module buffers; a stale alias would keep updating a tensor
-    the gate no longer reads — balancing that silently does nothing."""
+    """``.to()`` and dtype casts re-register buffers; a stale alias would update a tensor the gate does not read."""
     layer = _bare_layer()
     layer.enable_bias_balancing()
     layer.gate.expert_bias = layer.gate.expert_bias.clone()  # what any re-registration does
@@ -97,10 +80,10 @@ def test_callback_sign_update_lands_in_the_gate_buffer():
     layer = _bare_layer()
     layer.enable_bias_balancing()
     counts = torch.zeros(NUM_EXPERTS)
-    counts[0] = 10.0  # expert 0 overloaded, everything else starved
+    counts[0] = 10.0
     layer.expert_load_counter = counts.clone()
 
-    callback = RouterBiasBalancingCallback(update_rate=1e-3)
+    callback = BalancingBiasCallback(update_rate=1e-3)
     callback.on_step_end(args=None, state=SimpleNamespace(global_step=1), control=None, model=_Shell(layer))
 
     bias = layer.gate.expert_bias
@@ -112,9 +95,7 @@ def test_callback_sign_update_lands_in_the_gate_buffer():
 def test_auto_resolves_bailing_to_bias_update():
     shell = _Shell(_bare_layer())
     assert resolve_balancing_mode("auto", shell, is_moe=True) == "bias_update"
-    # Sanity control: without the wrapper nothing carries the bias, and the shell's forward consults
-    # no output_router_logits flag either, so auto falls through to none — never to an aux_loss the
-    # balancing strategy refuses (tests/cpu/models/test_moe_balancing_auto_resolution.py).
+    # No wrapper carries the bias and the forward takes no output_router_logits flag, so auto gives none.
     assert resolve_balancing_mode("auto", _Shell(nn.Linear(4, 4)), is_moe=True) == "none"
 
 

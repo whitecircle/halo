@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: Muon optimizer with FSDP2 on Qwen3.5-2B (real model).
-
-Validates Muon's ``to_local`` DTensor unwrapping on a production model
-under FSDP2, not just synthetic FFN models. Qwen3.5-2B has a mix of
-2D (Linear.weight) and 1D (bias, LayerNorm) parameters that exercise
-both Muon and scalar AdamW optimizer paths.
-
-Run with 2 GPUs:
-    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \
-        tests/gpu/optimizers/test_muon_fsdp_qwen35.py
-"""
+"""Muon's ``to_local`` DTensor unwrapping under FSDP2 on real Qwen3.5-2B, whose 2D and 1D params exercise both
+optimizer paths."""
 
 import math
 import time
@@ -21,7 +11,7 @@ from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.optimizers.muon import create_muon_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_5_2B
 
@@ -45,11 +35,9 @@ def run(ctx) -> dict:
         print(f"  Free memory: {free_gb:.1f} GB")
         print(f"{'=' * 70}")
 
-    # ── Load model ──────────────────────────────────────────────
     if rank == 0:
         print("\n[1/4] Loading Qwen3.5-2B...")
 
-    # Download on rank 0 first
     if rank == 0:
         AutoConfig.from_pretrained(MODEL_NAME, trust_remote_code=True)
     dist.barrier()
@@ -68,11 +56,10 @@ def run(ctx) -> dict:
         print(f"  Model loaded: {total_params / 1e9:.2f}B params")
         print(f"  Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ── Apply FSDP2 ─────────────────────────────────────────────
     if rank == 0:
         print("\n[2/4] Applying FSDP2...")
 
-    # Shard each transformer layer, then the root model
+    # Each transformer layer, then the root model.
     for module in model.modules():
         if hasattr(module, "self_attn") or (hasattr(module, "mlp") and hasattr(module, "input_layernorm")):
             fully_shard(module)
@@ -83,11 +70,10 @@ def run(ctx) -> dict:
         print(f"  Parameters wrapped as DTensors: {has_dtensor}")
         print(f"  Memory after FSDP2: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
 
-    # ── Create Muon optimizer ───────────────────────────────────
     if rank == 0:
         print("\n[3/4] Creating Muon optimizer...")
 
-    optimizer = create_muon_optimizer(model, lr=LR)
+    optimizer = build_muon_optimizer(model, lr=LR)
 
     muon_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim >= 2)
     scalar_count = sum(p.numel() for p in model.parameters() if p.requires_grad and p.ndim < 2)
@@ -95,7 +81,6 @@ def run(ctx) -> dict:
         print(f"  Muon (2D+) params: {muon_count / 1e6:.1f}M")
         print(f"  Scalar (1D) params: {scalar_count / 1e6:.1f}M")
 
-    # ── Train ───────────────────────────────────────────────────
     if rank == 0:
         print(f"\n[4/4] Training {MAX_STEPS} steps...")
 

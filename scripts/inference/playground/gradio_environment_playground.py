@@ -1,17 +1,8 @@
 #!/usr/bin/env python
-"""Gradio Environment Playground — Interactive UI for testing GRPO environments.
+"""Gradio Environment Playground: interactive UI for testing GRPO environments.
 
-Runs multi-turn episodes with any registered environment against a live rollout server, through the
-same driver the offline eval uses (:func:`src.environments.eval_runner.run_episode`), so an episode
-here is generated and graded exactly as one collected by the trainer.
-
-Usage:
-    # 1. Start the rollout server
-    docker compose -f docker-compose.vllm.yml up vllm-server
-
-    # 2. Launch playground
-    python scripts/inference/playground/gradio_environment_playground.py
-    python scripts/inference/playground/gradio_environment_playground.py --port 7861
+Episodes run against a live rollout server through the offline eval's driver
+(:func:`halo.environments.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
 """
 
 import argparse
@@ -23,24 +14,24 @@ from typing import Any
 
 import gradio as gr
 
-from scripts._common import add_openai_endpoint_args
-from scripts.inference._common import add_gradio_server_args, launch_gradio
-from src.configs.rollout_config import RolloutConfig
-from src.environments.base import ANSWER_KEY, Trajectory
-from src.environments.eval_runner import EVAL_STATS_KEY, require_answers, run_episode
-from src.environments.registry import get_registered_environments, resolve_environment
-from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL
-from src.inference.openai_client import create_openai_client
+from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
+from halo.environments.messages import Trajectory
+from halo.environments.registry import build_environment, get_registered_environments
+from halo.environments.rollout_config import RolloutConfig
+from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
+from halo.inference.openai_client import build_openai_client
+from scripts.cli_arguments import add_openai_endpoint_args
+from scripts.inference.inference_arguments import add_gradio_server_args, launch_gradio
 
 logger = logging.getLogger(__name__)
 
-# Per non-assistant message, in the transcript panel: a full tool observation (a failing test log, a
-# search dump) is capped at 16k chars by the env itself and would dominate the turn it belongs to.
+# Per non-assistant message: a tool observation is capped at 16k chars by the env and would dominate its turn.
 _MAX_RENDERED_CHARS = 500
 
 
 def build_context(expected_answer: str) -> dict[str, Any]:
-    """Build the episode context, parsing structured answers (code_contests test cases) as JSON."""
+    """Parses structured answers (code_contests test cases) as JSON."""
     context: dict[str, Any] = {}
     if expected_answer:
         try:
@@ -50,14 +41,11 @@ def build_context(expected_answer: str) -> dict[str, Any]:
     return context
 
 
-def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
-    """The episode's messages as Gradio chat turns.
-
-    Gradio renders only ``user``/``assistant``; a tool or system turn is shown as a labelled user
-    turn rather than dropped, since the observation is what the next turn conditions on.
-    """
+def render_transcript(trajectory: Trajectory) -> list[dict[str, str]]:
+    """Gradio renders only ``user``/``assistant``; a tool or system turn is shown as a labelled user turn, since the
+    observation is what the next turn conditions on."""
     rendered: list[dict[str, str]] = []
-    for message in trajectory.messages if trajectory else []:
+    for message in trajectory.messages:
         content = message.content or ""
         if message.role == "assistant":
             if message.tool_calls:
@@ -72,11 +60,8 @@ def render_transcript(trajectory: Trajectory | None) -> list[dict[str, str]]:
     return rendered
 
 
-def render_summary(env_type: str, trajectory: Trajectory | None, elapsed: float, max_turns: int) -> str:
+def render_summary(env_type: str, trajectory: Trajectory, elapsed: float, max_turns: int) -> str:
     """Episode verdict for the summary panel, read off the driver's own stats (:data:`EVAL_STATS_KEY`)."""
-    if trajectory is None:
-        return f"**Environment:** {env_type}\n\n**No episode** — the environment produced no trajectory."
-
     stats = trajectory.info.get(EVAL_STATS_KEY, {})
     parts = [
         f"**Environment:** {env_type}",
@@ -118,20 +103,15 @@ def run_playground_episode(
     top_p: float,
     max_turns: int,
 ) -> tuple[list[dict[str, str]], str]:
-    """Run one episode through the shared eval driver and render it for the UI.
-
-    The shared driver rather than a local copy of the loop: it stamps ``finish_reason`` (so a
-    length-cut or empty turn is recovered here as in training rather than graded as a final answer),
-    binds the episode's reasoning-effort level and token budget, and finalizes a truncated episode.
-    """
-    env = resolve_environment(env_type, {"max_turns": int(max_turns)})
+    """Through the shared driver: it stamps ``finish_reason`` (so a length-cut or empty turn recovers as in training),
+    binds the reasoning-effort level and token budget, and finalizes a truncated episode."""
+    env = build_environment(env_type, {"max_turns": int(max_turns)})
     try:
         context = build_context(expected_answer)
-        require_answers(env, [{"context": context}], "the Expected Answer box")
-        # A hand-edited "localhost:8000/v1" is not a URL the SDK can route. The field is prefilled with a
-        # full one, so the scheme is restored rather than refused.
+        reject_answerless_examples(env, [{"context": context}], "the Expected Answer box")
+        # A hand-edited "localhost:8000/v1" is not a URL the SDK can route, so the scheme is restored.
         url = server_url if server_url.startswith("http") else f"http://{server_url}"
-        client = create_openai_client(base_url=url, api_key_override=api_key)
+        client = build_openai_client(base_url=url, api_key_override=api_key)
 
         start_time = time.time()
         trajectory = asyncio.run(
@@ -141,8 +121,7 @@ def run_playground_episode(
                 context,
                 client,
                 rollout=RolloutConfig(
-                    # None rather than "": an unset model name is dropped from the body and a
-                    # single-model server answers with what it serves, while an empty string 404s.
+                    # None: an unset model name is dropped and a single-model server answers; an empty string 404s.
                     model_name=model_name or None,
                     temperature=temperature,
                     max_tokens=int(max_tokens),
@@ -157,9 +136,9 @@ def run_playground_episode(
         env.close()
 
 
-def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | None = None):
-    available_envs = get_registered_environments()
-    default_env = "react_math" if "react_math" in available_envs else available_envs[0]
+def _episode_handler(api_key: str | None):
+    """The Run button's callback. The API key is bound here: a Gradio value, hidden or not, is serialized into every
+    browser's page config."""
 
     def on_run(
         env_type,
@@ -191,65 +170,52 @@ def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | N
             logger.exception("Playground episode failed")
             return [], f"**Error:** {e}"
 
+    return on_run
+
+
+def _build_sidebar(available_envs: list[str], default_base_url: str) -> tuple[list, gr.Button]:
+    """The sidebar's inputs, in the order :func:`_episode_handler`'s callback takes them, and its Run button."""
+    env_type = gr.Dropdown(
+        choices=available_envs,
+        value="react_math" if "react_math" in available_envs else available_envs[0],
+        label="Environment Type",
+    )
+    prompt = gr.Textbox(label="Prompt", lines=3, placeholder="The task the episode opens with")
+    expected_answer = gr.Textbox(
+        label="Expected Answer (required where the environment grades against one)",
+        placeholder='Plain text, or JSON for a structured answer (code_contests: {"test_cases": [...]})',
+    )
+
+    gr.Markdown("### Rollout Server")
+    server_url = gr.Textbox(label="Rollout Server Base URL", value=default_base_url)
+    model_name = gr.Textbox(label="Model Name (optional)", value="")
+
+    gr.Markdown("### Generation")
+    temperature = gr.Slider(0, 2, step=0.05, value=0.7, label="Temperature")
+    max_tokens = gr.Slider(64, 8192, step=64, value=1024, label="Max Tokens")
+    top_p = gr.Slider(0.1, 1.0, step=0.05, value=0.95, label="Top P")
+
+    gr.Markdown("### Environment")
+    max_turns = gr.Slider(1, 30, step=1, value=10, label="Max Turns")
+
+    inputs = [env_type, prompt, expected_answer, server_url, model_name, temperature, max_tokens, top_p, max_turns]
+    return inputs, gr.Button("Run Episode", variant="primary")
+
+
+def create_demo(default_base_url: str = DEFAULT_LOCAL_BASE_URL, api_key: str | None = None):
     with gr.Blocks(title="Environment Playground") as demo:
         gr.Markdown("# Environment Playground\nTest GRPO environments interactively against a rollout server.")
-
         with gr.Row():
-            # Left sidebar
             with gr.Column(scale=1):
-                env_type = gr.Dropdown(
-                    choices=available_envs,
-                    value=default_env,
-                    label="Environment Type",
-                )
-                prompt = gr.Textbox(label="Prompt", lines=3, placeholder="The task the episode opens with")
-                expected_answer = gr.Textbox(
-                    label="Expected Answer (required where the environment grades against one)",
-                    placeholder='Plain text, or JSON for a structured answer (code_contests: {"test_cases": [...]})',
-                )
-
-                gr.Markdown("### Rollout Server")
-                # The API key is not a component: a Gradio value, hidden or not, is serialized into
-                # every browser's page config. It stays in the create_demo closure.
-                server_url = gr.Textbox(label="Rollout Server Base URL", value=default_base_url)
-                model_name = gr.Textbox(label="Model Name (optional)", value="")
-
-                gr.Markdown("### Generation")
-                temperature = gr.Slider(0, 2, step=0.05, value=0.7, label="Temperature")
-                max_tokens = gr.Slider(64, 8192, step=64, value=1024, label="Max Tokens")
-                top_p = gr.Slider(0.1, 1.0, step=0.05, value=0.95, label="Top P")
-
-                gr.Markdown("### Environment")
-                max_turns = gr.Slider(1, 30, step=1, value=10, label="Max Turns")
-
-                run_btn = gr.Button("Run Episode", variant="primary")
-
-            # Main content
+                inputs, run_btn = _build_sidebar(get_registered_environments(), default_base_url)
             with gr.Column(scale=2):
                 chatbot = gr.Chatbot(label="Episode", height=500)
                 summary = gr.Markdown(label="Episode Summary", value="*Run an episode to see results*")
-
-        run_btn.click(
-            on_run,
-            inputs=[
-                env_type,
-                prompt,
-                expected_answer,
-                server_url,
-                model_name,
-                temperature,
-                max_tokens,
-                top_p,
-                max_turns,
-            ],
-            outputs=[chatbot, summary],
-        )
-
+        run_btn.click(_episode_handler(api_key), inputs=inputs, outputs=[chatbot, summary])
     return demo
 
 
 def build_parser() -> argparse.ArgumentParser:
-    """The playground's CLI: the rollout endpoint it prefills, plus the shared server block."""
     parser = argparse.ArgumentParser(description="Gradio Environment Playground")
     add_openai_endpoint_args(parser)
     add_gradio_server_args(parser, port_default=7860)

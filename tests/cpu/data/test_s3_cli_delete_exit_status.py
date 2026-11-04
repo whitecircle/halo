@@ -1,33 +1,26 @@
 #!/usr/bin/env python
-"""The ``s3_datasets.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there.
-
-``S3Client.delete`` logs the ``ClientError`` and returns ``False`` for a single-object delete, and the
-two ``--recursive`` mismatches (a prefix without it, a single object with it) refuse before deleting
-anything; a CLI that only printed and exited 0 would let a ``&&`` chain proceed as if the data were
-gone. The client is stubbed at its own methods (no boto3 session), patched by dotted path like the
-sibling CLI tests.
-
-Run: pytest tests/cpu/data/test_s3_cli_delete_exit_status.py
-"""
+"""The ``s3.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there, so a ``&&``
+chain cannot proceed as if it were gone. The client is stubbed at its own methods (no boto3 session), patched by
+dotted path."""
 
 import sys
 from unittest.mock import patch
 
 import pytest
 
-from scripts.before_training.s3_datasets import main as s3_cli_main
+from scripts.before_training.s3 import main as s3_cli_main
 
 _URI = "s3://test-bucket/my_folder/a.json"
 
 
 def _run_delete(delete_result: bool, *, is_object: bool = True, recursive: bool = False) -> None:
-    argv = ["s3", "delete", "my_folder/a.json", "--yes", *(["--recursive"] if recursive else [])]
+    argv = ["s3", "delete", "my_folder/a.json", "--yes", "--bucket", "test-bucket", *(["-r"] if recursive else [])]
     with (
-        patch("src.data.sources.s3_client.S3Client.__post_init__"),
-        patch("src.data.sources.s3_client.S3Client.delete", return_value=delete_result),
-        patch("src.data.sources.s3_client.S3Client.s3_uri", return_value=_URI),
-        patch("src.data.sources.s3_client.S3Client.exists", return_value=True),
-        patch("src.data.sources.s3_client.S3Client.object_exists", return_value=is_object),
+        patch("halo.data.sources.s3_client.S3Client.__post_init__"),
+        patch("halo.data.sources.s3_client.S3Client.delete", return_value=delete_result),
+        patch("halo.data.sources.s3_client.S3Client.s3_uri", return_value=_URI),
+        patch("halo.data.sources.s3_client.S3Client.exists", return_value=True),
+        patch("halo.data.sources.s3_client.S3Client.object_exists", return_value=is_object),
         patch.object(sys, "argv", argv),
     ):
         s3_cli_main()

@@ -1,19 +1,11 @@
 #!/usr/bin/env python
-"""group_relative_advantages: an infra-errored rollout must not poison its group's baseline.
-
-An episode that errors carries a placeholder 0.0 reward; its own loss is masked separately, but if that
-0.0 is averaged into the group mean it drags the baseline down and inflates the advantages of its VALID
-siblings. The ``valid_mask`` argument excludes errored members from the group-mean baseline. This checks:
-default (no mask) is unchanged; a masked-out 0.0 raises the valid siblings' advantages; an all-errored
-group falls back to the plain mean without crashing.
-
-    python tests/cpu/grpo/test_grpo_advantages_valid_mask.py
-"""
+"""group_relative_advantages: an infra-errored rollout's placeholder 0.0 must not drag its group's baseline down and
+inflate its valid siblings' advantages."""
 
 import pytest
 import torch
 
-from src.trainers.grpo.objective.advantages import group_relative_advantages
+from halo.trainers.grpo.objective.advantages import group_relative_advantages
 
 
 def test_default_no_mask_unchanged():
@@ -29,7 +21,6 @@ def test_errored_member_excluded_from_baseline():
     poisoned = group_relative_advantages(rewards, 4, "none")  # baseline = 0.75 (0.0 included)
     fixed = group_relative_advantages(rewards, 4, "none", valid_mask=valid)  # baseline = 1.0 (valid only)
 
-    # Dropping the fake 0.0 lowers the siblings: 1 - 1.0 = 0.0 against the inflated 1 - 0.75 = 0.25.
     assert torch.allclose(fixed[:3], torch.zeros(3))
     assert (fixed[:3] < poisoned[:3]).all()
     assert abs(fixed[0].item() - (1.0 - 1.0)) < 1e-6
@@ -39,7 +30,7 @@ def test_all_errored_group_falls_back_to_plain_mean():
     rewards = torch.tensor([0.0, 0.0])
     valid = torch.tensor([False, False])
     adv = group_relative_advantages(rewards, 2, "none", valid_mask=valid)
-    # No valid member: fall back to the plain mean rather than dividing by an empty count (NaN).
+    # Dividing by an empty count would give NaN.
     assert torch.equal(adv, torch.zeros(2))
 
 
@@ -52,8 +43,7 @@ def test_partial_valid_across_two_groups():
 
 
 def test_group_std_excludes_invalid_members():
-    """The scale divisor must honor valid_mask like the baseline: an errored placeholder reward
-    (0.0) must not change the std its valid siblings are divided by."""
+    """The scale divisor honors valid_mask like the baseline."""
     rewards = torch.tensor([1.0, 1.0, 0.0, 0.0])
     valid = torch.tensor([True, True, True, False])
     adv = group_relative_advantages(rewards, 4, "group", valid_mask=valid)
@@ -70,7 +60,6 @@ def test_batch_std_excludes_invalid_members():
     rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
     valid = torch.tensor([True, True, True, False])
     adv = group_relative_advantages(rewards, 2, "batch", valid_mask=valid, already_gathered=True)
-    # Batch std over VALID rewards only: std([1,0,1]).
     expected_std = torch.tensor([1.0, 0.0, 1.0]).std()
     # Group A (both valid): baseline 0.5 → ±0.5 / std; Group B: baseline over valid = 1.0.
     expected = torch.tensor([0.5, -0.5, 0.0, -1.0]) / (expected_std + 1e-4)
@@ -78,7 +67,7 @@ def test_batch_std_excludes_invalid_members():
 
 
 def test_group_std_singleton_valid_member_is_safe():
-    # One valid member: the unbiased std over a single element is NaN unless the divisor is guarded.
+    # The unbiased std over a single element is NaN unless the divisor is guarded.
     rewards = torch.tensor([1.0, 0.0])
     valid = torch.tensor([True, False])
     adv = group_relative_advantages(rewards, 2, "group", valid_mask=valid)

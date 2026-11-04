@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
-"""normalize_preference_row: hub preference-shape adaptation.
-
-Covers the three hub shapes (string prompt + full-conversation chosen/rejected — ultrafeedback/tulu-3;
-already-contract continuation rows; implicit prompt — Skywork-Reward) and the fail-loud cases.
-
-Usage:
-    python tests/cpu/data/test_preference_normalization.py
-"""
+"""``normalize_preference_row``: the three hub preference shapes (string prompt + full-conversation chosen/rejected,
+contract continuation rows, implicit prompt) and the fail-loud cases."""
 
 import copy
 
 import pytest
 
-from src.data.pipeline import preferences as prefs
-from src.data.pipeline.preferences import (
-    apply_chat_template_to_preference_data,
-    normalize_preference_row,
-)
+from halo.data.pipeline import preferences as prefs
+from halo.data.pipeline.preferences import normalize_preference_row, render_preference_row
 
 
 class StubTokenizer:
@@ -115,16 +106,15 @@ def test_continuation_not_ending_on_assistant_raises():
 
 
 def test_apply_chat_template_renders_prompt_once():
-    row = apply_chat_template_to_preference_data(_tulu3_row(), StubTokenizer())
+    row = render_preference_row(_tulu3_row(), StubTokenizer())
     assert row["prompt"] == "<user>what is 2+2?</user>"
     assert row["chosen"] == "<assistant>4</assistant>", "the user turn must not be rendered into chosen"
     assert (row["prompt"] + row["chosen"]).count("<user>") == 1
 
 
 def test_generative_prep_normalizes_hub_shapes_before_templating(monkeypatch):
-    """The eval-generation prep receives RAW hub rows; a string prompt (tulu-3 mixtures) must go
-    through the same contract normalizer as the training path — the chat template dies on a bare
-    string. Asserted at the seam: the row that reaches ``prepare_generative_row`` is normalized."""
+    """The eval-generation prep receives raw hub rows, and the chat template dies on a bare string prompt, so the
+    row reaching ``prepare_generative_row`` is normalized."""
     seen = {}
 
     def fake_prepare(row, tokenizer, max_length, tools_field=None):

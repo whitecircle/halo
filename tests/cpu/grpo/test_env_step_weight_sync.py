@@ -1,25 +1,8 @@
 #!/usr/bin/env python
-"""The environmental trainer's live weight sync runs fenced, once per optimizer step, and holds every rank
-until the push lands.
+"""The environmental trainer's live weight sync runs fenced, once per optimizer step, and holds every rank until the
+push lands. ``barrier_on_exit`` in ``sync_trainer_weights`` is the path's only barrier; online GRPO relies on it."""
 
-* ``training_step`` enters the sync on the first microbatch after each optimizer step, through
-  ``_sync_weights_to_engine_fenced``. The unfenced push raised on the main process alone (an engine
-  500, a refused tensor) would leave its peers in the next collective.
-* ``sync_trainer_weights`` releases no rank before the forwarding rank's push has landed. A peer that
-  returned early would drive its next rollout round against an engine still mid-update. Its
-  ``barrier_on_exit`` is the only barrier on the path, and online GRPO relies on it too.
-* A push that finds no group formed forms it first, on every rank, through one fenced step ahead of the
-  gather. That is the state after ``train()`` returns, since its cleanup drops the client, and a test's
-  forced push from there must still reach the engine. A client that cannot form raises on every rank.
-* A forwarding rank that reaches the gather with no client raises on every rank. It does not gather
-  the policy and send none of it.
-
-The last three are read on a real 2-rank gloo group whose params are DTensors, so the gathers are
-genuine collectives.
-
-    python tests/cpu/grpo/test_env_step_weight_sync.py
-"""
-
+import contextlib
 import datetime
 import json
 import os
@@ -31,27 +14,25 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 
-import src.distributed.runtime as runtime
-import src.trainers.grpo.rollout.async_rollouts as async_mod
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.weight_sync import sync_trainer_weights, sync_weights_to_client
-from src.trainers.mixins.base import DistributedTrainerMixin
+import halo.trainers.grpo.environmental.async_rollouts as async_mod
+import halo.trainers.grpo.rollout.weight_push as weight_push
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime import consensus
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender
 
 WORLD_SIZE = 2
 PG_TIMEOUT = datetime.timedelta(seconds=90)
-# How long the forwarding rank's flush takes to land: far above the peer's own return path, so an
-# early release shows as a return ahead of the landing rather than a scheduling race.
+# The forwarding rank's flush time. It is far above the peer's own return path, so an early release reads as a
+# return ahead of the landing and cannot be a scheduling race.
 _FLUSH_S = 0.5
 
 
 def _stepping_trainer(monkeypatch, synced_at_step: int):
-    """The real ``training_step`` over a TRL step that returns ``"loss"``, recording each sync it enters.
-
-    ``synced_at_step`` is the step train-begin's forced push stamped: 0 on a fresh run, the restored step on
-    a resume."""
+    """``synced_at_step`` is train-begin's forced push: 0 on a fresh run, the restored step on a resume."""
     monkeypatch.setattr(DistributedTrainerMixin, "training_step", lambda self, model, inputs, n=None: "loss")
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.state = SimpleNamespace(global_step=synced_at_step)
@@ -76,9 +57,7 @@ def test_each_optimizer_step_enters_one_fenced_sync(monkeypatch, synced_at_step)
 
 
 class _SlowFlush(RecordingSender):
-    """The forwarding rank's client, whose closing broadcast takes ``_FLUSH_S`` to land."""
-
-    def reset_prefix_cache(self) -> None:
+    def finish_weight_update(self) -> None:
         time.sleep(_FLUSH_S)
         self.landed = time.monotonic()
 
@@ -97,14 +76,16 @@ class _ShardedPolicy(nn.Module):
 
 
 def _push_worker(rank: int, tmp_dir: str) -> None:
-    barriers = []
-    real_barrier = runtime.barrier
+    fences = []
+    real_fence = weight_push.barrier_on_exit
 
-    def counting_barrier(group=None):
-        barriers.append(rank)
-        real_barrier(group)
+    @contextlib.contextmanager
+    def counting_fence(what):
+        with real_fence(what):
+            yield
+        fences.append(rank)
 
-    runtime.barrier = counting_barrier
+    weight_push.barrier_on_exit = counting_fence
     client = _SlowFlush() if rank == 0 else None
     trainer = SimpleNamespace(
         model=_ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,))),
@@ -113,7 +94,7 @@ def _push_worker(rank: int, tmp_dir: str) -> None:
         state=SimpleNamespace(global_step=1),
     )
     sync_trainer_weights(trainer, client)
-    record = {"returned": time.monotonic(), "barriers": len(barriers)}
+    record = {"returned": time.monotonic(), "fences": len(fences)}
     if client is not None:
         record.update(landed=client.landed, sent=client.names)
     with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as fh:
@@ -125,18 +106,17 @@ def test_the_push_releases_no_rank_before_it_lands(tmp_path):
     forwarding, peer = (json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(WORLD_SIZE))
     assert forwarding["sent"] == ["layers.0.weight", "layers.1.weight"]
     assert peer["returned"] >= forwarding["landed"], "a peer left the sync while the engine was mid-update"
-    assert forwarding["barriers"] == peer["barriers"] == 1, "every rank joins the one barrier after the push"
+    assert forwarding["fences"] == peer["fences"] == 1, "every rank joins the one fence after the push"
 
 
 class _EngineClient(RecordingSender):
-    """What ``_init_weight_sync_client`` builds on the main process, with no server behind it. ``BUILT``
-    holds every instance this process made; ``FAIL`` makes the construction raise."""
+    """What ``_init_weight_sync_client`` builds on the main process, with no server behind it."""
 
     BACKEND_NAME = "vLLM"
     BUILT: list["_EngineClient"] = []
     FAIL = False
 
-    def __init__(self, base_url: str, group_port: int, connection_timeout: float):
+    def __init__(self, base_url: str, group_port: int, connection_timeout: float, group_host: str | None):
         if self.FAIL:
             raise ConnectionError("the NCCL group to the engine did not form")
         super().__init__()
@@ -144,9 +124,11 @@ class _EngineClient(RecordingSender):
         self.BUILT.append(self)
 
     def init_communicator(self, device) -> None:
-        pass
+        self.sync_device = device
 
-    def reset_prefix_cache(self) -> None:
+    buffer_param = RecordingSender.update_named_param
+
+    def finish_weight_update(self) -> None:
         self.flushes += 1
 
     def close_communicator(self) -> None:
@@ -156,33 +138,33 @@ class _EngineClient(RecordingSender):
 def _counted_verdicts(what: str) -> list[str]:
     """The rank-uniform verdicts named ``what`` this rank joins from here on."""
     joined = []
-    real_reject = runtime.reject_across_ranks
+    real_reject = consensus.reject_across_ranks
 
     def counting_reject(reason, name, exc_type=RuntimeError):
         if name == what:
             joined.append(name)
         return real_reject(reason, name, exc_type=exc_type)
 
-    runtime.reject_across_ranks = counting_reject
+    consensus.reject_across_ranks = counting_reject
     return joined
 
 
 def _trainer_outside_train(rank: int):
-    """The trainer as a fresh construction, or a returned ``train()``'s cleanup, leaves it: no group
-    formed and no client on any rank."""
+    """As a fresh construction or a returned ``train()``'s cleanup leaves it: no group, no client on any rank."""
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer.model = _ShardedPolicy(init_device_mesh("cpu", (WORLD_SIZE,)))
     trainer.parallelism_config = ParallelismConfig()
     trainer.accelerator = SimpleNamespace(is_main_process=rank == 0, device=torch.device("cpu"))
     trainer.state = SimpleNamespace(global_step=1)
-    trainer.args = SimpleNamespace(report_to=[], vllm_group_port=51216)
+    trainer.args = SimpleNamespace(report_to=[])
     trainer.async_config = SimpleNamespace(
+        rollout_group_port=51216,
         sync_weights_every_n_steps=1,
         rollout_backend="vllm",
         rollout_server_url="http://engine:8000",
+        rollout_server_configs=None,
         rollout_connection_timeout=1.0,
     )
-    trainer._multi_server_mode = False
     trainer._weight_sync_client = trainer._rollout_manager = trainer._loop = None
     trainer._prefetch_thread = trainer._engine_rescore_clients = None
     return trainer
@@ -221,8 +203,8 @@ def _reform_worker(rank: int, tmp_dir: str) -> None:
 
 
 def test_a_push_with_no_group_formed_forms_it_on_every_rank_and_sends(tmp_path):
-    """A fresh trainer's push forms the group. The cleanup a returned ``train()`` runs drops it, the next
-    push forms it again, and a push into a formed group joins no formation verdict."""
+    """``train()``'s cleanup drops the group and the next push forms it again; a push into a formed group joins no
+    formation verdict."""
     run_gloo_ranks(_reform_worker, WORLD_SIZE, str(tmp_path), pg_timeout=PG_TIMEOUT)
     forwarding, peer = (json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(WORLD_SIZE))
     assert forwarding["pushed"] == peer["pushed"] == [True, True, True]

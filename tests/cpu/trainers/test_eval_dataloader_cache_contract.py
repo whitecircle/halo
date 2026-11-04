@@ -1,32 +1,23 @@
 #!/usr/bin/env python
-"""Every eval path must cache the SAME kind of object in ``_eval_dataloaders``.
-
-Two paths write that dict on one MRO — the shared ``DataParallelDataLoaderMixin`` one and offline
-GRPO's grouped-sampler one. The base ``Trainer`` contract is to store the PREPARED loader, which is
-the whole point of ``dataloader_persistent_workers``: the next ``evaluate()`` reuses it instead of
-forking a new worker pool. A path storing the pre-prepare loader under the same key either hands
-back an unprepared loader or silently re-prepares one per evaluation.
-
-    python tests/cpu/trainers/test_eval_dataloader_cache_contract.py
-"""
+"""Eval paths must cache the prepared loader in ``_eval_dataloaders`` so the next ``evaluate()`` reuses its workers.
+Storing the pre-prepare loader hands back an unprepared one or silently re-prepares one per evaluation."""
 
 from types import SimpleNamespace
 
 import pytest
 from torch.utils.data import SequentialSampler
 
-import src.trainers.mixins.dataloader as dataloader_mod
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+import halo.trainers.dataloaders as dataloader_mod
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime.consensus import RankConsensus
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _ROWS = [{"x": 1}, {"x": 2}]
 
 
 class _Prepared:
-    """Stand-in for an accelerate-prepared loader — distinguishable from the loader it wraps."""
-
     def __init__(self, raw):
         self.raw = raw
 
@@ -54,8 +45,7 @@ def _base_stub(trainer_cls):
 
 
 def _mixin_stub():
-    """The shared DP eval path, stopped just short of accelerate."""
-    t = _base_stub(DataParallelDataLoaderMixin)
+    t = _base_stub(DataParallelLoaderMixin)
     t._needs_custom_dataloader = lambda: True
     t._get_eval_sampler = SequentialSampler
 
@@ -64,11 +54,10 @@ def _mixin_stub():
         return dataset, {"batch_size": batch_size}
 
     t._loader_params = _loader_params
-    return t, lambda: DataParallelDataLoaderMixin.get_eval_dataloader(t)
+    return t, lambda: DataParallelLoaderMixin.get_eval_dataloader(t)
 
 
 def _offline_stub():
-    """Offline GRPO's own grouped-sampler eval path."""
     t = _base_stub(OfflineGRPOTrainer)
     t._cached_eval_group_ids = [0, 0]
 
@@ -85,8 +74,7 @@ PATHS = {"shared-mixin": _mixin_stub, "offline-grpo": _offline_stub}
 
 @pytest.mark.parametrize("path", list(PATHS))
 def test_the_cached_loader_is_the_one_handed_back(path):
-    """Cache the PREPARED loader: caching the raw one makes the cached value a different object from
-    the return value, so the next evaluation reuses nothing the caller ever saw."""
+    """A raw cached loader differs from the return value, so the next evaluation reuses nothing the caller saw."""
     trainer, get_eval_dataloader = PATHS[path]()
     loader = get_eval_dataloader()
 
@@ -99,8 +87,7 @@ def test_the_cached_loader_is_the_one_handed_back(path):
 
 @pytest.mark.parametrize("path", list(PATHS))
 def test_a_second_evaluation_reuses_the_cached_loader(path):
-    """The persistent-worker cache must actually short-circuit: rebuilding per ``evaluate()`` forks a
-    new worker pool every time, which is the leak the cache exists to prevent."""
+    """Rebuilding per ``evaluate()`` forks a new worker pool every time, the leak the cache exists to prevent."""
     trainer, get_eval_dataloader = PATHS[path]()
     first = get_eval_dataloader()
     second = get_eval_dataloader()
@@ -111,22 +98,20 @@ def test_a_second_evaluation_reuses_the_cached_loader(path):
 
 @pytest.mark.parametrize("held", [True, False], ids=["rank-holding-the-key", "rank-that-missed-it"])
 def test_a_split_cache_hit_rebuilds_in_lockstep_and_displaces_no_live_loader(monkeypatch, held):
-    """A loader keyed by a process-local fingerprint hits only when every rank holds it, so on a split
-    every rank rebuilds (the build issues collectives). A rank that held the key keeps its own loader,
-    whose persistent workers are running: replaced in the cache, it would stay referenced by accelerate
-    with its pool alive for the rest of the run. A rank that missed caches the rebuilt one."""
+    """A key hits only when every rank holds it; on a split every rank rebuilds, since the build issues collectives.
+    A holder keeps its own loader; if replaced, accelerate would keep its worker pool alive for the rest of the run."""
     trainer, _ = _offline_stub()
     live = _Prepared("a loader whose persistent workers are running")
     if held:
         trainer._eval_dataloaders["eval/fingerprint"] = live
-    monkeypatch.setattr(dataloader_mod, "rank_consensus", lambda local_ok: (False, True))
+    monkeypatch.setattr(dataloader_mod, "rank_consensus", lambda local_ok: RankConsensus(False, True))
     built = []
 
     def build(dataset):
         built.append(_Prepared(dataset))
         return built[-1]
 
-    loader = DataParallelDataLoaderMixin._cached_eval_dataloader(trainer, _ROWS, build, key="eval/fingerprint")
+    loader = DataParallelLoaderMixin._cached_eval_dataloader(trainer, _ROWS, build, key="eval/fingerprint")
 
     assert len(built) == 1, "a rank skipped the rebuild its peers run in lockstep"
     expected = live if held else built[0]
@@ -142,15 +127,12 @@ class _InitStopped(Exception):
 
 
 class _InitHost:
-    """A bare trainer host for the shared init, which must declare the cache before anything else."""
-
-    def _configure_mixed_precision(self, kwargs, training_args):
+    def _snapshot_model_config_state(self, model_config):
         raise _InitStopped
 
 
 def test_the_cache_is_declared_by_the_shared_init():
-    """Both paths index ``_eval_dataloaders`` unguarded, so the shared init has to declare it: an
-    attribute materialized lazily at first use lets the two paths hold different kinds under it."""
+    """Both paths index ``_eval_dataloaders`` unguarded; a lazy attribute lets them hold different kinds under it."""
     host = _InitHost()
 
     with pytest.raises(_InitStopped):
@@ -160,12 +142,11 @@ def test_the_cache_is_declared_by_the_shared_init():
 
 
 def test_the_test_loader_takes_the_eval_loaders_dp_sharded_body():
-    """``predict()`` gathers through the same DP-scoped gather, so its loader must be the DP-sharded
-    one too: HF's own shards by world rank, handing TP/CP/PP siblings different rows."""
+    """HF's own loader shards by world rank, handing TP/CP/PP siblings different rows under the DP-scoped gather."""
     trainer, get_eval_dataloader = _mixin_stub()
     eval_loader = get_eval_dataloader()
 
-    test_loader = DataParallelDataLoaderMixin.get_test_dataloader(trainer, _ROWS)
+    test_loader = DataParallelLoaderMixin.get_test_dataloader(trainer, _ROWS)
 
     assert isinstance(test_loader, _Prepared), "the test loader skipped the DP-aware prepare"
     assert type(test_loader.raw.sampler) is type(eval_loader.raw.sampler), "the test loader drew another sampler"

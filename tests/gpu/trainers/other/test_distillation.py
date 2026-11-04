@@ -1,32 +1,12 @@
 #!/usr/bin/env python
-"""DistributedDistillationTrainer end-to-end, with the logged loss pinned to its exact objective.
+"""DistributedTeacherDistillationTrainer end to end, with the logged loss pinned to its exact objective.
 
-The objective is ``alpha * KL(teacher_T || student_T) * T^2 + (1 - alpha) * CE(student, hard_labels)``,
-each term ONE mean over the batch's supervised positions. Everything that can go wrong there is
-silent: a dropped ``T^2`` rescales the whole distillation gradient, a reversed KL argument order
-optimises the wrong direction (KL is asymmetric), an ignored ``alpha`` trains a different objective
-entirely, a per-row mean reweights short rows, and a teacher forward whose logits never reach the
-loss degenerates it to self-distillation. Each of those keeps the loss finite and the step count intact.
-
-So the objective is reimplemented here and pinned, on the batch the trainer consumed and an
-independently constructed student holding the weight snapshot it held at the pinned step:
-
-  * the logged loss, the logged ``distillation_loss`` and the logged ``sft_loss`` each equal their
-    independent reference;
-  * five NEGATIVE CONTROLS — temperature-squared dropped, KL arguments reversed, alpha ignored, a
-    per-row KL mean, and the teacher logits replaced by the student's own — must each miss the logged
-    loss by more than the pin's tolerance.
-
-Teacher and student start from the same checkpoint, so the pinned step is not the first: at step 1
-the two are identical, the KL term is exactly 0 and every control agrees with the real objective.
-Every batch pairs a few supervised tokens of low KL with hundreds of higher KL, so the per-row control
-is separated by construction rather than by a lucky draw of row lengths.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_distillation.py
+``alpha * KL(teacher_T || student_T) * T^2 + (1 - alpha) * CE``, each term one mean over the supervised positions. A
+dropped ``T^2``, reversed KL, ignored ``alpha``, per-row mean or unused teacher all keep the loss finite. Teacher and
+student start from one checkpoint, so step 1's KL is exactly 0 and the pinned step is later.
 """
 
+import argparse
 import random
 
 import torch
@@ -34,16 +14,18 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.configs.distillation_config import DistillationConfig
-from src.data.collators.packing import DataCollatorForCausalLMWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.configs.distillation import TeacherDistillationConfig
+from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_all, world_mean
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log, step_losses
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
@@ -51,42 +33,32 @@ MAX_SEQ_LENGTH = 512
 NUM_TRAIN_STEPS = 8
 BATCH_SIZE = 2
 LEARNING_RATE = 5e-5
-# T != 1 so a dropped T^2 rescaling is observable, and alpha strictly between 0 and 1 so BOTH terms
-# are live (the 1.0 default drops the CLM term, leaving the alpha weighting untested).
+# T != 1 so a dropped T^2 shows, and alpha strictly between 0 and 1 so both terms are live.
 TEMPERATURE = 2.0
 ALPHA = 0.5
 SEED = 42
-# Teacher and student are the same checkpoint, so at step 1 the KL term is exactly 0 and every
-# control below coincides with the real objective. One update leaves forward and reverse KL nearly
-# equal, and later steps pull the student back toward the teacher, narrowing every control's gap.
+# At step 1 the KL is exactly 0 and every control coincides. One update leaves forward and reverse KL nearly equal, and
+# later steps pull the student back toward the teacher, narrowing every control's gap.
 PINNED_STEP = 3
-# Copy rows: a sentence of COPY_WORDS random words, repeated COPY_REPEATS times; the repeats before
-# the supervised last copy dictate it.
+# Copy rows: a sentence of COPY_WORDS random words, repeated COPY_REPEATS times, with the last copy supervised.
 COPY_WORDS = 6
 COPY_REPEATS = 4
-# Dialogue rows: this many math exchanges, so a dialogue supervises dozens of times a copy's tokens.
 DIALOGUE_EXCHANGES = 6
-# Two rows with per-token KL means k_a, k_b and supervised counts in ratio r separate the per-row
-# mean from the token mean by |k_a - k_b| / 2 * (r - 1) / (r + 1); this floor on r keeps most of it.
+# Rows with token KL means k_a, k_b and supervised counts in ratio r separate the per-row mean from the token mean by
+# |k_a - k_b| / 2 * (r - 1) / (r + 1); this floor on r keeps most of it.
 MIN_COUNT_RATIO = 10
 
 LOSS_REL_TOL = TOL.exact_objective_rel
-# A control's job is to show the pin would FAIL, so its threshold IS the pin's tolerance.
+# A control shows the pin would fail, so its threshold is the pin's tolerance.
 CONTROL_MIN_GAP = LOSS_REL_TOL
-# The KL term must be non-trivial at the pinned step, or the alpha weighting and the KL-direction
-# control are both vacuous (a zero KL is symmetric and alpha-invariant).
+# A zero KL is symmetric and alpha-invariant, which makes the alpha weighting and direction control vacuous.
 MIN_KL = 1e-3
 
 
 def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Dataset:
-    """Tokenized rows alternating two kinds; with the sequential sampler every batch holds one of each.
-
-    Even rows are copy rows: only the last repeat of a random sentence is supervised, a handful of
-    tokens the context dictates, where a student that still copies stays close to the teacher. Odd
-    rows are chat-templated math dialogues, every token supervised; their turn boundaries and
-    openings carry most of the student's drift from the teacher. A per-row mean weighs the copy's
-    few tokens as much as the whole dialogue; the trainer's token mean weighs every token once.
-    """
+    """Alternates copy rows (a handful of supervised tokens the context dictates) and math dialogues (every token
+    supervised), so a per-row mean weighs the copy's few tokens as much as the whole dialogue. Sampled sequentially,
+    each batch holds one."""
     random.seed(seed)
     words = (
         "amber basket candle desert engine forest garden harbor island jacket kettle ladder marble needle "
@@ -137,18 +109,13 @@ def build_model():
 
 
 def shifted_logits(model, input_ids, attention_mask) -> torch.Tensor:
-    """Next-token logits ``[B, S-1, V]`` in fp32 — the span the objective scores."""
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
     return logits[..., :-1, :].float()
 
 
 def global_token_mean(per_token: torch.Tensor, mask: torch.Tensor, *, per_row: bool = False) -> torch.Tensor:
-    """One mean over every kept position of the batch — the trainer's reduction for both terms.
-
-    ``per_row=True`` is a control: a per-row mean, then a mean over rows, which weighs a short row's
-    tokens more than a long row's.
-    """
+    """The trainer's reduction for both terms. ``per_row=True`` is a control: it weighs a short row's tokens more."""
     if per_row:
         counts = mask.sum(-1, dtype=torch.float32).clamp(min=1e-9)
         return ((per_token * mask.float()).sum(-1) / counts).mean()
@@ -165,12 +132,8 @@ def kl_term(
     reverse: bool = False,
     per_row: bool = False,
 ) -> float:
-    """``KL(teacher_T || student_T) * T^2``, token-mean reduced over ``mask``.
-
-    The keyword flags are three of this test's controls for the term: ``scale_by_t2=False`` drops the
-    temperature-squared rescaling, ``reverse=True`` swaps the two distributions and ``per_row=True``
-    reduces per row.
-    """
+    """``KL(teacher_T || student_T) * T^2``, token-mean reduced. ``scale_by_t2``, ``reverse`` and ``per_row`` are
+    controls."""
     student_logprobs = F.log_softmax(student_logits / temperature, dim=-1)
     teacher_logprobs = F.log_softmax(teacher_logits / temperature, dim=-1)
     if reverse:
@@ -182,7 +145,6 @@ def kl_term(
 
 
 def clm_term(student_logits, hard_labels) -> float:
-    """The trainer's CLM term: fp32 cross-entropy, one mean over the valid tokens."""
     valid = (hard_labels != LABEL_IGNORE_INDEX).sum().clamp(min=1)
     total = F.cross_entropy(
         student_logits.reshape(-1, student_logits.size(-1)),
@@ -193,10 +155,18 @@ def clm_term(student_logits, hard_labels) -> float:
     return float(total / valid)
 
 
-@gpu_test_main(min_world_size=2, prefix="test_distill")
+parser = argparse.ArgumentParser()
+parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="test_distill")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = {**(hsdp_layout(ctx.world_size) if ARGS.hsdp else {}), "fsdp_reshard_after_forward": ARGS.zero3}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -205,7 +175,7 @@ def run(ctx):
 
     dataset = create_distillation_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    config = DistillationConfig(
+    config = TeacherDistillationConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -221,17 +191,15 @@ def run(ctx):
         logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
-        # In dataset order, so each two-row batch is one copy row and one dialogue.
         train_sampling_strategy="sequential",
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # the mixin owns FSDP wrapping
         distill_loss="kl_divergence",
         distill_temperature=TEMPERATURE,
         distill_alpha=ALPHA,
     )
 
-    trainer = DistributedDistillationTrainer(
+    trainer = DistributedTeacherDistillationTrainer(
         student_model=build_model(),
         teacher_model=build_model(),
         teacher_tokenizer=tokenizer,
@@ -239,7 +207,7 @@ def run(ctx):
         train_dataset=dataset,
         data_collator=DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False),
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -262,8 +230,14 @@ def run(ctx):
     losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    # Early return, not a bare check: without the capture every line below raises KeyError and the
-    # harness reports `error`, so this check could never be the thing that says FAIL.
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
+    # Early return: without the capture every line below raises KeyError, and the harness reports `error` over FAIL.
     checks["pinned_step_captured"] = bool(captured) and bool(weights)
     if not checks["pinned_step_captured"]:
         return {"checks": checks, "metrics": metrics}
@@ -271,11 +245,10 @@ def run(ctx):
         p.requires_grad for p in trainer.teacher_model.parameters()
     )
 
-    # ── Independent reference ────────────────────────────────────────────────────────────────
     student = build_model()
     student.load_state_dict(weights)
     student = student.to(ctx.device).eval()
-    # The teacher is frozen throughout: an input to the objective, not part of the math under test.
+    # Frozen throughout: an input to the objective, outside the math under test.
     teacher = trainer.teacher_model
 
     input_ids, attention_mask = captured["input_ids"], captured["attention_mask"]
@@ -284,9 +257,8 @@ def run(ctx):
     student_logits = shifted_logits(student, input_ids, attention_mask)
     teacher_logits = shifted_logits(teacher, input_ids, attention_mask)
 
-    # Without a few-token row beside a many-token one, the trainer's token mean is indistinguishable
-    # from a per-row one. Required on EVERY rank: the compared loss is a DP mean, so a rank whose rows
-    # are alike only dilutes the per-row control's gap.
+    # Required on every rank: the compared loss is a DP mean, so a rank whose rows are alike dilutes the per-row
+    # control.
     counts = supervised.sum(-1)
     checks["every_rank_pairs_a_copy_row_with_a_dialogue"] = world_all(
         int(counts.max()) >= MIN_COUNT_RATIO * int(counts.min()), ctx.device
@@ -299,12 +271,11 @@ def run(ctx):
     metrics["pinned_loss"], metrics["pinned_reference"] = logged, expected
     metrics["kl_reference"], metrics["clm_reference"] = kl, clm
     checks["loss_matches_reference"] = abs(logged - expected) < LOSS_REL_TOL * max(1.0, abs(expected))
-    # ANTI-VACUITY: a zero KL term makes the direction and alpha controls meaningless.
+    # Anti-vacuity: a zero KL term makes the direction and alpha controls meaningless.
     checks["kl_term_nontrivial"] = kl > MIN_KL
 
-    # The two components are logged separately; pin each so a compensating error in one is visible.
-    # A stored metric is logged as its world mean, every rank weighing one, so its reference is the
-    # world mean of the per-rank references.
+    # Pin each component, so a compensating error in one shows. A stored metric logs as its world mean, every rank
+    # weighing one.
     entry = [e for e in trainer.state.log_history if "loss" in e][PINNED_STEP - 1]
     for key, local in (("distillation_loss", kl), ("sft_loss", clm)):
         want = world_mean(local, ctx.device)
@@ -314,24 +285,22 @@ def run(ctx):
             1.0, abs(want)
         )
 
-    # ── NEGATIVE CONTROLS ────────────────────────────────────────────────────────────────────
     controls = {
-        # T^2 dropped: the distillation gradient is silently rescaled by 1/T^2.
+        # Silently rescales the distillation gradient by 1/T^2.
         "temperature_squared_dropped": ALPHA
         * kl_term(student_logits, teacher_logits, supervised, temperature=TEMPERATURE, scale_by_t2=False)
         + (1 - ALPHA) * clm,
-        # KL arguments reversed: KL is asymmetric, so this optimises the wrong direction.
+        # KL is asymmetric, so this optimizes the wrong direction.
         "kl_direction_reversed": ALPHA
         * kl_term(student_logits, teacher_logits, supervised, temperature=TEMPERATURE, reverse=True)
         + (1 - ALPHA) * clm,
-        # alpha ignored: the CLM term silently disappears from the objective.
+        # The CLM term silently disappears.
         "alpha_ignored": kl,
-        # A per-row KL mean: short rows' tokens outweigh long rows'.
+        # Short rows' tokens outweigh long rows'.
         "kl_reduced_per_row": ALPHA
         * kl_term(student_logits, teacher_logits, supervised, temperature=TEMPERATURE, per_row=True)
         + (1 - ALPHA) * clm,
-        # The teacher forward's logits never reach the loss (a dropped wiring), degenerating the
-        # distillation term to self-distillation: KL(student || student) == 0.
+        # A dropped wiring degrades the term to self-distillation: KL(student || student) == 0.
         "teacher_logits_unused": ALPHA * kl_term(student_logits, student_logits, supervised, temperature=TEMPERATURE)
         + (1 - ALPHA) * clm,
     }

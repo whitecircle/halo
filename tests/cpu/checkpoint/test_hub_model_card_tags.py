@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""Every checkpoint Halo writes, tool conversions included, carries the ``halo`` Hugging Face Hub tag.
-
-A model uploaded from a Halo output lists under ``halo`` on the Hub, the way TRL- and PEFT-written
-cards list under ``trl`` and ``peft``. The ``README.md`` card is tagged by the two export finalizers
-(the config finalizer every full-model writer ends with, and the non-weight copy every tool that
-builds an export from a source directory runs), by the adapter savers, and by the tools that reach
-neither finalizer. The cards libraries build from their own tag lists get it at the source of that
-list: the loaded model's ``model_tags`` (PEFT's adapter card), the trainer's ``create_model_card``
-(TRL's per-checkpoint card), and the embedding pipeline's card data. An existing card changes in its
-``tags`` entry only. A fresh card holds the tag, plus ``library_name: peft`` and the base model in a
-stock PEFT adapter directory, under the mode the umask gives any new file. A card with malformed
-metadata fails an adapter save naming the file to repair; an export, whose weights are already on
-disk by then, carries it verbatim and untagged with a warning naming the card it copied.
-
-    python tests/cpu/checkpoint/test_hub_model_card_tags.py
-"""
+"""Every checkpoint Halo writes carries the ``halo`` Hub tag. A malformed card fails an adapter save; an export,
+whose weights are already on disk, carries it verbatim with a warning."""
 
 import contextlib
 import json
@@ -26,37 +12,35 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from huggingface_hub import ModelCard
 from huggingface_hub.repocard import metadata_load
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import GptOssConfig, GptOssForCausalLM, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
-from trl import ModelConfig
+from transformers import GptOssConfig, GptOssForCausalLM, Qwen3Config, Qwen3ForCausalLM
 from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
-import src.distributed.checkpoint.peft as peft_saver
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
-from scripts.after_training import merge_models as merge_models_script
-from scripts.after_training.convert_to_bf16 import convert_to_bf16
-from scripts.after_training.reset_sinks import reset_sinks
+import halo.checkpoint.parallel.adapters as peft_saver
+from halo.checkpoint import model_card
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
+from halo.checkpoint.config_export import finalize_exported_config, save_model_config
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
+from halo.checkpoint.model_card import MalformedModelCardError, tag_model_card
+from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
+from halo.checkpoint.tools import model_merge as merge_models_script
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files
+from halo.checkpoint.tools.sink_reset import reset_sinks
+from halo.configs.embedding import EmbeddingConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.model_loading.model_preparation import apply_run_model_policies
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.sft import DistributedSFTTrainer
 from scripts.training.embedding import build_sentence_transformer
-from src.checkpoint import model_card
-from src.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, EXPERT_LORA_PEFT_TYPES
-from src.checkpoint.config_export import finalize_exported_config, save_model_config
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, copy_checkpoint_aux_files
-from src.checkpoint.model_card import MalformedModelCardError, tag_model_card
-from src.configs.embedding_config import EmbeddingConfig
-from src.distributed.checkpoint.context import CheckpointContext
-from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
-from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.models.loading.model_preparation import finalize_run_model
-from src.models.patches.gpt_oss_sinks import SinksPolicy
-from src.trainers.sft import DistributedSFTTrainer
-
-PartialState()  # the tools' loads log through accelerate's rank-aware logger
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import word_level_tokenizer
 
 HALO_TAG = "halo"
 CARD = "README.md"
@@ -71,9 +55,7 @@ _TINY_QWEN3 = {
     "max_position_embeddings": 64,
     "tie_word_embeddings": False,
 }
-# A card's metadata beyond ``tags`` must survive as a mapping: two model-index entries, one carrying
-# fields ModelCardData's EvalResult has no slot for, and keys it would reorder. YAML comments and flow
-# style are re-dumped.
+# Two model-index entries, one with fields ModelCardData's EvalResult has no slot for, and keys it would reorder.
 _EVAL_CARD = """---
 license: mit
 model-index:
@@ -104,7 +86,7 @@ language:
 _MALFORMED_CARD = "---\ntags: [x, y\n---\nbody\n"
 # Valid YAML whose tags entry the tagger cannot extend.
 _SCALAR_TAGS_CARD = "---\ntags: 1\n---\nbody\n"
-# A source model's own card: every field and the body must survive the export untouched.
+# Every field and the body must survive the export untouched.
 _SOURCE_CARD = """---
 library_name: transformers
 license: apache-2.0
@@ -124,13 +106,6 @@ def _tiny_qwen3() -> Qwen3ForCausalLM:
     return Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3))
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    """Built in-process, so the adapter conversion resolves a processing class without the network."""
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _card(directory) -> ModelCard:
     return ModelCard.load(directory / CARD)
 
@@ -143,7 +118,7 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
 
 @pytest.mark.parametrize("umask", [0o002, 0o022, 0o077])
 def test_a_fresh_card_takes_the_mode_the_umask_gives_any_new_file(tmp_path, umask):
-    """``0o666`` under the umask, as ``open(path, "w")`` gives: three umasks pin all three digits."""
+    """``0o666`` under the umask, as ``open(path, "w")`` gives."""
     previous = os.umask(umask)
     try:
         tag_model_card(str(tmp_path))
@@ -153,7 +128,6 @@ def test_a_fresh_card_takes_the_mode_the_umask_gives_any_new_file(tmp_path, umas
 
 
 def test_a_fresh_card_for_a_stock_peft_adapter_names_peft_and_its_base(tmp_path):
-    """An adapter the toolkit writes by hand gets what PEFT's own card would carry."""
     (tmp_path / "adapter_config.json").write_text(
         json.dumps({"peft_type": "LORA", "base_model_name_or_path": "Qwen/Qwen3-0.6B"})
     )
@@ -209,11 +183,8 @@ def test_an_existing_card_keeps_its_metadata_tags_body_and_mode(tmp_path):
 
 
 def test_a_read_only_card_is_tagged_and_stays_read_only(tmp_path, monkeypatch):
-    """A card an export copied from a read-only source (``shutil.copy2`` keeps ``0o444``) is tagged.
-
-    The mode is restored only after the write: a non-root user cannot open a ``0o444`` staged file,
-    and root ignores the bits, so the write is checked on the mode bits rather than on the open.
-    """
+    """A non-root user cannot open a ``0o444`` staged file and root ignores the bits, so the write is checked on the
+    mode bits."""
     (tmp_path / CARD).write_text(_SOURCE_CARD)
     (tmp_path / CARD).chmod(0o444)
     real_save = model_card.metadata_save
@@ -229,7 +200,7 @@ def test_a_read_only_card_is_tagged_and_stays_read_only(tmp_path, monkeypatch):
 
 
 def test_a_card_already_carrying_the_tag_is_not_rewritten(tmp_path):
-    """Flow style, which a rewrite would re-dump in block style: the bytes show whether it was touched."""
+    """Flow style, which a rewrite would re-dump in block style."""
     already = "---\ntags: [a, halo]\n---\nbody\n"
     (tmp_path / CARD).write_text(already)
     inode = (tmp_path / CARD).stat().st_ino
@@ -308,13 +279,12 @@ def test_a_card_with_malformed_metadata_names_the_file(tmp_path, metadata):
 
 
 def test_the_parallel_writers_config_step_tags_the_checkpoint_card(tmp_path):
-    """``save_model_config`` is the config write of every gathered/EP/PP saver: none writes a card itself."""
+    """``save_model_config`` is the config write of every gathered/EP/PP saver, none of which writes a card."""
     save_model_config(_tiny_qwen3(), str(tmp_path))
     assert _card(tmp_path).data.tags == [HALO_TAG]
 
 
 def test_the_config_finalizer_adds_the_tag_to_a_trainer_written_card(tmp_path):
-    """A library card already in the directory — TRL's here — keeps its own tags beside Halo's."""
     model = _tiny_qwen3()
     model.config.save_pretrained(tmp_path)
     generate_model_card(
@@ -337,9 +307,9 @@ def test_the_config_finalizer_adds_the_tag_to_a_trainer_written_card(tmp_path):
 
 
 def test_a_peft_adapter_of_a_loaded_model_carries_the_tag(tmp_path):
-    """PEFT's card replaces its tags with the base model's ``model_tags``: the load stamps them there."""
+    """PEFT's card replaces its tags with the base model's ``model_tags``."""
     model = _tiny_qwen3()
-    finalize_run_model(model, model.config, sinks_policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
+    apply_run_model_policies(model, model.config, sinks_policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
     get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])).save_pretrained(tmp_path)
 
     card = _card(tmp_path)
@@ -369,7 +339,7 @@ def _card_warnings(caplog) -> list[str]:
 
 @pytest.mark.parametrize("malformed", [_MALFORMED_CARD, _SCALAR_TAGS_CARD], ids=["bad-yaml", "scalar-tags"])
 def test_an_export_carries_a_malformed_source_card_verbatim_and_names_it(tmp_path, caplog, malformed):
-    """The weights are already written by then; the re-run recopies the source, so that is the file to fix."""
+    """The weights are already written; the re-run recopies the source, so that is the file to fix."""
     source, output = tmp_path / "source", tmp_path / "export"
     source.mkdir()
     output.mkdir()
@@ -449,7 +419,6 @@ def test_the_single_file_sinks_reset_tags_its_output(tmp_path):
 
 
 def test_the_sinks_reset_passthrough_tags_its_output(tmp_path):
-    """A checkpoint with no sinks is copied through unchanged, and that copy is still an export."""
     source, output = tmp_path / "source", tmp_path / "copy"
     _tiny_qwen3().save_pretrained(source)
     assert (source / "model.safetensors").is_file(), "premise: the single-file branch is the one exercised"
@@ -459,7 +428,7 @@ def test_the_sinks_reset_passthrough_tags_its_output(tmp_path):
 
 
 def test_the_sinks_reset_carries_a_malformed_source_card_and_warns(tmp_path, caplog):
-    """Its tree copy carries the card over as the aux copy does, after the checkpoint is in place."""
+    """Its tree copy carries the card over as the aux copy does."""
     source, output = tmp_path / "source", tmp_path / "copy"
     _tiny_qwen3().save_pretrained(source)
     (source / CARD).write_text(_MALFORMED_CARD)
@@ -472,10 +441,9 @@ def test_the_sinks_reset_carries_a_malformed_source_card_and_warns(tmp_path, cap
 
 
 def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
-    """The tool loads its base untagged, so PEFT's card for the converted adapter has no Halo tag of its own."""
     base, adapter, output = tmp_path / "base", tmp_path / "adapter", tmp_path / "converted"
     _tiny_qwen3().save_pretrained(base)
-    _tiny_tokenizer().save_pretrained(base)
+    word_level_tokenizer(("hello",)).save_pretrained(base)
     peft_model = get_peft_model(
         Qwen3ForCausalLM.from_pretrained(base), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"])
     )
@@ -489,14 +457,17 @@ def test_the_unmerged_adapter_conversion_tags_its_output(tmp_path):
 
 
 def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
-    """sentence-transformers writes its card from ``model_card_data`` and never reads ``model_tags``; the
-    backbone still carries them, finalized like the EP/TP branch's, for a push of the backbone alone."""
+    """sentence-transformers writes from ``model_card_data`` and never reads ``model_tags``."""
     base = tmp_path / "base"
     _tiny_qwen3().save_pretrained(base)
-    _tiny_tokenizer().save_pretrained(base)
+    word_level_tokenizer(("hello",)).save_pretrained(base)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
-            is_ep_mode=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False,
+            is_tp_mode=False,
+            needs_ep_layers=False,
+            fp32_non_ep_params=False,
+            max_concurrent_loading=None,
         ),
         model_source=str(base),
     )
@@ -506,7 +477,7 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     st_model = build_sentence_transformer(
         runtime,
         embedding_config,
-        ModelConfig(model_name_or_path=str(base)),
+        ModelArguments(model_name_or_path=str(base)),
         SimpleNamespace(reset_sinks=True, train_sinks=False),
     )
 
@@ -519,39 +490,22 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     assert "sentence-transformers" in card.data.tags
 
 
-def _cp_adapter_save_context(peft_model) -> CheckpointContext:
-    """The save rank of a CP LoRA run: the adapter saver writes the files itself."""
-    return CheckpointContext(
-        model=peft_model,
-        parallelism_config=None,
-        is_pp_mode=False,
-        is_cp_mode=True,
-        is_tp_mode=False,
-        is_ep_tp_mode=False,
-        has_ep_layers=False,
-        fsdp_wrapped=False,
-        accelerate_manages_fsdp=False,
-        is_save_rank=True,
-        max_shard_size="5GB",
-        save_sharded_ep=False,
-        has_expert_lora=False,
-        merge_expert_lora_on_save=False,
-        cp_wrapper=None,
-        tokenizer=None,
+def _cp_adapter_save_context(peft_model):
+    return save_context(
+        peft_model, make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2), is_save_rank=True
     )
 
 
 def test_a_hand_written_adapter_save_carries_the_tag(tmp_path):
-    """The CP / DTensor / expert-LoRA branches write the adapter files themselves, so no PEFT card."""
+    """These branches write the adapter files themselves, so no PEFT card."""
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
-    PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+    save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the hand-written branch wrote the adapter"
     assert metadata_load(tmp_path / CARD) == {"library_name": "peft", "tags": [HALO_TAG]}
 
 
 def test_the_adapter_savers_card_write_is_fenced(tmp_path, monkeypatch):
-    """The card and provenance follow the adapter's own barrier, so a save-rank failure there (a full
-    disk, a malformed card) must still release the peers through a fence of its own."""
+    """A save-rank failure after the adapter's barrier must still release peers through a fence of its own."""
     events: list[str] = []
 
     @contextlib.contextmanager
@@ -571,22 +525,24 @@ def test_the_adapter_savers_card_write_is_fenced(tmp_path, monkeypatch):
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
 
     with pytest.raises(OSError, match="No space left"):
-        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+        save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
 
     assert events[-3:] == ["enter", "card", "barrier"], events
 
 
 def test_an_adapter_save_onto_a_malformed_card_fails_naming_it(tmp_path):
-    """The adapter savers tag strictly: only an export, past its weight pass, carries such a card on."""
+    """Only an export, past its weight pass, carries such a card on."""
     peft_model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
     (tmp_path / CARD).write_text(_MALFORMED_CARD)
     with pytest.raises(MalformedModelCardError, match=re.escape(str(tmp_path / CARD))):
-        PeftAdapterSaver().save(_cp_adapter_save_context(peft_model), peft_model, str(tmp_path))
+        save_peft_adapters(_cp_adapter_save_context(peft_model), str(tmp_path))
 
 
 def test_the_expert_adapter_writer_tags_its_output(tmp_path):
-    save_ep_lora_adapters(_tiny_qwen3(), str(tmp_path), adapter_config={"peft_type": EXPERT_LORA_PEFT_TYPE})
+    config = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=ExpertLoraSpec(r=2, alpha=2))
+    save_expert_lora_adapters(save_context(_tiny_qwen3(), config, is_save_rank=True), str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the writer ran"
+    assert (tmp_path / ADAPTER_CONFIG_FILE).is_file(), "a resume refuses an adapter saved without its config"
     assert metadata_load(tmp_path / CARD) == {"tags": [HALO_TAG]}
 
 

@@ -1,6 +1,6 @@
 # Muon Optimizer (Newton-Schulz Orthogonalization)
 
-Muon projects each gradient matrix onto the nearest orthogonal matrix via Newton-Schulz iteration and uses that as the update direction on matrix-shaped parameters. Fused Triton kernels do the momentum/nesterov and weight-decay/update math per parameter; the orthogonalization itself runs the Newton-Schulz kernel (quack/cutlass, or a pure-torch fallback). Owning file: `src/optimizers/muon.py`.
+Muon projects each gradient matrix onto the nearest orthogonal matrix via Newton-Schulz iteration and uses that as the update direction on matrix-shaped parameters. Fused Triton kernels do the momentum/nesterov and weight-decay/update math per parameter; the orthogonalization itself runs the Newton-Schulz kernel (quack/cutlass, or a pure-torch fallback). Owning file: `halo/optimizers/muon.py`.
 
 ## Usage
 
@@ -16,20 +16,20 @@ torchrun --nproc_per_node=8 \
     --optim=muon --learning_rate=3e-4 --weight_decay=0.1
 ```
 
-`optim: muon` routes through `build_muon_optimizer` (`src/optimizers/muon.py`), which forwards `learning_rate`, `weight_decay`, `adam_epsilon`, and the decay-parameter set.
+`optim: muon` routes through `muon_optimizer_from_args` (`halo/optimizers/muon.py`), which forwards `learning_rate`, `weight_decay`, `adam_epsilon`, and the decay-parameter set.
 
-`adam_beta1` / `adam_beta2` reach Muon's internal scalar AdamW only when the config sets them to something other than the HF default; Muon's tuned `DEFAULT_SCALAR_BETAS = (0.9, 0.95)` (`src/optimizers/muon.py`) otherwise stands, since HF's `adam_beta2` default of `0.999` would silently retune the scalar optimizer of every Muon config that never mentions betas.
+`adam_beta1` / `adam_beta2` reach Muon's internal scalar AdamW only when the config sets them to something other than the HF default; Muon's tuned `DEFAULT_SCALAR_BETAS = (0.9, 0.95)` (`halo/optimizers/muon.py`) otherwise stands, since HF's `adam_beta2` default of `0.999` would silently retune the scalar optimizer of every Muon config that never mentions betas.
 
-Everything else takes the `create_muon_optimizer` default: `momentum=0.95`, `nesterov=True`, `scalar_lr=lr`, `ns_algorithm="gram_newton_schulz"`, `ns_use_kernels=True`. To change those, call `create_muon_optimizer` directly:
+Everything else takes the `build_muon_optimizer` default: `momentum=0.95`, `nesterov=True`, `scalar_lr=lr`, `ns_algorithm="gram_newton_schulz"`, `ns_use_kernels=True`. To change those, call `build_muon_optimizer` directly:
 
 ```python
-from src.optimizers.muon import create_muon_optimizer
-opt = create_muon_optimizer(model, lr=3e-4, weight_decay=0.1, ns_algorithm="standard_newton_schulz")
+from halo.optimizers.muon import build_muon_optimizer
+opt = build_muon_optimizer(model, lr=3e-4, weight_decay=0.1, ns_algorithm="standard_newton_schulz")
 ```
 
 ## Parameter splitting
 
-`create_muon_optimizer` splits parameters by shape and module role:
+`build_muon_optimizer` splits parameters by shape and module role:
 
 - Hidden 2D+ weight matrices (Linear, conv) → Muon with Newton-Schulz.
 - Everything below 2D (biases, norms) and the token embedding / `lm_head` → an internal scalar optimizer (`scalar_lr`, betas `(0.9, 0.95)`).
@@ -38,11 +38,11 @@ The embedding and head are 2D but excluded: their rows index the vocabulary, whe
 
 They are identified from the module tree the model declares (`get_input_embeddings()` / `get_output_embeddings()` plus a pooled `score`/`classifier` head), so a family spelling its embedding `tok_embeddings` or its head `output` is routed correctly. `_is_embedding_or_head`'s name-marker list is a second, always-active exclusion on top of the accessors, catching models that expose none.
 
-The scalar optimizer is [AdamWBF16](bf16-optimizer.md), not `torch.optim.AdamW`: Muon requires bf16 hidden weights, so the scalar params are bf16 too and a nearest-rounding write would truncate every sub-ULP update to zero (norm weights, value ~1 and ULP 3.9e-3, would never move). Being per-parameter, it also steps a mix of sharded DTensors and plain tensors under EP/TP, which a foreach/fused AdamW rejects.
+The scalar optimizer is [AdamWBF16](bf16-optimizer.md), not `torch.optim.AdamW`: Muon requires bf16 hidden weights, so the scalar params are bf16 too and a nearest-rounding write would truncate every sub-ULP update to zero (norm weights, value ~1 and ULP 3.9e-3, would never move). Stepping each parameter's local shard, it also takes a mix of sharded DTensors and plain tensors under EP/TP, which a foreach/fused AdamW rejects.
 
 Memory per param: ~4 B for 2D (bf16 weight + bf16 momentum), ~6 B for 1D (bf16 weight + bf16 AdamW states), plus transient Newton-Schulz buffers.
 
-Same-shape params are stacked for the NS kernel in chunks of 32 (`_GNS_CHUNK_SIZE`), which bounds the stacked NS input, not the whole transient: a bf16 update buffer for every param plus the per-shape concat of all NS outputs still materialize, tens of GB extra on a 100B+ MoE. Budget headroom for the step, and expect the same transient once on resume (the restore primes state with a zero-LR step).
+Same-shape params are stacked for the NS kernel in chunks of 32 (`_GNS_CHUNK_SIZE`), and each chunk's scaled output is copied straight back into its params' update buffers, so the step's transient is a bf16 update buffer for every param plus one stacked chunk and its Newton-Schulz output. Budget headroom for the update buffers (one bf16 copy of the matrix params), and expect the same transient once on resume (the restore primes state with a zero-LR step).
 
 **Muon-routed weights must be bf16.** Construction raises when any 2D+ param it would orthogonalize is not
 bf16, naming the offender, so the fp32 master-weight knobs (`fp32_non_ep_params`, `fp32_router`,
@@ -54,19 +54,21 @@ per-param index space; upstream Muon serializes only its own state, which would 
 
 ## Stochastic rounding on the bf16 weight write
 
-`_weight_decay_update_kernel` computes the update in fp32 and rounds the new weight to bf16 with stochastic rounding (same technique as [AdamWBF16](bf16-optimizer.md)). The orthogonalized update has magnitude ~`lr` after RMS-norm scaling, which at typical fine-tune LRs is below the bf16 weight ULP; nearest rounding would truncate the entire update to zero.
+`_weight_decay_update_kernel` computes the update in fp32 and rounds the new weight to bf16 with stochastic rounding, through the same `sr_round_to_bf16` step as [AdamWBF16](bf16-optimizer.md) (`halo/optimizers/stochastic_rounding.py`). The orthogonalized update has magnitude ~`lr` after RMS-norm scaling, which at typical fine-tune LRs is below the bf16 weight ULP; nearest rounding would truncate the entire update to zero.
 
 SR keeps the write unbiased so small updates accumulate. Each seed is keyed by the parameter's step count (a `step` entry in Muon's per-param state) and its name, under a key apart from the internal AdamWBF16's (see [AdamWBF16](bf16-optimizer.md#stochastic-rounding)), so replicas stay bit-identical and a resume rounds as the uninterrupted run would.
 
+A device skip flag (`skip_next_step_if`, as on [AdamWBF16](bf16-optimizer.md#stochastic-rounding)) reaches both legs: the momentum and weight kernels write nothing under it, and the internal AdamWBF16 skips with them.
+
 ## Newton-Schulz kernel backend
 
-The orthogonalization matmuls can run on the `quack-kernels` / `nvidia-cutlass-dsl` CUDA backend (`ns_use_kernels`, on by default). `create_muon_optimizer` probes the kernel on a tiny tensor at construction; if the call raises — missing package, import error, or ABI mismatch — it warns and falls back to a numerically-equivalent pure-torch path that is slower.
+The orthogonalization matmuls can run on the `quack-kernels` / `nvidia-cutlass-dsl` CUDA backend (`ns_use_kernels`, on by default). `build_muon_optimizer` probes the kernel on a tiny tensor at construction; if the call raises — missing package, import error, or ABI mismatch — it warns and falls back to a numerically-equivalent pure-torch path that is slower.
 
-The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.5.0`, `nvidia-cutlass-dsl==4.5.2`) over `uv.lock`'s `0.4.1` / `4.4.2`, so the probe passes and the kernel path is the active one in the images. A bare host on the lockfile versions takes the fallback.
+The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.6.4`, `nvidia-cutlass-dsl==4.6.2`) over `uv.lock`'s `0.4.1` / `4.4.2`, so the probe passes and the kernel path is the active one in the images. A bare host on the lockfile versions takes the fallback.
 
 ## Benchmark
 
-Optimizer micro-benchmark on one B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`: synthetic FFN, 8 layers × 4096 × 16384, 1.61B params; median of 20 timed steps; Blackwell image), isolating the optimizer step:
+Optimizer micro-benchmark on one B300, Halo 1.1.0 or earlier (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`: synthetic FFN, 8 layers × 4096 × 16384, 1.61B params; median of 20 timed steps; Blackwell image), isolating the optimizer step:
 
 | Optimizer | Optimizer step | Peak mem vs AdamW |
 |---|:---:|:---:|
@@ -77,13 +79,13 @@ Optimizer micro-benchmark on one B300 (`tests/gpu/optimizers/bench_muon.py --hid
 
 Muon's step costs 11–15× fused AdamW's here; the script prints no memory row for standard NS. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices amortized over a larger fwd+bwd, so the end-to-end slowdown is far smaller; measure on your model.
 
-The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`, holding the Muon step at ~200 ms on Qwen3.5-2B (H200) versus ~1000 ms for the upstream path.
+The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`.
 
 Run `tests/gpu/optimizers/bench_muon.py` or `tests/gpu/optimizers/bench_muon_qwen3_5.py` (real Qwen3.5-2B) for tables on your hardware.
 
 ## Compatibility
 
-Works with FSDP2, gradient checkpointing, and all parallelism modes — the kernels operate on the local shard after `to_local` (`src/distributed/runtime.py`) unwraps DTensors.
+Works with FSDP2, gradient checkpointing, and every parallelism mode but PP — the kernels operate on the local shard after `to_local` (`halo/runtime/dtensor.py`) unwraps DTensors. Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`): no PP run validates it.
 
 That implies an approximation: Newton-Schulz orthogonalization runs on each rank's local shard, not the full matrix, so the Muon update depends on the sharding layout and world size. The same model sharded differently takes a different update.
 

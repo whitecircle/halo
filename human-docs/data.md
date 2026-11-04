@@ -40,6 +40,11 @@ extracted as the prompt.
 - a local path: JSON/JSONL, Parquet, Arrow, CSV, or a `save_to_disk` directory;
 - an S3 path (`s3://my-bucket/key`), with your own AWS credentials.
 
+A bare `org/name` is read as a Hub ID, so write a local directory as
+`./data/corpus` or an absolute path; an `org/name` that also names a local
+directory is refused as ambiguous
+([Dataset path formats](../agent-docs/data/s3-utilities.md#dataset-path-formats) ↗).
+
 Pass a list to mix sources. `dataset_ratio` is the fraction of each source to
 keep, not a mixing weight:
 
@@ -70,43 +75,24 @@ run. Do it once, offline:
 halo run prepare-dataset -- --help
 ```
 
-The tool tokenizes, optionally packs, and shards the corpus, and can push the
-result to the Hub or S3. These flags decide whether the output is usable:
+The tool tokenizes, optionally packs (`--pack_sequences`), and shards the
+corpus, and can push the result to the Hub or S3. Four rules decide whether the
+output trains:
 
-- **`--mode`.** `chat` (the default) renders the conversation field through the
-  chat template. `text` tokenizes `--text-field` as raw text, for pretraining.
-- **`--num-shards`.** The default `1` writes one unsharded dataset that trains at
-  any data-parallel size. Above 1, the shard count must be at least your
-  data-parallel size.
-- **`--pack-sequences`.** Turns packing on. Without it each row holds one
-  document.
-- **`--packing-strategy`.** How packing fills rows:
-  - `bfd` (default): best-fit-decreasing; a document longer than
-    `--max-length` loses its overflow.
-  - `bfd_split`: the same packing, with the overflow carried into later
-    examples. Use it for lossless pretraining.
-  - `wrapped`: concatenates and chunks across documents. It keeps every token
-    but loses the document boundaries the collator uses to reset attention.
+- `--max_length` is stored with the data and must equal the training config's
+  `max_length`, or the load raises, since rows are never re-truncated.
+- `--num_shards` above 1 must be at least your data-parallel size. The default
+  `1` trains at any size.
+- `--mode text` tokenizes raw text for pre-training; the default `chat` renders
+  the conversation through the chat template.
+- The training run must end with the template the rows were rendered with, since
+  the checkpoint exports the run's: after a `--chat_template` bake, set the same
+  `chat_template` plus `force_chat_template: true`, or the load raises.
 
-  In chat mode a conversation longer than `--max-length` is dropped before
-  packing, whatever the strategy.
-- **`--max-length`.** Stored in the dataset metadata. It must equal the training
-  config's `max_length`, or the load raises, since rows are never re-truncated.
-- **`--test-size`.** Without it, a single-split input is written train-only. The
-  run then warns and uses the first 100 train rows as a placeholder test split,
-  and `--num-shards` above 1 is refused. The output keeps only `train` and
-  `test`: with no `test` split, the input's `validation` split becomes `test`,
-  and any other split is dropped with a warning.
-
-`--tokenizer-backend gigatoken` replaces the HF tokenizer with a Rust bulk
-encoder, about 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It
-checks its IDs against the HF tokenizer at startup and raises on any mismatch.
-It ships in the training image; elsewhere, install it from a checkout with
-`uv pip install -e '.[gigatoken]'`.
-
-Training configs take the same choice as `tokenizer_backend` (`hf` by default,
-`gigatoken` to opt in). Embedding training accepts only `hf`, because
-SentenceTransformers does its own tokenization.
+`--tokenizer_backend gigatoken` swaps in a faster Rust encoder whose IDs are
+checked against the HF tokenizer at startup; training configs take the same
+choice through `tokenizer_backend`. Every flag and the packing strategies:
+[Pre-Processing](../agent-docs/data/dataset-preparation.md#parameters) ↗.
 
 ## Data for the RL environments
 
@@ -115,13 +101,13 @@ The code-contests environment reads a prepared pool, not a plain dataset:
 1. `halo run compact-code-tests` compacts a test corpus into one row per
    problem, capping the tests in each suite.
 2. `halo run prepare-code-dataset` builds the pool. With `--push_bands` it also
-   pushes one config per rating band: the `<repo>:<band>` the shipped examples
-   name in `dataset:`.
+   pushes one config per rating band: the `<repo>:<band>` most shipped examples
+   name in `dataset:`. `--config_name` pushes one named config instead, which is
+   how stage 1 of the curriculum builds its pool.
 
 Pool format, build flags and bands:
 [Code Contests datasets](../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md) ↗.
 
 Full schema (multimodal content included), collators and the S3 utilities:
 [Dataset Formats](../agent-docs/data/dataset-formats.md) ↗ ·
-[Pre-Processing](../agent-docs/data/dataset-preparation.md) ↗ ·
 [S3 Utilities](../agent-docs/data/s3-utilities.md) ↗.

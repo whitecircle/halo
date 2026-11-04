@@ -1,18 +1,14 @@
 #!/usr/bin/env python
-"""CPU tests for the code-contests pool preparation: the HardTests adapter, the generated-tests merge on
-the Codeforces adapter, the test-suite caps and compaction order, and the preparation script's exclusion,
-tests-table, checker-soundness, hold-out and band-config steps. A Codeforces problem whose only tests are its
-statement's examples leaves the eval, the re-grade and the pool unless asked for, and a tests table covering
-one split prepares every split.
-
-Run: python tests/cpu/environments/test_code_pool_preparation.py  (or pytest)
-"""
+"""Code-contests pool preparation: the HardTests adapter, the generated-tests merge, suite caps and compaction, and
+the script's exclusion, tests-table, checker-soundness, hold-out and band steps. A Codeforces problem whose only
+tests are its statement's examples leaves the eval, the re-grade and the pool unless asked for."""
 
 import base64
 import dataclasses
 import json
 import logging
 import pickle
+import re
 import subprocess
 import sys
 import zlib
@@ -23,23 +19,23 @@ import pyarrow.parquet as pq
 import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
-from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import build_examples, resolve_selection
-from scripts.environments.preparation import compact_code_tests as cct
-from scripts.environments.preparation import prepare_code_dataset
-from scripts.environments.preparation.compact_code_tests import _flatten_indices, cap_tests
-from scripts.environments.preparation.prepare_code_dataset import (
+from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.entrypoints import code_contests_regrade, code_pool_preparation
+from halo.entrypoints.code_contests_eval import build_examples, resolve_selection
+from halo.entrypoints.code_pool_preparation import (
     RATING_BANDS,
     band_configs,
     band_of,
     carve_holdout,
     checker_is_sound,
+    drop_listed_rows,
     excluded_by,
     load_exclusions,
     load_tests_table,
+    suite_rejects_constants,
 )
-from src.args.mixins import DEFAULT_ANSWER_FIELD
-from src.environments.envs.tasks.coding.datasets import (
+from halo.environments.tasks.coding import contest_datasets, suite_compaction
+from halo.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,
     ContestSelection,
@@ -54,6 +50,9 @@ from src.environments.envs.tasks.coding.datasets import (
     pack_codeforces_verification,
     pack_hardtests_verification,
 )
+from halo.environments.tasks.coding.suite_compaction import _flatten_indices, cap_tests
+from scripts.environments.preparation import prepare_code_dataset
+from tests.common.repo import REPO_ROOT
 
 _SUITE = json.dumps([{"input": "1 2\n", "output": "3\n"}, {"input": "5 5\n", "output": "10\n"}])
 
@@ -137,8 +136,8 @@ def test_hardtests_pack_uses_the_joined_suite():
 
 
 def test_hardtests_checker_runs_the_judging_function_under_the_env_contract(tmp_path):
-    """The env calls ``python checker.py input expected got``; the judging function takes
-    ``(input, candidate, reference)``, so the two output paths must be swapped into it."""
+    """The env calls ``python checker.py input expected got`` and the judging function takes ``(input, candidate,
+    reference)``, so the output paths are swapped into it."""
     judge = (
         "def output_judging_function(input_str, candidate_output, reference_output):\n"
         "    return candidate_output.split() == list(reversed(reference_output.split()))\n"
@@ -238,6 +237,44 @@ def test_checker_soundness_gate_keeps_real_judges_and_drops_broken_ones():
     assert not checker_is_sound(_prepared_row(raising_judge))
 
 
+def _suite_row(outputs, checker=None):
+    tests = [{"input": f"{i}\n", "output": f"{out}\n"} for i, out in enumerate(outputs)]
+    return {"answer": json.dumps({"tests": tests, "checker": checker, "time_limit": 1.0})}
+
+
+def test_a_checker_that_rejects_any_test_s_own_reference_is_unsound():
+    # Accepts the first test's reference only: the second test fails every correct solution.
+    first_only = "import sys\nprint(1 if open(sys.argv[3]).read().strip() == 'A' else 0)\n"
+    assert not checker_is_sound(_suite_row(["A", "B"], first_only))
+    same = "import sys\nprint(1 if open(sys.argv[3]).read().split() == open(sys.argv[2]).read().split() else 0)\n"
+    assert checker_is_sound(_suite_row(["A", "B"], same))
+
+
+def test_a_suite_any_constant_answer_passes_is_rejected():
+    assert suite_rejects_constants(_suite_row(["3", "NO", "7"]))
+    assert not suite_rejects_constants(_suite_row(["NO", "NO"])), "every expected answer is the same constant"
+    # A checker that also takes -1 wherever the reference says otherwise pays a program that prints -1.
+    lax = "import sys\ngot = open(sys.argv[3]).read().split()\nprint(1 if got == ['-1'] or got == open(sys.argv[2]).read().split() else 0)\n"
+    assert not suite_rejects_constants(_suite_row(["3", "5"], lax))
+    strict = "import sys\nprint(1 if open(sys.argv[3]).read().split() == open(sys.argv[2]).read().split() else 0)\n"
+    assert suite_rejects_constants(_suite_row(["3", "5"], strict))
+
+
+def test_listed_training_rows_are_dropped_by_id_and_prefix(tmp_path):
+    listing = tmp_path / "drop.txt"
+    listing.write_text("# audited\ncodeforces_1063_d\nuva_*\n")
+    split = Dataset.from_list([{"id": i} for i in ("codeforces_1063_d", "codeforces_1064_f", "uva_1496", "luogu_p1")])
+    assert drop_listed_rows(split, str(listing))["id"] == ["codeforces_1064_f", "luogu_p1"]
+
+
+def test_the_shipped_training_exclusions_parse_and_hold_no_held_out_spelling():
+    exact, prefixes = load_exclusions(
+        str(REPO_ROOT / "scripts/environments/preparation/hardtests_train_exclusions.txt")
+    )
+    assert len(exact) == 144 and not prefixes
+    assert all(re.fullmatch(r"[a-z0-9]+_[a-z0-9_]+", problem) for problem in exact)
+
+
 def test_exclusions_match_exact_ids_and_prefixes(tmp_path):
     listing = tmp_path / "exclude.txt"
     listing.write_text("codeforces_2063_a\ncodeforces_1873_*\n\n# comment\n")
@@ -310,15 +347,17 @@ def test_holdout_takes_the_same_rows_from_every_band_and_the_rows_below():
 
 
 def test_recompaction_that_keeps_no_rows_removes_the_old_part(tmp_path, monkeypatch):
-    """A part written under wider caps must not survive a rebuild that empties the shard, or the next
-    tests-table join reads tests the current caps excluded."""
+    """A part written under wider caps must not survive a rebuild that empties the shard, or the next join reads
+    tests the caps excluded."""
     part = tmp_path / "shard-0.parquet"
-    stale = pa.Table.from_pylist([], schema=cct._OUTPUT_SCHEMA).replace_schema_metadata(
-        {cct._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
+    stale = pa.Table.from_pylist([], schema=suite_compaction._OUTPUT_SCHEMA).replace_schema_metadata(
+        {suite_compaction._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
     )
     pq.write_table(stale, part)
-    monkeypatch.setitem(cct._COMPACTORS, "empty", lambda path, caps: cct.ShardResult([], 0, 1))
-    assert cct._compact_one(("empty", "shard-0", str(part), {"max_tests": 1}))[1] == 0
+    monkeypatch.setitem(
+        suite_compaction.COMPACTORS, "empty", lambda path, caps: suite_compaction.ShardResult([], 0, 1)
+    )
+    assert suite_compaction._compact_one(("empty", "shard-0", str(part), {"max_tests": 1}))[1] == 0
     assert not part.exists(), "the stale part must be removed, not left for the next join"
 
 
@@ -336,8 +375,6 @@ def test_band_configs_share_the_test_split_and_cut_train_by_band():
     assert configs["extra-hard"]["train"]["rating"] == [2600, 3500]
     assert all(cfg["test"]["rating"] == [1200, 2100] for cfg in configs.values())
 
-
-# --- Problems graded on their statement's examples alone ---
 
 _SAMPLE = [{"input": "1\n", "output": "1\n"}]
 _ECHO = [{"input": "2\n", "output": "2\n"}]
@@ -374,8 +411,8 @@ _ROWS = [
 
 
 def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(caplog):
-    """A problem graded on the samples its prompt shows is passed by a program printing a constant: scored, such
-    problems inflate success@k."""
+    """A problem graded on the samples its prompt shows is passed by a program printing a constant, inflating
+    success@k."""
     adapter = dataclasses.replace(CODE_DATASET_ADAPTERS["codeforces"], load=lambda *_: list(_ROWS))
     args = SimpleNamespace(
         dataset="d",
@@ -398,30 +435,80 @@ def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(capl
 
 
 def test_the_regrader_rebuilds_the_rows_each_run_scored(monkeypatch):
-    """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line: a
-    run recording the exclusion scored without the examples-only problems, one predating it with them."""
-    monkeypatch.setattr(regrade_trajectories, "load_hf_split", lambda *_: list(_ROWS))
-    regrade_trajectories._load_payloads.cache_clear()
+    """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line."""
+    monkeypatch.setattr(contest_datasets, "load_dataset_split", lambda *_, **__: list(_ROWS))
+    code_contests_regrade._load_payloads.cache_clear()
     meta = {"adapter": "codeforces", "dataset": "examples-only/now", "split": "test"}
-    current = regrade_trajectories.build_payloads({**meta, "selection": ContestSelection().to_meta()})
+    current = code_contests_regrade.build_payloads({**meta, "selection": ContestSelection().to_meta()})
     older = {**meta, "dataset": "examples-only/older", "selection": {"start_date": None, "end_date": None}}
     assert [payload["tests"] for payload in current] == [_ECHO]
-    assert len(regrade_trajectories.build_payloads(older)) == len(_ROWS)
-    regrade_trajectories._load_payloads.cache_clear()
+    assert len(code_contests_regrade.build_payloads(older)) == len(_ROWS)
+    code_contests_regrade._load_payloads.cache_clear()
 
 
 def _prepare(monkeypatch, tmp_path, source: DatasetDict, name: str, *flags: str) -> DatasetDict:
     """``prepare_code_dataset.py --adapter codeforces`` over ``source``, saved under ``tmp_path / name``."""
-    load = prepare_code_dataset.load_dataset
+    load = code_pool_preparation.load_dataset
     monkeypatch.setattr(
-        prepare_code_dataset, "load_dataset", lambda path, *a, **k: source if path == "src" else load(path, *a, **k)
+        code_pool_preparation, "load_dataset", lambda path, *a, **k: source if path == "src" else load(path, *a, **k)
     )
-    monkeypatch.setattr(prepare_code_dataset, "disable_caching", lambda: None)
+    monkeypatch.setattr(code_pool_preparation, "disable_caching", lambda: None)
     out = tmp_path / name
     argv = ["prepare_code_dataset.py", "--adapter", "codeforces", "--dataset", "src", "--output_dir", str(out)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--num_proc", "1", "--no-verify_checkers", *flags])
+    # The filters these tests are not about stay off: the fixtures' samples are constant answers.
+    filters_off = ["--no-verify_checkers", "--no-reject_constant_answers"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--num_proc", "1", *filters_off, *flags])
     prepare_code_dataset.main()
     return load_from_disk(str(out))
+
+
+def _no_download(monkeypatch) -> None:
+    def refused(*args, **kwargs):
+        raise AssertionError("the source was read")
+
+    monkeypatch.setattr(code_pool_preparation, "load_dataset", refused)
+
+
+@pytest.mark.parametrize(
+    ("flags", "refusal"),
+    [
+        (["--output_dir", "out", "--config_name", "easy"], "--config_name names how --push_to_hub publishes"),
+        (["--output_dir", "out", "--push_bands"], "--push_bands names how --push_to_hub publishes"),
+        (["--push_to_hub", "o/r", "--push_bands", "--config_name", "easy"], "so --config_name would be dropped"),
+        ([], "Provide --output_dir and/or --push_to_hub"),
+    ],
+    ids=["config_name_without_push", "push_bands_without_push", "bands_beside_config_name", "no_destination"],
+)
+def test_the_pool_refuses_a_publish_flag_it_would_drop_before_any_download(monkeypatch, flags, refusal):
+    _no_download(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["prepare_code_dataset.py", "--adapter", "codeforces", "--dataset", "s", *flags])
+    with pytest.raises(SystemExit, match=refusal):
+        prepare_code_dataset.main()
+
+
+def test_the_pool_refuses_keeping_examples_only_rows_an_adapter_never_marks(monkeypatch):
+    _no_download(monkeypatch)
+    argv = ["prepare_code_dataset.py", "--adapter", "deepcoder", "--dataset", "s", "--output_dir", "out"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--include_examples_only"])
+    with pytest.raises(SystemExit, match="--include_examples_only on --adapter deepcoder"):
+        prepare_code_dataset.main()
+
+
+@pytest.mark.parametrize(("flag", "bound"), [("--min_rating", "1000"), ("--max_rating", "2000")])
+def test_the_pool_refuses_rating_bounds_a_source_cannot_apply(monkeypatch, tmp_path, flag, bound):
+    unrated = DatasetDict({"train": Dataset.from_list(_ROWS).remove_columns(["rating"])})
+    with pytest.raises(SystemExit, match="filter a 'rating' column, which src does not have"):
+        _prepare(monkeypatch, tmp_path, unrated, "unrated", flag, bound)
+    rated = DatasetDict({"train": Dataset.from_list(_ROWS)})
+    assert _prepare(monkeypatch, tmp_path, rated, "rated", flag, bound)["train"]["id"] == ["cf-2"]
+
+
+def test_the_pool_reads_a_rating_only_the_adapter_derives(monkeypatch, tmp_path):
+    """HardTests' raw rows hold ``difficulty_ratings``; its ``normalize`` makes the column the bounds filter."""
+    raw = DatasetDict({"train": Dataset.from_list(_ROWS).remove_columns(["rating"])})
+    adapter = dataclasses.replace(CODE_DATASET_ADAPTERS["codeforces"], normalize=lambda row: {"rating": 1200})
+    monkeypatch.setitem(CODE_DATASET_ADAPTERS, "codeforces", adapter)
+    assert _prepare(monkeypatch, tmp_path, raw, "derived", "--min_rating", "1000")["train"]["id"] == ["cf-2"]
 
 
 def test_the_pool_drops_examples_only_problems_unless_asked(monkeypatch, tmp_path):
@@ -439,8 +526,8 @@ def _tests_table(tmp_path, key: str) -> str:
 
 
 def test_a_tests_table_covering_one_split_prepares_every_split(monkeypatch, tmp_path):
-    """Generated tests that cover train alone are a valid table: the test split prepares from its own official
-    tests, and the train row the table covers is graded on its joined suite, no longer on its sample alone."""
+    """The test split prepares from its own official tests, and the train row the table covers is graded on its
+    joined suite."""
     source = DatasetDict(
         {"train": Dataset.from_list(_ROWS), "test": Dataset.from_list([_codeforces_row("cf-9", _ECHO)])}
     )

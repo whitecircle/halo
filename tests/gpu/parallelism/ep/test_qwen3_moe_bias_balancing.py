@@ -1,31 +1,20 @@
 #!/usr/bin/env python
-"""Qwen3-MoE bias-update balancing: inert at zero bias, and it actually steers at nonzero bias.
+"""Qwen3-MoE ``bias_update_transient`` balancing: inert at zero bias, steering at nonzero bias.
 
-Qwen3-MoE has no checkpoint slot for a routing bias, so its EP layer balances through the trainer-side
-buffer ``moe_balancing: bias_update_transient`` enables. Two properties make it safe to enable:
-
-  1. **Zero bias is a no-op.** Turning balancing on must reproduce the unbalanced route exactly, or
-     every run pays a silent routing change for a feature it never asked to engage. This is the half
-     that is easy to get wrong here: Qwen3-MoE's ``norm_topk_prob`` is configurable and the config
-     default is off (shipped checkpoints set it on), so gating through the shared
-     unconditional-renormalization helper would not be inert on a checkpoint that leaves it off.
-     The test forces the flag off to cover that, since no cached checkpoint exercises it.
-  2. **A nonzero bias moves selection.** Otherwise the balancing state is decorative.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_qwen3_moe_bias_balancing.py
+``norm_topk_prob`` defaults off while shipped checkpoints set it on, so gating through the shared
+unconditional-renormalization helper is not inert on a checkpoint leaving it off. The test forces it off, since no
+cached checkpoint exercises that.
 """
 
 import torch
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_30B_A3B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_30B_A3B
 EP_SIZE = 2
@@ -34,14 +23,13 @@ SEED = 7
 
 
 def routed(model, hidden):
-    """Run every EP layer's router path and collect (indices, weights) per layer."""
     out = []
     for layer in ep_layers(model):
         with torch.no_grad():
             flat = hidden.view(-1, hidden.shape[-1])
             with torch.amp.autocast("cuda", enabled=False):
                 logits, weights, experts = layer.gate(flat)
-            if layer._balancing_bias(logits) is not None:
+            if layer._transient_balancing_bias(logits) is not None:
                 experts = layer._biased_topk(logits)
                 weights = layer._gate_weights_at(logits, experts)
             out.append((experts.clone(), weights.float().clone()))
@@ -49,7 +37,6 @@ def routed(model, hidden):
 
 
 def compare_routes(baseline, candidate, tag: str) -> tuple[bool, bool]:
-    """(selection unchanged, gate weights unchanged) across every layer, logging what moved."""
     selection_same = True
     weights_same = True
     for i, ((idx_a, w_a), (idx_b, w_b)) in enumerate(zip(baseline, candidate, strict=True)):
@@ -82,16 +69,16 @@ def run(ctx) -> dict:
     layers = ep_layers(model)
     assert layers, "no EP layers built — this model should be EP-wrapped"
     # Without the declaration both bias modes raise.
-    checks["supports_bias_balancing"] = bool(type(layers[0])._supports_bias_balancing)
+    checks["supports_bias_balancing"] = bool(type(layers[0]).SUPPORTS_BIAS_BALANCING)
     log(f"EP layers: {len(layers)}  ({type(layers[0]).__name__})")
     log(f"norm_topk_prob = {layers[0].gate.norm_topk_prob}")
 
     torch.manual_seed(SEED)
     hidden = torch.randn(1, SEQ_LEN, model.config.hidden_size, device=device, dtype=torch.bfloat16)
 
-    baseline = routed(model, hidden)  # balancing not yet enabled
+    baseline = routed(model, hidden)  # Balancing not yet enabled.
 
-    enabled = [layer.enable_bias_balancing() for layer in layers]  # list: enable every layer, no short-circuit
+    enabled = [layer.enable_bias_balancing() for layer in layers]  # List: enable every layer, no short-circuit.
     checks["bias_balancing_enabled"] = all(enabled)
     checks["balancing_biases_created"] = layers[0].balancing_biases is not None
     checks["fresh_bias_is_zero"] = int(torch.count_nonzero(layers[0].balancing_biases)) == 0
@@ -102,10 +89,8 @@ def run(ctx) -> dict:
     )
     log(f"zero bias inert across all {len(layers)} layers: {checks['zero_bias_selection_unchanged']}")
 
-    # Shipped Qwen3-MoE checkpoints set norm_topk_prob=True, so the paragraph above does not actually
-    # exercise the case the shared _deepseek_biased_route would get wrong. Force it: with the renorm
-    # off, gating through an unconditional softmax-over-gathered-logits stops being inert, and only
-    # routing weights through the family's own _gate_weights_at stays exact.
+    # With the renorm off, an unconditional softmax over gathered logits stops being inert; only the family's
+    # _gate_weights_at stays exact.
     was_norm = [layer.gate.norm_topk_prob for layer in layers]
     biases = [layer.balancing_biases for layer in layers]
     try:
@@ -127,10 +112,9 @@ def run(ctx) -> dict:
             layer.gate.norm_topk_prob = flag
             layer.balancing_biases = bias
 
-    # A real bias must move selection, or the balancing state does nothing.
     victim = layers[0]
     victim.balancing_biases[:] = 0.0
-    victim.balancing_biases[0] = 1e3  # force expert 0 into every token's top-k
+    victim.balancing_biases[0] = 1e3  # Forces expert 0 into every token's top-k.
     steered = routed(model, hidden)
     idx = steered[0][0]
     checks["nonzero_bias_steers_selection"] = bool((idx == 0).any(dim=-1).all())

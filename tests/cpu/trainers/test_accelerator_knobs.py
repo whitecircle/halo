@@ -1,41 +1,32 @@
 #!/usr/bin/env python
-"""Test the accelerator-level parallelism knobs the mixin applies on BOTH launch branches.
-
-``fp32_output_conversion`` (default False, i.e. off) clears accelerate's
-``native_amp`` so ``prepare`` does not wrap the forward in ``convert_outputs_to_fp32`` — the full
-``[B, S, V]`` logits upcast. It must apply outside ``_create_plain_accelerator``, which an
-``accelerate launch`` that manages FSDP/DDP never reaches — a knob confined there leaves the upcast
-in place on that branch. The knobs that genuinely cannot apply there must say so instead of
-vanishing.
-
-Run: python tests/cpu/trainers/test_accelerator_knobs.py
-"""
+"""Accelerator knobs on both launch branches; knobs an accelerate-managed launch cannot apply warn. The fp32 output
+upcast is cleared outside ``build_plain_accelerator``, which ``accelerate launch`` never reaches."""
 
 import types
 
 import pytest
-from accelerate import PartialState
 
-import src.trainers.mixins.base as mixin_module
-from src.trainers.mixins.base import DistributedTrainerMixin
+import halo.trainers.accelerator as mixin_module
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.parser import HaloArgumentParser
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
-PartialState()  # the mixin's accelerate logger requires an initialized state
-
-_configure = DistributedTrainerMixin._configure_fp32_output_conversion
+_disable_upcast = DistributedTrainerMixin._disable_native_amp_logits_upcast
 _warn_unapplied = DistributedTrainerMixin._warn_knobs_unapplied_under_accelerate
 
 
-def _fake_self(*, fp32_output_conversion=False, fp16=False, **knobs):
-    config = types.SimpleNamespace(
-        fp32_output_conversion=fp32_output_conversion,
+def _fake_self(*, fp16=False, **knobs):
+    # Typed but unvalidated: the warning reads each knob's default off the dataclass that declares it.
+    config = object.__new__(ParallelismConfig)
+    vars(config).update(
         use_hsdp=False,
         fsdp_reshard_after_forward=False,
         fsdp_reshard_after_backward=True,
         fsdp_defer_grad_sync=False,
         fp32_grad_reduce=False,
     )
-    for name, value in knobs.items():
-        setattr(config, name, value)
+    vars(config).update(knobs)
     return types.SimpleNamespace(
         parallelism_config=config,
         args=types.SimpleNamespace(fp16=fp16, bf16=not fp16),
@@ -54,30 +45,22 @@ def _capture_warnings(fn) -> list[str]:
     return calls
 
 
-# ── fp32_output_conversion ───────────────────────────────────────────────
-
-
-def test_native_amp_disabled_when_requested():
+def test_native_amp_disabled_outside_fp16():
     me = _fake_self()
-    _configure(me)
+    _disable_upcast(me)
     assert me.accelerator.native_amp is False
 
 
-def test_native_amp_kept_when_knob_on():
-    me = _fake_self(fp32_output_conversion=True)
-    _configure(me)
-    assert me.accelerator.native_amp is True
-
-
 def test_native_amp_kept_under_fp16():
-    # native_amp also gates GradScaler unscaling — clearing it would clip on scaled grads.
+    # native_amp also gates GradScaler unscaling; clearing it would clip on scaled grads.
     me = _fake_self(fp16=True)
-    warnings = _capture_warnings(lambda: _configure(me))
+    _disable_upcast(me)
     assert me.accelerator.native_amp is True
-    assert any("fp16" in w for w in warnings), warnings
 
 
-# ── knobs an accelerate-managed launch cannot honour ─────────────────────
+def test_the_upcast_has_no_knob():
+    with pytest.raises(ValueError, match="fp32_output_conversion"):
+        HaloArgumentParser((ParallelismArguments,)).parse_dict({"fp32_output_conversion": True})
 
 
 def test_silent_when_all_knobs_are_default():
@@ -89,8 +72,6 @@ def test_names_every_unapplicable_knob_that_is_set():
     warnings = _capture_warnings(lambda: _warn_unapplied(me))
     assert len(warnings) == 1, warnings
     assert "use_hsdp" in warnings[0] and "fp32_grad_reduce" in warnings[0]
-    # Not listed: it IS applied on this branch.
-    assert "fp32_output_conversion" not in warnings[0]
 
 
 def test_reshard_after_forward_is_reported():

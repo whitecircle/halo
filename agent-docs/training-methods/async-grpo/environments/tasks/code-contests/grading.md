@@ -1,6 +1,7 @@
 # Grading
 
-`submit_solution` grades through `grade_solution` (`src/environments/envs/tasks/coding/grading.py`). The offline
+`submit_solution` grades through `grade_solution` (`halo/environments/tasks/coding/grading.py`; the per-test
+verdicts, comparators and checker in `verdicts.py`). The offline
 re-grader shares it, so the same rules grade online and offline; the re-grader alone stops at the first failing test
 and runs without `max_grading_seconds` ([Re-grading](../../../evaluation.md#re-grading-recorded-trajectories)). How the grade is paid:
 [Reward ladder](reward.md#reward-ladder).
@@ -32,8 +33,12 @@ and `bubblewrap`.
 ### Comparison
 
 - `exact` comparison spuriously fails correct Codeforces solutions, hence the `codeforces` preset.
-- Token comparison accepts a real-valued token within `1e-6 × max(1, |expected|)`, only when the expected token
-  looks like a float, so integer answers stay exact.
+- Token comparison accepts a real-valued token within an absolute or a relative error of `1e-6` of the expected
+  one, only when the expected token looks like a float, so integer answers stay exact. A statement that states a
+  looser bound is graded under it, each bound in its own kind: "absolute or relative error does not exceed 10^{-4}"
+  loosens both, "an absolute error of 10^{-2} or a relative error of 10^{-6}" each its own, and a bound that names
+  no kind loosens both. A tighter one never tightens the default, since the expected outputs are a reference
+  solution's printed digits.
 
 ### Verdict detail
 
@@ -53,6 +58,7 @@ Scratchpad runs on the model's own inputs show their output in both modes.
 - The per-test cap is the payload's `time_limit`, else `timeout_per_test`. An interpreted language is floored at
   `timeout_per_test`, so a C++-tuned limit cannot fail a correct CPython solution. A compiled one is scaled by
   `compiled_time_limit_scale`. Both are clamped to `max_time_limit`.
+- On `local` and `bubblewrap` the cap is wall clock from the program's exec, the interpreter's startup included and the sandbox's launch excluded ([Limits](../../sandbox.md#limits)); `remote` keeps its service's own clock. The build runs before it, under its own limit.
 - A list mixing interpreted and compiled languages states the floor, scale and clamp in the system prompt.
 - A payload without `time_limit` gets each language's limit appended to the task message
   (`Each test of this problem runs under 5 s in python, 10 s in cpp.`).

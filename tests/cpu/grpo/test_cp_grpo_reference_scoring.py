@@ -9,10 +9,10 @@ import torch
 import torch.distributed as dist
 import torch.nn.functional as F
 
-from src.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.config import cp_shift_against_full_labels
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.data.collators.offline_grpo import OfflineGRPOCPDataCollatorWithPadding
+from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 
@@ -66,9 +66,11 @@ def _reassembly_worker(rank, cp_size):
 
     def reverse_shards(shards, local, **kwargs):
         gather(shards, local, **kwargs)
-        shards.reverse()
+        # In place, as the shards may be views of the one receive buffer.
+        for shard, value in zip(shards, [shard.clone() for shard in reversed(shards)], strict=True):
+            shard.copy_(value)
 
-    with patch("src.trainers.grpo.offline.dist.all_gather", side_effect=reverse_shards):
+    with patch("torch.distributed.all_gather", side_effect=reverse_shards):
         broken = trainer._cp_score_reference_batch(batch)
     assert all(got.shape == want.shape for got, want in zip(broken, expected, strict=True))
     assert any(not torch.equal(got, want) for got, want in zip(broken, expected, strict=True)), (
@@ -106,7 +108,7 @@ def _local_mask_worker(rank, cp_size):
     chunk = width // cp_size
     grid = -0.25 - torch.arange(labels.numel()).reshape(labels.shape).float() * 0.01
     _, local_labels = cp_shift_against_full_labels(torch.zeros(labels.size(0), chunk, 1), labels, rank, cp_size)
-    # Each shard's shifted targets padded to its chunk and gathered: the grid the sweep's mask must equal.
+    # The gathered grid the sweep's mask must equal.
     local_valid = F.pad(local_labels != LABEL_IGNORE_INDEX, (0, chunk - local_labels.size(1)))
     shards = [torch.empty_like(local_valid) for _ in range(cp_size)]
     dist.all_gather(shards, local_valid)
@@ -121,7 +123,7 @@ def _local_mask_worker(rank, cp_size):
         grid[:, start : start + local_labels.size(1)],
         local_labels,
     )
-    with patch("src.trainers.grpo.offline.dist.all_gather", wraps=dist.all_gather) as gathers:
+    with patch("torch.distributed.all_gather", wraps=dist.all_gather) as gathers:
         actual = trainer._cp_score_reference_batch(batch)
     assert gathers.call_count == 1, "only the log-probs need gathering; every rank holds the full labels"
     for got, scores, valid in zip(actual, grid, gathered, strict=True):

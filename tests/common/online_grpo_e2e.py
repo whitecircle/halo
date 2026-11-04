@@ -1,31 +1,6 @@
-"""Shared body for the online-GRPO and SDPG end-to-end tests against a live vLLM server.
-
-``test_online_grpo_vllm_moe_e2e.py`` (Qwen3-30B-A3B) and ``test_online_grpo_vllm_dense_e2e.py``
-(Qwen3-0.6B) are thin wrappers over :func:`run_online_grpo_e2e`. Both trainers and every
-adapter x parallelism shape assert the same things about the same server, so the assertions live in
-one place; the scripts stay separate because the manifest attaches the family markers and the
-model-size timeout per file, and because one URL cannot serve both checkpoints.
-
-The assertions are on the served policy rather than the trainer's tensors: a sync that gathered the
-wrong shard, or an adapter fold that never ran, still returns a finite loss from ``train()``. The
-shape both on-policy families share (the probe, the perturbation round, the restore-point snapshot,
-the parallelism-engaged verdict, the resume comparisons) is :mod:`tests.common.on_policy_e2e`; what
-lives here is the axis x adapter table, the vLLM-server ``GRPOConfig``, the two trainer classes, the
-TP + LoRA refusal and SDPG's OPD term.
-
-``adapter`` puts the row on a fold no full fine-tune needs: attention PEFT reaches the engine through
-the sync's out-of-place PEFT fold, native grouped expert LoRA through ``merge_lora=True`` in the expert
-gather. ``beta`` puts a full fine-tune on the KL term, whose frozen reference the row loads as the entry
-scripts do and the trainer hands to TRL.
-
-``resume`` covers the invariant TRL's ``_last_loaded_step`` sentinel carries: a resumed run generates
-its first rollout from the checkpoint's weights rather than from whatever the engine still held.
-Phase 1 trains to ``RESUME_MAX_STEPS`` with a checkpoint at ``RESUME_SAVE_STEP``, and the
-perturbation round then moves the engine off that policy. Phase 2 is a fresh model and trainer
-resuming with one step left, so the sentinel's push is the only thing that can reach the engine
-before the resumed rollout. Both phases run in one process against one server on the same
-weight-transfer group port, as described in :mod:`tests.common.on_policy_e2e`.
-"""
+"""Shared body of the online-GRPO and SDPG e2e tests against a live vLLM server, one row per (trainer, mode, resume).
+Assertions are on the served policy: a sync that gathered the wrong shard still returns a finite loss from
+``train()``."""
 
 import math
 import os
@@ -38,31 +13,33 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
 
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
+from tests.common.memory import cleanup_memory
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
     RESUME_SAVE_STEP,
+    PolicyLayout,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
-    fresh_parallelism_config,
     frozen_base_weights,
     load_policy,
     local_view,
     logged_lrs,
-    parallelism_engaged,
     perturbation_round,
     probe_top_logprobs,
     qa_dataset,
     record_adapter_training,
+    record_dp_layout,
     record_optimizer_restore,
+    record_parallelism_engaged,
     record_resume_continuity,
     record_scheduler_restore,
     record_served_baseline,
@@ -70,15 +47,13 @@ from tests.common.on_policy_e2e import (
     served_policy_moved,
     sink_round,
 )
-from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 from tests.common.weight_sync import moved_parameters
 
-# Deliberately short: every step is a full engine round-trip, and the properties under test are that
-# the sync landed and that the resume pushed, neither of which needs a converged policy.
+# Short because every step is a full engine round-trip, and neither a landed sync nor a resume push needs convergence.
 MAX_STEPS = 3
 NUM_TRAIN_SAMPLES = 16
-# Deliberately large: the sync has to move the served weights measurably within a few steps.
+# Large, since the sync has to move the served weights measurably within a few steps.
 FULL_LEARNING_RATE = 1e-4
 LORA_LEARNING_RATE = 1e-3
 MAX_COMPLETION_LENGTH = 64
@@ -88,28 +63,14 @@ PER_DEVICE_BATCH_SIZE = 2
 
 @dataclass(frozen=True)
 class _Mode:
-    """One row's shape: the axes it engages and which adapter (if any) it trains.
-
-    ``adapter`` is the ``peft_helpers`` mode name: ``None`` (full fine-tune), ``"lora"`` (stock PEFT
-    handed to the trainer as ``peft_config``) or ``"expert_lora"`` (native grouped expert adapters
-    built inside the EP layers). ``refuses_lora_under_tp`` marks the row that asserts a
-    construction-time refusal instead of training; ``rejects_expert_lora`` marks the ETP row, which
-    asserts the config-time expert-LoRA refusal before it loads anything. ``family`` is the script a
-    mode belongs to, so neither script repeats the list.
-
+    """One row's shape: its parallel layout, world size and adapter (``None``, ``"lora"`` or ``"expert_lora"``).
     ``beta`` is the KL coefficient; non-zero on a full fine-tune, the row holds a frozen reference.
-
-    ``checkpoint_optimizer`` carries the optimizer and scheduler into the resume checkpoint, which
-    makes the continuity assertions possible. Off for a full fine-tune of the MoE policy, where that
-    state is 4 B/param of AdamWBF16 moments (over a hundred GB of disk, and the same again in host RAM
-    to compare) for a property the adapter rows and
-    ``tests/gpu/parallelism/ep/test_ep_optimizer_resume.py`` already cover at EP scale.
-    """
+    ``checkpoint_optimizer`` is off for a MoE full fine-tune, where AdamWBF16 moments cost over a hundred GB of disk
+    and the same in host RAM, for what the adapter rows and ``test_ep_optimizer_resume.py`` already cover."""
 
     family: str
-    ep_size: int = 1
-    expert_tp_size: int = 1
-    tp_size: int = 1
+    layout: PolicyLayout = PolicyLayout()
+    world_size: int = 2
     adapter: str | None = None
     refuses_lora_under_tp: bool = False
     rejects_expert_lora: bool = False
@@ -118,38 +79,42 @@ class _Mode:
 
     @property
     def expert_lora(self) -> bool:
-        """Whether this row's adapters are the native grouped expert ones, whose gather is collective."""
         return self.adapter == "expert_lora"
 
 
 MODES = {
-    "full_ep2": _Mode("moe", ep_size=2, checkpoint_optimizer=False),
-    "lora_ep2": _Mode("moe", ep_size=2, adapter="lora"),
-    "expert_lora_ep2": _Mode("moe", ep_size=2, adapter="expert_lora"),
-    "lora_etp2": _Mode("moe", expert_tp_size=2, adapter="lora", rejects_expert_lora=True),
-    "full_tp2": _Mode("dense", tp_size=2),
+    "full_ep2": _Mode("moe", PolicyLayout(ep_size=2), checkpoint_optimizer=False),
+    "lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora"),
+    "expert_lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="expert_lora"),
+    "lora_etp2": _Mode("moe", PolicyLayout(expert_tp_size=2), adapter="lora", rejects_expert_lora=True),
+    # ep1: the experts in the FSDP2 shard as DTensors, or kept whole and FSDP-ignored.
+    "full_ep1": _Mode("moe", checkpoint_optimizer=False),
+    "full_ep1_unsharded": _Mode("moe", PolicyLayout(shard_ep1_experts=False), checkpoint_optimizer=False),
+    "full_ep2_tp2": _Mode("moe", PolicyLayout(ep_size=2, tp_size=2), checkpoint_optimizer=False),
+    "full_ep2_dp2": _Mode("moe", PolicyLayout(ep_size=2), world_size=4, checkpoint_optimizer=False),
+    "full_ep2x2dom": _Mode("moe", PolicyLayout(ep_size=2, gpus_per_node=2), world_size=4, checkpoint_optimizer=False),
+    "full_ep2_etp2": _Mode("moe", PolicyLayout(ep_size=2, expert_tp_size=2), world_size=4, checkpoint_optimizer=False),
+    "full_tp2": _Mode("dense", PolicyLayout(tp_size=2)),
     "lora_fsdp": _Mode("dense", adapter="lora"),
-    "lora_tp2_rejected": _Mode("dense", tp_size=2, adapter="lora", refuses_lora_under_tp=True),
+    "lora_tp2_rejected": _Mode("dense", PolicyLayout(tp_size=2), adapter="lora", refuses_lora_under_tp=True),
     "full_fsdp_kl": _Mode("dense", beta=0.01),
+    "full_fsdp_zero3": _Mode("dense", PolicyLayout(reshard_after_forward=True)),
+    "full_tp2_dp2": _Mode("dense", PolicyLayout(tp_size=2), world_size=4),
+    # Two simulated NVLink domains of two, sharded within each and replicated across them.
+    "full_hsdp": _Mode("dense", PolicyLayout(use_hsdp=True, gpus_per_node=2), world_size=4),
+    "full_world1": _Mode("world1", world_size=1),
+    "lora_world1": _Mode("world1", world_size=1, adapter="lora"),
 }
 
 
 def modes_for(family: str) -> tuple[str, ...]:
-    """The ``--mode`` choices of one script, derived from the table rather than repeated in it."""
     return tuple(name for name, spec in MODES.items() if spec.family == family)
 
 
 def reward_len(completions, **kwargs):
-    """A reward that varies with the completion, so every GRPO group keeps a live advantage spread.
-
-    A tied group has zero advantage and therefore a zero gradient: nothing moves, and both the
-    adapter-movement and the SDPG OPD assertions would then measure nothing.
-    """
+    """A reward that varies with the completion: a tied group has zero advantage, so adapter-movement and OPD checks
+    measure nothing."""
     return [-abs(len(str(completion)) - 32) / 32.0 for completion in completions]
-
-
-def _config_for(spec: _Mode) -> ParallelismConfig:
-    return fresh_parallelism_config(spec.ep_size, spec.tp_size, spec.expert_tp_size)
 
 
 def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps) -> GRPOConfig:
@@ -179,7 +144,6 @@ def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, 
         max_completion_length=MAX_COMPLETION_LENGTH,
         beta=spec.beta,
         generation_kwargs={"temperature": 0.7},
-        fsdp="",
         remove_unused_columns=False,
     )
 
@@ -197,12 +161,9 @@ def _build_trainer(
     save_steps: int,
     weights_source: str | None = None,
 ):
-    """Construct the row's trainer. Returns ``(trainer, parallelism_config)``.
-
-    ``weights_source`` is where the weights come from: the hub id normally, or the checkpoint
-    directory on a resume whose loader expects the model to be constructed from it.
-    """
-    parallelism_config = _config_for(spec)
+    """Construct the row's trainer; returns ``(trainer, parallelism_config)``. ``weights_source`` is a hub id or a
+    resume checkpoint."""
+    parallelism_config = spec.layout.parallelism_config()
     model, peft_config = load_policy(weights_source or model_name, parallelism_config, spec.adapter)
     kwargs = {
         "model": model,
@@ -221,26 +182,25 @@ def _build_trainer(
         "peft_config": peft_config,
     }
     if spec.beta and not spec.adapter:
-        # As the entry scripts load it: from the configured model, as the policy loads (load_policy).
         kwargs["ref_model"] = load_frozen_auxiliary_model(
-            model_name, dtype=torch.bfloat16, trust_remote_code=True, reset_sinks=False
+            model_name, dtype=torch.bfloat16, trust_remote_code=True, reset_sinks=False, download_tag=None
         )
     if trainer_kind == "sdpg":
         trainer = DistributedSDPGTrainer(
-            **kwargs, sdpg_answer_field="answer", sdpg_loss="reverse_kl", sdpg_beta_base=1.0
+            **kwargs,
+            sdpg_answer_field="answer",
+            opd_positive_advantage_only=True,
+            sdpg_loss="reverse_kl",
+            sdpg_beta_base=1.0,
         )
     else:
-        trainer = DistributedGRPOTrainer(**kwargs)
+        trainer = DistributedOnlineGRPOTrainer(**kwargs)
     return trainer, parallelism_config
 
 
 def _release(trainer) -> None:
-    """Free a trainer the way its dying process would, so the next one can build on the same GPUs.
-
-    The vLLM communicator is closed explicitly rather than left to its ``atexit`` hook: it is what
-    frees the trainer-side group port and drops the server's weight-transfer engine, and phase 2
-    rebinds both.
-    """
+    """Free a trainer the way its dying process would. The vLLM communicator closes explicitly, since phase 2 rebinds
+    its group port and engine."""
     trainer.cleanup_ep()
     if trainer.accelerator.is_main_process:
         trainer.vllm_generation.vllm_client.close_communicator()
@@ -248,13 +208,8 @@ def _release(trainer) -> None:
 
 
 class _CheckpointOnce(TrainerCallback):
-    """Write only the checkpoint the resume targets.
-
-    Under a step-based save strategy HF's default flow saves again when training stops
-    (``DefaultFlowCallback.on_step_end``), which at MoE scale is a second copy of the model and its
-    optimizer state that nothing in this row reads. Registered after the default callback, so this
-    verdict is the one that survives.
-    """
+    """Write only the checkpoint the resume targets; HF's default flow would save a second copy when training stops.
+    Register after its callback."""
 
     def __init__(self, step: int):
         self._step = step
@@ -265,12 +220,8 @@ class _CheckpointOnce(TrainerCallback):
 
 
 def _weight_witnesses(model, spec: _Mode) -> dict[str, torch.Tensor]:
-    """One trained tensor per stream a full fine-tune's checkpoint must carry back.
-
-    Rank-local views, no collective: the expert shards a rank holds are the same in both phases (same
-    ``ep_size``), so a rank-local comparison is exact and runs no collective. Empty for an adapter
-    row, whose checkpoint holds adapters and whose base is compared separately.
-    """
+    """One trained tensor per stream a full fine-tune's checkpoint must carry back; rank-local, and empty for an
+    adapter row."""
     if spec.adapter:
         return {}
     unwrapped = unwrap(model)
@@ -289,11 +240,8 @@ def _weight_witnesses(model, spec: _Mode) -> dict[str, torch.Tensor]:
 
 
 class _RestorePoint(RestorePointSnapshot):
-    """The shared restore point plus the trained weights a full fine-tune's checkpoint must bring back.
-
-    Read after ``train()`` the witnesses already carry the resumed step's update, and a comparison
-    against the checkpoint would fail on a correct restore, hence the callback.
-    """
+    """The shared restore point plus the trained weights; read after ``train()`` they already carry the resumed step's
+    update."""
 
     def __init__(self, event: str, trainer, spec: _Mode, *, capture_optimizer: bool, expert_lora: bool | None = None):
         super().__init__(event, trainer, capture_optimizer=capture_optimizer, expert_lora=expert_lora)
@@ -304,20 +252,18 @@ class _RestorePoint(RestorePointSnapshot):
 
 
 def _perturb_and_sync(ctx, trainer, spec: _Mode, checks: dict, *, check_base_untouched: bool = True) -> None:
-    """This row's :func:`perturbation_round`, pushed through the trainer's own weight sync."""
     perturbation_round(
         ctx,
         trainer.model,
         adapter=spec.adapter,
         push=trainer._distributed_sync_weights,
         checks=checks,
-        expert_stream=spec.family == "moe",
         check_base_untouched=check_base_untouched,
     )
 
 
 def _sync_the_sinks(ctx, trainer, server_url: str, model_name: str, checks: dict) -> None:
-    """The sink stream's own round, for a policy that has one. Inert on a sink-less family."""
+    """The sink stream's own round; inert on a sink-less family."""
     sink_round(
         ctx,
         trainer.model,
@@ -329,14 +275,8 @@ def _sync_the_sinks(ctx, trainer, server_url: str, model_name: str, checks: dict
 
 
 def _sdpg_checks(trainer, checks: dict) -> None:
-    """The OPD term fired AND contributed.
-
-    ``opd_loss``/``opd_beta`` are logged on every step whenever ``sdpg_beta_base != 0``, so their
-    presence only shows an SDPG step ran. A regression (the fused-Liger loss bypass, a gate that masks
-    every token) would remove the non-zero ``opd_loss``, which needs the privileged-teacher forward
-    and at least one positive-advantage rollout, both guaranteed here by a graded reward that keeps
-    the group's advantage spread alive.
-    """
+    """The OPD term fired and contributed: ``opd_loss`` is logged whenever ``sdpg_beta_base != 0``, so only a non-zero
+    value proves it."""
     opd = [float(entry["opd_loss"]) for entry in trainer.state.log_history if "opd_beta" in entry]
     checks["sdpg_opd_term_fired"] = bool(opd)
     checks["sdpg_opd_loss_finite"] = bool(opd) and all(math.isfinite(v) for v in opd)
@@ -345,8 +285,7 @@ def _sdpg_checks(trainer, checks: dict) -> None:
 
 
 def _kl_checks(trainer, checks: dict) -> None:
-    """The KL term ran against the reference the row supplied: TRL holds it in the run dtype (its own build
-    is fp32), and logged a finite KL on every step, positive once the policy has moved off it."""
+    """The KL term ran against the row's reference, held in the run dtype, and logged a finite KL on every step."""
     reference = trainer.accelerator.unwrap_model(trainer.ref_model) if trainer.ref_model is not None else None
     checks["kl_reference_held_in_the_run_dtype"] = reference is not None and {
         p.dtype for p in reference.parameters()
@@ -358,14 +297,9 @@ def _kl_checks(trainer, checks: dict) -> None:
 
 
 def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
-    """The TP + LoRA refusal, asserted on a real construction rather than on a config object.
-
-    ``_validate_lora_tp_compatibility`` runs inside ``_setup_distributed_modes``, after the trainer's
-    own ``__init__`` has built the model wrappers and TRL's weight-transfer client, so a config-level
-    assertion never reaches it. The client that construction left behind is closed by the ``atexit``
-    hook ``init_communicator`` registers (``src/distributed/nccl/clients/vllm.py``), since the raise
-    leaves no handle to close it through.
-    """
+    """The TP + LoRA refusal on a real construction: ``reject_lora_under_tp`` runs after the model wrappers and client
+    are built. The raise leaves no handle to the client, so the ``atexit`` hook ``init_communicator`` registers closes
+    it."""
     try:
         _build_trainer(**build_kwargs)
     except ValueError as error:
@@ -381,7 +315,9 @@ def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
 
 
 def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server_url, group_port, checks) -> dict:
-    """Phase 1 (train, checkpoint, move the engine off it) then phase 2 (resume, prove the push)."""
+    """A resumed run's first rollout comes from the checkpoint's weights, the invariant TRL's ``_last_loaded_step``
+    sentinel carries. Phase 1 moves the engine off the checkpoint's policy; phase 2 has one step left, so the
+    sentinel's push is all that can reach the engine."""
     output_dir = shared_output_dir(ctx)
     checkpoint = os.path.join(output_dir, f"checkpoint-{RESUME_SAVE_STEP}")
 
@@ -401,19 +337,20 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     trainer.add_callback(_CheckpointOnce(RESUME_SAVE_STEP))
     saved = _RestorePoint("save", trainer, spec, capture_optimizer=spec.checkpoint_optimizer)
     trainer.add_callback(saved)
-    checks["parallelism_engaged"] = parallelism_engaged(trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size)
+    record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     trainer.train()
     record_step_losses(trainer, checks)
     reshard_fsdp2_modules(unwrap(trainer.model))
+    record_dp_layout(ctx, trainer, spec.layout, checks)
     phase1_lrs = logged_lrs(trainer)
     checks["checkpoint_captured_at_the_save_step"] = (
         saved.captured is not None and saved.captured["global_step"] == RESUME_SAVE_STEP
     )
     ctx.barrier()
 
-    # The last step's pre-generation sync pushed the checkpoint's own policy, so the engine already
-    # holds it and no extra merge stands between this probe and what phase 2 loads.
+    # The last step's pre-generation sync pushed the checkpoint's policy, so no extra merge stands between this and
+    # phase 2's load.
     checkpoint_policy = {}
     if ctx.rank == 0:
         checkpoint_policy = probe_top_logprobs(server_url, model_name)
@@ -422,8 +359,7 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
         log(f"  checkpoint policy: { {k: round(v, 4) for k, v in checkpoint_policy.items()} }")
     ctx.barrier()
 
-    # The base-weight witness belongs to the single-phase rows: here the fold is judged by the resumed
-    # engine landing back on the checkpoint's policy.
+    # The fold is judged by the resumed engine landing back on the checkpoint's policy.
     _perturb_and_sync(ctx, trainer, spec, checks, check_base_untouched=False)
     ctx.barrier()
     if ctx.rank == 0:
@@ -432,24 +368,20 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
         log(f"  engine moved off the checkpoint policy: {checks['engine_moved_off_the_checkpoint_policy']}")
     ctx.barrier()
 
-    # Off it in the sink stream too, which the dense delta above does not cover: the resume has to
-    # bring both back.
+    # The dense delta above does not cover the sink stream, and the resume has to bring both back.
     _sync_the_sinks(ctx, trainer, server_url, model_name, checks)
 
     _release(trainer)
     live["trainer"] = None
-    # The snapshot outlives its trainer, but only as values: holding the trainer would keep phase 1's
-    # model on the GPUs next to phase 2's.
+    # Holding the trainer would keep phase 1's model on the GPUs next to phase 2's.
     saved.trainer = None
     del trainer
     cleanup_memory()
     ctx.barrier()
 
-    # Phase 2: a fresh model and trainer, as a restarted job builds them, which puts TRL's
-    # ``_last_loaded_step`` back at its ``-1`` sentinel. The production rule rather than a test-local
-    # one: under the EP/CP wrappers a full checkpoint's weights load only at construction, while an
-    # adapter-only checkpoint keeps the base and has its adapters restored.
-    parallelism_config = _config_for(spec)
+    # A fresh model and trainer put ``_last_loaded_step`` back at ``-1``. Under EP/CP a full checkpoint's weights load
+    # only at construction; an adapter-only one keeps the base.
+    parallelism_config = spec.layout.parallelism_config()
     weights_source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=model_name), parallelism_config
     )
@@ -485,8 +417,7 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
 
     if ctx.rank == 0:
         after = probe_top_logprobs(server_url, model_name)
-        # Exact on every row: the checkpoint restores a full fine-tune's weights, an adapter row's
-        # adapters bit-equal over the freshly loaded base, and phase 1's syncs left its base as loaded.
+        # Exact on every row: weights or adapters restore bit-equal, and phase 1's syncs left the base as loaded.
         checks["resume_returned_the_engine_to_the_checkpoint_policy"] = after == checkpoint_policy
         if not checks["resume_returned_the_engine_to_the_checkpoint_policy"]:
             log("  the resumed run's first rollout did NOT come from the checkpoint's weights")
@@ -500,12 +431,11 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
         record_scheduler_restore(checks, capture)
         record_optimizer_restore(checks, saved.captured, capture)
 
-    # Train-begin captures rather than post-train reads: one resumed step has already moved them. A
-    # save that never fired leaves no witnesses, which the check above reports.
+    # Train-begin captures, since one resumed step has already moved them. A save that never fired leaves no witnesses.
     witnesses = saved.captured["weights"] if saved.captured else {}
     if witnesses:
-        # Only a full fine-tune has these: its checkpoint carries the weights themselves, so an
-        # inexact restore is visible here before the engine ever sees it.
+        # A full fine-tune's checkpoint carries the weights, so an inexact restore shows here before the engine sees
+        # it.
         mismatched = [
             k for k in witnesses if not torch.equal(witnesses[k], capture["weights"].get(k, torch.tensor([])))
         ]
@@ -529,13 +459,12 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
 def run_online_grpo_e2e(
     ctx, *, trainer_kind: str, mode: str, resume: bool, server_url: str, group_port: int, model_name: str
 ) -> dict:
-    """Drive one (trainer × mode × resume) row against the live server at ``server_url``."""
     spec = MODES[mode]
     checks: dict[str, bool] = {}
     log(f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} model={model_name} server={server_url}")
 
     if spec.rejects_expert_lora:
-        refusal = expert_lora_under_etp_refusal(spec.expert_tp_size)
+        refusal = expert_lora_under_etp_refusal(spec.layout.expert_tp_size)
         checks["expert_lora_under_etp_refused"] = bool(refusal)
         checks["etp_refusal_names_expert_tensor_parallel_size"] = "expert_tensor_parallel_size > 1" in refusal
 
@@ -575,14 +504,13 @@ def run_online_grpo_e2e(
 
     trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0)
     ctx.on_teardown(lambda: _release(trainer))
-    checks["parallelism_engaged"] = parallelism_engaged(trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size)
-    log(f"  parallelism engaged: {checks['parallelism_engaged']} ({mode})")
+    record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     adapters_before, base_before = {}, {}
     if spec.adapter:
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=spec.expert_lora)
         base_before = frozen_base_weights(unwrap(trainer.model))
-        ok, detail = assert_only_adapters_trainable(unwrap(trainer.model))
+        ok, detail = check_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  frozen base: {detail}")
 
@@ -597,6 +525,7 @@ def run_online_grpo_e2e(
         moved = moved_parameters(base_before, frozen_base_weights(unwrap(trainer.model)))
         checks["training_syncs_left_the_base_weights_alone"] = bool(base_before) and not moved
         log(f"  frozen base weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
+    record_dp_layout(ctx, trainer, spec.layout, checks)
 
     ctx.barrier()
     before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}
@@ -621,4 +550,7 @@ def run_online_grpo_e2e(
     if spec.beta:
         _kl_checks(trainer, checks)
 
-    return {"checks": ctx.broadcast_checks(checks), "metrics": {"steps_logged": float(len(losses))}}
+    return {
+        "checks": ctx.broadcast_checks(checks),
+        "metrics": {"steps_logged": float(len(losses)), "training_had_a_gradient": float(trained)},
+    }

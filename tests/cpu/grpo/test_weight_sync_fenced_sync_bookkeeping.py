@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""What the fenced weight sync does besides pushing: credit the pause to in-flight episodes, and
-release the score-only clients' HTTP sessions at cleanup.
-
-    python tests/cpu/grpo/test_weight_sync_fenced_sync_bookkeeping.py
-"""
+"""What the fenced weight sync does besides pushing: credit the pause to in-flight episodes, and release the
+score-only clients' HTTP sessions at cleanup."""
 
 import time
 from types import SimpleNamespace
@@ -11,9 +8,9 @@ from unittest.mock import Mock
 
 import pytest
 
-from src.configs.rollout_config import RolloutConfig
-from src.environments.ray_actors import RolloutManager
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
+from halo.environments.ray_actors import RolloutManager
+from halo.environments.rollout_config import RolloutConfig
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 
 _SYNC_S = 0.05
 
@@ -75,13 +72,12 @@ def test_cleanup_closes_the_score_only_clients_sessions():
     trainer._weight_sync_client = None
     trainer._loop = None
     trainer._prefetch_thread = None
-    trainer._multi_server_mode = False
-    sessions = [Mock(), Mock()]
-    trainer._engine_rescore_clients = [SimpleNamespace(session=s) for s in sessions]
+    clients = [Mock(), Mock()]
+    trainer._engine_rescore_clients = list(clients)
 
     trainer._cleanup_async_components()
 
-    assert all(s.close.call_count == 1 for s in sessions)
+    assert all(client.close_http_session.call_count == 1 for client in clients)
     assert trainer._engine_rescore_clients is None
 
 

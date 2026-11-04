@@ -2,7 +2,7 @@
 """Text-based tool-call parser for gpt-oss served with harmony disabled.
 
 The toolkit serves gpt-oss with vLLM's harmony pipeline disabled
-(``patch_vllm_disable_gptoss.sh`` sets ``use_harmony = False``) because the
+(``patch_vllm_source.py`` sets ``use_harmony = False``) because the
 native harmony serving path returns malformed output and parser errors on this
 stack. With harmony off, the model still follows its harmony chat template and
 emits the channel structure, but vLLM detokenizes the output with the harmony
@@ -41,13 +41,13 @@ from collections.abc import Sequence
 from typing import Any
 
 import regex as re
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.engine.protocol import (
+from vllm.entrypoints.generate.base.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 from vllm.tool_parsers.abstract_tool_parser import ToolParser, ToolParserManager
 

@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A code-contests run that lists several languages lets the model pick one per program.
-
-Both tools then take a required ``language`` argument (the set's canonical names), every program runs
-and is graded in the language its call named, the episode records the language it settled on as a
-metric slice, and a call without a valid language, or with code evidently in another of the set's
-languages, is refused before it spends the episode's budget. A run naming one language keeps the
-fixed-language contract (``python_repl``, no argument).
-
-Run: python tests/cpu/environments/test_code_contests_languages.py  (or pytest)
-"""
+"""A code-contests run listing several languages lets the model pick one per program: both tools take a required
+``language``, every program runs and grades in it, and a call naming an invalid one, or with code evidently in
+another, is refused before it spends budget. One language keeps the fixed contract."""
 
 import json
 import platform
@@ -18,12 +11,18 @@ from dataclasses import replace
 
 import pytest
 
-from scripts.environments.inference.run_code_contests import parse_language_flag, refuse_flag_owned_env_kwargs
-from src.environments.base import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment, evident_language
-from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution
-from src.environments.sandbox.base import LANGUAGES, SandboxExecutor, SandboxResult
-from src.environments.sandbox.local import LocalSubprocessSandbox
+from halo.entrypoints.code_contests_eval import FLAG_OWNED_ENV_KWARGS, parse_language_flag
+from halo.entrypoints.eval_contract import reject_flag_owned_env_kwargs
+from halo.environments.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.languages import LANGUAGES
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import SUBMISSION_AFTER_ACCEPT_REPLY
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution
+from halo.environments.tasks.coding.program_source import find_evident_language
+from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
 
 _ADD = {"answer": {"tests": [{"input": "2 3\n", "output": "5\n"}], "time_limit": 1.0}}
 # Every recording run answers 5, so this answer fails each submission and none ends the episode early.
@@ -171,8 +170,8 @@ def test_the_eval_flag_normalizes_one_name_and_splits_a_list():
     with pytest.raises(SystemExit, match="names no language"):
         parse_language_flag(" , ")
     with pytest.raises(SystemExit, match="--language, not --env_kwargs"):
-        refuse_flag_owned_env_kwargs({"language": "cpp"})
-    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
+        reject_flag_owned_env_kwargs({"language": "cpp"}, FLAG_OWNED_ENV_KWARGS)
+    reject_flag_owned_env_kwargs({"timeout_per_test": 3}, FLAG_OWNED_ENV_KWARGS)
 
 
 def test_language_set_validation():
@@ -235,9 +234,8 @@ def test_the_prompt_states_the_compiled_multiplier_only_when_it_is_not_one_and_t
 
 
 def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_call():
-    """C++ sent as python, and Python sent as cpp, are refused before they run and returned to the
-    budget unpriced: neither scratchpad run nor submission counts, the submission cap and its price
-    stay whole, nothing is recorded as graded, and the language slice is untouched."""
+    """Refused before they run: each pays the tool-error price and flags its turn untrainable, no run or submission
+    counts, and nothing is recorded as graded."""
     sandbox = _RecordingSandbox()
     env = _env(
         sandbox=sandbox,
@@ -259,14 +257,16 @@ def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_
     to_cpp = 'this looks like cpp code sent with language "python"; send it again with language "cpp".'
     to_py = 'this looks like python code sent with language "cpp"; send it again with language "python".'
     assert [m.content for m in traj.messages if m.role == "tool"] == [
-        f"Not run: {to_cpp} No scratchpad run was spent.",
-        f"Not graded: {to_cpp} No submission was spent.",
-        f"Not run: {to_py} No scratchpad run was spent.",
-        f"Not graded: {to_py} No submission was spent.",
+        f"Error: Not run: {to_cpp} No scratchpad run was spent.",
+        f"Error: Not graded: {to_cpp} No submission was spent.",
+        f"Error: Not run: {to_py} No scratchpad run was spent.",
+        f"Error: Not graded: {to_py} No submission was spent.",
     ]
     assert sandbox.runs == [], "a refused program never reaches the sandbox"
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"run_code": 0, "submit_solution": 0}
-    assert step.reward == 0.0 and not step.done, "neither paid as a success nor charged as an error"
+    assert step.reward == pytest.approx(-4 * 0.5) and not step.done, "each refusal charged as an error"
+    (turn,) = [m for m in traj.messages if m.role == "assistant"]
+    assert turn.calls_rejected and turn.untrainable, "a turn of refusals alone is never rewarded"
     assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (4, 0)
     assert EPISODE_SLICES_KEY not in traj.info and "language_switches" not in traj.info
     for key in ("submission_result", "submission_language", "_submitted_code", "tested_before_submission"):
@@ -278,8 +278,25 @@ def test_a_program_sent_with_the_wrong_language_is_refused_without_spending_the_
     assert len(sandbox.runs) == 2 and traj.done, "both graded submissions of the cap were still there"
     components = traj.info[REWARD_COMPONENTS_KEY]
     assert components["reward/resubmission"] == pytest.approx(-0.2), "only the one real resubmission is priced"
-    assert components["reward/turn_shaping"] == pytest.approx(0.1), "the two graded submissions alone are paid"
+    assert components["reward/turn_shaping"] == pytest.approx(-4 * 0.5 + 2 * 0.05), (
+        "the four refusals charged, the two graded submissions paid"
+    )
     assert traj.info["tested_before_submission"] is False
+
+
+def test_a_mislabelled_call_beside_the_accept_takes_the_free_post_accept_reply():
+    """After the accept the task has ended: a later submission in the turn is returned unpriced whatever its
+    label, never refused as mislabelled, which would charge it and ask for a resend."""
+    env = _env(sandbox=_RecordingSandbox(), max_submissions=3, tool_error_penalty=0.5)
+    ids, _ = env.reset(["a+b"], [_ADD])
+    calls = [
+        _call("1", "submit_solution", code=_PY_ADD, language="python"),
+        _call("2", "submit_solution", code=_CPP_SOURCE, language="python"),
+    ]
+    (step,) = env.step(ids, [""], [{"tool_calls": calls}])
+    assert step.done and step.trajectory.info["submission_result"].startswith("Passed 1/1")
+    assert step.trajectory.messages[-1].content == SUBMISSION_AFTER_ACCEPT_REPLY
+    assert step.reward == 0.0, "the refund, not the error price"
 
 
 def test_a_program_quoting_the_other_language_keeps_its_label():
@@ -316,8 +333,8 @@ def test_a_program_quoting_the_other_language_keeps_its_label():
         ("print(1", "python", ("python", "cpp"), None),  # broken, but not C
     ],
 )
-def test_evident_language(code, language, offered, evident):
-    assert evident_language(code, language, offered) == evident
+def test_find_evident_language(code, language, offered, evident):
+    assert find_evident_language(code, language, offered) == evident
 
 
 def test_a_problem_stating_no_time_limit_is_told_the_one_each_language_runs_under():

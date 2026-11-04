@@ -1,47 +1,22 @@
 #!/usr/bin/env python
-"""Grading-infra-outage episodes must not poison the GRPO group baseline.
-
-A ``CodeContestsEnvironment`` episode whose submission grade lost every test to backend errors
-completes WITHOUT a ``RolloutResult.error``, so nothing stops the trainer reading its forced 0 grade
-as a genuine wrong answer — biasing every sibling's advantage. The protocol-level contract:
-
-- the environment marks the trajectory via ``EPISODE_INVALID_KEY`` (``Trajectory.episode_invalid``);
-- ``rollout_valid_mask`` excludes it from the baseline exactly like ``RolloutResult.error``;
-- ``degenerate_group_mask`` computes degeneracy over VALID members only, so an invalid member's
-  differing placeholder reward cannot let an all-alike group escape degenerate detection
-  (a group with < 2 valid members is degenerate by definition).
-
-    python tests/cpu/grpo/test_grpo_infra_invalid_episodes.py
-"""
+"""Grading-infra-outage episodes must not poison the GRPO group baseline. Such an episode completes without a
+``RolloutResult.error``, so the trainer would read its forced 0 grade as a genuine wrong answer."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.environments.base import (
-    EPISODE_INVALID_KEY,
-    EPISODE_INVALID_REASON_KEY,
-    REWARD_COMPONENTS_KEY,
-    Trajectory,
-)
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.episode import RolloutResult
-from src.rewards.terms import OBJECTIVE_REWARD_KEY
-from src.trainers.grpo.environmental import (
-    EMPTY_ROLLOUT_STEP_LIMIT,
-    DistributedAsyncEnvironmentalGRPOTrainer,
-    rollout_valid_mask,
-)
-from src.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
-
-PartialState()  # the trainer warns through accelerate's logger, which refuses to log without it
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.messages import Trajectory
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY
+from halo.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, rollout_valid_mask
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
 
 _DEVICE = torch.device("cpu")
-
-
-# --- Environment side: code_contests marks the outage on the trajectory ---
 
 
 def _graded_traj(env, **info):
@@ -86,12 +61,9 @@ def test_genuine_failure_stays_valid():
 
 def test_never_submitted_stays_valid():
     env = CodeContestsEnvironment(language="python")
-    traj = _graded_traj(env)  # no submission_result at all
+    traj = _graded_traj(env)
     env._settle_grade(traj, None)
     assert traj.episode_invalid is False
-
-
-# --- Trainer side: rollout_valid_mask consumes the flag like RolloutResult.error ---
 
 
 def _result(error=None, invalid=False):
@@ -113,15 +85,12 @@ def test_outage_member_excluded_from_group_baseline():
     mask = rollout_valid_mask(results, _DEVICE)
 
     adv = group_relative_advantages(rewards, 4, "none", valid_mask=mask)
-    outage_free = rewards[:3] - rewards[:3].mean()  # baseline over valid members only
+    outage_free = rewards[:3] - rewards[:3].mean()
     assert torch.allclose(adv[:3], outage_free)
 
     # Without the mask, the outage placeholder's 0.0 drags the baseline down for every sibling.
     poisoned = group_relative_advantages(rewards, 4, "none")
     assert not torch.allclose(adv[:3], poisoned[:3])
-
-
-# --- Degenerate-group detection over valid members only ---
 
 
 def test_degenerate_detection_ignores_invalid_member_spread():
@@ -151,11 +120,7 @@ def test_no_mask_behavior_unchanged():
     assert degenerate_group_mask(rewards, 2).tolist() == [True, True, False, False]
 
 
-# --- A step in which NOTHING survived: zero gradient, so it must not pass silently ---
-
-
 def _all_invalid_results(error: str | None):
-    """Four rollouts that all carry ``error`` (or are all env-marked invalid when it is None)."""
     if error is not None:
         return [RolloutResult(prompt="p", error=error) for _ in range(4)]
     invalid = Trajectory(info={EPISODE_INVALID_KEY: True})
@@ -163,32 +128,29 @@ def _all_invalid_results(error: str | None):
 
 
 def _guard_stub():
-    """What the guard reads off the trainer: the streak counter ``__init__`` declares."""
     return SimpleNamespace(_empty_rollout_steps=0)
 
 
 def _check(stub, results):
-    DistributedAsyncEnvironmentalGRPOTrainer._check_step_has_valid_episodes(
+    DistributedAsyncEnvironmentalGRPOTrainer._track_empty_rollout_step(
         stub, results, rollout_valid_mask(results, _DEVICE)
     )
 
 
 def test_consecutive_empty_rollout_steps_halt_the_run_and_name_the_rollout_error():
-    """Every episode failing means an all-masked batch — a zero gradient logged as a plausible
-    ``loss=0, reward=0``. One step is a blip; the limit-th consecutive one has to stop the run, and
-    carry the engine's own message, which is where the remedy is."""
+    """An all-masked batch is a zero gradient logged as a plausible ``loss=0, reward=0``. The limit-th consecutive step
+    stops the run and carries the engine's own message, which is where the remedy is."""
     stub = _guard_stub()
     results = _all_invalid_results("vLLM error (status 400): thinking_token_budget is not supported")
     for _ in range(EMPTY_ROLLOUT_STEP_LIMIT - 1):
-        _check(stub, results)  # under the limit: warn, keep training
+        _check(stub, results)
     with pytest.raises(RuntimeError) as excinfo:
         _check(stub, results)
     assert "thinking_token_budget" in str(excinfo.value)
 
 
 def test_env_marked_invalid_episodes_halt_too_and_say_so():
-    """The other way a step empties out carries no ``RolloutResult.error`` at all (a grading
-    outage), so the message must not promise an engine error that does not exist."""
+    """A grading outage carries no ``RolloutResult.error``, so the message must not promise an engine error."""
     stub = _guard_stub()
     results = _all_invalid_results(None)
     for _ in range(EMPTY_ROLLOUT_STEP_LIMIT - 1):
@@ -198,8 +160,7 @@ def test_env_marked_invalid_episodes_halt_too_and_say_so():
 
 
 def test_untrainable_episodes_halt_names_the_render_failure():
-    """An episode the chat template could not re-render carries no ``RolloutResult.error`` either; the
-    halt must name that cause instead of blaming the environment."""
+    """An episode the template could not re-render carries no ``RolloutResult.error`` either."""
     stub = _guard_stub()
     reason = "cannot locate the trained turn spans of tok inside its own chat-template render"
     results = [
@@ -215,8 +176,6 @@ def test_untrainable_episodes_halt_names_the_render_failure():
 
 
 def test_one_survivor_resets_the_streak():
-    """The guard fires on CONSECUTIVE empty steps: a single valid episode means the step trained on
-    something, so a later isolated empty step must not inherit the earlier count."""
     stub = _guard_stub()
     empty = _all_invalid_results("boom")
     for _ in range(EMPTY_ROLLOUT_STEP_LIMIT - 1):

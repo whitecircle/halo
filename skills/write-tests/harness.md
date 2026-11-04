@@ -12,13 +12,17 @@ def gpu_test_main(
     exact_world_size: int | None = None,  # if set, world_size must equal it exactly
     prefix: str = "halo_test",       # temp-dir prefix for this test's isolated output/cache dirs
     partial_state: bool = True,      # build accelerate.PartialState() (needed by Trainer tests; off for pure-kernel)
+    process_group: bool = True,      # join the torchrun group; off for a launcher="python" driver (rank 0 of a world of one)
 ): ...
 ```
 
 It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body is just
 *load → train → assert*:
 
-1. `init_distributed()` → `(rank, world_size, local_rank)`, optional `PartialState()`.
+1. `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value (causal_conv1d's default
+   backward sums the conv weight gradient with atomics, so the gated-DeltaNet families would miss an
+   exact resume replay now and then), then `init_distributed()` → `(rank, world_size, local_rank)`,
+   optional `PartialState()`.
 2. **Validate the launch before allocating** — wrong world size emits an `error` result and
    `sys.exit(2)` (the launcher reports the `status="error"` line as a FAIL naming the launch).
 3. `setup_cache_dirs(prefix, rank)` → per-rank isolated `output_dir` / `cache_dir`.
@@ -42,6 +46,7 @@ It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body i
 | `ctx.output_dir`, `ctx.cache_dir` | per-rank isolated dirs (auto-cleaned) |
 | `ctx.on_teardown(fn)` | register a finalizer (e.g. `trainer.cleanup_ep`); run LIFO before teardown |
 | `ctx.barrier()` | `dist.barrier()` if initialized |
+| `ctx.broadcast_seed(seed=42)` | seed torch/cuda/random identically on all ranks (rank-0 value wins); returns the shared seed. Use when every rank must generate the same data. |
 | `ctx.broadcast_checks(checks)` | AND rank 0's verdict into this rank's dict, for a check only rank 0 can make (a served model's response, an HTTP probe). Merges rather than replaces, so a check that failed only on rank 1 survives — the harness exits per rank, and a rank-0-only failure would otherwise read as a teardown race. |
 | `ctx.metrics(trainer_or_cb)` | snapshot headline metrics from a trainer (or an `EfficiencyCallback`); returns `{}` if none attached |
 
@@ -58,7 +63,7 @@ The decorator computes `all(checks.values())`. **Returning no checks is an error
 return at least one. `metrics` is optional but should be present on any test that trains.
 
 Every check must be able to fail. A cross-rank spread of a logged loss cannot (HF logs the world
-mean), and neither can `trainer.parallelism_config.is_ep_mode` / `is_tp_mode` / `is_cp_mode`, which
+mean), and neither can `trainer.parallelism_config.has_ep_group` / `is_tp_mode` / `is_cp_mode`, which
 read back the config the trainer was handed; read the axis off the model instead.
 
 ### Shared checks and probes
@@ -67,18 +72,32 @@ Build checks from these rather than re-deriving them per file:
 
 | Helper | Module | What it gives |
 |---|---|---|
-| `step_losses(trainer)` | `tests/common/utils.py` | the per-step training losses, eval entries and the run summary excluded |
-| `training_run_checks(result, trainer, max_steps, *, loss_band=, grad_norms=, loss_decreased=)` | `tests/common/utils.py` | `loss_finite`, `all_steps_finite`, `steps_completed`, and on request `loss_reasonable`, `grad_norms_finite`, `loss_decreased` |
-| `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP wrappers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
+| `step_losses(trainer)` | `tests/common/training_checks.py` | the per-step training losses, eval entries and the run summary excluded |
+| `training_run_checks(result, trainer, max_steps, *, loss_band=, grad_norms=, loss_decreased=)` | `tests/common/training_checks.py` | `loss_finite`, `all_steps_finite`, `steps_completed`, and on request `loss_reasonable`, `grad_norms_finite`, `loss_decreased` |
+| `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP layers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
 | `ep_layers(model)` | `tests/common/ep_reference.py` | every EP/ETP-wrapped MoE layer |
-| `group_max_abs_diff(tensor, group)` | `tests/common/distributed.py` | the replica-identity probe: the largest elementwise difference across a group, NaN-propagating (collective) |
-| `pin_deterministic_ep_dispatch()` | `tests/common/distributed.py` | every DeepEP `ElasticBuffer` of the process built in deterministic mode, for an EP body that replays a run exactly without `full_determinism` (under it the dispatcher does this itself); the default dispatch claims receive slots with atomics, so expert weight gradients round differently run to run |
+| `router_parameters` / `routed_parameters` / `zero_filled_expert_banks` | `tests/common/ep_reference.py` | the EP layers' own router parameters, those plus their expert weights, and a layer's expert gradients gathered whole in the stock container's layout (collective) |
+| `captured_picks` / `routing_pinned` / `armed_routing_capture` / `top_k_shortfall` / `duplicate_pick_tokens` | `tests/common/ep_reference.py` | the EP layers' top-k picks per forward, the layers routed on given picks and scored against their routers' logits, the one arm-and-drain both captures share (refusing layers another reader armed), and the two pick scores: how far a pick falls below the router's k-th logit, and the tokens naming one expert twice, which that shortfall cannot see |
+| `group_max_abs_diff(tensor, group)` / `max_abs_diff_across(tensors, group)` | `tests/common/distributed.py` | the replica-identity probe: the largest elementwise difference across a group, NaN-propagating, for one tensor or the largest over several (NaN for none) (collective) |
+| `dp_layout_checks` / `full_shard_checks` / `ep1_expert_checks` / `hsdp_checks` / `expert_replica_checks` / `tp_dp_checks` | `tests/common/dp_layout.py` | the data-parallel half of a requested layout read off the model: FULL_SHARD resharding, where ep1 experts live, the HSDP mesh and its replicas, the expert replicas of several EP groups, the (dp, tp) mesh |
+| `pin_deterministic_ep_dispatch()` | `tests/common/distributed.py` | every DeepEP `ElasticBuffer` of the process built in deterministic mode, for an EP body that replays a run exactly without `full_determinism` (under it the dispatcher does this itself); the default dispatch claims receive slots with atomics, so expert weight gradients round differently run to run. A forward-only comparison on the grouped-GEMM path needs no pin: each expert row is independent of arrival order and the combine sums in top-k slot order ([EP → Determinism](../../agent-docs/parallelism/expert-parallelism.md#determinism)) |
 | `model_save_checks` / `resume_checkpoint_checks` / `resume_continuity_checks` | `tests/common/checkpoint_io.py` | the files a `save_model` or a mid-training checkpoint must hold, and what a resume restored at its first step |
-| `run_sft_suite(ctx, SFTSuite(...), {key: SFTMode(...)}, default_mode=)` | `tests/common/sft_modes.py` | the whole SFT smoke body: one `--mode` per manifest row, load → train → the checks above |
-| `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, sharded gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
+| `run_two_phase_resume(ctx, build_trainer, *, output_dir=, probe=, optimizer_state=)` | `tests/common/checkpoint_io.py` | the whole resume body: train to a checkpoint, resume a fresh trainer from it, and return both phases' checks, optionally with the optimizer state compared bit-exact (collective) |
+| `run_resume_export(ctx, ResumeExportRoute(...), parallelism_config, *, base=, root=, save_step=, total_steps=)` | `tests/common/resume_export.py` | the save → exact resume → export body over any trainer and layout: an unbroken run from a saved base (`save_base_checkpoint`) with a checkpoint every `save_step`, a trainer built from the midway checkpoint through `load_distributed_model` replaying the rest (optimizer bit-exact, restore logged, no warm restart, losses and final checkpoint), and the final checkpoint loaded through the route's export class; a route names its sidecars and the run state they restore (collective) |
+| `run_sft_suite(ctx, SFTSuite(...), {key: SFTMode(...)}, mode)` | `tests/common/sft_modes.py` | the whole SFT smoke body: one `--mode` per manifest row (`all` runs every mode), load → train → the checks above; a mode with `adapters` loads through the production PEFT path, and its `before_train` hook returns the checks run after training |
+| `run_lora_sft(ctx, *, model=, mode=, attn=, qlora=, convergence=, save_reload=, resume=)` | `tests/common/lora_sft_modes.py` | the LoRA SFT rows on that body: only the adapters train and every one moves, plus per row a save reloaded on a fresh unsharded base, a restore onto the zeroed live adapters, or a 25-step loss curve |
+| `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` / `dense_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, whole gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
+| `record_routed_first_step` / `capturing_routed_forwards` / `pinned_reference_routing` / `routed_first_step_checks` | `tests/common/routed_first_step.py` | the routed half `first_step.py` leaves out: a parallel run's EP layers (picks, routed outputs, whole router and expert gradients) against a stock reference whose MoE blocks route on the run's own top-k picks, so a bf16 near-tie cannot move a token between experts; the checks also refuse a pick outside the near-tie bound and a token naming one expert twice |
 | `skip_unless_local_checkpoint(path, env_var)` | `tests/common/harness.py` | the `SKIP:` exit for a suite whose local checkpoint is absent, called under `__main__` before `run()` |
-| `max_or_nan(values, *, default=)` | `tests/common/utils.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
-| `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call. The rendezvous store is served from the calling process, and no worker starts before every rank has initialized the group: a rank that finishes first tears down neither the store nor a pair a peer is still connecting |
+| `skip_unless_blackwell(what)` | `tests/common/harness.py` | the same `SKIP:` exit for a suite or row that runs FlashAttention 4, on a pre-Blackwell GPU |
+| `cuda_syncs_are_errors()` | `tests/common/harness.py` | CUDA's sync debug mode at `error` over a block, for a path that must not synchronize the host |
+| `recorded_launch_keys(kernels)` / `moved_arguments` | `tests/common/triton_launch_keys.py` | the Triton specialization key of each launch of kernels run under `TRITON_INTERPRET=1`, and the arguments whose specialization differs between two keys, so a CPU test compares the binaries two launches would run |
+| `max_or_nan(values, *, default=)` | `tests/common/numerics.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
+| `ModeLadder` / `per_rank_lora_model` / `per_rank_draws` | `tests/common/replica_start.py` | the trainer's parallel-mode ladder on a bare model, and a tiny model whose adapters and one added embedding row each rank draws from its own stream |
+| `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call. The rendezvous store is served from the calling process, and no worker starts before every rank has initialized the group: a rank that finishes first tears down neither the store nor a pair a peer is still connecting. The ranks of a multi-rank run are spawned with torchrun's `OMP_NUM_THREADS=1` unless the caller exports its own (one passed in `env` comes too late for OpenMP), so accelerate's `PartialState` keeps the rank's thread count instead of sizing it to the node's cores |
+| `UnsplitReference` / `build_pp_sft_trainer` / `compare_stage_grads_vs_reference` / `check_expert_grads_vs_reference` | `tests/common/pp_equivalence.py` | the PP gradient-equivalence blocks: an unsplit reference's loss and gradients, a real trainer on a hand-built PP config, and each stage's parameter and expert gradients scored against that reference |
+| `build_pp_trainer` / `build_pp_args` / `expect_construction_error` / `losses_identical_across_ranks` | `tests/common/pp_trainers.py` | a real trainer under PP with its runner's `step` and `eval_loss` spied (each call's batch, normalizer and extra targets), its PP training args, a construction refusal recorded as a check, and whether every rank logged the same losses (collective) |
+| `hf_eval_loss_reference` / `eval_loss_over_examples` | `tests/common/distributed.py` | two independent oracles for a run's `eval_loss` from per-rank reference losses: HF's gather with the DP-scoped dedup and accelerate's tail trim, and an example-by-example walk of the eval set (collective) |
 | `tiny_family_model` / `build_tiny_family_checkpoint` / `shared_tiny_family_checkpoint` | `tests/common/tiny_models.py` | one seeded random-init tiny model per EP MoE family, and a synthetic checkpoint of it the production loaders read (`shared_…` builds it once on rank 0 into a rank-shared scratch dir) |
 
 ## Minimal copy-pasteable skeleton
@@ -89,9 +108,15 @@ Build checks from these rather than re-deriving them per file:
 
 Run: torchrun --nproc_per_node=2 tests/gpu/<area>/test_<name>.py
 """
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import training_run_checks
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tokenizers import load_cached_tokenizer
+from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 5
 
@@ -99,9 +124,10 @@ MAX_STEPS = 5
 @gpu_test_main(min_world_size=2, prefix="test_sft_ep")
 def run(ctx) -> dict:
     # 1. Build a tiny model + deterministic synthetic dataset (NO Hub download on hot path).
-    #    Load from a cached snapshot or a small local config.
-    model, tokenizer = build_tiny_model(ctx)
-    dataset = make_synthetic_sft_dataset(seed=42)   # same seed on every rank: the SAME data
+    #    The tokenizer comes from the local HF cache; the model is a seeded random-init tiny config.
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"], tokenizer)
+    dataset = create_sft_dataset(64, tokenizer, seed=42)   # same seed on every rank: the SAME data
 
     # 2. Train a few REAL steps (>= 2 so the decrease check has signal).
     #    The body builds its own ParallelismConfig — ctx carries the launch, not the mode.
@@ -133,7 +159,7 @@ verdicts in one launch without aborting at the first failure — the conventions
 replacement for a printed pass/fail summary. Every raise inside an `fn` must be rank-symmetric or come
 after its last collective, or the ranks desynchronize. Cross-rank verdicts come from
 `tests/common/distributed.py` (`world_mean`, `world_any`, `world_min`, `world_spread`,
-`group_max_abs_diff`).
+`group_max_abs_diff`, `max_abs_diff_across`).
 
 ## Register in the manifest (`tests/gpu/manifest.py`)
 
@@ -152,14 +178,19 @@ MANIFEST: dict[str, TestSpec] = {
 }
 ```
 
-`TestSpec` fields: `nproc` (required), `markers` (by convention `'gpu'` + a tier
-`core` or `full` + a `Ngpu` tag + capability/model tags; only membership in `ALL_MARKERS` is
-enforced, by `--strict-markers`),
+`TestSpec` fields: `nproc` (required), `markers` (`'gpu'`, exactly one tier `core` or `full`, the
+`Ngpu` tag of the row's `nproc`, plus capability/model tags, all from `ALL_MARKERS`),
 `args_matrix` (default `("",)`; a multi-mode script like `('--mode fsdp', '--mode ep')`
-becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). World-size
-strictness is **not** a manifest field:
-the script owns it via `gpu_test_main(exact_world_size=N)`, which pins an exact count rather
-than a bool, and the launcher always launches exactly `nproc`.
+becomes several nodes), `timeout` (default 1200), `flaky` (default `False`) and `launcher` (default
+`"torchrun"`; `"python"` runs the script as one process that starts its own `nproc` ranks, a `halo launch`
+driver, handed the count in `HALO_TEST_NPROC`). An `args_matrix` entry
+may be a `Row(args, nproc=..., markers=..., timeout=..., flaky=...)` whose set fields replace the spec's
+for that node, so one script runs rows at several widths, tiers or engines. Each row's args must be
+unique within the script; `tests/cpu/conventions/test_gpu_harness_conventions.py` enforces that and the
+marker rules above per resolved row. World-size strictness is **not** a manifest
+field: the script owns it via `gpu_test_main(exact_world_size=N)`, which pins an exact count rather
+than a bool (derived from the row's arguments when its rows run at several widths), and the launcher
+always launches exactly the row's `nproc`.
 
 Drift guards: `unregistered_scripts()` (on-disk `test_*.py` missing from the manifest) and
 `stale_entries()` (manifest rows whose file vanished) both fail collection. Run:
@@ -170,8 +201,9 @@ python -c "from tests.gpu.manifest import unregistered_scripts, stale_entries; \
 ```
 
 If you add a brand-new marker, add it to `ALL_MARKERS` — `tests/conftest.py` registers every
-`ALL_MARKERS` entry with pytest, so `--strict-markers` (set in `pyproject.toml`) rejects typos
-without a second list.
+`ALL_MARKERS` entry with pytest without a second list. Pytest only warns on an unregistered mark, so
+the CPU conventions test is what fails a manifest marker missing from `ALL_MARKERS`; a typo would
+otherwise drop its row from every selection by that marker.
 
 ## Live-server e2e tests reuse a shared body
 
@@ -180,20 +212,16 @@ half — served-policy probe, policy loader, parallelism verdict, the perturb �
 round, the sink round — is `tests/common/on_policy_e2e.py`; the per-flavor bodies are
 `tests/common/env_grpo_e2e.py` (`run_env_grpo_e2e`) and `tests/common/online_grpo_e2e.py`
 (`run_online_grpo_e2e`), with `tests/common/thinking_budget.py` for the live
-`rollout_max_thinking_tokens` check. A new dense/MoE arm is a thin wrapper script over one of
-those, kept separate only so the manifest can attach its family markers, timeout and
-`vllm_server` / `sglang_server` marker per file.
+`rollout_max_thinking_tokens` check. A new dense/MoE arm is a row of the script that drives its
+body (`trainers/grpo/test_env_grpo_e2e.py --backend`, `trainers/grpo/test_online_grpo_vllm_e2e.py
+--mode`), a `Row` carrying its own family markers, timeout and `vllm_server` / `sglang_server` marker.
 
 ## Ports, tolerances, reporting
 
-- **Ports** (`tests/common/ports.py`) — never hardcode `--master_port`. The launcher calls
-  `free_port()` (a port below the kernel's ephemeral range, from this xdist worker's own slice
-  of the pool) and passes it via env; your script's `init_distributed()` reads it. A
-  CPU test that spawns ranks or starts a server takes its port from `free_port()` too. Hardcoded
-  ports race across CI shards (`Errno 98`). The pool runs from 20000 up to
-  `net.ipv4.ip_local_port_range`, so a host whose range starts less than one port per xdist
-  worker above 20000 raises `... leaves N test worker(s) no port`: move the range up to `32768 60999`
-  ([Troubleshooting](../../agent-docs/reference/troubleshooting.md) has the commands).
+- **Ports** (`tests/common/ports.py`) — the launcher calls `free_port()` (a port below the kernel's
+  ephemeral range, from this xdist worker's own slice of the pool) and passes it via env, where your
+  script's `init_distributed()` reads it; a CPU test that spawns ranks or starts a server takes its port
+  from `free_port()` too. Never hardcode one ([conventions](../../agent-docs/contributing/README.md#tests)).
 - **Hub files** (`tests/common/tokenizers.py`) — load a real tokenizer, processor, config or
   chat template through these helpers, and name its repo in `tests/common/models.py`. `make
   seed-hf-cache` fetches a seed derived from that module and the `examples/` configs, and an
@@ -211,8 +239,9 @@ those, kept separate only so the manifest can attach its family markers, timeout
     top level: `tokens_per_second` (per-GPU), `cluster_tokens_per_second`, `peak_allocated_gb`,
     `training_peak_allocated_gb`, `avg_step_time_seconds`. MFU/S-MFU/TFLOPS live under `"diagnostics"` and
     are never gated.
-    - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` prints a `__HALO_BENCH__` line a
-    refresh run uses to seed `tests/baselines/<key>.json`; `format_benchmark_report(cb)` for
+    - Benchmarks: `emit_benchmark("<key>", efficiency_cb)` (`emit_save_benchmark` for a checkpoint
+    save) prints this rank's `__HALO_BENCH__` line, which `make bench BAND=1` holds to
+    `tests/baselines/bench/<key>.json` and `make bench RECORD=1` records; `format_benchmark_report(cb)` for
     the human log. The result/bench lines (`RESULT_SENTINEL` = `__HALO_TEST_RESULT__`,
     `BENCH_SENTINEL` = `__HALO_BENCH__`) survive interleaved torchrun stdout.
 
@@ -226,7 +255,9 @@ python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <s
 ```
 
 with the spec `timeout` (on expiry the agent and every worker are killed — NCCL/FA hangs are
-live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. `TORCHELASTIC_ERROR_FILE` is
+live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. A `launcher="python"` row runs
+`python <script> <args>` instead, with `HALO_TEST_NPROC` in place of `MASTER_PORT`; its own launches
+inherit the launch id, so the timeout sweep reaches their ranks. `TORCHELASTIC_ERROR_FILE` is
 deliberately left unset: one shared path makes the last writer win, and the agent's collateral
 SIGTERMs would overwrite the real cause. It then classifies:
 
@@ -238,7 +269,8 @@ SIGTERMs would overwrite the real cause. It then classifies:
 - **SKIP** — fewer GPUs than `nproc` available; an OOM on the 8-GPU `full` tier (an OOM on
   a 2-GPU `core` smoke is a real ERROR — that config must fit); an unreachable
   `vllm_server`/`sglang_server` engine, unless `HALO_TEST_REQUIRE_SERVER` names it (then a
-  `UsageError`); or an exit-0 run that printed a `SKIP:` line (`skip_unless_local_checkpoint`).
+  `UsageError`); or an exit-0 run that printed a `SKIP:` line (`skip_unless_local_checkpoint`,
+  `skip_unless_blackwell`).
   **Zero** visible GPUs is a `UsageError`, never a skip.
 
 All of this runs inside the Docker image; selection is by marker, e.g. `pytest -m "gpu and

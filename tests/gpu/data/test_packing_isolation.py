@@ -1,36 +1,22 @@
 #!/usr/bin/env python
-"""Behavioral test: DataCollatorWithPacking must isolate documents under Flash Attention.
+"""DataCollatorWithPacking isolates documents under Flash Attention: a document's logits don't depend on those packed
+before it.
 
-The collator packs several documents into one row, restarts ``position_ids`` at every document
-boundary and drops the dense all-ones ``attention_mask`` so Flash Attention derives a block-diagonal
-``cu_seqlens`` from those positions. If that holds, a document's logits do not depend on the content
-of the documents packed BEFORE it.
-
-Direction is the whole test. Measuring the FIRST document while the second changes proves nothing —
-causality already forbids that dependence, so the measurement reads ~0 whether isolation works or
-not. The leak is the later document attending BACK into the earlier one, so the perturbed document
-must precede the measured one.
-
-The control re-runs the identical tokens with un-isolated inputs (contiguous ``position_ids`` and a
-dense mask) and requires the drift to be large: without it, "no drift" would be equally consistent
-with a model that ignores its context entirely.
-
-Single GPU::
-
-    torchrun --nproc_per_node=1 tests/gpu/data/test_packing_isolation.py
+The perturbed document must precede the measured one, since causality already shields an earlier document. The control
+runs un-isolated inputs and requires large drift, or "no drift" also fits a model ignoring its context.
 """
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.data.collators.packing import DataCollatorWithPacking
+from halo.data.collators.packing import DataCollatorWithPacking
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL = QWEN3_0_6B
-# The isolated path recomputes doc B over exactly the same keys/values, so bf16 accumulation is
-# reproduced bit-for-bit; the control moves the logits by O(1).
+# The isolated path recomputes doc B over the same keys and values, so bf16 accumulation repeats bit for bit; the
+# control moves logits by O(1).
 LEAK_THRESHOLD = 1e-2
 
 
@@ -40,13 +26,11 @@ def _packed_batch(collator, doc_a, doc_b):
 
 
 def _doc_b_logits(model, batch, device, la, lb, *, isolated: bool):
-    """Doc B's logits, either from the collator's isolating inputs or from un-isolated dense ones."""
     input_ids = batch["input_ids"].to(device)
     if isolated:
         kwargs = {"position_ids": batch["position_ids"].to(device)}
     else:
-        # Withhold the isolation: one continuous position ramp across the boundary plus the dense
-        # all-ones mask — what the kernel sees when the collator emits no document boundaries.
+        # One continuous position ramp plus the dense mask: what the kernel sees with no document boundaries.
         kwargs = {
             "position_ids": torch.arange(input_ids.shape[1], device=device).unsqueeze(0),
             "attention_mask": torch.ones_like(input_ids),
@@ -66,11 +50,9 @@ def run(ctx) -> dict:
 
     collator = DataCollatorWithPacking(tokenizer=tok)
 
-    # Doc A is PERTURBED and comes first; doc B is MEASURED and follows it.
     doc_a = tok("The capital of France is Paris.", add_special_tokens=False)["input_ids"]
     doc_b = tok("Quantum mechanics describes subatomic particles.", add_special_tokens=False)["input_ids"]
-    # Same length, different vocabulary: the packed layout and every slice offset stay byte-identical,
-    # so the only thing that changes between the two runs is doc A's content.
+    # Same length, so the packed layout and every slice offset stay byte-identical.
     doc_a_variant = [(t + 977) % tok.vocab_size for t in doc_a]
     la, lb = len(doc_a), len(doc_b)
 
@@ -87,8 +69,7 @@ def run(ctx) -> dict:
     max_diff = (isolated1 - isolated2).abs().max().item()
     log(f"[isolation] max|Δlogits| on doc B when the PRECEDING doc A changes = {max_diff:.6f}")
 
-    # Control: same tokens, isolation withheld. Doc B now attends back into doc A, so the drift the
-    # isolation check requires to be zero must here be large — otherwise that zero is vacuous.
+    # Same tokens, isolation withheld: doc B attends back into doc A, so the drift must be large.
     leaky1 = _doc_b_logits(model, batch1, device, la, lb, isolated=False)
     leaky2 = _doc_b_logits(model, batch2, device, la, lb, isolated=False)
     ctl_diff = (leaky1 - leaky2).abs().max().item()

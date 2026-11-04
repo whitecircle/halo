@@ -1,20 +1,12 @@
 #!/usr/bin/env python
-"""The shared NCCL pin: ``uv.lock``, the ``uv`` override, and the DeepEP V2 floor must agree.
-
-The training image and both inference images dynamically link one wheel's ``libnccl.so.2``, and a
-skew hangs the RL weight-sync ``ncclCommInitRank`` on the NCCL timeout with no error. All four build
-sites read the version through ``docker/nccl_pin.py``, whose answer is only as good as the lock —
-so a lock bumped without the ``override-dependencies`` pin (or below the floor ``deep_ep._C`` needs)
-is a build that fails late, in an image, instead of here.
-
-    python tests/cpu/config/test_nccl_pin_agreement.py
-"""
+"""``uv.lock``, the ``uv`` override and the DeepEP V2 floor agree on one NCCL pin. The images link one wheel's
+``libnccl.so.2``, and a skew hangs the RL weight-sync ``ncclCommInitRank`` on the NCCL timeout with no error."""
 
 import tomllib
 
 import pytest
 
-from tests.common.utils import REPO_ROOT, load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 nccl_pin = load_script_module("docker/nccl_pin.py")
 
@@ -36,17 +28,16 @@ def test_the_lock_the_override_and_the_floor_agree():
 
 
 def test_the_version_prefix_comparison_orders_real_wheel_spellings():
-    """Anti-vacuity for the floor above: the stdlib-only parse must order the versions it will see,
-    including a ``.post`` suffix, rather than comparing strings lexically (``2.9`` > ``2.31``)."""
+    """A stdlib-only parse must order the versions it sees, ``.post`` suffixes included, and not compare strings
+    lexically (``2.9`` > ``2.31``)."""
     assert nccl_pin._version_tuple("2.28.9") < nccl_pin._version_tuple("2.30.4")
     assert nccl_pin._version_tuple("2.9.0") < nccl_pin._version_tuple("2.31.2")
     assert nccl_pin._version_tuple("2.31.2.post1") == (2, 31, 2)
 
 
 def test_the_runtime_check_encodes_wheel_versions_the_way_nccl_reports_them():
-    """``--verify`` compares the lock against ``ncclGetVersion``'s integer, so the encoding must be
-    NCCL's own ``X*10000 + Y*100 + Z`` — a wrong formula would compare two numbers that never match
-    (a build that can never pass) or, worse, collide across releases."""
+    """``--verify`` compares the lock against ``ncclGetVersion``'s integer, so the encoding must be NCCL's own
+    ``X*10000 + Y*100 + Z``."""
     assert nccl_pin.version_code("2.31.2") == 23102  # the wheel every image installs
     assert nccl_pin.version_code("2.29.7") == 22907  # the NGC base's system copy
     assert nccl_pin.version_code("2.28.9") == 22809  # torch's own metadata pin

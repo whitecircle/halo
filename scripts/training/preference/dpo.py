@@ -1,61 +1,44 @@
 #!/usr/bin/env python
-"""Distributed DPO training (text or VLM).
+"""Distributed DPO training (text or VLM): ``load_policy_model`` auto-detects the modality, and a VLM's processor flips
+TRL 1.14's DPOTrainer into vision mode.
 
-Direct Preference Optimization on preference pairs (chosen vs rejected). One script serves both
-text and vision-language models: ``load_model_for_training`` auto-detects the modality. For a VLM
-the processor is the ``processing_class``, which flips TRL 1.6's DPOTrainer into vision mode and
-auto-selects ``DataCollatorForVisionPreference`` for an images-bearing dataset; for a text model
-the repo tokenizes the pairs and runs generation-eval examples.
+CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT (``ref_model=None``) or
+``precompute_ref_log_probs``, as the reference is not parallelized; PP runs text-only full fine-tuning of the per-pair
+loss types (sigmoid, hinge, ipo) with ``precompute_ref_log_probs`` only."""
 
-CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs`` — the reference is not parallelized. PP is
-declared but not yet available in this release.
+from trl import DPOConfig
 
-Usage:
-    # Text or VLM (auto-detected) — EP / TP via torchrun
-    torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \\
-        examples/preference/gptoss/dpo-gptoss-20b-tulu3-prefmix-ep.yaml
-
-Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the same plus an
-``images``/``image`` column (TRL applies the chat template and threads pixel_values), or
-``images_field`` naming the column a hub dataset stores them in.
-"""
-
-from trl import DPOConfig, ModelConfig
-
-from src.args.distributed_args import DistributedArguments
-from src.args.dpo_args import DPOScriptArguments
-from src.data.sources.loading import alias_images_column
-from src.distributed.loading.frozen_models import load_reference_model_for_preference
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier
-from src.models.loading.model_preparation import log_model_info
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
+from halo.config_validation import reject_unsupported_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.preference import DPOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.render_columns import alias_images_column
+from halo.data.vlm_detection import reject_unsupported_media_across_ranks
+from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
-    padded_workload_attn_implementation,
     prepare_script_preference_data,
-    reject_unsupported_args,
-    resolve_vlm_run,
-    run_trainer,
+    resolve_preference_vlm_run,
 )
+from halo.entrypoints.model_setup import apply_text_path_padding_side, load_preference_models
+from halo.entrypoints.script import (
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 
 
 def main():
-    parser = H4ArgumentParser((DPOScriptArguments, DPOConfig, ModelConfig, DistributedArguments))
-    args, dpo_config, model_config, dist_args = parser.parse()
+    args, dpo_config, model_config, dist_args = parse_script_args(
+        DPOScriptArguments, DPOConfig, ModelArguments, ParallelismArguments
+    )
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         dpo_config,
         model_config,
@@ -63,61 +46,30 @@ def main():
         script_prefix="dpo",
         trainer_cls=DistributedDPOTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
 
-    # Vision routing keys on the dataset, not the model: natively-multimodal models train on text
-    # preference data through the normal text pipeline, and only an image-carrying dataset takes TRL's
-    # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
-    # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
-    # before the model load, which requires the checkpoint's processor for a vision run.
-    is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
+    # Vision routing keys on the dataset: natively-multimodal models train on text preference data through the text
+    # pipeline, and only an image-carrying dataset takes TRL's vision path, rows untouched. Before the model load,
+    # which needs the checkpoint's processor.
+    is_vlm_data = resolve_preference_vlm_run(
+        args, model_config, ds, text_only_model=args.text_only_model, method="DPO", trl_renders_rows=True
+    )
     if is_vlm_data:
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
         # tools column would survive the signature filter and render toolless.
         reject_unsupported_args("DPO VLM mode", tools_field=args.tools_field)
+        reject_unsupported_media_across_ranks(ds, ("prompt", "chosen", "rejected"), "DPO")
 
-    # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
-    # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio
-    # whose halves came from different kernels is biased.
-    attn_default = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
-    model, processing_class, tokenizer, is_vlm = load_model_for_training(
-        model_config,
-        dpo_config,
-        parallelism_config,
-        vlm_run=is_vlm_data,
-        attn_default=attn_default,
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
-    )
+    models = load_preference_models(context, dpo_config, model_config, args, vlm_run=is_vlm_data, method="DPO")
+    apply_vision_options(args, models.model, model_config, models.processing_class, is_vlm=is_vlm_data)
+    tokenizer = models.tokenizer
 
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
-
-    # Reference model: under PEFT the reference is the adapter-free base; full finetune loads a copy.
-    model_ref = load_reference_model_for_preference(
-        args,
-        model_config,
-        dpo_config,
-        parallelism_config,
-        tokenizer,
-        is_vlm=is_vlm,
-        method="DPO",
-        reset_sinks=dist_args.reset_sinks,
-        attn_default=attn_default,
-    )
-
-    tokenizer = apply_max_length(dpo_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    log_model_info(model, tokenizer)
-
-    enforce_text_path_padding_side(tokenizer, is_vlm_data)
+    apply_text_path_padding_side(tokenizer, is_vlm_data)
     train_dataset, eval_dataset, generate_callback = prepare_script_preference_data(
         args,
         dpo_config,
@@ -127,34 +79,32 @@ def main():
         generation_max_prompt_length=args.generation_max_prompt_length,
     )
 
-    apply_distributed_trainer_config(dpo_config, parallelism_config)
-
-    callbacks = build_training_callbacks(
-        args, dpo_config, model, parallelism_config, generate_callback=generate_callback
+    callbacks = configure_balancing_and_build_callbacks(
+        args, dpo_config, models.model, context, generate_callback=generate_callback
     )
 
     barrier()
 
     trainer = DistributedDPOTrainer(
-        model=model,
+        model=models.model,
         args=dpo_config,
-        ref_model=model_ref,
+        ref_model=models.ref_model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=processing_class,
-        peft_config=peft_config,
+        processing_class=models.processing_class,
+        peft_config=models.peft_config,
         callbacks=callbacks,
-        resume_checkpoint=runtime.resume_checkpoint,
-        policy_from_checkpoint=runtime.policy_from_checkpoint,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        resume_checkpoint=context.resume_checkpoint,
+        policy_from_checkpoint=context.policy_from_checkpoint,
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="DPO",
         extra_start_log=[f"modality: {'vlm' if is_vlm_data else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

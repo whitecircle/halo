@@ -1,36 +1,23 @@
 #!/usr/bin/env python
-"""CPU test: what ``compute_metrics`` receives under a pipeline.
-
-Two independent failures live here, both silent:
-
-1. **Size.** Without a reduction the last stage's RAW logits plane crosses the chain and is
-   allocated on every other stage — rows x max_length x vocab.
-2. **Shape.** Every rank of a chain returns the SAME rows (the last stage's predictions are
-   broadcast down it), so a world gather repeats each data-parallel replica ``pp_size`` times, and
-   the final round's padding cut, which keeps a prefix, then keeps a prefix of the duplicates
-   rather than the real tail. Means survive both; nothing else does.
-
-    python tests/cpu/parallelism/test_pp_eval_metrics_scope.py
-"""
+"""What ``compute_metrics`` receives under a pipeline. The raw logits plane must not cross the chain, and a world
+gather repeats each replica ``pp_size`` times, so the padding cut keeps duplicates."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 from accelerate.data_loader import prepare_data_loader
 from torch.utils.data import DataLoader
 
-from src.distributed.pipeline_parallel.losses import PPLossAdapter, causal_lm_token_loss
-from src.trainers.mixins.dataloader import (
-    DataParallelDataLoaderMixin,
+from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
+from halo.trainers.dataloaders import (
+    _select_gathered_chunks,
     dp_representative_ranks,
     dp_scoped_gather,
-    select_gathered_chunks,
 )
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
-
-PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
+from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 
 PP_SIZE, STAGE_WORLD = 2, 2
 WORLD = PP_SIZE * STAGE_WORLD
@@ -38,19 +25,17 @@ ROWS_PER_RANK = 4
 
 
 class _HoistStage(PipelineTrainerMixin):
-    """Just enough trainer for ``_pp_hoist_metrics_reduction``."""
-
     def __init__(self, compute_metrics=None, preprocess=None):
         self.compute_metrics = compute_metrics
         self.preprocess_logits_for_metrics = preprocess
 
 
-def _adapter(**kwargs) -> PPLossAdapter:
-    return PPLossAdapter(token_loss_fn=causal_lm_token_loss, **kwargs)
+def _adapter(**kwargs) -> PipelineLossAdapter:
+    return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss, **kwargs)
 
 
 def test_compute_metrics_without_any_reduction_is_refused_naming_the_remedy():
-    """Refusing is the only honest option: the alternative is a multi-GB broadcast per eval batch."""
+    """The alternative is a multi-GB broadcast per eval batch."""
     stage = _HoistStage(compute_metrics=lambda predictions: {})
 
     with pytest.raises(ValueError, match="preprocess_logits_for_metrics"):
@@ -58,8 +43,7 @@ def test_compute_metrics_without_any_reduction_is_refused_naming_the_remedy():
 
 
 def test_preprocess_logits_for_metrics_moves_onto_the_last_stage_and_is_cleared():
-    """Hoisted, it runs once — on the stage that holds the logits. Left in place as well, HF would
-    reduce a second time (an argmax of an argmax)."""
+    """Left in place as well, HF would reduce a second time (an argmax of an argmax)."""
     stage = _HoistStage(compute_metrics=lambda p: {}, preprocess=lambda logits, labels: logits.argmax(-1))
 
     hoisted = stage._pp_hoist_metrics_reduction(_adapter())
@@ -72,7 +56,7 @@ def test_preprocess_logits_for_metrics_moves_onto_the_last_stage_and_is_cleared(
 
 
 def test_an_adapter_with_its_own_reduction_is_left_alone():
-    """SMPO/reward adapters already reduce on the last stage; hoisting on top would reduce twice."""
+    """SMPO/reward adapters already reduce on the last stage."""
     own = _adapter(predictions_fn=lambda outputs, inputs: outputs.mean(-1))
     stage = _HoistStage(compute_metrics=lambda p: {}, preprocess=lambda logits, labels: logits.argmax(-1))
 
@@ -85,23 +69,19 @@ def test_no_compute_metrics_leaves_the_contract_untouched():
     assert _HoistStage()._pp_hoist_metrics_reduction(untouched) is untouched
 
 
-# --- the duplication half ----------------------------------------------------------------------
-
-
 class _FakeAccelerator:
-    """accelerate's world gather over a fixed world, with no distributed backend, at the final round
-    of ``loader`` — the eval loader one DP replica's ranks iterate."""
+    """At the final round of ``loader``, the eval loader one DP replica's ranks iterate."""
 
     def __init__(self, per_rank_rows: list[torch.Tensor], loader):
         self._per_rank_rows = per_rank_rows
         self.gradient_state = SimpleNamespace(end_of_dataloader=True, active_dataloader=loader)
 
     def gather(self, tensor):
-        del tensor  # every rank contributes its own chunk; the fake holds them all
+        del tensor  # The fake holds every rank's chunk.
         return torch.cat(self._per_rank_rows)
 
 
-class _EvalTrainer(DataParallelDataLoaderMixin):
+class _EvalTrainer(EvaluationMixin):
     def __init__(self, accelerator, keep, world_size):
         self.accelerator = accelerator
         self.args = SimpleNamespace(eval_use_gather_object=False)
@@ -109,51 +89,48 @@ class _EvalTrainer(DataParallelDataLoaderMixin):
 
 
 def _eval_loader(split_rows: int):
-    """DP rank 0's eval loader over a split whose final round holds ``split_rows`` real rows."""
+    """Its final round holds ``split_rows`` real rows."""
     rows = list(range(STAGE_WORLD * ROWS_PER_RANK + split_rows))
     loader = DataLoader(rows, batch_size=ROWS_PER_RANK)
     return prepare_data_loader(loader, num_processes=STAGE_WORLD, process_index=0, put_on_device=False)
 
 
 def _pipeline_rank_map() -> list[int]:
-    """DP rank of every global rank under pp2 x dp2: stage blocks repeat the same DP ranks."""
+    """Under pp2 x dp2 stage blocks repeat the same DP ranks."""
     return [rank % STAGE_WORLD for rank in range(WORLD)]
 
 
 def test_the_chains_duplicate_copies_are_dropped():
-    """Each DP replica must appear once; at pp2 a world gather carries it twice."""
     keep = dp_representative_ranks(_pipeline_rank_map())
     assert keep == [0, 1], "one representative per DP rank, in DP order"
 
-    # rank r contributes rows tagged with its DP rank; stages 0 and 1 hold identical values.
+    # Stages 0 and 1 hold identical values.
     per_rank = [torch.full((ROWS_PER_RANK,), float(dp)) for dp in _pipeline_rank_map()]
     gathered = torch.cat(per_rank)
     assert gathered.numel() == WORLD * ROWS_PER_RANK
 
-    deduped = select_gathered_chunks(gathered, keep, WORLD)
+    deduped = _select_gathered_chunks(gathered, keep, WORLD)
     assert deduped.numel() == STAGE_WORLD * ROWS_PER_RANK
     assert deduped.tolist() == [0.0] * ROWS_PER_RANK + [1.0] * ROWS_PER_RANK
 
 
 def test_the_padding_cut_runs_after_the_dedup_not_before():
-    """The order is the whole bug: the cut keeps the FIRST ``split_rows`` rows, which before the
-    dedup are duplicates of replica 0 rather than the batch's real tail."""
+    """Before the dedup, the first ``split_rows`` rows are duplicates of replica 0."""
     per_rank = [torch.full((ROWS_PER_RANK,), float(dp)) for dp in _pipeline_rank_map()]
-    split_rows = 6  # a partial final batch: 6 real samples across the 2 DP replicas
+    split_rows = 6  # A partial final batch: 6 real samples across the 2 DP replicas.
     keep = dp_representative_ranks(_pipeline_rank_map())
     trainer = _EvalTrainer(_FakeAccelerator(per_rank, _eval_loader(split_rows)), keep, WORLD)
 
     scoped = trainer._dp_gather_for_metrics(per_rank[0])
 
     assert scoped.tolist() == [0.0] * ROWS_PER_RANK + [1.0, 1.0], "replica 1's rows must be reached"
-    split_rows = ROWS_PER_RANK  # a final round covering only the first replica
+    split_rows = ROWS_PER_RANK  # A final round covering only the first replica.
     trainer = _EvalTrainer(_FakeAccelerator(per_rank, _eval_loader(split_rows)), keep, WORLD)
     assert trainer._dp_gather_for_metrics(per_rank[0]).tolist() == [0.0] * ROWS_PER_RANK
 
 
 def test_the_scoped_gather_is_restored_after_use():
-    """It patches ``accelerator.gather`` for one call; a leak would silently halve every later
-    gather in the run, including the ones that are not metric gathers."""
+    """A leak would silently halve every later gather in the run."""
     per_rank = [torch.zeros(ROWS_PER_RANK) for _ in range(WORLD)]
     accelerator = _FakeAccelerator(per_rank, _eval_loader(0))
     original = accelerator.gather

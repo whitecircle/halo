@@ -1,19 +1,12 @@
-"""The attention layout must cost every family's layers the way its kernels attend.
-
-Two failure modes this guards, both of which over-report MFU silently: costing a sliding-window,
-chunked, sparse, compressed or linear layer as full attention, and costing a packed row as one
-document when the varlen kernels attend within each document. The roster half instantiates the real
-transformers configs, so a family whose ``layer_types`` vocabulary drifts fails here, not in a run.
-
-    python tests/cpu/models/test_attention_layout.py
-"""
+"""Costing a sliding, chunked, sparse, compressed or linear layer as full attention over-reports MFU silently.
+So does costing a packed row as one document, since the varlen kernels attend within each document."""
 
 import pytest
 import torch
 from torch import nn
-from transformers import CONFIG_MAPPING
+from transformers import CONFIG_MAPPING, NemotronHForCausalLM
 
-from src.models.attention_layout import (
+from halo.models.attention.layout import (
     INDEX_PASSES,
     LAYER_TYPE_KINDS,
     SCORE_PASSES,
@@ -22,6 +15,8 @@ from src.models.attention_layout import (
     attention_layout,
     attention_layout_from_config,
 )
+from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG, QWEN3_8_FLASH_NEXT, TINY_NEMOTRON_H_CONFIG
+from tests.common.tokenizers import load_cached_config
 
 # gpt-oss-120b: 18 full + 18 sliding(128) layers, 64 heads of 64.
 DEPTH = 36
@@ -73,7 +68,7 @@ def _per_token(full_layers: int, window_layers: int, seq_len: int, width=WIDTH, 
 
 
 def _full_attention_formula(seq_len: int) -> float:
-    """The PaLM ``12·L·S·H`` full-attention accounting over every layer."""
+    """PaLM's ``12·L·S·H`` full-attention accounting."""
     return 12.0 * DEPTH * seq_len * HIDDEN
 
 
@@ -94,7 +89,6 @@ def test_the_score_width_is_heads_times_head_dims_not_hidden_size():
 
 
 def test_documents_are_costed_individually_not_as_the_packed_row():
-    """A 64k row of many documents costs Σ L_i × per_token(L_i), never 64k × per_token(64k)."""
     layout = attention_layout_from_config(_Config(_alternating()))
     lengths = torch.tensor([1500, 1500, 1000, 8000, 20000, 32000], dtype=torch.long)
     assert int(lengths.sum()) == MAX_LENGTH
@@ -125,7 +119,6 @@ def test_the_layers_own_type_attribute_wins_over_list_position():
 
 
 def test_the_attention_submodules_layer_idx_indexes_layer_types():
-    """Without a type attribute, ``self_attn.layer_idx`` selects the ``layer_types`` entry."""
     config = _Config(_alternating())
     stage = _Model([_Layer(layer_idx=i) for i in (7, 8, 9)], config)
     assert [layer.kind for layer in attention_layout(stage).layers] == ["full", "window", "full"]
@@ -165,6 +158,12 @@ def test_hybrid_groups_without_layer_types_are_refused_not_costed_as_full():
         attention_layout_from_config(_Config(None, layer_group_size=4))
 
 
+def test_a_layer_group_of_one_is_softmax_attention_throughout():
+    """Each group's last layer is softmax attention, so groups of one hold no linear layer to tell apart."""
+    layout = attention_layout_from_config(_Config(None, layer_group_size=1, sliding_window=None))
+    assert {layer.kind for layer in layout.layers} == {"full"} and len(layout.layers) == DEPTH
+
+
 def test_an_unknown_layer_type_is_refused():
     with pytest.raises(ValueError, match="mystery_attention"):
         attention_layout_from_config(_Config(["mystery_attention"] * DEPTH))
@@ -190,7 +189,7 @@ def test_chunked_layers_are_costed_at_their_chunk():
 
 def test_sparse_layers_cost_top_k_keys_plus_a_pooled_indexer():
     config = _Config(
-        ["deepseek_sparse_attention"] * DEPTH,
+        ["indexed_attention"] * DEPTH,
         index_topk=2048,
         index_n_heads=32,
         index_head_dim=128,
@@ -200,6 +199,30 @@ def test_sparse_layers_cost_top_k_keys_plus_a_pooled_indexer():
     seq_len = 65536
     expected = DEPTH * (SCORE_PASSES * WIDTH * 2048 + INDEX_PASSES * 32 * 128 * seq_len / 16)
     assert layout.flops_per_token(seq_len) == pytest.approx(expected, rel=1e-12)
+
+
+def test_block_indexed_layers_cost_the_budget_plus_the_tail_block():
+    """Qwen3.8-Flash-Next's QSA keeps ``indexer_budget`` tokens of whole blocks plus the tail's up to
+    ``indexer_compress_ratio - 1`` tokens, and scores one pooled key per block."""
+    config = _Config(
+        ["indexed_attention"] * DEPTH,
+        indexer_budget=2048,
+        indexer_compress_ratio=4,
+        indexer_n_heads=4,
+        indexer_head_dim=128,
+    )
+    layout = attention_layout_from_config(config)
+    seq_len = 65536
+    expected = DEPTH * (SCORE_PASSES * WIDTH * 2051 + INDEX_PASSES * 4 * 128 * seq_len / 4)
+    assert layout.flops_per_token(seq_len) == pytest.approx(expected, rel=1e-12)
+
+
+def test_the_flash_next_release_costs_twelve_qsa_layers():
+    config = load_cached_config(QWEN3_8_FLASH_NEXT)
+    layers = attention_layout_from_config(config).layers
+    sparse = [layer for layer in layers if layer.kind == "sparse"]
+    assert len(layers) == 48 and len(sparse) == 12 and {layer.kind for layer in layers} == {"sparse", "none"}
+    assert {(layer.keys, layer.index_width, layer.index_pool) for layer in sparse} == {(2051, 512.0, 4)}
 
 
 def test_compressed_layers_cost_the_compressed_stream_plus_the_local_band():
@@ -250,7 +273,7 @@ def test_a_config_without_head_geometry_keeps_the_palm_width():
 
 
 def test_per_layer_head_geometry_is_read_off_the_per_layer_view():
-    """Gemma 4 registers head_dim per layer; each layer is costed at its own width."""
+    """Gemma 4 registers head_dim per layer."""
 
     class _View:
         def __init__(self, dims):
@@ -277,16 +300,14 @@ def test_grouping_sums_widths_per_rule_without_changing_the_total():
             LayerAttention("none", 0.0),
         )
     )
-    grouped = layout.grouped()
+    grouped = layout.grouped
     assert {(g.kind, g.width) for g in grouped} == {("full", 300.0), ("window", 50.0), ("none", 0.0)}
+    assert layout.grouped is grouped, "every batch's costing reads the one merge, not a rebuilt one"
     assert layout.flops_per_token(16) == pytest.approx(SCORE_PASSES * (300.0 * 16 + 50.0 * 8), rel=1e-12)
     assert "2×full + 1×window(8)" in layout.describe()
 
 
-# --- the roster, through the real transformers configs -----------------------------------------
-
-# (config key, kinds the family's default layer_types must map to). Every family the toolkit trains
-# is here; a family whose config vocabulary drifts outside LAYER_TYPE_KINDS fails the first case.
+# Config key -> kinds its default layer_types must map to, for every family the toolkit trains.
 _ROSTER = {
     "gpt_oss": {"full", "window"},
     "cohere2_moe": {"full", "window"},
@@ -305,6 +326,7 @@ _ROSTER = {
     "lfm2": {"full"},
     "mistral4": {"full"},
     "mistral": {"window"},
+    "nemotron_h": {"full", "none"},
     "step3p7": {"full"},
     "zaya": {"full"},
 }
@@ -324,6 +346,42 @@ def test_lfm2_moe_declares_its_conv_layers_through_layer_types():
     """The hub checkpoint carries the list; a default config leaves it None and derives all-full."""
     config = CONFIG_MAPPING["lfm2_moe"](layer_types=["conv", "full_attention"] * 20, num_hidden_layers=40)
     assert {layer.kind for layer in attention_layout_from_config(config).layers} == {"none", "full"}
+
+
+def _nemotron_h_release_config():
+    return CONFIG_MAPPING["nemotron_h"](
+        **{k: v for k, v in NEMOTRON_H_RELEASE_TEXT_CONFIG.items() if k != "model_type"}
+    )
+
+
+def test_only_nemotrons_attention_layers_score_keys():
+    """40 Mamba and 40 MoE blocks read no key matrix; the 8 attention blocks cost their heads at every key."""
+    config = _nemotron_h_release_config()
+    assert config.layer_types.count("linear_attention") == 40 and config.layer_types.count("moe") == 40
+    layout = attention_layout_from_config(config)
+    seq_len = 8192
+    assert layout.flops_per_token(seq_len) == pytest.approx(SCORE_PASSES * 32 * (128 + 128) * seq_len * 8, rel=1e-12)
+    assert layout.describe() == "80×no-attention + 8×full @ width 8192"
+
+
+def test_nemotrons_blocks_read_their_kinds_off_the_module_tree():
+    """A rank's layout reads the layers it holds, whose block type is what transformers keeps on them."""
+    config = CONFIG_MAPPING["nemotron_h"](**{k: v for k, v in TINY_NEMOTRON_H_CONFIG.items() if k != "model_type"})
+    with torch.device("meta"):
+        layout = attention_layout(NemotronHForCausalLM(config))
+    assert layout.source == "layers"
+    assert layout.describe() == "5×no-attention + 1×full @ width 512"
+
+
+@pytest.mark.parametrize("layer_type", ["moe", "mlp"])
+def test_a_feed_forward_block_has_a_cost_rule_of_its_own(layer_type, monkeypatch):
+    """Without its entry the block raises rather than being costed as full attention."""
+    config = _nemotron_h_release_config()
+    config.layer_types = [layer_type, "full_attention"]
+    assert {layer.kind for layer in attention_layout_from_config(config).layers} == {"none", "full"}
+    monkeypatch.delitem(LAYER_TYPE_KINDS, layer_type)
+    with pytest.raises(ValueError, match=f"{layer_type!r}.*no attention cost rule"):
+        attention_layout_from_config(config)
 
 
 def test_the_vocabulary_covers_every_layer_type_the_roster_declares():

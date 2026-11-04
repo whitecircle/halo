@@ -35,29 +35,28 @@ import torch
 import torch.distributed as dist
 from accelerate.state import GradientState
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from tests.common.adapters import freeze_base_keep_expert_adapters
+from tests.common.ep_reference import ep_layers, score_ep_grad_pairs, sweep_ep_grads
 from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import log, log_all
 
 EP_SIZE = 2
 BATCH, SEQ = 2, 48
 SEED = 1234
 LORA_R, LORA_ALPHA = 8, 16
-# Random adapters (B is zero at init, which would leave every A gradient zero and uninformative).
+# B is zero at init, which would leave every A gradient zero.
 ADAPTER_STD = 0.05
-# The ep2 and ep1 forwards run the same bf16 math apart from DeepEP's combine; a wrong routing or a
-# dropped layer moves the mean token loss by far more.
+# The ep2 and ep1 forwards run the same bf16 math apart from DeepEP's combine; a wrong routing moves the mean by far
+# more.
 LOSS_ATOL = 2e-2
 
 _DEEPEP_NODES = ("DeepEPDispatchFunctionBackward", "DeepEPCombineFunctionBackward")
@@ -66,12 +65,8 @@ _SEAM = EPMoELayerBase._dispatch_compute_combine
 
 @contextlib.contextmanager
 def forced_routing(starved_layers: set[int]):
-    """Replace every EP layer's selection at the dispatch seam.
-
-    A starved layer sends token ``t``'s ``k``-th pick to expert ``(t + k) % (E / EP_SIZE)``, all owned by
-    rank 0 at ep2; any other layer uses ``(t + k) % E``, which reaches every rank. The reference at ep1
-    gets the same ids. Gate weights stay the router's own: selection is not differentiable.
-    """
+    """A starved layer sends token ``t``'s ``k``-th pick to expert ``(t + k) % (E / EP_SIZE)``, all on rank 0 at ep2;
+    any other uses ``(t + k) % E``. Gate weights stay the router's own: selection is not differentiable."""
 
     def seam(self, flat, experts, weights, input_dtype):
         span = self.num_experts // EP_SIZE if self.test_layer_index in starved_layers else self.num_experts
@@ -105,16 +100,14 @@ def graph_signature(loss: torch.Tensor) -> list[int]:
 
 
 def build_models(family: str, device):
-    """The ep2 model and its ep1 reference: same base weights, same adapter values, adapters alone trainable."""
     torch.manual_seed(SEED)
     base = tiny_family_model(TINY_MOE_FAMILIES[family]).to(torch.bfloat16)
     reference = copy.deepcopy(base)
     spec = ExpertLoraSpec(r=LORA_R, alpha=LORA_ALPHA)
     ep_pc, ref_pc = ParallelismConfig(ep_size=EP_SIZE), ParallelismConfig(ep_size=1)
     ep_pc.expert_lora = ref_pc.expert_lora = spec
-    model = patch_moe_model_for_ep(base.to(device), ep_pc.create_ep_config())
-    reference = patch_moe_model_for_ep(reference.to(device), ref_pc.create_ep_config())
-    create_ep_buffers(model)
+    model = apply_ep_layers(base.to(device), ep_pc.ep_config())
+    reference = apply_ep_layers(reference.to(device), ref_pc.ep_config())
 
     generator = torch.Generator().manual_seed(SEED)
     for index, (layer, ref_layer) in enumerate(zip(ep_layers(model), ep_layers(reference), strict=True)):
@@ -130,8 +123,8 @@ def build_models(family: str, device):
 
 
 def score_adapter_grads(model, reference, name: str, checks: dict, metrics: dict) -> tuple[int, int]:
-    """Each local adapter gradient against its reference slice; a bank the reference routes nothing to
-    must hold no gradient at all. Returns the (active, idle) adapter-tensor counts."""
+    """A bank the reference routes nothing to must hold no gradient. Returns the (active, idle) adapter-tensor
+    counts."""
     pairs, idle_clean, idle = {}, [], 0
     for index, (layer, ref_layer) in enumerate(zip(ep_layers(model), ep_layers(reference), strict=True)):
         for attr in sorted(layer._expert_lora_attrs):
@@ -167,12 +160,13 @@ def run_scenario(ctx, model, reference, batches, name: str, starved: set[int], c
             # Every rank sees the same gathered list, so all skip together: this backward would hang.
             return
         loss.backward()
+        sweep_ep_grads(model)
         ref_losses = [reference(input_ids=batch, labels=batch).loss for batch in batches]
         (sum(ref_losses) / len(ref_losses)).backward()
 
     checks[f"{name}_loss_matches_reference"] = abs(loss.item() - ref_losses[ctx.rank].item()) < LOSS_ATOL
     active, idle = score_adapter_grads(model, reference, name, checks, metrics)
-    # The scenario's premise: rank 0's experts receive tokens, and rank 1's idle wherever starved.
+    # The premise: rank 0's experts receive tokens, and rank 1's idle wherever starved.
     checks[f"{name}_routing_premise"] = active > 0 if ctx.rank == 0 else idle > 0
     return signature.tolist()
 
@@ -188,9 +182,13 @@ def run(ctx):
     model, reference = build_models(family, ctx.device)
     layers = ep_layers(model)
     ep_config = layers[0].ep_config
-    # The comparison assumes the in-backward hook regime: its /world divide makes the ep2 gradient the
-    # gradient of the mean of both ranks' losses, which is what the reference differentiates.
-    checks["hook_regime"] = not ep_config.defer_grad_sync and not ep_config.experts_fsdp_managed
+    # The sweep's /world expert divide makes the ep2 gradient that of the mean of both ranks' losses, which the
+    # reference differentiates.
+    checks["single_group_sweep_regime"] = (
+        ep_config.runs_post_backward_sweep
+        and not ep_config.sweep_reduces_across_replicas
+        and not ep_config.experts_fsdp_managed
+    )
 
     generator = torch.Generator().manual_seed(SEED)
     vocab = model.config.vocab_size
@@ -205,8 +203,8 @@ def run(ctx):
             # Every MoE layer's dispatch and combine join the graph, the first one's included.
             checks[f"{name}_every_layer_in_graph"] = signature == [1, n_layers, n_layers]
 
-    if all(layer._supports_gradient_checkpointing for layer in layers):
-        enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    if all(layer.FAMILY.supports_gradient_checkpointing for layer in layers):
+        enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
         run_scenario(ctx, model, reference, batches, "gc", set(range(n_layers)), checks, metrics)
     return {"checks": checks, "metrics": metrics}
 

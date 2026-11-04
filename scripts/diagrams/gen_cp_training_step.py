@@ -1,9 +1,9 @@
 """Generate the CP training-step figure for parallelism/context-parallelism.md.
 
-Top to bottom: `UlyssesCPModelWrapper` slices the batch into one contiguous sequence chunk per CP
+Top to bottom: `UlyssesModel` slices the batch into one contiguous sequence chunk per CP
 rank, every layer runs Ulysses attention over the full sequence and its MLP/MoE on the local chunk
-only, the logits stay sharded, and the loss is normalized over the CP group's all-reduced token
-count.
+only, the head scores the chunk (from sharded logits, or fused with the loss where the run resolves
+it on), and the loss is normalized over the CP group's all-reduced token count.
 """
 
 from _pipeline_style import *
@@ -11,10 +11,11 @@ from _pipeline_style import *
 W, H = 11.9, 6.6
 
 ROW_H = card_height(2)
-TOP_Y, (TOP_XS, TOP_W) = 5.00, columns(W, 3, 0.3, 0.25)
-LAYER_Y, LAYER_H = 2.95, 1.60
-INNER_Y, (INNER_XS, INNER_W) = 3.05, columns(W, 2, 0.55, 0.2)
-OUT_Y, (OUT_XS, OUT_W) = 1.32, columns(W, 2, 0.3, 0.5)
+OUT_H = card_height(3)
+TOP_Y, (TOP_XS, TOP_W) = 5.00, columns(W, 3, 0.3, 0.4)
+LAYER_Y, LAYER_H = 2.95, 1.68
+INNER_Y, (INNER_XS, INNER_W) = 3.05, columns(W, 2, 0.55, 0.4)
+OUT_Y, (OUT_XS, OUT_W) = 1.14, columns(W, 2, 0.3, 0.5)
 ENTER_X = TOP_XS[-1] + TOP_W / 2  # the stack is entered under the last top-band card
 EXIT_X = OUT_XS[0] + OUT_W / 2  # and left again above the first output card
 
@@ -40,20 +41,36 @@ inner_cards = [
 ]
 card_row(ax, INNER_XS, INNER_Y, INNER_W, ROW_H, inner_cards, mono_lines=True)
 
-arrow(ax, EXIT_X, LAYER_Y, EXIT_X, OUT_Y + ROW_H, "final norm → lm_head", side="right")
+arrow(ax, EXIT_X, LAYER_Y, EXIT_X, OUT_Y + OUT_H, "final norm", side="right")
 
 out_cards = [
-    ("Logits, per chunk", ["[B, S/4, V] — never gathered", "boundary label from the next chunk"], BLUE),
-    ("Loss", ["cp_size · local_sum / global_tokens", "global_tokens: all_reduce(SUM, cp)"], TEAL),
+    (
+        "Head, per chunk",
+        [
+            "logits [B, S/4, V], never gathered",
+            "or fused with the loss: no logits plane",
+            "boundary label: next chunk",
+        ],
+        BLUE,
+    ),
+    (
+        "Loss",
+        [
+            "cp_size · local_sum / global_tokens",
+            "global_tokens: all_reduce(SUM, cp)",
+            "router aux term: no cp_size factor",
+        ],
+        TEAL,
+    ),
 ]
-card_row(ax, OUT_XS, OUT_Y, OUT_W, ROW_H, out_cards, mono_lines=True)
+card_row(ax, OUT_XS, OUT_Y, OUT_W, OUT_H, out_cards, mono_lines=True)
 
 footnote(
     ax,
     0.3,
-    0.35,
+    0.3,
     11.3,
-    "Only attention ever sees the whole sequence — every other layer, and the loss, works on this rank's chunk.",
+    "Only attention ever sees the whole sequence. Every other layer, and the loss, works on this rank's chunk.",
 )
 
 save(fig, "cp_training_step")

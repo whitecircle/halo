@@ -26,8 +26,9 @@ parallelism flag.
 - The image must already be on every node, pulled or built with `make build-*`.
   Flash Attention and DeepEP are compiled into it; a bare-host install is not
   supported.
-- On SLURM, launch with `--ntasks-per-node=1` and pass `$SLURM_NODEID` as the
-  node rank: one torchrun per node, not one per GPU.
+- On SLURM, run one torchrun per node, not one per GPU: `--ntasks-per-node=1`
+  and `srun bash -c 'torchrun --nnodes=$SLURM_NNODES --node_rank=$SLURM_NODEID ...'`.
+  Without the single quotes every task gets node rank 0.
 
 ## Storage
 
@@ -37,11 +38,13 @@ parallelism flag.
   does the downloads; each rank writes its own optimizer shard.
 - **`0`: per-node local disk** (RunPod pods, ephemeral NVMe). Each node saves its
   own copy. Resume needs no copying as long as every node keeps its
-  `--node_rank`, since optimizer shards stay on the node that wrote them. Resume
-  on per-node storage is validated in CPU simulations only.
+  `--node_rank`, since optimizer shards stay on the node that wrote them
+  ([what has run on real machines](supported-matrix.md#validation)).
 
-A multi-node run checks the declaration against `output_dir` at startup and
-refuses one that contradicts the mount.
+A multi-node run checks the declarations against `output_dir` and the HF caches
+at startup and refuses one that contradicts the mount. One input declaration
+covers both caches, so `HF_HUB_CACHE` and `HF_DATASETS_CACHE` must sit on the
+same kind of storage.
 
 The umbrella splits into a read side (`DIST_INPUT_SHARED_FILESYSTEM`) and a write
 side (`DIST_OUTPUT_SHARED_FILESYSTEM`). On a flaky NFS/EFS mount, set the input
@@ -69,14 +72,14 @@ Other rules for multi-node storage:
 
 ## Network fabric
 
-InfiniBand and RoCE run on the NCCL defaults in the image. Only EFA is validated
-by real multi-node runs. Three setups need extra environment:
+InfiniBand and RoCE run on the NCCL defaults in the image. Three setups need
+extra environment:
 
 - **AWS EFA.** Set `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` and pass `--device
-  /dev/infiniband`. Cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
-  and `--device /dev/gdrdrv`. `NCCL_PROTO=simple` is optional; if you set it,
-  set it on every rank, including a rollout server on another node. Do not set
-  these variables on an InfiniBand cluster: they make it slower.
+  /dev/infiniband`; cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
+  and `--device /dev/gdrdrv`. Don't set them on an InfiniBand cluster: they
+  slow it down. Details:
+  [RDMA fabrics](../agent-docs/parallelism/multi-node.md#rdma-fabrics) ↗.
 - **Multiple NICs.** Point `NCCL_SOCKET_IFNAME` at the fast interface so NCCL's
   bootstrap stays off the management network.
 - **Rollout server on another node** (RL). The server needs the same fabric:
@@ -92,12 +95,31 @@ Cross-node EP needs an RDMA fabric. The default `ep_scope: auto` goes global
 once the EP group outgrows the NVLink domain. The ready-made config is
 `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
 
-![Two nodes: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
+![Two nodes at ep16 + tp8: node-local TP groups over NVLink, one global EP group whose all-to-all crosses RDMA, and DP pairs formed by matching TP positions](../agent-docs/assets/diagrams/ep_multi_node_layout.png)
 
 Above one NVLink domain, EP with TP must be a single EP group spanning the job.
 On 2×8 GPUs, `ep8 + tp2` forms two EP groups and is rejected at config time;
 `ep16 + tp2` with `ep_scope=global` runs. Pure EP has no such rule: node-local
 `ep8` on 2×8 is two DP replicas and runs as is.
+
+## Pipeline parallelism across nodes
+
+PP puts one stage per node, so only the boundary activations cross nodes. Two
+recipes ship, each for 2 × 8 GPUs and launched as above, both without gradient
+checkpointing:
+
+```bash
+torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+    --master_addr=$MASTER_ADDR --master_port=29500 \
+    scripts/training/sft.py examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml
+```
+
+`examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` adds EP inside each
+stage. Both set `save_only_model: true`, so pass `--save_only_model=false` to
+resume with the optimizer. On per-node storage, merge the nodes' directories
+before you load the result
+([Per-node PP saves](checkpoints.md#per-node-pp-saves)). What PP covers and
+refuses: [Parallelism](parallelism.md#pipeline-parallelism).
 
 ## HSDP
 
@@ -106,8 +128,8 @@ and reduce-scatter crosses the fabric. `--use_hsdp=true` shards within an NVLink
 domain and replicates across domains, so only the gradient all-reduce leaves the
 NVLink domain.
 
-It covers the plain data-parallel path (pure DP or CP). EP, TP and ETP reject it
-at startup, and on a single-domain job it does nothing.
+It covers the plain data-parallel path (pure DP or CP). EP, TP, ETP and PP
+reject it at startup, and on a single-domain job it does nothing.
 
 ## Rollout servers on other nodes
 
@@ -119,20 +141,23 @@ rank and an engine cannot share one. Layouts, ports and the fabric setup:
 
 ## SkyPilot
 
-`launcher-configs/skypilot/` holds task YAMLs for AWS and Nebius: GPT-OSS 20B
-(node-local EP), plus GPT-OSS 120B and Qwen3.5-122B in node-local and cross-node
-EP variants. They handle rendezvous, fabric setup and storage mounts:
+`launcher-configs/skypilot/{aws,nebius}/{nodelocal,crossnode}-ep.yaml` launch
+GPT-OSS 120B, one task per cloud fabric and EP topology, with rendezvous, fabric
+setup and storage mounts; the [preset table](../agent-docs/infrastructure/skypilot.md#presets) ↗
+retargets them to the other shipped models at launch:
 
 ```bash
 pip install "skypilot-nightly[aws]"   # or [nebius]
-sky launch -c oss-120b launcher-configs/skypilot/aws/gpt-oss-120b/crossnode-ep.yaml \
+sky launch -c oss-120b launcher-configs/skypilot/aws/crossnode-ep.yaml \
     --secret HF_TOKEN --secret WANDB_API_KEY
 sky logs oss-120b --follow
 ```
 
 Each YAML ships `resources.image_id` commented out, naming the prebuilt image
-for its GPUs. Uncomment it before launching; change it only for your own build.
-[SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗.
+for its GPUs. Uncomment it (or pass `--image-id`) before launching. A
+multi-node `nodelocal-ep` launch needs `--network-tier best`: on Nebius, without
+it the cross-node gradient sync runs over TCP with no error
+([SkyPilot](../agent-docs/infrastructure/skypilot.md) ↗).
 
 ## RunPod
 
@@ -148,8 +173,9 @@ provisions nothing (GPU clients, the NVIDIA device plugin and the scratch disk
 are yours), so these are closer to raw `docker run` than the SkyPilot tasks.
 
 ```bash
-nomad job plan launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl   # dry run
-nomad job run  launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+# scratch_host_path: the clients' large volume (no default)
+nomad job plan -var 'scratch_host_path=/path/to/large/volume' launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
+nomad job run  -var 'scratch_host_path=/path/to/large/volume' launcher-configs/nomad/qwen3.5-35b-a3b-8gpu-ep.nomad.hcl
 ```
 
 Nomad has no gang scheduling, so a two-node job can half-place: rank 0 holds 8

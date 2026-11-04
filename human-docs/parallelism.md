@@ -1,8 +1,11 @@
 # Parallelism
 
 Plain data parallelism needs no flags. `halo launch <method> <config> -n 8` (or
-`torchrun --nproc_per_node=8`) shards the model across 8 GPUs with FSDP2. Add a
-mode below only when the model or the sequence does not fit.
+`torchrun --nproc_per_node=8`) shards the model across 8 GPUs with FSDP2. Each
+GPU loads the whole model before the wrap, so a dense model must fit on one GPU
+at its load dtype; past that, TP shards it as it loads
+([Data Parallelism](../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode) ↗).
+Add a mode below only when the model or the sequence does not fit.
 
 | Need | Mode | Flag |
 | --- | --- | --- |
@@ -10,27 +13,23 @@ mode below only when the model or the sequence does not fit.
 | Shard each expert's FFN | ETP | `--expert_tensor_parallel_size=N` |
 | Shard dense weights (attention and FFN) | TP | `--tensor_parallel_size=N` |
 | Split a long sequence across GPUs | CP | `--context_parallel_size=N` |
+| Split a model's layers across nodes | PP | `--pipeline_parallel_size=N` |
 | Cut cross-node FSDP traffic (DP or CP) | HSDP | `--use_hsdp=true` |
 
 EP combines with one of TP, CP or ETP (EP+TP for MoE plus attention sharding,
-EP+CP for MoE plus long context).
+EP+CP for MoE plus long context). PP combines with EP or pure ETP inside each
+stage.
 
-The data-parallel size is what is left:
-
-```text
-data_parallel_size = world_size / max(cp_size, tp_size, expert_tp_size)
-```
-
-EP does not reduce it, because an EP rank is also a data-parallel rank. The
-divisor is a max, not a product, because no two of CP, TP and ETP may exceed 1
-in the same run.
+The data-parallel size is what PP, CP, TP and ETP leave; EP does not reduce it,
+because an EP rank is also a data-parallel rank
+([formula](../agent-docs/parallelism/README.md#stacking-the-dimensions) ↗).
 
 ## How EP groups work
 
 ![Tokens routed to the ranks owning their experts and returned to the rank they came from](../agent-docs/assets/diagrams/ep_token_routing.png)
 
-EP moves tokens, not batches. Each token goes to the rank that holds its expert
-and comes back to the rank it came from.
+Each token goes to the rank that holds its expert and comes back to the rank it
+came from.
 
 ![Two EP dispatch groups inside one NVLink domain, with the ranks holding the same expert slice forming DP replicas](../agent-docs/assets/diagrams/ep_group_hierarchy.png)
 
@@ -41,66 +40,79 @@ pass. Most of the rules below are about how these groups may be shaped.
 ## Rules that save you a wasted run
 
 Halo validates the layout at startup and rejects an invalid shape with a
-message that names the rule. Most checks run at config time, before the model
-loads; a few (LoRA with TP, CP head counts) fail at model load or trainer
-construction.
+message that names the rule. Most checks run at config time. The CP and TP
+model checks (head counts, attention classes) run on a meta-device copy of the
+model before any weight loads, and LoRA under TP fails at trainer construction.
 
-- **Allowed combinations.** EP pairs with at most one of TP, CP or ETP. TP+CP,
-  TP+ETP, ETP+CP and any three axes are rejected.
-- **Within one NVLink domain, EP fills the domain or uses `ep_size=2`.** Sizes
-  in between, such as EP=4 on 8 GPUs, are rejected: the MoE routing collectives
-  race FSDP2's and the run faults or deadlocks. For a 4-way expert split on 8
-  GPUs, use `ep4 + etp2`. The check compares `ep_size × expert_tp_size` with the
-  domain size, so `ep4 + tp2` is rejected like plain `ep4`.
-- **TP, ETP and node-local EP stay inside one NVLink domain.** On a typical
-  8-GPU host that is the node; on NVL72, set `NVLINK_DOMAIN_SIZE=72` to make it
-  the rack. `tp_size` and `expert_tp_size` must divide the domain size. EP spans
-  domains with `--ep_scope=global` on an RDMA fabric ([Clusters](clusters.md)).
-  EP+TP across domains needs one EP group that spans the whole job (`ep_size` =
-  world size).
-- **EP+CP needs node-local EP that fills the domain.** `ep_size` must equal the
-  NVLink domain size, for example `ep8` on an 8-GPU node. Global-scope EP with
-  CP is rejected.
-- **HSDP is for pure DP or CP.** `--use_hsdp=true` shards within an NVLink
-  domain and replicates across domains ([Clusters](clusters.md)). It is
-  rejected with EP, TP and ETP, and does nothing on a single-domain job.
-- **Replicated experts are FSDP-sharded by default.** With `ep_size` and
-  `expert_tensor_parallel_size` both 1, `fsdp_shard_ep1_experts: true` shards
-  them, which saves memory that otherwise grows with the DP size. Setting it to
-  `false` is rejected under TP or CP.
-- **LoRA does not combine with TP** (or EP+TP).
-- **QLoRA runs on plain data parallelism and CP only.** Its 4-bit base is
-  replicated, not FSDP-sharded, so FSDP knobs such as `use_hsdp` are refused
-  under torchrun. EP, ETP and TP reject it, and a MoE model also needs
-  `use_grouped_gemm: false`. Offline GRPO rejects it under CP, and both online
-  RL methods reject it in every mode, because weight sync would ship packed
-  4-bit tensors to the server.
-- **CP covers SFT, SMPO and offline GRPO.** Offline GRPO under CP is full
-  fine-tuning only. Online GRPO and async GRPO do not support CP.
+- **Allowed combinations** are in the
+  [Supported matrix](supported-matrix.md#parallelism-modes).
+- **Within one NVLink domain, EP fills the domain or uses `ep_size=2`.** EP=4 on
+  8 GPUs is rejected, and so is `ep4 + tp2`; for a 4-way expert split on 8 GPUs,
+  use `ep4 + etp2`
+  ([why](../agent-docs/parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs) ↗).
+- **Every other layout rule** (what stays inside one NVLink domain, which is
+  the node, or the rack on NVL72 with `NVLINK_DOMAIN_SIZE=72`; EP+CP; HSDP; the
+  FSDP knobs) is in
+  [Topology rules](../agent-docs/parallelism/README.md#topology-rules) ↗.
+- **LoRA, QLoRA and the trainers each mode covers** are in the
+  [Supported matrix](supported-matrix.md#peft-quantization-and-data) and its
+  [Training methods](supported-matrix.md#training-methods) table.
 
 ## Context parallelism
 
 ![Ulysses attention: each rank holds a sequence chunk, all-to-all swaps it for a head slice of the full sequence, then swaps back](../agent-docs/assets/diagrams/ulysses_attention_flow.png)
 
 CP splits the sequence across ranks and switches to a head split for the
-attention itself, so the result is exact. The cost is three all-to-alls per
+attention itself, so the result is exact. The cost is two all-to-alls per
 attention layer. The head counts must divide by `cp_size`; the collator pads the
 sequence length to fit.
 
 ## Pipeline parallelism
 
-Not yet available in this release. `pipeline_parallel_size` parses, but any
-value above 1 is rejected at config time.
+![Tokens/s/GPU with and without pipeline parallelism: on two 8-GPU machines over a fast link PP runs 4.0% below dp16 and 15.9% below ep8 with DP; forced onto plain TCP sockets it leads dp16 by 13.8×; on one machine it runs 8.5% below dp8 and 9.2% above ep8; on GLM-5.3-Flash it leads ep16 by 1.61×](../agent-docs/assets/benchmarks/pp_throughput.png)
+
+`pipeline_parallel_size` splits the decoder layers into stages, each a whole
+number of NVLink domains, so only boundary activations cross nodes. A run needs
+at least two nodes, and `pp2` under one `torchrun` on an 8-GPU node is rejected;
+the figure's one-host rows run two 4-GPU `torchrun` agents, which count as two
+nodes. Inside a stage it runs
+FSDP2, EP or pure ETP. The methods and families it covers, multimodal text towers
+and Qwen3.8-Flash-Next included, are in the
+[Supported matrix](supported-matrix.md#model-families); any other model is
+refused by name before a weight loads.
+
+- **When it pays.** Between machines on a fast link, PP is not a speedup for a model
+  that fits on one machine: it runs 4.0% below `dp16` and 15.9% below `ep8`
+  with DP. It leads on a slow link (13.8× over `dp16` forced onto plain TCP
+  sockets), over layouts that cross the link with experts (3.82× over `ep16`), and
+  where experts and optimizer state do not fit one machine: GLM-5.3-Flash runs
+  1.61× over `ep16`, and `ep8` with DP runs out of memory
+  ([rows](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗).
+- **Batches.** `pipeline_microbatches` replaces gradient accumulation and must
+  divide `per_device_train_batch_size`. Every batch pads to `max_length`, so use
+  `packing` with one packed row per microbatch. Inkling, GLM-5 Next and
+  DeepSeek-V4 refuse packing under PP and train on padded rows.
+- **Gradient checkpointing.** Turn it off where memory allows. The shipped
+  recipes do, and run 19–23% faster than with it, at about twice the allocated
+  peak. Reentrant checkpointing is refused; `use_reentrant: false` works.
+- **Refused:** LoRA and any PEFT model, QLoRA, tied embeddings, `accelerate
+  launch`, `padding_free`, `torch_compile`, Muon and FlashAdamW, `save_sharded_ep`,
+  image data, and `aux_loss` with a live coefficient, so a MoE without an
+  exportable bias trains at `moe_balancing: none`
+  ([every refusal and why](../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations) ↗).
+
+Launch recipes and per-node merges:
+[Clusters](clusters.md#pipeline-parallelism-across-nodes).
 
 ## Picking a shape
 
 Sharding costs throughput, so use the least that fits
-([Performance](performance.md)). Which family supports which mode is in the
-[Supported Matrix](supported-matrix.md).
+([Performance](performance.md)).
 
 Deep dives:
 [Expert](../agent-docs/parallelism/expert-parallelism.md) ↗ ·
 [Context](../agent-docs/parallelism/context-parallelism.md) ↗ ·
 [Tensor](../agent-docs/parallelism/tensor-parallelism.md) ↗ ·
 [Expert-Tensor](../agent-docs/parallelism/expert-tensor-parallelism.md) ↗ ·
+[Pipeline](../agent-docs/parallelism/pipeline-parallelism.md) ↗ ·
 [Multi-Node](../agent-docs/parallelism/multi-node.md) ↗.

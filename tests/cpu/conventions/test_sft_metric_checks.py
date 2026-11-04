@@ -1,11 +1,5 @@
 #!/usr/bin/env python
-"""``tests.common.sft_modes.sft_metric_checks`` flips each verdict on the log that should flip it.
-
-The dense SFT mode suites grade their logged metrics through this helper and run only on the GPU
-tiers. A stand-in trainer state drives it here, one breach per case.
-
-Run: python tests/cpu/conventions/test_sft_metric_checks.py
-"""
+"""``tests.common.sft_modes.sft_metric_checks`` flips each verdict on the log that should flip it."""
 
 import math
 from types import SimpleNamespace

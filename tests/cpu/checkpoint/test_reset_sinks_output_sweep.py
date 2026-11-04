@@ -1,44 +1,23 @@
 #!/usr/bin/env python
-"""``reset_sinks`` must hand back a directory that holds ONLY the checkpoint it just wrote.
-
-The tool has two write paths — a direct safetensors rewrite for a single-file checkpoint and a
-``from_pretrained`` round-trip for a sharded one — and both land in ``--output_dir``. When that
-directory already holds a previous run's weight files, the leftovers outlive the save: the
-safetensors path writes one file and deletes nothing, and ``save_pretrained`` deletes only the shards
-its own ``-00001-of-00002`` numbering regex matches, so a stale index survives it. Either way
-``from_pretrained`` and the toolkit's index-first readers can resolve the OLD weights — or shards
-that no longer exist — from a directory the tool reported as successfully reset.
-
-The single-file branch sweeps at the dispatcher, and only when the output directory is not the
-input: under ``--in_place`` the directory's other weight files are not the tool's to delete. The
-``from_pretrained`` branch sweeps its own output after its staged swap.
-
-The other way this tool hands back a directory it should not: the ``from_pretrained`` branch applies
-the trainers' own sink policy, so a layout that walk does not recognize must RAISE there instead of
-saving a checkpoint whose sinks are still live under a name that says they are off.
-
-    python tests/cpu/checkpoint/test_reset_sinks_output_sweep.py
-"""
+"""``reset_sinks`` hands back a directory holding only the checkpoint it wrote, rewritten shard by shard.
+Every rewritten shard is staged and verified at dtype min before anything replaces its target."""
 
 import json
+import logging
 import os
 import time
 
 import pytest
 import torch
-from accelerate import PartialState
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM
 
-PartialState()  # the script's model loading logs through accelerate's logger
-
-import scripts.after_training.reset_sinks as reset_sinks_mod
-from scripts.after_training.reset_sinks import reset_sinks
-from src.checkpoint import tool_io
-from src.checkpoint.format import SAFETENSORS_METADATA
-from src.checkpoint.tool_io import PUBLISH_STAGING_SUFFIX, checkpoint_shard_files
-from src.models.patches import gpt_oss_sinks
+import halo.checkpoint.tools.sink_reset as reset_sinks_mod
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME, RUN_PLAN_FILE, SAFETENSORS_METADATA
+from halo.checkpoint.reading import checkpoint_shard_files
+from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools.sink_reset import reset_sinks
 from tests.common.checkpoint_io import weight_files
 
 INDEX = "model.safetensors.index.json"
@@ -48,7 +27,7 @@ VOCAB_SIZE, HIDDEN_SIZE = 128, 64
 
 
 def _tiny_gptoss():
-    """A real sink-carrying model: gpt-oss is the family this tool exists for."""
+    """gpt-oss is the family this tool exists for."""
     torch.manual_seed(0)
     config = GptOssConfig(
         vocab_size=VOCAB_SIZE,
@@ -67,7 +46,6 @@ def _tiny_gptoss():
 
 
 def _build_source(source_dir, *, sharded: bool) -> dict[str, torch.Tensor]:
-    """Write a source checkpoint; return its sink tensors so the reset can be shown to have happened."""
     model = _tiny_gptoss()
     model.save_pretrained(str(source_dir), max_shard_size="64KB" if sharded else "5GB")
     assert os.path.isfile(os.path.join(source_dir, INDEX)) == sharded, "the source did not land in the shape asked for"
@@ -80,12 +58,7 @@ def _build_source(source_dir, *, sharded: bool) -> dict[str, torch.Tensor]:
 
 
 def _plant_previous_sharded_run(out_dir) -> str:
-    """A COMPLETE previous sharded save in the output directory: index plus every shard it names.
-
-    Complete on purpose. Both that layout and the single file this run writes describe a whole
-    checkpoint, so only the modification time separates them — back-dated here to say which one is
-    the leftover. Returns the directory for convenience.
-    """
+    """Complete on purpose: only the back-dated modification time says which layout is the leftover."""
     os.makedirs(out_dir, exist_ok=True)
     shards = ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors")
     for shard in shards:
@@ -99,131 +72,8 @@ def _plant_previous_sharded_run(out_dir) -> str:
     return str(out_dir)
 
 
-def _staging_dir(target):
-    """Where a staged publish builds its output — the shared suffix, so a rename cannot silently
-    leave this test asserting on a path nothing writes."""
-    return target.parent / f"{target.name}{PUBLISH_STAGING_SUFFIX}"
-
-
 def _weight_files(directory) -> set[str]:
-    return set(weight_files(str(directory), include_index=True))  # the sweep owns the index too
-
-
-def _assert_sinks_reset(directory, source_sinks: dict[str, torch.Tensor]) -> None:
-    written = load_file(os.path.join(directory, SINGLE))
-    assert set(source_sinks) <= set(written), "the reset checkpoint dropped sink tensors"
-    for name in source_sinks:
-        tensor = written[name]
-        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset to dtype min"
-    # Not a stub and not the planted leftovers: a real weight survived the round trip.
-    assert written["model.embed_tokens.weight"].shape == (VOCAB_SIZE, HIDDEN_SIZE)
-
-
-def test_a_publish_that_fails_part_way_leaves_the_staged_checkpoint_whole(tmp_path, monkeypatch):
-    """Under ``--in_place`` the staged copy is the only complete checkpoint. Publishing by moving the
-    staged entries empties it as the swap proceeds, so a failure part-way leaves neither directory
-    holding a whole checkpoint; cloning each entry first keeps the staged one intact to recover from."""
-    staging, target = tmp_path / f"out{PUBLISH_STAGING_SUFFIX}", tmp_path / "out"
-    staging.mkdir()
-    names = sorted(f"model-{i}.safetensors" for i in range(6))
-    for name in names:
-        (staging / name).write_text(name)
-
-    real_replace, calls = os.replace, []
-
-    def replace_failing_part_way(src, dst):
-        calls.append(dst)
-        if len(calls) == 3:
-            raise PermissionError(13, "Permission denied")
-        return real_replace(src, dst)
-
-    monkeypatch.setattr(os, "replace", replace_failing_part_way)
-    with pytest.raises(RuntimeError, match="the complete, verified checkpoint is in"):
-        reset_sinks_mod._swap_staged_checkpoint(staging, target)
-    monkeypatch.undo()
-
-    assert sorted(p.name for p in staging.iterdir()) == names, (
-        "a publish that failed part way left the staged checkpoint incomplete or littered with clones"
-    )
-    assert all((staging / name).read_text() == name for name in names), "a staged entry was corrupted"
-
-
-def test_the_single_file_branch_sweeps_the_previous_runs_leftovers(tmp_path):
-    """The branch that clears nothing on its own: it copies the source directory over and writes one
-    ``model.safetensors``, so a complete previous sharded save survives it untouched — index, shards
-    and all — and would win the lookup over the file just written."""
-    source, out = tmp_path / "src", tmp_path / "out"
-    sinks = _build_source(source, sharded=False)
-    _plant_previous_sharded_run(out)
-
-    assert reset_sinks(str(source), str(out)) == len(sinks)
-
-    assert _weight_files(out) == {SINGLE}, "the previous sharded run outlived the reset"
-    _assert_sinks_reset(out, sinks)
-
-
-def test_the_single_file_branch_stamps_the_safetensors_format(tmp_path):
-    """The rewrite stamps the ``format`` metadata ``save_pretrained`` and the toolkit's full-checkpoint
-    writers stamp, so the reset file reads as the same kind of checkpoint it replaced."""
-    source, out = tmp_path / "src", tmp_path / "out"
-    _build_source(source, sharded=False)
-
-    reset_sinks(str(source), str(out))
-
-    with safe_open(os.path.join(out, SINGLE), framework="pt") as handle:
-        assert handle.metadata() == SAFETENSORS_METADATA
-
-
-def test_an_interrupted_single_file_write_leaves_the_target_and_no_stage(tmp_path, monkeypatch):
-    """A kill mid-write under ``--in_place`` must leave the only copy untouched and no partial file
-    behind: an unrecognized leftover beside the weights rides along into every later aux-file copy."""
-    source = tmp_path / "src"
-    _build_source(source, sharded=False)
-    before = sorted(os.listdir(source))
-    original = (source / SINGLE).read_bytes()
-
-    def interrupted(tensors, filename, metadata=None):
-        with open(filename, "wb") as handle:
-            handle.write(b"partial")
-        raise OSError(28, "No space left on device")
-
-    monkeypatch.setattr(reset_sinks_mod, "save_file", interrupted)
-    with pytest.raises(OSError, match="No space left"):
-        reset_sinks(str(source), in_place=True)
-
-    assert sorted(os.listdir(source)) == before, "the interrupted write left a staged file behind"
-    assert (source / SINGLE).read_bytes() == original
-
-
-def test_the_sharded_branch_sweeps_the_previous_runs_index(tmp_path):
-    """The ``from_pretrained`` branch: ``save_pretrained`` removes the numbered shards it did not
-    write but leaves the index naming them, so index-first readers resolve files that are gone."""
-    source, out = tmp_path / "src", tmp_path / "out"
-    sinks = _build_source(source, sharded=True)
-    _plant_previous_sharded_run(out)
-
-    assert reset_sinks(str(source), str(out)) == len(sinks)
-
-    assert _weight_files(out) == {SINGLE}, "a previous run's index/shards survived the reset"
-    _assert_sinks_reset(out, sinks)
-
-
-def test_an_in_place_run_sweeps_nothing(tmp_path):
-    """An ``--in_place`` reset does not prune the directory: the other weight
-    files belong to whoever put them there, and the reset still has to happen."""
-    source = tmp_path / "src"
-    sinks = _build_source(source, sharded=False)
-    _plant_previous_sharded_run(source)
-
-    assert reset_sinks(str(source), in_place=True) == len(sinks)
-
-    assert _weight_files(source) == {
-        SINGLE,
-        INDEX,
-        "model-00001-of-00002.safetensors",
-        "model-00002-of-00002.safetensors",
-    }
-    _assert_sinks_reset(source, sinks)
+    return set(weight_files(str(directory), include_index=True))  # The sweep owns the index too.
 
 
 def _sinks_across_shards(directory) -> dict[str, torch.Tensor]:
@@ -235,130 +85,171 @@ def _sinks_across_shards(directory) -> dict[str, torch.Tensor]:
     return values
 
 
-def test_an_in_place_sharded_reset_is_staged_verified_and_swapped(tmp_path, monkeypatch):
-    """Under ``--in_place`` the sharded (from_pretrained) branch writes over the only copy, so WHERE the
-    reset is written before it lands is the contract, not just the end state: a save straight into
-    the target reaches the same final bytes and loses the checkpoint on any failure along the way.
-    Recorded at the swap seam — the staged copy must already be reset while the target still holds
-    the original sinks."""
-    source = tmp_path / "src"
+def _assert_sinks_reset(directory, source_sinks: dict[str, torch.Tensor]) -> None:
+    written = _sinks_across_shards(directory)
+    assert set(source_sinks) <= set(written), "the reset checkpoint dropped sink tensors"
+    for name in source_sinks:
+        tensor = written[name]
+        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset to dtype min"
+
+
+def _sink_shards(directory, sinks) -> set[str]:
+    return {os.path.basename(s) for s in checkpoint_shard_files(str(directory)) if set(load_file(s)) & set(sinks)}
+
+
+def _shard_bytes(directory) -> dict[str, bytes]:
+    return {os.path.basename(shard): open(shard, "rb").read() for shard in checkpoint_shard_files(str(directory))}
+
+
+def _staged_leftovers(directory) -> list[str]:
+    return sorted(name for name in os.listdir(directory) if name.startswith("."))
+
+
+def test_a_single_file_reset_sweeps_the_previous_runs_leftovers(tmp_path):
+    """It would win the index-first lookup over the file just written."""
+    source, out = tmp_path / "src", tmp_path / "out"
+    sinks = _build_source(source, sharded=False)
+    _plant_previous_sharded_run(out)
+
+    assert reset_sinks(str(source), str(out)) == len(sinks)
+
+    assert _weight_files(out) == {SINGLE}, "the previous sharded run outlived the reset"
+    _assert_sinks_reset(out, sinks)
+    assert load_file(str(out / SINGLE))["model.embed_tokens.weight"].shape == (VOCAB_SIZE, HIDDEN_SIZE)
+
+
+def test_the_rewrite_stamps_the_safetensors_format(tmp_path):
+    source, out = tmp_path / "src", tmp_path / "out"
+    _build_source(source, sharded=False)
+
+    reset_sinks(str(source), str(out))
+
+    with safe_open(os.path.join(out, SINGLE), framework="pt") as handle:
+        assert handle.metadata() == SAFETENSORS_METADATA
+
+
+def test_a_sharded_reset_keeps_the_layout_and_rewrites_only_the_sink_shards(tmp_path, monkeypatch):
+    """Only one shard is resident at a time, and no model class is involved."""
+    source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=True)
-    real_swap = reset_sinks_mod._swap_staged_checkpoint
-    observed: dict = {}
+    before = _shard_bytes(source)
+    sink_shards = _sink_shards(source, sinks)
+    assert sink_shards and sink_shards != set(before), "premise: the source mixes sink and sink-free shards"
+    loaded: list[str] = []
+    real_load = reset_sinks_mod.load_file
+    monkeypatch.setattr(reset_sinks_mod, "load_file", lambda path, **kw: loaded.append(path) or real_load(path, **kw))
 
-    def recording_swap(staging_dir, output_dir):
-        observed["staging"] = str(staging_dir)
-        observed["staged_sinks"] = _sinks_across_shards(staging_dir)
-        observed["target_sinks"] = _sinks_across_shards(output_dir)
-        return real_swap(staging_dir, output_dir)
+    assert reset_sinks(str(source), str(out)) == len(sinks)
 
-    monkeypatch.setattr(reset_sinks_mod, "_swap_staged_checkpoint", recording_swap)
+    after = _shard_bytes(out)
+    assert set(after) == set(before) and _weight_files(out) == {*before, INDEX}
+    assert all(after[name] == before[name] for name in set(before) - sink_shards), "a sink-free shard was rewritten"
+    assert json.loads((out / INDEX).read_text()) == json.loads((source / INDEX).read_text())
+    read_back = {os.path.basename(path) for path in loaded}
+    assert {name for name in read_back if not name.startswith(".")} == sink_shards, f"shards loaded: {loaded}"
+    _assert_sinks_reset(out, sinks)
+
+
+def test_a_sharded_reset_sweeps_the_previous_runs_files(tmp_path):
+    source, out = tmp_path / "src", tmp_path / "out"
+    sinks = _build_source(source, sharded=True)
+    _plant_previous_sharded_run(out)
+    (out / SINGLE).write_bytes(b"stale-single")
+
+    assert reset_sinks(str(source), str(out)) == len(sinks)
+
+    assert _weight_files(out) == _weight_files(source), "a previous run's weight files survived the reset"
+    _assert_sinks_reset(out, sinks)
+
+
+def test_an_interrupted_write_leaves_the_target_and_no_stage(tmp_path, monkeypatch):
+    """An unrecognized leftover beside the weights rides along into every later aux-file copy."""
+    source = tmp_path / "src"
+    _build_source(source, sharded=False)
+    before = sorted(os.listdir(source))
+    original = (source / SINGLE).read_bytes()
+
+    def interrupted(tensors, filename, metadata=None):
+        with open(filename, "wb") as handle:
+            handle.write(b"partial")
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(reset_sinks_mod, "save_safetensors_file", interrupted)
+    with pytest.raises(OSError, match="No space left"):
+        reset_sinks(str(source), in_place=True)
+
+    assert sorted(os.listdir(source)) == before, "the interrupted write left a staged file behind"
+    assert (source / SINGLE).read_bytes() == original
+
+
+def test_an_in_place_run_deletes_nothing_it_did_not_write(tmp_path):
+    """A weight file outside the checkpoint's own layout belongs to whoever put it there."""
+    source = tmp_path / "src"
+    sinks = _build_source(source, sharded=False)
+    stray = source / "model-00009-of-00009.safetensors"
+    stray.write_bytes(b"not-ours")
 
     assert reset_sinks(str(source), in_place=True) == len(sinks)
 
-    assert observed.get("staging") == str(_staging_dir(source)), "the reset was not written to a staging copy"
-    assert set(observed["staged_sinks"]) == set(sinks), "the staged copy dropped sink tensors"
-    for name, tensor in observed["staged_sinks"].items():
-        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset in the staged copy"
-    assert all(
-        torch.equal(tensor, sinks[name].to(tensor.dtype)) for name, tensor in observed["target_sinks"].items()
-    ), "the target was already rewritten before the swap — the staging copy is not what lands"
-
-    written = _sinks_across_shards(source)
-    assert set(written) == set(sinks), "the reset checkpoint dropped sink tensors"
-    for name, tensor in written.items():
-        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset to dtype min"
-    assert not _staging_dir(source).exists(), "the staging directory must be cleaned up"
+    assert stray.read_bytes() == b"not-ours"
+    _assert_sinks_reset(source, sinks)
 
 
 def test_a_write_that_kept_live_sinks_never_replaces_the_source(tmp_path, monkeypatch):
-    """A torn or buggy write must not ship live sinks as a reported success, over the only copy.
-    The staged copy is verified sinks-at-dtype-min BEFORE the swap, and a failure raises with the
-    source byte-identical."""
+    """A torn or buggy write must not ship live sinks as a reported success over the only copy."""
     source = tmp_path / "src"
-    _build_source(source, sharded=True)
+    sinks = _build_source(source, sharded=True)
+    sink_shard_count = len(_sink_shards(source, sinks))
+    assert sink_shard_count > 1, "premise: the reset stages more than one shard"
     before = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
-    real_save = reset_sinks_mod.save_full_checkpoint
-
-    def corrupting_save(model, out_dir, **kwargs):
-        real_save(model, out_dir, **kwargs)
-        # A torn writer: flip every written sink back to a live value after the save reports done.
-        for shard in checkpoint_shard_files(out_dir):
-            tensors = load_file(shard)
-            sink_keys = [key for key in tensors if ".sinks" in key]
-            if sink_keys:
-                for key in sink_keys:
-                    tensors[key] = torch.zeros_like(tensors[key])
-                save_file(tensors, shard)
-
-    monkeypatch.setattr(reset_sinks_mod, "save_full_checkpoint", corrupting_save)
-
-    with pytest.raises(RuntimeError, match="failed verification"):
-        reset_sinks(str(source), in_place=True)
-
-    after = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
-    assert after == before, "a failed verification must leave the in-place source untouched"
-    assert not _staging_dir(tmp_path / "src").exists(), "the staging directory must be cleaned up"
-
-
-def test_single_file_write_that_kept_live_sinks_never_replaces_the_source(tmp_path, monkeypatch):
-    """The same guarantee on the single-file branch: the staged temp file is verified BEFORE the rename.
-
-    Verifying after it would, under ``--in_place``, put a checkpoint with live sinks over the only
-    copy and then raise — an unusable artifact where the source had been fine.
-    """
-    source = tmp_path / "src"
-    _build_source(source, sharded=False)
-    before = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
-    real_save_file = reset_sinks_mod.save_file
+    real_save_file = reset_sinks_mod.save_safetensors_file
+    saves: list[str] = []
 
     def corrupting_save_file(state_dict, path, **kwargs):
-        # A torn writer: the staged file lands with live sinks despite the in-memory reset.
-        live = {key: (torch.zeros_like(t) if ".sinks" in key else t) for key, t in state_dict.items()}
+        # A torn writer on the last staged shard, after the others verified.
+        saves.append(str(path))
+        last = len(saves) == sink_shard_count
+        live = {key: (torch.zeros_like(t) if ".sinks" in key and last else t) for key, t in state_dict.items()}
         real_save_file(live, path, **kwargs)
 
-    monkeypatch.setattr(reset_sinks_mod, "save_file", corrupting_save_file)
+    monkeypatch.setattr(reset_sinks_mod, "save_safetensors_file", corrupting_save_file)
 
     with pytest.raises(RuntimeError, match="failed verification"):
         reset_sinks(str(source), in_place=True)
 
-    after = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file()}
+    after = {p.name: p.read_bytes() for p in source.iterdir() if p.is_file() and not p.name.startswith(".")}
     assert after == before, "a failed verification must leave the in-place source untouched"
-    assert not list(source.glob("*.tmp")), "the unverified staging file must be cleaned up"
+    assert not _staged_leftovers(source), "the unverified staged shards must be cleaned up"
 
 
-def test_a_failed_swap_keeps_the_staged_checkpoint(tmp_path, monkeypatch):
-    """Staging is only worth anything if the staged copy outlives a failed swap: it holds the ONLY
-    complete reset checkpoint once the first file has replaced its counterpart, so a cleanup there
-    would leave the target half-old/half-new with nothing to recover from."""
+def test_a_failed_publish_names_the_verified_shards_still_to_place(tmp_path, monkeypatch):
+    """Once one shard is renamed, the staged ones are the only reset copies of the rest."""
     source = tmp_path / "src"
-    _build_source(source, sharded=True)
-    real_replace = os.replace
-    moved: list[str] = []
+    sinks = _build_source(source, sharded=True)
+    assert len(_sink_shards(source, sinks)) > 1, "premise: more than one shard is published"
+    real_replace, moved = os.replace, []
 
     def failing_replace(src, dst):
-        # Only the swap's own moves (into the target directory) fail, and only after one landed —
-        # that is the state where the staging copy is the only complete checkpoint left.
-        if os.path.dirname(str(dst)) == str(source):
-            if moved:
-                raise OSError("Read-only file system")
-            moved.append(str(dst))
+        if moved:
+            raise OSError("Read-only file system")
+        moved.append(str(dst))
         return real_replace(src, dst)
 
-    monkeypatch.setattr(reset_sinks_mod.os, "replace", failing_replace)
-
-    with pytest.raises(RuntimeError, match="move it into place by hand"):
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(RuntimeError, match="rename each over its name by hand"):
         reset_sinks(str(source), in_place=True)
+    monkeypatch.undo()
 
-    staging = _staging_dir(tmp_path / "src")
-    assert staging.is_dir(), "the only complete copy of the reset checkpoint must survive the failure"
-    for name, tensor in _sinks_across_shards(staging).items():
-        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset in the staged copy"
+    staged = _staged_leftovers(source)
+    assert staged, "the verified staged shards must survive a failed publish"
+    for name in staged:
+        for key, tensor in load_file(str(source / name)).items():
+            if key in sinks:
+                assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{key} was not reset in {name}"
 
 
 def test_a_dry_run_neither_writes_nor_sweeps(tmp_path):
-    """``--dry_run`` reports what would change. Sweeping there would delete files for a run that
-    writes nothing — and it must not touch the source's sinks either."""
+    """Sweeping would delete files for a run that writes nothing."""
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=False)
     _plant_previous_sharded_run(out)
@@ -374,11 +265,7 @@ def test_a_dry_run_neither_writes_nor_sweeps(tmp_path):
 
 @pytest.mark.parametrize("sharded", [False, True], ids=["single_file", "sharded"])
 def test_a_dry_run_needs_no_output_dir(tmp_path, sharded):
-    """``--dry_run`` is the documented read-only invocation, so the destination requirement — which
-    exists to stop a WRITING run from defaulting onto its own input — must not abort it first.
-
-    Both branches, because both dereference the destination: the dispatcher hands each one an
-    ``output_dir`` it never writes under a dry run."""
+    """The destination requirement exists to stop a writing run defaulting onto its own input."""
     source = tmp_path / "src"
     sinks = _build_source(source, sharded=sharded)
 
@@ -390,7 +277,6 @@ def test_a_dry_run_needs_no_output_dir(tmp_path, sharded):
 
 
 def test_a_writing_run_still_requires_an_output_dir(tmp_path):
-    """Anti-over-widening: the refusal still guards every invocation that writes."""
     source = tmp_path / "src"
     _build_source(source, sharded=False)
 
@@ -398,61 +284,70 @@ def test_a_writing_run_still_requires_an_output_dir(tmp_path):
         reset_sinks(str(source))
 
 
-def test_the_sharded_branch_honours_max_shard_size(tmp_path):
-    """The from_pretrained branch re-saves the whole model; without the toolkit's cap it lands in
-    transformers' own default shards (50GB in 5.16), which every single-file reader downstream has
-    to hold whole. The flag must reach the staged save and survive the swap."""
-    source, out = tmp_path / "src", tmp_path / "out"
-    sinks = _build_source(source, sharded=True)
-
-    assert reset_sinks(str(source), str(out), max_shard_size="64KB") == len(sinks)
-
-    written = _weight_files(out)
-    assert INDEX in written and SINGLE not in written, f"expected a sharded save at max_shard_size=64KB, got {written}"
-    assert len(checkpoint_shard_files(str(out))) > 1
-    for name, tensor in _sinks_across_shards(out).items():
-        assert torch.all(tensor == torch.finfo(tensor.dtype).min), f"{name} was not reset to dtype min"
-
-
 @pytest.mark.parametrize("sharded", [False, True], ids=["single_file", "sharded"])
-def test_both_branches_preflight_the_full_checkpoint_load(tmp_path, monkeypatch, capsys, sharded):
-    """Both branches hold the whole checkpoint in host RAM (``load_file``, or from_pretrained onto the
-    CPU), so the shared preflight must warn before either loads — silence means the tool stopped
-    calling the helper — and must not abort the reset."""
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
+def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog, sharded):
+    """Silence means the tool stopped calling the helper."""
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     source, out = tmp_path / "src", tmp_path / "out"
     sinks = _build_source(source, sharded=sharded)
 
     assert reset_sinks(str(source), str(out)) == len(sinks)
 
-    printed = capsys.readouterr().out
-    assert "WARNING: reset_sinks" in printed and "RAM" in printed, printed
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(m.startswith("reset_sinks: estimated peak host RAM") for m in warned), warned
     _assert_sinks_reset(out, sinks)
 
 
-def test_an_unrecognized_sink_layout_raises_instead_of_saving_live_sinks(tmp_path, monkeypatch):
-    """Filling ``.sinks`` parameters by name here would let a layout the walk cannot resolve reset
-    nothing, and the tool would still write, sweep and report a "reset" checkpoint whose sinks are
-    untouched. Routed through the trainers' ``apply_sinks_policy``, a sinks-carrying model the walk
-    finds no attention layers on is a raise."""
+def test_a_sink_family_whose_keys_miss_the_spelling_raises(tmp_path):
+    """Otherwise it copies through, reported as reset, with its sinks untouched."""
     source, out = tmp_path / "src", tmp_path / "out"
-    _build_source(source, sharded=True)
-    # The one thing an unrecognized layout changes: the decoder-layer list cannot be resolved.
-    monkeypatch.setattr(gpt_oss_sinks, "backbone_with_layers", lambda _model: None)
+    _build_source(source, sharded=False)
+    renamed = {key.replace(".sinks", ".sink_bias"): tensor for key, tensor in load_file(str(source / SINGLE)).items()}
+    save_file(renamed, str(source / SINGLE), metadata=SAFETENSORS_METADATA)
 
-    with pytest.raises(RuntimeError, match="touched no attention layers"):
+    with pytest.raises(RuntimeError, match="none of its tensors is named like a sink"):
         reset_sinks(str(source), str(out))
 
     assert not out.exists(), "a checkpoint whose sinks were never reset was written anyway"
 
 
-def test_a_hub_source_without_sinks_is_refused_loudly(tmp_path):
-    """A Hub id that carries no sinks has no local directory for the pass-through copy: the run must
-    say so rather than die in ``copytree`` after loading the whole model."""
-    checkpoint_dir, out = tmp_path / "org" / "model", tmp_path / "out"
-    with pytest.raises(ValueError, match="no attention sinks"):
-        reset_sinks_mod._passthrough_copy(checkpoint_dir, out, dry_run=False)
-    assert not out.exists()
+def _build_sink_free_source(source_dir) -> None:
+    _build_source(source_dir, sharded=False)
+    stripped = {key: tensor for key, tensor in load_file(str(source_dir / SINGLE)).items() if ".sinks" not in key}
+    save_file(stripped, str(source_dir / SINGLE), metadata=SAFETENSORS_METADATA)
+    config = json.loads((source_dir / "config.json").read_text())
+    config["model_type"] = "qwen3"
+    (source_dir / "config.json").write_text(json.dumps(config))
+
+
+def test_a_sink_free_family_is_copied_through(tmp_path):
+    source, out = tmp_path / "src", tmp_path / "out"
+    _build_sink_free_source(source)
+
+    assert reset_sinks(str(source), str(out)) == 0
+
+    assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
+
+
+def test_the_copy_through_leaves_the_vendor_weight_dumps_and_the_run_internal_entries_behind(tmp_path):
+    """gpt-oss ships ``original/`` and ``metal/``; an ``output_dir`` root also holds the run's ``_*`` entries."""
+    source, out = tmp_path / "src", tmp_path / "out"
+    _build_sink_free_source(source)
+    for dump in ("original", "metal"):
+        (source / dump).mkdir()
+        (source / dump / SINGLE).write_bytes(b"vendor-dump")
+    (source / RUN_PLAN_FILE).write_text("{}")
+    (source / REFERENCE_CACHE_DIR_NAME).mkdir()
+    (source / REFERENCE_CACHE_DIR_NAME / "merged.values").write_bytes(b"scores")
+    (source / "2_Dense").mkdir()
+    (source / "2_Dense" / "config.json").write_text("{}")
+
+    assert reset_sinks(str(source), str(out)) == 0
+
+    left_behind = ("original", "metal", RUN_PLAN_FILE, REFERENCE_CACHE_DIR_NAME)
+    assert not any((out / name).exists() for name in left_behind), sorted(os.listdir(out))
+    assert (out / "2_Dense" / "config.json").read_text() == "{}"
+    assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
 
 
 if __name__ == "__main__":

@@ -1,20 +1,19 @@
-"""Code-contests episode drivers for CPU tests: a canned-result sandbox, a recording stand-in for the
-SandboxFusion service, and the reset / tool-call steps, so a test runs episodes through the native
-protocol's own dispatch without a subprocess or a network."""
+"""Code-contests episode drivers for CPU tests, running episodes through the native protocol's dispatch with no
+subprocess or network."""
 
 import re
 from typing import Any, NamedTuple
 
-from src.environments.base import Trajectory
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
-from src.environments.tools.definitions import NativeToolCall
+from halo.environments.messages import Trajectory
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tools.definitions import NativeToolCall
 
-# One hidden test that the default stub run's ``X`` passes, as the env's ``answer`` context.
+# One hidden test the default stub run's ``X`` passes, as the env's ``answer`` context.
 SINGLE_TEST_ANSWER = {"answer": {"tests": [{"input": "", "output": "X"}]}}
-# The body SandboxFusion answers for a program that ran to a clean exit.
+# What SandboxFusion answers for a program that ran to a clean exit.
 FINISHED_RUN = {"status": "Success", "run_result": {"status": "Finished", "stdout": "", "return_code": 0}}
-# Wording no task message, tool description or tool reply may carry: an episode's budgets are
-# enforced by the engine and the protocol, never stated to the model.
+# Wording no task message, tool description or tool reply may carry: budgets are enforced, never stated to the model.
 RETIRED_BUDGET_PHRASES = (
     "Budgets for this task",
     "runs left",
@@ -25,7 +24,7 @@ RETIRED_BUDGET_PHRASES = (
     "only graded submission",
     "disabled for this task",
 )
-# The sentence window around each "submission"/"run" word, where a stated budget would put its count.
+# The window around each "submission"/"run" word, where a stated budget would put its count.
 _BUDGET_WORD_WINDOW = re.compile(r"[^.\n]{0,24}\b(?:graded\s+)?(?:submissions?|runs?)\b[^.\n]{0,24}", re.IGNORECASE)
 
 
@@ -46,17 +45,14 @@ class StubSandbox(SandboxExecutor):
 
 
 class SandboxPost(NamedTuple):
-    """One ``/run_code`` request a :class:`RecordingSandboxSession` received."""
-
     url: str
     payload: dict[str, Any]
     timeout: float | None
 
 
 class RecordingSandboxSession:
-    """A ``requests`` session standing in for a SandboxFusion service (``RemoteSandbox(session=...)``):
-    it records every POST and answers each with one canned body, a clean run by default, or raises
-    ``exc`` as a failed transport does."""
+    """A ``requests`` session standing in for SandboxFusion: records every POST and answers one canned body, or raises
+    ``exc``."""
 
     def __init__(self, body: dict[str, Any] | None = None, *, exc: Exception | None = None):
         self.body = FINISHED_RUN if body is None else body
@@ -77,18 +73,16 @@ class RecordingSandboxSession:
 
 
 def retired_budget_phrases(text: str) -> list[str]:
-    """The retired budget statements ``text`` still carries."""
     return [phrase for phrase in RETIRED_BUDGET_PHRASES if phrase in text]
 
 
 def counts_beside_budget_words(text: str) -> list[str]:
-    """The windows of ``text`` where a count sits beside "submission" or "run" — where a tool description
-    stating a budget puts it. Not for a task message, whose time-limit note ("runs under 5 s") is one."""
+    """Windows of ``text`` with a count beside "submission" or "run"; not for a task message, whose time-limit note is
+    one."""
     return [window.group(0) for window in _BUDGET_WORD_WINDOW.finditer(text) if re.search(r"\d", window.group(0))]
 
 
 def reset_episode(env: Any, context: dict[str, Any]) -> Trajectory:
-    """Reset one episode on ``env`` with ``context`` and return its trajectory."""
     ids, _ = env.reset(["solve it"], [context])
     return env.get_trajectories(ids)[0]
 

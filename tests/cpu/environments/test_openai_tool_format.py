@@ -1,31 +1,19 @@
 #!/usr/bin/env python
-"""Tests for OpenAI tool-call format handling on the data model
-(``src/environments/tools/definitions.py``): parsing one tool call out of a chat-completion message
-and serializing a tool result back into an OpenAI ``tool`` message.
-
-Tool-call *parsing* belongs on the data model (any OpenAI-compatible server, including vLLM,
-returns this shape); picking a server-side ``--tool-call-parser`` is the inference server's job,
-not the trainer's, so there is no parser-selection helper here.
-
-Covers: dict-vs-JSON-string arguments, malformed/empty payloads, and the serialized tool message.
-
-Run: ``pytest tests/cpu/environments/test_openai_tool_format.py``.
-"""
+"""OpenAI tool-call format on the data model (``halo/environments/tools/definitions.py``): parsing one tool call and
+serializing a tool result."""
 
 import warnings
 
 import pytest
 
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.tools.definitions import (
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.tools.definitions import (
     NativeTool,
     NativeToolCall,
     NativeToolRegistry,
     NativeToolResult,
     ToolParameter,
 )
-
-# NativeToolCall.from_openai_format — single call
 
 
 def test_from_openai_format_parses_json_string_arguments():
@@ -58,15 +46,14 @@ def test_from_openai_format_malformed_arguments_default_to_empty():
     ids=["unhashable-key", "unhashable-set-member", "deep-list", "deep-object"],
 )
 def test_from_openai_format_degrades_arguments_no_literal_can_build(raw):
-    """An unhashable dict key or set member raises TypeError out of the literal reader, deep nesting a
-    RecursionError out of the JSON one: neither is a syntax error, and uncaught either escapes
-    ``env.step``, so the policy could void its own episode by writing one."""
+    """An unhashable key raises TypeError and deep nesting RecursionError, neither a syntax error; uncaught, the
+    policy could void its own episode by writing one."""
     assert NativeToolCall.from_openai_format({"id": "c", "function": {"name": "f", "arguments": raw}}).arguments == {}
 
 
 def test_from_openai_format_repairs_a_python_literal_without_a_syntax_warning():
-    """An invalid escape in a model-written literal (a regex's ``\\d``) is read as Python reads it,
-    silently: a ``SyntaxWarning`` per parse would print once per call of every episode."""
+    """An invalid escape in a model-written literal is read as Python reads it, silently: a ``SyntaxWarning`` per
+    parse would print once per call."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         call = NativeToolCall.from_openai_format(
@@ -104,9 +91,6 @@ def test_a_call_no_literal_can_build_is_a_refused_call_not_a_lost_episode():
 def test_from_openai_format_missing_fields_default():
     tc = NativeToolCall.from_openai_format({})
     assert tc.id == "" and tc.name == "" and tc.arguments == {}
-
-
-# NativeToolResult serialization
 
 
 def test_tool_result_serializes_to_an_openai_tool_message():

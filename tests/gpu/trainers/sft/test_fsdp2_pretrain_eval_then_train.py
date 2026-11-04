@@ -1,56 +1,32 @@
 #!/usr/bin/env python
 """FSDP2: an ``evaluate()`` before ``train()`` must not freeze training.
 
-A gathered FSDP2 module registers its transient unsharded params, and the toolkit's
-``reshard_after_forward=False`` leaves a pre-train eval in that state; HF builds the optimizer after
-it. Without the re-shard in ``DistributedTrainerMixin.create_optimizer`` the param groups hold orphans
-the next unshard discards: every step updates them, the shards never move, and the loss only drifts
-with the batches while grad norms stay finite. It fails when:
-  * the sharded params do not move after evaluate() -> train() (world MIN of the per-rank max |delta|)
-  * the loss does not decrease over the run
-  * the control arm (train() with no pre-train eval) fails either check — the measurement is broken
-  * the pre-train eval no longer leaves the model gathered — the scenario stopped being exercised
-
-Topology: 2 GPUs, plain FSDP2 (``ParallelismConfig()``), tiny Qwen3 over the Qwen3-0.6B vocabulary.
-Run: torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_fsdp2_pretrain_eval_then_train.py
+A pre-train eval leaves transient unsharded params registered, and HF builds the optimizer after it. Without the
+re-shard in ``create_optimizer`` the groups hold orphans: shards never move and the loss drifts with finite grad norms.
 """
 
 import torch
 from torch.distributed.tensor import DTensor
-from transformers import AutoConfig, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoConfig, AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import world_all, world_min
 from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
-from tests.common.utils import log, step_losses
+from tests.common.models import QWEN3_0_6B
+from tests.common.pp_equivalence import build_dense_model
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 STEPS = 8
 LEARNING_RATE = 5e-3
 MIN_LOSS_DROP = 0.05
 
 
-def build_dense_model(tokenizer) -> Qwen3ForCausalLM:
-    """Tiny dense Qwen3 over ``tokenizer``'s checkpoint vocabulary, identical on every rank (fixed seed).
-
-    pad/eos ids must live inside the model's vocab: TRL copies the tokenizer's ids into the model
-    config, and the saved config would otherwise fail ``from_pretrained``'s padding_idx assert.
-    """
-    torch.manual_seed(1234)
-    return Qwen3ForCausalLM(
-        Qwen3Config(
-            **{**TINY_QWEN3_CONFIG, "vocab_size": AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size},
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
-    )
-
-
 def _shards(model) -> dict[str, torch.Tensor]:
-    """This rank's sharded parameter data — what the optimizer must be updating."""
+    """This rank's sharded parameter data, what the optimizer must be updating."""
     return {
         name: (param.to_local() if isinstance(param, DTensor) else param).detach().clone()
         for name, param in model.named_parameters()
@@ -79,7 +55,7 @@ def _arm(ctx, name: str, *, eval_first: bool) -> tuple[dict, dict]:
         seed=42,
     )
     trainer = DistributedSFTTrainer(
-        model=build_dense_model(tokenizer),
+        model=build_dense_model(tokenizer, vocab_size=AutoConfig.from_pretrained(QWEN3_0_6B).vocab_size),
         args=args,
         train_dataset=create_sft_dataset(64, tokenizer, seed=0),
         eval_dataset=create_sft_dataset(16, tokenizer, seed=1),

@@ -1,63 +1,69 @@
 # Supported Models
 
-**Any HuggingFace `AutoModelForCausalLM` trains with standard FSDP.** The matrix below is about *advanced* parallelism — EP for MoE routing, CP for long sequences, TP for weight sharding, ETP for expert FFN sharding.
+**Any HuggingFace `AutoModelForCausalLM` trains with standard FSDP**, which loads the whole model onto every GPU first, so it must fit one ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)). Packed rows keep documents apart on the families named in [Collators](../data/collators.md#document-isolation-under-packing). On other families a document can reach the next one (BERT- and BART-family decoders, OPT, BioGPT, GPT-Neo, Moshi), so train those without packing. The matrix below is about *advanced* parallelism — EP for MoE routing, ETP for expert FFN sharding, CP for long sequences, TP for weight sharding, PP for depth across NVLink domains. It is the one family table; `tests/cpu/parallelism/test_docs_limitation_tables.py` derives every EP/ETP/CP/TP/PP cell from the code, keyed on the row's `model_type`.
 
-The **TP column** tracks the Halo-side path: pure TP for dense models, and *selective* TP (attention only; embeddings and `lm_head` replicated; MoE left to EP) for MoE models in EP+TP mode. Most modern HF models also support native TP via `base_model_tp_plan`; GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path. **No** means no working selective-TP path.
+The **TP column** tracks the Halo-side path: HF-native `tp_plan="auto"` for dense models (Yes when the config ships a `base_model_tp_plan`), and *selective* TP (attention only; embeddings and `lm_head` replicated; experts left to EP) for MoE models. GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path.
 
-The registries behind the matrix: EP wrappers under `src/distributed/expert_parallel/layers/`, CP wrappers (which the CP accept-list is derived from) under `src/distributed/context_parallel/layers/`, TP accept-list in `src/distributed/tensor_parallel/module_types.py`.
+The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/models/moe/family_specs.py`) and their EP layers under `halo/distributed/expert_parallel/families/`; the Ulysses wrappers (`ULYSSES_ATTENTION_MAP`, `halo/distributed/context_parallel/families.py`) less the sequence-axis layers CP refuses (`halo/distributed/context_parallel/model_rules.py`); `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`); `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`).
 
 ## Compatibility matrix
 
-| Model Family | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA ⁷ | Training Configs |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--|
-| [Qwen3 (dense)](qwen3.md) | — | Yes | Yes | — | — | — | Yes | `examples/sft/qwen3/qwen3-4b-*` |
-| [Qwen3 MoE](qwen3.md#qwen3-moe) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | — |
-| [Qwen3-VL (text)](qwen3.md#qwen3-vl) | — | Yes | **No** ⁵ | — | — | — | Yes | — |
-| [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | Yes | **No** ¹ | Yes | Yes | **No** | Yes | Yes | `examples/sft/qwen3_5/*` |
-| [GPT-OSS](gpt-oss.md) | Yes | Yes | Yes | Yes | Yes ⁶ | Yes | Yes | `examples/sft/gptoss/*` |
-| [GLM-4 MoE Lite](glm4.md) | Yes | Yes | Yes ² | Yes | Yes ⁶ | Yes | Yes | `examples/sft/glm4/*` |
-| [Laguna S / XS 2.1](laguna.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/laguna/*` |
-| [Inkling-Small](inkling.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes ¹² | `examples/sft/inkling/*` |
-| [Gemma 4 MoE](gemma4.md) | Yes | **No** | **No** | Yes | **No** | **No** | Yes | `examples/sft/gemma4/*` |
-| [Bailing MoE / Ling](bailing.md) | Yes | Yes ³ | **No** ³ | Yes | partial ⁶ ¹³ | **No** | Yes | `examples/sft/ling_mini_2/*` |
-| [LFM-2 MoE](lfm2.md) | Yes | **No** | Yes | Yes | **No** | Yes | Yes | `examples/sft/lfm2/*` |
-| [Mistral4 MoE](mistral4.md) | Yes | Yes | Yes | Yes | partial ⁶ ¹³ | Yes | Yes | `examples/sft/mistral4/*` |
-| [DeepSeek-V4](deepseek-v4.md) | Yes | **No** ⁸ | **No** ⁸ | Yes | **No** | **No** | Yes | `examples/sft/deepseek_v4/*` |
-| [Zaya (Zyphra/ZAYA1)](zaya.md) | Yes ⁴ | **No** ⁴ | **No** ⁴ | Yes | **No** | **No** | Yes | `examples/sft/zaya/*` |
-| [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | Yes ¹² | `examples/sft/cohere2_moe/*` |
-| [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | Yes | **No** ¹⁰ | **No** ¹⁰ | Yes | **No** | **No** | Yes | `examples/sft/glm5_next/*` |
-| [Step-3.7 Flash](step3p7.md) | Yes | **No** ¹¹ | **No** ¹¹ | Yes | **No** | **No** | Yes | `examples/sft/step3p7/*` |
-| Any other HF model with `tp_plan` (Llama, Mistral, Phi, …) | — | — | Yes | — | — | — | Yes | — |
+| Model Family | `model_type` | EP | ETP | CP | TP | PP | Training Configs |
+|---|---|:--:|:--:|:--:|:--:|:--:|:--|
+| [Qwen3 (dense)](qwen3.md) | `qwen3` | — | — | Yes | Yes | Yes ¹ | `examples/sft/qwen3/*` |
+| [Qwen3 MoE](qwen3.md#qwen3-moe) | `qwen3_moe` | Yes | Yes | Yes | Yes | Yes ¹³ | — |
+| [Qwen3-VL (text)](qwen3.md#qwen3-vl) | `qwen3_vl_text` | — | — | Yes ² | No | No | — |
+| [Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | No | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
+| [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | `qwen3_5_moe` | Yes | Yes | No | Yes ³ | Yes ⁴ | `examples/sft/qwen3_5/*-a*b-*` |
+| [Qwen3-Next](qwen3-next.md) | `qwen3_next` | Yes ¹¹ | Yes ¹¹ | No | No | No | `examples/sft/qwen3_next/*` |
+| [Qwen3.8-Flash-Next](qwen4_exp.md) | `qwen4_exp` | Yes ¹² | Yes ¹² | No | No | Yes ¹⁰ ¹³ ¹⁴ | `examples/sft/qwen4_exp/*` |
+| [GPT-OSS](gpt-oss.md) | `gpt_oss` | Yes | Yes | Yes | Yes | Yes | `examples/sft/gptoss/*` |
+| [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | Yes ¹³ | `examples/sft/glm4/*` |
+| [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | Yes ¹³ | `examples/sft/laguna/*` |
+| [Inkling-Small](inkling.md) | `inkling_text` | Yes | Yes | No | No | Yes ¹⁰ ¹³ | `examples/sft/inkling/*` |
+| [Gemma 4 MoE](gemma4.md) | `gemma4` | Yes | Yes | No | No | No | `examples/sft/gemma4/*` |
+| [Bailing MoE / Ling](bailing.md) | `bailing_moe` | Yes | Yes | Yes ⁷ | No | No | `examples/sft/bailing/*` |
+| [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
+| [Mistral4 MoE](mistral4.md) | `mistral4` | Yes | Yes | Yes ⁸ | Yes | No | `examples/sft/mistral4/*` |
+| [DeepSeek-V4](deepseek-v4.md) | `deepseek_v4` | Yes | Yes ⁶ | No | No | Yes | `examples/sft/deepseek_v4/*` |
+| [Nemotron-H (Nemotron 3.5 Super VL, Lightning)](nemotron-h.md) | `nemotron_h` | Yes ¹⁵ | Yes ¹⁵ | No | No | Yes ¹⁰ ¹³ | `examples/sft/nemotron_h/*` |
+| [Zaya (ZAYA1)](zaya.md) | `zaya` | Yes ⁹ | Yes ⁹ | No | No | No | `examples/sft/zaya/*` |
+| [Command A+ (Cohere2 MoE)](cohere2-moe.md) | `cohere2_moe` | Yes | Yes ⁶ | Yes ⁶ | Yes ⁶ | No | `examples/sft/cohere2_moe/*` |
+| [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | `glm5_next` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/glm5_next/*` |
+| [Step-3.7 Flash](step3p7.md) | `step3p7` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/step3p7/*` |
+| Any other HF model with a `tp_plan` (Llama, Mistral, Phi, …) | — | — | — | No | Yes | No | — |
 
-**Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Mistral4, Nemotron-H, Qwen3-Next and Qwen3.8-Flash-Next. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
-Trainer × parallelism support is tracked in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
-¹ Qwen3.5/3.6 ship a working CP wrapper for the full-attention block, but every released checkpoint also carries `Qwen3_5MoeGatedDeltaNet` linear-attention layers whose sequence-axis Conv1d and recurrent scan are not CP-shardable. Validation rejects hybrid `layer_types`. See [qwen3_5.md](qwen3_5.md#why-cp-is-blocked-on-real-checkpoints).
+² Text rows only: SFT and SMPO refuse an image run under CP at startup, and the wrapper raises on a batch carrying `pixel_values`.
 
-² GLM-4 has LoRA-style attention compression; only the expansion projections shard — see [glm4.md](glm4.md#tp).
+³ `tensor_parallel_size` must divide the KV heads: at most 2 on 35B-A3B.
 
-³ CP covers **Ling 2.0** (standard softmax GQA). `Ring-mini-linear-2.0` is rejected by name (its file reuses the same full-attention class names). Ling 3.0 (`bailing_hybrid`) pairs KDA linear attention with MLA, so it has no CP path either; it also needs `attn_implementation: sdpa`, and `fp32_non_ep_params: true` (with `fsdp_shard_ep1_experts: false` at `ep_size: 1`) keeps its KDA state in fp32, see [bailing.md](bailing.md#ling-30). TP is unavailable for all of them: a missing DTensor plan, not an architectural blocker.
+⁴ Text towers (`text_only_model: true` for the multimodal checkpoints); packed rows run on the GatedDeltaNet segment markers each stage rebuilds. The MoE tower has no bias slot and the split severs `aux_loss`, so it trains with `moe_balancing: none`.
 
-⁴ Zaya supports **EP without gradient checkpointing**, **EP+ETP without GC**, *or* **plain FSDP2 without GC**. CCA's sequence-axis `Conv1d` rules out CP; no Zaya attention class is in the selective-TP accept-list and upstream ships no `base_model_tp_plan`, so `tensor_parallel_size > 1` raises. See [zaya.md](zaya.md#limitations).
+⁵ Only the MLA expansion projections shard.
 
-⁵ A dense Qwen3-VL takes the HF-native TP route (`tp_plan="auto"`) and ships no `base_model_tp_plan`: the plan resolves empty, so the loader **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. `Qwen3VLTextAttention` stays in the CP and selective-TP accept-lists, which govern CP and the attention-only path the loader takes for MoE and EP+TP shapes. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither registry.
+⁶ Tiny-model verified only. Laguna and DeepSeek-V4 ETP: pure ETP and EP+ETP train, save and resume in the precompute-resume suites. Command A+: only EP8 ran on the full checkpoint, on Halo 1.0.0 or earlier.
 
-⁶ EP+CP is gated the same way for every family: `_validate_ep_cp` requires node-local EP with `ep_group_size == nvlink_domain_size` and rejects both a smaller `ep` within the domain and cross-domain EP (`ep_scope='global'`). On an 8-GPU node that pins `ep_size` to 8; `cp_size` only has to divide the domain, and the fully orthogonal shape is `cp_size == ep_group_size == nvlink_domain_size`.
+⁷ Ling 2.0 only; Ring-mini-linear-2.0 and Ling 3.0 are refused. EP+CP's only GPU test is a tiny-model LoRA row.
 
-⁷ LoRA "Yes" means the family trains with adapters under FSDP/DP, EP, CP, and pure ETP. It is rejected at trainer construction under **TP** and **EP+TP** (adapters are plain tensors outside the TP DTensor graph). Under EP the adapters cover attention (PEFT) *and* the experts (native grouped adapters); the expert half is refused at `expert_tp_size > 1`, leaving attention-only LoRA there. See [PEFT](../optimization/peft.md).
+⁸ EP+CP's only GPU test is a tiny-model LoRA row.
 
-⁸ DeepSeek-V4 is eager-only (`head_dim=512` exceeds every FA kernel; sinks + compressor KV concat rule out SDPA/flex). Its CSA/HCA compressors pool token windows along the sequence axis (no CP), and shared-KV MQA is not shardable (`apply_tp_to_attention_only` raises). `packing` and `padding_free` are refused — the compressor windows are cut at row indices, so a packed document reads the row's first windows. See [deepseek-v4.md](deepseek-v4.md).
+⁹ Without gradient checkpointing, in every mode.
 
-⁹ Tiny-model verified on the single-node 8-GPU matrix (ep8 / cp8 / tp8 / ep8+cp2 / ep8+tp2 / etp8 / ep2+etp4) plus EP=2 loss/grad equivalence vs the stock model; only EP=8 is validated at the full Command A+ scale. See [cohere2-moe.md](cohere2-moe.md).
+¹⁰ Text tower only: image data is refused.
 
-¹⁰ 34 of GLM-5 Next's 45 layers are a KDA linear recurrence (sequence-axis conv + delta-rule scan), so validation rejects its `layer_types` for CP; TP has no sound shard plan (DSA indexer + KDA projections) and `tensor_parallel_size > 1` is rejected. See [glm5-next.md](glm5-next.md#limitations).
+¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
-¹¹ Step-3.7 Flash's per-layer head counts (64 full / 96 sliding) fit no uniform q/k/v shard plan, so `Step3p7Attention` is outside the selective-TP accept-list and TP shards zero layers (raise); no Ulysses CP wrapper is registered either — nothing architectural, the head counts divide cp 2/4/8. See [step3p7.md](step3p7.md#limitations).
+¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
-¹² Tiny-model LoRA verified: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` trains expert and mixed adapters at ep2, ep1 and ep2+cp2 (Inkling's CP row checks the refusal) through a merged save and an exact resume. No full-scale LoRA run.
+¹³ Tiny-model GPU tests, plus a 20-step Qwen3-30B-A3B correctness smoke on Qwen3 MoE: no released checkpoint is otherwise trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
 
-¹³ A tiny-model LoRA row is the only GPU test of the shape: Ling 2.0 and Mistral4 EP+CP in `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--cp-size 2`, ep2+cp2). Validate a short run first.
+¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
+
+¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
 
 ## MoE knobs
 
@@ -67,31 +73,29 @@ Every MoE family shares three settings:
 - **Expert compute** — [Grouped GEMM](../optimization/grouped-gemm.md) (`use_grouped_gemm`, default on at SM90+) batches the per-expert matmuls.
 - **Load balancing** — `moe_balancing`: `auto` (default), `aux_loss`, `bias_update` (DeepSeek-V3 auxiliary-loss-free bias, step size `router_balancing_rate`), `bias_update_transient`, or `none`.
 
-`auto` resolves per family ([Callbacks → `auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family)); which families export an explicit `bias_update` is the slot table under [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+`auto` resolves per family ([Callbacks → `auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family)); which families export an explicit `bias_update` is the slot table under [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 
-`aux_loss` trains the routers only where the trainer's loss adds the term — SFT and KTO — and does so with or without gradient checkpointing ([Callbacks](../training-methods/callbacks.md#aux_loss-under-gradient-checkpointing)).
+`aux_loss` trains the routers only where the trainer's loss adds the term — SFT, DPO and KTO — and does so with or without gradient checkpointing ([Callbacks](../training-methods/callbacks.md#aux_loss-under-gradient-checkpointing)).
 
 Every expert / router config field — the expert count, the top-k spelling, `router_aux_loss_coef`, `output_router_logits` — lives on the **text** sub-config for a composite (multimodal) family (Qwen3.5/3.6-MoE, Gemma 4, Mistral-4 under its VLM wrapper). `PreTrainedConfig` does not delegate attribute reads, so the toolkit resolves these through `get_config_field` / `set_config_field` over `config` **and** `config.get_text_config()`. Read one field off the wrapper alone and balancing plus `moe/*` metrics silently disappear.
 
-Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `ROUTER_EXPERT_COUNT_FIELDS` and `ROUTER_TOPK_FIELDS` in `src/models/moe_balancing.py` are the one registry every consumer reads — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
+Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `halo/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP, `detect_num_experts` reads the count off the live expert container instead.
 
 [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback) logs per-layer expert load by default (`enable_moe_metrics`).
-
-**Hybrid families** — [Qwen3.5 / 3.6](qwen3_5.md) (GatedDeltaNet), [LFM-2](lfm2.md) (short convolution), [GLM-5 Next](glm5-next.md) (KDA) and [Bailing](bailing.md)'s Ling 3.0 (KDA) / Ring (Lightning Attention) interleave linear or convolutional attention with standard attention. Their MoE side runs under EP, but the sequence-axis recurrence cannot be split, so CP is unavailable on released checkpoints.
 
 ## Load precision
 
 The training and scoring loaders cast floating parameters to the run dtype after `from_pretrained`
-and before parallel wrappers (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; lazy
-loaders cast per tensor). This overrides transformers' FP32 module pins — DeepSeek-V4's norms and
+and before parallel wrappers (`cast_parameters_to_run_dtype` in `halo/model_loading/dtype.py`, applied by
+the whole-model loads through `load_whole_model`; lazy loaders cast per tensor). This overrides transformers' FP32 module pins — DeepSeek-V4's norms and
 hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so FSDP2 sees one dtype
 within each shard group. Persistent buffers have a separate policy: a family-pinned buffer stays
 FP32 on every loader, including the lazy EP loader's `e_score_correction_bias`, and Zaya's balancing
 biases are FP32 by design.
 
 Configured FP32 parameter masters are the exception. The shared selector in
-`src/distributed/expert_parallel/fp32_masters.py` preserves non-EP weights under `fp32_non_ep_params`
-and the EP wrapper's selected router/expert weights under their flags. Eager construction streams
+`halo/model_loading/parallel/fp32_masters.py` (selection, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
+and the EP layer's selected router/expert weights under their flags. Eager construction streams
 those checkpoint values back before wrapping; lazy EP construction reads and fuses them at FP32
 directly. Native dense TP rebuilds its existing TP shards at FP32 before the DP wrap, preserving tied
 aliases and never moving a full FP32 matrix onto each GPU. This holds under every parallelism mode,
@@ -109,38 +113,34 @@ loads at the checkpoint's dtype; and the dense TP loader, which loads straight i
 family pins a parameter). The reward-scoring tool casts the whole model, buffers included, to its
 `--rm_dtype`.
 
+## MTP heads
+
+Qwen3.5/3.6, Qwen3.8-27B, Qwen3-Next, GLM-4 MoE Lite and Nemotron-H train the head their release ships under `mtp_loss_weight` ([MTP heads](../optimization/mtp-heads.md)); other tail-bearing families refuse by name. Without it, every family drops its tail at load and exports carry none, so `method=mtp` refuses them, except Ling-3.0-flash, whose remote class builds and re-exports its tail ([Bailing](bailing.md#mtp-tail)). `convert_to_bf16` and `patch_vocab` write a stored head of these families back; any other family's tail drops, with a warning naming the config field its output keeps. `reattach_vision_tower.py` carries the base's head at its weights, or keeps the one a text-only export trained.
+
 ## Per-family pages
 
-The matrix carries each family's supported modes; the per-family page covers model-specific caveats (attention quirks, checkpoint variants, balancing).
+Each family page covers its model-specific caveats (attention quirks, checkpoint variants, balancing) and why it drops an axis.
 
 - [Qwen3](qwen3.md) — dense and MoE; reference platform for trainers and tests.
-- [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) — hybrid linear/full attention; the shipped EP config trains 35B-A3B.
+- [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) — hybrid linear/full attention; the shipped EP config trains 35B-A3B. The dense Qwen3.8-27B runs the dense path, Qwen3.8-2.4T-A95B the MoE one.
+- [Qwen3-Next](qwen3-next.md) — Qwen3.5-MoE's block and hybrid attention under a router with a configurable renormalization; per-expert hub checkpoints.
+- [Qwen3.8-Flash-Next](qwen4_exp.md) — experimental: Qwen3-Next's router over hyper-connection streams, sparse QSA attention and a 95 GiB n-gram table held in host memory.
 - [GPT-OSS](gpt-oss.md) — 20B/120B, GLU experts and attention sinks.
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
-- [Laguna](laguna.md) — Poolside MoE; its EP wrapper subclasses GLM-4 MoE Lite's and overrides the top-k weight default plus the hub↔module key spellings.
+- [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's, differing in the top-k weight default and the hub↔module key spellings.
 - [Inkling](inkling.md) — Thinking Machines multimodal MoE; joint routed+shared router normalization forces a standalone wrapper, and its shipped config runs multi-node EP16.
 - [Gemma 4 MoE](gemma4.md) — router outside the EP-wrapped module.
 - [Bailing MoE / Ling](bailing.md) — softmax GQA + shared experts; needs `trust_remote_code`.
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.
 - [Mistral4 MoE](mistral4.md) — Mistral3 VLM text backbone, MLA attention.
 - [DeepSeek-V4](deepseek-v4.md) — hash-routing bootstrap + top-k MoE, compressed sparse attention, eager-only.
+- [Nemotron-H](nemotron-h.md) — NVIDIA Nemotron 3.5 Super VL: Mamba-2, MoE and attention layers, gateless experts on a latent, a composite VLM with a text-only route. Nemotron 3.5 Lightning is the text class alone, with no latent.
 - [Zaya](zaya.md) — CCA-augmented MoE with cross-layer router state.
 - [Cohere2 MoE](cohere2-moe.md) — Command A+ VLM text backbone; interleaved sliding/NoPE attention, averaged shared expert.
 - [GLM-5 Next](glm5-next.md) — GLM-5.3-Flash composite VLM; KDA + DeepSeek sparse attention, hyper-connections, 288 routed experts.
 - [Step-3.7 Flash](step3p7.md) — StepFun composite VLM; full/sliding attention interleave with per-layer head counts and per-head sigmoid gates, 288 routed experts.
 - [Adding a new model](adding-a-model.md) — per-mode checklists for EP, CP, TP, or vendoring.
 
-## Choosing a parallelism configuration
-
-| You have | Sequence length | Recommended mode |
-|---|---|---|
-| Dense that fits per GPU | ≤ 32K | FSDP2, no parallelism flags |
-| Dense Qwen3, long context | > 32K | [CP](../parallelism/context-parallelism.md) |
-| Dense, doesn't fit per GPU | any | [TP](../parallelism/tensor-parallelism.md) via native `tp_plan` |
-| MoE with full coverage (Qwen3 MoE, GPT-OSS, GLM-4, Mistral4, Cohere2 MoE) | ≤ 32K | [EP](../parallelism/expert-parallelism.md), or EP+TP at very large scale |
-| Same MoEs, long context | > 32K | EP+CP (on Mistral4 only a tiny-model LoRA row runs it) |
-| MoE without CP (Qwen3.5/3.6, LFM-2, Gemma 4, DeepSeek-V4, Laguna, Inkling, Ling 3.0, GLM-5 Next, Step-3.7 Flash) | any | EP; add EP+TP for Qwen3.5/3.6 and LFM-2, or pure ETP (`ep_size=1`) when expert memory is the bottleneck |
-| Ling 2.0, long context | > 32K | EP, plus CP once the sequence exceeds one GPU |
-| Zaya | any | EP without GC (optionally + ETP), or plain FSDP2 without GC |
+Which layout to pick per sequence length and memory budget: [Parallelism → Recommendations](../parallelism/README.md#recommendations).
 
 Parallelism and kernel vocabulary: [Reference Glossary](../reference/glossary.md).

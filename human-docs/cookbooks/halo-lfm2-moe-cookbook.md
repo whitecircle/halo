@@ -7,9 +7,8 @@ on the 8B and 64 on the 24B.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | Yes | Yes | No | Yes | Yes | vLLM, SGLang |
+Modes: the LFM-2 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `LiquidAI/LFM2.5-8B-A1B` and `LiquidAI/LFM2-24B-A2B`.
 - **GPUs:** the 8B runs at EP2 on two GPUs, 16 experts per GPU. The 24B runs at EP4 on four GPUs or EP8 on
@@ -28,7 +27,7 @@ halo launch sft examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml -n 2 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-sft
 ```
 
-The recipe sets `report_to: none`. To log to Weights & Biases, copy it and change that line to
+The recipe leaves `report_to` at its default, `none`. To log to Weights & Biases, copy it and add
 `report_to: wandb`; this field can't be overridden on the command line.
 
 LFM2-24B-A2B on four GPUs:
@@ -78,29 +77,33 @@ launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml lfm2-grpo.yaml
-CUDA_VISIBLE_DEVICES=2,3 halo launch environmental-grpo lfm2-grpo.yaml -n 2 \
+CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental lfm2-grpo.yaml -n 2 \
   --model_name_or_path=/data/checkpoints/lfm2.5-8b-a1b-sft \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-grpo
 ```
 
-Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. SGLang 0.5.17 also
+Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. SGLang 0.5.22 also
 serves and weight-syncs LFM-2: add `--rollout_backend=sglang --rollout_server_url=http://localhost:30000`
-and leave out `--routing_replay=rollout`, because SGLang's routing capture is not verified for LFM-2.
+and start the server with `SGLANG_ENABLE_R3=1`.
 
 ## Settings that matter
 
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks under EP.
   Sigmoid routing can collapse onto a few experts during SFT. The updates land in the router's own
-  `expert_bias`, so the trained bias ships in every checkpoint and the served model routes as it
-  trained. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
+  `expert_bias`, so the trained bias ships in every checkpoint and the served model routes on
+  it. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
   freeze the router instead with `freeze_layers_patterns: ["*.feed_forward.gate.weight"]`.
+- **Gradient checkpointing.** The recipe trains 16,384-token packed rows without it, a shape that has not
+  run on the full-size model. The fit on B200 and B300 is computed, not measured. On 80 GB GPUs add
+  `--gradient_checkpointing=true`.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=lfm2`. The default `hermes` leaves LFM-2's tool calls as
-  text, so every episode scores zero.
+  text, and the run stops by its second round.
 
 ## Limits
 
 - No CP: the short-convolution layers can't split the sequence across ranks.
+- No pipeline parallelism: LFM-2 is not a registered pipeline family.
 
 ## Export and serve
 
@@ -115,7 +118,7 @@ SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-sft" \
 
 ## Reference
 
-- [LFM-2 model notes](../../agent-docs/models/lfm2.md) ↗: the EP wrapper, packing across the conv
+- [LFM-2 model notes](../../agent-docs/models/lfm2.md) ↗: the EP layer, packing across the conv
   layers, balancing
 - [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
 - Model cards: [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B),

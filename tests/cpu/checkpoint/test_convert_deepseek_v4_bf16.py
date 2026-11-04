@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""``convert_deepseek_v4_bf16.py`` must dequantize a block-fp8 DeepSeek-V4 checkpoint exactly on the
-installed transformers, and export the layout a training run reads.
-
-End-to-end on a tiny random-init DeepSeek-V4 written in the hub's fp8 layout (128x128 block
-scales beside every quantized Linear, per-expert hub keys, the release's ``quantization_config``):
-the tool's output must hold every quantized weight as the block-wise ``weight * scale_inv``
-product an independent loop computes, stored bf16 with no scale sidecar left, under a
-``config.json`` that lost the quantization scheme and gained nothing else — the parallel plans
-the loader workaround blanks must not leak into it. The two load-time hazards this pins are
-transformers 5.16's ``update_tp_plan`` crash on a config with a class-level EP plan and
-``save_pretrained``'s revert through the quantizer-rewritten conversions, which cannot reach the
-hub layout (the export goes through the registry mapping instead).
-
-Run: ``python tests/cpu/checkpoint/test_convert_deepseek_v4_bf16.py`` (or ``pytest -m cpu``).
-"""
+"""``convert_deepseek_v4_bf16.py`` dequantizes block-fp8 exactly and exports the layout training reads, past 5.20's
+``update_tp_plan`` rewrite and the quantizer-rewritten revert."""
 
 from __future__ import annotations
 
@@ -26,12 +13,12 @@ import pytest
 import torch
 from safetensors import safe_open
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import DeepseekV4Config, DeepseekV4ForCausalLM, PreTrainedTokenizerFast
+from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from scripts.before_training.convert_deepseek_v4_bf16 import main, reject_uneven_fp8_blocks
+from halo.checkpoint.tools.deepseek_v4_dequant import reject_uneven_fp8_blocks
+from scripts.before_training.convert_deepseek_v4_bf16 import main
 from tests.common.models import TINY_DSV4_CONFIG
-from tests.common.tiny_models import randomize_tid2eid
+from tests.common.tiny_models import randomize_tid2eid, word_level_tokenizer
 
 _BLOCK = (128, 128)
 _FP8_MAX = 448.0
@@ -44,13 +31,12 @@ _HUB_QUANT_CONFIG = {
 
 
 def _quantized_key(key: str) -> bool:
-    """The Linear weights the hub quantizes: projections and experts, never the router, norms or embeddings."""
+    """Projections and experts, never the router, norms or embeddings."""
     return key.endswith(".weight") and "layers." in key and "norm" not in key and ".gate." not in key
 
 
 def _block_quantize(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    """``[rows, cols]`` → fp8 e4m3 + fp32 scale grid ``ceil(rows/128) x ceil(cols/128)``; ``scale_inv[i, j]``
-    MULTIPLIES block ``[i, j]`` on dequant (the DeepSeek-V3/V4 convention)."""
+    """``scale_inv[i, j]`` multiplies block ``[i, j]`` on dequant (the DeepSeek-V3/V4 convention)."""
     rows, cols = weight.shape
     grid_rows, grid_cols = math.ceil(rows / _BLOCK[0]), math.ceil(cols / _BLOCK[1])
     padded = torch.zeros(grid_rows * _BLOCK[0], grid_cols * _BLOCK[1])
@@ -62,7 +48,7 @@ def _block_quantize(weight: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def _reference_dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Independent per-block loop — the oracle the tool's output is judged against."""
+    """Independent per-block loop, the oracle."""
     rows, cols = weight.shape
     out = torch.empty(rows, cols, dtype=torch.float32)
     for i in range(scale.shape[0]):
@@ -73,21 +59,13 @@ def _reference_dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tenso
     return out.to(torch.bfloat16)
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
 def _write_fp8_checkpoint(path) -> tuple[str, dict[str, torch.Tensor], dict]:
-    """A tiny DeepSeek-V4 saved by transformers (hub layout), then re-written with its Linear weights
-    block-quantized to fp8. Returns the source dir, the dequant oracle keyed by hub name, and the
-    pristine config dict the export must reproduce minus the quantization scheme."""
+    """Returns the source dir, the dequant oracle by hub name, and the pristine config dict."""
     torch.manual_seed(0)
     model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG)).to(torch.bfloat16)
     randomize_tid2eid(model)
     model.save_pretrained(path)
-    _tiny_tokenizer().save_pretrained(path)
+    word_level_tokenizer(("hello",)).save_pretrained(path)
     with open(os.path.join(path, "config.json")) as f:
         pristine = json.load(f)
 
@@ -131,8 +109,7 @@ def _stored(output: str) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
 
 
 def test_quantized_weights_match_the_blockwise_oracle(converted):
-    """Exact equality per tensor: the loader's block dequant, the tool's bf16 flattening and the
-    dequantized-layout save must together reproduce the reference product bit for bit."""
+    """Must reproduce the reference product bit for bit."""
     output, oracle, _ = converted
     tensors, _ = _stored(output)
     missing = sorted(set(oracle) - set(tensors))
@@ -151,8 +128,7 @@ def test_the_export_is_bf16_with_no_scale_sidecars(converted):
 
 
 def test_config_loses_the_quantization_scheme_and_nothing_else_leaks(converted):
-    """The workaround blanks the instance-level parallel plans for the load; the exported config
-    must be the pristine one (no ``base_model_ep_plan``/``base_model_tp_plan`` keys, no scheme)."""
+    """The workaround blanks instance-level parallel plans for the load; the exported config is pristine."""
     output, _, pristine = converted
     with open(os.path.join(output, "config.json")) as f:
         exported = json.load(f)
@@ -164,8 +140,8 @@ def test_config_loses_the_quantization_scheme_and_nothing_else_leaks(converted):
 
 
 def test_an_uneven_fp8_block_grid_is_refused_before_the_load(tmp_path):
-    """transformers' dequantizer splits a dimension into EQUAL pieces, so a 192-row matrix with a
-    (2, 1) grid gets scale[0] on rows 0-95 instead of 0-127 — silently. Refuse it up front."""
+    """transformers' dequantizer splits into equal pieces, so a 192-row (2, 1) grid gets scale[0] on rows 0-95
+    instead of 0-127."""
     weight, scale = _block_quantize(torch.randn(192, 128))
     assert tuple(scale.shape) == (2, 1)
     save_file(

@@ -1,23 +1,17 @@
 #!/usr/bin/env python3
-"""normalize_vlm_conversation: hub-shape adaptation for the VLM SFT pipeline.
+"""``normalize_vlm_conversation``: the native and HuggingFaceM4 paired conversation shapes, top-level image
+injection into the first user turn, and input immutability."""
 
-Covers the two accepted conversation shapes (native role/content and the HuggingFaceM4
-paired {user, assistant} ``texts`` shape shared by FineVision / the_cauldron / Docmatix),
-top-level image injection into the first user turn (``images_field``, also through
-``create_vlm_processor``), and input immutability.
-
-Usage:
-    python tests/cpu/data/test_vlm_normalize_conversation.py
-"""
-
+import base64
 import copy
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from src.data.pipeline.row_processors import create_vlm_processor, normalize_vlm_conversation
-from src.data.vlm import process_vlm_conversation
+from halo.data.conversation import reject_image_content
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor, normalize_vlm_conversation
+from halo.data.vlm_render import extract_conversation_images
 
 
 def _image(color: int = 128) -> Image.Image:
@@ -69,9 +63,8 @@ def test_images_with_list_content_prepend():
 
 
 def test_existing_placeholders_filled_not_doubled():
-    """TRL vision convention: bare {"type": "image"} placeholders pair with the images column by
-    order — filling must not add a second placeholder (double-injection starves the processor's
-    replacement iterator, surfacing as a swallowed StopIteration = silent zero-step training)."""
+    """Bare placeholders pair with the images column by order; a second placeholder starves the processor's
+    replacement iterator, surfacing as a swallowed StopIteration and silent zero-step training."""
     img = _image()
     conv = [
         {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What digit?"}]},
@@ -114,10 +107,10 @@ def test_empty_image_list_is_noop():
     assert out[0]["content"] == "q"
 
 
-def test_normalized_output_feeds_process_vlm_conversation():
+def test_normalized_output_feeds_extract_conversation_images():
     img = _image()
     conv = normalize_vlm_conversation([{"user": "read the page", "assistant": "the page text"}], [img])
-    history, images = process_vlm_conversation(conv)
+    history, images = extract_conversation_images(conv)
     assert images == [img]
     assert history[0]["content"][0] == {"type": "image"}, "processor placeholder must replace inline image data"
     # Uniform parts-form: string contents become text parts so the Arrow column schema is stable.
@@ -126,28 +119,100 @@ def test_normalized_output_feeds_process_vlm_conversation():
 
 @pytest.mark.parametrize("payload", [b"", ""], ids=["empty-bytes", "empty-path"])
 def test_a_falsy_but_present_image_payload_fails_loud(payload):
-    """A truthiness test here would drop the payload while still emitting the placeholder, handing the
-    processor a prompt with an image placeholder and no image — which surfaces later as a
-    placeholder-count mismatch, if at all. A present payload must reach ``process_image``.
-    """
+    """A truthiness test would drop the payload while still emitting the placeholder, a later placeholder-count
+    mismatch."""
     conv = [{"role": "user", "content": [{"type": "image", "image": payload}]}]
     with pytest.raises((OSError, ValueError)):
-        process_vlm_conversation(conv)
+        extract_conversation_images(conv)
 
 
-def test_an_absent_image_payload_is_still_a_bare_placeholder():
-    """The other side: an unfilled placeholder (``images_field`` pairing, or the ``image: None`` key
-    Arrow adds to every text part of a mixed dataset) carries no payload and must pass through."""
-    history, images = process_vlm_conversation([{"role": "user", "content": [{"type": "image"}]}])
-    assert images == []
+@pytest.mark.parametrize(
+    "part",
+    [{"type": "image"}, {"type": "image", "image": None, "path": None, "url": None}],
+    ids=["bare", "arrow-null"],
+)
+def test_an_image_part_nothing_filled_has_no_pixels_and_is_refused(part):
+    """The images column fills placeholders before this point, so a part still empty would train its placeholder
+    tokens with no pixels."""
+    with pytest.raises(ValueError, match="carries no source"):
+        extract_conversation_images([{"role": "user", "content": [part]}])
+
+
+@pytest.mark.parametrize(
+    "part",
+    [
+        {"type": "video", "video": "/data/a.mp4"},
+        {"type": "video", "path": "/data/a.mp4"},
+        {"type": "audio", "audio": "/data/a.wav"},
+        {"type": "image_url", "image_url": {"url": "https://x/y.png"}},
+        {"type": "input_image", "image_url": "https://x/y.png"},
+        {"type": "video_url", "video_url": {"url": "https://x/y.mp4"}},
+        {"type": "audio_url", "audio_url": {"url": "https://x/y.wav"}},
+        {"type": "input_audio", "input_audio": {"data": "AAAA", "format": "wav"}},
+    ],
+    ids=lambda part: part["type"],
+)
+@pytest.mark.parametrize("pipeline", ["vlm", "text"])
+def test_a_media_part_no_collator_feeds_a_processor_is_refused(part, pipeline):
+    conversation = [{"role": "user", "content": [part, {"type": "text", "text": "Describe."}]}]
+    with pytest.raises(ValueError, match="no Halo collator feeds a processor"):
+        if pipeline == "vlm":
+            extract_conversation_images(conversation)
+        else:
+            reject_image_content(conversation, "the prompt")
+
+
+@pytest.fixture
+def image_file(tmp_path):
+    path = tmp_path / "page.png"
+    _image(77).save(path)
+    return path
+
+
+def _base64_of(path) -> str:
+    return base64.b64encode(path.read_bytes()).decode()
+
+
+@pytest.mark.parametrize(
+    "spell",
+    [
+        lambda path: {"path": str(path)},
+        lambda path: {"url": str(path)},
+        lambda path: {"url": f"file://{path}"},
+        lambda path: {"url": f"data:image/png;base64,{_base64_of(path)}"},
+        lambda path: {"base64": _base64_of(path)},
+        lambda path: {"base64": f"data:image/png;base64,{_base64_of(path)}"},
+        # Arrow's union pads the keys a part lacks.
+        lambda path: {"image": None, "path": str(path), "url": None, "base64": None},
+    ],
+    ids=["path", "url-path", "url-file", "url-data", "base64", "base64-data", "arrow-null-keys"],
+)
+def test_the_chat_format_spellings_are_payloads_that_decode_to_the_pixels(image_file, spell):
+    conversation = [{"role": "user", "content": [{"type": "image", **spell(image_file)}]}]
+    history, images = extract_conversation_images(conversation)
     assert history[0]["content"] == [{"type": "image"}]
+    assert np.array_equal(np.asarray(images[0].convert("RGB")), np.asarray(_image(77)))
 
 
-def test_create_vlm_processor_images_field():
+@pytest.mark.parametrize("url", ["https://x/y.png", "http://x/y.png"])
+def test_a_remote_url_is_refused_since_training_fetches_nothing(url):
+    with pytest.raises(ValueError, match="training fetches nothing"):
+        extract_conversation_images([{"role": "user", "content": [{"type": "image", "url": url}]}])
+
+
+def test_a_chat_format_part_is_no_placeholder_for_the_images_column_to_fill(image_file):
+    filled = {"type": "image", "path": str(image_file)}
+    conversation = [{"role": "user", "content": [filled, {"type": "image"}]}]
+    out = normalize_vlm_conversation(conversation, [_image(5)])
+    assert out[0]["content"][0] == filled, "a part with a source keeps it"
+    assert np.array_equal(np.asarray(out[0]["content"][1]["image"]), np.asarray(_image(5)))
+
+
+def test_build_vlm_row_processor_images_field():
     img = _image()
     row = {"texts": [{"user": "describe", "assistant": "a cat"}], "images": [img]}
 
-    example = create_vlm_processor(conversation_field="texts", images_field="images")(dict(row))
+    example = build_vlm_row_processor(conversation_field="texts", images_field="images")(dict(row))
     assert [m["role"] for m in example["history"]] == ["user", "assistant"]
     assert example["images"] == [img]
 

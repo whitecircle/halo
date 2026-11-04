@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: what the code-contests scratchpad tells the model about a program that failed.
-
-The scratchpad is where the policy debugs, so its reply has to carry the diagnosis a judge would:
-a compile error as the compiler's first diagnostics (the last stderr line of g++ is a caret gutter),
-a crash as its signal and the traceback's tail, ahead of any stdout (the protocol cuts a long
-observation from the end), and a program run under the same limits its graded tests get — the
-problem's time limit, and a stack as large as the memory limit. A run given no input says so and is booked like
-any other run; a turn of calls refused unrun is flagged untrainable, so the next turn retries on the recovery
-reserve. Every program here really compiles and runs on the local backend.
-
-Run: python tests/cpu/environments/test_scratchpad_feedback.py  (or pytest)
-"""
+"""What the code-contests scratchpad tells the model about a failed program: a compile error as the compiler's first
+diagnostics, a crash as its signal and traceback tail ahead of stdout, under the limits its graded tests get.
+Every program really compiles and runs on the local backend."""
 
 import json
 import resource
@@ -18,20 +9,20 @@ import shutil
 
 import pytest
 
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.code_contests import (
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.repl import REPL_NO_OUTPUT_MESSAGE, run_code_via_sandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import (
     NO_STDIN_NOTE,
     SCRATCHPAD_BUDGET_SPENT_REPLY,
     SCRATCHPAD_TIME_LIMIT_NOTE,
     SUBMIT_TOOL,
-    CodeContestsEnvironment,
 )
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.episode import recovering_turn
-from src.environments.sandbox.base import REPL_NO_OUTPUT_MESSAGE, SandboxExecutor, SandboxResult
-from src.environments.sandbox.local import LocalSubprocessSandbox
-from src.environments.sandbox.repl import run_code_via_sandbox
-from src.environments.tools.definitions import NativeToolCall
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import counts_beside_budget_words, retired_budget_phrases
 
 needs_gpp = pytest.mark.skipif(shutil.which("g++") is None, reason="g++ not installed")
@@ -99,8 +90,12 @@ def _turn(env, ids, *calls: tuple[str, dict]):
     return env.step(ids, [""], [{"finish_reason": "stop", "tool_calls": tool_calls}])[0]
 
 
+def _last_turn(traj):
+    return next(m for m in reversed(traj.messages) if m.role == "assistant")
+
+
 def _last_turn_flagged(traj) -> bool:
-    return next(m for m in reversed(traj.messages) if m.role == "assistant").calls_rejected
+    return _last_turn(traj).calls_rejected
 
 
 def _scratchpad(env, traj, **arguments):
@@ -112,8 +107,7 @@ def _scratchpad(env, traj, **arguments):
 
 @needs_gpp
 def test_a_compile_error_reply_carries_the_compilers_first_diagnostic():
-    """g++'s last stderr line is the caret gutter under the offending token; the reply must lead with
-    the error line that names the undeclared identifier."""
+    """g++'s last stderr line is the caret gutter, so the reply leads with the error line."""
     env = _env()
     reply = _scratchpad(env, _episode(env), code=_UNDECLARED, stdin="1\n")
     assert reply.startswith("Error: compilation failed\n"), reply
@@ -130,8 +124,7 @@ def test_a_compile_error_is_not_mistaken_for_missing_stdin():
 
 
 def test_a_crash_after_long_output_keeps_the_traceback_inside_the_observation_cap():
-    """A program printing 100k debug lines and then crashing: the protocol keeps the first
-    ``max_observation_chars`` of the reply, so the error must come before the stdout."""
+    """The protocol keeps the first ``max_observation_chars``, so the error comes before the stdout."""
     env = _env(language="python")
     code = "for i in range(100000):\n    print('debug', i)\n\ndef f(x):\n    return x[5]\n\nf([])\n"
     reply = _scratchpad(env, _episode(env), code=code, stdin="1\n")
@@ -203,9 +196,8 @@ def test_a_compile_that_outruns_its_timeout_is_a_compile_error_not_an_infra_faul
 
 
 def test_no_scratchpad_reply_states_the_runs_left():
-    """The cap is enforced, never stated: a reply is the run's output and its notes, the run that spends
-    the last one reads like any other, and the next call is refused with the spent-budget reply, which
-    names no count either and spends nothing."""
+    """The cap is enforced, never stated: the last run reads like any other, and the next is refused with a reply
+    naming no count."""
     env = _env(language="python")
     traj = _episode(env)
     replies = [_scratchpad(env, traj, code=code, stdin="1\n") for code in ("print(1)", "raise SystemExit(3)")]
@@ -258,9 +250,8 @@ def test_output_that_fits_beside_its_notes_is_not_cut(past_the_fit):
 
 
 def test_a_list_program_is_refused_unspent_on_both_tools():
-    """A list ``code`` has no string reading, and staged into the sandbox it fails there as the
-    backend's fault, voiding a graded episode: refused at binding, it spends neither budget and grades
-    nothing."""
+    """Written into the sandbox it fails as the backend's fault, voiding a graded episode; refused at binding, it
+    spends no budget."""
     env = _env(language="python")
     traj = _episode(env)
     for tool in (env.test_tool_name, SUBMIT_TOOL):
@@ -282,8 +273,7 @@ def test_a_scalar_stdin_runs_as_its_string_and_a_null_one_as_none():
 
 
 def test_a_silent_input_less_run_is_an_ordinary_run():
-    """A run given no input that prints nothing still ran: its reply carries the no-stdin note, it spends its
-    slot and earns ``tool_success_reward`` like any run, and a turn of nothing else trains like any turn."""
+    """It still ran: the reply carries the no-stdin note, it spends its slot and earns ``tool_success_reward``."""
     env = _env(language="python", tool_success_reward=0.05, tool_error_penalty=0.03)
     ids = _reset(env)
     step = _turn(env, ids, (env.test_tool_name, {"code": _READS_INPUT}), (env.test_tool_name, {"code": "x = 1"}))
@@ -292,7 +282,7 @@ def test_a_silent_input_less_run_is_an_ordinary_run():
     assert step.reward == pytest.approx(0.05 + 0.05)
     assert (traj.info["total_tool_calls"], traj.info["successful_tool_calls"]) == (2, 2)
     assert env._test_calls(traj) == 2
-    assert not _last_turn_flagged(traj) and not recovering_turn(traj)
+    assert not _last_turn_flagged(traj) and not _last_turn(traj).untrainable
 
 
 def test_output_computed_from_no_input_says_it_got_none():
@@ -317,8 +307,7 @@ def test_a_python_source_that_does_not_compile_gets_no_missing_input_note(code, 
 
 
 def test_every_input_less_run_spends_its_run_and_carries_the_note():
-    """A run with no stdin says so whatever it did — printed nothing, crashed or printed — and spends its run; a
-    quiet run on real input carries no note."""
+    """A run with no stdin says so whatever it did and spends its run; a quiet run on real input carries no note."""
     env = _env(language="python")
     traj = _episode(env)
     silent = _scratchpad(env, traj, code=_READS_INPUT)
@@ -333,19 +322,18 @@ def test_every_input_less_run_spends_its_run_and_carries_the_note():
 
 
 def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers():
-    """A ``run_code`` call missing the ``language`` a language list requires is refused at binding, unrun and
-    unspent: a turn of nothing else is flagged untrainable and the next turn runs on the recovery reserve, the
-    reply and the tool-error price as they were. Beside a call that ran, it is not."""
+    """Refused at binding, unrun and unspent: a turn of nothing else is flagged untrainable, and beside a call that
+    ran it is not."""
     env = _env(language=["python", "cpp"], tool_error_penalty=0.05)
     ids = _reset(env)
     step = _turn(env, ids, ("run_code", {"code": "print(1)", "stdin": "1\n"}))
     traj = step.trajectory
     assert traj.messages[-1].content == "Error: run_code: missing a required argument: 'language'"
-    assert _last_turn_flagged(traj) and recovering_turn(traj)
+    assert _last_turn_flagged(traj) and _last_turn(traj).untrainable
     assert step.reward == pytest.approx(-0.05) and env._test_calls(traj) == 0
     step = _turn(env, ids, ("run_code", {"code": "print(1)", "stdin": "1\n", "language": "python"}))
     assert step.trajectory.messages[-1].content == "1"
-    assert not _last_turn_flagged(step.trajectory) and not recovering_turn(step.trajectory)
+    assert not _last_turn_flagged(step.trajectory) and not _last_turn(step.trajectory).untrainable
     step = _turn(
         env,
         ids,
@@ -356,8 +344,7 @@ def test_a_turn_of_only_malformed_calls_is_flagged_and_the_next_turn_recovers():
 
 
 def test_a_turn_of_only_scratchpad_calls_past_the_budget_is_flagged():
-    """A scratchpad call past ``max_test_calls`` is refused unrun: a turn of nothing else is flagged and the next
-    turn recovers, the refusal text unchanged; beside a submission it is not."""
+    """Refused unrun: a turn of nothing else is flagged untrainable, and beside a submission it is not."""
     env = _env(language="python", max_test_calls=1)
     ids = _reset(env)
     assert not _last_turn_flagged(
@@ -366,7 +353,7 @@ def test_a_turn_of_only_scratchpad_calls_past_the_budget_is_flagged():
     step = _turn(env, ids, (env.test_tool_name, {"code": "print(2)", "stdin": "1\n"}))
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
-    assert _last_turn_flagged(traj) and recovering_turn(traj) and env._test_calls(traj) == 1
+    assert _last_turn_flagged(traj) and _last_turn(traj).untrainable and env._test_calls(traj) == 1
     step = _turn(
         env, ids, (env.test_tool_name, {"code": "print(3)", "stdin": "1\n"}), (SUBMIT_TOOL, {"code": "print(2)"})
     )
@@ -379,9 +366,8 @@ def test_a_direct_call_outside_an_episode_gets_the_plain_note():
 
 
 def test_a_garbled_argument_name_is_refused_unspent_and_named():
-    """A doubled ``parameter=`` prefix arrives as an argument the tool does not declare: the call is refused
-    before it runs or spends a run, and the reply names the bad key and the real ones, where a dropped key
-    would have run the program without its input."""
+    """A doubled ``parameter=`` prefix arrives as an undeclared argument: refused before it runs, and the reply
+    names the bad key and the real ones."""
     env = _env(language="python")
     traj = _episode(env)
     reply = _scratchpad(env, traj, code="print(int(input()) + 1)", **{"parameter=stdin": "1\n"})

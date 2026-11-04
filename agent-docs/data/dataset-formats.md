@@ -16,7 +16,7 @@ re-splits it: train and test are concatenated and re-divided, destroying the cur
 split you want with `@split` to keep `test_size` splitting only that one (`openai/gsm8k:main@train`).
 
 A sharded or pre-processed dataset carries the split decided at preparation time; `test_size` there
-is ignored with a warning.
+is ignored with a warning. A pre-processed dataset also fixed its rows, so a `dataset_ratio` below 1 raises.
 
 Combine multiple datasets by passing lists; `dataset_ratio` is the per-dataset fraction kept:
 
@@ -37,7 +37,7 @@ corpus test split comes from the sources that ship one, and only a corpus where 
 to a placeholder cut from its own train rows (set `test_size` to carve a held-out split from every
 source instead).
 
-`_normalize_dataset_schema` (`src/data/sources/loading.py`) keeps the intersection over train and
+`_normalize_dataset_schema` (`halo/data/sources/corpus.py`) keeps the intersection over train and
 test together: a column missing from any dataset, or whose feature type differs across them, is
 dropped, with no fixed allowlist.
 
@@ -72,9 +72,9 @@ RNG API, algorithm or per-split seed would swap the training corpus under an unc
 | DPO | `scripts/training/preference/dpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
 | SMPO | `scripts/training/preference/smpo.py` | `chosen`, `rejected` (+ optional `prompt`) | all `List[Dict]` | hardcoded |
 | KTO | `scripts/training/preference/kto.py` | `prompt`, `completion`, `label` | `List[Dict]`/`str`, bool | `completion_field`, `label_field` |
-| Offline GRPO | `scripts/training/offline_grpo.py` | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` | hardcoded |
+| Offline GRPO | `scripts/training/grpo/offline.py` | `prompt`, `completions`, `rewards` | `List[Dict]`, `List[List[Dict]]`, `List[float]` | hardcoded |
 | Classification | `scripts/training/classification.py` | `prompt` or `text_field`, `label` | `List[Dict]` or `str`, `str`/`List[str]` | `text_field` (label hardcoded) |
-| Reward Model | `scripts/training/preference/rewards.py` | `chosen`, `rejected` (+ optional `prompt`, `images`) | all `List[Dict]` | `images_field` |
+| Reward Model | `scripts/training/reward/reward_model.py` | `chosen`, `rejected` (+ optional `prompt`, `images`) | all `List[Dict]` | `images_field` |
 
 Every message is `{"role": "system"|"user"|"assistant", "content": str}` (or multimodal content for
 VLM, below).
@@ -123,27 +123,27 @@ Messages carry text and images:
 {"prompt": [{"role": "user", "content": [{"type": "image", "image": "<image_data>"}, {"type": "text", "text": "What's in this image?"}]}, {"role": "assistant", "content": "A sunset over the ocean."}]}
 ```
 
-The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file path, PIL Image, or raw bytes. Text-only messages keep the plain `"content": str` form. A conversation stored as a JSON string parses the same as on the text path.
+The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file path, PIL Image, or raw bytes. So do the transformers chat format's spellings of the part: `path`, `base64`, and `url` for a local path, `file://` or a `data:` URI. An `http(s)` URL is refused, since training fetches nothing. Text-only messages keep the plain `"content": str` form. A conversation stored as a JSON string parses the same as on the text path.
 
 Hub datasets that store images in a separate column instead train via `images_field` (the column is injected into the first user turn), and the paired `{user, assistant}` turn shape used by the HuggingFaceM4 `texts` column is normalized to role/content messages — see [SFT — Vision-language models](../training-methods/sft.md#vision-language-models).
 
-A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `src/data/vlm.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
+A run takes the VLM data path only when **both** halves agree (`is_vlm_run_across_ranks`, `halo/data/vlm_detection.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
 
-A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
+A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column, which the map then reads as if named; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
 
-The embedded-parts declaration is read from the column's **Arrow schema**: the parts struct is typed over the whole split, so an image payload field — or a `datasets.Image` feature under any name — declares the run no matter which rows carry images. A conversation column stored as JSON strings has no struct to read and falls back to a probe of each split's first row.
+The embedded-parts declaration is read from the column's **Arrow schema**: the parts struct is typed over the whole split, so an image payload field (`image`, `path`, `base64` or `url`) — or a `datasets.Image` feature under any name — declares the run no matter which rows carry images. A conversation column stored as JSON strings has no struct to read and falls back to a probe of each split's first row.
 
 The verdict is **agreed across ranks** (all-reduce MAX — any image-declaring rank wins), because on a pre-sharded corpus every rank probes a disjoint slice: its own first row, and the Arrow schema `datasets` inferred for its own shard set. A split verdict would pair one arm's barrier against the other's store wait, so the probe spends one collective per call whatever the answer.
 
-The checkpoint half is `is_vlm_model`: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
+The checkpoint half is `is_vlm_model` (`halo/models/modality.py`), judged on the config that `probe_checkpoint` (`halo/model_loading/parallel/model_source.py`) reads once, on every rank, at the pinned revision: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
 
 The name-substring heuristic (`-vl`, `vl-`, `vl2`, `llava`, `vision`, `pixtral`, `molmo`, `idefics`, `paligemma`, `cogvlm`, `minicpm-v`, `qwen3.5-`, `qwen3.6-`) runs only when the config cannot load (offline, or a raw weights dir without `config.json`) or its `model_type` is unregistered (remote code). The hints match mid-word — a path containing `revision` reads as a VLM — so pass an explicit config where the path is uncontrolled.
 
 For a JSON-string conversation column, the first-row fallback cannot see a mixed dataset whose probed rows are text-only: that run resolves to the text path and then **fails loud at the first image row**.
 
-Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--vlm` preprocessing.
+Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--is_vlm` preprocessing. The VLM path refuses an image part with no payload, and every path refuses video, audio and `image_url` parts, which no collator hands a processor. The text renderers refuse any other non-text part too (`input_image`, `input_text`): by template it renders as a placeholder with no data behind it, or vanishes with no error. A `thinking` part passes, as the Mistral Small 4 and Command A+ templates write it as their reasoning block. A text checkpoint refuses image data of any declaration rather than drop it.
 
-Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--vlm`, see [SFT pre-processing](dataset-preparation.md).
+Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--is_vlm`, which the Qwen and Gemma 4 processors' image rows do not fit, so those train through this runtime path; see [SFT pre-processing](dataset-preparation.md).
 
 ## Preference (DPO/SMPO)
 
@@ -153,7 +153,7 @@ DPO and SMPO share the format below; full history goes in `prompt`.
 {"prompt": [{"role": "user", "content": "Capital of France?"}], "chosen": [{"role": "assistant", "content": "Paris, the largest city in France..."}], "rejected": [{"role": "assistant", "content": "France capital is Paris I think."}]}
 ```
 
-Hub shape variants normalize to this contract automatically (`normalize_preference_row`, `src/data/pipeline/preferences.py`): a plain-string `prompt` becomes a user turn; chosen/rejected that repeat the prompt turns (ultrafeedback_binarized, the Tulu-3 mixtures) have that prefix stripped; a missing `prompt` column (Skywork-Reward style) is extracted as the shared leading span of chosen/rejected.
+Hub shape variants normalize to this contract automatically (`normalize_preference_row`, `halo/data/pipeline/preferences.py`): a plain-string `prompt` becomes a user turn; chosen/rejected that repeat the prompt turns (ultrafeedback_binarized, the Tulu-3 mixtures) have that prefix stripped; a missing `prompt` column (Skywork-Reward style) is extracted as the shared leading span of chosen/rejected.
 
 Completions are rendered as `template(prompt + completion)` minus the rendered-prompt prefix, so strict chat templates (Qwen3.5) work and `prompt + chosen` always reconstructs the full conversation exactly.
 
@@ -180,7 +180,7 @@ Reference-model shapes for vision rows: [DPO → Vision-language](../training-me
 - Provide one reward per completion. A length mismatch raises `ValueError` naming the offending row, rather than silently truncating to the shorter list.
 - Each group's rewards become group-relative advantages via `advantage_method` (default `quantile_norm`).
 
-Config in `OfflineGRPOConfig` (`src/configs/offline_grpo_config.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
+Config in `OfflineGRPOConfig` (`halo/configs/grpo_offline.py`); defaults: [Offline GRPO → Configuration](../training-methods/grpo/offline.md#configuration).
 
 Full-fine-tune KL runs need a finite, unsharded dataset ([Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model)).
 
@@ -213,10 +213,12 @@ column. Rows over `max_length` are filtered by the trainer, not truncated. `tool
 
 **CP not supported** — pooled representations are incompatible with sequence splitting.
 
-`dataset_num_proc` (parallel map processes, default `None`) is a field on the non-SFT method configs
-(SMPO, Classification, Distillation, Offline GRPO); SFT inherits it from TRL's `SFTConfig`. Unset
-means the toolkit default (`DATASET_NUM_PROC`), not one worker, and the count is the same
-under every parallelism mode.
+## Dataset maps
+
+`dataset_num_proc` sets the map/filter worker processes: Halo's field on the SMPO, classification,
+distillation and offline GRPO configs, TRL's own on the configs taken from TRL. Unset, the toolkit's
+maps run the toolkit default, not one worker; how that default is derived and how ranks share it:
+[`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables).
 
 Trainer-side map/filter callables must be **module-level functions** taking their state through
 `fn_kwargs`, never bound methods. At `num_proc > 1` `datasets` ships the callable to worker
@@ -227,6 +229,17 @@ DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
 tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` never
 reach.
 
+At `num_proc > 1` both seams pickle the callable once per call, its `fn_kwargs` bound, and every
+worker task carries those bytes. `datasets` otherwise pickles the callable into each task one after
+another in the calling process, whatever the dataset size: about 1.2 s of dill per task for a captured
+Qwen3 tokenizer, 3.6 s for Gemma 4. The key reads the bare callable, so every rank names the same cache
+file whatever worker count it maps with.
+
+The key (`halo/data/pipeline/map_cache_key.py`) hashes the callable's source plus the source of every
+first-party module-level function it calls by bare name, so editing such a helper re-maps. A helper
+reached as a module attribute or a method stays out of the key, and editing it reuses stale rows: call
+helpers by bare name from a mapped function, a `functools.partial` of one, or a builder closure.
+
 Those two helpers carry their own rank ordering and must never be nested in a main-first block — see
 [Filesystem Handling](filesystem-handling.md#coordination-primitives).
 
@@ -234,7 +247,7 @@ Those two helpers carry their own rank ordering and must never be nested in a ma
 
 ```yaml
 chat_template: "jinja-templates/qwen3/qwen3-instruct.jinja"  # file path or inline Jinja string
-force_chat_template: true                                 # override model's own template
+force_chat_template: true                                 # needed over a template the model ships, or the run raises
 
 pad_token: "<|endoftext|>"
 eos_token: "<|im_end|>"
@@ -248,19 +261,19 @@ model_supports_system_role: false   # merge system message into first user messa
 Bundled templates live under `jinja-templates/<family>/`: stripped training templates
 (`*-instruct.jinja` single-turn, `*-multiturn.jinja`/`*-chat.jinja` multi-turn) plus verbatim
 upstream `*-native.jinja` templates (system messages, tools, thinking) for Qwen3, Qwen3.5/3.6,
-GLM, Ling, and GPT-OSS (`gpt-oss-harmony.jinja`; `gpt-oss-multiturn.jinja` is the SFT form that
-terminates every assistant turn). Pin a native template whenever the training
-render must match serving byte-for-byte.
+GLM and Ling. GPT-OSS has `gpt-oss-harmony.jinja`, upstream's with [two deviations](../models/gpt-oss.md#chat-template),
+and `gpt-oss-multiturn.jinja`, the SFT form that terminates every assistant turn. Pin a native
+template whenever the training render must match serving byte-for-byte.
 
 The template lands on the tokenizer and, for a VLM run, on its processor as well
 (`adopt_tokenizer_chat_template`): a processor renders and saves with a `chat_template` of its own,
 so the processor is what decides both the VLM rows and the exported `chat_template.jinja`. The same
-holds for `prepare_dataset.py --vlm` and `patch_vocab.py --chat_template`.
+holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
 
 ### Special-token ownership
 
 Rendered chat-template text tokenizes through `tokenize_rendered`
-(`src/data/pipeline/rendered.py`), which probes each tokenizer once — tokenizing `""` with
+(`halo/data/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
 `add_special_tokens=True` — to learn what its post-processor actually adds. `bos_token` alone is
 unreliable: gpt-oss and Bailing declare a nominal BOS their post-processor never emits, and Zaya
 appends a trailing `<|im_end|>` instead of prepending BOS.

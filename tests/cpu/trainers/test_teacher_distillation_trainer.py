@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""``DistributedDistillationTrainer``'s objective, teacher gate and PEFT wiring, on stub models.
-
-The objective is ``alpha * L_distill + (1 - alpha) * L_clm``, each term one mean over the batch's
-supervised (shifted) tokens. Every way it can go wrong keeps the loss finite: an ignored alpha or a
-dropped CLM term, labels left unshifted, the teacher's logits replaced by the student's, the
-hard-label gate skipped (or applied on top of SLIM's own weight), a per-row instead of a global
-token mean. The stub models score each token through their own random table, so each of those lands
-on a different number than the independent oracle below.
-
-Run: pytest tests/cpu/trainers/test_teacher_distillation_trainer.py
-"""
+"""``DistributedTeacherDistillationTrainer``'s objective, teacher gate and PEFT wiring, on stub models.
+Each stub scores tokens through its own table, so a dropped term or unshifted labels miss the independent oracle."""
 
 import contextlib
 import inspect
@@ -20,23 +11,24 @@ from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 from peft import LoraConfig
 from torch import nn
 from torch.nn.functional import cross_entropy, log_softmax, softmax
 from transformers import Trainer
 
+import halo.kernels.logprobs as logprob_kernels
+import halo.trainers.distillation.teacher_distillation as teacher_distillation
 import scripts.training.distillation.teacher_distill as teacher_distill_script
-import src.trainers.distillation.teacher_distillation as teacher_distillation
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.losses import get_divergence
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from src.training.script_runner import ScriptRuntime
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.model_setup import PolicyLoad
+from halo.entrypoints.script import ScriptContext
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from halo.trainers.distillation.divergences import place_frozen_scorer, require_divergence
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.models import QWEN3_0_6B
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_tokenizer
-
-PartialState()  # the trainer's accelerate logger requires an initialized state
 
 VOCAB = 11
 TEMPERATURE = 2.0
@@ -61,7 +53,8 @@ class _TokenTableModel(nn.Module):
         self.device = torch.device("cpu")
 
     def forward(self, input_ids, attention_mask=None, use_cache=None):
-        return types.SimpleNamespace(logits=self.table[input_ids])
+        self.last_logits = self.table[input_ids]
+        return types.SimpleNamespace(logits=self.last_logits)
 
 
 class _Tokenizer:
@@ -80,7 +73,7 @@ TOKENS = {f"t{i}": i for i in range(VOCAB)}
 
 def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALPHA, peft_casted=False):
     """The real ``compute_loss`` on a bare trainer; returns ``(trainer, stored_metrics)``."""
-    trainer = object.__new__(DistributedDistillationTrainer)
+    trainer = object.__new__(DistributedTeacherDistillationTrainer)
     trainer.model = _TokenTableModel(seed=0)
     trainer.teacher_model = _TokenTableModel(seed=1)
     trainer.args = types.SimpleNamespace(
@@ -89,7 +82,7 @@ def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALP
         distill_temperature=TEMPERATURE,
         apply_hard_labels=apply_hard_labels,
     )
-    trainer.distillation_loss_fn = get_divergence(distill_loss)
+    trainer.distillation_loss_fn = require_divergence(distill_loss)
     trainer._vocab_width = None
     trainer._peft_has_been_casted_to_bf16 = peft_casted
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
@@ -128,24 +121,22 @@ def _oracle(trainer, *, gate: bool = False, slim: bool = False):
     return ALPHA * distill + (1 - ALPHA) * clm, distill, clm
 
 
-def _construct(args, *, peft_config=None):
-    """The real ``__init__`` with the model loads, the distributed setup and HF's Trainer stubbed."""
-
+def _construct(args, *, peft_config=None, teacher_model=None):
     def init_config(self, kwargs, **explicit):
         self.parallelism_config = explicit["parallelism_config"]
         return {**kwargs, "model": explicit["model"]}
 
     with (
-        mock.patch.object(teacher_distillation, "load_model_from_pretrained", lambda model, *a, **k: (model, None)),
-        mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
-        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
+        mock.patch.object(teacher_distillation, "resolve_trainer_model", lambda model, *a, **k: model),
+        mock.patch.object(DistributedTeacherDistillationTrainer, "_init_distributed_config", init_config),
+        mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: vars(self).update(kwargs, model=model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_distributed_modes"),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_teacher_model"),
+        mock.patch.object(DistributedTeacherDistillationTrainer, "_configure_distributed_modes"),
+        mock.patch.object(teacher_distillation, "place_frozen_scorer", return_value=(None, torch.device("cpu"))),
     ):
-        return DistributedDistillationTrainer(
+        return DistributedTeacherDistillationTrainer(
             student_model=nn.Linear(2, 2),
-            teacher_model=nn.Linear(2, 2),
+            teacher_model=teacher_model if teacher_model is not None else nn.Linear(2, 2),
             teacher_tokenizer=_Tokenizer(TOKENS),
             args=args,
             processing_class=_Tokenizer(TOKENS),
@@ -154,7 +145,7 @@ def _construct(args, *, peft_config=None):
         )
 
 
-def test_the_loss_is_the_alpha_mix_of_two_global_token_means():
+def test_the_loss_is_the_alpha_mix_of_two_pooled_token_means():
     trainer, stored = _trainer()
     expected, distill, clm = _oracle(trainer)
     torch.testing.assert_close(_loss(trainer), expected)
@@ -164,9 +155,7 @@ def test_the_loss_is_the_alpha_mix_of_two_global_token_means():
 
 
 def test_an_eval_split_s_padding_rows_leave_the_loss_and_its_metrics():
-    """Row 2 pads the eval split's final round, a repeat of row 0 (``eval_split_rows`` keeps rows 0 and
-    1): the loss and both metrics are the two real rows' global token means, stored with their two
-    rows as the weight."""
+    """Row 2 pads the eval split's final round, a repeat of row 0."""
     trainer, stored = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 2
@@ -201,6 +190,31 @@ def test_slim_takes_its_own_gold_token_weight():
     assert "distillation_coef" not in stored
 
 
+@pytest.mark.parametrize(
+    ("distill_loss", "apply_hard_labels"),
+    [("kl_divergence", True), ("slim", False), ("jensen_shannon", False), ("cosine_similarity", False)],
+)
+def test_backward_holds_no_fp32_vocab_plane_beyond_the_two_logits(monkeypatch, distill_loss, apply_hard_labels):
+    """Every term scores token chunks under a checkpoint, so autograd keeps no fp32 ``[tokens, V]`` plane itself."""
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
+    trainer, _ = _trainer(distill_loss, apply_hard_labels=apply_hard_labels)
+    saved = []
+
+    def record(tensor):
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(record, lambda tensor: tensor):
+        _loss(trainer)
+    owned = {model.last_logits.untyped_storage().data_ptr() for model in (trainer.model, trainer.teacher_model)}
+    planes = [
+        tuple(t.shape)
+        for t in saved
+        if t.dtype == torch.float32 and t.dim() and t.size(-1) == VOCAB and t.untyped_storage().data_ptr() not in owned
+    ]
+    assert not planes, f"fp32 vocab-wide tensors held for backward: {planes}"
+
+
 def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_itself():
     """slim applies its own gold-token weight, so the gate on top would count it twice."""
     with pytest.raises(ValueError, match="apply_hard_labels cannot combine with distill_loss='slim'"):
@@ -208,8 +222,8 @@ def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_i
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
-    """``prepare_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every
-    sibling trainer feeds its cast flag to the autocast, so this one must too."""
+    """``build_peft_model`` leaves a QLoRA student's adapters bf16 over fp32 activations; every sibling trainer feeds
+    its cast flag to the autocast."""
     seen = []
 
     @contextmanager
@@ -223,22 +237,40 @@ def test_a_casted_peft_student_forwards_under_bf16_autocast():
     assert seen == [True]
 
 
-def test_the_trainer_wraps_peft_through_prepare_peft_model_and_keeps_its_cast_flag():
-    """The PEFT wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss."""
+def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_flag():
+    """The wrap lives in the trainer, as in every sibling, so the cast flag reaches compute_loss; the student keeps its
+    dropout, since the config has no switch for it."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
-    with mock.patch.object(teacher_distillation, "prepare_peft_model", return_value=(wrapped, True)) as prepare:
+    with mock.patch.object(teacher_distillation, "prepare_policy_model", return_value=(wrapped, True)) as prepare:
         trainer = _construct(
             types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
         )
     assert prepare.call_args.args[1] is peft_config
+    assert prepare.call_args.kwargs["disable_dropout"] is False
     assert trainer.model is wrapped
     assert trainer._peft_has_been_casted_to_bf16 is True
 
 
+@pytest.mark.parametrize("policy", [SinksPolicy.NEUTRALIZED, SinksPolicy.LIVE, None], ids=str)
+def test_a_teacher_loaded_with_neutralized_sinks_is_refused(policy):
+    """A frozen teacher never trains back from neutralized sinks. One loaded under a live policy, or by a loader that
+    stamps none, constructs."""
+    torch.manual_seed(0)
+    teacher = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"])
+    if policy is not None:
+        apply_sinks_policy(teacher, teacher.config, policy=policy)
+    args = types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False)
+    if policy is SinksPolicy.NEUTRALIZED:
+        with pytest.raises(ValueError, match="loaded with its attention sinks neutralized"):
+            _construct(args, teacher_model=teacher)
+    else:
+        assert _construct(args, teacher_model=teacher).teacher_model is teacher
+
+
 def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_slots():
-    parameter = inspect.signature(DistributedDistillationTrainer.__init__).parameters["teacher_tokenizer"]
+    parameter = inspect.signature(DistributedTeacherDistillationTrainer.__init__).parameters["teacher_tokenizer"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    assert list(inspect.signature(DistributedDistillationTrainer.__init__).parameters)[1:4] == [
+    assert list(inspect.signature(DistributedTeacherDistillationTrainer.__init__).parameters)[1:4] == [
         "student_model",
         "teacher_model",
         "args",
@@ -246,12 +278,12 @@ def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_
 
 
 def _setup(student_rows, teacher_rows, teacher_tokens=TOKENS):
-    trainer = object.__new__(DistributedDistillationTrainer)
-    trainer.model = _TokenTableModel(seed=0, rows=student_rows)
-    trainer.teacher_model = _TokenTableModel(seed=1, rows=teacher_rows)
-    trainer.processing_class = _Tokenizer(TOKENS)
-    trainer._setup_teacher_model(_Tokenizer(teacher_tokens))
-    return trainer
+    """The teacher gate the trainer's ctor runs (``place_frozen_scorer``), on stub models."""
+    teacher = _TokenTableModel(seed=1, rows=teacher_rows)
+    width, _ = place_frozen_scorer(
+        teacher, _TokenTableModel(seed=0, rows=student_rows), _Tokenizer(TOKENS), _Tokenizer(teacher_tokens)
+    )
+    return types.SimpleNamespace(teacher_model=teacher, _vocab_width=width)
 
 
 def test_a_teacher_of_another_tokenizer_is_refused_even_at_an_equal_vocab_size():
@@ -266,7 +298,6 @@ def test_a_teacher_missing_logit_rows_for_tokenizer_ids_is_refused():
 
 
 def test_embedding_padding_alone_is_compared_over_the_tokenizer_ids():
-    """Same tokenizer, padded embeddings: both rows are sliced to the tokenizer's ids."""
     trainer = _setup(VOCAB, VOCAB + 5)
     assert trainer._vocab_width == VOCAB
     assert _setup(VOCAB, VOCAB)._vocab_width is None
@@ -288,20 +319,20 @@ def _run_teacher_script(tmp_path, teacher_tokens):
     """Drive the script's ``main()`` with every load stubbed, the teacher's tokenizer and config included."""
     student = _TokenTableModel(seed=0)
     stubs = {
-        "init_training_script": lambda *a, **k: ScriptRuntime(
+        "init_training_script": lambda *a, **k: ScriptContext(
             parallelism_config=ParallelismConfig(),
-            mode_suffix="",
             local_rank=0,
             resume_checkpoint=None,
             model_source="stub/student",
+            trainer_cls=DistributedTeacherDistillationTrainer,
         ),
         "load_script_datasets": lambda *a, **k: (None, False),
         "resolve_vlm_run": lambda *a, **k: False,
-        "load_model_for_training": lambda *a, **k: (student, _Tokenizer(TOKENS), _Tokenizer(TOKENS), False),
+        "load_policy_model": lambda *a, **k: PolicyLoad(student, _Tokenizer(TOKENS), _Tokenizer(TOKENS), False),
         "apply_max_length": lambda config, args, model, tokenizer: tokenizer,
         "install_resolved_tokenizer": lambda processing_class, tokenizer: tokenizer,
-        "enforce_text_path_padding_side": lambda *a, **k: None,
-        "setup_peft_model": lambda *a, **k: None,
+        "apply_text_path_padding_side": lambda *a, **k: None,
+        "configure_adapter_training": lambda *a, **k: None,
         "AutoTokenizer": types.SimpleNamespace(from_pretrained=lambda *a, **k: _Tokenizer(teacher_tokens)),
         "AutoConfig": types.SimpleNamespace(from_pretrained=lambda *a, **k: student.config),
         "_load_distill_teacher": mock.Mock(side_effect=_TeacherWeightsLoaded),
@@ -312,7 +343,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
         f"output_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         contextlib.ExitStack() as stack,
     ):
@@ -330,8 +361,8 @@ def test_the_script_refuses_a_teacher_tokenizer_before_any_teacher_weight_loads(
 
 
 def test_the_text_collator_keeps_the_real_eos_label_when_pad_is_eos():
-    """A plain LM collator masks every pad-valued label, the turn-ending EOS included when pad == eos,
-    leaving the student no stop signal; both terms mask on these labels."""
+    """A plain LM collator masks every pad-valued label, the turn-ending EOS included when pad == eos, leaving the
+    student no stop signal."""
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     tokenizer.pad_token = tokenizer.eos_token
     args = types.SimpleNamespace(train_on_completions_only=False, assistant_message_template=None)

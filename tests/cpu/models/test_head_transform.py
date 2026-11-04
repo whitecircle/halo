@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""The head-path transform contract (``src/models/head_transform.py``) across the supported roster.
-
-The chunked GRPO log-prob sweep and the last pipeline stage compute logits from the backbone's last
-hidden state instead of through the model's forward. A family whose forward transforms that path —
-Inkling's μP hidden division and vocabulary cut, Cohere's ``logit_scale``, Granite's
-``logits_scaling`` division, MiniCPM3's pre-head division, Gemma's softcap — is scored against the
-wrong distribution unless the path applies the same transform, and nothing raises. This file pins:
-
-* every roster family's head path verifies against its own forward — the MoE half is derived from
-  the EP layer registry, so a new native MoE family is swept without editing this file; the dense
-  families (``_DENSE_ROSTER``) and the remote-code ones (``_REMOTE_ROSTER``) are listed here;
-* the chunked sweep reproduces the forward log-probs and every parameter gradient of each tiny model
-  in ``_TINY_MODELS``, the transform families included, and those families' transforms are
-  load-bearing here; a new family's tiny model is added there;
-* a declaration removed makes its family refused, and an undeclared transform is refused.
-
-    pytest -m cpu tests/cpu/models/test_head_transform.py
-"""
+"""The head-path transform contract. Chunked log-probs and the last pipeline stage compute logits from the last hidden
+state, so a family whose forward transforms that path is silently scored wrong unless the path applies it too."""
 
 import pytest
 import torch
@@ -25,9 +9,10 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto import modeling_auto
 from trl.trainer.utils import selective_log_softmax
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.models import head_transform
-from src.models.head_transform import (
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models import head_transform
+from halo.models import nemotron_h as _sets_the_composite_head_accessors  # noqa: F401
+from halo.models.head_transform import (
     IDENTITY_HEAD_TRANSFORM,
     GraniteHeadTransform,
     HeadTransform,
@@ -35,8 +20,8 @@ from src.models.head_transform import (
     resolve_head_transform_spec,
     verify_head_transform,
 )
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
+from halo.models.moe.family_specs import moe_model_types
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     BAILING_MOE_RING_MINI,
@@ -52,14 +37,18 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MINICPM3_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+    TINY_QWEN4_EXP_VISION_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
     TINY_ZAYA_CONFIG,
 )
+from tests.common.tiny_models import TINY_LLAMA4_FAMILY, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_config
 
 apply_remote_code_compat_shims()
@@ -67,18 +56,20 @@ apply_remote_code_compat_shims()
 # The dense half of the roster; the MoE half is every model_type the EP layer registry claims.
 _DENSE_ROSTER = ("qwen3", "qwen3_5_text", "qwen3_vl")
 
-# Families whose transformers defaults do not build a model; their tiny config stands in.
-_DEFAULT_CONFIG_OVERRIDES = {"lfm2_moe": TINY_LFM2_MOE_CONFIG}
+# Defaults that build no model; the tiny config stands in. Qwen3.8-Flash-Next's declare QSA without an indexer budget.
+_DEFAULT_CONFIG_OVERRIDES = {
+    "lfm2_moe": TINY_LFM2_MOE_CONFIG,
+    "qwen4_exp_text": TINY_QWEN4_EXP_CONFIG,
+    "qwen4_exp": {"text_config": TINY_QWEN4_EXP_CONFIG, "vision_config": TINY_QWEN4_EXP_VISION_CONFIG},
+}
 
-# Values the shipped checkpoints carry and the defaults leave at identity, so the sweep verifies the
-# transform the run applies: Gemma 4 caps at 30, Inkling cuts its padded vocabulary.
+# Shipped values the defaults leave at identity: Gemma 4 caps at 30, Inkling cuts its padded vocabulary.
 _UNPADDED_VOCAB = TINY_INKLING_CONFIG["vocab_size"] - 12
 _GEMMA4_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 30.0}
-# The tiny models' random-init logits stay far below 30, where the cap is the identity; this one bites.
+# Random-init logits stay far below 30, where the cap is the identity, so this cap is low enough to act.
 _GEMMA4_SATURATED_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 0.02}
 _INKLING_TEXT = {**TINY_INKLING_CONFIG, "unpadded_vocab_size": _UNPADDED_VOCAB}
 
-# Remote-code roster families, verified from their cached hub configs.
 _REMOTE_ROSTER = (BAILING_MOE_LING_MINI, BAILING_MOE_RING_MINI)
 
 _BATCH, _SEQ, _COMPLETION = 2, 12, 6
@@ -96,7 +87,7 @@ def _causal_lm_class_names(model_type: str) -> set[str]:
 
 
 def _roster_classes() -> list[tuple[str, str]]:
-    model_types = {model_type for cls in ep_layer_classes() for model_type in cls.HF_MODEL_TYPES}
+    model_types = moe_model_types()
     return sorted(
         (model_type, name)
         for model_type in model_types | set(_DENSE_ROSTER)
@@ -105,14 +96,19 @@ def _roster_classes() -> list[tuple[str, str]]:
 
 
 def _model(class_name: str, config_class_name: str, **config) -> torch.nn.Module:
-    """A seeded fp32 tiny model; classes are resolved by name at build time, after ``src`` installed
-    its device-aware kernel dispatch, so the linear-attention families run their CPU paths."""
+    """Classes resolve by name at build time, after ``halo`` installed its device-aware kernel dispatch, so the
+    linear-attention families run their CPU paths."""
     torch.manual_seed(0)
     model_class = getattr(transformers, class_name)
     return model_class(getattr(transformers, config_class_name)(**config)).float().eval()
 
 
-# (id, builder) for every roster family with a shared tiny config, plus the dense transform families.
+def _tiny(name: str, families: dict) -> torch.nn.Module:
+    torch.manual_seed(0)
+    return tiny_family_model(families[name]).float().eval()
+
+
+# Every roster family with a shared tiny config, plus the dense transform families.
 _TINY_MODELS = {
     "qwen3": lambda: _model("Qwen3ForCausalLM", "Qwen3Config", **TINY_QWEN3_CONFIG),
     "qwen3_moe": lambda: _model("Qwen3MoeForCausalLM", "Qwen3MoeConfig", **TINY_QWEN3_MOE_CONFIG),
@@ -142,26 +138,22 @@ _TINY_MODELS = {
     "gemma4": lambda: _model("Gemma4ForConditionalGeneration", "Gemma4Config", text_config=_GEMMA4_SATURATED_TEXT),
     "granite": lambda: _model("GraniteForCausalLM", "GraniteConfig", **TINY_GRANITE_CONFIG),
     "minicpm3": lambda: _model("MiniCPM3ForCausalLM", "MiniCPM3Config", **TINY_MINICPM3_CONFIG),
+    "nemotron_h": lambda: _tiny("nemotron_h", TINY_MOE_FAMILIES),
+    "nemotron_h_omni": lambda: _tiny("nemotron_h_omni", TINY_MOE_VLM_FAMILIES),
+    "llama4": lambda: _tiny("llama4", {"llama4": TINY_LLAMA4_FAMILY}),
 }
 
-# The families above whose forward transforms the head path; each must be load-bearing here.
 _TRANSFORM_FAMILIES = ("inkling", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
 
 
-class _ForwardParityHarness(ChunkedLogprobsCore):
-    """The chunked sweep over a real model, fed the hidden state TRL's and the offline trainer's
-    ``_get_last_hidden_state`` take: ``base_model``, the final position dropped, the completion kept."""
+class _ForwardParityHarness(LogprobScoringMixin):
+    """The chunked sweep over the hidden state the trainers take."""
 
     temperature = 1.0
 
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        hidden = model.base_model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False)
-        return hidden.last_hidden_state[:, :-1, :][:, -logits_to_keep:, :]
-
 
 class _UndeclaredSpec:
-    """What every family resolves to with its declaration removed, softcap included. Not a
-    ``HeadTransformSpec`` subclass, so it joins no registry."""
+    """A family with its declaration removed. Not a ``HeadTransformSpec`` subclass, so it joins no registry."""
 
     @classmethod
     def transform(cls, config) -> HeadTransform:
@@ -169,7 +161,6 @@ class _UndeclaredSpec:
 
 
 def _batch(model) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``(input_ids, attention_mask, upstream)``; ids below the family's returned vocabulary."""
     text = model.config.get_text_config()
     vocab = getattr(text, "unpadded_vocab_size", None) or text.vocab_size
     generator = torch.Generator().manual_seed(1)
@@ -193,7 +184,7 @@ def _grads(model) -> dict[str, torch.Tensor]:
 def test_every_roster_head_path_verifies_against_its_forward(model_type, class_name):
     """A roster family the verification cannot reproduce would be refused on both hidden-state paths."""
     model_class = getattr(transformers, class_name)
-    config = model_class.config_class(**_DEFAULT_CONFIG_OVERRIDES.get(model_type, {}))
+    config = model_class.config_class(**_DEFAULT_CONFIG_OVERRIDES.get(model_class.config_class.model_type, {}))
     verify_head_transform(model_class, config)
 
 
@@ -239,7 +230,6 @@ _GRANITE_TRANSFORM = HeadTransform(logit_scale=1 / 8)
     ],
 )
 def test_declared_transforms_are_what_the_forwards_apply(class_name, config, expected):
-    """Each declaration verifies, carries the values the forward applies, and is refused once removed."""
     model_class = getattr(transformers, class_name)
     config = model_class.config_class(**config)
     verified = verify_head_transform(model_class, config)
@@ -254,8 +244,7 @@ def test_declared_transforms_are_what_the_forwards_apply(class_name, config, exp
 
 
 def test_an_undeclared_transform_is_refused():
-    """HyperCLOVAX spells Granite's ``logits_scaling`` and MULTIPLIES by it: a config-field list would
-    apply it backwards, and nothing declares it, so the verification must refuse it."""
+    """HyperCLOVAX multiplies by Granite's ``logits_scaling``; a config-field list would apply it backwards."""
     model_class = transformers.HyperCLOVAXForCausalLM
     config = model_class.config_class(logits_scaling=0.5)
     with pytest.raises(ValueError, match="HyperCLOVAXForCausalLM's forward transforms its head path") as refused:
@@ -269,8 +258,8 @@ def test_an_undeclared_transform_is_refused():
 
 
 def test_verification_leaves_the_global_generator_untouched():
-    """The last pipeline stage verifies once more than its peers; a probe that consumed the global
-    CPU generator would shift that stage's seed stream against every other rank's."""
+    """The last pipeline stage verifies once more than its peers; a probe that consumed the global CPU generator would
+    shift that stage's seed stream against every other rank's."""
     model_class = transformers.GraniteForCausalLM
     config = model_class.config_class(**TINY_GRANITE_CONFIG)
     before = torch.get_rng_state()
@@ -287,7 +276,7 @@ def test_resolution_follows_the_class_hierarchy():
 
 
 def test_a_classification_head_has_no_head_transform():
-    """No output embedding, nothing a causal-LM forward applies around it: the stage projects directly."""
+    """No output embedding, so the stage projects directly."""
     model = transformers.Qwen3ForSequenceClassification(transformers.Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=3))
     assert resolve_head_transform(model) == IDENTITY_HEAD_TRANSFORM
 
@@ -299,12 +288,8 @@ def test_a_model_that_is_not_a_transformers_model_is_refused():
 
 @pytest.mark.parametrize("family", sorted(_TINY_MODELS))
 def test_chunked_sweep_reproduces_the_family_forward(family):
-    """Log-probs, entropy-carrying sweep and every parameter gradient against the family's own forward.
-
-    The upstream gradient varies per token so a per-row scale error cannot hide in a sum. For the
-    transform families, the untransformed sweep is checked to be off by whole nats first, so a sweep
-    that dropped the transform could not pass by coincidence.
-    """
+    """The upstream gradient varies per token so a per-row scale error cannot hide in a sum. A transform family's
+    untransformed sweep must differ, so a sweep that dropped the transform cannot pass by coincidence."""
     model = _TINY_MODELS[family]()
     input_ids, attention_mask, upstream = _batch(model)
 
@@ -335,8 +320,39 @@ def test_chunked_sweep_reproduces_the_family_forward(family):
         assert harness._head_transform(model) == IDENTITY_HEAD_TRANSFORM
 
 
+def _scaling_logits(model_class: type) -> type:
+    """``model_class`` with a forward scaling its logits, which only a probe running that forward can see."""
+
+    class _Scaling(model_class):
+        def forward(self, *args, **kwargs):
+            output = super().forward(*args, **kwargs)
+            output.logits = output.logits * 2.0
+            return output
+
+    return _Scaling
+
+
+@pytest.mark.parametrize("family", ["nemotron_h", "nemotron_h_omni", "llama4"])
+def test_a_composite_probe_runs_the_forward_above_its_tower(family):
+    """It verifies, and only through that forward: a scale there is refused, a probe that skipped it would pass."""
+    model = _TINY_MODELS[family]()
+    assert verify_head_transform(type(model), model.config) == IDENTITY_HEAD_TRANSFORM
+    with pytest.raises(ValueError, match="forward transforms its head path"):
+        verify_head_transform(_scaling_logits(type(model)), model.config)
+
+
+def test_a_class_with_no_backbone_below_it_is_refused():
+    """A backbone class holding its own layers has nothing for the probe to stand in for."""
+
+    class _Headed(transformers.NemotronHModel):
+        def get_output_embeddings(self):
+            return torch.nn.Linear(4, 4)
+
+    with pytest.raises(ValueError, match="exposes no backbone distinct from its head"):
+        verify_head_transform(_Headed, transformers.NemotronHConfig(**TINY_NEMOTRON_H_CONFIG))
+
+
 def test_the_sweep_refuses_a_family_whose_declaration_is_removed(monkeypatch):
-    """With Inkling's declaration gone the chunked sweep must raise, not score the wrong distribution."""
     model = _TINY_MODELS["inkling"]()
     input_ids, attention_mask, _ = _batch(model)
     monkeypatch.setattr(head_transform, "resolve_head_transform_spec", lambda _cls: _UndeclaredSpec)

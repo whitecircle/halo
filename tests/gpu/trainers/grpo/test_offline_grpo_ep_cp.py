@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Offline GRPO's actual trainer on EP8 with CP2/CP4, including KL and resume/export.
-
-The oracle runs full rows through an EP8/CP1 trainer model and independently reduces its logits.
-Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_ep_cp.py
-Use --ep-loading lazy or --ep-loading eager to select checkpoint loading.
-"""
+"""Offline GRPO's actual trainer on EP8 with CP2/CP4, including KL and resume/export, against an EP8/CP1 oracle on full
+rows."""
 
 import functools
 import hashlib
@@ -18,15 +14,15 @@ from datasets import Dataset
 from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPOCPDataCollatorWithPadding
+from halo.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.cp_grpo import (
     ep_gradient_parameter_names,
     gradient_agreement,
@@ -35,6 +31,7 @@ from tests.common.cp_grpo import (
 )
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     OFFLINE_VOCAB,
     build_offline_grpo_trainer,
@@ -47,8 +44,8 @@ from tests.common.offline_grpo import (
     swept_reference_error,
     token_logps,
 )
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, finish_phase, log
 
 SEED = 1337
 BETA = 0.2
@@ -203,7 +200,7 @@ def _perturb_policy(model):
 
 
 def _pure_kl_loss(logps, reference, batch):
-    """The pure-KL oracle over CP-collated full rows, whose completion tokens the shifted labels mark."""
+    """Over CP-collated full rows, whose completion tokens the shifted labels mark."""
     valid = batch["labels"][:, 1:] != LABEL_IGNORE_INDEX
     return pure_kl_objective(logps, reference, valid, batch["group_size"], BETA)
 
@@ -218,7 +215,7 @@ def run(ctx):
     if ctx.rank == 0:
         save_offline_moe_base(base, SEED)
     dist.barrier()
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"EP8 CP kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; oracle: full-row FA2")
     train, evaluation = _dataset(16), _dataset(8, 3)
     checks = {}
@@ -238,7 +235,7 @@ def run(ctx):
         for index, row in enumerate(rows)
     ]
     batch = {name: tensor[:2] for name, tensor in all_rows.items()}
-    # A pure-KL validation batch catches an absent KL gradient, rather than hiding it under reward gradients.
+    # Catches an absent KL gradient, rather than hiding it under reward gradients.
     batch["advantage"] = torch.zeros_like(batch["advantage"])
     _perturb_policy(oracle.model)
     initial_weights = _snapshot(oracle.model)
@@ -246,6 +243,8 @@ def run(ctx):
     logps = token_logps(oracle.model, batch["input_ids"], batch["attention_mask"])
     expected_loss = _pure_kl_loss(logps, reference[:2], batch)
     expected_loss.backward()
+    # The trainer's post-backward EP sweep, which the clip or the step pre-hook runs in training.
+    oracle._run_deferred_grad_sweep()
     expected_gradients = _snapshot(oracle.model, gradients=True)
     oracle_missing = _missing_gradients(oracle.model)
     expected_loss_value = expected_loss.detach().clone()
@@ -290,7 +289,7 @@ def run(ctx):
                     [local_batch["prompt_attention_mask"], local_batch["completion_attention_mask"]], dim=1
                 )
                 width = local_batch["completion_input_ids"].size(1)
-                _, got_logps = trainer._get_per_token_logps(trainer.model, ids, mask, width)
+                got_logps = trainer._get_per_token_logps(trainer.model, ids, mask, width)
                 valid = local_batch["completion_attention_mask"].bool()
                 start = local_batch["prompt_input_ids"].size(1) - 1
                 expected_tokens = expected_logps[:, start : start + width]
@@ -302,6 +301,7 @@ def run(ctx):
         loss_error = abs((loss.detach() - expected_loss_value).item())
         checks[f"{prefix}_kl_loss_oracle"] = loss_error < TOL.exact_objective_rel * expected_loss_value.abs().item()
         loss.backward()
+        trainer._run_deferred_grad_sweep()
         gradients = _snapshot(trainer.model, gradients=True)
         log(f"{prefix} absent gradients CP1={oracle_missing}, CP{cp_size}={_missing_gradients(trainer.model)}")
         ep_names = ep_gradient_parameter_names(

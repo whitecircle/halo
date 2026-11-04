@@ -1,25 +1,5 @@
 #!/usr/bin/env python
-"""
-SMPO MFU benchmark with Expert Parallelism using SmoothMarginPOTrainer.
-
-Benchmarks Smooth Margin Preference Optimization training on a GptOss-20B MoE model
-with expert parallelism. Measures MFU, S-MFU, tokens per second, and peak memory
-using EfficiencyCallback.
-
-Usage:
-    # EP=2 with 4096 sequence length, 10 steps
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_smpo_ep.py --ep 2 --seq 4096 --steps 10
-
-    # EP=2 with 8192 sequence length, custom warmup
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_smpo_ep.py --ep 2 --seq 8192 --steps 12 --warmup 3
-
-    # Custom model path with sdpa attention
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_smpo_ep.py --ep 2 --seq 4096 --steps 10 \
-        --model_path /path/to/local/model --attn_implementation sdpa
-"""
+"""SMPO throughput on an EP (or EP+CP) MoE run: MFU, S-MFU, tok/s and peak memory."""
 
 import gc
 import random
@@ -32,13 +12,14 @@ from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoTokenizer
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.benchmark_args import create_benchmark_parser
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.smpo import SMPOTrainer
+from tests.common.benchmark_args import axis_tags, create_benchmark_parser
 from tests.common.distributed import (
     cleanup_dirs,
     ensure_model_downloaded,
@@ -46,10 +27,8 @@ from tests.common.distributed import (
     setup_cache_dirs,
 )
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import log
-
-# Dataset Creation
 
 
 def create_smpo_dataset(
@@ -58,21 +37,6 @@ def create_smpo_dataset(
     num_samples: int = 100,
     seed: int = 42,
 ) -> Dataset:
-    """Create a dummy SMPO preference dataset with prompt/chosen/rejected pairs.
-
-    Each sample generates a chat-templated prompt with chosen (correct) and
-    rejected (incorrect) completions. Completions are padded with filler text
-    to approximate the target sequence length.
-
-    Args:
-        tokenizer: HuggingFace tokenizer for chat template application.
-        seq_len: Target total sequence length (prompt + completion).
-        num_samples: Number of preference pairs to generate.
-        seed: Random seed for reproducibility.
-
-    Returns:
-        Dataset with columns: prompt, chosen, rejected.
-    """
     random.seed(seed)
 
     prompt_len = seq_len // 3
@@ -125,7 +89,6 @@ def create_smpo_dataset(
         q = template["q"].format(a=a, b=b)
         messages = [{"role": "user", "content": q}]
 
-        # Apply chat template to create the prompt
         if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
             prompt = tokenizer.apply_chat_template(
                 messages,
@@ -135,7 +98,6 @@ def create_smpo_dataset(
         else:
             prompt = f"User: {q}\nAssistant:"
 
-        # Build chosen and rejected with filler to approximate seq_len
         chosen_base = template["chosen"].format(
             a=a,
             b=b,
@@ -163,16 +125,15 @@ def create_smpo_dataset(
     return Dataset.from_list(data)
 
 
-# Main Benchmark
-
-
 def main() -> int:
+    configure_training_logging()
     failed = False
     trainer = None
     model = None
     parser = create_benchmark_parser(
         description="SMPO MFU benchmark with Expert Parallelism",
     )
+    parser.add_argument("--cp", type=int, default=1, help="Context parallel size (EP+CP, node-local).")
     parser.add_argument(
         "--optim",
         type=str,
@@ -184,7 +145,6 @@ def main() -> int:
 
     model_config = MODEL_CONFIGS[args.model]
 
-    # --- Distributed Setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
@@ -194,8 +154,8 @@ def main() -> int:
     try:
         if rank == 0:
             print(f"\n{'=' * 60}")
-            print("SMPO EP BENCHMARK with SmoothMarginPOTrainer")
-            print(f"Model: {args.model}, EP={args.ep}, SeqLen={args.seq}")
+            print("SMPO EP BENCHMARK with SMPOTrainer")
+            print(f"Model: {args.model}, EP={args.ep}, CP={args.cp}, SeqLen={args.seq}")
             print(
                 f"Full params: {model_config['full_params'] / 1e9:.1f}B, "
                 f"Experts: {model_config['num_experts']}, top_k={model_config['top_k']}"
@@ -209,19 +169,16 @@ def main() -> int:
 
         model_name = args.model_path or model_config["hf_name"]
 
-        # --- Ensure model is cached (download on rank 0 first) ---
         ensure_model_downloaded(model_name, rank)
 
-        # --- Load tokenizer ---
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Load model with EP ---
         if rank == 0:
             print("\n--- Loading model with Expert Parallelism ---")
 
-        parallelism_config = ParallelismConfig(ep_size=args.ep)
+        parallelism_config = ParallelismConfig(ep_size=args.ep, cp_size=args.cp)
 
         model, _ = load_distributed_model(
             model_name_or_path=model_name,
@@ -239,15 +196,13 @@ def main() -> int:
             print(f"Trainable params: {trainable / 1e9:.2f}B")
             print(f"GPU memory after model load: {mem_gb:.1f}GB")
 
-        # --- Create dataset ---
         prompt_len = seq_len // 3
 
         dataset = create_smpo_dataset(tokenizer, seq_len, num_samples=100, seed=42)
         if rank == 0:
             print(f"Dataset created: {len(dataset)} samples")
 
-        # --- SMPO Config ---
-        smpo_config = SmoothMarginPOConfig(
+        smpo_config = SMPOConfig(
             output_dir=output_dir,
             per_device_train_batch_size=1,
             gradient_accumulation_steps=1,
@@ -264,7 +219,6 @@ def main() -> int:
             logging_nan_inf_filter=False,
             include_num_input_tokens_seen=True,
             ddp_find_unused_parameters=True,
-            # SMPO specific
             max_length=seq_len,
             max_prompt_length=prompt_len,
             target_margin=0.5,
@@ -272,18 +226,16 @@ def main() -> int:
             use_margin_schedule=False,
             chosen_sft_ratio=0.0,
         )
-        # Disable TRL re-application of Liger (we applied via load_distributed_model)
+        # Already applied via load_distributed_model.
         smpo_config.use_liger_kernel = False
 
-        # --- Efficiency Callback ---
         efficiency_callback = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
             num_full_model_params=model_config["full_params"],
         )
 
-        # --- Create Trainer ---
-        trainer = SmoothMarginPOTrainer(
+        trainer = SMPOTrainer(
             model=model,
             args=smpo_config,
             train_dataset=dataset,
@@ -293,9 +245,8 @@ def main() -> int:
         )
 
         if rank == 0:
-            print(f"Trainer created: EP={args.ep}, DP={parallelism_config.data_parallel_size}")
+            print(f"Trainer created: EP={args.ep}, CP={args.cp}, DP={parallelism_config.data_parallel_size}")
 
-        # --- Train ---
         barrier()
         torch.cuda.reset_peak_memory_stats()
 
@@ -304,10 +255,10 @@ def main() -> int:
 
         trainer.train()
 
-        # --- Print Results ---
         if rank == 0:
             log("\n" + format_benchmark_report(efficiency_callback))
-            emit_benchmark(f"smpo_ep_{args.model}_ep{args.ep}_s{seq_len}", efficiency_callback)
+            layout = "_".join([f"ep{args.ep}", *axis_tags(cp=args.cp)])
+            emit_benchmark(f"smpo_ep_{args.model}_{layout}_s{seq_len}", efficiency_callback)
 
     except Exception as e:
         failed = True
@@ -316,7 +267,6 @@ def main() -> int:
             traceback.print_exc()
 
     finally:
-        # --- Cleanup ---
         if trainer is not None and hasattr(trainer, "cleanup_ep"):
             trainer.cleanup_ep()
         barrier()

@@ -1,15 +1,7 @@
 #!/usr/bin/env python
-"""Packed batches must flatten to [1, total_tokens] so transformers' FA packed-sequence path fires.
-
-transformers' ``_is_packed_sequence`` gates the varlen-from-position_ids path on ``batch_size == 1``:
-a ``[B>1, L]`` packed batch with no attention_mask falls through to plain dense-causal attention and
-documents silently attend across boundaries — the shape any config that packs at
-``per_device_train_batch_size > 1`` produces. These tests pin the flattening contract against the REAL
-transformers helpers (no reimplementation) and prove loss equivalence: the flattened stream is the
-exact concatenation of the per-row (batch-1) collations.
-
-Run: pytest tests/cpu/data/test_packed_batch_flattening.py
-"""
+"""Packed batches flatten to [1, total_tokens] so transformers' FA packed-sequence path fires:
+``_is_packed_sequence`` gates on ``batch_size == 1``, and a ``[B>1, L]`` batch with no attention_mask runs
+dense-causal across documents. Pinned against the real transformers helpers."""
 
 from unittest.mock import MagicMock
 
@@ -20,7 +12,7 @@ from transformers.modeling_flash_attention_utils import (
     prepare_fa_kwargs_from_position_ids,
 )
 
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithPacking,
     flatten_packed_batch,
@@ -36,7 +28,6 @@ IGNORE = -100
 
 
 def make_tokenizer(pad_token_id: int = PAD, eos_token_id: int = EOS) -> MagicMock:
-    """Mock tokenizer with the minimal interface the LM collators need."""
     tok = MagicMock()
     tok.pad_token_id = pad_token_id
     tok.eos_token_id = eos_token_id
@@ -69,9 +60,6 @@ def _packed_row(*docs: list[int]) -> dict:
 
 
 def test_b2_packed_batch_satisfies_transformers_packed_detection():
-    """A batch-2 packed collation must come out as [1, N] and fire transformers' own
-    ``_is_packed_sequence`` — a [2, L] output fails that check (batch_size gate) and FA then runs
-    dense-causal across document boundaries."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     row0 = _packed_row([USER_A, ASST_A, EOS, USER_B], [ASST_B, EOS, USER_C, ASST_C])
     row1 = _packed_row([USER_C, ASST_A, EOS, USER_A, ASST_B], [USER_B, ASST_C, EOS])
@@ -88,9 +76,8 @@ def test_b2_packed_batch_satisfies_transformers_packed_detection():
 
 
 def test_flattened_batch_equals_concat_of_single_row_collations():
-    """Loss equivalence: collating [row0, row1] together must yield exactly the concatenation of
-    collating each row alone (identical input_ids/labels/position_ids streams → identical
-    token-level CE over the same non-masked tokens, with the same per-document segmentation)."""
+    """Identical input_ids, labels and position_ids streams give identical token-level CE with the same per-document
+    segmentation."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     # Equal-length rows: no cross-row padding, so concatenation is exact.
     row0 = _packed_row([USER_A, ASST_A, EOS, USER_B], [ASST_B, EOS, USER_C, ASST_C])
@@ -106,8 +93,7 @@ def test_flattened_batch_equals_concat_of_single_row_collations():
 
 
 def test_padding_is_dropped_from_the_flattened_row():
-    """A shorter row's pad tail must NOT survive flattening: only real tokens remain, and
-    transformers' cu_seqlens derivation sees exactly the documents — no pad segments at all."""
+    """Transformers' cu_seqlens derivation sees exactly the documents, no pad segments."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     row0 = _packed_row([USER_A, ASST_A, EOS, USER_B], [ASST_B, EOS, USER_C, ASST_C])
     row1 = _packed_row([USER_C, ASST_A, EOS, USER_A, ASST_B])  # len 5 → padded to 8, pads dropped
@@ -121,11 +107,9 @@ def test_padding_is_dropped_from_the_flattened_row():
 
 
 def test_mostly_pad_row_adds_no_segments():
-    """The dataset's final PARTIAL pack, co-batched with a full row, must not explode the segment
-    count. Left unflattened, every pad token becomes its own length-1 segment (position_id 0), and
-    the varlen kernels pay a fixed cost per segment — a 34k-pad row measured 275x on the FA4
-    backward (6.9 s vs 25 ms per layer), serialized onto all ranks by FSDP's per-layer collectives.
-    """
+    """Left unflattened, every pad becomes its own length-1 segment at a fixed per-segment cost: a 34k-pad row
+    measured 275x on the FA4 backward (6.9 s vs 25 ms per layer), serialized onto all ranks by FSDP's per-layer
+    collectives."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     full = _packed_row([USER_A] * 400, [ASST_A] * 400)
     partial = _packed_row([USER_B, ASST_B, EOS])  # 3 real tokens, 797 pads
@@ -141,9 +125,7 @@ def test_mostly_pad_row_adds_no_segments():
 
 
 def test_completion_masked_packed_b2_flattened_spans():
-    """Completion masking must run per-row BEFORE flattening: each document's template→EOS span
-    lands at the right global offset in the [1, N] output, and the output still fires
-    transformers' packed detection."""
+    """Masking runs per row before flattening, so each span lands at the right global offset."""
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE_TEMPLATE_IDS,
         tokenizer=make_tokenizer(),
@@ -162,8 +144,7 @@ def test_completion_masked_packed_b2_flattened_spans():
 
 
 def test_precomputed_labels_survive_b2_flattening():
-    """Offline-baked (ragged) labels must survive a batch-2 packed collation: authoritative masks
-    kept, boundary masking applied on top, flattened in row order."""
+    """Authoritative masks kept, boundary masking applied on top, flattened in row order."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     examples = [
         {"input_ids": [5, 6, 7, 8, 9, 12], "labels": [IGNORE, IGNORE, 7, 8, IGNORE, 12], "seq_lengths": [3, 3]},
@@ -178,17 +159,15 @@ def test_precomputed_labels_survive_b2_flattening():
 
 
 def test_flatten_without_real_row_lengths_fails_loudly():
-    """``real_lengths`` is required, not optional: a plain reshape keeps every pad, and each pad
-    (position_id 0) becomes its own varlen segment — the 275x FA4-backward cliff. A caller that
-    omits them must fail at the call, never silently fall back to the padded reshape."""
+    """A plain reshape keeps every pad as its own varlen segment (the 275x FA4-backward cliff), so the call fails
+    and never falls back."""
     batch = {"input_ids": torch.zeros(2, 4, dtype=torch.long)}
     with pytest.raises(TypeError):
         flatten_packed_batch(batch)
 
 
 def test_b1_single_doc_full_row_stays_dense():
-    """A batch-1 pack holding ONE document with no padding is a plain increasing arange —
-    transformers correctly treats it as a normal dense row (nothing to isolate)."""
+    """One document with no padding is a plain increasing arange, which transformers treats as a dense row."""
     collator = DataCollatorWithPacking(tokenizer=make_tokenizer())
     batch = collator.torch_call([_packed_row([USER_A, ASST_A, ASST_B, EOS])])
     assert batch["input_ids"].shape == (1, 4)

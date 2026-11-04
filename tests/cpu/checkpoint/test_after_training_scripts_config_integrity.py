@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""Config + weight-file integrity of the standalone checkpoint-writing scripts.
-
-Every script covered here loads a model and re-saves a whole checkpoint into its own output
-directory, where two failures are silent:
-
-* ``PretrainedConfig.to_dict`` stamps ``model_type`` from the CLASS attribute, which the Bailing/Ling
-  vendor configs leave empty — the diff-based write then omits the key entirely and every
-  model-type-keyed reader downstream (the sharded merge, the hub key renames) sees no family. The
-  tests reproduce that exact shape by emptying a real config class's ``model_type``, so the live
-  instance still carries one (loaded from ``config.json``) while the class does not.
-* ``save_pretrained`` deletes only the previous shards its own ``-00001-of-00002`` numbering regex
-  matches, so a leftover single ``model.safetensors`` or a stale index outlives the save —
-  ``from_pretrained`` then prefers that file over the index just written, and the tools that read
-  the index (``checkpoint_shard_files``) follow it to shards that are gone.
-
-Run: ``python tests/cpu/checkpoint/test_after_training_scripts_config_integrity.py`` (or ``pytest -m cpu``).
-"""
+"""Config and weight-file integrity of standalone checkpoint-writing scripts. ``to_dict`` stamps ``model_type`` from
+the class, empty on Bailing/Ling; ``save_pretrained`` deletes only shards its numbering regex matches."""
 
 from __future__ import annotations
 
@@ -29,14 +14,17 @@ import pytest
 import torch
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
-from tokenizers import Tokenizer, models, pre_tokenizers
-from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint import tool_io
+from halo.checkpoint.tools import adapter_merge as mpa
+from halo.checkpoint.tools import bf16_conversion as cb
+from halo.checkpoint.tools import model_merge as mm
+from halo.checkpoint.tools import offline_export
 from tests.common.checkpoint_io import weight_files
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
-# Tiny but real: the scripts run the genuine load → transform → save path.
+# The scripts run the genuine load → transform → save path.
 _TINY_QWEN3 = {
     "vocab_size": 64,
     "hidden_size": 32,
@@ -49,7 +37,7 @@ _TINY_QWEN3 = {
     "tie_word_embeddings": False,
 }
 
-# A remote-code repo's shape: the configuration module the auto_map names, plus a modeling stub.
+# The configuration module the auto_map names, plus a modeling stub.
 _REMOTE_CONFIG_MODULE = '''"""Stand-in vendor config module: the class declares no model_type (Bailing/Ling shape)."""
 
 from transformers import PretrainedConfig
@@ -75,24 +63,13 @@ _REMOTE_CONFIG_JSON = {
 }
 
 
-cb = load_script_module("scripts/after_training/convert_to_bf16.py")
-mpa = load_script_module("scripts/after_training/merge_peft_adapters.py")
-mm = load_script_module("scripts/after_training/merge_models.py")
 pv = load_script_module("scripts/before_training/patch_vocab.py")
-
-
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    """A real fast tokenizer built in-process: the merge scripts refuse a checkpoint without one, and
-    downloading a hub tokenizer would make these tests network-bound."""
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
 
 
 def _build_tiny_checkpoint(out_dir: Path, seed: int = 0) -> None:
     torch.manual_seed(seed)
     Qwen3ForCausalLM(Qwen3Config(**_TINY_QWEN3)).save_pretrained(out_dir)
-    _tiny_tokenizer().save_pretrained(out_dir)
+    word_level_tokenizer(("hello", "world")).save_pretrained(out_dir)
 
 
 def _build_lora_adapter(base_dir: Path, adapter_dir: Path) -> None:
@@ -108,12 +85,8 @@ def _build_lora_adapter(base_dir: Path, adapter_dir: Path) -> None:
 
 
 def _plant_stale_weights(out_dir: Path) -> None:
-    """Leave a previous save's weight files in the output directory.
-
-    The single ``model.safetensors`` is the dangerous one: ``from_pretrained`` prefers it over the
-    index, so a sharded save that leaves it behind serves the OLD weights. The index is the mirror
-    case for the tools that read it directly.
-    """
+    """``from_pretrained`` prefers a single ``model.safetensors`` over the index, so a sharded save leaving it
+    serves the old weights."""
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "model.safetensors").write_bytes(b"stale-single-file")
     (out_dir / "model-00001-of-00002.safetensors").write_bytes(b"stale-shard")
@@ -123,7 +96,6 @@ def _plant_stale_weights(out_dir: Path) -> None:
 
 
 def _weight_files(out_dir: Path) -> list[str]:
-    # index included: these assertions pin the whole on-disk artifact set, index and all
     return sorted(weight_files(str(out_dir), include_index=True))
 
 
@@ -133,12 +105,8 @@ def _saved_model_type(out_dir: Path) -> str:
 
 
 class _VendorConfigWithoutClassModelType:
-    """Empty ``Qwen3Config.model_type`` for the duration of a save.
-
-    Reproduces the Bailing/Ling vendor configs on a class the test can otherwise load and save for
-    real: the instance keeps the ``model_type`` it was constructed/loaded with, while ``to_dict``
-    (which reads the class) writes an empty one and the diff drops the key.
-    """
+    """The instance keeps its ``model_type`` while ``to_dict``, reading the class, writes an empty one and the diff
+    drops the key."""
 
     def __enter__(self):
         self._patch = patch.object(Qwen3Config, "model_type", "")
@@ -185,8 +153,7 @@ def test_merge_peft_adapters_keeps_model_type_and_clears_stale_weights():
         _plant_stale_weights(out)
 
         with _VendorConfigWithoutClassModelType():
-            # Below the model size to force the sharded write — the case where a leftover single
-            # model.safetensors wins the from_pretrained lookup over the new index.
+            # Below the model size to force the sharded write, where a leftover single file wins the lookup.
             mpa.merge_peft_adapter(
                 adapter_dir=str(adapter),
                 output_dir=str(out),
@@ -197,8 +164,6 @@ def test_merge_peft_adapters_keeps_model_type_and_clears_stale_weights():
 
         written = _weight_files(out)
         assert "model.safetensors.index.json" in written, "expected a sharded save at max_shard_size=20KB"
-        # transformers prefers the planted single file over the index, so its survival would serve
-        # the stale run's weights.
         assert not (out / "model.safetensors").exists()
         assert _saved_model_type(out) == "qwen3"
         reloaded = Qwen3ForCausalLM.from_pretrained(out)
@@ -208,17 +173,8 @@ def test_merge_peft_adapters_keeps_model_type_and_clears_stale_weights():
 
 
 def test_convert_to_bf16_carries_source_aux_files_without_shadowing_the_fresh_config():
-    """A conversion owes its output every non-weight file the source carried, in the right order.
-
-    ``save_pretrained`` writes weights + config only, so a converted checkpoint that skips the aux
-    copy lands without the chat template (the model then answers with a raw-text prompt), without the
-    remote-code modules its own ``auto_map`` names (unloadable), and without
-    ``router_balancing_biases.pt`` (a resume from it restarts every router bias at zero). The copy
-    therefore runs BEFORE the save — the live config and tokenizer must overwrite the copied ones,
-    not the other way round. ``dtype`` is the discriminator: the source declares the pre-conversion
-    one, so a copy that ran last would leave a checkpoint whose config claims float32 over bf16
-    weights.
-    """
+    """``dtype`` is the discriminator: a copy that ran last would claim float32 over bf16 weights. Skipping it loses
+    the chat template, ``auto_map`` modules and router biases."""
     PartialState()
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp) / "src", Path(tmp) / "out"
@@ -248,15 +204,13 @@ def test_convert_to_bf16_carries_source_aux_files_without_shadowing_the_fresh_co
             "config.json is the source's copy, not the one the save wrote: the aux copy ran after the save"
         )
         assert _saved_model_type(out) == "qwen3"
-        # The copy must still refuse the source's weights, or they would shadow the converted ones.
+        # Otherwise the source's weights would shadow the converted ones.
         assert _weight_files(out) == ["model.safetensors"]
         assert Qwen3ForCausalLM.from_pretrained(out).dtype == torch.bfloat16
 
 
 def test_convert_to_bf16_unmerged_peft_save_never_sweeps_the_output_dir():
-    """--peft without --merge_adapter writes ADAPTER files only: the full-checkpoint sweep must not
-    run there, or it deletes whatever full-model weights the directory already holds while the save
-    replaces none of them."""
+    """--peft writes adapter files only, so the sweep would delete full-model weights the save does not replace."""
     PartialState()
     with tempfile.TemporaryDirectory() as tmp:
         base, adapter, out = Path(tmp) / "base", Path(tmp) / "adapter", Path(tmp) / "out"
@@ -265,7 +219,7 @@ def test_convert_to_bf16_unmerged_peft_save_never_sweeps_the_output_dir():
         _plant_stale_weights(out)
         planted = set(_weight_files(out))
 
-        cb.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True, merge_adapter=False)
+        cb.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
 
         assert (out / "adapter_model.safetensors").exists(), "adapter save must still land"
         assert planted <= set(_weight_files(out)), "the unmerged-PEFT branch swept full-model weights it did not write"
@@ -311,32 +265,17 @@ def _build_fake_remote_code_repo(repo_dir: Path) -> None:
     (repo_dir / "modeling_tiny_remote.py").write_text(_REMOTE_MODELING_MODULE)
 
 
-def test_merge_models_hub_source_ships_the_modules_its_auto_map_names():
-    """A Hub ``--tokenizer_source`` must leave a directory that loads.
-
-    Re-emitting the source config through ``save_pretrained`` writes its ``auto_map`` while shipping
-    none of the modules named there, so the merged checkpoint raises ``does not appear to have a file
-    named modeling_<x>.py`` for every consumer. The snapshot is stubbed to keep the test offline; the
-    repo layout it returns is a real remote-code one.
-    """
+def test_merge_models_remote_code_source_ships_the_modules_its_auto_map_names():
+    """Writing ``auto_map`` without the modules makes every consumer raise."""
     with tempfile.TemporaryDirectory() as tmp:
-        repo, out = Path(tmp) / "hub-cache", Path(tmp) / "out"
+        repo, out = Path(tmp) / "remote-code", Path(tmp) / "out"
         _build_fake_remote_code_repo(repo)
         out.mkdir()
 
-        with patch.object(mm, "snapshot_download", side_effect=lambda repo_id, **kwargs: str(repo)) as download:
-            # allow_missing_tokenizer: this fake repo ships config + modules only, and the merge
-            # REFUSES a tokenizer-less artifact by default — a separate contract from the auto_map one
-            # under test here.
-            mm._copy_aux_files(
-                "org/tiny-remote",
-                str(out),
-                "bfloat16",
-                verbose=False,
-                allow_missing_tokenizer=True,
-                trust_remote_code=True,
-            )
-            assert download.call_count == 1, "a Hub id must be resolved to a local snapshot, not re-saved"
+        # This fake repo has no tokenizer, a separate contract from the auto_map one under test.
+        mm._copy_aux_files(
+            str(repo), str(out), "bfloat16", verbose=False, allow_missing_tokenizer=True, trust_remote_code=True
+        )
 
         with open(out / "config.json") as f:
             written = json.load(f)
@@ -344,16 +283,14 @@ def test_merge_models_hub_source_ships_the_modules_its_auto_map_names():
             module = reference.split(".")[0] + ".py"
             assert (out / module).is_file(), f"auto_map names {reference} but {module} was not shipped"
         assert written["model_type"] == "tiny_remote", "the vendor config's model_type was dropped on re-save"
-        # transformers serializes the dtype under ``dtype``; ``torch_dtype`` is the pre-5 spelling.
+        # ``torch_dtype`` is the pre-5 spelling.
         assert written.get("dtype", written.get("torch_dtype")) == "bfloat16", (
             "the merged dtype was not stamped into the copied config"
         )
 
 
 def test_convert_to_bf16_honours_max_shard_size():
-    """``save_pretrained`` alone caps shards at transformers' own default (50GB in 5.16), not the
-    toolkit's ``DEFAULT_MAX_SHARD_SIZE``: a 120B conversion then lands in 50GB files every
-    single-file reader (the sink reset, ``load_file``) has to hold whole. The flag must reach the save."""
+    """transformers' own default is 50GB in 5.20; every single-file reader would hold those files whole."""
     PartialState()
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp) / "src", Path(tmp) / "out"
@@ -386,9 +323,8 @@ def test_patch_vocab_honours_max_shard_size():
 
 
 def test_patch_vocab_preflights_the_full_model_load(monkeypatch, capsys):
-    """The whole model lands in host RAM before the patch; the shared preflight must warn ahead of it
-    (silence means the tool stopped calling the helper) and must not abort the run."""
-    monkeypatch.setattr(tool_io, "available_host_ram_bytes", lambda: 1)
+    """Silence means the tool stopped calling the helper."""
+    monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     with tempfile.TemporaryDirectory() as tmp:
         src, out = Path(tmp) / "src", Path(tmp) / "out"
         _build_tiny_checkpoint(src)
@@ -397,8 +333,9 @@ def test_patch_vocab_preflights_the_full_model_load(monkeypatch, capsys):
         with patch.object(sys, "argv", argv):
             pv.main()
 
-        printed = capsys.readouterr().out
-        assert "WARNING: patch_vocab" in printed and "RAM" in printed, printed
+        # The CLI's own logging setup writes to stderr.
+        printed = capsys.readouterr().err
+        assert "WARNING patch_vocab: estimated peak host RAM" in printed, printed
         assert _weight_files(out) == ["model.safetensors"], "the warn-only preflight aborted the patch"
 
 

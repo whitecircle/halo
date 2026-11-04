@@ -1,41 +1,42 @@
 #!/usr/bin/env python
-"""Offline GRPO: train, evaluate, restore the original KL, resume, and export.
-
-Qwen3 runs pure CP; GPT-OSS and Cohere2 MoE also exercise EP2+CP2 with fp32 expert masters.
-Every family uses a random tiny checkpoint and an offline tokenizer, with no Hub downloads.
-Run with: torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_offline_grpo_cp_resume.py --cp-size {1,2}
-"""
+"""Offline GRPO: train, evaluate, restore the original KL, resume and export, under CP and EP+CP on every MoE family
+Ulysses takes, on tiny offline checkpoints."""
 
 import argparse
 import math
 import os
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
-from transformers import AutoModelForCausalLM, AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.format import REFERENCE_LOGPS_FILE, load_full_state_dict
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.patches.attention import model_has_sinks
-from src.models.patches.gpt_oss_sinks import (
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.checkpoint.reading import load_full_state_dict
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.finalization import finalize_loaded_model
+from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     is_sink_key,
     neutralized_sink_value,
     stamped_sinks_policy,
+    uses_gpt_oss_sinks,
 )
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     build_offline_grpo_trainer,
     completion_logps,
@@ -49,15 +50,16 @@ from tests.common.offline_grpo import (
     token_logps,
 )
 from tests.common.offline_grpo_reference import restore_reference
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
+from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, finish_phase, log, optimizer_state_matches
 
 SEED = 721
 STEPS = 3
 CHECKPOINT_STEP = 2
 KL_BETA = 0.05
-MOE_FAMILIES = ("gpt_oss", "cohere2_moe")
+MOE_FAMILIES = tuple(family for family, tiny in TINY_MOE_FAMILIES.items() if tiny.ulysses_cp)
 
 
 class _ReferenceProbe(OfflineGRPOReferenceMixin):
@@ -85,7 +87,7 @@ def _has_second_moments(optimizer_state):
 
 
 def _expert_masters(model):
-    """Local FSDP-ignored expert masters, by wrapper ownership rather than checkpoint spelling."""
+    """By wrapper ownership rather than checkpoint spelling."""
     expert_ids = {
         id(parameter)
         for layer in model.modules()
@@ -125,25 +127,9 @@ def _save_tiny_model(path, family="qwen3"):
     fast.save_pretrained(path)
 
 
-def _parallelism_config(cp_size, ep_size, fp32_masters):
-    return ParallelismConfig(cp_size=cp_size, ep_size=ep_size, ep_fp32_experts=fp32_masters)
-
-
-def _build_trainer(
-    ctx,
-    source,
-    output_dir,
-    tokenizer,
-    train,
-    evaluation,
-    *,
-    cp_size,
-    ep_size=1,
-    fp32_masters=False,
-    checkpoint=None,
-    save=False,
-):
-    parallelism = _parallelism_config(cp_size, ep_size, fp32_masters)
+def _build_trainer(ctx, source, output_dir, tokenizer, train, evaluation, *, fields, checkpoint=None, save=False):
+    parallelism = ParallelismConfig(**fields)
+    cp_size = parallelism.cp_size
     args = offline_grpo_config(
         output_dir,
         steps=STEPS,
@@ -155,7 +141,15 @@ def _build_trainer(
         max_grad_norm=1.0,
     )
     trainer = build_offline_grpo_trainer(
-        ctx, source, parallelism, args, train, evaluation, checkpoint=checkpoint, tokenizer=tokenizer
+        ctx,
+        source,
+        parallelism,
+        args,
+        train,
+        evaluation,
+        checkpoint=checkpoint,
+        tokenizer=tokenizer,
+        trust_remote_code=TINY.trust_remote_code,
     )
     assert trainer.parallelism_config.is_cp_mode == (cp_size > 1)
     if cp_size > 1:
@@ -164,17 +158,24 @@ def _build_trainer(
 
 
 def _eager_oracle(source, device="cpu"):
-    """Same sink-free policy as Ulysses, with independent full-row eager attention."""
-    model, info = AutoModelForCausalLM.from_pretrained(
-        source, dtype=torch.bfloat16, attn_implementation="eager", output_loading_info=True
+    """The sink-free policy with full-row eager attention, finalized as production loads are: a remote-code rotary
+    table is otherwise the uninitialized memory transformers 5 leaves in non-persistent buffers."""
+    model, info = TINY.load_class.from_pretrained(
+        source,
+        dtype=torch.bfloat16,
+        attn_implementation="eager",
+        output_loading_info=True,
+        trust_remote_code=TINY.trust_remote_code,
     )
     assert not loading_problems(info), f"incomplete oracle/export checkpoint: {loading_problems(info)}"
+    model.to(device)
+    finalize_loaded_model(model, source)
     apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
-    return model.to(device).eval()
+    return model.eval()
 
 
 def _sink_checks(model, checkpoint=None):
-    if not model_has_sinks(model.config):
+    if not uses_gpt_oss_sinks(model.config):
         return {}
     checks = {"gptoss_sink_policy_neutralized": stamped_sinks_policy(model) is SinksPolicy.NEUTRALIZED}
     if checkpoint is not None:
@@ -191,7 +192,6 @@ def _reference_rows(dataset):
 
 
 def _unsharded_reference_error(source, dataset, swept_rows, device):
-    """Compare the initial sweep with a separate full-row causal-LM score."""
     model = _eager_oracle(source, device)
     errors = []
     with torch.inference_mode():
@@ -208,7 +208,7 @@ def _unsharded_reference_error(source, dataset, swept_rows, device):
 
 
 def _record_training_rows(trainer):
-    """Capture the logical rows used by each train step, excluding eval sweeps."""
+    """The logical rows of each train step, excluding eval sweeps."""
     rows = []
     original = trainer._compute_loss_inner
 
@@ -326,21 +326,43 @@ def cp_resume_parser():
     parser.add_argument("--family", choices=("qwen3", *MOE_FAMILIES), default="qwen3")
     parser.add_argument("--ep-size", choices=(1, 2), type=int, default=1)
     parser.add_argument("--fp32-masters", action="store_true")
+    parser.add_argument("--world", choices=(2, 4), type=int, default=2)
+    parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
+    parser.add_argument("--unsharded-ep1-experts", action="store_true", help="fsdp_shard_ep1_experts=False")
+    parser.add_argument("--gpus-per-node", type=int, default=0, help="simulated NVLink domain width")
     return parser
 
 
-def run(ctx) -> dict:
-    parser = cp_resume_parser()
+def _parse_fields(parser: argparse.ArgumentParser) -> tuple[argparse.Namespace, dict]:
+    """Refuses the shapes the config or the suite cannot run."""
     args = parser.parse_args()
-    cp_size, ep_size, fp32_masters = args.cp_size, args.ep_size, args.fp32_masters
-    if fp32_masters and (ep_size != 2 or args.family not in MOE_FAMILIES):
+    moe = args.family in MOE_FAMILIES
+    if args.fp32_masters and (args.ep_size != 2 or not moe):
         parser.error("--fp32-masters requires a MoE family with --ep-size 2")
+    if args.ep_size > 1 and not moe:
+        parser.error("--ep-size 2 requires a MoE family")
+    if args.zero3 and args.ep_size > 1:
+        parser.error("--zero3 (FULL_SHARD) runs only where no expert-distribution group exists (--ep-size 1)")
+    if args.unsharded_ep1_experts and (args.ep_size > 1 or args.cp_size > 1 or not moe):
+        parser.error("--unsharded-ep1-experts keeps ep1 experts out of FSDP: a MoE family, --ep-size 1, --cp-size 1")
+    fields = {
+        "cp_size": args.cp_size,
+        "ep_size": args.ep_size,
+        "ep_fp32_experts": args.fp32_masters,
+        "fsdp_reshard_after_forward": args.zero3,
+        "fsdp_shard_ep1_experts": not args.unsharded_ep1_experts,
+        "gpus_per_node": args.gpus_per_node,
+    }
+    return args, fields
+
+
+def run(ctx) -> dict:
+    args = ARGS
+    cp_size, ep_size, fp32_masters = args.cp_size, args.ep_size, args.fp32_masters
     if ep_size > 1:
-        if args.family not in MOE_FAMILIES:
-            parser.error("--ep-size 2 requires a MoE family")
         # Exact resume compares the same routed-token order, not atomic receive-slot races.
         pin_deterministic_ep_dispatch()
-    log(f"offline GRPO {args.family}: EP{ep_size}/CP{cp_size}, fp32 expert masters={fp32_masters}")
+    log(f"offline GRPO {args.family}: {FIELDS} on {ctx.world_size} ranks")
     shared = shared_output_dir(ctx)
     base = os.path.join(shared, f"tiny_{args.family}")
     output = os.path.join(shared, "train")
@@ -352,8 +374,7 @@ def run(ctx) -> dict:
     tokenizer = AutoTokenizer.from_pretrained(base)
     train, evaluation = offline_grpo_dataset(8), offline_grpo_dataset(4, 6)
 
-    layout = {"cp_size": cp_size, "ep_size": ep_size, "fp32_masters": fp32_masters}
-    trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, **layout, save=True)
+    trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, fields=FIELDS, save=True)
     saved_state = _OptimizerSnapshot("save", trainer, capture_optimizer=True)
     trainer.add_callback(saved_state)
     checks = {"run_start_reference_swept": REF_PER_TOKEN_LOGPS_COLUMN in trainer.train_dataset.column_names}
@@ -380,6 +401,13 @@ def run(ctx) -> dict:
     uninterrupted_rows = _record_training_rows(trainer)
     result = trainer.train()
     checks["fresh_train_three_steps"] = trainer.state.global_step == STEPS and math.isfinite(result.training_loss)
+    checks |= dp_layout_checks(
+        trainer.model,
+        FIELDS,
+        world_size=ctx.world_size,
+        ep_config=trainer._ep_config,
+        forward=partial(probe_forward, trainer.model, ctx.device),
+    )
     checks["fresh_eval_finite"] = any(
         entry.get("step") == STEPS and math.isfinite(entry["eval_loss"])
         for entry in trainer.state.log_history
@@ -411,13 +439,15 @@ def run(ctx) -> dict:
     dist.barrier()
 
     source = resolve_resume_weights_source(
-        checkpoint, SimpleNamespace(model_name_or_path=base), _parallelism_config(cp_size, ep_size, fp32_masters)
+        checkpoint, SimpleNamespace(model_name_or_path=base), ParallelismConfig(**FIELDS)
     )
     checks["path_b_uses_trained_checkpoint"] = source == checkpoint
     with patch.object(
         OfflineGRPOTrainer, "_sweep_reference_logps", side_effect=AssertionError("reswept KL reference")
     ):
-        resumed = _build_trainer(ctx, source, output, tokenizer, train, evaluation, **layout, checkpoint=checkpoint)
+        resumed = _build_trainer(
+            ctx, source, output, tokenizer, train, evaluation, fields=FIELDS, checkpoint=checkpoint
+        )
     at_save = saved_state.captured or {}
     if fp32_masters:
         expected_masters = at_save.get("expert_masters", {})
@@ -505,7 +535,10 @@ def run(ctx) -> dict:
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(exact_world_size=2, prefix="offline_grpo_cp_resume")(run)
+ARGS, FIELDS = _parse_fields(cp_resume_parser())
+# Its tiny-roster entry, or the dense Qwen3's.
+TINY = TINY_MOE_FAMILIES.get(ARGS.family, TINY_DENSE_FAMILY)
+main = gpu_test_main(exact_world_size=ARGS.world, prefix="offline_grpo_cp_resume")(run)
 
 if __name__ == "__main__":
     main()

@@ -1,6 +1,6 @@
 # Code Contests Environment
 
-`CodeContestsEnvironment` (`src/environments/envs/tasks/coding/code_contests.py`) trains competitive
+`CodeContestsEnvironment` (`halo/environments/tasks/coding/code_contests.py`) trains competitive
 programming. The model tries a solution in a scratchpad tool and submits it with `submit_solution`, which runs it
 against the hidden tests in a [sandbox](../../sandbox.md). The reward's `environment` term pays 1 when the
 submission passes every hidden test, else 0.
@@ -30,7 +30,7 @@ rewards:
   - source: environment
   - source: judge            # the audit veto
     name: audit
-    checks: [...]            # Reward → Audit judge
+    checks: environment      # the environment's rubric: Reward → Audit judge
 ```
 
 | Knob | Default | Effect |
@@ -42,9 +42,9 @@ rewards:
 | `max_time_limit` | 15 s | Clamp on every per-test limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's limit |
 | [`max_grading_seconds`](grading.md#grading-budget) | `None` | Wall-clock budget for one grade |
-| `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
+| `max_output_size` | 1 MB | Bytes, at least 1. Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
 | `stop_on_first_failure` | `false` | Stop at the first failing test. The grade is unchanged; `outcome/test_pass_frac` becomes a lower bound |
-| `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level. The tuning lever; `max_turns` (15) is a backstop |
+| `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level, and set here rather than in `tool_budgets`, which raises. The tuning lever; `max_turns` (15) is a backstop |
 | [`eval_protocol`](evaluation.md#evaluation-protocols) | `harness` | `leaderboard` pins both tool budgets |
 
 `timeout_per_test`, `max_time_limit` and `compiled_time_limit_scale` must be finite and > 0; a non-positive
@@ -80,16 +80,16 @@ curriculum recipes are the three Qwen3.6 vLLM stages
 | Setting | Value |
 |---|---|
 | [Per-turn reasoning budget](../../../reasoning.md#reasoning-budget) | `thinking_tokens` low 8192, medium 12288, high 16384, all soft (`enforce_thinking_cap: false`): an enforced cap cuts reasoning mid-thought and teaches a policy to stop well short of the budget |
-| [`max_submissions` / `max_test_calls`](#reasoning-effort) | low 1 / 2, medium 2 / 4, high 3 / 6; curriculum 1 / 4, 2 / 6, 3 / 8 |
+| [`max_submissions` / `max_test_calls`](#reasoning-effort) | low 1 / 2, medium 2 / 4, high 3 / 6; curriculum 1 / 6, 2 / 8, 3 / 8 |
 | [`max_turns`](../../../episodes.md#trajectory-length) | 16; 18 in the curriculum recipes |
-| [`rollout_max_tokens`](../../../episodes.md#trajectory-length) | 30000 per turn |
-| [`rollout_max_answer_tokens`](../../../reasoning.md#answer-room) | 8192 on vLLM, so the engine closes a turn's reasoning at 21,808 tokens; unset on SGLang |
-| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns |
+| [`rollout_max_tokens`](../../../episodes.md#trajectory-length) | 30000 per turn; 38192 in the curriculum recipes |
+| [`rollout_max_answer_tokens`](../../../reasoning.md#answer-room) | 8192 on vLLM, so the engine closes a turn's reasoning at 21,808 tokens (30,000 in the curriculum recipes); unset on SGLang |
+| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 128000 on gpt-oss, so the prompt and tool schema fit its 131072 window; 160000 in the curriculum recipes |
 | [`rollout_stop_tokens`](../../../episodes.md#tool-calls) | `<\|im_start\|>` on the Qwen3.6 vLLM recipes, so a model past a forced close cannot open a chat turn whose `<think>` starts a fresh budget; `<\|call\|>` on the gpt-oss recipes (the harmony tool-call terminator) |
 | [`reasoning_floor`](../../../reasoning.md#reasoning-length-reward) | 0.10 on the Qwen3.6 vLLM recipes, 0.05 elsewhere |
-| [`reasoning_price`](../../../reasoning.md#price-past-the-budget) with `reasoning_price_past_budget: true` | low 0.015, medium 0.01, high 0.005 per 1,000 tokens a turn reasons past its level's budget; `reasoning_price_cap: 0.1` an episode |
-| [`judge` term `audit`](reward.md#audit-judge) | `openai/gpt-6-luna`, `view: full`, `max_view_chars: 900000`, eight checks (six vetoes), `weight: -0.1`, `on_error: invalid` |
-| [Shaping](reward.md#reward-ladder) (`environment_kwargs`) | `submission_reward` 0.1, `resubmission_penalty` 0.2, `no_tool_use_penalty` 0.1, `turn_overflow_penalty` 0.1 (0.15 on Qwen3.6 vLLM), `length_cutoff_penalty` 0.08 with `max_length_cutoff_recoveries: 2`, `tool_error_penalty` 0.05 |
+| [`reasoning_price`](../../../reasoning.md#price-past-the-budget) with `reasoning_price_past_budget: true` | low 0.008, medium 0.006, high 0.004 per 1,000 tokens a turn reasons past its level's budget; `reasoning_price_cap: 0.28` an episode, which one turn at the ceiling stays under |
+| [`judge` term `audit`](reward.md#audit-judge) | `openai/gpt-6-luna`, `view: full`, `max_view_chars: 900000`, nine checks (six vetoes), `weight: -0.7`, `on_error: invalid` |
+| [Shaping](reward.md#reward-ladder) (`environment_kwargs`) | `submission_reward` 0.1, `resubmission_penalty` 0.2, `no_tool_use_penalty` 0.2, `turn_overflow_penalty` 0.35, `length_cutoff_penalty` 0.08 with `max_length_cutoff_recoveries: 2`, `tool_error_penalty` 0.05 |
 | [`language`](tools.md#languages) | `python`; `[python, cpp]` in the curriculum recipes |
 
 ## Pages

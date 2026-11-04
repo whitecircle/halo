@@ -2,7 +2,7 @@
 
 DPO fits the policy to pairwise preferences against a frozen reference model, with no reward model. Use it on `prompt` / `chosen` / `rejected` rows when a reference fits the budget; for the same data without one use [SMPO](smpo.md), for unpaired thumbs-up/down rows [KTO](kto.md).
 
-Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP and ETP apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedDPOTrainer`, script `scripts/training/preference/dpo.py` (text or VLM). EP, TP, ETP and [PP](#pipeline-parallelism) apply; CP does not — TRL's loss path is not CP-aware ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Configuration
 
@@ -21,13 +21,9 @@ use_peft: false                    # true makes the adapter-free base the refere
 output_dir: checkpoints/dpo-qwen3.5-9b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `beta` | `0.1` | Scales the implicit-reward gap inside the loss; `0` flattens the objective |
-| `max_length` | `1024` | Truncates prompt + completion, keeping the start |
-| `generation_max_prompt_length` | `512` | Prompt cap for the eval generation split only |
+`beta` scales the implicit-reward gap inside the loss (`0` flattens the objective), `max_length` truncates prompt + completion keeping the start, and `generation_max_prompt_length` caps prompts of the eval generation split only. Types and defaults: [DPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [DPOScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
 
-`loss_type` takes 15 TRL values — `sigmoid`, `hinge`, `ipo`, `sft`, `exo_pair`, `nca_pair`, `robust`, `bco_pair`, `sppo_hard`, `aot`, `aot_unpaired`, `discopop`, `apo_zero`, `apo_down`, `sigmoid_norm` — and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
+`loss_type` takes TRL's losses ([values](../../reference/configuration-reference.md#trl-trainer-configs)), and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
 
 No training-side prompt cap exists, so an over-long prompt eats its own completion: filter those rows in the dataset ([sequence length](../../reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets)).
 
@@ -35,7 +31,7 @@ No training-side prompt cap exists, so an over-long prompt eats its own completi
 
 The trainer sums sequence log-probs in fp32. TRL's own `selective_log_softmax` keeps the per-token log-probs of bf16 logits in bf16, and sums them in bf16. At `|logp|` in [8192, 16384) that grid is 64 nats, so a long completion's margin carries tens of nats of rounding.
 
-`FP32LogprobsMixin` (`src/trainers/preference/logprobs.py`) swaps that function out while TRL's loss and reference pass run. The replacement is a chunked fp32 log-softmax (`src/kernels/logprobs.py`) that never builds a full fp32 `[B, T, V]` plane. TRL sums its output in fp32, so these are fp32:
+`TRLPreferenceMixin` (`halo/trainers/preference/trl_preference.py`) swaps that function out while TRL's loss and reference pass run. The replacement is a chunked fp32 log-softmax (`halo/kernels/logprobs.py`) that never builds a full fp32 `[B, T, V]` plane. TRL sums its output in fp32, so these are fp32:
 
 - every loss term built on the sequence log-probs, and the `ld_alpha` split;
 - the log-prob term of the WPO weights;
@@ -43,11 +39,11 @@ The trainer sums sequence log-probs in fp32. TRL's own `selective_log_softmax` k
 
 Terms TRL takes from the logits directly keep TRL's precision: the `sft` loss type's cross-entropy, WPO's normalizer, and the `entropy`, `logits/*` and `mean_token_accuracy` metrics. Reference columns the dataset supplies keep the precision they were computed in.
 
-Nearly every run takes the fp32 path. TRL's fused Liger DPO loss runs only when Liger's fused linear cross-entropy was applied at load (the [per-model default](../../optimization/liger-kernels.md#configuration) for Zaya, DeepSeek-V4 and GLM-4.7-Flash, or `fused_linear_cross_entropy: true`), on an unsharded policy against a frozen reference copy. FSDP2, EP and TP switch it off, and TRL refuses it alongside precompute or PEFT.
+Every run takes the fp32 path. The trainer turns TRL's `use_liger_kernel` off at construction: the flag selects TRL's chunked log-prob path, which refuses the router aux loss and skips the family's head transform. Liger kernels applied at load are unaffected.
 
 ## Reference model
 
-Three shapes, decided by `load_reference_model_for_preference` (`src/distributed/loading/frozen_models.py`):
+Three shapes, decided by `load_reference_model_for_preference` (`halo/model_loading/parallel/frozen_models.py`):
 
 - **PEFT** (`use_peft: true`) — no second model: the script passes a LoRA config, so the reference is the base with the adapter disabled. A trainer built by hand around an already-wrapped `PeftModel` gets a frozen `ref` adapter copy instead.
 - **EP / TP with `precompute_ref_log_probs: true`** — no reference is loaded either. Log-probs come from the untrained policy before step 1, and a resume restores them from the checkpoint ([below](#resuming-a-precompute-run)).
@@ -59,7 +55,7 @@ A reference model whose attention sinks differ from the policy's is refused in e
 
 ### Resuming a precompute run
 
-The sweep runs inside the trainer's `__init__`, over the policy when no separate reference exists, and every rank attaches the gathered columns in memory, so per-node storage needs no shared cache file. A [Path-B resume](../../reference/checkpoints.md#resuming-training) builds the policy from the checkpoint before that, so a sweep there would score the trained weights and zero every log-ratio. Every checkpoint of a sweeping run therefore carries the columns in `reference_logps.pt`: one entry per split (`train`, then each eval dataset by name) with its row count, a digest of each token-id column the reference read, and the settings that shape the values (`max_length` and the [log-prob precision](#log-prob-precision), plus `truncation_mode` and `ld_alpha` for DPO). The script hands the trainer the resume checkpoint, and the shared lifecycle attaches the saved columns instead of sweeping (`src/trainers/mixins/reference_logps.py`).
+The sweep runs inside the trainer's `__init__`, over the policy when no separate reference exists, and every rank attaches the gathered columns in memory, so per-node storage needs no shared cache file. A [Path-B resume](../../reference/checkpoints.md#resuming-training) builds the policy from the checkpoint before that, so a sweep there would score the trained weights and zero every log-ratio. Every checkpoint of a sweeping run therefore carries the columns in `reference_logps.pt`: one entry per split (`train`, then each eval dataset by name) with its row count, a digest of each token-id column the reference read, and the settings that shape the values (`max_length` and the [log-prob precision](#log-prob-precision), plus `truncation_mode` and `ld_alpha` for DPO). The script hands the trainer the resume checkpoint, and the shared lifecycle attaches the saved columns instead of sweeping (`halo/trainers/reference_logps.py`).
 
 - When the policy was built from the checkpoint's weights and no separate reference exists, a split with no saved entry raises, and so does one whose row count, token ids, settings or columns (a KL column the run's KTO loss needs) differ from the run's. Any other resume (an adapter or merge-on-save checkpoint builds the policy from the base; a frozen reference copy) sweeps untrained weights for such a split and proceeds.
 - A split whose settings record another log-prob precision, or none, is such a mismatch: its values carry that precision's rounding. The refusal names the one-step regeneration below.
@@ -81,11 +77,15 @@ torchrun --nproc_per_node=8 scripts/training/preference/dpo.py \
 
 `halo launch dpo <config> --nproc 8` builds the same line; any field is overridable (`--beta=0.05`). `accelerate launch` serves plain DP only — EP/CP/TP reject it.
 
+## Pipeline parallelism
+
+Under `pipeline_parallel_size > 1` DPO is precompute-only and text-only: no stage holds the whole model, so set `precompute_ref_log_probs: true` with `ref_chosen_logps` / `ref_rejected_logps` already in the train and every eval split, and pass no `ref_model`. The last stage re-implements `sigmoid`, `hinge` and `ipo`, alone or combined; every other `loss_type` is refused (`aot`, `aot_unpaired` and `sft` couple the whole batch), as are an `f_divergence_type` other than `reverse_kl`, `use_weighting`, `ld_alpha` and `compute_metrics`. The refusals every PP trainer shares, PEFT included: [Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations).
+
 ## Vision-language
 
 `dpo.py` trains a VLM checkpoint on image+text pairs. The model class follows the checkpoint, the data path follows the **dataset**: text-only pairs on a natively multimodal model take the text pipeline, hub-shape normalization included.
 
-An `images`/`image` column puts TRL in vision mode with `DataCollatorForVisionPreference`. Those rows must already be contract-shaped — prompt a message list, chosen/rejected continuation-only — since TRL normalizes no hub shapes. `tools_field` is refused: the vision render passes no `tools=`.
+An `images`/`image` column puts TRL in vision mode with `DataCollatorForVisionPreference`, except on a family declaring `refuses_trl_image_rows` (Nemotron-H), refused before the load. Those rows must already be contract-shaped — prompt a message list, chosen/rejected continuation-only — since TRL normalizes no hub shapes. `tools_field` is refused: the vision render passes no `tools=`. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
 
 Set `images_field: <column>` when the dataset stores images under another name — it is renamed to `images` before the dispatch, the spelling TRL probes for. A name the splits do not carry raises at dataset preparation, after the policy and the reference have loaded.
 
@@ -102,7 +102,8 @@ Covering tests:
 
 - `pytest tests/cpu/trainers -m cpu`
 - `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py`
-- precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model) and `tests/gpu/trainers/preference/test_preference_precompute_resume_families.py` (every other EP family; TP and EP+TP where its attention has a TP plan), and `tests/gpu/trainers/preference/test_preference_precompute_resume_ep_etp.py` (EP+ETP on four ranks, every EP family)
+- pipeline parallelism on precomputed reference log-probs: `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer dpo`, and its save, exact resume and export: `test_pp_trainer_checkpoints.py --trainer dpo`
+- precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model in the core tier; every other EP family, with TP and EP+TP where its attention has a TP plan, and EP+ETP on four ranks for every EP family in the full tier)
 
 ## What to watch
 

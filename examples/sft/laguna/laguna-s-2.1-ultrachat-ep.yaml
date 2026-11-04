@@ -1,5 +1,5 @@
-# Laguna S 2.1 — EP=4 SFT example on UltraChat 200K.
-# Launch: torchrun --nproc_per_node=4 scripts/training/sft.py <this config>
+# Laguna S 2.1 — EP=8 SFT example on UltraChat 200K.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model ---
 model_name_or_path: poolside/Laguna-S-2.1
@@ -14,34 +14,31 @@ conversation_field: messages
 test_size: 0.01
 
 # --- Parallelism ---
-expert_parallel_size: 4               # 256 routed experts → 64/rank
-# ep_size must equal the launch size: gpus_per_node resolves from LOCAL_WORLD_SIZE, so ep=4 is one
-# dispatch group under --nproc_per_node=4, but two racy groups on 8 — rejected at config time.
-save_sharded_ep: false
+expert_parallel_size: 8               # 256 routed experts → 32/rank
+# ep_size must equal the launch size: gpus_per_node resolves from LOCAL_WORLD_SIZE, so a four-GPU launch
+# passes --expert_parallel_size=4; ep=4 on 8 GPUs is two racy dispatch groups, rejected at config time.
 
 # --- Attention & kernels ---
 # sdpa: the pinned modeling code never passes sliding_window to flash, which would run the sliding layers
 # as full attention; SDPA applies the sliding mask.
 attn_implementation: sdpa
 packing: true
-max_length: 2048
+max_length: 8192
 
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 1
+gradient_checkpointing: false   # ~114 GB of activations per row beside ~75 GB of EP8 state; set true below B300
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
 optim: flash_adamw
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300

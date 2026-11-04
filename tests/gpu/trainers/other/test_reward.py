@@ -1,33 +1,12 @@
 #!/usr/bin/env python
-"""DistributedRewardTrainer end-to-end, with the logged loss pinned to TRL 1.6's exact BT objective.
+"""DistributedRewardTrainer end to end, with the logged loss pinned to TRL 1.14's exact BT objective.
 
-A reward model's loss is ``-logsigmoid(r_chosen - r_rejected)`` over a batch that TRL collates as
-``[all chosen ; all rejected]`` and scores at each row's last non-pad token. Three things there fail
-silently rather than loudly: the chunk order (``torch.chunk`` reading the halves the wrong way round
-inverts the preference — the model learns to prefer the rejected answer), the pooling position (a
-fixed index instead of the last non-pad token scores padding), and the sign. All keep the loss finite
-and the step count intact, so finiteness cannot see any of them.
-
-So the reward head is scored independently here — this test pools the logits itself, at the position
-rule transformers documents, from an independently constructed copy of the model holding the weight
-snapshot the trainer had at the pinned step — and:
-
-  * the logged loss at ``PINNED_STEP`` must equal that reference objective on the batch the trainer
-    actually consumed;
-  * the captured rows must map back to the tokenized dataset's own ``chosen``/``rejected`` columns,
-    which is what pins the chunk ORDER — the reference's own ``chunk`` shares the trainer's
-    convention, so nothing else here would notice a collator emitting the halves reversed;
-  * the logged ``accuracy`` / ``mean_reward`` / ``margin`` metrics must equal the same independent
-    quantities, which pins the chosen/rejected assignment separately from the loss;
-  * three NEGATIVE CONTROLS must each miss the logged loss by far more than the pin's tolerance —
-    swapping the two halves (the chunk-order inversion), dropping the sign, and pooling at the last
-    *padded* position instead of the last real token.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_reward.py
+Chunk order, pooling position and sign all fail silently: each keeps the loss finite and the step count intact. A
+reversed chunk trains the model to prefer the rejected answer. The test pools the logits itself, since the reference's
+own ``chunk`` shares the trainer's convention, and anchors chunk order against the tokenized dataset's columns.
 """
 
+import argparse
 import random
 
 import torch
@@ -36,11 +15,11 @@ from datasets import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from trl import RewardConfig
 
-from src.args.common_script_args import CommonScriptArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.distributed import (
     ensure_model_downloaded,
     snapshot_full_weights,
@@ -48,47 +27,43 @@ from tests.common.distributed import (
     world_mean,
     world_min,
 )
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log, step_losses
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
 MAX_SEQ_LENGTH = 1024
 NUM_TRAIN_STEPS = 10
-# >1 pair per device so the batch is ragged; the `pooling_at_pad` control is only distinguishable
-# once some row actually carries padding.
+# >1 pair per device so the batch is ragged; the `pooling_at_pad` control needs some row to carry padding.
 BATCH_SIZE = 4
-# Tiny on purpose: the O(1) margin the controls need comes from the randomly initialised `score`
-# head, not from training, and this rate keeps it inside RESPONSIVE_MARGIN instead of saturating
-# -logsigmoid to 0 — where the pin degenerates into comparing two zeros.
+# Tiny: the O(1) margin comes from the random `score` head, and this rate keeps it inside RESPONSIVE_MARGIN instead of
+# saturating -logsigmoid to 0, where the pin compares two zeros.
 LEARNING_RATE = 1e-7
 SEED = 42
-# Late, so the pinned weights are ones the trainer reached — that puts the snapshot path under test.
+# Late, so the pinned weights are ones the trainer reached and the snapshot path is under test.
 PINNED_STEP = NUM_TRAIN_STEPS
 
 LOSS_REL_TOL = TOL.exact_objective_rel
-# A control must show the pin would FAIL, so its threshold IS the pin's tolerance.
+# A control shows the pin would fail, so its threshold is the pin's tolerance.
 CONTROL_MIN_GAP = LOSS_REL_TOL
-# bf16 pooled rewards of magnitude ~3 differenced against an fp32 reference (measured 0.023). A
-# swapped chosen/rejected assignment flips the margin's sign (~1.2), so this still catches it.
+# bf16 pooled rewards of magnitude ~3 against an fp32 reference (measured 0.023). A swapped assignment flips the
+# margin's sign (~1.2), so this still catches it.
 REWARD_ABS_TOL = 0.05
-# Below this band chosen and rejected score alike and every control collapses onto log(2); above it
-# -logsigmoid saturates to ~0 and the sign-drop control becomes undetectable.
+# Below this band every control collapses onto log(2); above it -logsigmoid saturates and the sign-drop control can't
+# show.
 RESPONSIVE_MARGIN = (0.3, 5.0)
-# The trainer compares bf16 rewards, this test fp32: a pair inside bf16 noise (~0.03 at magnitude ~3)
-# can flip and move `accuracy` by 1/BATCH_SIZE, so the exact rate is only pinnable clear of it.
+# bf16 vs fp32 comparison: a pair inside bf16 noise (~0.03 at magnitude ~3) can flip and move `accuracy` by
+# 1/BATCH_SIZE.
 MIN_PAIR_GAP = 0.1
 
 
 def create_reward_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Dataset:
-    """Synthetic math preference data as chat-templated conversation strings.
-
-    30% of rows are multi-turn, which is what makes the batch ragged enough for the pooling rule to
-    matter. TRL's RewardTrainer takes ``{"chosen": str, "rejected": str}`` complete conversations.
-    """
+    """30% of rows are multi-turn, which makes the batch ragged enough for the pooling rule to matter."""
     random.seed(seed)
 
     question_templates = [
@@ -114,7 +89,7 @@ def create_reward_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Data
     for _ in range(num_samples):
         template_q, op_fn, op_name = random.choice(question_templates)
         a = random.randint(2, 100)
-        b = random.randint(1, min(a, 50))  # b <= a keeps subtraction/division clean
+        b = random.randint(1, min(a, 50))  # b <= a keeps subtraction/division clean.
         result = op_fn(a, b)
         wrong = result + random.choice([-4, -3, -2, -1, 1, 2, 3, 4])
         question = template_q.format(a=a, b=b)
@@ -155,8 +130,8 @@ def create_reward_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Data
 
 
 def build_model(tokenizer):
-    # The scalar `score` head is not in the checkpoint; seed before construction (the Trainer seeds
-    # later) or the margin the controls depend on differs run to run.
+    # The scalar `score` head is not in the checkpoint; seed first, or the margin the controls depend on differs per
+    # run.
     torch.manual_seed(SEED)
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
@@ -165,30 +140,25 @@ def build_model(tokenizer):
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
-    # Through the script's own seam, never a hand-written config.pad_token_id: the pooling rule
-    # pinned here reads that id back, so setting it by hand would survive a regression in the sync.
-    setup_model_and_tokenizer(
-        CommonScriptArguments(), model, tokenizer, MAX_SEQ_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
+    # Through the script's own seam: the pooling rule reads this id back, so setting it by hand would survive a sync
+    # regression.
+    configure_run_tokenizer(
+        CommonScriptArguments(), model, tokenizer, MAX_SEQ_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
     )
     return model
 
 
 def token_rewards(model, input_ids, attention_mask) -> torch.Tensor:
-    """Per-TOKEN reward logits ``[B, T]`` in fp32: the backbone plus the scalar head, run by hand.
-
-    ``model(...)`` returns logits that are already pooled ``[B, 1]``, so scoring the head directly is
-    what lets this test own the pooling rule and therefore detect a wrong pooling position.
-    """
+    """Per-token reward logits in fp32. ``model(...)`` returns already-pooled logits, which would hide a wrong
+    position."""
     with torch.no_grad():
         hidden = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         return model.score(hidden).float().squeeze(-1)
 
 
 def pool_rewards(token_logits, input_ids, pad_token_id, *, at_pad: bool = False) -> torch.Tensor:
-    """Per-row scalar reward at the LAST NON-PAD token — transformers' own sequence-classification
-    position rule, reimplemented here. ``at_pad`` pools at the final column instead, which is the
-    control for exactly that bug.
-    """
+    """Scalar reward at the last non-pad token, transformers' position rule reimplemented. ``at_pad`` is that bug's
+    control."""
     rows, seq_len = input_ids.shape
     if at_pad:
         positions = torch.full((rows,), seq_len - 1, device=input_ids.device, dtype=torch.long)
@@ -200,11 +170,8 @@ def pool_rewards(token_logits, input_ids, pad_token_id, *, at_pad: bool = False)
 
 
 def bt_objective(rewards: torch.Tensor, *, swap: bool = False, drop_sign: bool = False) -> float:
-    """TRL's exact Bradley-Terry loss: ``-logsigmoid(chosen - rejected)`` meaned over pairs.
-
-    The row order is TRL's ``[all chosen ; all rejected]``, recovered with a single ``chunk``.
-    ``swap`` reads the halves the wrong way round; ``drop_sign`` omits the negation.
-    """
+    """``-logsigmoid(chosen - rejected)`` over TRL's ``[all chosen ; all rejected]``. ``swap`` and ``drop_sign`` are
+    controls."""
     chosen, rejected = torch.chunk(rewards, chunks=2)
     if swap:
         chosen, rejected = rejected, chosen
@@ -212,10 +179,17 @@ def bt_objective(rewards: torch.Tensor, *, swap: bool = False, drop_sign: bool =
     return float(difference.sigmoid().log().mean() if drop_sign else -F.logsigmoid(difference).mean())
 
 
-@gpu_test_main(min_world_size=2, prefix="test_reward")
+parser = argparse.ArgumentParser()
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="test_reward")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = hsdp_layout(ctx.world_size) if ARGS.hsdp else {}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -239,7 +213,6 @@ def run(ctx):
         dataloader_drop_last=True,
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # the mixin owns FSDP wrapping
     )
 
     trainer = DistributedRewardTrainer(
@@ -248,11 +221,10 @@ def run(ctx):
         train_dataset=create_reward_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED),
         eval_dataset=create_reward_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1),
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
-    # The reference must score exactly the pinned step's rows with exactly its weights.
     captured: dict = {}
     weights: dict = {}
     real_compute_loss = trainer.compute_loss
@@ -270,8 +242,14 @@ def run(ctx):
     losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    # Early return, not a bare check: without the capture every line below raises KeyError and the
-    # harness reports `error` instead of this check failing.
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
+    # Early return: without the capture every line below raises KeyError, and the harness reports `error` over FAIL.
     checks["pinned_step_captured"] = bool(captured) and bool(weights)
     if not checks["pinned_step_captured"]:
         return {"checks": checks, "metrics": metrics}
@@ -279,16 +257,15 @@ def run(ctx):
     rows = captured["input_ids"].shape[0]
     checks["batch_is_chosen_then_rejected_pairs"] = rows == 2 * BATCH_SIZE
 
-    # Anchor WHICH half is which against the trainer's own tokenized dataset: the reference's
-    # `chunk` shares the trainer's convention, so a collator emitting [rejected ; chosen] would make
-    # both sides agree and the swap control would still pass.
+    # Anchored on the dataset: the reference's `chunk` shares the trainer's convention, so a collator emitting
+    # [rejected ; chosen] would make both sides agree and the swap control still pass.
     tokenized = trainer.train_dataset
     columns = tokenized.column_names
     chosen_column = next(c for c in ("chosen_input_ids", "chosen_ids") if c in columns)
     rejected_column = next(c for c in ("rejected_input_ids", "rejected_ids") if c in columns)
     chosen_rows = {tuple(row[chosen_column]) for row in tokenized}
     rejected_rows = {tuple(row[rejected_column]) for row in tokenized}
-    # ANTI-VACUITY: if a sequence could be both, membership proves nothing about the ordering.
+    # Anti-vacuity: if a sequence could be both, membership proves nothing about the ordering.
     checks["chosen_and_rejected_are_distinguishable"] = chosen_rows.isdisjoint(rejected_rows)
     captured_rows = [
         tuple(captured["input_ids"][i][: int(captured["attention_mask"][i].sum())].tolist()) for i in range(rows)
@@ -296,8 +273,7 @@ def run(ctx):
     checks["first_half_is_the_chosen_column"] = all(row in chosen_rows for row in captured_rows[:BATCH_SIZE]) and all(
         row in rejected_rows for row in captured_rows[BATCH_SIZE:]
     )
-    # World-wide, not per-shard: the compared loss is a DP mean, so padding need only exist
-    # somewhere, and a shard whose rows tokenize alike would flake a per-rank form.
+    # World-wide: the compared loss is a DP mean, and a shard whose rows tokenize alike would flake a per-rank form.
     lengths = captured["attention_mask"].sum(-1)
     checks["batch_is_ragged"] = world_any(int(lengths.min()) < int(lengths.max()), ctx.device)
 
@@ -314,18 +290,18 @@ def run(ctx):
     chosen, rejected = torch.chunk(rewards, chunks=2)
     margin = float((chosen - rejected).mean())
     metrics["reward_margin"] = margin
-    # ANTI-VACUITY: outside this band every control below collapses onto the real objective.
+    # Anti-vacuity: outside this band every control below collapses onto the real objective.
     checks["margin_in_responsive_region"] = RESPONSIVE_MARGIN[0] < abs(margin) < RESPONSIVE_MARGIN[1]
-    # Precondition for the exact `accuracy` pin: no pair may sit inside bf16 reward noise, where the
-    # trainer's bf16 comparison and this test's fp32 one can disagree on its sign.
+    # No pair may sit inside bf16 noise, where the trainer's bf16 comparison and this fp32 one can disagree on its
+    # sign.
     min_pair_gap = float((chosen - rejected).abs().min())
     metrics["min_pair_gap"] = min_pair_gap
     checks["pair_gaps_clear_of_bf16_noise"] = world_min(min_pair_gap, ctx.device) > MIN_PAIR_GAP
 
-    # Pinned independently of the loss, which is what separates the chosen/rejected assignment.
+    # Pinned independently of the loss, which separates the chosen/rejected assignment.
     entry = [e for e in trainer.state.log_history if "loss" in e][PINNED_STEP - 1]
     metric_pins = {
-        # An exact rate over pair comparisons — no accumulation, so no dtype slack.
+        # An exact rate over pair comparisons: no accumulation, so no dtype slack.
         "accuracy": (world_mean(float((chosen > rejected).float().mean()), ctx.device), 1e-6),
         "margin": (world_mean(margin, ctx.device), REWARD_ABS_TOL),
         "mean_reward": (world_mean(float(rewards.mean()), ctx.device), REWARD_ABS_TOL),
@@ -335,13 +311,11 @@ def run(ctx):
         metrics[f"logged_{key}"], metrics[f"expected_{key}"] = (got if got is not None else float("nan")), want
         checks[f"metric_matches_reference[{key}]"] = got is not None and abs(got - want) < tol
 
-    # NEGATIVE CONTROLS: each degenerate objective must MISS the logged loss.
     controls = {
-        # Chunk-order inversion: the model is trained to prefer the rejected answer.
+        # Chunk-order inversion: trains the model to prefer the rejected answer.
         "halves_swapped": world_mean(bt_objective(rewards, swap=True), ctx.device),
-        # Negation dropped: ascent on the preference instead of descent.
+        # Ascent on the preference instead of descent.
         "sign_dropped": world_mean(bt_objective(rewards, drop_sign=True), ctx.device),
-        # Pooled at the final column, so padded rows score padding.
         "pooling_at_pad": world_mean(
             bt_objective(pool_rewards(per_token, captured["input_ids"], tokenizer.pad_token_id, at_pad=True)),
             ctx.device,

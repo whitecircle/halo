@@ -9,8 +9,8 @@ from peft import LoraConfig, get_peft_model
 from torch import nn
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 
 PartialState()
@@ -51,7 +51,7 @@ def test_cp_unsupported_options_fail_before_loading_weights(tmp_path, option, kl
         report_to="none",
     )
     expected = "Drop ref_model" if option == "ref-model" else "requires a full policy fine-tune"
-    with patch("src.trainers.grpo.offline.load_model_from_pretrained") as loader:
+    with patch("halo.trainers.grpo.offline.trainer.resolve_trainer_model") as loader:
         with pytest.raises(ValueError, match=expected) as raised:
             OfflineGRPOTrainer(
                 model=model,

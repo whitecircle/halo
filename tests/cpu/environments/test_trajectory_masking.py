@@ -1,21 +1,17 @@
 #!/usr/bin/env python
-"""Tests for Environmental-GRPO multi-turn trajectory tokenization + masking.
+"""Environmental-GRPO trajectory tokenization: ``_tokenize_trajectory`` trains assistant tokens across every turn
+and masks tool and user tokens. Runs on Qwen3, whose EOS ``<|im_end|>`` doubles as the turn delimiter, the case a
+first-EOS heuristic mis-handles."""
 
-`_tokenize_trajectory` must (1) train on assistant tokens across *every* turn — not
-collapse to turn 1 at the first per-turn ``<|im_end|>`` EOS — and (2) mask out
-environment-injected tool/user tokens so they never receive policy gradient. These are
-pure tokenizer mechanics, so they run on CPU against a real chat tokenizer (Qwen3, whose
-EOS ``<|im_end|>`` doubles as the turn delimiter — the exact case a first-EOS
-heuristic mis-handles). Run: ``pytest tests/cpu/environments/test_trajectory_masking.py``.
-"""
-
+from collections import defaultdict
 from types import MethodType, SimpleNamespace
 
 import pytest
 
-from src.environments.base import BaseEnvironment, Message, Trajectory
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.rollout_metrics import _summarize_episode_generation_tokens
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -28,9 +24,8 @@ def tokenizer():
 
 
 def _stub(tokenizer):
-    """Minimal object exposing the attributes _tokenize_trajectory reads. The real
-    ``_render_messages_to_ids`` is bound so the render goes through the genuine chat-template path
-    (see the sibling stub in tests/cpu/grpo/test_token_id_training.py)."""
+    """Minimal object with the attributes _tokenize_trajectory reads; the real ``_render_messages_to_ids`` is bound,
+    as in tests/cpu/grpo/test_token_id_training.py."""
     stub = SimpleNamespace(
         processing_class=tokenizer,
         max_completion_length=2048,
@@ -38,14 +33,15 @@ def _stub(tokenizer):
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         _tools_schema=None,  # resolved None → cached_property short-circuits, no env built
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, MethodType(getattr(DistributedAsyncEnvironmentalGRPOTrainer, name), stub))
     stub._masked_trajectory_tensors = MethodType(
         DistributedAsyncEnvironmentalGRPOTrainer._masked_trajectory_tensors, stub
     )
@@ -64,7 +60,6 @@ def _tokenize(stub, result):
 
 
 def test_multi_turn_assistant_tokens_all_trainable(tokenizer):
-    # Both assistant turns stay trainable even though the first ends in <|im_end|> (EOS == delimiter).
     stub = _stub(tokenizer)
     messages = [
         Message.user("What is 2+2? Use the calculator."),
@@ -116,8 +111,7 @@ def test_empty_trajectory_fallback(tokenizer):
     assert completion_mask.numel() == 1
 
 
-# Reasoning (CoT) capture/gating contract: the final turn's CoT must be trainable, yet never reach a
-# vLLM generation request (unknown field → 400, and prior-turn CoT must stay out of context).
+# The final turn's CoT must be trainable yet never reach a generation request (unknown field: 400).
 
 
 def test_to_dict_includes_reasoning_only_when_requested():
@@ -132,7 +126,7 @@ def test_add_action_message_carries_reasoning_from_context():
     assistant Message so the final turn's CoT is trainable."""
     traj = Trajectory()
     # Instance method: it reads self.max_tool_calls_per_turn, whose None default means no truncation.
-    BaseEnvironment._add_action_message(
+    EnvironmentBase._add_action_message(
         SimpleNamespace(max_tool_calls_per_turn=None),
         traj,
         "the answer",
@@ -145,21 +139,16 @@ def test_add_action_message_carries_reasoning_from_context():
 
 
 def test_add_action_message_caps_tool_calls_to_execution_limit():
-    """The stored assistant tool_calls must be capped to max_tool_calls_per_turn — else the message
-    advertises more calls than there are tool-result messages, a structural mismatch."""
+    """Otherwise the message advertises more calls than there are tool-result messages."""
     traj = Trajectory()
     ctx = {"tool_calls": [{"id": f"c{i}"} for i in range(8)]}
-    BaseEnvironment._add_action_message(SimpleNamespace(max_tool_calls_per_turn=5), traj, "act", ctx)
+    EnvironmentBase._add_action_message(SimpleNamespace(max_tool_calls_per_turn=5), traj, "act", ctx)
     assert len(traj.messages[-1].tool_calls) == 5
 
 
 class _EffortRecordingTokenizer:
-    """Records the reasoning_effort kwarg every apply_chat_template render receives.
-
-    Renders a minimal per-message template and tokenizes one id per character, so span location
-    SUCCEEDS: a stand-in whose render ignored its messages would return the same ids for every probe,
-    and the recorded efforts would then only prove the effort reached a failed location.
-    """
+    """Records the reasoning_effort each render receives. Renders per message, one id per character, so span
+    location succeeds and the recorded efforts are from real locations."""
 
     eos_token_id = 1
     pad_token_id = 0
@@ -186,14 +175,15 @@ def _tokenize_with(tok, reasoning_effort):
         pad_token_id=0,
         _tools_schema=None,
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub._tokenizer = tok
     stub._render_messages_to_ids = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._render_messages_to_ids, stub)
     stub._context_limit = MethodType(DistributedAsyncEnvironmentalGRPOTrainer._context_limit, stub)
+    for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
+        setattr(stub, name, MethodType(getattr(DistributedAsyncEnvironmentalGRPOTrainer, name), stub))
     traj = Trajectory(reasoning_effort=reasoning_effort)
     traj.add_message(Message.user("solve it"))
     traj.add_message(Message.assistant("done", thinking="cot"))
@@ -225,14 +215,32 @@ def test_render_omits_effort_when_unset():
     assert tok.efforts and all(e == "<<unset>>" for e in tok.efforts), tok.efforts
 
 
-def test_summarize_episode_generation_tokens_mean_max_p90():
+def test_episode_generation_tokens_mean_max_p90():
     # Guards the aggregation the trainer logs as episode/generation_tokens{,_max,_p90}.
     vals = [10, 20, 30, 40, 50, 60, 70, 80, 90, 100]  # each = one episode's total (summed over turns)
-    s = _summarize_episode_generation_tokens(vals)
-    assert s["episode/generation_tokens"] == 55.0  # mean, NOT the max/last
-    assert s["episode/generation_tokens_max"] == 100.0
+    results = [
+        SimpleNamespace(
+            latency=0.0,
+            requests_expired_in_sync=0,
+            generation_tokens=v,
+            episode_length=1,
+            terminated_naturally=True,
+            trajectory=None,
+            error=None,
+            total_reward=0.0,
+            metrics={},
+        )
+        for v in vals
+    ]
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.async_config = SimpleNamespace(truncation_alarm_rate=None)
+    host._metrics = {"train": defaultdict(list)}
+    host._log_rollout_metrics(results, "train", [[] for _ in vals])
+    m = host._metrics["train"]
+    assert m["episode/generation_tokens"] == [55.0]  # mean, not the max/last
+    assert m["episode/generation_tokens_max"] == [100.0]
     # nearest-rank p90 of 10 sorted values -> ceil(0.9 * 10) = 9th = 90
-    assert s["episode/generation_tokens_p90"] == 90.0
+    assert m["episode/generation_tokens_p90"] == [90.0]
 
 
 if __name__ == "__main__":

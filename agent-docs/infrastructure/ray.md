@@ -7,7 +7,7 @@ Ray's entire job: weight sync and gradients go over NCCL, generation is HTTP to
 [Rollout Servers](rollout-servers.md), and Ray carries only episode dispatch and results.
 
 On a single node Ray configures itself. The implementation lives in
-`src/environments/ray_actors.py` and the trainer's `_init_async_components`; the pin is
+`halo/environments/ray_actors.py` and the trainer's `_init_async_components`; the pin is
 `ray[default] 2.58.x` (`pyproject.toml`). Terms: [glossary](../reference/glossary.md).
 
 ## Lifecycle
@@ -29,9 +29,12 @@ Two init settings differ from Ray's defaults:
     ([below](#multi-node)).
 
 - **Temp-dir fallback**: Ray's object-store socket is an AF_UNIX path with a ~107-byte cap, so when
-  `TMPDIR` is longer than 40 characters Ray is redirected to `/tmp/ray`.
+  Ray's temp root (`RAY_TMPDIR`, else `TMPDIR`) is longer than 40 characters, Ray gets a short link
+  under `/tmp` (`halo-ray-<uid>-<hash>`) to `<root>/ray` as its temp dir: the sockets take the short
+  path, while the session logs and spilled objects stay on the root's volume.
 
-Teardown runs in `train()`'s `finally`: the prefetch thread stops, every actor's `shutdown()` is
+Teardown runs in `train()`'s `finally`: the prefetch thread stops, cancelling the rounds still collecting (their
+episodes run until the actor shutdown), every actor's `shutdown()` is
 awaited sequentially, weight-sync communicators close. `ray.shutdown()` is never called; actors die
 by reference counting. A truly wedged actor can stall this teardown; kill the trainer container if
 exit hangs.
@@ -66,11 +69,12 @@ exit hangs.
 - **Lazy environment build**: the env is constructed inside the actor on its first episode. A broken
   environment constructor surfaces as per-episode errors, not a startup crash.
 
-The actor's episode loop shares three things with the offline eval driver (`run_episode` in
-`src/environments/eval_runner.py`), all in `src/environments/episode.py`: the per-turn step-context
-stamp (`step_context_from_generation`), the effort binding, and the turn retry policy
-(`generate_turn`: backoff, engine-abort re-issue). It keeps its own aiohttp session, retryable-4xx
-classification, and engine token/routing capture.
+The actor and the offline eval driver (`run_episode` in `halo/environments/eval_runner.py`) play one
+episode loop, `play_episode` in `halo/environments/episode.py`: reset, the per-turn caps, the step
+context, the truncated close, the effort stamp and the cleanup. Both read replies with
+`turn_from_chat_completion` (`halo/environments/engine_wire.py`) and retry turns under `generate_turn`
+(backoff, engine-abort re-issue). The actor keeps its own aiohttp transport and retryable-4xx rule, and
+turns a fault anywhere in the episode into a masked row.
 
 A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
 same observation, up to `max_retries` times (default `3`), rather than stepped as a length cut; past
@@ -106,15 +110,16 @@ exported `RAY_ADDRESS` joins the cluster (Ray substitutes it for the `address=No
 passes) while `ray_address: null` still has every rank build the full pool. Set the config field.
 
 Three cluster-wide totals bound a large run: actors (above), in-flight episodes
-(`world_size × max_concurrent_rollouts`), and per-node sandbox slots (next section).
+(`world_size × max_concurrent_rollouts` per round in flight: `prefetch_depth` rounds plus a cold or eval
+round), and per-node sandbox slots (next section).
 
 **Under TP/ETP, most of that load is discarded.** Every rank collects a full batch, then
-`_broadcast_rollouts_for_tp` replaces each rank's results with its TP-group leader's, so all ranks
+the round entry replaces each rank's results with its TP-group leader's (`_broadcast_object_from_tp_leader`), so all ranks
 tokenize identical trajectories. Actor and rollout-server load therefore scales with `world_size`
 while useful rollouts scale with `data_parallel_size`.
 
 Size the pool and the servers for the former: per-server load is
-`max_concurrent_rollouts × world_size / num_servers`
+`max_concurrent_rollouts × world_size / num_servers` per round in flight
 ([Rollout Servers — Throughput](rollout-servers.md#throughput)).
 
 Actors are async, so size the pool to the env's **blocking** per-episode cost, not to HTTP
@@ -163,8 +168,8 @@ jobs API on 8265 that the section above says is never opened.
 The toolkit configures no other Ray ports; upstream defaults apply. What must hold across nodes:
 
 - **Rollout-server URLs must resolve from every actor node**: actors call the servers directly over
-  HTTP. The trainer warns when a loopback URL meets a multi-node run (a scattered actor would hit a
-  node with no server and return masked rows).
+  HTTP. The trainer refuses a loopback URL in a run spanning several nodes, launch or Ray cluster: a scattered actor
+  would reach another engine or none, and an engine on each node takes no push but the forwarding rank's.
 
 - **Actor nodes need the environment's runtime**, not GPUs — per env: a sandbox plus a large
   `TMPDIR` for the coding envs and `swe` (an SWE session's whole working tree lives in `TMPDIR` for
@@ -212,4 +217,4 @@ PIDs show as `ray::EnvironmentActor` in `ps`).
 | Rollouts fail with connection refused on some ranks only | Loopback/unresolvable server URL from an actor node → use routable hostnames in `rollout_server_configs` |
 | Search/MCP env scores all zero on a shared cluster | Backend key or `npx`/`uvx` missing from the actor node's env → export before `ray start` |
 | Sandbox runs queue far beyond core count | Per-process gate × many actors → set `HALO_SANDBOX_MAX_CONCURRENCY` so slots sum to cores |
-| `episode_timeout` errors while the env is healthy | Deadline below real episode latency (long SWE sessions hit this first) → raise it; it must stay under the NCCL watchdog ([`episode_timeout`](../reference/configuration-reference.md#asynctrainingconfig)) |
+| `episode_timeout` errors while the env is healthy | Deadline below real episode latency (long SWE sessions hit this first) → raise it; it must stay under the NCCL watchdog ([`episode_timeout`](../reference/configuration-reference.md#asyncrolloutconfig)) |

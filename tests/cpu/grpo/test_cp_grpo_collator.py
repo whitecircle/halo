@@ -2,14 +2,13 @@
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.data.collators.offline_grpo import (
+from halo.data.collators.offline_grpo import (
     REF_PER_TOKEN_LOGPS_COLUMN,
     OfflineGRPOCPDataCollatorWithPadding,
     OfflineGRPODataCollatorWithPadding,
 )
-from src.trainers.grpo.offline import tokenize_offline_grpo_rows
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
 
 
 class _Tokenizer:
@@ -61,7 +60,6 @@ def test_cp_rows_keep_completion_targets_and_reference_in_full_row_positions():
     torch.testing.assert_close(
         batch[REF_PER_TOKEN_LOGPS_COLUMN][0], torch.tensor([0.0, 0.0, -1.0, -2.0, -3.0, 0, 0, 0])
     )
-    # The causal shift predicts each completion token from the position immediately before it.
     shifted_targets = batch["labels"][:, 1:]
     shifted_refs = batch[REF_PER_TOKEN_LOGPS_COLUMN][:, 1:]
     torch.testing.assert_close(shifted_refs[shifted_targets != -100], torch.tensor([-1.0, -2.0, -3.0, -4.0]))
@@ -69,7 +67,6 @@ def test_cp_rows_keep_completion_targets_and_reference_in_full_row_positions():
 
 @pytest.mark.parametrize("cp", [False, True], ids=["local", "cp"])
 def test_empty_completion_is_inert_and_mixed_reference_rows_fail(cp):
-    PartialState()  # the substituted-completion warning logs through accelerate's logger
     collator = (
         OfflineGRPOCPDataCollatorWithPadding(pad_token_id=7, cp_size=2)
         if cp

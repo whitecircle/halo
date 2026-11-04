@@ -114,7 +114,7 @@ ax.text(
 )
 
 ax.text(0.3, 2.45, "Memory in HBM", fontsize=SECTION, fontweight="bold", color=INK, va="top")
-ax.text(0.3, 2.04, "per parameter — 8 B total (bf16 AdamW)", fontsize=SMALL, color=INK2, va="top")
+ax.text(0.3, 2.04, "per parameter: 8 B total (bf16 AdamW)", fontsize=SMALL, color=INK2, va="top")
 
 bar_x0, bar_w, bar_y, bar_h = 0.3, 6.3, 1.05, 0.62
 scale = bar_w / 8.0  # 8 bytes/param spans the bar
@@ -136,7 +136,7 @@ for name, byts, a, b, color in segs:
     )
 
 # activations: not per parameter, set apart with a dashed card
-ax.text(7.05, 2.04, "+ activations — the long-context cost", fontsize=SMALL, color=INK2, va="top")
+ax.text(7.05, 2.04, "+ activations: the long-context cost", fontsize=SMALL, color=INK2, va="top")
 act = FancyBboxPatch((7.05, bar_y), 4.15, bar_h, boxstyle="round,pad=0.02", facecolor=AMBER_T, edgecolor=AMBER, lw=1.3)
 act.set_linestyle((0, (4, 2)))
 ax.add_patch(act)
@@ -154,7 +154,7 @@ ax.text(
 ax.text(
     0.3,
     0.5,
-    "The first three shard with FSDP / EP; activations don't — X is saved at forward, freed after wgrad.",
+    "The first three shard with FSDP / EP; activations don't: X is saved at forward, freed after wgrad.",
     fontsize=TINY,
     color=INK3,
     va="top",

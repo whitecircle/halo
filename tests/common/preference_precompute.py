@@ -1,12 +1,6 @@
-"""The DPO / KTO precompute tests' shared pieces, and the real trainers over a stubbed reference
-forward for the CPU tests.
-
-``TRAINERS`` and :func:`column` serve the GPU precompute suites as well. ``precompute_trainer``
-builds ``DistributedDPOTrainer`` / ``DistributedKTOTrainer`` with ``__new__`` and the attributes
-TRL's ``__init__`` holds when it runs the sweep, so the tests drive the real MRO, column sets and
-TRL signature columns. ``compute_ref_log_probs`` is replaced by :class:`StubReference`, whose values
-encode which weights "ran" and each row's tokens.
-"""
+"""The DPO / KTO precompute tests' shared pieces, and the real trainers over a stubbed reference forward for CPU.
+``precompute_trainer`` builds the real class with ``__new__`` and what TRL's ``__init__`` holds at the sweep, so tests
+drive the real MRO and columns."""
 
 from __future__ import annotations
 
@@ -17,14 +11,13 @@ import torch
 from datasets import Dataset
 from trl import DPOConfig, KTOConfig
 
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
-# Each kind's trainer and the TRL config it takes.
 TRAINERS = {"dpo": (DistributedDPOTrainer, DPOConfig), "kto": (DistributedKTOTrainer, KTOConfig)}
-# The columns each TRL base writes, spelled out rather than read off the trainer under test.
+# Spelled out rather than read off the trainer under test.
 REFERENCE_COLUMNS = {"dpo": ("ref_chosen_logps", "ref_rejected_logps"), "kto": ("ref_logps", "ref_KL_logps")}
-# The columns the reference forward reads, per TRL's signature columns.
+# Per TRL's signature columns.
 TOKEN_COLUMNS = {
     "dpo": ("prompt_ids", "chosen_ids", "rejected_ids"),
     "kto": ("prompt_ids", "completion_ids", "KL_completion_ids", "label"),
@@ -32,7 +25,6 @@ TOKEN_COLUMNS = {
 BASE = 0.0
 TRAINED = 1000.0
 N_ROWS = 4
-# The batch size the CPU tests hand the reference sweep.
 SWEEP_BATCH_SIZE = 2
 MAX_LENGTH = 64
 
@@ -61,22 +53,22 @@ def token_rows(kind: str, n: int = N_ROWS, *, bump: str | None = None) -> Datase
 
 
 class StubReference:
-    """Stands in for TRL's ``compute_ref_log_probs``: one value per output column per row, offset by
-    the ``weights`` that "ran" and by the row's token sum, with KTO's KL term ``None`` off the KL loss."""
+    """TRL's ``compute_ref_log_probs`` stand-in: per row and column, a value offset by ``weights`` and the row's token
+    sum; KTO's KL is None off the KL loss."""
 
     def __init__(self, kind: str, weights: float, calculate_kl: bool):
         self.outputs = 2 if kind == "dpo" or calculate_kl else 1
         self.weights = weights
         self.batches = 0
 
-    def __call__(self, batch: torch.Tensor):
+    def __call__(self, model, batch: torch.Tensor):
         self.batches += 1
         values = [-(self.weights + 100 * index + batch) for index in range(self.outputs)]
         return (values[0], values[1] if self.outputs == 2 else None)
 
 
 def collate_token_sums(rows: list[dict]) -> torch.Tensor:
-    """Each row's sum over its token-id and label columns: the stub reference's per-row input."""
+    """Each row's sum over token-id and label columns: the stub's per-row input."""
     return torch.tensor(
         [
             sum(sum(value) if isinstance(value, list) else int(value) for key, value in row.items() if key != "prompt")
@@ -97,11 +89,8 @@ def precompute_trainer(
     max_length: int = MAX_LENGTH,
     **resume_context,
 ):
-    """The real trainer class with the attributes TRL's ``__init__`` holds when it runs the sweep.
-
-    ``resume_context`` is what the entry scripts pass (``resume_checkpoint``, ``policy_from_checkpoint``);
-    leave it empty for a trainer built without it.
-    """
+    """The real trainer class with what TRL's ``__init__`` holds at the sweep; ``resume_context`` is what the entry
+    scripts pass."""
     trainer_cls, _ = TRAINERS[kind]
     trainer = trainer_cls.__new__(trainer_cls)
     trainer._init_reference_resume(dict(resume_context))
@@ -112,6 +101,7 @@ def precompute_trainer(
     trainer.ref_model = ref_model
     trainer.calculate_KL = calculate_kl
     trainer.ld_alpha = None
+    trainer.use_liger_kernel = False
     trainer.args = SimpleNamespace(
         dataloader_num_workers=0,
         dataloader_pin_memory=False,

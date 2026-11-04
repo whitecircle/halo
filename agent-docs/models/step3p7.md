@@ -1,12 +1,8 @@
 # Step-3.7 Flash
 
-`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers 5.16 (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
+`Step3p7ForConditionalGeneration` (`stepfun-ai/Step-3.7-Flash`) — 198B total / ~11B active composite VLM (196B language backbone + 1.8B vision encoder), native in transformers (`model_type` `step3p7`, text config `step3p5`; no remote code). 45 text layers interleave 12 full-attention and 33 sliding-window layers, every head carries a sigmoid attention gate, and a 288-expert sigmoid-routed MoE carries most of the parameters.
 
-| | EP | CP | TP | ETP | PP | FSDP2 |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| Step-3.7 Flash | Yes | **No** | **No** | Yes | — ¹ | Yes |
-
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism takes the text tower only: a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and stage boundaries land on the period-4 `layer_types` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -19,7 +15,7 @@
 
     Layers 43–44 clamp the routed SwiGLU at 7 (`swiglu_limits`, applied **after** the activation) and the shared expert at 16 (`swiglu_limits_shared`); every other layer runs unclamped.
 
-- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata.
+- **MTP** — the checkpoint ships 3 MTP tail layers (indices 45–47); transformers never builds them (their keys are ignored on load), so every export ships without them. The config field `num_nextn_predict_layers: 3` survives as metadata, so vLLM and `generate(use_mtp=True)` refuse an export, and each draft layer owns its head with attention widths that differ from the trunk's layers, so `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
 
 ## Checkpoint
 
@@ -33,11 +29,11 @@ The EP SFT round-trip test pins the on-disk keys against a plain `save_pretraine
 
 Nothing restores that layout from a module-spelled file: `scripts/after_training/unfuse_moe_experts.py` refuses the family (its hub layout stores no per-expert tensors), and a transformers load + `save_pretrained` of a module-layout source reverts nothing (the load consumed no conversions). Sharded EP saves (`save_sharded_ep: true`) are refused for the family for the same reason: the offline merge streams key by key and cannot apply the revert.
 
-The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. The serving engines have no `step3p7` config class (vLLM 0.26.0 ships transformers 5.14) and read the family only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
+The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. vLLM 0.32.0 cannot serve the family through transformers' native `step3p7` config class (its config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it) and reads it only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
 
-transformers 5.16 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
+transformers 5.20 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
 
-The family therefore declares `_EXPORTS_SOURCE_CONFIG_SCHEMA`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
+The family spec therefore declares `exports_source_config_schema`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
 
 A source that itself declares no `auto_map` (a synthetic checkpoint) has no schema to hand on; the export says so and keeps the native one.
 
@@ -47,21 +43,21 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 
 Train with `trust_remote_code: false` (the default). The repo's `auto_map` names remote-code config, processor and modeling classes for the serving engines; trusting it makes `AutoConfig` return the remote config, which the native class cannot build from (`StepRoboticsVisionEncoderConfig` has no `hidden_size`).
 
-The repo ships no native processor config (`processor_config.json` / `preprocessor_config.json`; its only processor is remote code), so a text run takes the native `AutoTokenizer` as its processing class ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). It carries the chat template: `<|im_start|>`/`<|im_end|>` roles, a `reasoning_effort` template variable, and a generation prompt that forces `<think>`. An image-data run requires the native `Step3p7Processor` and stops at its load unless a processor config sits beside the checkpoint. `tests/cpu/models/test_run_processing_class.py` pins that choice on a tiny checkpoint — the tokenizer for a text run without a processor config, the refusal for an image run without one, `Step3p7Processor` for either run with one — but no test trains on image data.
+The repo ships no native processor config (`processor_config.json` / `preprocessor_config.json`; its only processor is remote code), so a text run takes the native `AutoTokenizer` as its processing class ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). It carries the chat template: `<|im_start|>`/`<|im_end|>` roles, a `reasoning_effort` template variable, and a generation prompt that forces `<think>`. An image-data run requires the native `Step3p7Processor` and stops at its load unless a processor config sits beside the checkpoint. `tests/cpu/model_loading/test_run_processing_class.py` pins that choice on a tiny checkpoint — the tokenizer for a text run without a processor config, the refusal for an image run without one, `Step3p7Processor` for either run with one — but no test trains on image data.
 
 Two tokenizer facts to hold:
 
 - `tokenizer_config.json` pins `model_max_length` 131072 while the model accepts 262144; set `max_length` explicitly for runs past 128k.
 - The 128896-row embedding is deliberately wider than the 128815-entry tokenizer, so do not resize.
 
-## EP wrapper
+## EP layer
 
-`EPStep3p7MoELayer` (`src/distributed/expert_parallel/layers/step3p7.py`) replaces `Step3p7SparseMoeBlock`.
+`EPStep3p7MoELayer` (`halo/distributed/expert_parallel/families/step3p7.py`) replaces `Step3p7SparseMoeBlock`.
 
 - Routing: fp32 sigmoid scores plus `gate.e_score_correction_bias` on **selection only**, plain top-8 (no group limiting); the combine weights are the unbiased scores renormalized, with the block's `routed_scaling_factor` folded into them (equivalent — the combine is linear in the expert outputs).
 - Experts: fused `Step3p7Experts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. Unclamped layers take the base fused-SiLU combine.
 
-    The clamped layers run a fused Triton **post-activation** clamped SwiGLU: SiLU first, then clamp the activated gate (`fused_silu_then_clamp_mul`, `src/kernels/fused_glu.py`; the bound is a runtime kernel argument, so per-layer limits share one kernel). It is the mirror of DeepSeek-V4/GLM-5's pre-activation clamp and not interchangeable with it.
+    The clamped layers run a fused Triton **post-activation** clamped SwiGLU: SiLU first, then clamp the activated gate (`GluCombine.clamped_silu(limit, clamp_activated=True)`, logged as `glu_combine=silu_then_clamp`, `halo/kernels/fused_glu.py`; the bound is a runtime kernel argument, so per-layer limits share one kernel). It is the mirror of DeepSeek-V4/GLM-5's pre-activation clamp and not interchangeable with it.
 
 - Shared expert: the block's own `Step3p7MLP`, adopted by reference (it carries its own `swiglu_limits_shared` clamp), added after DeepEP combine. The 3 dense leading layers keep their plain MLP — EP swaps MoE blocks only.
 
@@ -69,33 +65,37 @@ ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves
 
 EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (the top-level prefix renames, `moe.*` → `mlp.*`, the two-source `moe.gate_proj + moe.up_proj → gate_up_proj` concatenate, the Step-3.5 vision tower's own chunked, RoPE-permuted `in_proj`).
 
-The lazy loaders replay transformers' `step3p7` and `step3p5_vision` conversions per key (`_HUB_CONVERSION_KEYS`; the vision entries scoped under the tower's module path, as transformers scopes them) while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
+The lazy loaders plan their keys on transformers' `step3p7` and `step3p5_vision` conversions, as `from_pretrained` does (the vision entries scoped under the tower's module path), while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
 
 There is no full-model host residency at 198B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~398 GB of page cache node-wide at ep8 (the checkpoint minus the MTP tail, shared by the 8 ranks), up to ~65 GB of file-backed RSS per rank while its shard handles are open. The fan-in's 2× transient (~0.8 GB per layer) is on the GPU.
 
 ## Serving for GRPO (vLLM)
 
-Online and async GRPO sync into vLLM 0.26.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any name it does not map.
+Online and async GRPO sync into vLLM 0.32.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any language-model name it does not map (an unmapped vision name raises).
 
 The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 
-`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server. Serve the hub repo or a toolkit export directly, and note:
+`tests/cpu/grpo/test_weight_sync_hub_namespace.py` pins the two against `save_pretrained`; `tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py` proves the server's logprobs follow the trainer's, per weight group, on a live server serving a tiny hub-layout checkpoint, with no training loop. On the release at EP=2 against a TP=2 server, an unchanged push forwards 1,378 tensors and moves no served log-prob on 2,010 positions. Serve the hub repo or a toolkit export directly, and note:
 
-- `--trust-remote-code` — the vLLM image's transformers has no native `step3p7`; the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
-- `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `FusedMoE`, which the patch already excludes from the reload lifecycle.
-- The router's selection bias (`moe.router_bias`) is a buffer and the sync ships parameters only: it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
+- At the release shape (288 experts × 1280 × 4096) one MoE layer gathers 8.44 GiB, its hub split copies 5.63 GiB beside that, and each 2.81 GiB stack rides alone through its snapshot and send buffer: about 19.7 GiB on the forwarding GPU at the peak (calculated). On the release a sync adds 18 GiB at EP=2 and 16 GiB at EP=4 on that GPU, read by a 2 s sampler. `fp32_non_ep_params` takes the held vision q/k/v past the 1 GiB bound on held dense tensors, so the first push raises at that bound, naming `HALO_WEIGHT_SYNC_CHUNK_MB`, and passes at `HALO_WEIGHT_SYNC_CHUNK_MB=1536`. At EP=4 on 4 GPUs the release takes one async step of expert LoRA at a 140 GiB peak on the forwarding GPU, and a full fine-tune runs out of memory at its first optimizer step.
+
+- `--trust-remote-code` (`VLLM_TRUST_REMOTE_CODE=1` under compose) — vLLM cannot parse transformers' native `step3p7` config, so the composite config is the repo's own `configuration_step3p7.py` (the text tower resolves to vLLM's `step3p5`). A toolkit export ships that module and the ones it imports itself ([Checkpoint](#checkpoint)), so it needs the same flag and nothing else.
+- `--moe-backend triton` and the layerwise-reload patch, as for every MoE family ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)); the experts are a `RoutedExperts`, which the patch already excludes from the reload lifecycle.
+- The router's selection bias (`moe.router_bias`) is a buffer the sync does not ship (the family declares no `engine_loaded_buffers`): it stays at its checkpoint value on both sides, which is exact because weight-sync RL runs `moe_balancing: none` (bias-update balancing is downgraded before any bias state exists).
 - vLLM's clamped fused-MoE kernel accepts `swiglu_limits` of exactly 7 (the release value); any other clamp fails at server start, not silently.
 - SGLang is refused for the family at construction: `Step3p5ForCausalLM.load_weights` asserts full parameter coverage in each call, which the chunked online update cannot satisfy ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 ## Router balancing
 
-The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP wrappers `moe_balancing: auto` therefore resolves to `bias_update`: [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
+The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP layers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes on it.
 
-On the wrapper-less tree (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
+On a tree with no EP layer (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
 
 ## Attention
 
 Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself).
+
+On CUDA the model is then built as `sdpa_flex_sliding` ([Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa)): the 33 sliding layers, and the 12 full layers on packed or padded rows, run compiled FlexAttention under a block mask of the dense mask, skipping the tiles outside the window and across documents that SDPA computes. A full layer over one unpadded document keeps SDPA's causal kernel. The load-time warm-up compiles each layer type's own head count (64 full, 96 sliding). Because it compiles without deterministic mode, a run at world size > 1 refuses `full_determinism` ([Troubleshooting](../reference/troubleshooting.md)). `HALO_FLEX_SLIDING=0` keeps plain SDPA, which takes it.
 
 ## Limitations
 
@@ -107,8 +107,8 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 ## Configs
 
-| Config | Topology | Notes |
-|---|---|---|
-| `examples/sft/step3p7/step-3.7-flash-ultrachat-ep-lora.yaml` | EP=8, 1×8 | LoRA + expert-LoRA — the single-node shape with headroom (~65 GB static of a 288 GB Blackwell card, expected); full FT at ep8 is ~190 GB of experts at 8 B/param, ~213 GB static — marginal and unmeasured |
+`examples/sft/step3p7/step-3.7-flash-ultrachat-ep-lora.yaml` trains LoRA + expert-LoRA at EP=8 on one
+8-GPU node, the single-node shape with headroom (~65 GB static of a 288 GB Blackwell card, expected).
+Full fine-tuning at ep8 is ~190 GB of experts at 8 B/param, ~213 GB static: marginal and unmeasured.
 
 The config points `model_name_or_path` at the hub repo directly (bf16 release). Full fine-tuning takes cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

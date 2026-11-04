@@ -1,24 +1,19 @@
 #!/usr/bin/env python
 """Every trainer writes its card through the checkpointing mixin, which adds the Halo Hub tag.
-
-``CheckpointingMixin.create_model_card`` unions the tag into the ``tags`` keyword and hands off to the
-library writer behind it. A trainer class, or a base ahead of the mixin, that defines its own writer
-drops the tag; a library writer that stops taking ``tags`` as a keyword breaks the hand-off.
-
-    python tests/cpu/trainers/test_trainer_card_tags.py
+A trainer, or a base ahead of the mixin, that defines its own writer drops the tag.
 """
 
 import inspect
 
 import pytest
 
-from src.trainers.mixins.checkpointing import CheckpointingMixin
+from halo.trainers.checkpointing import CheckpointingMixin
 from tests.common.rosters import distributed_trainer_classes
 
 _WRITER = "create_model_card"
 _KEYWORD_KINDS = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
 
-# Derived from the class hierarchy, not listed: a new trainer joins by existing.
+# Derived from the class hierarchy, so a new trainer joins by existing.
 TRAINERS = distributed_trainer_classes()
 
 
@@ -27,10 +22,10 @@ def _writer_owner(classes) -> type:
 
 
 def test_the_derived_roster_covers_every_trainer():
-    """Anti-vacuity: a roster that stopped finding trainers would make the check below assert nothing."""
+    """A roster that stopped finding trainers would make the check below assert nothing."""
     names = {cls.__name__ for cls in TRAINERS}
     assert len(names) >= 13, f"the roster collapsed to {sorted(names)}"
-    assert {"DistributedSFTTrainer", "SmoothMarginPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
+    assert {"DistributedSFTTrainer", "SMPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
 
 
 @pytest.mark.parametrize("trainer", TRAINERS, ids=lambda cls: cls.__name__)

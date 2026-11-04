@@ -1,20 +1,17 @@
 #!/usr/bin/env python
-"""Tests for RLRR relative-reward shaping (arXiv:2601.23058).
-
-Run: python tests/cpu/grpo/test_relative_rewards.py
-"""
+"""RLRR relative-reward shaping (arXiv:2601.23058)."""
 
 import math
 
 import numpy as np
 import pytest
 
-from src.args.mixins import RLRRConfig
-from src.trainers.grpo.objective.relative_rewards import (
+from halo.configs.grpo import RLRRConfig
+from halo.trainers.grpo.objective.relative_rewards import (
     dense_ranks,
     hierarchical_ranks,
-    relative_advantages,
-    relative_advantages_grouped,
+    rlrr_advantages,
+    rlrr_advantages_grouped,
     shape_rewards,
 )
 
@@ -30,7 +27,7 @@ def test_dense_ranks_ties_share_rank():
     keys = [(0,), (0,), (1,)]
     ranks = dense_ranks(keys)
     assert list(ranks) == [1, 1, 2], list(ranks)
-    assert ranks.max() == 2  # number of distinct keys
+    assert ranks.max() == 2
 
 
 def test_rerank_correct_outranks_incorrect():
@@ -48,7 +45,6 @@ def test_rerank_shorter_correct_ranks_higher():
 
 def test_rerank_reward_breaks_remaining_ties():
     cfg = RLRRConfig(lam=1000.0)
-    # same length bin -> reward is the only remaining key
     ranks = hierarchical_ranks(rewards=[0.2, 0.9], correct=[True, True], lengths=[10, 10], config=cfg)
     assert ranks[1] < ranks[0], ranks
 
@@ -104,47 +100,46 @@ def test_prr_single_rank_degenerate():
 
 def test_advantage_centered_zero_mean():
     cfg = RLRRConfig(mode="prr", correctness_clip=False, correctness_threshold=0.0)
-    adv = relative_advantages([0.1, 0.5, 0.9], cfg)
+    adv = rlrr_advantages([0.1, 0.5, 0.9], cfg)
     assert abs(adv.mean()) < 1e-9, adv
 
 
 def test_all_correct_group_still_has_signal():
     # The RLRR property: zero binary-reward variance, yet length re-ranking still yields signal.
     cfg = RLRRConfig(mode="hrr", lam=100.0, correctness_clip=False)
-    adv = relative_advantages(
+    adv = rlrr_advantages(
         [1.0, 1.0, 1.0],
         cfg,
-        lengths=[10, 300, 600],  # distinct length bins -> distinct ranks
+        lengths=[10, 300, 600],
     )
     assert adv.std() > 0, adv
     assert adv[0] > adv[1] > adv[2], adv
 
 
 def test_truly_identical_group_zero_advantage():
-    # Tied rank must stay at zero advantage — the flip side of the test above (no fabricated signal).
     cfg = RLRRConfig(mode="hrr", lam=100.0, correctness_clip=False)
-    adv = relative_advantages([1.0, 1.0, 1.0], cfg, lengths=[10, 10, 10])
+    adv = rlrr_advantages([1.0, 1.0, 1.0], cfg, lengths=[10, 10, 10])
     assert np.allclose(adv, 0.0), adv
 
 
 def test_correctness_clip_floors_correct():
     # A last-ranked correct response earns a negative raw advantage; the clip floors it at xi_neg.
     cfg = RLRRConfig(mode="prr", xi_neg=-1e-3, xi_pos=1e-3, correctness_threshold=0.0)
-    adv = relative_advantages([0.0, 1.0, 1.0, 1.0], cfg)
+    adv = rlrr_advantages([0.0, 1.0, 1.0, 1.0], cfg)
     assert (adv >= -1e-3 - 1e-12).all(), adv
 
 
 def test_correctness_clip_caps_incorrect():
     cfg = RLRRConfig(mode="prr", xi_neg=-1e-3, xi_pos=1e-3, correctness_threshold=10.0)
     # idx 0 is incorrect yet best-ranked, so its raw advantage is positive; the cap holds it at xi_pos.
-    adv = relative_advantages([9.0, 0.0, 0.0, 0.0], cfg)
+    adv = rlrr_advantages([9.0, 0.0, 0.0, 0.0], cfg)
     assert (adv <= 1e-3 + 1e-12).all(), adv
 
 
 def test_correctness_clip_mixed_group():
     cfg = RLRRConfig(mode="hrr", tau=0.1, xi_neg=-1e-3, xi_pos=1e-3)
     # rewards straddle the 0.5 threshold: the first two are correct, the last two are not.
-    adv = relative_advantages([1.0, 1.0, 0.0, 0.0], cfg, lengths=[10, 20, 30, 40])
+    adv = rlrr_advantages([1.0, 1.0, 0.0, 0.0], cfg, lengths=[10, 20, 30, 40])
     adv = np.asarray(adv)
     assert (adv[:2] >= -1e-3 - 1e-12).all(), adv
     assert (adv[2:] <= 1e-3 + 1e-12).all(), adv
@@ -154,8 +149,8 @@ def test_std_normalize_scales():
     cfg_raw = RLRRConfig(mode="prr", std_normalize=False, correctness_clip=False, correctness_threshold=0.0)
     cfg_std = RLRRConfig(mode="prr", std_normalize=True, correctness_clip=False, correctness_threshold=0.0)
     rewards = [0.1, 0.4, 0.6, 0.9]
-    a_raw = relative_advantages(rewards, cfg_raw)
-    a_std = relative_advantages(rewards, cfg_std)
+    a_raw = rlrr_advantages(rewards, cfg_raw)
+    a_std = rlrr_advantages(rewards, cfg_std)
     # 0.2 slack: 4 discrete ranks give a sample std only approximately 1.
     assert abs(a_std.std() - 1.0) < 0.2, a_std.std()
     assert not np.allclose(a_raw, a_std)
@@ -163,8 +158,7 @@ def test_std_normalize_scales():
 
 def test_correctness_from_threshold():
     cfg = RLRRConfig(mode="hrr", correctness_threshold=0.5, correctness_clip=True)
-    # No explicit `correct` labels: the first two must be inferred correct from the 0.5 threshold.
-    adv = relative_advantages([0.9, 0.8, 0.2, 0.1], cfg)
+    adv = rlrr_advantages([0.9, 0.8, 0.2, 0.1], cfg)
     adv = np.asarray(adv)
     assert (adv[:2] >= -1e-3 - 1e-12).all(), adv
     assert (adv[2:] <= 1e-3 + 1e-12).all(), adv
@@ -174,9 +168,9 @@ def test_grouped_matches_per_group():
     cfg = RLRRConfig(mode="hrr", lam=100.0)
     rewards = [1.0, 1.0, 0.0, 0.0, 1.0, 1.0]
     lengths = [10, 200, 5, 5, 50, 50]
-    flat = relative_advantages_grouped(rewards, group_size=2, config=cfg, lengths=lengths)
-    g0 = relative_advantages(rewards[:2], cfg, lengths=lengths[:2])
-    g2 = relative_advantages(rewards[4:], cfg, lengths=lengths[4:])
+    flat = rlrr_advantages_grouped(rewards, group_size=2, config=cfg, lengths=lengths)
+    g0 = rlrr_advantages(rewards[:2], cfg, lengths=lengths[:2])
+    g2 = rlrr_advantages(rewards[4:], cfg, lengths=lengths[4:])
     assert np.allclose(flat[:2], g0), (flat[:2], g0)
     assert np.allclose(flat[4:], g2), (flat[4:], g2)
 
@@ -184,7 +178,7 @@ def test_grouped_matches_per_group():
 def test_grouped_rejects_bad_size():
     cfg = RLRRConfig()
     try:
-        relative_advantages_grouped([1.0, 2.0, 3.0], group_size=2, config=cfg)
+        rlrr_advantages_grouped([1.0, 2.0, 3.0], group_size=2, config=cfg)
     except ValueError:
         return
     raise AssertionError("expected ValueError for indivisible group size")

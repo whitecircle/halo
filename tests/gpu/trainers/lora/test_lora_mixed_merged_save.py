@@ -1,39 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: merge_expert_lora_on_save gives a MIXED attention+expert LoRA run a SERVABLE checkpoint.
+"""``merge_expert_lora_on_save`` gives a mixed attention+expert LoRA run a servable checkpoint.
 
-A mixed run trains two adapter kinds at once: stock PEFT on the attention projections, and native
-grouped LoRA on the EP experts (grouped ``[E, K, r]`` tensors PEFT cannot wrap). Its adapter-only
-save is resume-only — no merge tool folds it, because ``PeftModel.merge_and_unload`` drops every
-expert delta. ``merge_expert_lora_on_save`` therefore routes the write through
-``save_ep_checkpoint``, which folds BOTH halves: the expert deltas inside each family's gather,
-and the attention deltas into each base tensor as it is written, out of place.
-
-Each check fails when a piece of that wiring breaks:
-
-  1. The run is genuinely mixed — a PeftModel AND native expert adapters. Everything below is
-     vacuous otherwise.
-  2. Both halves are live: disabling the adapters moves the logits by a measurable amount. Without
-     this, check 4 would also pass against a base-quality checkpoint.
-  3. Key hygiene: the merged checkpoint carries no ``base_model.`` prefix, no ``.base_layer`` infix,
-     no ``lora_`` tensor and no ``original_module`` duplicate. A leaked PEFT prefix is exactly what
-     makes ``from_pretrained`` load nothing and leave those weights randomly initialised.
-  4. Value correctness: the tensors on disk are the base plus the delta as PEFT's merge adds it
-     (``w += delta``, computed here from the live adapters), bit for bit. The base is compared too, to
-     prove the merge moved something and the check is not vacuous.
-  5. The save is non-destructive: every LoRA-wrapped base weight and every adapter is bit-identical
-     afterwards, and the adapters are still trainable — so an intermediate merged checkpoint does not
-     silently end the run's training.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_mixed_merged_save.py
-
-Requirements:
-    - 2x GPUs (>=80GB), DeepEP installed. Model: unsloth/gpt-oss-20b-BF16 by default.
-    - Scratch for one merged checkpoint (~model size) — TMPDIR must point at the large volume.
-    - HALO_TEST_MODEL / HALO_TEST_REVISION / HALO_TEST_ATTN / HALO_TEST_EP / HALO_TEST_GC sweep the
-      other MoE families, whose expert storage layouts and export renames differ.
+``PeftModel.merge_and_unload`` drops every expert delta, so the save routes through ``save_ep_gathered_checkpoint``,
+which folds both halves. A leaked PEFT prefix makes ``from_pretrained`` load nothing and leave those weights randomly
+initialized. Needs scratch for one merged checkpoint, so TMPDIR must point at the large volume.
 """
 
 import glob
@@ -45,52 +15,45 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors import safe_open
 from trl import SFTConfig
 
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_flag, env_int, env_str
-from src.models.structure import normalize_peft_param_name
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_flag, env_int, env_str
+from halo.models.unwrapping import find_peft_model, plain_peft_param_name
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import load_peft_model
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import lora_bases_and_merges
 
-# Model/attn/EP are env-overridable exactly as in test_lora_ep_experts.py, so one file sweeps the
-# other MoE storage layouts (fused-GLU, separate-GLU, per-expert-unfused) and the ep1 grouped-GEMM
-# shape without a copy: each family's own gather_expert_state_dict does the fold, so the assertions
-# below are family-agnostic. Default flex_attention keeps GptOss sinks live (the FA2 path sets
-# self_attn.sinks=None, which the save then re-emits neutralized — a different tensor set).
+# One file sweeps the other MoE storage layouts: each family's gather_expert_state_dict does the fold, so the
+# assertions are family-agnostic. Default flex_attention keeps GptOss sinks live (the FA2 path sets
+# self_attn.sinks=None, which the save re-emits neutralized, a different tensor set).
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 MODEL_REVISION = env_str("HALO_TEST_REVISION") or None
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "flex_attention")
 EP_SIZE = env_int("HALO_TEST_EP", 2)
-# Zaya rejects EP + gradient checkpointing (its cross-layer EDA/CCA state recurses under recompute),
-# so the sweep turns it off for that family rather than skipping the family.
+# Zaya rejects EP + gradient checkpointing (its cross-layer EDA/CCA state recurses under recompute).
 GRADIENT_CHECKPOINTING = env_flag("HALO_TEST_GC", default=True)
 MAX_STEPS = 3
 MAX_SEQ_LENGTH = 512
-LEARNING_RATE = 1e-3  # large so both adapter halves move clearly in 3 steps
+LEARNING_RATE = 1e-3  # Large so both adapter halves move clearly in 3 steps.
 SEED = 42
 PROBE_TOKENS = 64
 
-# Tensor-name fragments that must not survive into a servable checkpoint. Each is a distinct failure:
-# a PEFT wrapper level, a LoRA-wrapped module's base weight, an adapter tensor, and the frozen
+# Each is a distinct failure: a PEFT wrapper level, a LoRA-wrapped base weight, an adapter tensor, and the frozen
 # duplicate PEFT keeps beside a modules_to_save copy.
 _PEFT_KEY_ARTIFACTS = ("base_model.", ".base_layer", "lora_A", "lora_B", "original_module", "modules_to_save")
 
-# Below this the adapters did not move enough in MAX_STEPS for anything downstream to be meaningful.
 _MIN_ADAPTER_EFFECT = 1e-2
 
 
 def _probe_batch(tokenizer, device):
-    """A fixed, rank-identical batch. Every rank runs the same forward, so the EP dispatch
-    collectives stay aligned and each rank computes the same logits."""
+    """Rank-identical, so the EP dispatch collectives stay aligned and each rank computes the same logits."""
     text = "The capital of France is Paris, and the capital of Japan is Tokyo. " * 8
     ids = tokenizer(text, return_tensors="pt", truncation=True, max_length=PROBE_TOKENS)
     return {k: v.to(device) for k, v in ids.items()}
@@ -107,12 +70,8 @@ def _logits(model, batch):
 
 
 def _weight_snapshot(model) -> dict[str, torch.Tensor]:
-    """Local-shard copies of what ``merge_adapter`` touches (LoRA-wrapped base weights) and what it
-    must leave alone (every adapter tensor, PEFT and native alike).
-
-    ``to_local()`` rather than ``full_tensor()``: the comparison only needs each rank's own view, and
-    a gather here would inject collectives around the save the production path does not have.
-    """
+    """Local-shard copies of LoRA-wrapped base weights and every adapter. ``to_local()``: a gather would inject
+    collectives around the save the production path does not have."""
     snapshot = {}
     for name, param in model.named_parameters():
         if ".base_layer." not in name and "lora_" not in name:
@@ -123,8 +82,7 @@ def _weight_snapshot(model) -> dict[str, torch.Tensor]:
 
 
 def _checkpoint_keys(checkpoint_dir: str) -> list[str]:
-    """Every tensor name in the checkpoint, from the index when there is one (same reason as
-    :func:`_read_checkpoint_tensors`: no per-shard walk after the last collective)."""
+    """From the index when there is one, for the reason in :func:`_read_checkpoint_tensors`."""
     index_path = os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)
     if os.path.isfile(index_path):
         with open(index_path) as fh:
@@ -137,13 +95,8 @@ def _checkpoint_keys(checkpoint_dir: str) -> list[str]:
 
 
 def _read_checkpoint_tensors(checkpoint_dir: str, wanted: list[str]) -> dict[str, torch.Tensor]:
-    """Read just ``wanted`` from the checkpoint, via the index rather than by scanning every shard.
-
-    Scanning matters: at 60 GB across 16 shards this runs on both ranks after the last collective,
-    and DeepEP's ElasticBuffer carries a 100 s GPU-side timeout — the first rank to reach teardown's
-    destroy barrier waits out that timeout for its peer and the job aborts. The index makes the read
-    O(files actually holding a wanted key), which is one or two.
-    """
+    """Read via the index: at 60 GB across 16 shards a scan runs on both ranks after the last collective, and DeepEP's
+    100 s GPU-side timeout aborts the job when the first rank at teardown's destroy barrier waits out its peer."""
     index_path = os.path.join(checkpoint_dir, SAFETENSORS_INDEX_FILE)
     if os.path.isfile(index_path):
         with open(index_path) as fh:
@@ -153,7 +106,7 @@ def _read_checkpoint_tensors(checkpoint_dir: str, wanted: list[str]) -> dict[str
             if key in weight_map:
                 by_file.setdefault(weight_map[key], []).append(key)
         shards = {os.path.join(checkpoint_dir, name): keys for name, keys in by_file.items()}
-    else:  # single-file checkpoint (small model): one shard holds everything
+    else:  # Single-file checkpoint: one shard holds everything.
         shards = {path: list(wanted) for path in glob.glob(os.path.join(checkpoint_dir, "*.safetensors"))}
 
     found: dict[str, torch.Tensor] = {}
@@ -165,16 +118,11 @@ def _read_checkpoint_tensors(checkpoint_dir: str, wanted: list[str]) -> dict[str
 
 
 def _sample_merged_weights(model, checkpoint_keys: list[str]) -> dict[str, torch.Tensor]:
-    """Full tensors for ``checkpoint_keys``, read off the live model under its CHECKPOINT names.
-
-    The live tree spells them with PEFT's ``.base_layer`` infix and, at ep>1, holds them as FSDP2
-    DTensor shards — so this resolves both through the very seams the save uses
-    (``normalize_peft_param_name`` + ``full_tensor()``), which is what makes an equality comparison
-    against the written bytes meaningful rather than a coincidence of naming.
-    """
+    """Full tensors under checkpoint names, resolved through the seams the save uses (``plain_peft_param_name`` +
+    ``full_tensor()``): the live tree has PEFT's ``.base_layer`` infix and, at ep>1, FSDP2 DTensor shards."""
     out: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
-        hf_name = normalize_peft_param_name(name, model.prefix)
+        hf_name = plain_peft_param_name(name, model.prefix)
         if hf_name not in checkpoint_keys:
             continue
         data = param.data
@@ -184,14 +132,10 @@ def _sample_merged_weights(model, checkpoint_keys: list[str]) -> dict[str, torch
 
 
 def _pick_sample_keys(model) -> list[str]:
-    """Checkpoint names of a few LoRA-wrapped weights, chosen from what the model actually adapted.
-
-    Derived from the live tree rather than hardcoded module names, so this holds for any family
-    whose projections the run targets. ``named_parameters()`` order is deterministic and identical
-    on every rank, which is what lets the gather below stay collective-safe.
-    """
+    """Checkpoint names of a few LoRA-wrapped weights. ``named_parameters()`` order is identical on every rank, which
+    keeps the gather below collective-safe."""
     picked = [
-        normalize_peft_param_name(name, model.prefix)
+        plain_peft_param_name(name, model.prefix)
         for name, _ in model.named_parameters()
         if ".base_layer.weight" in name
     ]
@@ -238,7 +182,6 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,
@@ -251,9 +194,9 @@ def run(ctx) -> dict:
 
     unwrapped = extract_model_from_parallel(trainer.model, recursive=True)
     peft_model = find_peft_model(unwrapped)
-    # 1. Both adapter kinds must exist, or every assertion below is about a run that is not mixed.
-    checks["run_is_mixed"] = peft_model is not None and has_ep_lora(unwrapped)
-    log(f"  peft_model={peft_model is not None}, native expert adapters={has_ep_lora(unwrapped)}")
+    # Every assertion below is vacuous unless both adapter kinds exist.
+    checks["run_is_mixed"] = peft_model is not None and model_has_expert_lora(unwrapped)
+    log(f"  peft_model={peft_model is not None}, native expert adapters={model_has_expert_lora(unwrapped)}")
 
     log(f"\n[2/5] Training {MAX_STEPS} steps...")
     trainer.train()
@@ -261,43 +204,37 @@ def run(ctx) -> dict:
     device = next(trainer.model.parameters()).device
     batch = _probe_batch(tokenizer, device)
     trained_logits = _logits(trainer.model, batch)
-    # 2. Adapters off (EP-aware: make_disable_adapter_ep_aware drops the expert half too).
+    # EP-aware: install_ep_aware_disable_adapter drops the expert half too.
     with peft_model.disable_adapter():
         base_logits = _logits(trainer.model, batch)
     adapter_effect = (trained_logits - base_logits).abs().max().item()
     checks["adapters_changed_the_model"] = adapter_effect > _MIN_ADAPTER_EFFECT
     log(f"  adapter effect on logits: {adapter_effect:.4g} (floor {_MIN_ADAPTER_EFFECT})")
 
-    # The probe forwards above left the FSDP2 modules holding their transient unsharded params;
-    # the save reshards before it reads, so everything sampled or snapshotted below must read
-    # the same resharded tensors — else the before/after comparison spans two registrations.
+    # The probe forwards left transient unsharded params and the save reshards before it reads, so everything sampled
+    # below must read the same resharded tensors.
     reshard_fsdp2_modules(unwrapped)
 
-    # Everything that needs a collective happens HERE, before the save. After it, the checks are
-    # local reads and file I/O only — so a failure on one rank reports itself instead of leaving
-    # its peer parked in a gather that will never complete.
+    # Every collective happens before the save. After it only local reads and file I/O remain, so a failure on one rank
+    # reports itself instead of leaving its peer parked in a gather.
     sample_keys = _pick_sample_keys(unwrapped)
     _bases, merges = lora_bases_and_merges(peft_model)
-    # What the save must write: the base plus the delta, as PEFT's merge adds it.
     expected = {
         key: merges[name].to(torch.bfloat16).cpu()
         for name in merges
-        if (key := normalize_peft_param_name(name, peft_model.prefix)) in sample_keys
+        if (key := plain_peft_param_name(name, peft_model.prefix)) in sample_keys
     }
     del merges
-    unmerged = _sample_merged_weights(unwrapped, sample_keys)  # the frozen base, for non-vacuity
-    # The LoRA-wrapped base weights and the adapters, which the save must not write.
+    unmerged = _sample_merged_weights(unwrapped, sample_keys)  # The frozen base, for non-vacuity.
     before = _weight_snapshot(unwrapped)
 
     log("\n[3/5] Saving merged checkpoint (both halves folded)...")
-    # No barrier after this: save_ep_model ends on DeferredRankFailure.reject(), a collective, so
-    # the ranks are already in step.
+    # No barrier: the gathered EP save ends on DeferredRankFailure.reject(), a collective.
     trainer.save_model(merged_dir)
 
-    # 5. Asserted on the weights rather than on a second forward: it is the direct statement of the
-    # invariant, and a post-save EP forward would add a DeepEP dispatch minutes after the previous
-    # one, which the NVLink barrier can time out on. Bit-identical, base weights included: a bf16
-    # merge undone by an unmerge, (w+d)-d, misses w by a rounding step.
+    # Asserted on the weights: a post-save EP forward would add a DeepEP dispatch minutes after the previous one, which
+    # the NVLink barrier can time out on. Bit-identical, since an unmerge's (w+d)-d misses w by a rounding step in
+    # bf16.
     after = _weight_snapshot(unwrapped)
     changed = sorted(k for k, v in after.items() if not torch.equal(v, before[k]))
     checks["save_left_weights_unchanged"] = not changed
@@ -307,10 +244,7 @@ def run(ctx) -> dict:
         f"adapters trainable={checks['adapters_still_trainable']}"
     )
 
-    # Both ranks run the remaining checks, on the same shared-FS directory and on their own
-    # (identical) view of the model. Deliberately symmetric: a rank-0-only block would need the
-    # verdict broadcast back, adding cross-rank machinery to the assertions rather than to the
-    # code under test — and leaving the peer parked in that collective while rank 0 works.
+    # Both ranks run the rest: a rank-0-only block would leave the peer parked in a verdict broadcast.
     log("\n[4/5] Checking merged checkpoint key hygiene...")
     keys = _checkpoint_keys(merged_dir)
     offenders = sorted({a for a in _PEFT_KEY_ARTIFACTS if any(a in k for k in keys)})
@@ -320,16 +254,15 @@ def run(ctx) -> dict:
     log("\n[5/5] Comparing the written tensors against the live MERGED weights...")
     written = _read_checkpoint_tensors(merged_dir, sample_keys)
 
-    # Bitwise: `expected` is the same base plus the same delta the save folds. A key absent from the
-    # checkpoint counts as a mismatch, not a KeyError — "the save dropped it" is one of the failures
-    # this catches.
+    # Bitwise. A key absent from the checkpoint counts as a mismatch, since the save dropping it is one of the
+    # failures.
     def _is_the_merged_weight(key: str) -> bool:
         return key in written and torch.equal(written[key], expected[key])
 
     mismatched = sorted(k for k in sample_keys if not _is_the_merged_weight(k))
     checks["written_tensors_are_the_merged_weights"] = bool(sample_keys) and not mismatched
     log(f"  {len(sample_keys)} sampled tensors ({sample_keys[:2]}…), mismatched: {mismatched or 'none'}")
-    # Non-vacuity: an unmerged save would write the frozen base, which is NOT what we compared to.
+    # Non-vacuity: an unmerged save would write the frozen base.
     checks["merge_actually_changed_the_weights"] = any(not torch.equal(unmerged[k], expected[k]) for k in sample_keys)
     log(f"  merge moved at least one sampled tensor: {checks['merge_actually_changed_the_weights']}")
 

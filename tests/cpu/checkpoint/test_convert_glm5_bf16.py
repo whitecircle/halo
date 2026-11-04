@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""``convert_glm5_bf16.py`` must dequantize fp8 blocks exactly and strip only the quant sidecars.
-
-End-to-end on a tiny fake fp8-block checkpoint: every fp8 tensor must come out as the block-wise
-``weight * scale_inv`` product an independent per-block loop computes — including a tail block on a
-non-multiple-of-block dimension — while unquantized tensors keep their STORED dtype (bf16 stays
-bf16, the fp32-strict ones stay fp32). The ``*_scale_inv`` sidecars must be dropped, but the
-hyper-connection ``hc_*_scale`` tensors — real weights whose names also end in "scale" — must
-survive. The emitted ``config.json`` loses exactly its ``quantization_config``. Structural faults
-(an fp8 tensor without its sidecar, a wrong-shaped scale grid, a checkpoint that was never
-quantized) must be refused before the output directory exists.
-
-Run: ``python tests/cpu/checkpoint/test_convert_glm5_bf16.py`` (or ``pytest -m cpu``).
-"""
+"""``convert_glm5_bf16.py`` dequantizes fp8 blocks exactly and strips only the quant sidecars.
+Hyper-connection ``hc_*_scale`` are real weights whose names also end in "scale"."""
 
 from __future__ import annotations
 
@@ -25,38 +14,36 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from scripts.before_training.convert_glm5_bf16 import dequantize_block_fp8, main
+from halo.checkpoint.tools.fp8_dequant import dequantize_block_fp8
+from scripts.before_training.convert_glm5_bf16 import main
 
 _BLOCK = (4, 4)
-# Rows are NOT a multiple of the block (10 = 2 full blocks + a 2-row tail), so the tail block must
-# get its own scale row; columns are an exact multiple.
+# 10 rows = 2 full blocks + a 2-row tail, so the tail needs its own scale row.
 _FP8_KEY = "model.language_model.layers.3.mlp.experts.0.gate_proj.weight"
 _FP8_SHAPE = (10, 8)
 _BF16_KEY = "model.language_model.layers.0.input_layernorm.weight"
-# The family's fp32 pins are transformers' _keep_in_fp32_modules_strict — e_score_correction_bias,
-# conv1d, dt_bias, A_log — so the release stores them fp32 and the conversion must not flatten them.
+# transformers' _keep_in_fp32_modules_strict pins these, so the conversion must not flatten them.
 _FP32_KEY = "model.language_model.layers.3.mlp.gate.e_score_correction_bias"
 _FP32_CONV1D_KEY = "model.language_model.layers.0.self_attn.k_conv1d.weight"
-# The trap: a real hyper-connection weight whose name ends in "scale" — not a quant sidecar.
+# A real hyper-connection weight whose name ends in "scale".
 _HC_SCALE_KEY = "model.language_model.layers.3.hc_attn_scale"
 
 
 def _fp8_weight() -> torch.Tensor:
-    """A deterministic fp8 tensor whose values are exact in e4m3 (halves in [-4, 4))."""
+    """Exact in e4m3 (halves in [-4, 4))."""
     values = (torch.arange(math.prod(_FP8_SHAPE), dtype=torch.float32).reshape(_FP8_SHAPE) % 16 - 8) / 2.0
     return values.to(torch.float8_e4m3fn)
 
 
 def _scale_grid() -> torch.Tensor:
-    """A (3, 2) grid of distinct powers of two; the tail-block row differs from its neighbor, so a
-    dequant that mis-indexes (or never reaches) the tail block cannot pass by accident."""
+    """The tail-block row differs from its neighbor, so a mis-indexed tail cannot pass by accident."""
     grid = torch.tensor([[1.0, 2.0], [0.5, 4.0], [8.0, 0.25]], dtype=torch.float32)
     assert not torch.equal(grid[2], grid[1])
     return grid
 
 
 def _reference_dequant(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Independent per-block loop — the oracle the vectorized implementation is judged against."""
+    """Independent per-block loop, the oracle."""
     rows, cols = weight.shape
     out = torch.empty(rows, cols, dtype=torch.float32)
     for i in range(scale.shape[0]):
@@ -86,7 +73,7 @@ def _write_checkpoint(path, tensors: dict[str, torch.Tensor], *, quantization_co
 
 
 def _default_tensors() -> dict[str, torch.Tensor]:
-    """Deterministic, so a test can rebuild the dict and compare against the converted output."""
+    """Deterministic, so a test can rebuild the dict."""
     return {
         _FP8_KEY: _fp8_weight(),
         _FP8_KEY + "_scale_inv": _scale_grid(),
@@ -104,7 +91,6 @@ def _run(source: str, output_dir: str, monkeypatch) -> None:
 
 @pytest.fixture(scope="module")
 def converted(tmp_path_factory):
-    """One conversion of the tiny fake checkpoint, shared by the read-only assertions."""
     root = tmp_path_factory.mktemp("glm5_convert")
     source = _write_checkpoint(root / "src", _default_tensors())
     output = str(root / "out")
@@ -126,14 +112,13 @@ def _stored(output: str) -> tuple[dict[str, torch.Tensor], dict[str, str]]:
 
 
 def test_block_dequant_matches_the_blockwise_reference(converted):
-    """Exact equality against the independent per-block loop, tail block included — a transposed
-    grid, a swapped expansion axis, or a truncated tail all land off this oracle."""
+    """A transposed grid, swapped axis or truncated tail all land off this oracle."""
     _, output = converted
     tensors, dtypes = _stored(output)
     expected = _reference_dequant(_fp8_weight(), _scale_grid())
     assert dtypes[_FP8_KEY] == "BF16"
     assert torch.equal(tensors[_FP8_KEY], expected)
-    # Anti-vacuity: the tail block really is scaled differently from the block above it.
+    # Anti-vacuity: the tail block is scaled differently.
     assert not torch.equal(expected[8:10], _reference_dequant(_fp8_weight(), _scale_grid()[[0, 1, 1]])[8:10])
 
 
@@ -146,7 +131,6 @@ def test_scale_sidecars_are_dropped_and_hc_scale_tensors_kept(converted):
 
 
 def test_unquantized_tensors_keep_their_stored_dtype(converted):
-    """bf16 stays bf16 and the fp32-strict tensors stay fp32 — no uniform-bf16 flattening."""
     _, output = converted
     tensors, dtypes = _stored(output)
     source_tensors = _default_tensors()
@@ -186,7 +170,7 @@ def test_a_mismatched_scale_grid_is_refused_before_any_write(tmp_path, monkeypat
 
 
 def test_an_unquantized_checkpoint_is_refused(tmp_path, monkeypatch):
-    """Pointing the tool at an already-BF16 checkpoint must refuse, not silently re-shard it."""
+    """It must not silently re-shard an already-BF16 checkpoint."""
     source = _write_checkpoint(tmp_path / "src", {_BF16_KEY: torch.zeros(4, 4)}, quantization_config=None)
     with pytest.raises(ValueError, match="quantization_config"):
         _run(source, str(tmp_path / "out"), monkeypatch)

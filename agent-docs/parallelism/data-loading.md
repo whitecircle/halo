@@ -10,44 +10,35 @@ the *same* batch.
 | TP | Ranks in a TP group get the **same** data | Weights are sharded; all shards need the same activations, combined by AllReduce |
 | CP | Ranks in a CP group get the **same** sequence | The sequence is split across ranks (Ulysses) |
 | Expert TP | Ranks in an expert-TP group get the **same** data | Expert FFN is sharded across the group |
+| PP | The stages of one pipeline chain get the **same** batch | Stage 0 reads its `input_ids`, the last stage its `labels` |
 
 Every rank reads its own copy of the source — a per-node S3 cache, a pre-staged directory, a cached
-hub revision — so the load agrees the rows before any rank trains on them (`src/data/sources/loading.py`).
+hub revision — so the load agrees the rows before any rank trains on them (`halo/data/sources/replica_identity.py`).
 A replicated load compares each split's row count, schema and a digest of 16 evenly spaced rows across
 the world (media columns excluded, decoded or not and at any depth: their stored paths can name a
-node's own cache). A sharded load
-compares every split's `shard_index.json` across the world, and the same row identity among the ranks
-sharing a DP rank — TP/CP/ETP siblings. A disagreement
+node's own cache). A sharded load compares every split's `shard_index.json` across the world, and the
+same row identity among the ranks sharing a DP rank (TP/CP/ETP siblings and pipeline chains). A disagreement
 raises `ValueError` on every rank: the row-identity check names the ranks and nodes holding each
 version, the shard-index check lists each split's distinct digests and rank 0's mapping. Unchecked, a stale
 node trains other rows.
 
 ## Data parallel size
 
-`data_parallel_size` is the number of distinct batches (= unique shards needed):
+`data_parallel_size` is the number of distinct batches (= unique shards needed), derived in
+[Stacking the dimensions](README.md#stacking-the-dimensions) and listed per mode in
+[Supported combinations](README.md#supported-combinations).
 
-```text
-dp_size = world_size / max(tp_size, cp_size, expert_tp_size)
-```
-
-- DDP, EP-only: `dp_size = world_size` (EP is orthogonal)
-- TP-only: `world_size / tp_size`
-- CP-only: `world_size / cp_size`
-- EP+TP: `world_size / tp_size` (only TP reduces DP)
-- EP+CP: `world_size / cp_size` (only CP reduces DP)
-- pure ETP (`ep_size=1`): `world_size / expert_tp_size`
-- EP+ETP (`ep_size>1` AND `expert_tp_size>1`): `world_size / expert_tp_size` (experimental; the expert-TP group is node-local, EP itself may be node-local or cross-node)
-
-Computed once in `ParallelismConfig.__post_init__` (`src/distributed/parallelism_config.py`).
-`get_data_parallel_rank()` derives the shard index per mode — TP/CP take `rank // group_size`,
-expert-TP reads its sub-group membership (strided under node-local
-EP, contiguous under cross-node EP), so partners sharing a dispatch rank process the same batch.
+Computed once in `ParallelismConfig.__post_init__` (`halo/distributed/parallelism_config.py`).
+`get_data_parallel_rank()` derives the shard index from the stage-local rank, so every stage of a
+pipeline chain gets the same one: TP/CP take `rank // group_size`, expert-TP reads its sub-group
+membership (strided under node-local EP, contiguous under cross-node EP), so partners sharing a
+dispatch rank process the same batch.
 
 ## How the DataLoader is built
 
-`DataParallelDataLoaderMixin` (`src/trainers/mixins/dataloader.py`, composed into
-`DistributedTrainerMixin`) takes the custom path when `needs_dp_sharded_loader` sees
-`non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP or ETP) or a
+`DataParallelLoaderMixin` (`halo/trainers/dataloaders.py`, composed into
+`DistributedTrainerMixin`) takes the custom path when `uses_dp_sharded_loader` sees
+`non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP, ETP or PP) or a
 pre-sharded dataset; otherwise (DDP / EP-only / HSDP, not presharded) it uses the base Trainer flow.
 
 On the custom path `_prepare_dataloader()` wraps the loader through Accelerate's
@@ -57,15 +48,32 @@ datasets it passes `num_processes=1` (device placement only) so Accelerate does 
 already-disjoint slice. Prepared loaders are marked `_is_accelerate_prepared` to avoid double
 preparation. The custom path never dispatches: accelerate's dispatching loader (its default for an
 iterable dataset) slices rank 0's batches by global rank whatever size/rank it is handed, so
-siblings would draw different rows. An iterable dataset is sharded by DP rank instead, and an
-explicit `accelerator_config.dispatch_batches: true` raises.
+siblings would draw different rows. An iterable dataset is sharded by DP rank instead (online and
+async GRPO refuse one here, since their prompt-group sampler needs a length), and an explicit
+`accelerator_config.dispatch_batches: true` raises, as does `train_sampling_strategy: batch_rebalance`,
+whose HF sampler shards over every process rather than over the DP replicas.
+
+On the base flow (DDP, plain FSDP2 data parallel, pure EP) `train_sampling_strategy: batch_rebalance`
+runs HF's `BatchRebalanceSampler`. It draws each optimizer step's rows from its own shuffle, seeded 42
+plus the epoch: HF hands it no seed, so `seed` and `data_seed` do not move the data order, and the
+steps hold other rows than under `random`. Within a step it only reassigns those rows among
+(rank, accumulation slot), splitting them by length into groups of near-equal padded cost so the ranks
+of a micro-step finish together. A rank's row count per micro-step varies whenever
+`per_device_train_batch_size > 1`, so `per_device_train_batch_size × max_length` no longer bounds the
+tokens one MoE forward presents (a cross-node dispatch past the Gin ceiling raises at that step). It reads each row's length from
+`processing_class.model_input_names[0]`, which for a multimodal checkpoint's processor (Command A+,
+Inkling, Gemma 4) is an image or audio input that a text row lacks, so on those checkpoints it raises
+at loader build.
 
 The samplers are not `DistributedSampler` — distribution happens in `prepare_data_loader` via
 Accelerate's `BatchSamplerShard`, which yields batch `idx` to a process when
 `idx % num_processes == process_index`. `data_seed` is passed through, so it owns the shuffle order
 exactly as on the standard path; unset, the seedable sampler falls back to the ambient torch seed.
 The custom-path train loader seeds its workers by **DP rank**, not global rank, so TP/CP/ETP
-siblings draw identical worker randomness; the eval loader sets no `worker_init_fn`.
+siblings and pipeline chains draw identical worker randomness; the eval loader sets no `worker_init_fn`.
+Under CP every loader collates through `_loader_collate_fn` (offline GRPO's grouped and reference-sweep
+loaders included), which refuses a left-padded batch on the host before it moves to the device
+([CP requirements](context-parallelism.md#requirements)).
 
 Every rank of one split must draw the same permutation, but a sampler without a generator shuffles
 off the rank's own torch RNG, which EP ranks consume differently.
@@ -94,14 +102,14 @@ rank), the custom path by DP rank (ranks in a TP/CP group share a batch):
 
 ![Standard dataloader path: with no TP/CP/ETP and no pre-sharded dataset the base Trainer's loader goes through accelerator.prepare with num_processes = world_size, so BatchSamplerShard hands each of the 16 ranks its own batch](../assets/diagrams/dataloader_standard.png)
 
-![Custom dataloader path: under TP/CP/ETP or a pre-sharded dataset the loader passes num_processes = data_parallel_size and process_index = dp_rank, so at tp 2 on 16 ranks the eight TP pairs read eight distinct batches](../assets/diagrams/dataloader_custom.png)
+![Custom dataloader path: under TP/CP/ETP/PP or a pre-sharded dataset the loader passes num_processes = data_parallel_size and process_index = dp_rank, so at tp 2 on 16 ranks the eight TP pairs read eight distinct batches](../assets/diagrams/dataloader_custom.png)
 
 ## Per-trainer sampling
 
 | Trainer | Sampler | Handles DP itself | `_prepare_dataloader` |
 |---------|---------|-------------------|----------------------|
-| SFT / SMPO | `RandomSampler` | No | for TP / CP / ETP |
-| Classification | `RandomSampler` | No | for TP / ETP (no CP) |
+| SFT / SMPO | `RandomSampler` | No | for TP / CP / ETP / PP |
+| Classification | `RandomSampler` | No | for TP / ETP / PP (no CP) |
 | Online GRPO | `RepeatSampler` (TRL) | No (same seed all ranks) | for TP / ETP (no CP) |
 | Offline GRPO | `MultiGroupSampler` | Yes (DP rank/size) | uses `prepare_data_loader(num_processes=1)` |
 
@@ -116,7 +124,7 @@ TRL's default `scale_rewards="group"`). When TP or ETP reduces DP, `_prepare_dat
 prompts across DP groups while all ranks within a TP group share the same prompts.
 
 On that custom-dataloader path the trainers override `_get_train_sampler`
-(`GRPOTrainDataLoaderMixin` in `src/trainers/grpo/mixins/dataloader.py`) to size the sampler at the
+(`GenerationRoundMixin` in `halo/trainers/grpo/on_policy.py`) to size the sampler at the
 loader's real DP consumption rate. TRL's world-rate geometry would re-roll part of every prompt
 block and silently skip the rest.
 
@@ -126,7 +134,7 @@ too, because TP siblings inject duplicate blocks into TRL's world-order reward g
 per-rank groups regroup correctly. Pre-sharded datasets consume per DP rank, so the rate is one
 rank's.
 
-**Offline GRPO** uses `MultiGroupSampler` (`src/trainers/grpo/offline.py`). Advantages are
+**Offline GRPO** uses `MultiGroupSampler` (`halo/trainers/grpo/offline/group_sampler.py`). Advantages are
 pre-computed per example at tokenization time (`compute_group_advantages` normalizes a group's
 rewards via `advantage_method`, default `quantile_norm`), so the sampler does not pack a group into
 one batch. It emits each group's indices in group-appearance order, shards the sequence across DP
@@ -141,28 +149,30 @@ minimum, keeping every rank's optimizer-step count equal; a global minimum of 0 
 
 A sharded dataset (a `train/shard_index.json` layout) loads at the **shard level** before the
 DataLoader is built. Every training script passes DP rank/size (not global rank/world_size) to its
-loader (`load_script_datasets`, `src/training/script_runner.py`), so CP/TP/ETP group members load the
-same shards; SFT additionally detects a pre-processed (tokenized) dataset via `load_datasets_auto()`.
+loader (`load_script_datasets`, `halo/entrypoints/data_setup.py`), so CP/TP/ETP group members and a
+pipeline chain's stages load the same shards; SFT additionally detects a pre-processed (tokenized) dataset via `load_datasets_auto()`.
 Each DP rank takes a **contiguous** range of shards, remainder to the first ranks — 10 shards over 3
-ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `src/data/sources/sharded_dataset.py`).
+ranks gives `[4, 3, 3]` (`ShardedDatasetLoader`, `halo/data/sources/sharded_dataset.py`).
 
 **Hard requirement:** `num_shards >= data_parallel_size`. A train split with fewer shards **raises**
 at load time, since ranks with index `>= num_shards` would get zero examples; any other split warns.
 A missing `train`/`test` split, or one empty on every rank, is rejected at load
-(`src/data/sources/loading.py`) — the sharded loader skips a split with no shard index, so the check
+(`halo/data/sources/loading.py`) — the sharded loader skips a split with no shard index, so the check
 is what turns that into a failure.
 
 The length-equalizer (`_equalize_presharded_length`, collective — every rank must reach it) runs for
 **both train and eval**: unequal per-rank lengths make ranks run different step counts and hang at
-the gradient sync or metrics gather, so each split is all-reduce-MIN truncated to the global minimum
-(with a data-loss warning when uneven).
+the gradient sync or metrics gather, so each split is truncated to the global minimum. When ranks
+differ, global rank 0 warns of the largest drop any rank takes: about a shard per rank when
+`num_shards` is not a multiple of `data_parallel_size`, and up to one row per shard a rank holds when
+it is, since shard sizes differ by one row.
 
 A minimum of 0 raises instead of truncating every rank to empty. For eval this means a small test
 split (sharding skips empty shards) must still yield at least `data_parallel_size` non-empty shards,
 or evaluation must be disabled.
 
 Downstream map/filter caches key on a forced deterministic fingerprint (`load_datasets` in
-`src/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
+`halo/data/sources/loading.py`) that folds in a content signature of the freshly loaded data, so
 an in-place re-push cannot serve stale mapped rows.
 
 A tokenizer or processor in the map's `fn_kwargs` keys by **content**, not by path: the fast
@@ -182,12 +192,20 @@ The map/filter runs on one rank per filesystem scope and the rest read its cache
 the store joins and the never-nest rule are on
 [Filesystem Handling](../data/filesystem-handling.md#coordination-primitives).
 
+Whether a source is sharded at all is agreed across ranks (`is_sharded_dataset_across_ranks`, an all-reduce MAX): a
+per-rank S3 probe errs only toward "not sharded" on a credentials flake, and a split verdict would load
+different sizes on different ranks and hang the first collective.
+
+A rank past the last shard is handed an empty split carrying the artifact's **schema** (read off the
+split's first shard), never a column-less one: every downstream `column_names` test gates a
+coordinated operation, so a rank whose split had no columns would skip a barrier its peers make.
+
 ## Common pitfalls
 
 - **Double-sharding:** a sampler that already shards DP (e.g. `MultiGroupSampler`) must pass
   `num_processes=1, process_index=0` to `_prepare_dataloader`, not let it resolve DP itself.
-- **Global rank instead of DP rank:** use `get_data_parallel_rank()` / `get_data_parallel_size()` for
-  samplers under TP/CP/ETP, not `accelerator.process_index` / world_size.
+- **Global rank instead of DP rank:** use `parallelism_config.get_data_parallel_rank()` / `.data_parallel_size` for
+  samplers under TP/CP/ETP/PP, not `accelerator.process_index` / world_size.
 - **Treating EP like TP:** EP does not reduce DP. `dp_size = world_size` for EP-only.
 - **Expecting a dataset list to shard:** `load_datasets` deliberately does not pass DP rank/size for
   a list path, so every entry loads whole — a sharded entry would otherwise get `1/dp` of its own

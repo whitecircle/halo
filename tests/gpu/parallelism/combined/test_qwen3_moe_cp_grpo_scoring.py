@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""Qwen3-MoE EP8 offline-GRPO scoring: CP1 vs CP2/CP4 on identical logical rows.
-
-Tests the production scoring seam on real DeepEP and Ulysses, including EP-owned expert
-gradients and one optimizer step.
-
-Run on one NVLink-connected eight-GPU domain:
-    torchrun --nproc_per_node=8 tests/gpu/parallelism/combined/test_qwen3_moe_cp_grpo_scoring.py
-"""
+"""Qwen3-MoE EP8 offline-GRPO scoring on real DeepEP and Ulysses: CP1 vs CP2/CP4 on identical logical rows, on one
+NVLink-connected 8-GPU domain."""
 
 from types import SimpleNamespace
 
@@ -15,15 +9,14 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.base_layer import get_flash_attn_func
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.pipeline_parallel.losses import loss_token_counts_per_row
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from halo.distributed.context_parallel.ulysses_attention import _flash_attn_func
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import (
     boundary_loss_negative_control,
     ep_gradient_parameter_names,
@@ -31,10 +24,12 @@ from tests.common.cp_grpo import (
     gradient_agreement,
     optimizer_step_agreement,
 )
+from tests.common.ep_reference import sweep_ep_grads
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 SEED = 221
 SEQ = 64
@@ -74,11 +69,10 @@ def _build_model(device, cp_size):
     pc = ParallelismConfig(
         world_size=8, gpus_per_node=8, nvlink_domain_size=8, ep_size=8, cp_size=cp_size, ep_fp32_router=True
     )
-    patch_moe_model_for_ep(model, pc.create_ep_config())
-    assert create_ep_buffers(model) == CONFIG["num_hidden_layers"]
-    cp_config = pc.create_cp_config() if cp_size > 1 else None
+    apply_ep_layers(model, pc.ep_config())
+    cp_config = pc.cp_config() if cp_size > 1 else None
     if cp_size > 1:
-        model = UlyssesCPModelWrapper(model, cp_config)
+        model = UlyssesModel(model, cp_config)
     model.train()
     ep_layers = [layer for layer in model.modules() if isinstance(layer, EPMoELayerBase)]
     assert len(ep_layers) == CONFIG["num_hidden_layers"]
@@ -86,10 +80,12 @@ def _build_model(device, cp_size):
 
 
 def _sync_non_ep_grads(model, ep_layers):
+    # The router's in-backward hook has averaged it, and the trainer's sweep divides the experts.
+    sweep_ep_grads(model)
     expert_ids = {id(param) for layer in ep_layers for param in layer.parameters()}
     for _name, param in model.named_parameters():
         if id(param) in expert_ids:
-            continue  # EP router/expert hooks already applied the correct world-wide sync/scale.
+            continue
         has_grad = torch.tensor(int(param.grad is not None), device=param.device)
         dist.all_reduce(has_grad, op=dist.ReduceOp.MAX)
         if has_grad.item() == 0:
@@ -122,7 +118,7 @@ def _destroy_ep(ep_layers):
 
 
 def run(ctx) -> dict:
-    cp_kernel = get_flash_attn_func()
+    cp_kernel = _flash_attn_func()
     log(f"CP attention kernel: {cp_kernel.__module__}.{cp_kernel.__name__}; CP1 oracle: flash_attention_2")
     ids, mask, labels, advantages, group_sizes = _batch(ctx.device)
     for tensor in (ids, mask, labels, advantages, group_sizes):
@@ -151,7 +147,7 @@ def run(ctx) -> dict:
     for cp_size in (2, 4):
         model, cp_config, ep_layers = _build_model(ctx.device, cp_size)
         assert ep_gradient_parameter_names(model, ep_layers) == ep_names
-        scorer = ChunkedLogprobsCore()
+        scorer = LogprobScoringMixin()
         scorer.temperature = 1.0
         scorer.accelerator = SimpleNamespace(unwrap_model=lambda m: m)
         local_logps, local_labels = scorer._cp_chunked_logps(model, ids, mask, labels)

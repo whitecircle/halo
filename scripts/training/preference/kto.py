@@ -1,74 +1,51 @@
 #!/usr/bin/env python
-"""Distributed KTO training (text or VLM).
+"""Distributed KTO training (text or VLM) on *unpaired* ``{prompt, completion, label}`` rows. A VLM's processor flips
+TRL's KTOTrainer into vision mode (vision KTO is unpaired-only).
 
-Kahneman-Tversky Optimization on *unpaired* preference data — each row is a single
-``{prompt, completion, label}`` triple (``label`` marks the completion desirable or not). One
-script serves both text and vision-language models: ``load_model_for_training`` auto-detects the
-modality. For a VLM the processor is the ``processing_class``, flipping TRL 1.6's KTOTrainer into
-vision mode (``DataCollatorForVisionUnpairedPreference``; vision KTO is unpaired-only) — add an
-``images``/``image`` column to the dataset, or point ``images_field`` at the column that holds them.
+CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT (``ref_model=None``) or
+``precompute_ref_log_probs``; PP runs text-only ``apo_zero_unpaired`` full fine-tuning with
+``precompute_ref_log_probs`` only."""
 
-The vision-vs-text data path follows the dataset, and TRL decides it from the row's columns alone;
-image parts embedded in the messages of a column-less dataset are refused here, since nothing on
-the text path would render them with pixels behind them.
+from trl import KTOConfig
 
-CP is not supported (full-sequence log-prob pooling + KL reference term). Under EP/TP use PEFT
-(``ref_model=None``) or ``precompute_ref_log_probs``. PP is declared but not yet available in this
-release.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/preference/kto.py \\
-        examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
-"""
-
-from trl import KTOConfig, ModelConfig
-
-from src.args.distributed_args import DistributedArguments
-from src.args.kto_args import KTOScriptArguments
-from src.data.pipeline.processing import carry_cache_key, require_render_column
-from src.data.sources.loading import alias_images_column
-from src.data.vlm import dataset_declares_images
-from src.distributed.loading.frozen_models import load_reference_model_for_preference
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier
-from src.models.loading.model_preparation import log_model_info
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
-    distributed_trainer_kwargs,
-    init_training_script,
-    install_resolved_tokenizer,
+from halo.config_validation import reject_unsupported_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.preference import KTOScriptArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.pipeline.map_cache_key import carry_cache_key
+from halo.data.render_columns import alias_images_column, reject_missing_render_column
+from halo.data.vlm_detection import dataset_declares_images_across_ranks, reject_unsupported_media_across_ranks
+from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
     log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    reject_unsupported_args,
-    resolve_vlm_run,
-    run_trainer,
+    resolve_preference_vlm_run,
 )
+from halo.entrypoints.model_setup import load_preference_models
+from halo.entrypoints.script import (
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
+    run_trainer,
+    with_distributed_teardown,
+)
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.kto import DistributedKTOTrainer
 
-# The two column knobs KTO renames onto TRL's own spelling, as ``(knob, target)``.
 _KTO_RENAMED_FIELDS = (("completion_field", "completion"), ("label_field", "label"))
 
 
 def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
-    """Raise on image content parts in a dataset TRL would read as text-only.
-
-    TRL's KTOTrainer decides vision-vs-text from the first row's columns alone, so a dataset that
-    embeds ``{"type": "image"}`` parts in its prompt/completion messages while shipping no image
-    column takes the text path: the chat template expands each part into vision placeholder tokens
-    with no pixels behind them. KTO renders nothing itself (TRL templates the raw
-    ``prompt``/``completion`` columns), so the per-row ``reject_image_content`` backstop the other
-    preference scripts inherit does not run here.
-    """
-    if dataset_declares_images(dataset):  # an image column, which TRL's own probe sees
+    """Raise on image parts in a dataset TRL would read as text-only: TRL decides from the first row's columns alone,
+    so embedded parts with no image column become placeholder tokens with no pixels. KTO renders nothing itself, so the
+    per-row ``reject_image_content`` backstop does not run here."""
+    if dataset_declares_images_across_ranks(dataset):  # an image column, which TRL's own probe sees
         return
     # TRL hard-codes the prompt column; the completion column is the configured one.
-    embedded = [column for column in ("prompt", completion_field) if dataset_declares_images(dataset, column)]
+    embedded = [
+        column for column in ("prompt", completion_field) if dataset_declares_images_across_ranks(dataset, column)
+    ]
     if not embedded:
         return
     raise ValueError(
@@ -82,25 +59,16 @@ def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
 
 
 def _require_kto_columns(ds, args) -> None:
-    """Raise on a configured KTO column the dataset does not carry.
-
-    Skipping the rename would leave TRL's KTOTrainer to fail downstream on a missing column, or to
-    train on a stale ``completion``/``label`` column that happens to exist under the default name.
-    Reported through the shared render-column guard, so a mistyped column reads the same here as on
-    every other data path.
-    """
+    """Skipping the rename would leave TRL to fail on a missing column, or train on a stale ``completion``/``label``
+    column under the default name."""
     for knob, target in _KTO_RENAMED_FIELDS:
         column = getattr(args, knob)
         if column != target:
-            require_render_column(ds, str(args.dataset), knob, column)
+            reject_missing_render_column(ds, str(args.dataset), knob, column)
 
 
 def _rename_kto_columns(dataset, args):
-    """Normalize dataset columns to KTO's expected ``completion``/``label`` names.
-
-    Renames exactly the pairs :func:`_require_kto_columns` checked, from the same roster. Presence is
-    that function's job, checked once over the whole DatasetDict before the first rename.
-    """
+    """Renames the pairs :func:`_require_kto_columns` checked, over the whole DatasetDict before the first rename."""
     for knob, target in _KTO_RENAMED_FIELDS:
         source = getattr(args, knob)
         if source != target:
@@ -109,15 +77,14 @@ def _rename_kto_columns(dataset, args):
 
 
 def main():
-    parser = H4ArgumentParser((KTOScriptArguments, KTOConfig, ModelConfig, DistributedArguments))
-    args, kto_config, model_config, dist_args = parser.parse()
+    args, kto_config, model_config, dist_args = parse_script_args(
+        KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments
+    )
 
-    # TRL's KTOTrainer chat-templates and tokenizes the raw prompt/completion columns itself: it
-    # passes no `tools=`, so a dataset tool column would never reach the template, and the rows the
-    # script hands it carry no input_ids, so the decoded-sample writer would have nothing to decode.
+    # TRL templates and tokenizes the raw columns itself: it passes no `tools=`, and its rows have no input_ids.
     reject_unsupported_args("KTO training", tools_field=args.tools_field, log_decoded_samples=args.log_decoded_samples)
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         kto_config,
         model_config,
@@ -125,86 +92,53 @@ def main():
         script_prefix="kto",
         trainer_cls=DistributedKTOTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
-    # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
-    # text-only unpaired data through TRL's text path. Decided before the model load, which requires
-    # the checkpoint's processor for a vision run.
-    is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=dist_args.text_only_model)
-    _reject_embedded_image_parts(ds, args.completion_field)
-
-    # --- Model (text or VLM, auto-detected); padded preference takes the shared padded-workload
-    # backend (SDPA, dropped under live sinks). The reference load uses the same binding: a logratio
-    # whose halves came from different attention kernels is biased. ---
-    attn_default = padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks)
-    model, processing_class, tokenizer, is_vlm = load_model_for_training(
-        model_config,
-        kto_config,
-        parallelism_config,
-        vlm_run=is_vlm_data,
-        attn_default=attn_default,
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
-    )
-
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
-
-    # Reference model: under PEFT the reference is the adapter-free base; full finetune loads a copy.
-    model_ref = load_reference_model_for_preference(
-        args,
-        model_config,
-        kto_config,
-        parallelism_config,
-        tokenizer,
-        is_vlm=is_vlm,
-        method="KTO",
-        reset_sinks=dist_args.reset_sinks,
-        attn_default=attn_default,
-    )
-
-    tokenizer = apply_max_length(kto_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    log_model_info(model, tokenizer)
-
     _require_kto_columns(ds, args)
+    # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.
+    # Before the load, which needs the checkpoint's processor for a vision run.
+    is_vlm_data = resolve_preference_vlm_run(
+        args, model_config, ds, text_only_model=args.text_only_model, method="KTO", trl_renders_rows=True
+    )
+    _reject_embedded_image_parts(ds, args.completion_field)
+    reject_unsupported_media_across_ranks(ds, ("prompt", args.completion_field), "KTO")
+
+    models = load_preference_models(context, kto_config, model_config, args, vlm_run=is_vlm_data, method="KTO")
+    apply_vision_options(args, models.model, model_config, models.processing_class, is_vlm=is_vlm_data)
+
     train_dataset = _rename_kto_columns(ds["train"], args)
     eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None
 
-    log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, kto_config)
+    log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, models.tokenizer, args, kto_config)
 
-    apply_distributed_trainer_config(kto_config, parallelism_config)
-
-    callbacks = build_training_callbacks(args, kto_config, model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, kto_config, models.model, context)
 
     barrier()
 
     trainer = DistributedKTOTrainer(
-        model=model,
+        model=models.model,
         args=kto_config,
-        ref_model=model_ref,
+        ref_model=models.ref_model,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        processing_class=processing_class,
-        peft_config=peft_config,
+        processing_class=models.processing_class,
+        peft_config=models.peft_config,
         callbacks=callbacks,
-        resume_checkpoint=runtime.resume_checkpoint,
-        policy_from_checkpoint=runtime.policy_from_checkpoint,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        resume_checkpoint=context.resume_checkpoint,
+        policy_from_checkpoint=context.policy_from_checkpoint,
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
     run_trainer(
         trainer,
-        runtime,
+        context,
         method_name="KTO",
         extra_start_log=[f"modality: {'vlm' if is_vlm_data else 'text'}"],
     )
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

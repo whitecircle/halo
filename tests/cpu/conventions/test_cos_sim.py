@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.utils.cos_sim`` raises on an operand with no direction instead of scoring it.
-
-The GPU correctness suites gate gradient and weight agreement on this helper, and they run only on the
-GPU tiers. A cosine that scores a zero-norm operand passes one side of every threshold: 1.0 matches a
-dead gradient against a live one, and 0.0 lets a negative control whose gradient vanished read as
-decorrelated. NaN slips past the ``<`` and ``min`` trackers that report the worst tensor. These pins
-keep those outcomes out of the helper on the CPU tier.
-
-Run: python tests/cpu/conventions/test_cos_sim.py
-"""
+"""``tests.common.numerics.cos_sim`` raises on an operand with no direction. Scoring 1.0 matches a dead gradient
+against a live one, 0.0 reads a vanished negative control as decorrelated, and NaN slips past ``<`` and ``min``."""
 
 import math
 import re
@@ -16,7 +8,7 @@ import re
 import pytest
 import torch
 
-from tests.common.utils import cos_sim
+from tests.common.numerics import cos_sim
 
 SEED = 0
 LABEL = "model.layers.0.mlp.router.weight"

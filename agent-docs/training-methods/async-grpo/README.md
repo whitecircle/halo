@@ -5,7 +5,7 @@ trains with GRPO. For pre-collected rewards use [Offline GRPO](../grpo/offline.m
 [Online GRPO](../grpo/online.md); for pairwise preferences, [SMPO](../preference/smpo.md) or
 [DPO](../preference/dpo.md).
 
-- Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/environmental_grpo.py`.
+- Trainer `DistributedAsyncEnvironmentalGRPOTrainer`, script `scripts/training/grpo/environmental.py`.
 - Pick an environment with `environment_type` or register your own ([Environments](environments/README.md)).
 - [Reward Terms](../grpo/rewards/README.md#environment-arm) defines how the episode reward is composed.
 - A [rollout server](../../infrastructure/rollout-servers.md) must be serving before you launch;
@@ -26,11 +26,11 @@ One YAML, six dataclasses.
 | Knob family | Class |
 |---|---|
 | `environment_type`, `rewards`, `max_turns`, `environment_kwargs` | `EnvironmentConfig` ([fields](../../reference/configuration-reference.md#environmentconfig)) |
-| Ray, servers, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
-| Dataset columns, prompt filter, `save_completions` | `EnvironmentalGRPOScriptArguments` |
-| Optimizer, batch, `beta`, `num_generations`, `vllm_group_port` | TRL `GRPOConfig` |
-| Model id, LoRA | `ModelConfig` |
-| Parallel sizes, `reset_sinks` | `DistributedArguments` |
+| Ray, servers and their group port, sync cadence, prefetch, rollout sampling, trust region | `AsyncRolloutConfig` ([fields](../../reference/configuration-reference.md#asyncrolloutconfig)) |
+| Dataset columns, prompt filter, `save_completions`, `reset_sinks` | `EnvironmentalGRPOScriptArguments` |
+| Optimizer, batch, `beta`, `num_generations` | TRL `GRPOConfig` |
+| Model id, LoRA, `trust_remote_code` | `ModelArguments` |
+| Parallel sizes | `ParallelismArguments` |
 
 ## Dataset
 
@@ -53,19 +53,23 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
   and the `context_fields` columns.
 - The environment owns the system turn and the tool schema: there is no `system_prompt` field and `tools_field` is
   rejected. An override, where accepted, is `environment_kwargs.system_prompt`; the ReAct presets refuse it.
+- `text_only_model` is rejected: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would
+  miss a multimodal server's `model.language_model.layers.*`.
 
 ## Quickstart
 
 Point the template's `dataset:` at your data, start a server on a GPU the trainer will not use, wait for `/health`,
 launch. The template runs a ReAct environment, which is served without a tool-call parser
-(`VLLM_TOOL_CALLING_FLAGS=`):
+(`VLLM_TOOL_CALLING_FLAGS=`). The vLLM compose file needs `HALO_SCRATCH`, a large host volume, exported or set in the
+repo-root `.env`:
 
 ```bash
+make build-vllm   # or set VLLM_IMAGE to the public image
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=7 VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \
-    scripts/training/environmental_grpo.py \
+    scripts/training/grpo/environmental.py \
     examples/grpo/environmental/environmental-grpo-template.yaml
 ```
 
@@ -81,13 +85,13 @@ trainer = DistributedAsyncEnvironmentalGRPOTrainer(
     train_dataset=train_dataset,
     processing_class=tokenizer,
     environment_config=EnvironmentConfig(environment_type="react_math"),
-    async_config=AsyncTrainingConfig(rollout_server_url="http://localhost:8000"),
+    async_config=AsyncRolloutConfig(rollout_server_url="http://localhost:8000"),
     parallelism_config=ParallelismConfig(),          # required; the default is plain data parallelism
     peft_config=lora_config,                         # optional
 )
 ```
 
-For an unregistered `BaseEnvironment` subclass, pass `environment_cls=MyEnvironment` with `environment_kwargs={...}`
+For an unregistered `EnvironmentBase` subclass, pass `environment_cls=MyEnvironment` with `environment_kwargs={...}`
 instead. One of the two is required.
 
 ## Testing a setup
@@ -96,7 +100,7 @@ Run the environment on a few rows first. `--training_config` samples under the t
 ([Smoke-testing a config](evaluation.md#smoke-testing-a-config)).
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --training_config examples/grpo/environmental/environmental-grpo-template.yaml \
     --dataset <hub-id> --split test --num_examples 20 \
     --base_url http://localhost:8000/v1 --model <served-model-id>

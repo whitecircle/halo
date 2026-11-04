@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""
-End-to-end test for SFT dataset caching: simulates the sft.py data pipeline.
+"""The sft.py data pipeline's cache: created once, reused on rerun, per-tokenizer, per-split and across a restart.
 
-Verifies:
-1. First run: coordinated_map + coordinated_filter create cache files
-2. Second run: same pipeline loads from cache (no new cache files)
-3. Both ranks get identical results after coordination
-4. Cache key changes when tokenizer/processor changes
-5. DatasetDict (train/test splits) cached correctly per-split
-
-Every test raises on failure and is recorded as its own check; each ends its collectives on every
-rank before it can raise, so a failure never strands a peer inside one.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/data/test_sft_caching_e2e.py
+Each test ends its collectives on every rank before it can raise, so a failure never strands a peer.
 """
 
 import os
@@ -25,14 +12,12 @@ import torch.distributed as dist
 from datasets import Dataset, DatasetDict
 from transformers import AutoTokenizer
 
-from src.data.pipeline.processing import process_dataset_with_map_and_filter
-from src.data.pipeline.row_processors import create_llm_processor
-from src.distributed.runtime import barrier
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
+from halo.data.pipeline.text_rows import build_chat_row_processor
+from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
-
-# Configuration
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_0_6B
 ALT_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -42,12 +27,7 @@ NUM_TEST = 10
 CONVERSATION_FIELD = "prompt"
 
 
-# Utilities
-
-
 def create_conversation_splits(num_train: int = NUM_TRAIN, num_test: int = NUM_TEST) -> DatasetDict:
-    """Create a synthetic SFT dataset mimicking real training data format."""
-
     def make_conversations(n: int):
         data = []
         for i in range(n):
@@ -70,30 +50,23 @@ def create_conversation_splits(num_train: int = NUM_TRAIN, num_test: int = NUM_T
 
 
 def count_cache_files(cache_dir: str) -> int:
-    """Count .arrow cache files in directory."""
     if not os.path.exists(cache_dir):
         return 0
     return len([f for f in os.listdir(cache_dir) if f.endswith(".arrow")])
 
 
-# Tests
-
-
 def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
-    """Test 1: Full sft.py pipeline creates cache files on first run."""
     ds = create_conversation_splits()
 
-    # Simulate sft.py: create_llm_processor -> process_dataset_with_map_and_filter
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
 
     extra_columns = list(set(ds["train"].column_names))
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -116,25 +89,22 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
 
 
 def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
-    """Test 2: Second run reuses cache: it writes no new cache file."""
+    """A reused cache writes no new file."""
     ds = create_conversation_splits()
 
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
-    # Count cache files before
     cache_before = count_cache_files(cache_dir)
 
-    # Time the second run (should be fast due to cache)
     barrier()
     start = time.monotonic()
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -144,7 +114,7 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
     barrier()
     elapsed = time.monotonic() - start
 
-    # A reused cache is loaded, not rewritten: a new file means the cache key changed between runs.
+    # A new file means the cache key changed between runs.
     cache_after = count_cache_files(cache_dir)
     assert cache_after == cache_before, f"cache not reused: .arrow files {cache_before} -> {cache_after}"
     assert len(result["train"]) > 0, "Empty train split on cache reuse"
@@ -153,30 +123,26 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
 
 
 def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
-    """Test 3: Both ranks produce identical results after coordination."""
     ds = create_conversation_splits()
 
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
-    result = process_dataset_with_map_and_filter(
+    result = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
         desc="sft tokenization",
     )
 
-    # Gather first example's input_ids from all ranks
     device = torch.device("cuda", torch.cuda.current_device())
     local_ids = result["train"][0]["input_ids"]
 
-    # Pad to same length for all_gather. -1 is no token id, so rows of different lengths never
-    # compare equal through the padding.
+    # -1 is no token id, so rows of different lengths never compare equal through the padding.
     max_len = torch.tensor(len(local_ids), device=device)
     dist.all_reduce(max_len, op=dist.ReduceOp.MAX)
 
@@ -195,41 +161,35 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
 
 
 def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer, alt_tokenizer) -> None:
-    """Test 4: Different tokenizer produces different cache (no stale data)."""
     ds = create_conversation_splits(num_train=20, num_test=5)
 
-    # Process with primary tokenizer
-    processor_a = create_llm_processor(
+    processor_a = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
-    result_a = process_dataset_with_map_and_filter(
+    result_a = coordinated_map_and_filter(
         ds,
         processor_a,
         remove_columns=extra_columns,
         desc="tokenizer_a",
     )
 
-    # Process with alternate tokenizer
-    processor_b = create_llm_processor(
+    processor_b = build_chat_row_processor(
         tokenizer=alt_tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     ds_b = create_conversation_splits(num_train=20, num_test=5)
     extra_columns_b = list(set(ds_b["train"].column_names))
-    result_b = process_dataset_with_map_and_filter(
+    result_b = coordinated_map_and_filter(
         ds_b,
         processor_b,
         remove_columns=extra_columns_b,
         desc="tokenizer_b",
     )
 
-    # Verify token IDs differ
     ids_a = result_a["train"][0]["input_ids"]
     ids_b = result_b["train"][0]["input_ids"]
 
@@ -239,38 +199,34 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
 
 
 def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
-    """Test 5: Generate dataset (add_generation_prompt=True) uses separate cache."""
     ds = create_conversation_splits()
 
-    # Train processor (no generation prompt)
-    train_processor = create_llm_processor(
+    train_processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=False,
-        use_padding=True,
     )
 
-    # Generate processor (with generation prompt) — different function body
-    generate_processor = create_llm_processor(
+    # Different function body.
+    generate_processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=True,
-        use_padding=True,
     )
 
     extra_columns = list(set(ds["train"].column_names))
 
-    train_result = process_dataset_with_map_and_filter(
+    train_result = coordinated_map_and_filter(
         ds,
         train_processor,
         remove_columns=extra_columns,
         desc="train processing",
     )
 
-    # Process test set separately for generation (like sft.py does)
-    gen_result = process_dataset_with_map_and_filter(
+    # Separately for generation, as sft.py does.
+    gen_result = coordinated_map_and_filter(
         ds["test"],
         generate_processor,
         desc="generate processing",
@@ -279,8 +235,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
     assert len(train_result["train"]) > 0, "Empty train result"
     assert len(gen_result) > 0, "Empty generate result"
 
-    # The generation render drops the final assistant turn and appends the generation prompt, so the
-    # same row can only tokenize identically if the generate pass was served the training rows.
+    # The generation render drops the final assistant turn, so identical tokens mean it was served the training rows.
     train_ids = train_result["test"][0]["input_ids"]
     gen_ids = gen_result[0]["input_ids"]
     assert train_ids != gen_ids, "the generate pass returned the training rows' token IDs"
@@ -291,18 +246,15 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
 
 
 def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
-    """Test 6: Simulate process restart — cache from prior run is picked up."""
     ds = create_conversation_splits(num_train=30, num_test=8)
-    processor = create_llm_processor(
+    processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
-    # First "run"
-    result1 = process_dataset_with_map_and_filter(
+    result1 = coordinated_map_and_filter(
         ds,
         processor,
         remove_columns=extra_columns,
@@ -310,20 +262,19 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
     )
     cache_count_after_first = count_cache_files(cache_dir)
 
-    # Second "run" with fresh dataset objects (simulates restart)
+    # Fresh dataset objects simulate a restart.
     ds2 = create_conversation_splits(num_train=30, num_test=8)
-    processor2 = create_llm_processor(
+    processor2 = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns2 = list(set(ds2["train"].column_names))
 
     barrier()
     start = time.monotonic()
 
-    result2 = process_dataset_with_map_and_filter(
+    result2 = coordinated_map_and_filter(
         ds2,
         processor2,
         remove_columns=extra_columns2,
@@ -335,7 +286,6 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
 
     cache_count_after_second = count_cache_files(cache_dir)
 
-    # Results should match
     ids1 = result1["train"][0]["input_ids"]
     ids2 = result2["train"][0]["input_ids"]
 
@@ -351,8 +301,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
 
 
 def run(ctx) -> dict:
-    # setup_cache_dirs already points HF_DATASETS_CACHE here; every test in this file shares it,
-    # which is what makes the reuse/restart checks meaningful.
+    # Every test shares setup_cache_dirs's HF_DATASETS_CACHE, which makes the reuse and restart checks meaningful.
     cache_dir = ctx.cache_dir
 
     log(f"\n{'=' * 70}")
@@ -362,7 +311,6 @@ def run(ctx) -> dict:
     log(f"  Cache dir: {cache_dir}")
     log(f"{'=' * 70}\n")
 
-    # Load tokenizers on rank 0 first
     if ctx.rank == 0:
         tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
         alt_tokenizer = AutoTokenizer.from_pretrained(ALT_MODEL_NAME, trust_remote_code=True)

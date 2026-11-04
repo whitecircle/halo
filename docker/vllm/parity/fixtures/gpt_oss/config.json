@@ -42,6 +42,8 @@
   },
   "router_aux_loss_coef": 0.0,
   "sliding_window": 64,
+  "swiglu_alpha": 1.702,
+  "swiglu_limit": 7.0,
   "tie_word_embeddings": false,
   "use_cache": true,
   "vocab_size": 1024

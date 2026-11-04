@@ -1,6 +1,6 @@
 """Attach py-spy to a running training job: all-rank stack dumps and CPU flame graphs.
 
-Out-of-process CLI over the :mod:`src.diagnostics.debugging` helpers. It needs no profiling flags at
+Out-of-process CLI over the :mod:`halo.diagnostics.py_spy` helpers. It needs no profiling flags at
 launch time, so it works on a job that is already running or already hung. Discovers this node's
 torchrun training ranks (or takes explicit ``--pid``) and either:
 
@@ -28,20 +28,20 @@ import logging
 import os
 import sys
 
-from src.diagnostics.debugging import (
+from halo.diagnostics.py_spy import (
     FLAMEGRAPH_DIR,
     STACK_DUMP_DIR,
-    dump_distributed_stacks,
-    record_distributed_flamegraph,
+    dump_node_stacks,
+    record_flamegraphs,
     torchrun_python_pids,
 )
-from src.log import configure_cli_logging
+from halo.log import configure_cli_logging
 
-configure_cli_logging()
 logger = logging.getLogger(__name__)
 
 
 def main() -> None:
+    configure_cli_logging()
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     # Shared options live on a parent parser so they are accepted after the subcommand (the
     # docstring's `record --pid N` form); options on `parser` itself would not be.
@@ -58,12 +58,12 @@ def main() -> None:
     dump = subparsers.add_parser(
         "dump", parents=[common], help="Instantaneous stack dump of every rank (hang triage)."
     )
-    dump.add_argument("--output-dir", default=STACK_DUMP_DIR, help="Default: %(default)s")
+    dump.add_argument("--output_dir", default=STACK_DUMP_DIR, help="Default: %(default)s")
 
     record = subparsers.add_parser(
         "record", parents=[common], help="Per-rank CPU flame-graph SVGs over a sampling window."
     )
-    record.add_argument("--output-dir", default=FLAMEGRAPH_DIR, help="Default: %(default)s")
+    record.add_argument("--output_dir", default=FLAMEGRAPH_DIR, help="Default: %(default)s")
     record.add_argument("--duration", type=int, default=30, help="Sampling window in seconds (default: %(default)s).")
     record.add_argument("--rate", type=int, default=100, help="Samples per second (default: %(default)s).")
     record.add_argument("--native", action="store_true", help="Also sample native (C/CUDA-runtime) frames.")
@@ -75,10 +75,10 @@ def main() -> None:
         parser.error("no torchrun training processes found on this node — pass --pid explicitly")
 
     if args.command == "dump":
-        capture = dump_distributed_stacks(args.output_dir, pids=pids)
+        capture = dump_node_stacks(args.output_dir, pids=pids)
     else:
         logger.info(f"Sampling {len(pids)} process(es) for {args.duration}s…")
-        capture = record_distributed_flamegraph(
+        capture = record_flamegraphs(
             args.output_dir, duration=args.duration, rate=args.rate, native=args.native, pids=pids
         )
 

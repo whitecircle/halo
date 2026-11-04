@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""A pipeline stage must carry the generation config, or PP checkpoints ship unservable.
-
-``save_model_config`` is the one home that writes ``config.json`` **and**
-``generation_config.json`` together, because ``PretrainedConfig`` does not carry the latter and
-custom ``eos_token_id`` sets (harmony/GPT-OSS), stop strings and sampling defaults live nowhere
-else. The PP save path hands it a :class:`PipelineStageModule`, not the original model — so unless
-the stage mirrors ``generation_config`` and ``can_generate``, every PP checkpoint is written with
-``config.json`` alone and served with default sampling and EOS. It trains and resumes; it just
-generates wrongly, silently.
-
-Run: ``pytest -m cpu tests/cpu/parallelism/test_pp_stage_generation_config.py``
-"""
+"""A pipeline stage carries the generation config, or PP checkpoints serve with default sampling and EOS, silently.
+The PP save hands ``save_model_config`` a stage, which must mirror ``generation_config`` and ``can_generate``."""
 
 from __future__ import annotations
 
@@ -21,33 +11,24 @@ import pytest
 import torch.nn as nn
 from transformers import GenerationConfig, PretrainedConfig
 
-from src.checkpoint.config_export import save_model_config
-from src.distributed.pipeline_parallel.stage import PipelineStageModule
+from halo.checkpoint.config_export import save_model_config
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule
+from tests.common.pp_fakes import hand_built_stage
 
 
 def _stage() -> PipelineStageModule:
-    """A minimal stage; the split logic is covered elsewhere — this pins the config-carrying seam."""
-    return PipelineStageModule(
-        nn.Linear(4, 4),
-        None,
-        is_first=True,
-        is_last=False,
-        backbone_prefix="model",
-        head_attr="lm_head",
-        layer_attr="layers",
-        layer_offset=0,
-    )
+    """The split logic is covered elsewhere."""
+    return hand_built_stage(nn.Linear(4, 4), None, is_first=True, is_last=False, layer_offset=0)
 
 
 def test_stage_without_generation_config_is_not_generative():
-    """Reward/classification stages must report False, as their unsplit models do."""
+    """As their unsplit models do."""
     stage = _stage()
     assert stage.generation_config is None
     assert stage.can_generate() is False
 
 
 def test_pp_save_writes_generation_config(tmp_path):
-    """The writing end: save_model_config must emit BOTH files for a generative stage."""
     stage = _stage()
     stage.config = PretrainedConfig()
     stage.generation_config = GenerationConfig(eos_token_id=[199999, 200002], do_sample=True, temperature=0.7)
@@ -59,13 +40,12 @@ def test_pp_save_writes_generation_config(tmp_path):
     assert os.path.isfile(written), (
         "generation_config.json missing — a PP checkpoint would serve with default sampling/EOS"
     )
-    # The custom EOS set is the payload that lives nowhere else; assert it survived, not just the file.
+    # The custom EOS set is the payload that lives nowhere else.
     with open(written) as f:
         assert json.load(f)["eos_token_id"] == [199999, 200002]
 
 
 def test_non_generative_stage_writes_no_generation_config(tmp_path):
-    """Anti-vacuity: the writer must not emit the file for a stage that cannot generate."""
     stage = _stage()
     stage.config = PretrainedConfig()
 

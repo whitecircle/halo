@@ -1,20 +1,17 @@
-"""``s3_datasets.py --quiet`` exists only on the commands that draw a transfer progress bar.
-
-``push`` and ``download`` forward it as ``show_progress=False``; ``list`` / ``exists`` / ``delete`` draw
-no bar, so they refuse the flag instead of accepting it and doing nothing. The client is stubbed at its
-own methods (no boto3 session), patched by dotted path like the sibling CLI tests.
-"""
+"""``s3.py --quiet`` exists only on the commands that draw a progress bar; ``list``, ``exists`` and ``delete``
+refuse it. The client is stubbed at its own methods, patched by dotted path."""
 
 import sys
 from unittest.mock import patch
 
 import pytest
 
-from scripts.before_training.s3_datasets import main as s3_cli_main
+from scripts.before_training.s3 import main as s3_cli_main
 
 
 def _run(argv: list[str]) -> None:
-    with patch("src.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", ["s3", *argv]):
+    argv = ["s3", *argv, "--bucket", "test-bucket"]
+    with patch("halo.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", argv):
         s3_cli_main()
 
 
@@ -25,7 +22,7 @@ def _run(argv: list[str]) -> None:
 )
 @pytest.mark.parametrize("quiet", [False, True], ids=["default", "quiet"])
 def test_quiet_turns_off_the_transfer_progress_bar(argv, method, quiet):
-    with patch(f"src.data.sources.s3_client.S3Client.{method}", return_value="s3://b/key") as transfer:
+    with patch(f"halo.data.sources.s3_client.S3Client.{method}", return_value="s3://b/key") as transfer:
         _run([*argv, *(["-q"] if quiet else [])])
     assert transfer.call_args.kwargs["show_progress"] is not quiet
 

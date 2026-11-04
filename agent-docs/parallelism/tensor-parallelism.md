@@ -1,8 +1,10 @@
 # Tensor Parallelism (TP)
 
-TP shards large weight matrices across GPUs. Use it when a dense model's layers don't fit on one
-GPU. `data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
-(`ParallelismConfig`, `src/distributed/parallelism_config.py`). Why its all-reduce has to stay on
+TP shards large weight matrices across GPUs. Use it when a dense model does not fit on one GPU: its
+HF-native load places each rank's shard as it reads, while plain FSDP2 and DDP load the whole model
+onto every GPU first ([Data Parallelism](data-parallelism.md#fsdp2-strategy-by-mode)).
+`data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
+(`ParallelismConfig`, `halo/distributed/parallelism_config.py`). Why its all-reduce has to stay on
 NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collectives).
 
 > [!WARNING]
@@ -10,17 +12,19 @@ NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collective
 >
 > On MoE models TP shards **attention only**. The experts stay replicated (EP owns them), and
 > `embed_tokens`/`lm_head` stay replicated deliberately. On a fine-grained MoE those are nearly all
-> the parameters, so raising `tp_size` costs collectives and saves little — and every TP rank still
-> holds the full expert set, so a full fine-tune of a 35B-A3B under `tp_size=2` needs ≈280 GB per rank
-> (weights + AdamW-bf16 states + grads) before activations, past a B300's ≈260 GB practical ceiling; that
-> shape runs under EP. The useful MoE shapes are **EP**, **EP+ETP** (expert memory), and **EP+TP**
-> (only when attention itself is the bottleneck).
+> the parameters, so raising `tp_size` costs collectives and saves little. Every TP rank still holds
+> the full expert set: a full fine-tune of a 35B-A3B at `tp_size=2` on two GPUs (DP 1, no FSDP2 wrap)
+> needs ≈280 GB per rank (weights + AdamW-bf16 states + grads) before activations, by arithmetic, nearly
+> all of a B300's 288 GB. At DP > 1 FSDP2 shards their gradients and optimizer state, not the weights it
+> gathers. The useful MoE shapes are **EP**, **EP+ETP** (expert memory), and **EP+TP** (only when attention
+> itself is the bottleneck).
 
 Two sharding mechanisms are in play — HF-native TP (`tp_plan="auto"`, dense models) and the
 toolkit's selective attention TP — and both place their sharded params as **DTensors** on the TP
 mesh, so one `full_tensor()` walk reconstructs either. The exception is the params sliced by hand
 (GptOss `sinks`), which stay plain tensors and are load-bearing for gradients and checkpoints. See
-[Gradient sync](#gradient-sync-and-the-grad-norm).
+[Gradient sync](#gradient-sync-and-the-grad-norm). Both run their linears on the local shards
+rather than through DTensor dispatch: [Local-shard linears](#local-shard-linears).
 
 ## Supported models
 
@@ -34,60 +38,51 @@ embedding/lm_head replicated):
 | Model | Notes | Page |
 |---|---|---|
 | GPT-OSS | Attention sinks sharded as non-DTensor, all-gathered at save | [gpt-oss.md](../models/gpt-oss.md) |
-| Qwen3 MoE | ColwiseParallel(Q/K/V) + RowwiseParallel(O) | [qwen3.md](../models/qwen3.md) |
+| Qwen3 MoE | colwise Q/K/V + rowwise O | [qwen3.md](../models/qwen3.md) |
 | Qwen3.5 / Qwen3.6 MoE | Double-width `q_proj` shards uniformly | [qwen3_5.md](../models/qwen3_5.md) |
 | GLM-4 MoE Lite | MLA — of the colwise projections only `q_b_proj` / `kv_b_proj` shard (`o_proj` is still rowwise) | [glm4.md](../models/glm4.md) |
 | LFM-2 MoE | Standard GQA pattern | [lfm2.md](../models/lfm2.md) |
 | Mistral4 | MLA — same as GLM-4 | [mistral4.md](../models/mistral4.md) |
 | Cohere2 MoE | Standard GQA pattern; the tied lm_head stays replicated | [cohere2-moe.md](../models/cohere2-moe.md) |
 
-Every MoE under **pure** TP routes to `_load_tp_moe_model` rather than `tp_plan="auto"`, because
+Every MoE under **pure** TP routes to `load_tp_moe_model` rather than `tp_plan="auto"`, because
 HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
-`src/distributed/tensor_parallel/module_types.py`.
+`TP_SHARDABLE_ATTENTION_CLASSES` in `halo/distributed/tensor_parallel/parallelize_attention.py`.
 
-**Not supported:** every family absent from the table above, and Qwen3-VL: a dense checkpoint loads
-through HF-native `tp_plan="auto"` and the architecture ships no `base_model_tp_plan`, so the load
-raises, while the MoE variant's `Qwen3VLMoeTextAttention` is in no registry
-([qwen3.md](../models/qwen3.md#qwen3-vl)). For the others no attention class is in the registry, so a `tp_size > 1` run shards zero layers and raises rather than silently leaving
-every weight replicated. Zaya trips the earlier head-divisibility gate at `tp_size > 2`
-(`num_key_value_heads` is 2). Use EP for their experts.
-
-Behind the missing entries:
-
-- Gemma 4's KV-shared layers plus `attention_k_eq_v`.
-- Zaya's CCA/Conv1d front-end, which has no DTensor sharding primitive.
-- Step-3.7 Flash's per-layer head counts, which fit no uniform q/k/v plan.
-- GLM-5 Next's DSA indexer plus KDA projections, which have no sound sharding
-  ([glm5-next.md](../models/glm5-next.md#limitations)).
+**Not supported:** every family absent from the table above. Their attention class is in no
+registry, so a `tp_size > 1` run shards zero layers and raises rather than leaving every weight
+replicated; a dense checkpoint shipping no `base_model_tp_plan` (Qwen3-VL) raises at the HF-native
+load. Per family, with the reason on its page:
+[Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Load paths
 
-Three paths in `load_distributed_model` (`src/distributed/loading/model_loading.py`):
+Three paths in `load_distributed_model` (`halo/model_loading/parallel/loader.py`):
 
 | Path | When | Mechanism |
 |---|---|---|
-| `_load_tp_model` | Pure TP, dense, `ep_size=1` | `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))` — HF-native |
-| `_load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
-| `_load_ep_tp_model` | EP+TP | `apply_tp_to_attention_only()`; EP owns experts |
+| `load_tp_model` | Pure TP, dense, `ep_size=1` | `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))` — HF-native |
+| `load_tp_moe_model` | Pure TP, MoE, `ep_size=1` | `apply_tp_to_attention_only()`; experts replicated |
+| `load_ep_tp_model` | EP+TP | the EP loader slices each rank's experts, lazy or eager, then `apply_tp_to_attention_only()` |
 
-The HF-native path validates the load's materialization, not just its plan: a plan that shards zero
-parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
+The HF-native path validates the load's materialization, not just its plan (`finish_hf_tp_load`): a plan
+that shards zero parameters raises (the run would be `tp_size` replicas), and a plan-sharded param that materialized
 as a **plain** tensor raises too (`reject_plan_sharded_plain_params`,
-`src/distributed/tensor_parallel/state_dict.py`) — such a bare slice is indistinguishable from a
+`halo/distributed/tensor_parallel/hf_plan.py`) — such a bare slice is indistinguishable from a
 replica downstream, and the replicated-grad AVG would mix disjoint slices across the TP group.
-Hand-sliced params recorded in `_tp_sharded_non_dtensor` are exempt.
+Hand-sliced params (`register_hand_sliced`, `halo/distributed/tensor_parallel/plain_params.py`) are exempt.
 
 ### Tied embeddings under HF-native TP
 
-`_load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
+`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
 injects `embed_tokens: embedding_rowwise` into the backbone `base_model_tp_plan`, the ForCausalLM's
 `lm_head: colwise_gather_output` agrees with it on `Shard(0)` of the vocab dim, and transformers
 shards module by module and ties *afterwards* — so both ends land on the same DTensor: one weight,
 one gradient, one exported key, and half the embedding + head memory per rank at `tp_size=2`.
 
 Sharding the pair makes the vocabulary a TP dimension: `colwise_gather_output` refuses a
-`vocab_size` that `tp_size` does not divide (`ColwiseParallel.validate_param`, loud at load, naming
-the layer), where a replicated pair did not care. Every tied dense model in the roster divides
+`vocab_size` that `tp_size` does not divide (transformers' `ColwiseParallel.validate_param`, loud at
+load, naming the layer), where a replicated pair did not care. Every tied dense model in the roster divides
 evenly (Qwen3 151936, Qwen3.5 248320); a vocab-patched checkpoint that does not must drop `tp_size`
 to a divisor.
 
@@ -95,7 +90,7 @@ An architecture planning only **one** end of the pair (a multimodal wrapper clas
 `lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
 
-`consistent_tied_tp_plan` (`src/distributed/tensor_parallel/tie_plan.py`) drops that lone entry for
+`consistent_tied_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
 the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
@@ -104,7 +99,7 @@ For a checkpoint carrying **both** tied keys on disk (the Qwen3-0.6B/1.7B export
 compares them before tying, which on two DTensors is an **all-reduce on the default process group**:
 every rank must reach it.
 
-`_load_tp_model` therefore does not throttle the load with `max_concurrent_loading`. A
+`load_tp_model` therefore does not throttle the load with `max_concurrent_loading`. A
 rank-serialized load blocks the loading rank inside that collective while its peers wait their turn,
 and the job hangs until the NCCL watchdog fires.
 
@@ -115,35 +110,36 @@ straight on its GPU, so host RAM never holds the model. The FP32-master restore 
 
 ## The selective-TP plan
 
-`apply_tp_to_attention_only` (`src/distributed/tensor_parallel/parallelize_attention.py`) walks the
-model and builds a per-module DTensor plan:
+`apply_tp_to_attention_only` (`halo/distributed/tensor_parallel/parallelize_attention.py`) walks the
+model and shards each attention projection under its style (`shard_linear`, rank 0's values
+distributed into DTensor placements):
 
 | Module | Strategy | Notes |
 |--------|----------|-------|
-| `self_attn.{q,k,v}_proj` | `ColwiseParallel` | per-head |
-| `self_attn.{q_b,kv_b}_proj` | `ColwiseParallel` | MLA: only the head-dim expansion shards |
-| `self_attn.{o,out}_proj` | `RowwiseParallel` | the all-reduce point |
+| `self_attn.{q,k,v}_proj` | `colwise` | per-head |
+| `self_attn.{q_b,kv_b}_proj` | `colwise` | MLA: only the head-dim expansion shards |
+| `self_attn.{o,out}_proj` | `rowwise` | the all-reduce point |
 | `self_attn.sinks` | sliced (`shard_sinks_param`) | GptOss, one slice per head shard |
 | per-head norms (`q_norm`/`k_norm`, LFM2 `q_layernorm`/`k_layernorm`) | replicated + grad all-reduce | see below |
 | `embed_tokens` / `lm_head` | replicated | the plan never visits them: DTensor-sharding them faults cuBLAS under EP+TP |
 
 Head divisibility is validated before sharding: `num_attention_heads % tp_size == 0` always, and
-`num_key_value_heads % tp_size == 0` for standard GQA. `ColwiseParallel` splits Q/K/V with no
-knowledge of heads, so an indivisible count would split *within* a head; the guard raises instead.
+`num_key_value_heads % tp_size == 0` for standard GQA. The colwise split of Q/K/V knows nothing of
+heads, so an indivisible count would split *within* a head; the guard raises instead.
 MLA models skip the KV-head check — they shard by query head and keep the KV compression replicated.
 
 **Per-head norm gradients.** A norm applied *after* a colwise projection is a replicated
-`(head_dim,)` parameter shared across heads. `ColwiseParallel` defaults `use_local_output=True`, so
-the DTensor graph ends at the projection and each rank's gradient covers only its own heads: the
-true gradient is the **SUM** over the TP group, not the average a replica gets.
+`(head_dim,)` parameter shared across heads. A colwise projection returns this rank's heads only, so
+each rank's gradient covers only its own heads: the true gradient is the **SUM** over the TP group,
+not the average a replica gets.
 
 `apply_tp_to_attention_only` finds those norms structurally (any unplanned attention child with
-trainable parameters, never a name list), records their names on `model._tp_per_head_norm_params`,
+trainable parameters, never a name list), records their names through `register_per_head_norm_params`,
 and `_sync_tp_replicated_grads` sums them once per optimizer step. A name missing from that set is
 AVG-reduced as a plain replica, i.e. `1/tp_size` of its true gradient.
 
-MLA families are exempt: their `q_a`/`kv_a` norms sit *before* the colwise expansion, where
-DTensor's `Replicate` backward already all-reduces. The rope half of their `kv_a_proj_with_mqa`
+MLA families are exempt: their `q_a`/`kv_a` norms sit *before* the colwise expansion, whose input
+gradient is already summed over the TP group. The rope half of their `kv_a_proj_with_mqa`
 output bypasses `kv_b_proj`, so a forward hook (`register_mla_rope_grad_reduction`) sums its
 gradient over the TP group.
 
@@ -164,12 +160,43 @@ Every TP rank must call `model.forward` with **identical** `input_ids` / `attent
 same hidden states. Mismatched inputs do not error early; they deadlock at the first `o_proj`
 all-reduce (visible in py-spy as ranks stuck at different sub-modules of one forward).
 
-This affects trainers pulling per-rank data from an external service. `DistributedGRPOTrainer`
+This affects trainers pulling per-rank data from an external service. `DistributedOnlineGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
-custom trainers, add an `assert_consistent` / `assert_tensor_shape_consistent` call
-(`src.diagnostics.debugging`) at the suspect tensor — the toolkit ships no call sites, so
-`HALO_TP_CONSISTENCY_CHECK=1` on its own produces nothing; it only turns those checks' warning into
-a raise.
+custom trainers, add an `assert_rank_uniform` call (`halo.runtime.consensus`; pass
+`tuple(t.shape)` to compare a shape, `strict=True` to raise instead of warn) at the suspect tensor —
+the toolkit ships no call sites.
+
+## Local-shard linears
+
+Every TP linear of either mechanism computes `F.linear` on its local shards (`weight.to_local()`)
+between explicit c10d collectives instead of dispatching through DTensor, which costs about ten
+dispatches per linear and copies the activation inside every functional all-reduce
+(`halo/distributed/tensor_parallel/local_linears.py`). The parameters stay DTensors in the same
+placements, so FSDP2, checkpoints, export, the optimizer, the clip and the weight sync see the same
+layout. Each style runs the collectives its DTensor redistributes ran, on the same values and group:
+
+| Style | Weight / bias | Forward | Backward |
+|---|---|---|---|
+| `colwise` | `Shard(0)` / `Shard(0)` | local output shard | input gradient SUM |
+| `colwise_gather_output` | `Shard(0)` / `Shard(0)` | output all-gathered on the last dim | this rank's gradient slice; input gradient SUM |
+| `rowwise` | `Shard(1)` / replicated | in-place output SUM, then the bias | identity |
+| `rowwise_split_input` | `Shard(1)` / replicated | this rank's input slice; in-place output SUM, then the bias | input gradient all-gathered |
+
+The HF-native load installs this forward on every planned `nn.Linear` at the load finish
+(`install_planned_local_forwards`, called from `finish_hf_tp_load`); the selective plan shards and installs
+it in one step, and `apply_lowp_compute` re-installs it around the dense MLP projections `lowp_precision`
+retypes, computing their fake-quant matmul on the local shards. Embeddings (`embedding_rowwise`), the MoE
+and activation styles, and a Linear subclass with a forward of its own keep transformers' forward. A
+projection called outside its FSDP unit's forward, with FSDP2's `(dp, tp)` shard still registered, raises
+rather than computing part of its output.
+
+The results are bit-identical to DTensor dispatch with one exception: a rowwise bias is added once after
+the SUM, in the matmul's dtype, where DTensor added `bias / tp_size` to each rank's partial, so GPT-OSS's
+biased `o_proj` differs in the last bit (`tests/cpu/parallelism/test_tp_local_linears.py`: every TP family
+of the tiny roster at TP 2, both plans under FSDP2 at dp 2 × tp 2 and under activation checkpointing).
+
+Against DTensor dispatch on 8× B300 at s4096 (1.2.0, three rounds), Qwen3-8B TP2 runs **57.5%** faster with the
+step-1 loss bitwise and gpt-oss-20b ep8 × tp2 11.0% faster.
 
 ## Quick start
 
@@ -189,7 +216,7 @@ torchrun --nproc_per_node=4 scripts/training/sft.py \
 2D `(dp, tp)` mesh: TP within a node, FSDP2 across replicas. DTensor gradients cannot be reduced
 with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTensor semantics. The
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
-`setup_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
+`apply_fsdp2_for_tp` (`halo/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
 point with its EP modules as `ignored_params`. Pure TP (DP=1)
 skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
 
@@ -201,17 +228,17 @@ wrong is silent — the loss stays finite and the objective is just different:
 | Kind | Produced by | Grad sync | Grad-norm bucket |
 |---|---|---|---|
 | DTensor shard | either mechanism — HF's `tp_plan` styles, selective attention TP | DTensor / FSDP2 | summed over the axes its mesh names |
-| **Plain slice** | hand-sliced GptOss `sinks` (`model._tp_sharded_non_dtensor`) | none — the slices are already disjoint | summed over the TP group |
+| **Plain slice** | hand-sliced GptOss `sinks` (`register_hand_sliced`) | none — the slices are already disjoint | summed over the TP group |
 | Replica | `embed_tokens`/`lm_head` under selective TP, router, norms outside attention | `_sync_tp_replicated_grads` averages over the TP group (the local `dp` shards once FSDP2 wraps them — TP siblings hold the same shard) | counted once, no TP reduce |
 | Per-head attention norm | a norm after a colwise projection (`q_norm`/`k_norm`) | `_sync_tp_replicated_grads` **sums** over the TP group | counted once, no TP reduce |
 
 The trap is the plain slice. It is indistinguishable from a replica by tensor type, and once FSDP2
 wraps the run for DP **both** become 1-D `dp` DTensors, so the mesh cannot separate them either.
 
-`_tp_sharded_plain_param_ids()` (`src/trainers/mixins/grad_sync.py`) is the single source of truth:
-it reads the `_tp_sharded_non_dtensor` registry (the `(suffix, shard_dim)` pairs recorded when a
-param is sliced by hand), and both `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off
-it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
+`_tp_sharded_plain_param_ids()` (`halo/trainers/parallelism/grad_sync.py`) is the single source of truth:
+it reads the hand-sliced registry (`hand_sliced_suffixes`: the suffixes `register_hand_sliced`
+records, each with its shard dim, when a param is sliced by hand), and both
+`_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
 no entries here.
 
 Classifying a slice as a replica costs twice: the TP-group average mixes another rank's heads into
@@ -223,9 +250,10 @@ unsharded single-GPU grad norm.
 ## EP+TP mode
 
 EP+TP shards attention with TP and distributes MoE experts with EP on the same GPU groups
-(`_load_ep_tp_model`). Router, `embed_tokens`/`lm_head`, and norms stay replicated. `ep_size` must be
-a multiple of `tp_size`, TP stays NVLink-local, and DP = `world_size / tp_size`. Locality rules, the
-EP/TP/DP example shapes, and the gradient-sync groups: [multi-node.md](multi-node.md#eptp-mode).
+(`load_ep_tp_model`). Router, `embed_tokens`/`lm_head`, and norms stay replicated. `ep_size` must be
+a multiple of `tp_size`, TP stays NVLink-local, and DP = `world_size / tp_size`. Its topology rules:
+[Topology rules](README.md#topology-rules); example shapes and the gradient-sync groups:
+[multi-node.md](multi-node.md#eptp-mode).
 
 For MoE where only expert memory is the bottleneck, shard the expert FFN with
 [ETP](expert-tensor-parallelism.md) instead. Attention TP and expert TP are mutually exclusive.
@@ -235,7 +263,7 @@ the attention reductions feeding the router, which flips a handful of near-tied 
 and moves whole-expert mass. Gradient scale and direction still match; this is bf16 reduction
 order, not a sync bug.
 
-Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32), so the correctness gate uses
+Measured **0.060** loss offset on gpt-oss-20b (top-4-of-32, before 1.2.0), so the correctness gate uses
 `TOL.router_pick_flip_loss_abs` (0.1, shared with the EP+ETP gate) instead of the generic
 parallel-vs-baseline bound.
 
@@ -246,9 +274,10 @@ parallel-vs-baseline bound.
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** There is no per-family "supports TP" flag. Selective TP shards exactly the attention
-classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`), and
+classes in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`), and
 a `tp_size > 1` run that shards **zero** layers raises, naming the model's attention classes; that
-is how the [unsupported families](#supported-models) are rejected.
+is how the [unsupported families](#supported-models) are rejected. The check runs on a meta-device shell
+before any weight is read (`reject_unsupported_structure`), and again when the plan is applied.
 
 A run that shards *some* layers (hybrid stacks — Qwen3.5/3.6 `GatedDeltaNet`, LFM-2 short-conv)
 only **warns**: numerics stay correct, but the unsharded layers keep a full replica per rank, so
@@ -256,37 +285,35 @@ per-rank memory falls by far less than `1/tp_size`.
 
 Head divisibility is checked first: `num_attention_heads % tp_size == 0` always,
 `num_key_value_heads % tp_size == 0` for non-MLA GQA. The dense HF-native `tp_plan="auto"` path gets
-the same gate: `ParallelismConfig.validate_against_model_config` runs `validate_tp_head_divisibility`
+the same gate: `reject_unsupported_model` runs `validate_tp_head_divisibility`
 on every load path, off `config.json` before any weight is read.
 
 Transformers validates no head count of its own, so without it the run dies on the first forward's
 reshape, after the whole checkpoint has been pulled and placed on every rank.
 
-**Axis combinations.** TP composes with EP only. TP+CP, TP+ETP and EP+TP+ETP are refused by the
-[allowlist](README.md#supported-combinations). EP+TP also meets two topology rejections:
-single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domain multi-group EP
-([Multi-Node → EP+TP](multi-node.md#eptp-mode)).
+**Axis combinations.** TP composes with EP only; the allowlist and the EP+TP topology rules:
+[Supported combinations](README.md#supported-combinations).
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 
 | Knob | Under TP | Gate |
 |---|---|---|
-| `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `_validate_lora_tp_compatibility` |
+| `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `reject_lora_under_tp` |
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
-| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading.py` |
-| `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_validate_fsdp_settings` |
+| QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading/parallel/load_rules.py` |
+| `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_reject_fsdp_settings` |
 | `fsdp_reshard_after_backward: false` | rejected — the TP setup shards through its own `fully_shard` calls | same |
 | `fsdp_defer_grad_sync` | rejected at `data_parallel_size == 1` — no FSDP2 wrap, so no reduce to defer | same |
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
-| `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_validate_hsdp` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading.py` |
-| `accelerate launch` | rejected — TP requires `torchrun` | `model_loading.py`, `ParallelismValidationMixin` |
+| `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
+| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
+| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_custom_parallelism_under_accelerate` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
-| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
-| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `kernels/liger/orchestrator.py` |
-| `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `setup_model_and_tokenizer` (`input_embeddings_tp_sharded`) |
+| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP layers | `reject_unreloadable_best_model` |
+| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
+| `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |
-| `torch_compile` | not gated, and no meaningful speedup — DTensor's sharded-op dispatch breaks the graph at every sharded op. Use Liger | — |
+| `torch_compile` | not gated and unmeasured under TP: the local-shard linears and their collectives trace without a graph break ([Graph breaks](../optimization/torch-compile.md#graph-breaks)), but FA4 still breaks it at every attention call. Use Liger | — |
 
 ## Multi-node
 
@@ -301,25 +328,25 @@ torchrun --nnodes=2 --node_rank=0 --nproc_per_node=4 \
     scripts/training/sft.py <config>.yaml --tensor_parallel_size=4
 ```
 
-`DIST_NCCL_TIMEOUT_MINUTES` (default 30) is pinned onto the default group and every EP/CP/TP subgroup
-via `apply_default_pg_timeout`. DeepEP's dispatch/combine runs behind its own `ElasticBuffer`
-GPU-side barrier, not the PyTorch watchdog, so this does **not** bound it.
+The NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) covers the TP mesh too:
+[Launch Recipes → Environment variables](launch-recipes.md#environment-variables).
 
 ## Checkpoint saving
 
-`save_tp_model` (`src/distributed/checkpoint/tp_save.py`) drives TP saving, and it always
+`save_tp_checkpoint` (`halo/checkpoint/parallel/save.py`), the ladder's TP rung, always
 gathers: all TP ranks reconstruct full tensors and one save rank writes a standard HF checkpoint, put
 through `normalize_gathered_state_dict` (hub expert layout, save dtype) like the FSDP2 and CP
 writers. There is no per-rank TP save. The write streams through `stream_gathered_checkpoint`, so
-the save rank's host RAM is bounded by one chunk plus one pending shard rather than the whole model.
+the save rank's host RAM is bounded by one chunk plus the shards it is filling and writing
+([Checkpoints](../reference/checkpoints.md)) rather than the whole model.
 
 `chunked_saveable_tensors` reconstructs every sharded param with `DTensor.full_tensor()` — one walk
-covers both mechanisms — and `gather_tp_sharded_non_dtensor_params` all-gathers the hand-sliced
-GptOss `sinks` after it. Both are **collective**: every TP-mesh rank must drive them or the gather
-hangs.
+covers both mechanisms — and `gather_hand_sliced_params` (`halo/checkpoint/parallel/writing.py`)
+all-gathers the hand-sliced GptOss `sinks` after it. Both are **collective**: every TP-mesh rank
+must drive them or the gather hangs.
 
 On resume every TP shape is Path B: the training scripts repoint `model_name_or_path` at the
-checkpoint, so the weights load at construction and `CheckpointLoader._load_streamed` skips the re-read.
+checkpoint, so the weights load at construction and `load_resume_weights` skips the re-read.
 Where it does read (a best-model reload, or a model built from elsewhere), each rank streams the
 checkpoint's full tensors and `distribute_tensor`s them into the live DTensor placements.
 

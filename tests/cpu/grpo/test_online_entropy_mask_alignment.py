@@ -1,22 +1,11 @@
 #!/usr/bin/env python
-"""``top_entropy_quantile`` protection must fail loud when its completion ids do not match the mask.
-
-The mixin stashes the completion ids in ``_get_per_token_logps_and_entropies`` and unions their
-special-token positions into ``get_high_entropy_mask`` on the SAME micro-batch. A stash from a
-different micro-batch (or none at all) must not fall through to TRL's plain mask, which silently
-drops the structural tokens from the trained set — the template rot the mixin exists to prevent.
-
-    python tests/cpu/grpo/test_online_entropy_mask_alignment.py
-"""
+"""``top_entropy_quantile`` protection must fail loud when its completion ids do not match the mask. Falling through
+to TRL's plain mask would silently drop the structural tokens from the trained set."""
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.trainers.grpo.mixins.entropy_mask import ProtectedTokenEntropyMixin
-
-# The mixin logs through accelerate's adapter, which needs the process state to exist.
-PartialState()
+from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 
 SPECIAL_ID = 100
 
@@ -41,7 +30,7 @@ class _PlainQuantile:
         return (entropies >= cutoff) & mask.bool()
 
     def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, *a, **kw):
-        return None, None
+        return None, None, None
 
 
 class _Harness(ProtectedTokenEntropyMixin, _PlainQuantile):
@@ -80,7 +69,6 @@ def test_an_aligned_stash_protects_the_special_token():
 
 
 def test_nothing_to_protect_is_not_a_mismatch():
-    """A tokenizer exposing no specials has nothing to align; the plain mask stands, warned once."""
     harness = _Harness(_NoSpecialsTokenizer())
     _, entropies, mask = _batch(rows=1, length=5)
     plain = _PlainQuantile().get_high_entropy_mask(entropies, mask, 0.8)

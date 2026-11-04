@@ -8,9 +8,9 @@ import shutil
 import pytest
 import torch
 
-import src.trainers.mixins.reference_logps as reference_mod
-from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME, REFERENCE_LOGPS_FILE
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+import halo.trainers.reference_logps as reference_mod
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME, REFERENCE_LOGPS_FILE
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
     SETTINGS,
@@ -149,7 +149,7 @@ def test_a_failed_sidecar_write_keeps_the_previous_checkpoint(tmp_path, monkeypa
         raise OSError("disk full")
 
     monkeypatch.setattr(reference_mod.torch, "save", fail_save)
-    with pytest.raises(RuntimeError, match="disk full"):
+    with pytest.raises(OSError, match="disk full"):
         trainer.save_checkpoint()
     assert not trainer.rotated
     assert (previous / "sentinel").read_text() == "complete"
@@ -240,9 +240,8 @@ def _mapped_files() -> list[str]:
 
 
 def test_a_resume_maps_a_staged_copy_so_rotation_can_remove_the_checkpoint(tmp_path):
-    """A resume maps its saved scores for the run. Mapped through the checkpoint's own entry, rotation's
-    removal of that checkpoint on NFS leaves a fresh ``.nfs*`` file keeping the directory, which HF's
-    newest-mtime rotation then keeps in place of a complete checkpoint."""
+    """Mapped through the checkpoint's own entry, rotation's removal on NFS leaves a ``.nfs*`` file keeping the
+    directory, which HF's newest-mtime rotation then keeps in place of a complete checkpoint."""
     attached, checkpoint = _save_first_split(tmp_path)
     resumed = ReferenceStorageTrainer(tmp_path, checkpoint=str(checkpoint), step=2)
     restored = restore_reference(resumed, reference_dataset(), "train")
@@ -272,8 +271,7 @@ def _ranked_partial_restore(rank: int, root: str) -> None:
 
 
 def test_a_node_without_its_checkpoint_copy_fails_the_resume_on_every_rank(tmp_path):
-    """Node-local output: each node's writer stages its own copy, so a node missing it is the torn verdict
-    on every rank, not a silent resume from the other node's scores or a hang."""
+    """Each node's writer stages its own copy; a node missing it must not resume from the other's scores or hang."""
     _, source = _save_first_split(tmp_path / "source")
     checkpoint = tmp_path / "rank-0" / "checkpoint-1"
     checkpoint.mkdir(parents=True)

@@ -1,39 +1,32 @@
 #!/usr/bin/env python
-"""The SDPG self-distillation collators (src/data/collators/self_distill.py and the VLM sibling).
-
-OPD pairs the k-th supervised token of the student branch with the k-th of the hinted teacher
-branch, so both must supervise the same tokens in the same order while the teacher sequence is
-longer by the hint; a row breaking that raises at prep, world-uniform, rather than distilling across
-shifted tokens. Confidence weights divide by ONE dataset normalizer, so they weight rows at any
-batch size. A real tokenizer is needed for chat templating; tests skip when one is not cached.
-
-Run: pytest tests/cpu/data/test_self_distill_collator.py
-"""
+"""The SDPG self-distillation collators. OPD pairs the k-th supervised token of student and teacher branches, so a
+row breaking that raises at prep, world-uniform. The text path encodes each row once at prep, and confidence
+weights divide by one dataset normalizer. Tests skip when a real tokenizer is not cached."""
 
 import types
 from functools import partial
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.data.collators.self_distill import (
+import halo.data.collators.self_distill as self_distill_collator
+from halo.data.chat_render import render_conversation, tokenize_rendered
+from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
+    SelfDistillVLMDataCollator,
     confidence_normalizer,
     inject_privileged_hint,
     privileged_hint,
     teacher_history,
 )
-from src.data.collators.vlm import SelfDistillVLMDataCollator
-from src.data.pipeline.vlm_dataset import _filter_vlm_over_length
+from halo.data.completion_spans import build_training_labels
+from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
+from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_tokenizer
-from tests.common.utils import load_script_module
 
 MARKER = "<|im_start|>assistant\n"
-
-PartialState()  # the VLM filter logs through accelerate's logger, which requires an initialized state
 
 
 def _tokenizer():
@@ -45,6 +38,9 @@ def _collator(tokenizer, **overrides):
         "max_length": 256,
         "conversation_field": "messages",
         "hint_template": "\n[Hint] answer is {answer}\n",
+        "answer_field": "answer",
+        "solution_field": "solution",
+        "confidence_power": 1.0,
         "response_prompt_template": MARKER,
         "train_on_completions_only": True,
     }
@@ -94,7 +90,16 @@ def test_only_the_slots_a_template_names_must_be_filled():
 
 def test_the_vlm_collator_hints_the_teacher_history_the_same_way():
     tokenizer = types.SimpleNamespace(eos_token_id=2, pad_token_id=0, get_vocab=dict)
-    collator = SelfDistillVLMDataCollator(None, tokenizer, hint_template="\n[Hint] {answer}\n")
+    collator = SelfDistillVLMDataCollator(
+        None,
+        tokenizer,
+        2048,
+        train_on_completions_only=False,
+        hint_template="\n[Hint] {answer}\n",
+        answer_field="answer",
+        solution_field="solution",
+        confidence_power=1.0,
+    )
     history = [
         {"role": "user", "content": "Q1"},
         {"role": "assistant", "content": "A1"},
@@ -114,30 +119,79 @@ def test_student_and_teacher_supervise_the_same_response_tokens():
         assert torch.equal(student, teacher)
 
 
-def test_supervising_the_prompt_is_refused_at_the_audit():
+def test_supervising_the_prompt_is_refused_at_the_encoding():
     """With the prompt in the labels the hint shifts every pair after it onto another token."""
     tokenizer = _tokenizer()
     collator = _collator(tokenizer, train_on_completions_only=False, response_prompt_template=None)
     with pytest.raises(ValueError, match="not the same sequence"):
-        collator.audit_row(_row())
+        collator.encode_row(_row())
 
 
-def test_the_audit_writes_no_copy_of_its_input(tmp_path, monkeypatch):
-    """The audit returns no columns, so its cache artifact must carry none: a map writes every column
-    it leaves in place, so a VLM split's image bytes would be copied per node on a non-shared FS."""
+def _whole_batch_collation(collator, rows):
+    """The batch the collator built from raw rows before rows were encoded at prep, spelled out: render and
+    tokenize each row, ``tokenizer.pad`` the branch, then label the padded batch."""
+    batch = {}
+    branches = [("", [row["messages"] for row in rows])]
+    if collator.builds_teacher_branch:
+        branches.append(("teacher_", [collator._teacher_history(row["messages"], row) for row in rows]))
+    for prefix, histories in branches:
+        texts = [
+            render_conversation(collator.tokenizer, history, row, conversation_field="messages")
+            for history, row in zip(histories, rows, strict=True)
+        ]
+        encoded = collator.tokenizer.pad(
+            [tokenize_rendered(collator.tokenizer, text) for text in texts], padding=True, return_tensors="pt"
+        )
+        batch[f"{prefix}input_ids"], batch[f"{prefix}attention_mask"] = encoded["input_ids"], encoded["attention_mask"]
+        batch[f"{prefix}labels"] = build_training_labels(
+            encoded["input_ids"],
+            collator.tokenizer,
+            MARKER,
+            True,
+            attention_mask=encoded["attention_mask"],
+            eos_token_ids=collator.eos_token_ids,
+        )
+    return batch
+
+
+@pytest.mark.parametrize("padding_side", ["right", "left"])
+def test_collating_rows_encoded_at_prep_builds_the_whole_batch_collation(padding_side, monkeypatch):
+    """Collation renders nothing and pads ``encode_row``'s rows into the batch the whole-batch collation builds, on
+    either padding side."""
+    tokenizer = _tokenizer()
+    tokenizer.padding_side = padding_side
+    collator = _collator(tokenizer)
+    rows = [_row(), _row("capital of France, in one word please?", "Paris, the city of light")]
+    encoded = [collator.encode_row(row) for row in rows]
+    assert set(encoded[0]) == {"input_ids", "labels", "teacher_input_ids", "teacher_labels"}
+
+    monkeypatch.setattr(self_distill_collator, "render_conversation", lambda *a, **k: pytest.fail("rendered"))
+    batch = collator(encoded)
+    monkeypatch.undo()
+
+    expected = _whole_batch_collation(collator, rows)
+    assert batch.keys() == expected.keys()
+    for key, value in expected.items():
+        assert torch.equal(batch[key], value), key
+    assert batch["input_ids"].shape[1] != batch["teacher_input_ids"].shape[1], "the rows must need padding"
+
+
+def test_the_text_encoding_keeps_only_the_encoded_columns(tmp_path, monkeypatch):
+    """Every column the map leaves in place is written to its cache file on every node."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
-    script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_audit")
-    produced = []
-    real_map = script.coordinated_map
-    monkeypatch.setattr(script, "coordinated_map", lambda *args, **kwargs: produced.append(real_map(*args, **kwargs)))
-    rows = [_row(payload="x" * 4096), _row("capital of France?", "Paris", payload="y" * 4096)]
-    split = Dataset.from_list(rows)
+    script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_encode")
+    rows = [_row(payload="x" * 4096, confidence=0.5), _row("capital of France?", "Paris", payload="y", confidence=1.0)]
 
-    script._audit_rows(_collator(_tokenizer()), split, None, 1)
+    encoded = script._encode_text_rows(_collator(_tokenizer()), Dataset.from_list(rows), "train", 1, ("confidence",))
 
-    (audited,) = produced
-    (artifact,) = audited.cache_files
-    assert Dataset.from_file(artifact["filename"]).column_names == []
+    (artifact,) = encoded.cache_files
+    assert sorted(Dataset.from_file(artifact["filename"]).column_names) == [
+        "confidence",
+        "input_ids",
+        "labels",
+        "teacher_input_ids",
+        "teacher_labels",
+    ]
 
 
 def test_no_teacher_branch_is_built_with_the_opd_term_off():
@@ -149,8 +203,7 @@ def test_no_teacher_branch_is_built_with_the_opd_term_off():
 
 @pytest.mark.parametrize("max_length", [8, None], ids=["student-over", "teacher-over"])
 def test_an_over_length_branch_raises_by_name_instead_of_truncating(max_length):
-    """Truncating one branch would cut response tokens the other keeps; the raise names the branch so
-    the budget is raised for the hint, and the audit raises it at prep."""
+    """Truncating one branch would cut response tokens the other keeps; the raise names the branch."""
     tokenizer = _tokenizer()
     hint = " here is a sufficiently long privileged hint: answer={answer}"
     if max_length is None:
@@ -158,8 +211,8 @@ def test_an_over_length_branch_raises_by_name_instead_of_truncating(max_length):
     collator = _collator(tokenizer, hint_template=hint, max_length=max_length)
     branch = "student" if max_length == 8 else "teacher"
     with pytest.raises(ValueError, match=f"{branch} branch"):
-        collator.audit_row(_row())
-    assert _collator(tokenizer, hint_template=hint, max_length=4096).audit_row(_row()) == {}
+        collator.encode_row(_row())
+    assert _collator(tokenizer, hint_template=hint, max_length=4096).encode_row(_row())
 
 
 def _confidence_split(values):
@@ -167,7 +220,7 @@ def _confidence_split(values):
 
 
 def test_confidence_weights_divide_by_the_dataset_mean_at_any_batch_size():
-    """A per-batch mean is 1.0 at batch size 1 — the weighting every shipped recipe would run as a no-op."""
+    """A per-batch mean is 1.0 at batch size 1, a no-op on every shipped recipe."""
     tokenizer = _tokenizer()
     normalizer = confidence_normalizer(_confidence_split([1.0, 0.5, 0.0]), None, "confidence", 2.0)
     assert normalizer == pytest.approx((1.0 + 0.25) / 3)
@@ -221,7 +274,14 @@ class _QwenTemplateProcessor:
 
 
 def _vlm_collator(tokenizer, **overrides):
-    kwargs = {"response_prompt_template": MARKER, "train_on_completions_only": True, "hint_template": " hint {answer}"}
+    kwargs = {
+        "response_prompt_template": MARKER,
+        "train_on_completions_only": True,
+        "hint_template": " hint {answer}",
+        "answer_field": "answer",
+        "solution_field": "solution",
+        "confidence_power": 1.0,
+    }
     return SelfDistillVLMDataCollator(_QwenTemplateProcessor(tokenizer), tokenizer, 256, **{**kwargs, **overrides})
 
 
@@ -273,9 +333,8 @@ def _vlm_script_args(**overrides):
 
 @pytest.mark.parametrize("hint_template", [" hint {answer}", None], ids=["opd-on", "opd-off"])
 def test_the_script_runs_the_vlm_audit_at_prep(hint_template, tmp_path, monkeypatch):
-    """The VLM builder must hand every row to the collator's audit before training: here the labels
-    reach into the prompt, so the hinted branch supervises other tokens, and the build itself raises.
-    With the OPD term off no teacher branch exists, so the same rows build."""
+    """The labels here reach into the prompt, so the hinted branch supervises other tokens and the build raises.
+    With the OPD term off the same rows build."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     script = load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_vlm_audit")
     ds = DatasetDict({"train": Dataset.from_list([_row("What digit?", "7")])})
@@ -297,8 +356,7 @@ def test_the_script_runs_the_vlm_audit_at_prep(hint_template, tmp_path, monkeypa
 
 
 def test_the_vlm_length_filter_measures_the_hinted_teacher_branch():
-    """The teacher branch is the longer one; a row only its hint pushes over would otherwise raise in
-    one rank's collator and hang the peers."""
+    """A row only its hint pushes over would otherwise raise in one rank's collator and hang the peers."""
     rows = {
         "history": [[{"role": "user", "content": "q q"}, {"role": "assistant", "content": "a"}]] * 2,
         "tools_json": [None, None],
@@ -313,7 +371,6 @@ def test_the_vlm_length_filter_measures_the_hinted_teacher_branch():
 
 
 def _render(tok, **collator_kwargs) -> str:
-    """Decode the student branch of a one-row batch — what the model actually sees."""
     row = _row(
         tools=[
             {
@@ -327,8 +384,7 @@ def _render(tok, **collator_kwargs) -> str:
 
 
 def test_system_prompt_reaches_the_rendered_conversation():
-    """The knob parses on the self-distillation script (SFTScriptArguments); rendering without it
-    would train the model on a prompt shape it is never served with."""
+    """Rendering without it would train the model on a prompt shape it is never served with."""
     tok = _tokenizer()
     assert "BE TERSE" not in _render(tok)
     assert "BE TERSE" in _render(tok, system_prompt="BE TERSE")

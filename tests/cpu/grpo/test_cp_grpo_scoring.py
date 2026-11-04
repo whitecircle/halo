@@ -11,13 +11,12 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.config import cp_boundary_shift
-from src.distributed.context_parallel.wrapper import find_cp_wrapper
-from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
-from src.trainers.grpo.objective.offline import offline_loss
+from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import full_row_loss
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.models import TINY_QWEN3_CONFIG
 
 SEQ = 12
@@ -53,7 +52,7 @@ def _model():
 
 
 def _scorer():
-    scorer = ChunkedLogprobsCore()
+    scorer = LogprobScoringMixin()
     scorer.temperature = 1.0
     return scorer
 
@@ -65,9 +64,7 @@ def _scored_shards(model, hidden, ids, mask, labels, cp_size):
         wrapper = unpatched_cp_wrapper(model, cp_size=cp_size, cp_rank=rank)
         start = rank * SEQ // cp_size
         end = (rank + 1) * SEQ // cp_size
-        # CPU has no Ulysses attention kernel. The actual wrapper split is pinned separately in
-        # test_cp_grpo_hidden.py; inject the full-backbone hidden shard here to isolate the real
-        # boundary shift, head transform, ignore-index handling and chunked scorer.
+        # CPU has no Ulysses attention kernel, so inject the hidden shard; test_cp_grpo_hidden.py pins the real split.
         wrapper.forward_hidden_states = lambda **kwargs: hidden[:, start:end]
         local_logps, local_labels = scorer._cp_chunked_logps_impl(wrapper, ids, mask, labels)
         logps.append(local_logps)
@@ -126,11 +123,11 @@ def test_dropping_boundary_targets_breaks_the_production_scorer_objective():
             max_completion_length=SEQ,
         )
 
-    def drop_boundary(local_hidden, local_labels, _boundary, _is_last_rank):
-        return cp_boundary_shift(local_hidden, local_labels, None, True)
+    def drop_boundary(labels, start, length):
+        return next_token_targets(labels[:, start : start + length], 0, length)
 
     correct = score_loss()
-    with patch("src.distributed.context_parallel.config.cp_boundary_shift", side_effect=drop_boundary):
+    with patch("halo.distributed.context_parallel.sequence_chunks.next_token_targets", side_effect=drop_boundary):
         broken = score_loss()
     torch.testing.assert_close(correct, expected, atol=1e-4, rtol=1e-4)
     assert not torch.isclose(broken, expected, atol=1e-4, rtol=1e-4)
@@ -160,7 +157,7 @@ def test_cp_scorer_finds_real_peft_layout_and_preserves_adapter_gradients(peft_o
     else:
         wrapper.model = get_peft_model(wrapper.model, config)
         model = wrapper
-    assert find_cp_wrapper(model) is wrapper
+    assert find_ulysses_model(model) is wrapper
     scorer = _scorer()
     scorer.accelerator = SimpleNamespace(unwrap_model=lambda value: value)
     expected_logits = model(input_ids=ids, attention_mask=mask, use_cache=False).logits[:, :-1]

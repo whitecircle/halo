@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the QLoRA post-backward gradient sync.
-
-QLoRA cannot use FSDP2 (quantized base weights conflict with DTensor inputs), so the DP average is
-the toolkit's own. The property that matters is **structural membership**: which parameters enter
-the collective must be identical on every rank, because grad presence is not. A VLM with vision
-adapters in ``lora_target_modules`` and a text-only microbatch on one rank alone is enough — the
-rank with no vision grad skips a collective its peers enter, and the job hangs until the watchdog.
-
-Run: ``pytest -m cpu tests/cpu/trainers/test_qlora_grad_sync.py``
+"""QLoRA's post-backward gradient sync: membership in the collective must be identical on every rank.
+A rank with no vision grad on a text-only microbatch would skip a collective its peers enter and hang the job.
 """
 
 from __future__ import annotations
@@ -18,7 +11,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _Model(torch.nn.Module):
@@ -45,21 +38,16 @@ def _trainer(model, *, fp32=False):
 
 
 def _run_sweep(trainer, *, present_on_some_rank):
-    """Drive the sweep with the presence mask a peer rank would have contributed.
-
-    ``all_reduce(MAX)`` over the mask is what makes membership structural, so the test supplies the
-    peer's answer rather than mocking the decision away.
-    """
+    """Supplies the peer's presence mask; ``all_reduce(MAX)`` over the mask is what makes membership structural."""
     reduced: list[list[torch.Tensor]] = []
 
     def fake_all_reduce(tensor, op=None, group=None):
         tensor.copy_(torch.tensor(present_on_some_rank, dtype=tensor.dtype))
 
     with (
-        patch("src.trainers.mixins.grad_sync.dist.all_reduce", side_effect=fake_all_reduce),
-        patch("src.trainers.mixins.grad_sync.current_device", return_value=torch.device("cpu")),
+        patch("halo.trainers.parallelism.grad_sync.dist.all_reduce", side_effect=fake_all_reduce),
         patch(
-            "src.trainers.mixins.grad_sync.reduce_grads_bucketed",
+            "halo.trainers.parallelism.grad_sync.reduce_grads_bucketed",
             side_effect=lambda grads, **kw: reduced.append(grads),
         ),
     ):
@@ -68,10 +56,9 @@ def _run_sweep(trainer, *, present_on_some_rank):
 
 
 def test_a_param_another_rank_has_a_grad_for_still_enters_the_collective():
-    """The defect: this rank produced no vision grad, its peer did. Skipping it here desyncs them."""
     model = _Model()
     model.text_lora.weight.grad = torch.ones(4, 4)
-    # vision_lora.grad stays None — a text-only microbatch on this rank.
+    # vision_lora.grad stays None: a text-only microbatch on this rank.
     trainer = _trainer(model)
 
     reduced = _run_sweep(trainer, present_on_some_rank=[1, 1])
@@ -86,8 +73,7 @@ def test_a_param_another_rank_has_a_grad_for_still_enters_the_collective():
 
 
 def test_a_param_no_rank_touched_is_left_alone():
-    """Anti-over-reach: zero-filling everywhere would hand the optimizer weight decay and momentum
-    on a parameter that should have been skipped entirely."""
+    """Zero-filling everywhere would hand the optimizer weight decay and momentum on a parameter it should skip."""
     model = _Model()
     model.text_lora.weight.grad = torch.ones(4, 4)
     trainer = _trainer(model)
@@ -121,6 +107,18 @@ def test_the_sweep_runs_once_per_optimizer_step():
 
     trainer.state.global_step = 1
     assert _run_sweep(trainer, present_on_some_rank=[1, 1]), "a new step must sweep again"
+
+
+def test_each_run_sweeps_its_own_first_step():
+    """``global_step`` restarts per ``train()``; an earlier first sweep must not leave the new run un-averaged."""
+    model = _Model()
+    model.text_lora.weight.grad = torch.ones(4, 4)
+    trainer = _trainer(model)
+    assert _run_sweep(trainer, present_on_some_rank=[1, 1])
+
+    trainer.state = SimpleNamespace(global_step=0)
+    assert _run_sweep(trainer, present_on_some_rank=[1, 1]), "the new run's first step was taken as already swept"
+    assert not _run_sweep(trainer, present_on_some_rank=[1, 1]), "the new run swept its first step twice"
 
 
 def test_disabled_when_the_run_is_not_qlora():

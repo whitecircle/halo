@@ -2,11 +2,7 @@
 
 Three variants: dense (`Qwen3ForCausalLM`), MoE (`Qwen3MoeForCausalLM`), and the text branch of the VL model.
 
-| Variant | HF classes | EP | CP | TP | ETP |
-|---|---|:--:|:--:|:--:|:--:|
-| Qwen3 dense | `Qwen3ForCausalLM` / `Qwen3Attention` | — | Yes | Yes | — |
-| Qwen3 MoE | `Qwen3MoeForCausalLM` / `Qwen3MoeSparseMoeBlock` / `Qwen3MoeAttention` | Yes | Yes | Yes | Yes |
-| Qwen3-VL (text) | `Qwen3VLTextAttention` | — | Yes | **No** (dense: no `base_model_tp_plan`) | — |
+Per-axis support: the Qwen3 rows of the [compatibility matrix](README.md#compatibility-matrix).
 
 Qwen3.5 / Qwen3.6 share the name prefix but use a different `Qwen3_5*` class hierarchy — see the [separate page](qwen3_5.md).
 
@@ -17,7 +13,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 - **FSDP2** — default under torchrun; under `accelerate launch` the `--config_file` decides.
 - **TP** — native HF `tp_plan="auto"` shards attention and MLP.
 - **CP** — `Qwen3Attention` uses the same `Qwen3MoeUlyssesAttention` wrapper as Qwen3 MoE and Qwen3-VL.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
+- **PP** — registered for the dense family; the tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate, 8B and up split. Two-node recipe: `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 - **LoRA** — under FSDP/DP and CP; rejected at construction under TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ### Configs
@@ -27,42 +23,49 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 | `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` | SFT (full), 4K seq | `Qwen/Qwen3-4B-Instruct-2507` |
 | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` | SFT (LoRA) | `Qwen/Qwen3-4B-Instruct-2507` |
 | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | SFT (QLoRA) | `Qwen/Qwen3-4B-Instruct-2507` |
+| `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml` | SFT (full), `pp2` across two 8-GPU nodes | `Qwen/Qwen3-8B` |
 | `examples/embedding/qwen3/embedding-qwen3-4b-nq.yaml` | Embedding | `Qwen/Qwen3-Embedding-4B` |
 | `examples/grpo/online/qwen3/online-grpo-qwen3-{4b,8b}-smoke.yaml` | Online GRPO smoke | `Qwen/Qwen3-4B-Instruct-2507`, `Qwen/Qwen3-8B` |
 | `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` | Online GRPO (RLVR + RLRR) | `Qwen/Qwen3-8B` |
 | `examples/grpo/{online/rlvr-online-grpo,environmental/environmental-grpo}-template.yaml` | RLVR / env GRPO templates | `Qwen/Qwen3-4B-Instruct-2507` |
 
+The full fine-tune trains without gradient checkpointing. Each micro-batch, two packed 4,096-token rows, holds about 35 GB of activations, which fit under FSDP2 on several GPUs but not beside the whole model, gradient and optimizer state of a single 80 GB GPU, so a one-GPU Hopper launch passes `--gradient_checkpointing=true`.
+
 The per-method canonical examples (DPO, SMPO, KTO, reward, classification, distillation, GRPO task configs) are built on Qwen3.5/3.6 — see [Qwen3.5 / Qwen3.6](qwen3_5.md).
 
 ## Qwen3 MoE
 
-`EPQwen3MoELayer` (`src/distributed/expert_parallel/layers/qwen3.py`) replaces `Qwen3MoeSparseMoeBlock`.
+`EPQwen3MoELayer` (`halo/distributed/expert_parallel/families/qwen3.py`) replaces `Qwen3MoeSparseMoeBlock`.
 
 - Routing: the gate returns `(logits, weights, experts)`; softmax + top-k.
 - Activation: `act(gate(x)) * up(x)` → `down`, where `act` is read off `Qwen3MoeExperts.act_fn` (the resolved `hidden_act`, SiLU on every released checkpoint) rather than assumed.
-- Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at wrapper construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
+- Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at EP layer construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
 - Compute: Grouped GEMM on SM90+, falling back to a per-expert loop with `index_add_`.
 - RL weight sync: `gather_expert_state_dict` emits the per-expert hub layout, which both pinned
-  engines read — vLLM 0.26.0 and SGLang 0.5.17's `qwen3_moe` loader
+  engines read — vLLM 0.32.0's `RoutedExperts` and SGLang 0.5.22's `qwen3_moe` loader
   (`make_expert_params_mapping`) alike, so either `rollout_backend` takes the sync
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-**Router balancing** — the wrapper re-derives selection from the router's own logits, applying the DeepSeek-V3 bias to the selection scores while the gate weights stay on the unbiased softmax (honoring the family's `norm_topk_prob`).
+**Router balancing** — the EP layer re-derives selection from the router's own logits, applying the DeepSeek-V3 bias to the selection scores while the gate weights stay on the unbiased softmax (honoring the family's `norm_topk_prob`).
 
 The architecture has no bias slot (the gate is a bare weight), so the bias is trainer-only: `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in, with exported checkpoints serving without the trained bias. `auto` stays on `aux_loss`, since `Qwen3MoeForCausalLM.forward` declares `output_router_logits` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
 
-**CP** — `Qwen3MoeAttention` → `Qwen3MoeUlyssesAttention` (`src/distributed/context_parallel/layers/qwen3.py`), RoPE before all-to-all and native GQA.
+**CP** — `Qwen3MoeAttention` → `Qwen3MoeUlyssesAttention` (`halo/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA.
 
-**TP and ETP** — selective attention-only TP (`q/k/v_proj` ColwiseParallel, `o_proj` RowwiseParallel); embeddings and `lm_head` stay replicated, expert layers belong to EP. ETP shards `gate_proj` / `up_proj` / `down_proj` along the intermediate dim; because Qwen3 already stores gate and up separately, the same compute path runs under both ETP and non-ETP with a smaller `M`.
+**TP and ETP** — selective attention-only TP (`q/k/v_proj` colwise, `o_proj` rowwise); embeddings and `lm_head` stay replicated, expert layers belong to EP. ETP shards `gate_proj` / `up_proj` / `down_proj` along the intermediate dim; because Qwen3 already stores gate and up separately, the same compute path runs under both ETP and non-ETP with a smaller `M`.
+
+**PP** — registered, at any split offset. With no exportable bias slot and the aux-loss path severed by the split, a PP run sets `moe_balancing: none` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 **LoRA** on the experts works under EP through native grouped adapters (`_init_expert_lora`). It is rejected under TP and EP+TP, and at `expert_tp_size > 1` (the replicated adapter half would take partial gradients) — attention LoRA still runs there.
 
-**Configs** — `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` (plain FSDP2; `-lora` / `-qlora` variants). `Qwen/Qwen3-235B-A22B-Instruct-2507` trains at `--expert_parallel_size=8`.
+**Tree packing** — dense and MoE Qwen3 take `tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)); a run pinned to `flash_attention_2` takes the `gather` form, unset `tree_full_attention` resolving to it.
+
+**Configs** — no Qwen3 MoE recipe ships; the EP benchmarks and GPU suites run `Qwen/Qwen3-30B-A3B-Instruct-2507`.
 
 ## Qwen3-VL
 
-`Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP and is in the selective-TP accept-list (`src/distributed/tensor_parallel/module_types.py`). That accept-list governs the attention-only DTensor path, which the loader takes for MoE and EP+TP shapes.
+`Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP.
 
-A **dense** Qwen3-VL goes through HF-native `tp_plan="auto"` instead, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
+Under TP a dense Qwen3-VL goes through HF-native `tp_plan="auto"`, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no EP layer claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
 
-No dedicated SFT configs ship; `tests/gpu/trainers/sft/test_sft_vlm.py` exercises the path on `Qwen/Qwen3-VL-2B-Instruct`. See [Vision-language models](../training-methods/sft.md#vision-language-models).
+No dedicated SFT configs ship; `tests/gpu/trainers/sft/test_sft_vlm.py` loads `Qwen/Qwen3-VL-2B-Instruct` on text rows, and `test_dpo_vlm.py`, `test_smpo_vlm.py` and `test_self_distillation_vlm.py` train it on images. See [Vision-language models](../training-methods/sft.md#vision-language-models).

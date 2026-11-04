@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""Consolidation contract for the frozen auxiliary models: one loader, one sinks policy.
-
-The DPO/KTO reference, the on-policy GRPO KL reference, the SDPG KL anchor, the offline-GRPO native
-expert-LoRA KL reference and the distillation teacher all load an unparallelized frozen model whose
-logprobs are the other half of the objective. A per-site copy of that load buys a silent numerical bug the moment it drifts — a pin read off an object that cannot
-carry it (a "pinned" teacher on hub ``main``), or a backend resolved under ``sinks_reset=True``
-whose sink reset is then never applied (a GptOss teacher running sdpa over live sinks, every
-logprob shifted by nats). Both are "this copy is missing a step the others have".
-
-These tests pin the property that removes that class of bug: every call site reaches
-``load_frozen_auxiliary_model``, the sinks policy is applied there rather than by each caller, and no
-module outside the two owning loaders binds those steps at all.
-
-Run: python tests/cpu/models/test_frozen_auxiliary_loader.py  (or pytest)
-"""
+"""Frozen auxiliary models share one loader and one sinks policy.
+A per-site copy drifts silently: a pin read off an object that cannot carry it, or sdpa over sinks never reset."""
 
 import ast
 import inspect
@@ -23,61 +10,50 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from accelerate import PartialState
 from torch import nn
-from transformers import AutoModelForImageTextToText, GenerationConfig
-from trl import ModelConfig
+from transformers import AutoModelForImageTextToText, GenerationConfig, Qwen3Config
 
+import halo.model_loading.parallel.frozen_models as frozen_models
 import scripts.training.distillation.self_distill as self_distill_script
 import scripts.training.distillation.teacher_distill as distill_script
-import scripts.training.offline_grpo as offline_grpo_script
-import src.distributed.loading.frozen_models as frozen_models
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.loading.frozen_models import (
+import scripts.training.grpo.offline as offline_grpo_script
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading import model_preparation
+from halo.model_loading.parallel.frozen_models import (
     load_frozen_auxiliary_model,
     load_reference_model_for_on_policy_grpo,
     load_reference_model_for_preference,
 )
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
-
-# The SDPG reference load logs through accelerate's logger, which requires an initialized state.
-PartialState()
+from tests.common.repo import REPO_ROOT
 
 AUX_MODEL = "org/auxiliary"
 
-# The steps no call site may own itself: resolving the backend and applying the sinks policy are one
-# decision (``sinks_reset=True`` is what APPROVES a sink-dropping backend), so a site that binds
-# either of them again owns a second copy of it, free to drift from the loaders that own the first.
-# The two sink primitives are not swept: only their definer binds them, and every caller reaches
-# them through ``apply_sinks_policy`` — which is what a drifting copy would have to bind.
+# Resolving the backend and applying the sinks policy are one decision (a neutralized ``SinksPolicy`` approves a
+# sink-dropping backend), so a site binding either again owns a second copy.
 FROZEN_LOAD_STEPS = ("resolve_attn_implementation", "apply_sinks_policy")
 
-# Allowlist, not a list of known offenders: the sweep below is over the whole tree, so a new copy is
-# caught by default. attention.py and gpt_oss_sinks.py define the two steps; the loaders and the
-# shared ``finalize_run_model`` apply them, with model_loading.py re-running the resolver AFTER the
-# parallelism-specific overrides (CP's flex→FA switch, EP's flex-compile disable). The rest apply a
-# RECORDED or explicit policy to a checkpoint on disk rather than filling ``.sinks`` by name behind it.
+# Allowlist: the sweep covers the whole tree, so a new copy is caught by default. loader.py re-runs the resolver after
+# the parallelism overrides; the checkpoint modules apply a recorded or explicit policy to a checkpoint on disk.
 FROZEN_LOAD_STEP_OWNERS = frozenset(
     {
-        "src/models/patches/attention.py",
-        "src/models/patches/gpt_oss_sinks.py",
-        "src/models/loading/model_preparation.py",
-        "src/distributed/loading/frozen_models.py",
-        "src/distributed/loading/model_loading.py",
+        "halo/models/attention/selection.py",
+        "halo/models/attention/gpt_oss_sinks.py",
+        "halo/model_loading/model_preparation.py",
+        "halo/model_loading/parallel/frozen_models.py",
+        "halo/model_loading/parallel/loader.py",
         "scripts/training/embedding.py",
-        "src/checkpoint/tool_io.py",
-        "scripts/before_training/patch_vocab.py",
-        "scripts/after_training/reset_sinks.py",
+        "halo/checkpoint/sidecars.py",
+        "halo/checkpoint/tools/vocab_patch.py",
     }
 )
 
-REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
-
 
 def _token_setup_args():
-    """The script arguments the tokenizer setup seam reads, all at their defaults."""
     return types.SimpleNamespace(
         eos_token=None,
         bos_token=None,
@@ -90,9 +66,7 @@ def _token_setup_args():
 
 
 def _tokenizer():
-    # Every ``<special>_token_id`` accompanies its token: ``PreTrainedTokenizerBase.__getattr__``
-    # resolves them, so no real tokenizer can carry one without the other, and the setup seam the
-    # loader runs records the pad id on the model.
+    # Every ``<special>_token_id`` accompanies its token, as ``PreTrainedTokenizerBase.__getattr__`` resolves them.
     return types.SimpleNamespace(
         eos_token="<e>",
         eos_token_id=1,
@@ -105,10 +79,9 @@ def _tokenizer():
 
 
 def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation=None):
-    """The DPO/KTO full-finetune reference load, driven through its real call site."""
     return load_reference_model_for_preference(
         _token_setup_args(),
-        ModelConfig(model_name_or_path=AUX_MODEL, attn_implementation=attn_implementation),
+        ModelArguments(model_name_or_path=AUX_MODEL, attn_implementation=attn_implementation),
         types.SimpleNamespace(bf16=True, fp16=False, precompute_ref_log_probs=False),
         ParallelismConfig(),
         _tokenizer(),
@@ -120,41 +93,41 @@ def _preference_reference(*, reset_sinks, attn_default=None, attn_implementation
 
 
 def _script_teacher(*, reset_sinks):
-    """The shipped distillation launch path (the script preloads the teacher for the trainer)."""
+    """The script preloads the teacher for the trainer."""
     return distill_script._load_distill_teacher(
-        args=types.SimpleNamespace(teacher_model=AUX_MODEL, teacher_model_revision=None),
-        model_config=types.SimpleNamespace(attn_implementation=None, trust_remote_code=False),
+        args=types.SimpleNamespace(teacher_model=AUX_MODEL, teacher_model_revision=None, reset_sinks=reset_sinks),
+        model_config=types.SimpleNamespace(trust_remote_code=False),
         training_config=types.SimpleNamespace(bf16=True, fp16=False),
-        dist_args=types.SimpleNamespace(reset_sinks=reset_sinks),
+        requested_attn=None,
         is_vlm=False,
         local_rank=0,
     )
 
 
 def _sdpg_reference(*, reset_sinks):
-    """The SDPG self-distillation ``L_ref`` KL anchor."""
     args = _token_setup_args()
-    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, AUX_MODEL
+    args.reference_kl_coef, args.reference_model_name_or_path, args.reset_sinks = 0.1, AUX_MODEL, reset_sinks
     return self_distill_script._load_sdpg_reference(
         args=args,
-        model_config=ModelConfig(model_name_or_path=AUX_MODEL),
+        model_config=ModelArguments(model_name_or_path=AUX_MODEL),
         sft_config=types.SimpleNamespace(bf16=True, fp16=False),
-        dist_args=types.SimpleNamespace(reset_sinks=reset_sinks),
         tokenizer=_tokenizer(),
         is_vlm=False,
+        attn_default=None,
     )
 
 
 def _offline_grpo_reference(*, reset_sinks):
     """Native expert LoRA uses a live unadapted base rather than full-FT's run-start score cache."""
+    args = _token_setup_args()
+    args.reset_sinks = reset_sinks
     return offline_grpo_script._load_kl_reference(
-        _token_setup_args(),
+        args,
         types.SimpleNamespace(
             parallelism_config=ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)), model_source=AUX_MODEL
         ),
         types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False),
-        ModelConfig(model_name_or_path=AUX_MODEL),
-        types.SimpleNamespace(reset_sinks=reset_sinks),
+        ModelArguments(model_name_or_path=AUX_MODEL),
         policy=nn.Sequential(StubEPLayerBase()),
         tokenizer=_tokenizer(),
         peft_config=None,
@@ -163,10 +136,10 @@ def _offline_grpo_reference(*, reset_sinks):
 
 
 def _on_policy_grpo_reference(*, reset_sinks):
-    """The online and environmental GRPO full-finetune KL reference, handed to TRL in place of its own."""
+    """The online and environmental GRPO KL reference, handed to TRL in place of its own."""
     return load_reference_model_for_on_policy_grpo(
         _token_setup_args(),
-        ModelConfig(model_name_or_path=AUX_MODEL),
+        ModelArguments(model_name_or_path=AUX_MODEL),
         types.SimpleNamespace(beta=0.1, bf16=True, fp16=False),
         ParallelismConfig(),
         _tokenizer(),
@@ -184,35 +157,25 @@ FROZEN_LOAD_SITES = {
     "offline-grpo-reference": _offline_grpo_reference,
 }
 
-# The scripts that load a policy AND a live reference, i.e. the ones whose two loads must agree.
-PREFERENCE_SCRIPTS = tuple(
-    pathlib.Path(__file__).resolve().parents[3] / "scripts/training/preference" / f"{name}.py"
-    for name in ("dpo", "kto")
-)
+# Where DPO and KTO load both a policy and a live reference, so the two loads must agree.
+PREFERENCE_LOADS = REPO_ROOT / "halo/entrypoints/model_setup.py"
 
 
 @pytest.mark.parametrize("site", FROZEN_LOAD_SITES.values(), ids=list(FROZEN_LOAD_SITES))
 def test_every_frozen_load_site_reaches_the_shared_loader(site):
-    """Only ``load_frozen_auxiliary_model``'s namespace is stubbed here.
-
-    A call site that fetched through its own ``AutoConfig``/``auto_load_model`` would miss these stubs
-    entirely — it would reach the hub for a repo that does not exist, and record no fetch — so this is
-    a routing check, not a smoke test.
-    """
+    """Only the shared loader is stubbed, so a site with its own fetch would reach the hub and record nothing."""
     with stub_frozen_loader() as caps:
         model = site(reset_sinks=True)
     captured = captured_load(caps)
     assert model is captured.model
     assert captured.load_positional[0] == AUX_MODEL
-    # Whatever pin a site resolves must reach BOTH fetches — a pinned checkpoint paired with
-    # hub-main's config is its own way of loading the wrong model.
+    # A pinned checkpoint paired with hub-main's config would load the wrong model.
     assert captured.config["revision"] == captured.load["revision"]
     assert captured.load["attn_implementation"] == STUB_RESOLVED_ATTN
     assert captured.load["dtype"] is torch.bfloat16
 
 
 def _repo_tokenizers(vocabs):
-    """``AutoTokenizer`` stand-in serving one vocabulary per repo, recording each fetch's revision."""
     fetched = {}
 
     def from_pretrained(path, revision=None, **_):
@@ -222,12 +185,12 @@ def _repo_tokenizers(vocabs):
     return types.SimpleNamespace(from_pretrained=from_pretrained), fetched
 
 
-POLICY_CONFIG = ModelConfig(model_name_or_path=AUX_MODEL, model_revision="abc123")
+POLICY_CONFIG = ModelArguments(model_name_or_path=AUX_MODEL, model_revision="abc123")
 
 
 def _anchor_args(reference):
     args = _token_setup_args()
-    args.reference_kl_coef, args.reference_model_name_or_path = 0.1, reference
+    args.reference_kl_coef, args.reference_model_name_or_path, args.reset_sinks = 0.1, reference, True
     return args
 
 
@@ -239,9 +202,9 @@ def test_the_sdpg_reference_takes_the_policy_pin_only_from_the_policy_repo(refer
             args=_anchor_args(reference),
             model_config=POLICY_CONFIG,
             sft_config=types.SimpleNamespace(bf16=True, fp16=False),
-            dist_args=types.SimpleNamespace(reset_sinks=True),
             tokenizer=_tokenizer(),
             is_vlm=False,
+            attn_default=None,
         )
     captured = captured_load(caps)
     assert captured.load_positional[0] == reference
@@ -249,8 +212,7 @@ def test_the_sdpg_reference_takes_the_policy_pin_only_from_the_policy_repo(refer
 
 
 def test_a_separate_reference_repo_of_another_tokenizer_is_refused():
-    """The reference is grown and keyed to the policy's tokenizer, so a different id map scores other
-    tokens; the policy's own repo needs no second tokenizer. main runs this before any load."""
+    """The reference is keyed to the policy's tokenizer, so a different id map scores other tokens."""
     auto_tokenizer, fetched = _repo_tokenizers({AUX_MODEL: {"a": 0, "b": 1}, "org/other-reference": {"a": 1, "b": 0}})
     with patch.object(self_distill_script, "AutoTokenizer", auto_tokenizer):
         with pytest.raises(ValueError, match="disagree on"):
@@ -264,13 +226,7 @@ def test_a_separate_reference_repo_of_another_tokenizer_is_refused():
 @pytest.mark.parametrize("reset_sinks", [True, False])
 @pytest.mark.parametrize("site", FROZEN_LOAD_SITES.values(), ids=list(FROZEN_LOAD_SITES))
 def test_every_frozen_load_site_gets_the_sinks_policy(site, reset_sinks):
-    """The policy the backend was resolved UNDER must land on the model every site returns.
-
-    ``resolve_attn_implementation(..., sinks_reset=True)`` approves sdpa for a GptOss model only on
-    the premise that the caller then neutralizes the sinks; ``sinks_reset=False`` keeps them live and
-    they must be frozen instead. Skipping the pairing shifts every logprob of the frozen model by nats
-    against the policy it scores, with nothing logged.
-    """
+    """The policy the backend was resolved under must land on the returned model, or every logprob shifts by nats."""
     with stub_frozen_loader() as caps:
         model = site(reset_sinks=reset_sinks)
     captured = captured_load(caps)
@@ -285,12 +241,7 @@ def test_every_frozen_load_site_gets_the_sinks_policy(site, reset_sinks):
 
 
 def _module_binds(path: pathlib.Path, name: str) -> bool:
-    """Whether a module imports or defines ``name``.
-
-    Binding is the check rather than a text match: CLAUDE.md bans function-local imports, so a
-    module-level import is the only way a call site can reach one of these, while a prose mention in
-    a docstring (the CP GptOss layer explains when the reset runs relative to its wrap) is not a copy.
-    """
+    """Binding rather than a text match: function-local imports are banned, and a docstring mention is not a copy."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom | ast.Import) and any(
@@ -304,17 +255,13 @@ def _module_binds(path: pathlib.Path, name: str) -> bool:
 
 @pytest.mark.parametrize("step", FROZEN_LOAD_STEPS)
 def test_the_resolve_and_sinks_steps_live_only_in_their_owners(step):
-    """Sweep the whole tree, not a list of the copies we happen to know about.
-
-    Drift takes the form of a copy that looks finished — a pin read off an object that cannot carry
-    it, a backend resolved under a premise never applied. A hand-enumerated call-site list misses
-    each such copy at the moment it is written, so the assertion is inverted: any module outside the
-    owners that binds one of these steps is a new copy until proven otherwise.
-    """
+    """Any module outside the owners that binds one of these steps is a new copy until proven otherwise."""
+    roots = [REPO_ROOT / directory for directory in ("halo", "scripts")]
+    assert all(root.is_dir() for root in roots), f"the sweep lost a root: {roots}"
     offenders = sorted(
         str(path.relative_to(REPO_ROOT))
-        for directory in ("src", "scripts")
-        for path in (REPO_ROOT / directory).rglob("*.py")
+        for root in roots
+        for path in root.rglob("*.py")
         if str(path.relative_to(REPO_ROOT)) not in FROZEN_LOAD_STEP_OWNERS and _module_binds(path, step)
     )
     assert not offenders, (
@@ -325,34 +272,22 @@ def test_the_resolve_and_sinks_steps_live_only_in_their_owners(step):
 
 
 def test_the_frozen_model_is_finalized_like_the_policy():
-    """Both loaders end in ``finalize_run_model``, so the frozen copy carries the same fixups.
-
-    ``sanitize_generation_config`` is the one the frozen path did NOT run: a config shipping sampling
-    params with ``do_sample=False`` is what ``save_pretrained`` refuses, and a teacher exported or
-    re-saved by a tool would have hit it while the policy never does.
-    """
+    """``save_pretrained`` refuses sampling params with ``do_sample=False``, which a re-saved teacher would hit."""
     with stub_frozen_loader() as caps:
         model = caps.auto_load.return_value
         model.generation_config = GenerationConfig(temperature=0.7, do_sample=False)
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
 
     assert model.generation_config.do_sample is True
 
 
 def test_reset_sinks_default_matches_the_policy_loaders():
-    """A caller that omits the policy gets the off-policy fine-tuning one, like every sibling loader."""
     assert inspect.signature(load_frozen_auxiliary_model).parameters["reset_sinks"].default is True
 
 
 def test_the_reference_requests_the_policy_s_attention_default():
-    """The reference must inherit the POLICY's fallback backend, not auto-detect its own.
-
-    DPO/KTO pin the policy to ``attn_default="sdpa"`` (padded batches run FA4's slow varlen path).
-    A reference that passes only ``model_config.attn_implementation`` sends ``None`` — the request
-    that means "auto-detect" — and lands on flash_attention_4 on Blackwell. Every logratio is then
-    a difference of logprobs computed by two different kernels, which biases the objective instead
-    of crashing. The unset case is the common one: no shipped preference YAML sets the field.
-    """
+    """Off Blackwell DPO/KTO request ``attn_default="sdpa"``. A reference sending ``None`` auto-detects a flash kernel,
+    so every logratio differences two kernels' logprobs, which biases the objective instead of crashing."""
     with stub_frozen_loader() as caps:
         _preference_reference(reset_sinks=True, attn_default="sdpa")
     assert captured_load(caps).resolver["attn_implementation"] == "sdpa"
@@ -363,16 +298,16 @@ def test_the_reference_requests_the_policy_s_attention_default():
     assert captured_load(caps).resolver["attn_implementation"] == "eager"
 
 
-@pytest.mark.parametrize("script", PREFERENCE_SCRIPTS, ids=lambda p: p.stem)
-def test_both_loads_in_a_preference_script_share_one_attention_default(script):
-    """``attn_default`` defaults to None on both loaders, so a call site that passes it to only one
-    silently reopens the split above. Pin that each script hands both the SAME expression."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
+def test_both_loads_of_a_preference_run_share_one_attention_default():
+    """It defaults to None on both loaders, so passing it to only one silently reopens the split above."""
+    tree = ast.parse(PREFERENCE_LOADS.read_text(encoding="utf-8"))
+    (function,) = (node for node in ast.walk(tree) if getattr(node, "name", None) == "load_preference_models")
+    script = PREFERENCE_LOADS
     defaults = {}
-    for node in ast.walk(tree):
+    for node in ast.walk(function):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
             continue
-        if node.func.id not in ("load_model_for_training", "load_reference_model_for_preference"):
+        if node.func.id not in ("load_policy_model", "load_reference_model_for_preference"):
             continue
         passed = [kw.value for kw in node.keywords if kw.arg == "attn_default"]
         assert passed, f"{script.name}: {node.func.id} does not pass attn_default"
@@ -385,55 +320,51 @@ def test_both_loads_in_a_preference_script_share_one_attention_default(script):
 
 
 def test_vlm_load_pins_the_image_text_class_and_placement():
-    """``is_vlm`` must pin ``AutoModelForImageTextToText``: resolving the class off the config drops
-    the vision tower for a wrapper the mapping does not name."""
+    """Resolving the class off the config drops the vision tower for a wrapper the mapping does not name."""
     with stub_frozen_loader() as caps:
         load_frozen_auxiliary_model(
-            AUX_MODEL, dtype=torch.bfloat16, is_vlm=True, device_map={"": 2}, download_tag="aux"
+            AUX_MODEL,
+            dtype=torch.bfloat16,
+            is_vlm=True,
+            device_map={"": 2},
+            download_tag="aux",
+            trust_remote_code=False,
         )
-    captured = captured_load(caps, is_vlm=True)
-    assert captured.load_positional[0] is AutoModelForImageTextToText
+    captured = captured_load(caps)
+    assert captured.load["model_class"] is AutoModelForImageTextToText
     assert captured.load["device_map"] == {"": 2}
     captured.fetch_scope.assert_called_once_with(AUX_MODEL, None, tag="aux")
 
 
 @pytest.mark.parametrize("is_vlm", [False, True], ids=["text", "vlm"])
 def test_the_frozen_load_keeps_the_task_head(is_vlm):
-    """The coverage gate excuses whatever the architecture adds on top of a base checkpoint, because
-    a run that TRAINS that head supplies it. This model never trains anything — every tensor it
-    carries is consumed to score the policy — so an absent head is not an excusable absence but a
-    randomly initialized one producing plausible numbers on one side of the objective. The reward
-    scorers already load this way (``scripts/inference/reward_model/_common.py``).
-    """
+    """The coverage gate excuses an added head because a run that trains it supplies it. This model trains nothing,
+    so an absent head is random weights producing plausible numbers on one side of the objective."""
     with stub_frozen_loader() as caps:
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, is_vlm=is_vlm)
-    assert captured_load(caps, is_vlm=is_vlm).load["excuse_task_head"] is False
+        load_frozen_auxiliary_model(
+            AUX_MODEL, dtype=torch.bfloat16, is_vlm=is_vlm, trust_remote_code=False, download_tag=None
+        )
+    assert captured_load(caps).load["excuse_task_head"] is False
 
 
 def test_the_frozen_load_applies_the_remote_code_shims_before_the_config_fetch():
-    """A teacher or reference preloaded ahead of the policy is the first remote-code load of the
-    process, so it cannot inherit the shims the policy loader applies — and the config fetch is
-    already enough to import a remote modeling file, so the order matters as much as the call.
-    """
+    """A teacher or reference preloaded ahead of the policy is the process's first remote-code load, and the config
+    fetch alone can import a remote modeling file."""
     order = []
     with (
-        stub_frozen_loader() as caps,
-        patch.object(frozen_models, "apply_remote_code_compat_shims", lambda: order.append("shims")),
+        stub_frozen_loader(),
+        patch.object(frozen_models, "resolve_build_config", model_preparation.resolve_build_config),
+        patch.object(model_preparation, "apply_remote_code_compat_shims", lambda: order.append("shims")),
+        patch.object(model_preparation, "AutoConfig") as auto_config,
     ):
-        caps.auto_config.from_pretrained.side_effect = lambda *args, **kwargs: order.append("config") or STUB_CONFIG
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        auto_config.from_pretrained.side_effect = lambda *args, **kwargs: order.append("config") or Qwen3Config()
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     assert order == ["shims", "config"]
 
 
 def test_the_frozen_load_warms_the_fa4_kernels_after_the_load():
-    """This model's first scoring forward must not be the one that JIT-compiles FA4.
-
-    The policy loader warms them; a frozen teacher/reference left cold pays a ~10s compile inside a
-    training step, on whichever rank reaches it first, while its peers run ahead into the next
-    collective — the desync the warm-up exists to prevent, moved onto the auxiliary model. The
-    warm-up barriers, so it must follow the coordinated source resolution and the weight load,
-    never sit inside either.
-    """
+    """Left cold, it pays a ~10s compile in a training step on one rank while its peers run into the next collective.
+    The warm-up barriers, so it must follow the source resolution and the weight load, never sit inside either."""
     order: list = []
 
     with (
@@ -444,18 +375,19 @@ def test_the_frozen_load_warms_the_fa4_kernels_after_the_load():
             lambda model, *, dtype: order.append(("warmup", dtype)),
         ),
     ):
-        caps.fetch_scope.side_effect = lambda path, revision, *, tag: order.append(("resolve", tag)) or revision
+        caps.fetch_scope.side_effect = lambda path, revision, *, tag: order.append(("resolve", tag)) or ModelSource(
+            path, revision, path
+        )
         caps.auto_load.side_effect = lambda *args, **kwargs: order.append("weights") or caps.auto_load.return_value
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, download_tag="teacher")
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, download_tag="teacher", trust_remote_code=False)
 
     assert order == [("resolve", "teacher"), "weights", ("warmup", torch.bfloat16)]
 
 
 def test_an_untagged_fetch_opens_no_coordination_scope():
-    """``fs_aware_main_first`` demands every rank reach a tag equally often — an unconditional scope
-    around a load only some ranks perform would hang the ones that do."""
+    """``fs_aware_main_first`` needs every rank to reach a tag equally often, so a scope on a partial load hangs."""
     with stub_frozen_loader() as caps:
-        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16)
+        load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     caps.fetch_scope.assert_not_called()
 
 

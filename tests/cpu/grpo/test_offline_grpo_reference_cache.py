@@ -10,12 +10,12 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 
-import src.distributed.runtime as runtime
-import src.trainers.grpo.reference_cache as cache_module
-from src.checkpoint.format import REFERENCE_CACHE_DIR_NAME
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.reference_cache import ReferenceScoreCache, reference_cache_writers
-from src.training.environment import _validate_output_dir
+import halo.trainers.grpo.offline.reference_cache as cache_module
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.entrypoints.run_setup import _validate_output_dir
+from halo.runtime import consensus
+from halo.trainers.grpo.offline.reference_cache import ReferenceScoreCache, reference_cache_writers
 from tests.common.distributed import shared_output_dir
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
@@ -30,7 +30,6 @@ from tests.common.offline_grpo_reference import (
 
 
 def _scratch_files(root) -> list[str]:
-    """The scratch's files, minus the lock a live launch holds beside its directory for the run."""
     return sorted(
         str(path.relative_to(root))
         for path in (root / REFERENCE_CACHE_DIR_NAME).rglob("*")
@@ -41,14 +40,13 @@ def _scratch_files(root) -> list[str]:
 @pytest.mark.parametrize("owners", [(1, 0, 0, 0), (0, 1, 0, 1), (1, 1, 1, 1)])
 def test_cache_writer_election_gathers_the_checkpoint_owner_predicate(monkeypatch, owners):
     monkeypatch.setattr(cache_module, "get_global_world_size", lambda: len(owners))
-    monkeypatch.setattr(cache_module, "fs_aware_save_rank", lambda: bool(owners[1]))
+    monkeypatch.setattr(cache_module, "is_fs_save_rank", lambda: bool(owners[1]))
 
-    def gather(output, flag):
+    def gather(output, flag, group=None):
         assert flag.item() == owners[1]
-        for tensor, owner in zip(output, owners, strict=True):
-            tensor.fill_(owner)
+        output.copy_(torch.tensor(owners, dtype=output.dtype))
 
-    monkeypatch.setattr(dist, "all_gather", gather)
+    monkeypatch.setattr(dist, "all_gather_into_tensor", gather)
     assert reference_cache_writers() == tuple(rank for rank, owner in enumerate(owners) if owner)
 
 
@@ -357,7 +355,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     cache.writers = writers
     rejects = []
     metadata = []
-    original_join = runtime._rank_max
+    original_join = consensus.rank_max
     original_metadata_gather = dist.all_gather_into_tensor
 
     def record_reject(slots):
@@ -374,7 +372,7 @@ def _bounded_batch(rank, root, failure, dp_size, writers, buffer_values):
     def unexpected_broadcast(*args, **kwargs):
         pytest.fail("batch metadata used per-shard broadcasts")
 
-    patch.setattr(runtime, "_rank_max", record_reject)
+    patch.setattr(consensus, "rank_max", record_reject)
     patch.setattr(dist, "all_gather_into_tensor", record_metadata)
     patch.setattr(dist, "broadcast", unexpected_broadcast)
     if failure == "write" and rank == writers[-1]:
@@ -515,8 +513,7 @@ def test_transport_failure_is_not_deferred_to_a_world_failure_join(tmp_path, mon
 
 
 def test_completed_scores_stay_on_disk_for_the_launch(tmp_path):
-    """Every rank maps the merged files for the run: on NFS a reader on another node faults on a stale
-    handle once the file is unlinked and the unlinking host closes its own mappings."""
+    """On NFS a reader on another node faults on a stale handle once the unlinking host closes its own mappings."""
     first = mapped_scores(tmp_path, reference_dataset(), reference_rows())
     mapped_scores(tmp_path, reference_dataset(), reference_rows())
     launches = [path for path in (tmp_path / REFERENCE_CACHE_DIR_NAME).iterdir() if path.is_dir()]
@@ -536,7 +533,7 @@ def test_a_new_launch_removes_earlier_launches_scratch_but_not_live_nfs_remnants
     held.mkdir()
     (held / ".nfs000000001").write_bytes(b"a file a process on another host still maps")
     # The earlier launch's process exits, which releases its lock.
-    os.close(cache_module._HELD_LAUNCH_LOCKS.pop(str(tmp_path / REFERENCE_CACHE_DIR_NAME)))
+    os.close(cache_module._held_launch_locks.pop(str(tmp_path / REFERENCE_CACHE_DIR_NAME)))
     monkeypatch.setattr(cache_module, "_launch_id", lambda: "next-launch")
     current = mapped_scores(tmp_path, reference_dataset(), reference_rows())
     remaining = sorted(_scratch_files(tmp_path))

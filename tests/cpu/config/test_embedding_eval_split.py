@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""``embedding.py`` hands the trainer the dataset's ``test`` split whenever the dataset has one.
-
-A pre-sharded eval split can leave a rank no rows. Chosen by truthiness, that rank alone got no eval
-dataset (or fell through to another split) and skipped the evaluation its peers entered.
-
-Driven through ``main()`` up to the trainer construction, with the model build stubbed.
-
-Run: pytest tests/cpu/config/test_embedding_eval_split.py
-"""
+"""``embedding.py`` hands the trainer the dataset's ``test`` split whenever it has one. A pre-sharded eval split can
+leave a rank no rows; chosen by truthiness, that rank alone would skip the evaluation its peers entered."""
 
 import sys
 import types
@@ -16,7 +9,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from tests.common.utils import load_script_module
+from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"
 
@@ -34,7 +27,7 @@ def _eval_dataset_handed_to_the_trainer(tmp_path, dataset: DatasetDict):
     )
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(
-            cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False, non_dp_replication_factor=1
+            cp_size=1, is_cp_mode=False, pp_size=1, has_ep_group=False, non_dp_replication_factor=1
         ),
         model_source=_MODEL_ID,
         mode_suffix="",
@@ -51,11 +44,10 @@ def _eval_dataset_handed_to_the_trainer(tmp_path, dataset: DatasetDict):
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "build_sentence_transformer", return_value=model),
         mock.patch.object(module, "inject_lora"),
-        mock.patch.object(module, "apply_distributed_trainer_config"),
         mock.patch.object(module, "barrier"),
-        mock.patch.object(module, "build_training_callbacks", return_value=[]),
+        mock.patch.object(module, "configure_balancing_and_build_callbacks", return_value=[]),
         mock.patch.object(module, "EmbeddingTrainer", side_effect=build_trainer),
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
     for patch in patches:

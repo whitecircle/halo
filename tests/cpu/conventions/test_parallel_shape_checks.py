@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""``tests.common.parallel_shape.parallel_shape_checks`` fails on a model the axis never reached.
-
-The SFT mode suites gate "the mode engaged" on these probes and run only on the GPU tiers, so a probe
-that stopped reading the model (and started agreeing with the config again) would go unnoticed. Each
-probe is driven here with the model the axis leaves behind and with one it left untouched: real
-Ulysses wrappers on a tiny Qwen3, a real TP DTensor over a fake process group, and EP layers stubbed
-down to the class and attributes the probe reads.
-
-Run: python tests/cpu/conventions/test_parallel_shape_checks.py
-"""
+"""``tests.common.parallel_shape.parallel_shape_checks`` fails on a model the axis never reached. Each probe runs on
+the model the axis leaves behind and on one it left untouched."""
 
 import pytest
 import torch
@@ -17,13 +9,14 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
-from src.distributed.context_parallel.patching import patch_attention_for_ulysses
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.mesh import MeshDim
+from halo.distributed.context_parallel.ulysses_model import apply_ulysses_attention
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.mesh import MeshDim
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import TINY_UNWRAPPED_MOE_FAMILY, tiny_family_model
 
 WORLD_SIZE = 2
 NUM_EXPERTS = TINY_QWEN3_MOE_CONFIG["num_experts"]
@@ -31,8 +24,8 @@ HIDDEN = 8
 
 
 class _StubEPLayer(EPMoELayerBase):
-    """The attributes and expert weights an EP wrapper carries, for ``expert_count`` local experts.
-    The base ``__init__`` needs a live process group, so only the ``nn.Module`` half is initialized."""
+    """The attributes and expert weights an EP layer carries. The base ``__init__`` needs a live process group, so
+    only the ``nn.Module`` half is initialized."""
 
     def __init__(self, ep_size: int, *, expert_count: int | None = None, expert_tp_size: int = 1):
         nn.Module.__init__(self)
@@ -95,7 +88,12 @@ def test_an_etp_run_reads_the_sharding_off_every_layer(expert_tp_size, ok):
     assert "expert_bank_split_ep_way" not in checks, "ep_size=1 splits no bank"
 
 
-def test_a_dense_model_owes_no_ep_wrapper():
+def test_a_moe_with_no_ep_class_owes_no_ep_layer():
+    model = tiny_family_model(TINY_UNWRAPPED_MOE_FAMILY)
+    assert parallel_shape_checks(model, _config()) == {}, "grouped GEMM has no layer to put on stock experts"
+
+
+def test_a_dense_model_owes_no_ep_layer():
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     assert parallel_shape_checks(model, _config()) == {}, "grouped GEMM wraps experts, and a dense model has none"
 
@@ -116,7 +114,7 @@ def test_a_tp_run_needs_a_param_sharded_over_a_tp_mesh(dim_name, ok):
 def test_a_cp_run_needs_the_attention_swapped_for_ulysses(patched):
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     if patched:
-        patch_attention_for_ulysses(model, cp_group=None, cp_size=WORLD_SIZE, validate=False)
+        apply_ulysses_attention(model, cp_group=None, cp_size=WORLD_SIZE)
     assert parallel_shape_checks(model, _config(cp_size=WORLD_SIZE)) == {"cp_attention_wrapped": patched}
 
 

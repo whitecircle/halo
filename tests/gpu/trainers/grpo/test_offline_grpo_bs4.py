@@ -1,22 +1,6 @@
 #!/usr/bin/env python
-"""
-Offline GRPO Trainer smoke test with batch_size=4 and mixed group sizes.
-
-Runs OfflineGRPOTrainer with per_device_train_batch_size > 1, where a single batch contains
-examples from multiple different prompt groups with different group sizes (4 and 8 completions
-per prompt), once per loss type (grpo, bnpo, dr_grpo). For each it checks only that every configured
-step ran and that the final and every per-step loss is finite; no loss is compared against a
-reference or across loss types.
-
-Key differences from test_offline_grpo.py:
-- batch_size=4 (vs 1) to stress multi-example batching
-- Mixed group sizes: 50% prompts with 4 completions, 50% with 8 completions
-- Runs all 3 loss types sequentially
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo_bs4.py
-"""
+"""Offline GRPO smoke at batch_size=4 on mixed group sizes (4 and 8 completions), per loss type. Compares no loss
+against a reference."""
 
 import math
 import os
@@ -26,14 +10,14 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, step_losses
-
-# Configuration
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 6
@@ -46,7 +30,6 @@ NUM_EVAL_SAMPLES = 12
 SEED = 123
 LOSS_TYPES = ["grpo", "bnpo", "dr_grpo"]
 
-# Dataset Creation — mixed group sizes
 
 QUESTION_TEMPLATES = [
     {"q": "What is {a} + {b}?", "op": "+"},
@@ -83,13 +66,11 @@ def _generate_graded_completions(
     rng: random.Random,
     num_completions: int,
 ) -> tuple[list[str], list[float]]:
-    """Generate completions with graded rewards for a given group size."""
     templates = [rng.choice(ANSWER_TEMPLATES) for _ in range(num_completions)]
 
     completions = []
     rewards = []
 
-    # Create a gradient of quality from best (1.0) to worst (0.0)
     for i in range(num_completions):
         reward = max(0.0, 1.0 - i * (1.0 / (num_completions - 1)))
         offset = i * rng.randint(1, 5) * rng.choice([1, -1]) if i > 0 else 0
@@ -97,7 +78,6 @@ def _generate_graded_completions(
         completions.append(templates[i].format(val=val))
         rewards.append(round(reward, 2))
 
-    # Shuffle completions and rewards together
     combined = list(zip(completions, rewards, strict=False))
     rng.shuffle(combined)
     completions, rewards = zip(*combined, strict=False)
@@ -109,10 +89,6 @@ def create_offline_grpo_dataset(
     num_samples: int,
     seed: int = SEED,
 ) -> Dataset:
-    """Create synthetic offline GRPO dataset with mixed group sizes.
-
-    50% of prompts get 4 completions, 50% get 8 completions.
-    """
     rng = random.Random(seed)
     data = []
 
@@ -127,7 +103,6 @@ def create_offline_grpo_dataset(
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
 
-        # Alternate between 4 and 8 completions
         num_completions = 4 if i % 2 == 0 else 8
         completions, rewards = _generate_graded_completions(correct, rng, num_completions)
 
@@ -142,9 +117,6 @@ def create_offline_grpo_dataset(
     return Dataset.from_list(data)
 
 
-# Single loss-type training run
-
-
 def run_single_loss_type(
     loss_type: str,
     model_name: str,
@@ -153,8 +125,7 @@ def run_single_loss_type(
     eval_dataset: Dataset,
     output_dir: str,
 ) -> dict:
-    """Run training with a specific loss type and return results."""
-    # Load fresh model for each loss type
+    # Fresh for each loss type.
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
         dtype=torch.bfloat16,
@@ -179,7 +150,6 @@ def run_single_loss_type(
         max_completion_length=MAX_COMPLETION_LENGTH,
         dataloader_drop_last=True,
         loss_type=loss_type,
-        fsdp="",
     )
 
     trainer = OfflineGRPOTrainer(
@@ -196,7 +166,6 @@ def run_single_loss_type(
     log_history = trainer.state.log_history
     losses = step_losses(trainer)
 
-    # Collect per-split metrics
     pos_logps = [e.get("positive/logps_mean") for e in log_history if "positive/logps_mean" in e]
     neg_logps = [e.get("negative/logps_mean") for e in log_history if "negative/logps_mean" in e]
 
@@ -213,9 +182,6 @@ def run_single_loss_type(
     return result
 
 
-# Main Test
-
-
 def run(ctx):
     log(f"\n{'=' * 70}")
     log("  Offline GRPO batch_size=4 Test (mixed group sizes, all loss types)")
@@ -225,18 +191,15 @@ def run(ctx):
     log("  Group sizes: mixed 4 and 8 completions per prompt")
     log(f"{'=' * 70}")
 
-    # ── Load tokenizer ──
     log("\n[1/3] Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── Create datasets ──
     log("\n[2/3] Creating synthetic datasets with mixed group sizes...")
     train_dataset = create_offline_grpo_dataset(tokenizer, NUM_TRAIN_SAMPLES, seed=SEED)
     eval_dataset = create_offline_grpo_dataset(tokenizer, NUM_EVAL_SAMPLES, seed=SEED + 1)
 
-    # Log dataset composition
     group_sizes = [len(s["completions"]) for s in train_dataset]
     size_4_count = sum(1 for s in group_sizes if s == 4)
     size_8_count = sum(1 for s in group_sizes if s == 8)
@@ -245,14 +208,13 @@ def run(ctx):
     log(f"  Group composition: {size_4_count} groups of 4, {size_8_count} groups of 8")
     log(f"  Eval: {len(eval_dataset)} prompts")
 
-    # ── Run each loss type ──
     log("\n[3/3] Training with each loss type...")
     checks = {}
     metrics = {}
 
     for loss_type in LOSS_TYPES:
         log(f"\n  --- Training with loss_type='{loss_type}' ---")
-        # A fresh output dir per loss type, inside the harness-owned scratch it reclaims.
+        # Inside the harness-owned scratch it reclaims.
         output_dir = os.path.join(ctx.output_dir, loss_type)
         result = run_single_loss_type(loss_type, MODEL_NAME, tokenizer, train_dataset, eval_dataset, output_dir)
 
@@ -266,7 +228,6 @@ def run(ctx):
         if result["neg_logps"]:
             log(f"    Negative logps (first/last): {result['neg_logps'][0]:.4f} / {result['neg_logps'][-1]:.4f}")
 
-        # Checks per loss type
         finite = math.isfinite(loss)
         checks[f"{loss_type}_loss_finite"] = finite
         log(f"    Loss finite: {'PASS' if finite else 'FAIL'}")

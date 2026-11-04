@@ -1,23 +1,15 @@
 #!/usr/bin/env python
-"""CLI-override casting/dispatch tests for H4ArgumentParser (src/training/parser.py).
-
-Pins the Optional cast — Optional-typed numeric fields are cast, not left as raw strings —
-plus bool override parsing (truthy/falsey accepted, garbage rejected) and the ``--key=value``
-form the parser requires of example launch commands.
-
-Run: python tests/cpu/config/test_yaml_cli_overrides.py
-"""
+"""CLI-override casting and dispatch in ``HaloArgumentParser``: Optional numeric fields are cast, bools parse
+strictly, and launch commands use ``--key=value``."""
 
 import re
 import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 
 import pytest
 
-from src.training.parser import H4ArgumentParser
-
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
+from halo.configs.parser import HaloArgumentParser
+from tests.common.repo import REPO_ROOT
 
 
 @dataclass
@@ -36,8 +28,8 @@ def _parse(overrides):
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write("lr: 0.001\n")
         yaml_path = f.name
-    parser = H4ArgumentParser((_ScriptArgs, _TrainConfig))
-    return parser.parse_yaml_and_args(yaml_path, overrides)  # returns [_ScriptArgs, _TrainConfig]
+    parser = HaloArgumentParser((_ScriptArgs, _TrainConfig))
+    return parser.parse_dict(parser.load_values([yaml_path, *overrides]))  # returns [_ScriptArgs, _TrainConfig]
 
 
 def test_optional_int_and_float_cast():
@@ -63,25 +55,21 @@ def test_bool_override_rejects_garbage():
 
 
 def test_example_launch_commands_use_the_equals_form():
-    """``parse_yaml_and_args`` only accepts ``--key=value``; the space form raises immediately.
-
-    Example headers are copy-pasted verbatim, so a ``--expert_parallel_size 2`` written there is a
-    launch command that cannot run. Scans the tree rather than a list.
-    """
+    """``load_values`` only accepts ``--key=value``, and example headers are copy-pasted verbatim. Scans the tree."""
     launch_line = re.compile(r"scripts/training/\S+\.py.*")
-    # A torchrun/accelerate flag consumed by the LAUNCHER, before the script path — not an override.
+    # A torchrun/accelerate flag consumed by the launcher before the script path is no override.
     space_form = re.compile(
         r"--(?!nproc_per_node|master_port|rdzv|config_file|num_processes|main_process_port)[a-z_]+\s+[^-\s]"
     )
     offenders = []
-    for config in sorted((PROJECT_ROOT / "examples").rglob("*.yaml")):
+    for config in sorted((REPO_ROOT / "examples").rglob("*.yaml")):
         for lineno, line in enumerate(config.read_text().splitlines(), 1):
             match = launch_line.search(line)
             if match and space_form.search(match.group()):
-                offenders.append(f"{config.relative_to(PROJECT_ROOT)}:{lineno}: {line.strip()}")
+                offenders.append(f"{config.relative_to(REPO_ROOT)}:{lineno}: {line.strip()}")
     assert not offenders, (
         "example launch commands must pass overrides as --key=value; these use the space form, "
-        "which parse_yaml_and_args rejects outright:\n  " + "\n  ".join(offenders)
+        "which load_values rejects outright:\n  " + "\n  ".join(offenders)
     )
 
 

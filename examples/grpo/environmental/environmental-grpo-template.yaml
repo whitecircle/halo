@@ -1,6 +1,6 @@
 # Async GRPO with Environments training template — see agent-docs/training-methods/async-grpo/README.md.
 # Launch: start a vLLM server on the GPUs the trainer does not take, then
-#   torchrun --nproc_per_node=4 scripts/training/environmental_grpo.py <this config>
+#   torchrun --nproc_per_node=4 scripts/training/grpo/environmental.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
@@ -31,18 +31,18 @@ rewards:
 #   reasoning_effort: null       # every environment: low / medium / high, or random (drawn once per generation group)
 # Shared kwargs: agent-docs/training-methods/async-grpo/environments/README.md; native-tool shaping: .../environments/protocols/native-tool-use.md
 
-# --- Ray Workers (AsyncTrainingConfig fields) ---
+# --- Ray Workers (AsyncRolloutConfig fields) ---
 num_rollout_workers: 16
-max_concurrent_rollouts: null  # default: 4 × this rank's share of the rollout workers
+# max_concurrent_rollouts: null  # 4 × this rank's share of the rollout workers
 # eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
-ray_address: null  # null = local, or "head-node:6379"
+# ray_address: null  # null = local, or "head-node:6379"
 
-# --- vLLM Server - Single Server (AsyncTrainingConfig fields; vllm_group_port is a GRPOConfig field) ---
+# --- Rollout Server - Single Server (AsyncRolloutConfig fields) ---
 # rollout_backend: vllm  # vllm or sglang
-rollout_server_url: "http://localhost:8000"
-vllm_group_port: 51216  # NCCL group port for weight sync
-rollout_connection_timeout: 120.0
-sync_weights_every_n_steps: 1
+# rollout_server_url: "http://localhost:8000"
+# rollout_group_port: 51216  # NCCL group port for weight sync; the base port with several servers
+# rollout_connection_timeout: 120.0
+# sync_weights_every_n_steps: 1
 # model_name: null         # model name sent in the rollout requests; null = model_name_or_path
 # request_timeout: 120.0   # seconds of engine-serving time per rollout-server HTTP call (sync pauses credited)
 # episode_timeout: 1200.0  # one rollout episode's deadline in seconds of engine-serving time; below the NCCL watchdog
@@ -56,9 +56,9 @@ sync_weights_every_n_steps: 1
 #   - url: "http://localhost:8001"
 #     group_port: 51217
 
-# --- Rollout Generation (AsyncTrainingConfig fields) ---
+# --- Rollout Generation (AsyncRolloutConfig fields) ---
 rollout_temperature: 0.7
-rollout_top_p: 0.95
+# rollout_top_p: 0.95
 # rollout_top_k: -1                   # -1 = off; sent on every request, as are the two below
 # rollout_min_p: 0.0                  # 0 = off
 # rollout_repetition_penalty: 1.0     # 1 = off
@@ -75,17 +75,18 @@ rollout_max_tokens: 8192
 # reasoning_price_past_budget: false # price only what each turn reasons past its level's soft budget (a profile with enforce_thinking_cap: false)
 # reasoning_price_cap: 0.1           # that price's cap per episode, in reward units
 # reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
+# reasoning_terms_in_failed_groups: false # also charge both terms in a training group no episode of which earned the objective
 
-# --- Prefetch (AsyncTrainingConfig fields) ---
-enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
-                          # trainer auto-disables it (that server stops serving during weight sync)
+# --- Prefetch (AsyncRolloutConfig fields) ---
+# enable_prefetch: true   # unset = on with 2+ rollout_server_configs, off with one server; true prefetches on one
+                          # server too: the next round rolls out while this one trains, one step stale (IS-corrected)
 
 # --- Dataset (EnvironmentalGRPOScriptArguments fields) ---
 dataset:
 - path/to/dataset  # HuggingFace dataset or s3://bucket/path
 test_size: 0.05
-prompt_field: prompt
-answer_field: answer
+# prompt_field: prompt
+# answer_field: answer
 # context_fields: null   # extra dataset columns handed to the environment as context
 # No system_prompt on this surface: the rollout conversation opens with the environment's own system
 # prompt. Environments that accept an override take it under environment_kwargs (e.g. qa_search).
@@ -121,20 +122,15 @@ per_device_eval_batch_size: 4   # global eval batch must divide by num_generatio
 gradient_accumulation_steps: 8
 num_train_epochs: 2.0
 learning_rate: 5.0e-06
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 50
 
 # --- Optimization ---
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 
 # --- Output ---
 output_dir: checkpoints/environmental-grpo
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 save_total_limit: 3
@@ -145,13 +141,8 @@ logging_steps: 1
 logging_first_step: true
 report_to: wandb
 log_completions: true        # per-sample console table
-save_completions: true       # trajectories → <output_dir>/completions/*.parquet
+# save_completions: true     # trajectories → <output_dir>/completions/*.parquet
 num_completions_to_print: 3
-
-# --- Data ---
-dataloader_num_workers: 0
-remove_unused_columns: false
-seed: 42
 
 # --- PEFT (optional) ---
 use_peft: false

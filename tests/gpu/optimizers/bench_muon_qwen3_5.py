@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""
-Benchmark: Muon vs AdamW vs AdamWBF16 step time on Qwen3.5-2B.
-
-Loads the real Qwen3.5-2B model in bf16 and compares optimizer step time,
-peak memory, and convergence on synthetic data. Reloads from disk per
-optimizer to avoid OOM from deep copies.
-
-Usage (single GPU):
-    python tests/gpu/optimizers/bench_muon_qwen3_5.py
-    python tests/gpu/optimizers/bench_muon_qwen3_5.py --steps 50 --seq-len 512
-"""
+"""Muon vs AdamW vs AdamWBF16 step time, memory and convergence on Qwen3.5-2B, reloading per optimizer to avoid OOM
+from deep copies."""
 
 import argparse
 import gc
@@ -18,9 +9,9 @@ import time
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.optimizers.flash_adamw import create_flash_adamw_optimizer
-from src.optimizers.muon import create_muon_optimizer
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
+from halo.optimizers.muon import build_muon_optimizer
 from tests.common.models import QWEN3_5_2B
 
 
@@ -48,28 +39,23 @@ def create_optimizer_for(name, model, lr):
     elif name == "AdamWBF16 (SR)":
         return AdamWBF16(model.named_parameters(), lr=lr)
     elif name == "Muon (GNS)":
-        return create_muon_optimizer(model, lr=lr)
+        return build_muon_optimizer(model, lr=lr)
     elif name == "Muon (std NS)":
-        return create_muon_optimizer(model, lr=lr, ns_algorithm="standard_newton_schulz")
+        return build_muon_optimizer(model, lr=lr, ns_algorithm="standard_newton_schulz")
     elif name == "FlashAdamW":
-        return create_flash_adamw_optimizer(model, lr=lr)
+        return build_flash_adamw_optimizer(model, lr=lr)
     else:
         raise ValueError(f"Unknown optimizer: {name}")
 
 
 def bench_step_time(model, opt, input_ids, labels, warmup, timed):
-    """Measure fwd+bwd+step time with GC disabled for stable results.
-
-    Records loss from step 0 (before any warmup) for fair convergence comparison.
-    """
+    """GC disabled for stable results; loss recorded from step 0 for a fair convergence comparison."""
     all_losses = []
 
-    # Record initial loss (step 0, no optimizer step yet)
     with torch.no_grad():
         out = model(input_ids=input_ids, labels=labels)
         all_losses.append(out.loss.item())
 
-    # Warmup steps (record losses for convergence curve)
     for _ in range(warmup):
         opt.zero_grad()
         out = model(input_ids=input_ids, labels=labels)
@@ -78,7 +64,6 @@ def bench_step_time(model, opt, input_ids, labels, warmup, timed):
         all_losses.append(out.loss.item())
     torch.cuda.synchronize()
 
-    # Timed steps
     times_full = []
     times_optim = []
 
@@ -153,7 +138,6 @@ def main():
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        # Reload model from disk each time to avoid OOM from deep copies
         print("  Loading model...")
         model = load_model(args.model)
         total_params = sum(p.numel() for p in model.parameters())
@@ -182,13 +166,11 @@ def main():
         gc.collect()
         torch.cuda.empty_cache()
 
-    # ── Tables ──────────────────────────────────────────────────────
     print()
     print("=" * 80)
     print(f"RESULTS -- {args.model} ({total_params / 1e9:.2f}B params)")
     print("=" * 80)
 
-    # Step time table
     print()
     print("Step Time (ms):")
     rows = []
@@ -212,7 +194,6 @@ def main():
         [20, 12, 12, 12, 12, 12, 12],
     )
 
-    # Memory table
     print()
     print("Peak Memory:")
     rows = []
@@ -222,7 +203,7 @@ def main():
         rows.append([name, f"{peak:.0f}", delta])
     print_table(["Optimizer", "Peak MB", "vs AdamW"], rows, [20, 12, 12])
 
-    # Convergence table (from step 0 — same init for all)
+    # From step 0: same init for all.
     total_steps = args.warmup + args.steps
     print()
     print(f"Loss (from step 0, {total_steps} total steps):")

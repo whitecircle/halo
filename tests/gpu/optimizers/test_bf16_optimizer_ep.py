@@ -1,48 +1,31 @@
 #!/usr/bin/env python
-"""
-Test: AdamWBF16 optimizer with EP=8 on GPT-OSS-20B MoE model.
-
-Verifies that bf16_optimizer works end-to-end with Expert Parallelism:
-1. Full training (no LoRA): AdamWBF16 is selected, states and params stay bf16, the loss is finite
-2. LoRA + EP training: AdamWBF16 is selected and every trainable LoRA param carries a bf16 exp_avg; the loss is finite
-3. SR under EP: exp_avg_sq de-biasing on an expert-shard-shaped param, SR weights identical across ranks
-
-Usage (8 GPUs required):
-    torchrun --nproc_per_node=8 \
-        tests/gpu/optimizers/test_bf16_optimizer_ep.py
-
-    # LoRA only:
-    torchrun --nproc_per_node=8 \
-        tests/gpu/optimizers/test_bf16_optimizer_ep.py --mode lora
-
-    # Full training only:
-    torchrun --nproc_per_node=8 \
-        tests/gpu/optimizers/test_bf16_optimizer_ep.py --mode full
-"""
+"""AdamWBF16 end to end with EP=8 on GPT-OSS-20B: full training, LoRA + EP, and SR under EP."""
 
 import argparse
 import math
 import os
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.loading import load_ep_model
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
-from src.distributed.parallelism_config import ParallelismConfig
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.ep import load_ep_model
+from halo.model_loading.parallel.model_source import resolve_model_source
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.ranks import get_global_world_size, get_local_world_size
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
-
-# ── Configuration ─────────────────────────────────────────────────────────────
+from tests.common.rank_log import log
 
 MODEL_PATH = GPT_OSS_20B
 EP_SIZE = 8
@@ -52,44 +35,49 @@ NUM_TRAIN_STEPS = 5
 BATCH_SIZE = 2
 
 
-# ── Test 1: Full Training with bf16_optimizer ─────────────────────────────────
+def _load_ep_policy() -> nn.Module:
+    ep_config = EPConfig(
+        ep_size=EP_SIZE,
+        stage_world_size=get_global_world_size(),
+        nvlink_domain_size=get_local_world_size(),
+        experts_fsdp_managed=False,
+    )
+    pc = SimpleNamespace(
+        ep_config=lambda: ep_config, ep_lazy_loading=True, fp32_non_ep_params=False, max_concurrent_loading=None
+    )
+    from_pretrained_kwargs = {
+        "config": AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
+        "dtype": torch.bfloat16,
+        "trust_remote_code": True,
+        # Auto-detect: FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path.
+        "attn_implementation": None,
+    }
+    source = resolve_model_source(MODEL_PATH, None, tag="policy")
+    return load_ep_model(source, pc, AutoModelForCausalLM, from_pretrained_kwargs, preserve_checkpoint_precision=False)
 
 
 def test_full_training(output_dir: str) -> bool:
-    """Test bf16_optimizer with EP=8, no LoRA (full fine-tuning)."""
     log(f"\n{'=' * 70}")
     log(f"TEST 1: Full Training with bf16_optimizer (EP={EP_SIZE})")
     log(f"{'=' * 70}")
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE)
-    model = load_ep_model(
-        MODEL_PATH,
-        ep_config,
-        AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=None,  # auto-detect (FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path)
-    )
+    model = _load_ep_policy()
 
     total_params = sum(p.numel() for p in model.parameters())
     bf16_params = sum(p.numel() for p in model.parameters() if p.dtype == torch.bfloat16)
     fp32_params = sum(p.numel() for p in model.parameters() if p.dtype == torch.float32)
     log(f"Total params: {total_params / 1e6:.1f}M  (bf16={bf16_params / 1e6:.1f}M, fp32={fp32_params / 1e6:.1f}M)")
 
-    # Enable gradient checkpointing with EP-safe dispatch caching
     log("Enabling gradient checkpointing...")
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
-    # Create config
     config = SFTConfig(
         output_dir=output_dir,
         max_steps=NUM_TRAIN_STEPS,
@@ -97,7 +85,7 @@ def test_full_training(output_dir: str) -> bool:
         learning_rate=1e-5,
         max_length=MAX_SEQ_LENGTH,
         bf16=True,
-        gradient_checkpointing=False,  # Already enabled above
+        gradient_checkpointing=False,  # Already enabled above.
         logging_steps=1,
         save_strategy="no",
         report_to=[],
@@ -106,7 +94,7 @@ def test_full_training(output_dir: str) -> bool:
         dataloader_num_workers=0,
     )
 
-    # Create trainer - bf16_optimizer auto-enabled from config.bf16=True
+    # bf16_optimizer is auto-enabled from config.bf16=True.
     log("Creating trainer (bf16_optimizer auto-enabled)...")
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
     trainer = DistributedSFTTrainer(
@@ -117,22 +105,18 @@ def test_full_training(output_dir: str) -> bool:
         parallelism_config=parallelism_config,
     )
 
-    # Verify optimizer type
     log("Starting training...")
     dist.barrier()
     train_result = trainer.train()
-    # Free this model's DeepEP buffers before the next test loads its own; the checks read no EP state.
+    # Free this model's DeepEP buffers before the next test loads its own.
     trainer.cleanup_ep()
 
-    # ── Verification ──────────────────────────────────────────────
     issues = []
 
-    # 1. Verify optimizer is AdamWBF16
     if not isinstance(trainer.optimizer, AdamWBF16):
         issues.append(f"Optimizer is {type(trainer.optimizer).__name__}, expected AdamWBF16")
 
-    # 2. Verify optimizer states are bf16 — counted, so "no param matched the guard" cannot
-    # silently assert nothing.
+    # Counted, so "no param matched the guard" cannot silently assert nothing.
     checked_states = 0
     for p in model.parameters():
         if p in trainer.optimizer.state and p.requires_grad:
@@ -148,8 +132,7 @@ def test_full_training(output_dir: str) -> bool:
     if checked_states == 0:
         issues.append("no model parameter carries optimizer state — the state-dtype check asserted nothing")
 
-    # 3. Verify model params stayed bf16. This config enables no fp32 knob (fp32_router /
-    # fp32_experts / fp32_non_ep_params — the documented exceptions), so every param must be bf16.
+    # This config enables no fp32 knob, so every param must be bf16.
     bf16_numel = sum(p.numel() for p in model.parameters() if p.dtype == torch.bfloat16)
     fp32_named = [n for n, p in model.named_parameters() if p.dtype == torch.float32]
     if bf16_numel == 0:
@@ -157,13 +140,11 @@ def test_full_training(output_dir: str) -> bool:
     if fp32_named:
         issues.append(f"{len(fp32_named)} unexpected fp32 param(s) with no fp32 knob enabled, e.g. {fp32_named[:3]}")
 
-    # 4. Verify training loss is valid
     loss = train_result.training_loss
     log(f"Training loss: {loss:.4f}")
     if not math.isfinite(loss):
         issues.append(f"Training loss is not finite: {loss}")
 
-    # 5. Log memory stats
     mem = torch.cuda.max_memory_allocated() / 1e9
     log(f"Peak GPU memory: {mem:.1f} GB")
 
@@ -181,35 +162,20 @@ def test_full_training(output_dir: str) -> bool:
     return True
 
 
-# ── Test 2: LoRA + EP with bf16_optimizer ─────────────────────────────────────
-
-
 def test_lora_training(output_dir: str) -> bool:
-    """Test bf16_optimizer with EP=8 + LoRA (attention-only)."""
     log(f"\n{'=' * 70}")
     log(f"TEST 2: LoRA Training with bf16_optimizer (EP={EP_SIZE})")
     log(f"{'=' * 70}")
 
-    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    # Load model with EP
     log("Loading model with EP...")
-    ep_config = EPConfig(ep_size=EP_SIZE)
-    model = load_ep_model(
-        MODEL_PATH,
-        ep_config,
-        AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=None,  # auto-detect (FA4 on Blackwell handles gpt-oss sinks; FA2 forces the Hopper-only S-aux path)
-    )
+    model = _load_ep_policy()
 
-    # Apply LoRA (attention-only, not MoE experts)
     log("Applying LoRA...")
     lora_config = LoraConfig(
         r=8,
@@ -221,7 +187,6 @@ def test_lora_training(output_dir: str) -> bool:
     )
     model = get_peft_model(model, lora_config)
 
-    # Ensure uniform dtype for FSDP
     for name, param in model.named_parameters():
         if param.dtype != torch.bfloat16:
             param.data = param.data.to(torch.bfloat16)
@@ -230,19 +195,17 @@ def test_lora_training(output_dir: str) -> bool:
     total = sum(p.numel() for p in model.parameters())
     log(f"Trainable: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M ({100 * trainable / total:.2f}%)")
 
-    # Enable gradient checkpointing with EP-safe dispatch caching
     log("Enabling gradient checkpointing...")
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
-    # Create config
     config = SFTConfig(
         output_dir=output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
-        learning_rate=1e-4,  # Higher LR for LoRA
+        learning_rate=1e-4,  # Higher LR for LoRA.
         max_length=MAX_SEQ_LENGTH,
         bf16=True,
-        gradient_checkpointing=False,  # Already enabled above
+        gradient_checkpointing=False,  # Already enabled above.
         logging_steps=1,
         save_strategy="no",
         report_to=[],
@@ -251,7 +214,6 @@ def test_lora_training(output_dir: str) -> bool:
         dataloader_num_workers=0,
     )
 
-    # Create trainer - bf16_optimizer auto-enabled from config.bf16=True
     log("Creating trainer (bf16_optimizer auto-enabled) + LoRA...")
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
     trainer = DistributedSFTTrainer(
@@ -262,22 +224,18 @@ def test_lora_training(output_dir: str) -> bool:
         parallelism_config=parallelism_config,
     )
 
-    # Train
     log("Starting training...")
     dist.barrier()
     train_result = trainer.train()
-    # Free this model's DeepEP buffers before the next test loads its own; the checks read no EP state.
+    # Free this model's DeepEP buffers before the next test loads its own.
     trainer.cleanup_ep()
 
-    # ── Verification ──────────────────────────────────────────────
     issues = []
 
-    # 1. Verify optimizer is AdamWBF16
     if not isinstance(trainer.optimizer, AdamWBF16):
         issues.append(f"Optimizer is {type(trainer.optimizer).__name__}, expected AdamWBF16")
 
-    # 2. Verify LoRA params are trainable and have optimizer states — counted, so the state
-    # guard cannot silently skip every param.
+    # Counted, so the state guard cannot silently skip every param.
     lora_param_count = 0
     checked_lora_states = 0
     for name, p in model.named_parameters():
@@ -296,13 +254,11 @@ def test_lora_training(output_dir: str) -> bool:
     if checked_lora_states == 0:
         issues.append("no trainable param carries optimizer state — the LoRA state check asserted nothing")
 
-    # 3. Verify training loss is valid
     loss = train_result.training_loss
     log(f"Training loss: {loss:.4f}")
     if not math.isfinite(loss):
         issues.append(f"Training loss is not finite: {loss}")
 
-    # 4. Log memory stats
     mem = torch.cuda.max_memory_allocated() / 1e9
     log(f"Peak GPU memory: {mem:.1f} GB")
 
@@ -321,33 +277,10 @@ def test_lora_training(output_dir: str) -> bool:
     return True
 
 
-# ── Test 3: SR correctness under EP (de-bias on a sharded expert + replica seeds) ──
-
-
 def test_sr_under_ep() -> bool:
-    """SR de-biasing and per-rank-identical seeds, validated on an EP topology.
-
-    Two load-bearing SR claims that the dtype/finite-loss checks above do not touch:
-
-      A. UNBIASEDNESS on a sharded expert param: each rank owns a DIFFERENT expert's local
-         FFN shard under EP=8. We drive a fixed tiny gradient on a bf16 param shaped like one
-         such local expert shard through AdamWBF16 and assert its exp_avg_sq tracks an fp32
-         single-rank reference EMA (rel-err < 5%), while the nearest-rounded control misses it
-         by a large single-signed margin (premise guard > 15%; the sign depends on the regime). This is exactly
-         test_sr_removes_second_moment_bias, now exercised on each rank's expert shard.
-
-      B. REPLICA SEED IDENTITY: EP is orthogonal to DP, so under EP=8 on 8 GPUs all 8 ranks
-         form one data-parallel replicate group for replicated (non-expert) params. The SR seed
-         is keyed by the param's step and optimizer position, identical on every rank, precisely so
-         SR rounds identically across replicas — otherwise replicas would silently drift apart. We run an identical
-         AdamWBF16 step on identical inputs on every rank, all-gather the SR-rounded weight, and
-         assert it is BIT-IDENTICAL across the whole replicate group. A negative control inside
-         the run (weight differs from a nearest-rounded reference) proves SR actually fired.
-
-    This is a standalone numeric check (not routed through the trainer's sharded expert tensors,
-    which are not addressable as plain bf16 params for a fixed-point statistical test). The
-    expert-shard shape and the EP=8 replicate group are real; the gradient is synthetic.
-    """
+    """SR on a synthetic gradient at the real EP=8 shard shape and group. exp_avg_sq tracks an fp32 EMA (rel-err < 5%)
+    while the nearest control misses by > 15%. All 8 ranks replicate non-expert params, so SR must round alike or
+    replicas drift."""
     rank = dist.get_rank()
     world_size = dist.get_world_size()
 
@@ -359,10 +292,9 @@ def test_sr_under_ep() -> bool:
     beta1, beta2 = 0.9, 0.999
     grad_val = 1e-4
     n_steps = 500
-    # Shape of one expert's local FFN shard slice (gate/up column block); small but realistic.
+    # One expert's local FFN shard slice (gate/up column block).
     size = 8192
 
-    # ── A. Unbiasedness on this rank's expert shard ───────────────────────────
     g32 = torch.full((size,), grad_val, dtype=torch.float32, device=device)
     easq_fp32 = torch.zeros(size, dtype=torch.float32, device=device)
     for _ in range(n_steps):
@@ -395,20 +327,17 @@ def test_sr_under_ep() -> bool:
     if not abs(sr_mean - fp32_mean) < abs(sr_mean - nearest_mean):
         issues.append("SR easq on expert shard must be closer to fp32 than to nearest reference")
 
-    # ── B. Replica seed identity across the EP=8 data-parallel group ──────────
-    # Identical fixed input + state on every rank; SR-rounded weight must match bit-for-bit.
-    torch.manual_seed(0)  # identical grad/init across ranks (no per-rank randomness)
+    # Identical fixed input and state on every rank; the SR-rounded weight must match bit for bit.
+    torch.manual_seed(0)
     pr = nn.Parameter(torch.full((size,), 0.5, dtype=torch.bfloat16, device=device))
     opt_r = AdamWBF16([("p", pr)], lr=1e-3, betas=(beta1, beta2), weight_decay=0.0)
-    # A small SIGNED gradient whose Adam step lands below the bf16 ULP of 0.5 (~0.004),
-    # so SR is what carries the update — makes the rounding non-trivial.
+    # A signed gradient whose Adam step lands below the bf16 ULP of 0.5 (~0.004), so SR carries the update.
     for _ in range(8):
         pr.grad = torch.full((size,), 1e-3, dtype=torch.bfloat16, device=device)
         opt_r.step()
     w_local = pr.data.clone()
 
-    # Negative control: an identical NEAREST-rounded reference run must differ from the SR
-    # weight, proving SR actually altered the write (otherwise bit-identity is vacuous).
+    # Negative control: an identical nearest-rounded run must differ, or the bit-identity is vacuous.
     w_ref32 = torch.full((size,), 0.5, dtype=torch.float32, device=device)
     ea = torch.zeros(size, dtype=torch.float32, device=device)
     ev = torch.zeros(size, dtype=torch.float32, device=device)
@@ -424,7 +353,6 @@ def test_sr_under_ep() -> bool:
     if torch.equal(w_local, w_nearest):
         issues.append("SR weight identical to nearest reference — SR did not fire; bit-identity vacuous")
 
-    # All-gather the SR weight across the (EP=8) replicate group and require bit-identity.
     gathered = [torch.empty_like(w_local) for _ in range(world_size)]
     dist.all_gather(gathered, w_local)
     for other_rank, g in enumerate(gathered):
@@ -435,7 +363,7 @@ def test_sr_under_ep() -> bool:
             )
             break
 
-    # Reduce pass/fail across ranks so the test fails if ANY rank's checks failed.
+    # So the test fails if any rank's checks failed.
     local_ok = torch.tensor([1 if not issues else 0], device=device)
     dist.all_reduce(local_ok, op=dist.ReduceOp.MIN)
     all_ok = bool(local_ok.item())
@@ -451,9 +379,6 @@ def test_sr_under_ep() -> bool:
     log("  SR-rounded weight bit-identical across the EP=8 replicate group ✓")
     log("✓ SR-under-EP Test PASSED")
     return True
-
-
-# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 @gpu_test_main(exact_world_size=EP_SIZE, prefix="bf16opt_ep")

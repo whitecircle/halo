@@ -1,7 +1,7 @@
 name: lint
 
 # Hosted gates that run on every PR/push outside the Docker image (the runner has no GPU stack).
-# ruff (lint + format-check) is pinned.
+# ruff (lint + format-check) and the conventions job's pytest run at uv.lock's pins.
 
 on:
   push:
@@ -27,13 +27,46 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      # Pinned ruff via pip — ruff is a standalone binary, no project install needed
-      # (host has no torch).
-      - run: pip install ruff==0.9.10
+      # ruff alone, at uv.lock's pin: a standalone binary needs no project install (the runner has no torch).
+      - name: Install ruff at the locked version
+        run: |
+          version=$(python .github/scripts/locked_version.py ruff)
+          pip install "ruff==$version"
       - name: ruff format --check
         run: ruff format --check .
       - name: ruff check
         run: ruff check --output-format=github .
+
+  conventions:
+    # The convention tests that read the tree without importing it, on the standard library and pytest
+    # alone: test_hosted_conventions_are_stdlib.py fails when a file listed here, or a file pytest runs
+    # for it, reaches anything else.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - name: Install pytest at the locked version
+        run: |
+          version=$(python .github/scripts/locked_version.py pytest)
+          pip install "pytest==$version"
+      - name: Convention tests
+        run: >-
+          pytest -p no:cacheprovider
+          tests/cpu/conventions/test_bench_band.py
+          tests/cpu/conventions/test_docs_link_check.py
+          tests/cpu/conventions/test_env_var_catalogue.py
+          tests/cpu/conventions/test_gpu_harness_conventions.py
+          tests/cpu/conventions/test_hosted_conventions_are_stdlib.py
+          tests/cpu/conventions/test_import_layering.py
+          tests/cpu/conventions/test_logger_form.py
+          tests/cpu/conventions/test_messages_name_symbols.py
+          tests/cpu/conventions/test_move_kit.py
+          tests/cpu/conventions/test_package_inits.py
+          tests/cpu/conventions/test_references_resolve.py
+          tests/cpu/conventions/test_sensitive_label.py
+          tests/cpu/conventions/test_test_conventions.py
 
   actionlint:
     # Lints the workflow files themselves — unknown runner labels, invalid action

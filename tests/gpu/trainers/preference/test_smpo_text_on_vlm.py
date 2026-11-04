@@ -1,19 +1,9 @@
 #!/usr/bin/env python
-"""SMPO TEXT run on a natively-multimodal checkpoint (Qwen3-VL-2B) — the run-verdict path.
+"""SMPO text run on a natively multimodal checkpoint: the model class follows the checkpoint, the data path follows the
+run.
 
-The dispatch rule under test end-to-end: the model CLASS follows the checkpoint
-(``AutoModelForImageTextToText``), the DATA path follows the run (``is_vlm=False`` for text pairs).
-Forcing this shape onto the VLM branch instead would deny it CP and ``padding_free`` and
-template rows through the processor. Two things only a GPU run proves:
-
-  * the text branch trains a real multimodal model on text preference pairs — finite loss, margins
-    logged — with the row fn tokenizing through the processor's INNER tokenizer;
-  * the export still ships ``processor_config.json``: the processor stays the saved processing
-    class even though the run is text, so the checkpoint remains servable as what it is — a
-    multimodal model.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_text_on_vlm.py
+The VLM branch would deny it CP and ``padding_free``. The export still ships ``processor_config.json``, so the
+checkpoint stays servable as a multimodal model.
 """
 
 import os
@@ -22,13 +12,13 @@ import shutil
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 NUM_TRAIN_SAMPLES = 32
@@ -40,7 +30,7 @@ def run(ctx) -> dict:
     log("SMPO text run on a multimodal checkpoint (Qwen3-VL-2B)")
     log("=" * 70)
 
-    # Rank-shared: every rank saves to the same path and rank 0 inspects what landed there.
+    # Every rank saves to one path and rank 0 inspects what landed there.
     export_root = shared_scratch_dir("smpo_text_on_vlm")
     save_dir = os.path.join(export_root, "export")
     if ctx.rank == 0:
@@ -54,7 +44,7 @@ def run(ctx) -> dict:
 
     model = AutoModelForImageTextToText.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, attn_implementation="sdpa")
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=2,
@@ -73,13 +63,11 @@ def run(ctx) -> dict:
         max_prompt_length=256,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
-    # The text branch consumes what the script's prepare_preference_datasets emits: rendered
-    # STRING columns, tokenized by the row fn through the processor's inner tokenizer.
+    # What prepare_preference_datasets emits: rendered strings, tokenized through the processor's inner tokenizer.
     train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer)
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model,
         args=config,
         train_dataset=train_dataset,

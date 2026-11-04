@@ -22,24 +22,23 @@ import argparse
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
+from halo.callbacks.balancing import apply_balancing_mode
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe_balancing import declared_routers
-from tests.common.harness import gpu_test_main, log
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.router_logits import declared_routers
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.rank_log import log
 
 EP_SIZE = 2
 BATCH, SEQ = 2, 64
 COEF = 0.5
 SEED = 1234
-# bf16 recompute through the replayed dispatch: the aux share must agree to well inside this, while a
-# dropped aux gradient is off by 100%.
+# bf16 recompute through the replayed dispatch, while a dropped aux gradient is off by 100%.
 AUX_REL_TOL = 5e-2
 
 _FAMILIES = {
@@ -58,7 +57,6 @@ def build_model(family: str, device):
 
 
 def router_gradient(model, batch, coef: float) -> torch.Tensor:
-    """The routers' gradient after one forward+backward with the head's aux coefficient at ``coef``."""
     model.zero_grad(set_to_none=True)
     model.router_aux_loss_coef = coef
     model(**batch).loss.backward()
@@ -71,9 +69,8 @@ def run(ctx):
     family = parser.parse_args().family
     checks, metrics = {}, {}
     model = build_model(family, ctx.device)
-    patch_moe_model_for_ep(model, ParallelismConfig(ep_size=EP_SIZE).create_ep_config())
-    create_ep_buffers(model)
-    apply_balancing_strategy(model, "aux_loss", is_moe=True)
+    apply_ep_layers(model, ParallelismConfig(ep_size=EP_SIZE).ep_config())
+    apply_balancing_mode(model, "aux_loss", is_moe=True)
     model.train()
     ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]
     checks["ep_layers_patched"] = len(ep_layers) == len(declared_routers(model)) > 0
@@ -90,7 +87,7 @@ def run(ctx):
     plain = router_gradient(model, batch, COEF)
     plain_aux = plain - router_gradient(model, batch, 0.0)
 
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     forward_calls["n"] = 0
     checkpointed = router_gradient(model, batch, COEF)
     checks["recompute_ran"] = forward_calls["n"] == 2

@@ -1,8 +1,8 @@
 # Classification
 
-Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`src/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
+Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`halo/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](reward-modeling.md).
 
-EP, TP, ETP, EP+TP and EP+ETP run, as does plain FSDP2 data parallelism. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
+EP, TP, ETP, EP+TP, EP+ETP, PP, PP+EP and PP+ETP run, as does plain FSDP2 data parallelism; under PP `compute_metrics` is served. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
@@ -14,7 +14,7 @@ The label set comes from the training split: stringified, sorted for determinist
 
 `ds["test"]` is the eval split; a source with no `test` split evaluates on its `validation` split, and next to a `test` split `validation` contributes labels only.
 
-`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set. A single-label split carrying it is refused before the model load when the run reads that split (train always; the eval split when the run evaluates: `eval_strategy` other than `no`, or `eval_on_start`), since the row has no class and the loss would read `-1` as an out-of-range index. A split the run does not read is not tokenized. Filter unlabeled rows out of train; for an unlabeled eval split (a GLUE-style `test`), set `dataset: <id>@train` and cut the eval split with `test_size`, or set `eval_strategy: no`.
+`-1` marks an unlabeled row. A multi-label row treats it as absence and it is dropped from the label set. A single-label split carrying it is refused before the model load when the run reads that split (train always; the eval split when the run evaluates: `eval_strategy` other than `no`, or `eval_on_start`), since the row has no class and the loss would read `-1` as an out-of-range index. A split the run reads with no `label` column at all is refused the same way, by name; one it does not read adds no labels. A split the run does not read is not tokenized. Filter unlabeled rows out of train; for an unlabeled eval split (a GLUE-style `test`), set `dataset: <id>@train` and cut the eval split with `test_size`, or set `eval_strategy: no`.
 
 ## Configuration
 
@@ -33,20 +33,11 @@ gradient_checkpointing: true
 output_dir: checkpoints/clf-qwen3.5-9b-mage
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `max_length` | `1024` | Truncation length; `null` or non-positive → the context window |
-| `loss_type` | `cross_entropy` | Also `focal` (`focal_gamma` `2.0`; `focal_alpha` on multi-label heads only) and `label_smoothing_ce` (single-label only) |
-| `class_weights` | `None` | Per-class weights by label id; `pos_weight` on the multi-label BCE |
-| `derive_class_weights` | `false` | Balanced weights from world-reduced label counts; single-label only |
-| `multi_label_threshold` | `0.5` | Sigmoid decision threshold |
-| `compute_mcc` / `compute_auc_roc` / `compute_per_class_metrics` | `true` / `false` / `false` | Extra eval metrics; MCC and per-class are single-label only |
+`loss_type` picks `cross_entropy`, `focal` or `label_smoothing_ce`, and refuses the other losses' knobs; every field's type and default, and which apply to single- or multi-label heads, is in [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
 
-Full field list: [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
+`class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`halo/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 
-The two weighting knobs are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own and evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
-
-The script defaults `attn_implementation` to `sdpa` when the YAML pins none, because batches are right-padded and the auto-selected FA4 would take its slow varlen path. Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
+Batches are right-padded, so an unpinned `attn_implementation` takes the padded-batch default: the loader's own pick on Blackwell (SDPA for a remote-code checkpoint, FA2 for a softcapped policy), SDPA elsewhere ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
 
 ## Launch
 
@@ -59,13 +50,13 @@ torchrun --nproc_per_node=8 scripts/training/classification.py \
 halo launch classification examples/classification/qwen3_5/clf-qwen3.5-9b-mage.yaml --nproc 8
 ```
 
-LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP and EP+TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
+LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 
-Not supported. The script loads through the text-only `load_script_model`, builds no processor, and refuses `text_only_model` as well as any image column.
+Not supported. The script loads through the text-only `load_model_and_tokenizer`, builds no processor, and refuses `text_only_model` as well as any image column.
 
-A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.16 ships that head for a few families and the toolkit registers two more ([roster](preference/reward-modeling.md#vision-language)).
+A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.20 ships that head for a few families and the toolkit registers two more ([roster](reward-modeling.md#vision-language)).
 
 ## Testing a setup
 
@@ -74,7 +65,7 @@ torchrun --nproc_per_node=2 scripts/training/classification.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/gpu/trainers/other/test_classification.py`.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/gpu/trainers/other/test_classification.py`; under EP, TP and ETP with save, exact resume and export, `tests/gpu/parallelism/ep/test_ep_pooled_head_trainers.py --trainer classification`; under PP, `tests/gpu/parallelism/pp/test_pp_classification.py` and `test_pp_trainer_checkpoints.py --trainer classification`.
 
 ## What to watch
 
@@ -82,7 +73,7 @@ Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/g
 |---|---|
 | `accuracy` | Single-label; multi-label reports `exact_match_accuracy` instead |
 | `f1` | Binary averaging at 2 labels, weighted for multi-class, macro for multi-label |
-| `mcc` | Stays honest under class imbalance |
+| `mcc` | Single-label (`compute_mcc`); stays honest under class imbalance |
 
 Failure signatures:
 
@@ -91,6 +82,6 @@ Failure signatures:
 
 ## Related pages
 
-- [Reward Modeling](preference/reward-modeling.md) · [SFT](sft.md)
+- [Reward Modeling](reward-modeling.md) · [SFT](sft.md)
 - [Expert Parallelism](../parallelism/expert-parallelism.md) · [Pipeline Parallelism](../parallelism/pipeline-parallelism.md)
 - [ClassificationConfig Reference](../reference/configuration-reference.md#classificationconfig) · [Scripts Reference](../reference/scripts-reference.md)

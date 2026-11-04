@@ -1,16 +1,10 @@
-"""Offline GRPO's per-loss-type reduction (``offline_loss_numerator`` / ``offline_loss_normalizer``), the
-one dispatch the non-PP loss and the pipeline's microbatch numerator + per-step normalizer share.
-
-Hand-derived constants on a two-row batch: row 0 has three loss tokens and group size 2 (weight 0.5),
-row 1 has two loss tokens and group size 4 (weight 0.25).
-
-    python tests/cpu/grpo/test_offline_grpo_loss_reduction.py
-"""
+"""Per-loss-type reduction shared by the non-PP loss and the pipeline. Hand-derived on two rows: row 0 has three loss
+tokens and group size 2 (weight 0.5), row 1 has two loss tokens and group size 4 (weight 0.25)."""
 
 import pytest
 import torch
 
-from src.trainers.grpo.objective.offline import LOSS_TYPES, offline_loss_normalizer, offline_loss_numerator
+from halo.trainers.grpo.objective.offline_loss import LOSS_TYPES, offline_loss_normalizer, offline_loss_numerator
 
 PER_TOKEN_LOSS = torch.tensor([[1.0, 2.0, 3.0], [4.0, 5.0, 7.0]])
 MASK = torch.tensor([[1, 1, 1], [1, 1, 0]])

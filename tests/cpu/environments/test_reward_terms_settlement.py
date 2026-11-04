@@ -1,43 +1,36 @@
 #!/usr/bin/env python
-"""CPU tests: the environment side of reward terms — grades priced into components that sum to the
-reward, external terms settled by the dispatcher after the closing step, the sample a scorer reads,
-scorer failures that invalidate the episode (or price it neutral), the veto gate on the objective,
-and the guards around a stale or unsettled reward.
-
-Run: python tests/cpu/environments/test_reward_terms_settlement.py  (or pytest)
-"""
+"""The environment side of reward terms: grades priced into components summing to the reward, external terms settled
+after the closing step, the sample a scorer reads, scorer failures, the veto gate on the objective, and the
+guards around a stale or unsettled reward."""
 
 import asyncio
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
-from src.environments import base as base_module
-from src.environments.base import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments import environment_base as base_module
+from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
+from halo.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
+from halo.environments.episode_keys import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
-    REWARD_ERRORS_KEY,
-    REWARD_PENDING_KEY,
-    AsyncBaseEnvironment,
-    BaseEnvironment,
-    EpisodeGrade,
-    Message,
-    Trajectory,
 )
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
-from src.environments.registry import resolve_environment
-from src.environments.tools.definitions import NativeToolRegistry
-from src.inference.response import FINISH_REASON_LENGTH
-from src.rewards.samples import CUT_CALL_NOTE, CUT_CALLS_KEY, render_transcript
-from src.rewards.scorers import catalog as scorers_module
-from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.scorers.judge import action_text, grading_prompt
-from src.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
+from halo.environments.episode_scoring import REWARD_ERRORS_KEY, REWARD_PENDING_KEY, EpisodeGrade
+from halo.environments.messages import Message, Trajectory
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
+from halo.environments.tools.definitions import NativeToolRegistry
+from halo.inference.response import FINISH_REASON_LENGTH
+from halo.rewards import composer as scorers_module
+from halo.rewards.samples import CUT_CALL_NOTE, CUT_TOOL_CALLS_KEY, render_transcript
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.scorers.judge import action_text, grading_prompt
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY, JudgeTerm, OnError
 
 JUDGE = {
     "source": "judge",
@@ -94,7 +87,7 @@ def fake_judge(monkeypatch):
 
 
 def _native(judge=JUDGE, **kwargs):
-    return resolve_environment("native_math", {"reward_terms": [{"source": "environment"}, judge], **kwargs})
+    return build_environment("native_math", {"reward_terms": [{"source": "environment"}, judge], **kwargs})
 
 
 async def _run(env, answer_text, answer="4"):
@@ -104,12 +97,9 @@ async def _run(env, answer_text, answer="4"):
     return ids[0], steps[0].trajectory
 
 
-# --- EpisodeGrade ---
-
-
 @pytest.mark.parametrize("objective", [-0.01, 1.01, float("nan"), True, "1"])
 def test_grade_refuses_an_objective_outside_the_unit_interval(objective):
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+    with pytest.raises(ValueError, match=r"^EpisodeGrade: objective must be (in \[0, 1\]|a finite number), got"):
         EpisodeGrade(objective)
 
 
@@ -119,11 +109,8 @@ def test_grade_refuses_reserved_or_malformed_shaping(shaping):
         EpisodeGrade(1.0, shaping)
 
 
-# --- pricing without external terms ---
-
-
 def test_components_sum_to_the_reward_and_price_the_objective():
-    env = resolve_environment(
+    env = build_environment(
         "native_math",
         {"reward_terms": [{"source": "environment", "weight": 2.0, "exponent": 2.0}], "no_tool_use_penalty": 0.1},
     )
@@ -159,7 +146,7 @@ def test_code_contests_grade_is_priced_by_the_term_not_the_environment(passed, p
 
 
 def test_a_stale_compute_reward_override_is_refused():
-    class Stale(BaseEnvironment):
+    class Stale(EnvironmentBase):
         def _reset_single(self, prompt, context=None):
             return Trajectory()
 
@@ -174,9 +161,6 @@ def test_a_stale_compute_reward_override_is_refused():
 
     with pytest.raises(TypeError, match="_compute_reward"):
         Stale()
-
-
-# --- external terms ---
 
 
 def test_external_terms_are_pending_until_settled_and_the_dispatcher_settles_them(fake_judge):
@@ -265,8 +249,11 @@ def test_a_fired_veto_zeroes_the_objective_and_keeps_the_episode_valid(fake_judg
 
 
 def test_a_veto_judge_needs_the_environment_term_it_gates():
-    with pytest.raises(ValueError, match=r"veto judge term\(s\) \['conduct'\]"):
-        resolve_environment("native_math", {"reward_terms": [CHECKS]})
+    with pytest.raises(
+        ValueError,
+        match=r"\['conduct'\] list 'checks' \(a veto judge\).*without a \{source: environment\} term \(add one to",
+    ):
+        build_environment("native_math", {"reward_terms": [CHECKS]})
 
 
 def test_an_episode_its_driver_lost_is_not_sent_to_a_scorer(fake_judge):
@@ -280,7 +267,7 @@ def test_an_episode_its_driver_lost_is_not_sent_to_a_scorer(fake_judge):
 
 
 def test_an_async_environment_settles_through_the_dispatcher(fake_judge):
-    class Echo(AsyncBaseEnvironment):
+    class Echo(AsyncEnvironmentBase):
         def _reset_single(self, prompt, context=None):
             return self._init_trajectory(prompt, context)
 
@@ -325,7 +312,7 @@ def test_truncated_episodes_are_settled_too(fake_judge):
 
 
 def test_settle_is_a_no_op_without_pending_episodes(fake_judge):
-    env = resolve_environment("native_math", {})
+    env = build_environment("native_math", {})
     ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
     env.step(ids, ["4"], [{"answer": "4", "finish_reason": "stop"}])
     env.settle(ids)  # no loop, no scorer, no error
@@ -338,10 +325,7 @@ def test_verify_backend_probes_every_external_term(fake_judge):
     env = _native()
     env.verify_backend()
     assert [judge.verified for judge in fake_judge.instances] == [1]
-    assert resolve_environment("native_math", {}).verify_backend() is None
-
-
-# --- the sample a scorer reads ---
+    assert build_environment("native_math", {}).verify_backend() is None
 
 
 def test_the_sample_carries_the_turns_with_their_reasoning_and_flags():
@@ -380,8 +364,8 @@ def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carri
     sample = env._scoring_sample(env.get_trajectories(ids)[0])
 
     cut, nudge, final = sample.completion
-    assert cut[CUT_CALLS_KEY] == partial and "tool_calls" not in cut
-    assert CUT_CALLS_KEY not in nudge and CUT_CALLS_KEY not in final
+    assert cut[CUT_TOOL_CALLS_KEY] == partial and "tool_calls" not in cut
+    assert CUT_TOOL_CALLS_KEY not in nudge and CUT_TOOL_CALLS_KEY not in final
     head = f"→ calculate (call c1; {CUT_CALL_NOTE}): "
     veto = {key: value for key, value in CHECKS.items() if key != "source"}
     for view in ("full", "digest"):
@@ -395,8 +379,8 @@ def test_the_judge_reads_the_call_a_cut_turn_was_writing_and_no_other_turn_carri
 
 
 def test_a_turn_whose_reasoning_ran_to_its_cap_is_marked_for_the_judge():
-    """A turn whose counted reasoning reached the cap it ran under carries the mark a judge reads — what it
-    wrote came after the engine closed its reasoning — and a turn under its cap, or with no count, carries none."""
+    """A turn whose counted reasoning reached its cap carries the mark a judge reads, since what it wrote came after
+    the engine closed its reasoning; a turn under its cap, or with no count, carries none."""
     env = _native(max_turns=4)
     ids, _ = env.reset(["What is 2+2?"], [{"answer": "4"}])
     cut = {"answer": "4", "finish_reason": "length", "thinking_cap": 100}
@@ -419,7 +403,7 @@ def test_a_tool_less_environment_hands_the_scorer_no_tools():
 def test_the_final_answer_is_the_protocols_own_and_none_for_an_unfinished_episode():
     """ReAct hands its ``Final Answer:``; an episode its turn budget ended has none, so a scorer reads
     a note rather than the fragment that happens to be the last assistant text."""
-    react = resolve_environment("react_math", {"reward_terms": [{"source": "environment"}, JUDGE]})
+    react = build_environment("react_math", {"reward_terms": [{"source": "environment"}, JUDGE]})
     ids, _ = react.reset(["What is 2+2?"], [{"answer": "4"}])
     react.step(ids, ["Thought: easy\nFinal Answer: 4"], [{"answer": "4", "finish_reason": "stop"}])
     assert react._scoring_sample(react.get_trajectories(ids)[0]).final_answer == "4"
@@ -451,9 +435,6 @@ def test_code_contests_hands_the_scorer_the_submitted_program():
     assert [(m["role"], m.get("tool_calls")) for m in sample.completion] == [("assistant", [call]), ("tool", None)]
 
 
-# --- config ---
-
-
 def test_environment_config_parses_terms_and_forwards_them():
     config = EnvironmentConfig(
         environment_type="native_math", rewards=[{"source": "environment", "exponent": 2.0}, JUDGE]
@@ -467,27 +448,45 @@ def test_environment_config_parses_terms_and_forwards_them():
 
 
 def test_environment_config_round_trips_a_veto_judge():
-    """A ``checks`` term parses as a veto judge with the defaults a config gives one — priced at 0,
-    neutral on error — and reaches the environment as the same term."""
+    """A ``checks`` term parses as a veto judge with a config's defaults (priced at 0, neutral on error) and reaches
+    the environment as the same term."""
     config = EnvironmentConfig(environment_type="native_math", rewards=[{"source": "environment"}, CHECKS])
     term = config.reward_terms[1]
     assert term.is_veto and term.weight == 0.0 and term.on_error is OnError.NEUTRAL
-    env = resolve_environment(config.environment_type, config.to_env_config())
+    env = build_environment(config.environment_type, config.to_env_config())
     assert env.reward_terms[1] == term
+
+
+@pytest.mark.parametrize(("language", "test_tool"), [("python", "python_repl"), (["python", "cpp"], "run_code")])
+def test_a_veto_judge_listing_environment_checks_audits_with_the_declared_rubric(language, test_tool):
+    """``checks: environment`` reaches the code-contests environment from a config and resolves to the rubric it
+    declares, the run's own scratchpad named where the rubric names it."""
+    audit = {"source": "judge", "name": "audit", "checks": "environment"}
+    config = EnvironmentConfig(
+        environment_type="codeforces",
+        rewards=[{"source": "environment"}, audit],
+        environment_kwargs={"language": language, "sandbox_backend": "local"},
+    )
+    term = build_environment(config.environment_type, config.to_env_config()).reward_terms[1]
+    assert [check.name for check in term.checks] == [check.name for check in AUDIT_CHECKS]
+    described = " ".join(check.description for check in term.checks)
+    assert test_tool in described and "{test_tool}" not in described
+    with pytest.raises(ValueError, match="declares none"):
+        build_environment("native_math", {"reward_terms": [{"source": "environment"}, audit]})
 
 
 def test_a_term_cannot_take_a_declared_shaping_name():
     clash = {**JUDGE, "name": "tool_shaping"}
     with pytest.raises(ValueError, match="shaping components of NativeToolUseEnvironment"):
-        resolve_environment("native_math", {"reward_terms": [{"source": "environment"}, clash]})
+        build_environment("native_math", {"reward_terms": [{"source": "environment"}, clash]})
     with pytest.raises(ValueError, match="shaping components of CodeContestsEnvironment"):
         CodeContestsEnvironment(language="python", reward_terms=[{**JUDGE, "name": "submission"}])
     with pytest.raises(ValueError, match="shaping components"):
-        resolve_environment("native_math", {"reward_terms": [{**JUDGE, "name": "turn_shaping"}]})
+        build_environment("native_math", {"reward_terms": [{**JUDGE, "name": "turn_shaping"}]})
 
 
 def test_an_undeclared_shaping_component_is_refused():
-    class Undeclared(base_module.BaseEnvironment):
+    class Undeclared(base_module.EnvironmentBase):
         def _reset_single(self, prompt, context=None):
             return self._init_trajectory(prompt, context)
 
@@ -512,11 +511,10 @@ def test_an_undeclared_shaping_component_is_refused():
 
 
 def test_a_grade_that_is_not_an_episode_grade_is_refused():
-    """``_settle_grade`` reads ``.objective``/``.shaping`` off the return value; a bare float (the
-    retired ``_compute_reward`` shape) would otherwise fail deep inside pricing, or — for a duck-typed
-    stand-in — price an unvalidated objective straight into the reward."""
+    """``_settle_grade`` reads ``.objective``/``.shaping``; a bare float fails deep inside pricing, and a duck-typed
+    stand-in prices an unvalidated objective."""
 
-    class NotAGrade(base_module.BaseEnvironment):
+    class NotAGrade(base_module.EnvironmentBase):
         def _reset_single(self, prompt, context=None):
             return self._init_trajectory(prompt, context)
 
@@ -533,11 +531,9 @@ def test_a_grade_that_is_not_an_episode_grade_is_refused():
 
 
 def test_a_shaping_component_declared_by_both_halves_is_refused():
-    """The protocol's ``_episode_shaping`` and the env's own grade both contribute shaping under bare
-    names. A name produced by both would silently take the grade's value (a plain dict update), losing
-    the protocol's — so the collision is refused instead."""
+    """A name both halves produce would silently take the grade's value, losing the protocol's."""
 
-    class Colliding(base_module.BaseEnvironment):
+    class Colliding(base_module.EnvironmentBase):
         SHAPING_COMPONENTS = ("bonus",)
 
         def _reset_single(self, prompt, context=None):

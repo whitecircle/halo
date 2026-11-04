@@ -1,36 +1,18 @@
 #!/usr/bin/env python
-"""The rollout-server config-parity fixtures must cover the roster and match what the toolkit exports.
-
-``docker/vllm/parity/generate.py`` renders one ``config.json`` per served family — from the tiny
-roster config, or from the release config at a pinned revision — through the export rewrites, and
-``Dockerfile.vllm`` asserts the server's transformers parses them at build. Three ways that gate can
-quietly stop meaning anything, and one test each.
-
-A family the weight sync ADMITS but no fixture covers is never checked against the server at all,
-though every sync into it starts with the server parsing its config; the roster is therefore derived
-from the EP registry, not listed. A fixture that drifts from what the writer produces today (a tiny
-config edited, a family's legacy keys changed, a rewrite altered) certifies a config the toolkit does
-not write, so the roster fixtures are re-rendered here and compared as parsed payloads — not bytes,
-which would fail on key order or indentation alone. And a fixture pinned to a release is one this
-offline suite cannot re-render at all, so the pin is confined to the single thing a tiny config
-cannot express: an export that carries its SOURCE checkpoint's schema.
-
-That one pinned fixture is checked structurally instead — rendering it downloads its release config;
-``generate.py`` is what refreshes it.
-
-Run: ``pytest -m cpu tests/cpu/checkpoint/test_vllm_parity_fixtures.py``
-(regenerate with ``python docker/vllm/parity/generate.py`` in the training image)
-"""
+"""Rollout-server config-parity fixtures (``docker/vllm/parity/generate.py``) cover the roster and match what the
+toolkit exports, compared as parsed payloads. Only source-schema carries are pinned."""
 
 from __future__ import annotations
 
 import importlib.util
 import json
 import os
+import shutil
 
 import pytest
 
-from tests.common.utils import REPO_ROOT
+from halo.checkpoint.config_export import drop_unshipped_auto_map
+from tests.common.repo import REPO_ROOT
 
 _PARITY_ROOT = os.path.join(REPO_ROOT, "docker", "vllm", "parity")
 
@@ -52,8 +34,7 @@ def _refuse_download(*args, **kwargs):
 @pytest.fixture(scope="module")
 def generate():
     module = _generate_module()
-    # Every roster render is in-memory; only a pinned fixture's `source` downloads, and nothing here
-    # asks for one. Refusing the call keeps that true on a machine whose Hub cache is already warm.
+    # Refusing the call keeps every render in-memory on a machine with a warm Hub cache.
     module.snapshot_download = _refuse_download
     return module
 
@@ -64,22 +45,19 @@ def _on_disk(path: str) -> dict:
 
 
 def _roster_fixtures(generate):
-    """The fixtures built in memory — the ones this offline suite can re-render."""
     return [fixture for fixture in generate.FIXTURES if not isinstance(fixture, generate.HubFixture)]
 
 
 def _pinned_fixtures(generate):
-    """The fixtures built from a release config at a pinned revision."""
     return [fixture for fixture in generate.FIXTURES if isinstance(fixture, generate.HubFixture)]
 
 
 def test_every_weight_sync_family_has_a_fixture(generate):
-    """A family the sync admits with no fixture is one the gate never parsed: the first thing a
-    sync needs is a server that loaded that family's checkpoint."""
+    """The first thing a sync needs is a server that loaded that family's checkpoint."""
     assert generate.weight_sync_families(), "premise: the EP registry admits at least one family"
     assert generate.uncovered_families() == [], (
         f"{generate.uncovered_families()}: the weight sync admits these families but no parity "
-        f"fixture covers them — add one, or refuse the family (_supports_weight_sync = False, or the vLLM "
+        f"fixture covers them — add one, or refuse the family (a weight_sync_refusal on its spec, or the vLLM "
         f"client's UNSERVABLE_MODEL_TYPES)"
     )
 
@@ -102,19 +80,17 @@ def test_every_roster_fixture_matches_a_fresh_render(generate):
 
 
 def test_only_a_source_schema_carry_is_pinned_to_a_release(generate):
-    """A pinned fixture is one the drift check above cannot re-render, so nothing may be pinned that
-    a tiny roster config could express — including a family transformers ships no class for, which
-    builds through the vendor config module the fixture already carries."""
+    """A pinned fixture is one the drift check cannot re-render, so nothing a tiny config could express may be
+    pinned."""
     for fixture in _pinned_fixtures(generate):
-        assert generate.exports_source_config_schema(fixture.model_type), (
+        assert generate.find_moe_family_spec(fixture.model_type).exports_source_config_schema, (
             f"{fixture.name} is pinned to a release revision but its export carries no source "
             f"schema — build it from a tiny roster config so this suite can re-render it"
         )
 
 
 def test_every_hub_fixture_declares_the_family_it_ships(generate):
-    """The offline half of the drift check: a checked-in hub payload must still be the family and
-    revision the fixture declares, so the roster coverage above is not satisfied by a stale file."""
+    """So the roster coverage is not satisfied by a stale file."""
     hub = _pinned_fixtures(generate)
     assert hub, "premise: at least one fixture comes from a pinned release config"
     for fixture in hub:
@@ -127,19 +103,9 @@ def test_every_hub_fixture_declares_the_family_it_ships(generate):
         assert len(fixture.revision) == 40, f"{fixture.name}: pin a full commit sha, not {fixture.revision!r}"
 
 
-def test_the_gemma4_control_is_the_folded_form_its_rewrite_removes(generate):
-    """The build gate is load-bearing only while the unrewritten Gemma 4 form still carries
-    ``per_layer_config`` and the rewritten one carries the flat keys instead."""
-    (folded,) = (fixture for fixture in generate.UNPARSEABLE if fixture.model_type == "gemma4")
-    unrewritten = _on_disk(generate.fixture_path("unparseable", folded))["text_config"]
-    rewritten = _on_disk(generate.fixture_path("fixtures", folded))["text_config"]
-    assert "per_layer_config" in unrewritten and "per_layer_config" not in rewritten
-    assert {"global_head_dim", "num_global_key_value_heads"} <= set(rewritten)
-
-
 def test_the_step3p7_control_is_the_native_schema_its_carry_replaces(generate):
-    """Same, for the source-schema carry: unrewritten, the export is transformers' own spellings —
-    which the pinned server has no class for — and the carried one is the release's."""
+    """Unrewritten, the export is spellings the pinned vLLM refuses to read; the gate means something only while the
+    control differs."""
     (native,) = (fixture for fixture in generate.UNPARSEABLE if fixture.model_type == "step3p7")
     unrewritten = _on_disk(generate.fixture_path("unparseable", native))["text_config"]
     carried = _on_disk(generate.fixture_path("fixtures", native))["text_config"]
@@ -148,9 +114,22 @@ def test_the_step3p7_control_is_the_native_schema_its_carry_replaces(generate):
     assert {"moe_num_experts", "moe_top_k", "moe_layers_enum", "attention_other_setting"} <= set(carried)
 
 
+def test_a_control_names_no_remote_code_it_does_not_ship(generate, tmp_path):
+    """A control still naming a module is refused for the missing file alone, and the gate then proves nothing."""
+    assert generate.UNPARSEABLE, "premise: at least one family's export is rewritten, so it has a control"
+    for fixture in generate.UNPARSEABLE:
+        path = generate.fixture_path("unparseable", fixture)
+        staged = tmp_path / fixture.name
+        shutil.copytree(os.path.dirname(path), staged)
+        drop_unshipped_auto_map(str(staged))
+        assert _on_disk(staged / "config.json") == _on_disk(path), (
+            f"unparseable/{fixture.name} names remote code it does not ship, which the export without the "
+            f"rewrite never does — regenerate it"
+        )
+
+
 def test_a_remote_code_fixture_ships_the_config_module_its_auto_map_names(generate):
-    """A family the server parses through ``auto_map`` needs the module beside the config; one it
-    parses natively must not be silently treated as if it had shipped one."""
+    """A family parsed through ``auto_map`` needs the module beside the config."""
     named = 0
     for fixture in generate.FIXTURES:
         directory = os.path.dirname(generate.fixture_path("fixtures", fixture))

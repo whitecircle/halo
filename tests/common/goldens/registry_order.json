@@ -1,0 +1,853 @@
+{
+ "ep layer classes": [
+  "EPZayaMoELayer",
+  "EPInklingMoELayer",
+  "EPGptOssMoELayer",
+  "EPGemma4MoELayer",
+  "EPSharedExpertsMoELayerBase",
+  "EPQwen3_5MoELayer",
+  "EPQwen3NextMoELayer",
+  "EPQwen4ExpMoELayer",
+  "EPQwen3MoELayer",
+  "EPLfm2MoELayer",
+  "EPDeepseekV4MoELayer",
+  "EPCohere2MoELayer",
+  "EPBailingMoELayer",
+  "EPGroupLimitedMoELayerBase",
+  "EPStep3p7MoELayer",
+  "EPNemotronHMoELayer",
+  "EPMistral4MoELayer",
+  "EPGlm5NextMoELayer",
+  "EPGlm4MoELayer",
+  "EPLagunaMoELayer"
+ ],
+ "ep moe block claims": {
+  "ZayaSparseMoeBlock": "EPZayaMoELayer",
+  "InklingMoE": "EPInklingMoELayer",
+  "GptOssMLP": "EPGptOssMoELayer",
+  "Gemma4TextExperts": "EPGemma4MoELayer",
+  "Qwen3_5MoeSparseMoeBlock": "EPQwen3_5MoELayer",
+  "Qwen3NextSparseMoeBlock": "EPQwen3NextMoELayer",
+  "Qwen4ExpTextSparseMoeBlock": "EPQwen4ExpMoELayer",
+  "Qwen3MoeSparseMoeBlock": "EPQwen3MoELayer",
+  "Lfm2MoeSparseMoeBlock": "EPLfm2MoELayer",
+  "DeepseekV4SparseMoeBlock": "EPDeepseekV4MoELayer",
+  "Cohere2MoeSparseMoeBlock": "EPCohere2MoELayer",
+  "BailingMoeV2SparseMoeBlock": "EPBailingMoELayer",
+  "BailingMoeV3SparseMoeBlock": "EPBailingMoELayer",
+  "Step3p7SparseMoeBlock": "EPStep3p7MoELayer",
+  "NemotronHMoE": "EPNemotronHMoELayer",
+  "Mistral4MoE": "EPMistral4MoELayer",
+  "Glm5NextTextMoE": "EPGlm5NextMoELayer",
+  "Glm4MoeLiteMoE": "EPGlm4MoELayer",
+  "LagunaSparseMoeBlock": "EPLagunaMoELayer"
+ },
+ "ep model_type claims": {
+  "zaya": "EPZayaMoELayer",
+  "inkling_text": "EPInklingMoELayer",
+  "inkling_mm_model": "EPInklingMoELayer",
+  "gpt_oss": "EPGptOssMoELayer",
+  "gemma4": "EPGemma4MoELayer",
+  "gemma4_text": "EPGemma4MoELayer",
+  "qwen3_5_moe": "EPQwen3_5MoELayer",
+  "qwen3_5_moe_text": "EPQwen3_5MoELayer",
+  "qwen3_next": "EPQwen3NextMoELayer",
+  "qwen4_exp": "EPQwen4ExpMoELayer",
+  "qwen4_exp_text": "EPQwen4ExpMoELayer",
+  "qwen3_moe": "EPQwen3MoELayer",
+  "lfm2_moe": "EPLfm2MoELayer",
+  "lfm2_vl": "EPLfm2MoELayer",
+  "deepseek_v4": "EPDeepseekV4MoELayer",
+  "cohere2_moe": "EPCohere2MoELayer",
+  "cohere2_vision": "EPCohere2MoELayer",
+  "bailing_moe": "EPBailingMoELayer",
+  "bailing_moe_linear": "EPBailingMoELayer",
+  "bailing_hybrid": "EPBailingMoELayer",
+  "step3p7": "EPStep3p7MoELayer",
+  "step3p5": "EPStep3p7MoELayer",
+  "nemotron_h": "EPNemotronHMoELayer",
+  "nemotron_h_omni": "EPNemotronHMoELayer",
+  "mistral4": "EPMistral4MoELayer",
+  "mistral3": "EPMistral4MoELayer",
+  "glm5_next": "EPGlm5NextMoELayer",
+  "glm5_next_text": "EPGlm5NextMoELayer",
+  "glm4_moe_lite": "EPGlm4MoELayer",
+  "laguna": "EPLagunaMoELayer"
+ },
+ "ep-wrapped model types": [
+  "bailing_hybrid",
+  "bailing_moe",
+  "bailing_moe_linear",
+  "cohere2_moe",
+  "cohere2_vision",
+  "deepseek_v4",
+  "gemma4",
+  "gemma4_text",
+  "glm4_moe_lite",
+  "glm5_next",
+  "glm5_next_text",
+  "gpt_oss",
+  "inkling_mm_model",
+  "inkling_text",
+  "laguna",
+  "lfm2_moe",
+  "lfm2_vl",
+  "mistral3",
+  "mistral4",
+  "nemotron_h",
+  "nemotron_h_omni",
+  "qwen3_5_moe",
+  "qwen3_5_moe_text",
+  "qwen3_moe",
+  "qwen3_next",
+  "qwen4_exp",
+  "qwen4_exp_text",
+  "step3p5",
+  "step3p7",
+  "zaya"
+ ],
+ "source config schema model types": [
+  "nemotron_h",
+  "nemotron_h_omni",
+  "step3p5",
+  "step3p7"
+ ],
+ "native balancing slots": {
+  "bailing_moe": {
+   "attrs": [
+    "gate.expert_bias"
+   ],
+   "config_flag": null
+  },
+  "bailing_moe_linear": {
+   "attrs": [
+    "gate.expert_bias"
+   ],
+   "config_flag": null
+  },
+  "bailing_hybrid": {
+   "attrs": [
+    "gate.expert_bias"
+   ],
+   "config_flag": null
+  },
+  "deepseek_v4": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "glm4_moe_lite": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "glm5_next": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "glm5_next_text": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "gpt_oss": {
+   "attrs": [
+    "router.bias"
+   ],
+   "config_flag": null
+  },
+  "inkling_text": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "inkling_mm_model": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "laguna": {
+   "attrs": [
+    "gate.e_score_correction_bias",
+    "experts.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "lfm2_moe": {
+   "attrs": [
+    "expert_bias"
+   ],
+   "config_flag": "use_expert_bias"
+  },
+  "lfm2_vl": {
+   "attrs": [
+    "expert_bias"
+   ],
+   "config_flag": "use_expert_bias"
+  },
+  "nemotron_h": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "nemotron_h_omni": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "step3p7": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "step3p5": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  }
+ },
+ "balancing key suffixes": [
+  "balancing_biases",
+  "expert_bias",
+  "experts.e_score_correction_bias",
+  "gate.e_score_correction_bias",
+  "gate.expert_bias",
+  "router.bias"
+ ],
+ "cp attention claims": {
+  "Qwen3MoeAttention": "Qwen3MoeUlyssesAttention",
+  "Qwen3Attention": "Qwen3MoeUlyssesAttention",
+  "Qwen3VLTextAttention": "Qwen3MoeUlyssesAttention",
+  "Qwen3_5MoeAttention": "Qwen3_5MoeUlyssesAttention",
+  "Qwen3_5Attention": "Qwen3_5MoeUlyssesAttention",
+  "GptOssAttention": "GptOssUlyssesAttention",
+  "Cohere2MoeAttention": "Cohere2MoeUlyssesAttention",
+  "BailingMoeV2Attention": "BailingMoeV2UlyssesAttention",
+  "BailingMoeV2FlashAttention2": "BailingMoeV2UlyssesAttention",
+  "BailingMoeV2SdpaAttention": "BailingMoeV2UlyssesAttention",
+  "Mistral4Attention": "Mistral4UlyssesAttention",
+  "Glm4MoeLiteAttention": "Glm4MoeLiteUlyssesAttention"
+ },
+ "pp backbone claims": [
+  "Glm4MoeLiteModel",
+  "GptOssModel",
+  "InklingTextModel",
+  "LagunaModel",
+  "Qwen3Model",
+  "Qwen3MoeModel",
+  "Qwen3_5TextModel",
+  "Qwen3_5MoeTextModel",
+  "Step3p7TextModel",
+  "ZayaModel",
+  "DeepseekV4Model",
+  "Gemma4TextModel",
+  "Glm5NextTextModel",
+  "NemotronHModel",
+  "Qwen4ExpTextModel"
+ ],
+ "head transform claims": {
+  "MiniCPM3ForCausalLM": "MiniCPM3HeadTransform",
+  "FalconH1ForCausalLM": "FalconH1HeadTransform",
+  "GraniteForCausalLM": "GraniteHeadTransform",
+  "GraniteSWAForCausalLM": "GraniteHeadTransform",
+  "GraniteMoeForCausalLM": "GraniteHeadTransform",
+  "GraniteMoeSWAForCausalLM": "GraniteHeadTransform",
+  "GraniteMoeSharedForCausalLM": "GraniteHeadTransform",
+  "GraniteMoeHybridForCausalLM": "GraniteHeadTransform",
+  "CohereForCausalLM": "CohereHeadTransform",
+  "Cohere2ForCausalLM": "CohereHeadTransform",
+  "Cohere2MoeForCausalLM": "CohereHeadTransform",
+  "InklingForCausalLM": "InklingHeadTransform",
+  "InklingForConditionalGeneration": "InklingHeadTransform"
+ },
+ "weight-sync clients": {
+  "sglang": "SGLangWeightSyncClient",
+  "vllm": "VLLMWeightSyncClient"
+ },
+ "liger family specs": [
+  {
+   "model_types": [
+    "mistral4"
+   ],
+   "modeling_module": "transformers.models.mistral4.modeling_mistral4",
+   "rms_norm": [
+    "Mistral4RMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "Mistral4MLP"
+   ],
+   "causal_lm": [
+    "Mistral4ForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "zaya"
+   ],
+   "modeling_module": "transformers.models.zaya.modeling_zaya",
+   "rms_norm": [
+    "ZayaRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "ZayaForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": true,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "deepseek_v4"
+   ],
+   "modeling_module": "transformers.models.deepseek_v4.modeling_deepseek_v4",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "DeepseekV4ForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": true,
+   "rope": false,
+   "flce_default": true,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "glm4_moe_lite"
+   ],
+   "modeling_module": "transformers.models.glm4_moe_lite.modeling_glm4_moe_lite",
+   "rms_norm": [
+    "Glm4MoeLiteRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "Glm4MoeLiteMLP"
+   ],
+   "causal_lm": [
+    "Glm4MoeLiteForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": true,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "laguna"
+   ],
+   "modeling_module": "transformers.models.laguna.modeling_laguna",
+   "rms_norm": [
+    "LagunaRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "LagunaMLP"
+   ],
+   "causal_lm": [
+    "LagunaForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": true,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [
+    "LagunaRMSNorm",
+    "LagunaMLP",
+    "LagunaForCausalLM"
+   ],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "glm5_next",
+    "glm5_next_text"
+   ],
+   "modeling_module": "transformers.models.glm5_next.modeling_glm5_next",
+   "rms_norm": [
+    "Glm5NextTextRMSNorm",
+    "Glm5NextRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [
+    "Glm5NextTextRMSNormGated"
+   ],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "nemotron_h"
+   ],
+   "modeling_module": "transformers.models.nemotron_h.modeling_nemotron_h",
+   "rms_norm": [
+    "NemotronHRMSNorm"
+   ],
+   "rms_norm_casting_mode": "gemma",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "NemotronHForCausalLM"
+   ],
+   "fp32_logits": true,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": true,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "qwen3_5",
+    "qwen3_5_text"
+   ],
+   "modeling_module": "transformers.models.qwen3_5.modeling_qwen3_5",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [
+    "Qwen3_5RMSNormGated"
+   ],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "qwen3_5_moe",
+    "qwen3_5_moe_text"
+   ],
+   "modeling_module": "transformers.models.qwen3_5_moe.modeling_qwen3_5_moe",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [
+    "Qwen3_5MoeRMSNormGated"
+   ],
+   "glu_mlp": [
+    "Qwen3_5MoeMLP"
+   ],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": [
+    "swiglu"
+   ]
+  },
+  {
+   "model_types": [
+    "qwen3_next"
+   ],
+   "modeling_module": "transformers.models.qwen3_next.modeling_qwen3_next",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [
+    "Qwen3NextRMSNormGated"
+   ],
+   "glu_mlp": [
+    "Qwen3NextMLP"
+   ],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": [
+    "swiglu"
+   ]
+  },
+  {
+   "model_types": [
+    "qwen4_exp_text"
+   ],
+   "modeling_module": "transformers.models.qwen4_exp.modeling_qwen4_exp",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "Qwen4ExpForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": true,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "qwen3_moe"
+   ],
+   "modeling_module": "transformers.models.qwen3_moe.modeling_qwen3_moe",
+   "rms_norm": [
+    "Qwen3MoeRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": [
+    "rms_norm"
+   ]
+  },
+  {
+   "model_types": [
+    "gpt_oss"
+   ],
+   "modeling_module": "transformers.models.gpt_oss.modeling_gpt_oss",
+   "rms_norm": [
+    "GptOssRMSNorm"
+   ],
+   "rms_norm_casting_mode": "gemma",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": [
+    "rms_norm"
+   ]
+  },
+  {
+   "model_types": [
+    "gemma4_text"
+   ],
+   "modeling_module": "transformers.models.gemma4.modeling_gemma4",
+   "rms_norm": [
+    "Gemma4RMSNorm"
+   ],
+   "rms_norm_casting_mode": "gemma",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "Gemma4TextMLP"
+   ],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": true,
+   "upstream_off": [
+    "geglu",
+    "rms_norm"
+   ]
+  },
+  {
+   "model_types": [
+    "inkling_text",
+    "inkling_mm_model"
+   ],
+   "modeling_module": "transformers.models.inkling.modeling_inkling",
+   "rms_norm": [
+    "InklingRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "lfm2"
+   ],
+   "modeling_module": "transformers.models.lfm2.modeling_lfm2",
+   "rms_norm": [
+    "Lfm2RMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "Lfm2ForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": true,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "lfm2_moe"
+   ],
+   "modeling_module": "transformers.models.lfm2_moe.modeling_lfm2_moe",
+   "rms_norm": [
+    "Lfm2MoeRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "Lfm2MoeForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": true,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "cohere2"
+   ],
+   "modeling_module": "transformers.models.cohere2.modeling_cohere2",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "Cohere2MLP"
+   ],
+   "causal_lm": [
+    "Cohere2ForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "cohere2_moe"
+   ],
+   "modeling_module": "transformers.models.cohere2_moe.modeling_cohere2_moe",
+   "rms_norm": [
+    "Cohere2MoeRMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "Cohere2MoeMLP"
+   ],
+   "causal_lm": [
+    "Cohere2MoeForCausalLM"
+   ],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "step3p7",
+    "step3p5"
+   ],
+   "modeling_module": "transformers.models.step3p7.modeling_step3p7",
+   "rms_norm": [
+    "Step3p7RMSNorm"
+   ],
+   "rms_norm_casting_mode": "gemma",
+   "rms_norm_offset": 1.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "bailing_moe",
+    "bailing_moe_linear"
+   ],
+   "modeling_module": "",
+   "rms_norm": [
+    "BailingMoeV2RMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "BailingMoeV2MLP"
+   ],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [
+    "BailingMoeV2RMSNorm",
+    "BailingMoeV2MLP"
+   ],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "bailing_hybrid"
+   ],
+   "modeling_module": "",
+   "rms_norm": [
+    "BailingMoeV3RMSNorm"
+   ],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [
+    "BailingMoeV3MLP"
+   ],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [
+    "BailingMoeV3RMSNorm",
+    "BailingMoeV3MLP"
+   ],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  }
+ ],
+ "sequence-classification heads": {
+  "Gemma4Config": "Gemma4ForSequenceClassification",
+  "Gemma4TextConfig": "Gemma4TextForSequenceClassification",
+  "Qwen3_5MoeConfig": "Qwen3_5MoeForSequenceClassification",
+  "Qwen3_5MoeTextConfig": "Qwen3_5MoeTextForSequenceClassification"
+ },
+ "optimizer builders": {
+  "muon": "muon_optimizer_from_args",
+  "flash_adamw": "flash_adamw_optimizer_from_args"
+ },
+ "environments": [
+  "react_math",
+  "react_search",
+  "native_math",
+  "native_coding",
+  "native_combined",
+  "mcp",
+  "swe",
+  "qa_search",
+  "code_contests",
+  "codeforces",
+  "exam_qa"
+ ]
+}

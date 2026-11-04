@@ -2,22 +2,16 @@
 
 Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalars) and an interleaved expert layout de-interleaved at load on the grouped-GEMM and ETP paths, then re-interleaved on save.
 
-| | EP | CP | TP | ETP | PP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| GPT-OSS 20B / 120B | Yes | Yes | Yes | Yes | — ¹ | Yes | Yes |
+Every axis runs on both sizes ([Compatibility matrix](README.md#compatibility-matrix)). `GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path. Under pipeline parallelism balance with `bias_update` or `none` (`aux_loss` is severed by the split); two-node recipe: `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
-`GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path.
+## EP layer
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
-
-## EP wrapper
-
-`EPGptOssMoELayer` (`src/distributed/expert_parallel/layers/gpt_oss.py`) replaces `GptOssMLP`.
+`EPGptOssMoELayer` (`halo/distributed/expert_parallel/families/gpt_oss.py`) replaces `GptOssMLP`.
 
 - Routing: custom router returning `(logits, weights, experts)`; softmax top-k with FP32 weights for DeepEP.
 - Storage: interleaved `gate_up_proj [E, H, 2M]` (`[g0, u0, g1, u1, …]`), `down_proj [E, M, H]`, plus the optional expert biases `gate_up_proj_bias [E, 2M]` (interleaved the same way) and `down_proj_bias [E, H]`.
-- Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice. The **loop fallback** iterates per expert with `index_add_`.
-- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`fused_gptoss_glu`, `src/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
+- Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice; under ETP it reads the sharded pair ETP stores as `gate_proj` / `up_proj`. The **loop fallback** iterates per expert with `index_add_`.
+- Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`GluCombine.gptoss`, latched once per layer and logged as `glu_combine=gptoss`, `halo/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
 
     The kernel replaces `torch.compile`, whose recompiles would storm on the varying per-step routed-token count and whose float arguments go stale once shapes are dynamic. The loop path splits the halves out of its interleaved projection output first.
 
@@ -32,52 +26,54 @@ interfaces do receive `position_ids` and isolate correctly, so pin `flash_attent
 FA) whenever packing is on, and use padded batches otherwise
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
+[Tree packing](../optimization/tree-packing.md) (`tree_packing: true`) runs on this family: rows that
+share a prefix store it once.
+
 ## Attention sinks
 
 GptOss attention adds a per-head learnable scalar to the attention logits before softmax, with two parallelism consequences.
 
-**TP sharding.** `shard_sinks_param()` (`src/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded in `model._tp_sharded_non_dtensor` so `gather_tp_sharded_non_dtensor_params()` all-gathers it at save time.
+**TP sharding.** `shard_sinks_param()` (`halo/distributed/tensor_parallel/parallelize_attention.py`) shards sinks per rank as plain tensors, not DTensors — the forward concatenates sinks with locally-sharded logits, and a DTensor would dimension-mismatch on the concat. The slice is recorded through `register_hand_sliced` so `gather_hand_sliced_params()` all-gathers it at save time.
 
-**Sink handling** (`src/models/patches/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
+**Sink handling** (`halo/models/attention/gpt_oss_sinks.py`). One `SinksPolicy` per run, resolved from `reset_sinks` / `train_sinks` at load, stamped on the model for the trainer gates, and recorded in a LoRA run's `training_provenance.json` so the merge tools re-apply it (a merge rebuilds the base from the hub, whose sinks are always live).
 
 - **Neutralized** (`reset_sinks: true`, the SFT default): `None` under FA2 (its kernel takes no sink argument), `dtype.min` and frozen everywhere else (~0 softmax mass, zero gradient). Every checkpoint writer re-emits the FA2-removed sinks as `dtype.min`.
 - **Live, frozen** (`reset_sinks: false`): the pretrained sinks stay in every softmax, `requires_grad=False`. This is the RL setting — the trainer scores with the sinks the rollout engine serves — and the only live policy an adapter run or weight-sync trainer accepts.
 
-    Live sinks admit only sink-carrying implementations (FA4, `flex_attention`, `eager`; FA3 with an `s_aux` build). They are refused under Context Parallelism, whose kernels never see the column.
+    Live sinks admit only sink-carrying implementations (FA4, `flex_attention`, `eager`; FA3 with an `s_aux` build): a sink-dropping implementation shifts every logprob ~−3 nats against the served policy (gpt-oss-20b). The resolver refuses one before the load, and the model every loader builds is checked again (`verify_live_sinks_carried`), the builds no resolver picks a backend for included: a sentence-transformers backbone on a pinned label, and the reward-model scorer, whose checkpoint's own sinks decide. They are refused under Context Parallelism, whose kernels never see the column. On Hopper no fused kernel carries them: `flex_attention` under EP runs uncompiled ([Known issues](../optimization/flash-attention.md#known-issues)) and `eager` everywhere, both holding the full score matrix, so memory bounds the row length.
 
-- **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only.
+- **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only. Another family's load refuses `train_sinks`.
 
-    The fused FA4 backward returns no sink gradient, so the loader installs a rescale on both `flash_attn.cute` entry points (varlen and dense). A grad-requiring sink runs the sink-less kernel with `return_lse=True` and applies `out * sigmoid(lse - sink)` outside it — algebraically the fused sink, with `d_sink` from the gate and complete `dq/dk/dv` through `dout` and the kernel's `dlse` path.
+    The loader installs a rescale on both `flash_attn.cute` entry points (varlen and dense), so a sink trains without the kernel's own sink backward, which is not validated here. A grad-requiring sink runs the sink-less kernel with `return_lse=True` and applies `out * sigmoid(lse - sink)` outside it — algebraically the fused sink, with `d_sink` from the gate and complete `dq/dk/dv` through `dout` and the kernel's `dlse` path.
 
     `tests/gpu/kernels/test_fa4_trainable_sink_rescale.py` pins all four against an eager reference on both entry points. Frozen sinks and no-grad calls pass through untouched.
 
-    Refused: `reset_sinks: true` (a dtype-min sink has zero gradient), `flex_attention` (NaN sink gradients in its compiled backward), FA3 (no sink gradient), adapter runs (the adapter artifact has no sink slot), and weight-sync RL (no validated end-to-end sync of a moving sink; frozen live sinks are on-policy by construction).
+    Refused: `reset_sinks: true` (a dtype-min sink has zero gradient), `flex_attention` (NaN sink gradients in its compiled backward), FA3 (no sink gradient), adapter runs (the adapter artifact has no sink slot), and weight-sync RL (no validated end-to-end sync of a moving sink; frozen live sinks stay equal on both sides).
 
 ## CP, TP, ETP
 
-- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`src/distributed/context_parallel/layers/gpt_oss.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
+- **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`halo/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
-- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
+- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Each rank stores its slice of the de-interleaved pair as `gate_proj` / `up_proj` (biases likewise, `down_proj_bias` on expert-TP rank 0), which grouped GEMM and the per-expert loop both read, so the storage and its checkpoints do not depend on `use_grouped_gemm`.
 
     See [ETP weight sharding](../parallelism/expert-tensor-parallelism.md#weight-sharding).
 
 ## Precision and kernels
 
-- `fp32_non_ep_params: true` is safe — the router lives inside the EP wrapper (unlike Gemma 4).
-- **Blackwell** auto-selects FA4. SFT runs it with sinks reset to `dtype.min`; RL runs it with sinks kept and frozen. GPT-OSS is unaffected by the Qwen3.5/3.6 FA4→SDPA fallback.
-- **SFT alternatives.** With sinks reset, `flash_attention_2` (`sinks = None`) and `sdpa` (the `dtype.min` column contributes `exp(dtype.min)=0`) also run end to end, both JIT-free. RL cannot use them: a sink-dropping impl shifts every logprob ~−3 nats vs the served policy.
-- **RL sink gates.** Under `reset_sinks: false`, `validate_attn_implementation` rejects any implementation whose kernel does not accept a sink argument — SDPA always, and each flash build by its `s_aux` / `learnable_sink` signature, which the shipped FA2 lacks.
-
-    The inverse shape is gated too. `validate_weight_sync_support` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends named parameters only, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time. The sink-capability matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
-
-- **Hopper FA2** needs the split-K kernel patch shipped in the image (`docker/training/flash_attn_split_stubs_hopper.cpp`).
-- **Variable-length RL** (async GRPO) uses FA4 through a per-row dense forward (`_dense_last_hidden_state`): a padded batch would unpad to a varlen FA4 call that re-JITs per length-set.
-
-    Each row is forwarded alone, trimmed to its real span, with `attention_mask=None` — dense kernel, RoPE `[0, len)`, bit-identical log-probs. Every row stays connected to the loss so per-rank backward collectives keep lockstep.
+- `fp32_non_ep_params: true` is safe — the router lives inside the EP layer (unlike Gemma 4).
+- **Blackwell** auto-selects FA4 under every sink policy. GPT-OSS is unaffected by the Qwen3.5/3.6 FA4→SDPA fallback.
+- **SFT alternatives.** With sinks reset, `flash_attention_2` (`sinks = None`) and `sdpa` (the `dtype.min` column contributes `exp(dtype.min)=0`) also run end to end, both JIT-free. RL cannot use them ([why](#attention-sinks)). Which kernel carries a sink, and how the resolver reads it: [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+- **Sink-free trainer, live engine.** `reject_unsyncable_model` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends the trainer's named parameters, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time.
+- **Hopper FA2** runs the image's build, whose split-K kernels are stubbed and never picked by a forward Halo runs ([Docker → Building](../infrastructure/docker.md#building)).
+- **Variable-length RL** (async GRPO) runs FA4 through a per-row dense forward ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)).
 
 ## Configs
 
 `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` is the infra-agnostic EP example for GPT-OSS 20B and doubles as the multi-node reference; `gptoss-120b-multinode-ep.yaml` is its 120B counterpart.
+
+The DPO, SMPO, reward, classification and offline GRPO configs pin `flash_attention_4`, so they run on Blackwell only; it is also what those scripts pick there for an unset label. Elsewhere those scripts default an unset label to SDPA ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)), so on Hopper pass `--attn_implementation=flash_attention_3`. The self-distillation and embedding configs leave it unset, which those scripts resolve to FA4 on Blackwell and FA3 on Hopper.
+
+The DPO, SMPO, reward, classification, offline GRPO, self-distillation and 20B multi-node SFT configs train without gradient checkpointing, the largest single throughput lever here: at EP8 the activations fit to 32k tokens per rank (159 GiB, [Throughput Benchmarks](../optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)). The 120B multi-node config keeps it, since it targets 80 GB parts.
 
 A multi-stage fine-tune must agree on `reset_sinks` across stages — a continuation run keeps the sink policy of the export it starts from.
 
@@ -91,7 +87,7 @@ Async GRPO with Environments: `examples/grpo/environmental/gptoss/vllm/` plus th
 
 ## Chat template
 
-Two templates ship for GPT-OSS under `jinja-templates/gpt-oss/`, selected with `chat_template:`. `gpt-oss-harmony.jinja` is the upstream OpenAI-harmony template from `unsloth/gpt-oss-20b-BF16`, kept so the training render is **byte-identical** to vLLM's server-side render. Its one deviation: tool and parameter `description` is guarded with `is defined`, so a tool without descriptions does not crash the render. (The checkpoint's built-in template renders `param_spec.description` unconditionally and raises without it.)
+Two templates ship for GPT-OSS under `jinja-templates/gpt-oss/`, selected with `chat_template:`. `gpt-oss-harmony.jinja` is the upstream OpenAI-harmony template from `unsloth/gpt-oss-20b-BF16`, passed to vLLM too, so the training render is **byte-identical** to the server-side one. It deviates twice. Tool and parameter `description` is guarded with `is defined`, so a tool without descriptions does not crash the render (the checkpoint's built-in template renders `param_spec.description` unconditionally and raises without it). A tool call's string `arguments`, the OpenAI schema rollouts store, render verbatim, where the built-in `tojson` double-encodes them; restoring the upstream file trains quoted, escaped arguments no harmony parser reads.
 
 For SFT and self-distillation the shipped examples pin `gpt-oss-multiturn.jinja` with `force_chat_template: true` and `assistant_message_template: <|start|>assistant<|channel|>final<|message|>`: it renders every assistant turn as an empty `analysis` channel followed by the `final` channel the served model emits, and ends every assistant turn with `<|return|>`, so completion-only masking trains each assistant turn of a multi-turn row. Under harmony a plain assistant message renders channel-less as `<|start|>assistant<|message|>…` and only the final turn ends in `<|return|>` (earlier turns end in `<|end|>`, which is not an eos id), so that marker matches no turn at all and every row masks; the channel-less spelling of it would train only the last assistant turn.
 
@@ -99,7 +95,7 @@ For RL the training and serving templates must match, since log-probs are comput
 
 ## Serving for GRPO (vLLM)
 
-Use the toolkit `vllm-server:0.26.0` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_disable_gptoss.sh`) forces vLLM's harmony pipeline off and generates coherently.
+Use the toolkit `halo:vllm-0.32.0` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_source.py`) forces vLLM's harmony pipeline off and generates coherently.
 
 With harmony disabled, five settings are load-bearing.
 
@@ -109,27 +105,25 @@ With harmony disabled, five settings are load-bearing.
 
     Only the **first** call is extracted: without `<|call|>` as an eos the model keeps writing `to=functions.*` text and hallucinates its own tool result. A header with no brace-balanced JSON after it is dropped rather than rescued, so the turn scores as a no-tool turn and the policy is pushed toward valid JSON. Non-tool RLVR needs no tool parser.
 
-- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s). At the budget it forces the final-channel opener `<|start|>assistant<|channel|>final<|message|>`, which the vLLM recipes name as `rollout_reasoning_end_token` so the loss drops those forced tokens ([Objective](../training-methods/async-grpo/objective.md#importance-sampling-correction)).
+- **Reasoning budget.** `--reasoning-parser-plugin /opt/gpt_oss_reasoning_parser.py --reasoning-parser openai_gptoss` re-registers the harmony-only stock parser for the harmony-disabled path. It separates the CoT from the answer, and is what lets a request carry `thinking_token_budget` at all (without it every such request 400s). When an analysis channel overruns the budget it forces the move into the final channel, `<|end|><|start|>assistant<|channel|>final<|message|>`, which the vLLM recipes name as `rollout_reasoning_end_token` so the loss drops those forced tokens ([Objective](../training-methods/async-grpo/objective.md#importance-sampling-correction)).
 
-    vLLM arms the budget on the `reasoning_start_token_ids` it tokenizes from the parser's `reasoning_start_str`, and ends it by forcing `reasoning_end_str`'s ids. The budget bounds every token generated before the `final` channel, whichever channel opened them (vLLM's counter trails the marker by one, so the cut lands at `budget + 1`).
+    The budget counts only inside an analysis channel: the count starts at an analysis opening (`analysis<|message|>`, the parser's `reasoning_start_str`) and stops at any channel header (`<|channel|>`, its `reasoning_end_str`), so a tool call, a commentary preamble and the final answer are never counted or cut. It is per analysis message, and counts up to the three closing tokens (`<|end|><|start|>assistant`) before the next header, so an analysis ending on its own within three tokens of the budget is turned into final.
 
-    No channel opening can serve as that start marker. The parser treats every channel before `final` as reasoning while the render opens `analysis` or `commentary`, and a bare `<|channel|>` also matches the tool-result turn already in the prompt, cutting before the first sampled token. So the plugin arms on `<|start|>assistant`, the generation prompt's own tail.
+    vLLM forces the parser's `reasoning_end_str` unless told otherwise, and stops forcing at the first natural end marker. Two image patches make the gpt-oss cut whole: `vllm_reasoning_forced_end_patch` forces the parser's `reasoning_forced_end_str` (the six-token move) instead, and `vllm_thinking_budget_completion_patch` finishes that sequence past the `<|channel|>` it contains rather than letting the model pick the channel, where a reopened analysis would count afresh. The forced cut carries the role tokens, so it decodes byte-identical to the ending the model writes itself and the split finds the answer behind it.
 
-    `reasoning_end_str` carries the role tokens — `<|start|>assistant<|channel|>final<|message|>` — so the forced cut is byte-identical to the ending the model writes itself. The channel marker alone would decode to a bare `final` glued to the truncated CoT, indistinguishable from prose `final` whenever the cut lands on whitespace, and the whole answer would stay in `reasoning` with `content` empty.
-
-    `docker/vllm/plugins/verify_gptoss_plugins.py` drives vLLM's own budget state machine over a simulated harmony-disabled stream at build time and pins that the forced marker's decoded text still splits, so a render or marker drift fails the image build rather than a run.
+    `docker/vllm/plugins/verify_gptoss_plugins.py` drives Model Runner V2's own budget kernels (on the Triton interpreter) over simulated harmony-disabled streams at build time: a cut lands right after the budget, a cut model cannot reopen analysis, tool calls, preambles and straight-to-final turns are never cut, and a recycled slot forgets a previous cut. A render or marker drift fails the image build rather than a run.
 
     The parser keeps the commentary tool call and the `final` answer in `content`: vLLM extracts tool calls from `content` only, so a call left in `reasoning` would be dropped and the turn mis-scored as a giveup.
 
 - **`--return-tokens-as-token-ids`** — required whenever `train_on_sampled_tokens` is on (the default); the compose file passes it ([Rollout Servers](../infrastructure/rollout-servers.md#vllm)).
-- **`rollout_stop_tokens: ["<|call|>"]`** — with harmony disabled `<|call|>` is not an eos, so the model keeps generating past its tool call and hallucinates the result for ~90% of the turn. A server-side `--override-generation-config` eos does not fix it ([Async GRPO with Environments](../training-methods/async-grpo/episodes.md#tool-calls)).
+- **`rollout_stop_tokens: ["<|call|>"]`** — with harmony disabled `<|call|>` is not an eos, so the model keeps generating past its tool call and hallucinates the result for most of the turn. A tool-bearing environment without it is refused at trainer construction. A server-side `--override-generation-config` eos does not fix it ([Async GRPO with Environments](../training-methods/async-grpo/episodes.md#tool-calls)).
 - **Full padded vocab.** GPT-OSS ships 201088 embedding rows against `len(tokenizer)` 200019; rows 200019–201087 are unassigned padding. Every harmony special sits below that line — `<|return|>`/EOS at 200002, `<|call|>` at 200012, highest added id 200018 — so a resize to `len(tokenizer)` keeps them all.
 
     The trap is `tokenizer.vocab_size`, which is **199998**: shrink to that and the checkpoint loses EOS and emits garbage. `scripts/before_training/patch_vocab.py` only **grows** the embedding, so a patched checkpoint keeps every special and serves like the base — unless it was patched with `--reset_sinks`, which leaves it sinks-off, and the pretrained model served sinks-off degenerates (below).
 
-Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer matches by freezing the same sinks, so recompute equals vLLM to ~0 nats (`is_ratio ~1`).
+Sinks stay **on** at serving (the default): served sinks-off, the pretrained model degenerates to repetitive garbage with zero tool calls. The trainer freezes the same sinks, so both sides score with them; what remains between the two bf16 forwards is routing and rounding noise ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.17); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
+GPT-OSS serves from **SGLang** for async GRPO (`rollout_backend: sglang`): SGLang's own built-in detectors replace both vLLM plugins — the compose default `--tool-call-parser auto` resolves gpt-oss off the chat template, and `SGLANG_REASONING_PARSER=gpt-oss` separates the analysis channel (both registered in 0.5.22); thinking budgets are rejected at config time for this backend, and the server container needs `NCCL_CUMEM_ENABLE=1` (the compose default). Flags and constraints: [Rollout Servers](../infrastructure/rollout-servers.md#sglang).
 
 ## Router balancing
 
@@ -137,12 +131,12 @@ GPT-OSS defaults to switch-style **aux-loss** balancing: `moe_balancing: auto` r
 
 The coefficient a run reads is the checkpoint's, not the class default. `GptOssConfig` declares `router_aux_loss_coef: 0.001`, but every released `config.json` (`openai/gpt-oss-*` and the `unsloth/*-BF16` mirrors) ships **0.9**, large enough to dominate both the SFT loss and the router gradient.
 
-Every shipped example that stays on `aux_loss` overrides it back down to `0.001` in `model_init_kwargs`; do the same on a new aux-loss run rather than inheriting 0.9. A `bias_update` run needs no override — that mode zeroes the coefficient itself (below).
+The shipped SFT examples that stay on `aux_loss` override it back down to `0.001` in `model_init_kwargs`; do the same on any aux-loss run, DPO and KTO included (their TRL loss weighs the term by the model config's coefficient: [Callbacks](../training-methods/callbacks.md#moe-balancing-modes)), rather than inheriting 0.9. A `bias_update` run needs no override — that mode zeroes the coefficient itself (below).
 
-The DeepSeek-V3 **aux-loss-free bias update** is opt-in on the EP path (`moe_balancing: bias_update`) and adopts the hub router's own **`router.bias`** as the balancing state. The Parameter is re-registered as a persistent buffer under the same key: frozen out of gradient training, sign-updated by [`RouterBiasBalancingCallback`](../training-methods/callbacks.md#routerbiasbalancingcallback) each optimizer step, and exported with every checkpoint.
+The DeepSeek-V3 **aux-loss-free bias update** is opt-in on the EP path (`moe_balancing: bias_update`) and adopts the hub router's own **`router.bias`** as the balancing state. The Parameter is re-registered as a persistent buffer under the same key: frozen out of gradient training, sign-updated by [`BalancingBiasCallback`](../training-methods/callbacks.md#balancingbiascallback) each optimizer step, and exported with every checkpoint.
 
-vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive logits, combine = softmax over the selected values). `_route_with_bias` computes exactly that arithmetic, so trainer and served copy pick the same experts with the same weights.
+vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive logits, combine = softmax over the selected values). `_route_with_bias` computes that arithmetic, so both read the trained bias the same way; bf16 near-ties can still pick differently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-`router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+`router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 
-**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer and the weight sync ships parameters only, so a synced engine routes on the pretrained bias (`build_perf_callbacks` downgrades it automatically). Bias-update needs the EP wrappers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.
+**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer, and the weight sync ships a buffer only where the family declares it in `engine_loaded_buffers`, so a synced engine routes on the pretrained bias (`configure_moe_balancing` downgrades it automatically). Bias-update needs the EP layers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.

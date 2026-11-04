@@ -18,18 +18,18 @@ Floating-point tensors are merged in float32 and cast to `--dtype` (default `bfl
 ```bash
 # Weighted linear average (weights are normalized by their sum)
 python scripts/after_training/merge_models.py --method linear \
-    --models /ckpt/run-a:0.3 /ckpt/run-b:0.7 --output_dir /mnt/merged-linear
+    --models /ckpt/run-a:0.3 /ckpt/run-b:0.7 --output_dir <large-volume>/merged-linear
 
 # SLERP halfway between two checkpoints
 python scripts/after_training/merge_models.py --method slerp --t 0.5 \
-    --models /ckpt/run-a /ckpt/run-b --output_dir /mnt/merged-slerp
+    --models /ckpt/run-a /ckpt/run-b --output_dir <large-volume>/merged-slerp
 
 # TIES onto a base
 python scripts/after_training/merge_models.py --method ties --density 0.6 --lambda 1.0 \
-    --base_model /ckpt/base --models /ckpt/run-a:0.5 /ckpt/run-b:0.5 --output_dir /mnt/merged-ties
+    --base_model /ckpt/base --models /ckpt/run-a:0.5 /ckpt/run-b:0.5 --output_dir <large-volume>/merged-ties
 ```
 
-Each `--models` entry is a **local directory**, optionally suffixed `:weight` (split on the last colon, so absolute paths are safe); the default weight is `1.0`. Weights are read off disk, so a Hub id there raises `FileNotFoundError` — `--tokenizer_source` is the one flag that resolves one.
+Each `--models` entry is a **local directory**, optionally suffixed `:weight` (split on the last colon, so absolute paths are safe); the default weight is `1.0`. Weights are read off disk, so a Hub id there raises `FileNotFoundError`; `--tokenizer_source` is a local directory too (a Hub id is refused, so the local `--trust_remote_code` default covers every source — download the repo first).
 
 | Flag | Default | Applies to | Meaning |
 |---|---|---|---|
@@ -41,7 +41,7 @@ Each `--models` entry is a **local directory**, optionally suffixed `:weight` (s
 | `--density` | `0.6` | ties | Fraction of each task vector's deltas kept, in `(0, 1]` |
 | `--lambda` | `1.0` | ties | Scale of the merged delta onto the base; any finite value |
 | `--t` | `0.5` | slerp | Interpolation factor, limited to `[0, 1]` |
-| `--tokenizer_source` | base, else first model | all | Where to copy config + tokenizer/processor from |
+| `--tokenizer_source` | base, else first model | all | Local directory to copy config + tokenizer/processor from |
 | `--max_shard_size` | `5GB` | all | Per-file cap for the output safetensors shards |
 | `--allow_missing_tokenizer` | off | all | Accept a merged checkpoint whose `--tokenizer_source` ships no tokenizer files (refused by default) |
 | `--trust_remote_code` | on | all | Trust remote code when re-reading the merged config (`--no-trust_remote_code` to disable); needed for Bailing/Ling |
@@ -51,20 +51,20 @@ The *Applies to* column is enforced, not advisory: a knob passed explicitly for 
 
 ## Memory and output
 
-Merging runs on CPU and streams the inputs **one tensor at a time** — each key is read from every model, merged, then released — so peak host memory is set by the costliest tensor (the largest, in practice), never the merged model: every input's copy of it as stored, the method's fp32 working copies of it, and the writer's pending output shard (`--max_shard_size`). `linear`, `task_arithmetic` and `slerp` hold 3, 4 and 5 working copies whatever the model count; `ties` holds 5.25 per model plus 5 (each delta, their stacked copy, the sign-masked copy, and the agreement mask with its int64 cast), so a TIES merge of four bf16 models onto a bf16 base, whose largest tensor has 1B elements, peaks near 120 GB. The tool warns before merging when this estimate exceeds the host's available RAM. Peak disk is the merged artifact, one input's size.
+Merging runs on CPU and streams the inputs **one tensor at a time** — each key is read from every model, merged, then released — so peak host memory is set by the costliest tensor (the largest, in practice), never the merged model: every input's copy of it as stored, the method's fp32 working copies of it, and the writer's staged output parts: the shard it is filling plus one per write thread (`--max_shard_size` each, [`HALO_CHECKPOINT_WRITE_THREADS`](configuration-reference.md#environment-variables), default 0). `linear`, `task_arithmetic` and `slerp` hold 3, 4 and 5 working copies whatever the model count; `ties` holds 5.25 per model plus 5 (each delta, their stacked copy, the sign-masked copy, and the agreement mask with its int64 cast), so a TIES merge of four bf16 models onto a bf16 base, whose largest tensor has 1B elements, peaks near 120 GB. The tool warns before merging when this estimate exceeds the host's available RAM. Peak disk is the merged artifact, one input's size.
 
 The output is a standard HF checkpoint: sharded safetensors plus an index above `--max_shard_size` (5 GB by default), or a single `model.safetensors` with no index when it fits.
 
-Every non-weight file in `--tokenizer_source` is copied: config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names. Two are rewritten after the copy: the saved config's `dtype` is set to the merged dtype, and the `README.md` model card gains the `halo` Hub tag, or is created holding it ([Hub model card](checkpoints.md#hub-model-card)). A Hub id resolves to its local snapshot first and is copied the same way.
+Every non-weight file in `--tokenizer_source` is copied: config, tokenizer, the multimodal processor files, and any remote-code modules the config's `auto_map` names. Two are rewritten after the copy: the saved config's `dtype` is set to the merged dtype, and the `README.md` model card gains the `halo` Hub tag, or is created holding it ([Hub model card](checkpoints.md#hub-model-card)).
 
 The resume state is the exception: `trainer_state.json`, `scheduler.pt`, `router_balancing_biases.pt`, `reference_logps.pt`, `rng_state_*`, `prefetch_pending-*` and a merged checkpoint's `resume_adapter/` with its `resume_adapter.json` describe one training run, which an N-way merge has none of, so they are dropped. The merged model therefore ships **no** balancing sidecar — a family whose balancing bias lives in a checkpoint slot keeps it through the merged weights, while a `bias_update_transient` run's bias is gone (see [Checkpoints](checkpoints.md#resume-by-parallelism-mode)).
 
 Every input must carry the merge's reference key set (the base's under `task_arithmetic`/`ties`, else the first model's), nothing beyond it, and each key at one shape; a mismatch is refused from the safetensors headers before any output is written. Two kinds of base key no fine-tune stores are legitimate, both tensors the shipped config's model never reads from a checkpoint, and the merge leaves them out as every fine-tune export does:
 
 - a Hub base's stored tied `lm_head.weight`, when every fine-tune stores the embedding and the shipped config ties the pair at both levels (a multimodal wrapper's own `tie_word_embeddings` and its text sub-config's). The load rebuilds the head from the merged embedding;
-- keys the shipped config's model class drops at load (`_keys_to_ignore_on_load_unexpected`): the `mtp.*` head of the Qwen3.5/3.6 Hub checkpoints, GLM-4.7-Flash's `model.layers.47.*` MTP layer.
+- keys the shipped config's model class drops at load (`_keys_to_ignore_on_load_unexpected`): the `mtp.*` head of the Qwen3.5/3.6 Hub checkpoints, GLM-4.7-Flash's `model.layers.47.*` MTP layer, Nemotron-H's `mtp.*` or `language_model.mtp.*`, which its composite's text class names. A text class's other drops stay refused, as its composite reads them: Qwen3.5's `model.visual.*`.
 
-The merge keeps its inputs' key layout, so the result loads with `from_pretrained` and serves wherever its inputs would ([serving rules](checkpoints.md#serving-on-vllm--sglang)). A `--tokenizer_source` that ships no tokenizer files **raises** once the weights are written, since no `from_pretrained`-based consumer could build a tokenizer from the output — re-point it at a directory or Hub id that carries one, or pass `--allow_missing_tokenizer` to accept the tokenizer-less artifact.
+The merge keeps its inputs' key layout, so the result loads with `from_pretrained` and serves wherever its inputs would ([serving rules](checkpoints.md#serving-on-vllm--sglang)). A `--tokenizer_source` that ships no tokenizer files **raises** once the weights are written, since no `from_pretrained`-based consumer could build a tokenizer from the output — re-point it at a directory that carries one, or pass `--allow_missing_tokenizer` to accept the tokenizer-less artifact.
 
 `slerp` falls back to linear interpolation when the two tensors are near-(anti-)colinear (`|cosine| > 0.9995`), where spherical interpolation is numerically unstable and ≈ equal anyway.
 
@@ -73,4 +73,4 @@ The merge keeps its inputs' key layout, so the result loads with `from_pretraine
 Weight-space merging is distinct from the reassembly/adapter merges:
 
 - **EP sharded checkpoints** → reassemble with `scripts/after_training/merge_ep_shards.py`. See [Checkpoints & Resume](checkpoints.md).
-- **LoRA / PEFT adapters** → fold into the base with `scripts/after_training/merge_peft_adapters.py`. It refuses a directory carrying native EP expert-LoRA (`peft_type: EXPERT_LORA` or `LORA_WITH_EP_EXPERT_LORA`, or `*.experts.<attr>.lora_{A,B}` keys), which `merge_and_unload` would silently drop; those fold only at save time, with `merge_expert_lora_on_save: true`. See [PEFT (LoRA)](../optimization/peft.md).
+- **LoRA / PEFT adapters** → fold into the base with `scripts/after_training/merge_peft_adapters.py`. It refuses a directory carrying native EP expert-LoRA (`peft_type: EXPERT_LORA` or `LORA_WITH_EP_EXPERT_LORA`, or `*.experts.<attr>.lora_{A,B}` keys), which `merge_and_unload` would silently drop; those fold only at save time, with `merge_expert_lora_on_save: true`. A base with fewer embedding rows than the adapter's tokenizer has ids grows to it first ([PEFT → Merging adapters](../optimization/peft.md#merging-adapters)). See [PEFT (LoRA)](../optimization/peft.md).

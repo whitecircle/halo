@@ -1,0 +1,81 @@
+"""EP layer for Inkling (Thinking Machines): fused experts, joint routed+shared normalisation."""
+
+from __future__ import annotations
+
+from functools import partial
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.models.moe.family_specs import INKLING
+
+
+class EPInklingMoELayer(EPMoELayerBase):
+    """EP layer for ``InklingMoE``. One router projection emits routed and shared logits, and the routed top-k and
+    shared experts are normalised jointly, so the shared FFN is scaled by its share (``gammas``). That is why this
+    layer cannot use :class:`EPSharedExpertsMoELayerBase`, whose shared-expert call takes no extra arguments."""
+
+    HF_MODULE_NAMES = ("InklingMoE",)
+    FAMILY = INKLING
+
+    SUPPORTS_BIAS_BALANCING = True
+    # The causal-LM loss never reads router_logits, so there is no aux-loss path either way.
+    SEVERS_AUX_LOSS = True
+
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
+        super()._adopt_routing(original_layer)
+        self.n_shared_experts = self.gate.n_shared_experts
+        self.route_scale = self.gate.route_scale
+        if self.n_shared_experts < 1:
+            # ``_route_joint`` slices the last ``n_shared_experts`` logit columns; at 0 the ``[..., :-0]``
+            # slice would drop every routed logit instead.
+            raise ValueError(f"EPInklingMoELayer requires n_shared_experts >= 1, got {self.n_shared_experts}")
+
+    def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
+        return (
+            *super()._init_summary_extras(original_layer),
+            f"n_shared={self.n_shared_experts}",
+            f"route_scale={self.route_scale}",
+        )
+
+    def _route_joint(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Reproduce ``InklingTopkRouter``; returns ``(topk_indices, topk_weights, shared_gammas)``."""
+        routed_logits = router_logits[..., : -self.n_shared_experts]
+        shared_logits = router_logits[..., -self.n_shared_experts :]
+
+        topk_indices = self._apply_routing_replay(self._select_topk_on_scores(routed_logits.sigmoid()))
+
+        # Routed and shared logits are normalised together, so a shared expert takes mass away from
+        # the routed ones; splitting this into two softmaxes would change the weights.
+        topk_logits = torch.cat([routed_logits.gather(-1, topk_indices), shared_logits], dim=-1)
+        log_probs = F.logsigmoid(topk_logits)
+        weights = torch.exp(log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True))
+        weights = weights * self.route_scale * self.gate.global_scale
+
+        return (
+            topk_indices,
+            weights[..., : self.top_k].contiguous(),
+            weights[..., -self.n_shared_experts :].contiguous(),
+        )
+
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+        orig_shape = hidden_states.shape
+        _B, _S, H = orig_shape
+        input_dtype = hidden_states.dtype
+
+        residuals = hidden_states  # shared experts read the layer input, not the routed output
+        flat = hidden_states.view(-1, H)
+
+        # Re-run the projection instead of calling ``self.gate``: the balancing bias enters between the logits and the
+        # top-k, and the joint normalisation needs the shared logits.
+        topk_indices, topk_weights, shared_gammas = self._route_joint(self._linear_router_logits(flat).float())
+
+        # Routing runs in fp32, but the shared FFN is a bf16 bmm: an fp32 gamma promotes its
+        # activations and mismatches ``down_proj``. Stock HF's gammas carry the input dtype.
+        shared_fn = partial(self.shared_experts, residuals, gammas=shared_gammas.to(input_dtype))
+
+        return self._dispatch_compute_combine_shared(
+            flat, topk_indices.long(), topk_weights.float(), input_dtype, orig_shape, shared_fn
+        )

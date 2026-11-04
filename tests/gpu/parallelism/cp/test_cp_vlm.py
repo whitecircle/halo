@@ -1,0 +1,238 @@
+#!/usr/bin/env python
+"""CP patching on Qwen3-VL-2B's text tower matches the unpatched loss, on a shared text-only batch."""
+
+import math
+
+import torch
+import torch.distributed as dist
+from transformers import AutoModelForImageTextToText
+
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from tests.common.distributed import ensure_model_downloaded, world_mean
+from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
+from tests.common.models import QWEN3_VL_2B
+from tests.common.rank_log import log, log_all
+from tests.common.tolerances import TOL
+
+MODEL_NAME = QWEN3_VL_2B
+CP_SIZE = 2
+MAX_SEQ_LENGTH = 64
+SEED = 42
+
+
+def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
+    total = sum(p.numel() for p in model.parameters())
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    return total, trainable
+
+
+def create_text_only_input(device: str) -> dict[str, torch.Tensor]:
+    """Broadcast from rank 0, so the CP loss compares against the baseline on the same tokens."""
+    torch.manual_seed(SEED)
+    input_ids = torch.randint(100, 30000, (1, MAX_SEQ_LENGTH), device=device)
+    dist.broadcast(input_ids, src=0)
+    return {
+        "input_ids": input_ids,
+        "attention_mask": torch.ones_like(input_ids),
+        "labels": input_ids.clone(),
+    }
+
+
+def find_attention_layers(model: torch.nn.Module) -> list[tuple[str, str]]:
+    attn_layers = []
+    for name, module in model.named_modules():
+        cls_name = type(module).__name__
+        if "Attention" in cls_name or "attention" in cls_name:
+            attn_layers.append((name, cls_name))
+    return attn_layers
+
+
+def find_vision_components(model: torch.nn.Module) -> dict[str, bool]:
+    components = {
+        "has_visual": False,
+        "has_language_model": False,
+        "has_lm_head": False,
+        "visual_class": None,
+        "language_model_class": None,
+    }
+
+    # transformers >=5 nests the vision tower and text backbone below the wrapper, so take the top-most match.
+    def _topmost(predicate) -> str | None:
+        matches = [(name, type(m).__name__) for name, m in model.named_modules() if name and predicate(name.lower())]
+        if not matches:
+            return None
+        return min(matches, key=lambda nc: nc[0].count("."))[1]
+
+    components["visual_class"] = _topmost(lambda n: "visual" in n or "vision" in n)
+    components["has_visual"] = components["visual_class"] is not None
+    components["language_model_class"] = _topmost(lambda n: "language_model" in n) or _topmost(
+        lambda n: "model" in n and "visual" not in n and "vision" not in n
+    )
+    components["has_language_model"] = components["language_model_class"] is not None
+    components["has_lm_head"] = any(name and "lm_head" in name.lower() for name, _ in model.named_modules())
+
+    return components
+
+
+def test_model_loading(inputs: dict[str, torch.Tensor], local_rank: int) -> tuple[dict[str, bool], float]:
+    checks = {}
+
+    log("\n" + "=" * 70)
+    log("SUB-TEST 1: VLM Model Loading and Architecture Verification")
+    log("=" * 70)
+
+    log(f"\n  Loading model: {MODEL_NAME}")
+    log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
+
+    model = AutoModelForImageTextToText.from_pretrained(
+        MODEL_NAME,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        device_map={"": local_rank},
+    )
+
+    log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
+
+    total_params, trainable_params = count_parameters(model)
+    log(f"  Total parameters: {total_params:,}")
+    log(f"  Trainable parameters: {trainable_params:,}")
+
+    components = find_vision_components(model)
+
+    checks["has_visual"] = components["has_visual"]
+    checks["has_language_model"] = components["has_language_model"]
+
+    log("\n  Architecture analysis:")
+    log(f"  Has vision encoder: {'PASS' if components['has_visual'] else 'FAIL'} ({components['visual_class']})")
+    log(
+        f"  Has language model: {'PASS' if components['has_language_model'] else 'FAIL'}"
+        f" ({components['language_model_class']})"
+    )
+    log(f"  Has lm_head: {components['has_lm_head']}")
+
+    log(f"\n  Model type: {model.config.model_type}")
+    if hasattr(model.config, "text_config"):
+        text_cfg = model.config.text_config
+        log(f"  Text model type: {getattr(text_cfg, 'model_type', 'N/A')}")
+        log(f"  Hidden size: {getattr(text_cfg, 'hidden_size', 'N/A')}")
+        log(f"  Num attention heads: {getattr(text_cfg, 'num_attention_heads', 'N/A')}")
+        log(f"  Num KV heads: {getattr(text_cfg, 'num_key_value_heads', 'N/A')}")
+        log(f"  Num hidden layers: {getattr(text_cfg, 'num_hidden_layers', 'N/A')}")
+    if hasattr(model.config, "vision_config"):
+        vis_cfg = model.config.vision_config
+        log(f"  Vision model type: {getattr(vis_cfg, 'model_type', 'N/A')}")
+
+    attn_layers = find_attention_layers(model)
+    attn_types = {cls for _, cls in attn_layers}
+    log(f"\n  Attention layer types: {attn_types}")
+    log(f"  Total attention layers: {len(attn_layers)}")
+
+    log("\n  Running baseline forward pass (text-only)...")
+    model.eval()
+    with torch.no_grad():
+        loss_value = model(**inputs).loss.item()
+
+    checks["baseline_forward"] = math.isfinite(loss_value)
+    log(f"  Baseline forward loss: {loss_value:.6f} {'PASS' if checks['baseline_forward'] else 'FAIL'}")
+
+    del model
+    cleanup_memory()
+
+    return checks, loss_value
+
+
+def test_cp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_loss: float) -> dict[str, bool]:
+    checks = {}
+
+    log("\n" + "=" * 70)
+    log(f"SUB-TEST 2: VLM Context Parallelism Patching (CP={CP_SIZE})")
+    log("=" * 70)
+
+    log("\n  Loading model for CP patching...")
+    log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
+
+    model = AutoModelForImageTextToText.from_pretrained(
+        MODEL_NAME,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        device_map={"": local_rank},
+    )
+
+    log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
+
+    log(f"\n  Creating CP config (cp_size={CP_SIZE})...")
+    cp_config = CPConfig(
+        CP_SIZE,
+        stage_world_size=dist.get_world_size(),
+        stage_base_rank=0,
+        nvlink_domain_size=dist.get_world_size(),  # Single-node test.
+    )
+    log(f"    cp_rank={cp_config.cp_rank}, cp_group_idx={cp_config.cp_group_idx}")
+
+    log("\n  Applying CP patching (Ulysses attention)...")
+    cp_model = UlyssesModel(model, cp_config)
+    log(f"  Wrapper type: {type(cp_model).__name__}")
+
+    is_wrapped = isinstance(cp_model, UlyssesModel)
+    checks["cp_wrapped"] = is_wrapped
+    log(f"  Model wrapped as UlyssesModel: {'PASS' if is_wrapped else 'FAIL'}")
+
+    log("\n  Running CP forward pass (text-only)...")
+    cp_model.eval()
+
+    # The wrapper shards the sequence, so it must divide cp_size.
+    assert MAX_SEQ_LENGTH % CP_SIZE == 0, f"seq_length {MAX_SEQ_LENGTH} must be divisible by cp_size {CP_SIZE}"
+
+    with torch.no_grad():
+        loss_value = cp_model(**inputs).loss.item()
+
+    checks["cp_forward"] = math.isfinite(loss_value)
+    log_all(f"  CP forward loss: {loss_value:.6f} {'PASS' if checks['cp_forward'] else 'FAIL'}")
+
+    # Same weights, batch and no step: CP's global normalization equals the baseline mean.
+    cp_loss_avg = world_mean(loss_value)
+    cp_diff = abs(cp_loss_avg - baseline_loss)
+    checks["cp_loss_matches_baseline"] = cp_diff < TOL.parallel_vs_baseline_loss_abs
+    log(
+        f"  CP loss (avg) {cp_loss_avg:.6f} vs baseline {baseline_loss:.6f}: |diff|={cp_diff:.2e} "
+        f"(tol {TOL.parallel_vs_baseline_loss_abs}) {'PASS' if checks['cp_loss_matches_baseline'] else 'FAIL'}"
+    )
+
+    log(f"\n  Sub-test 2 result: {'PASS' if all(checks.values()) else 'FAIL'}")
+
+    del cp_model, model
+    cleanup_memory()
+
+    return checks
+
+
+@gpu_test_main(exact_world_size=2, prefix="cp_vlm")
+def run(ctx):
+    log(f"\n{'#' * 70}")
+    log("  VLM Context Parallelism Patching Test")
+    log(f"  World size: {ctx.world_size}, CP size: {CP_SIZE}")
+    log(f"  Model: {MODEL_NAME}")
+    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
+    log(f"  GPU memory: {torch.cuda.get_device_properties(ctx.local_rank).total_memory / 1e9:.1f}GB")
+    log(f"{'#' * 70}")
+
+    log("\nEnsuring model is downloaded...")
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
+
+    inputs = create_text_only_input(f"cuda:{ctx.local_rank}")
+
+    checks, baseline_loss = test_model_loading(inputs, ctx.local_rank)
+    ctx.barrier()
+    cleanup_memory()
+
+    checks.update(test_cp_patching(inputs, ctx.local_rank, baseline_loss))
+
+    return {"checks": checks}
+
+
+if __name__ == "__main__":
+    run()

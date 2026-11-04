@@ -1,26 +1,6 @@
 #!/usr/bin/env python
-"""Hand-sliced TP shards (GptOss sinks) must reach the engine gathered, exactly once, after the stream.
-
-Under tensor parallelism every param the plan owns is a DTensor, which the sync materializes full one
-at a time. The sinks are not: they carry no plan entry, are sliced by hand across the TP group, and
-are recorded in ``model._tp_sharded_non_dtensor``. That leaves the sync two ways to be silently
-wrong, both of which serve a corrupt policy with no error at sync time:
-
-* stream them like any other param — the engine gets TP-rank 0's *slice* under the full-tensor name,
-  so the served model attends with a quarter of its sinks (or the load is rejected on arrival, after
-  the engine is paused and partly written);
-* skip them and forget the drain — nothing is ever pushed for those slots, and the engine keeps
-  generating with the pretrained sinks while the trainer moves on. Permanently off-policy, which is
-  exactly the failure ``validate_weight_sync_support`` refuses the FA2 sink reset over.
-
-So ``_send_dense_weights`` skips them by suffix in the streaming loop and re-sends them gathered from
-``iter_tp_sharded_non_dtensor_full``. This pins that wiring: the sinks arrive once, at full shape,
-after everything streamed. The gather itself moves its tensors to CUDA before the collective, so the
-group half is the GPU tier's (``parallelism/tp``); what stands in for it here is a fake TP drain, and
-the sync's own halves — the skip and the drain — are what is under test.
-
-    python tests/cpu/grpo/test_weight_sync_tp_sink_drain.py
-"""
+"""Hand-sliced TP shards (GptOss sinks) must reach the engine gathered, exactly once, after the stream. Streamed, the
+engine gets one rank's slice under the full name; skipped with no drain, it keeps the pretrained sinks."""
 
 from __future__ import annotations
 
@@ -28,9 +8,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
-from src.trainers.grpo.rollout import weight_sync
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_dims, hand_sliced_suffixes, register_hand_sliced
+from halo.trainers.grpo.rollout import weight_push
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 HIDDEN, NUM_HEADS, TP_SIZE = 8, 4, 2
 SINK_NAME = "layers.0.self_attn.sinks"
@@ -48,8 +28,7 @@ class _Attention(nn.Module):
 
 
 class _TPModel(nn.Module):
-    """A TP-parallelized policy as ``parallelize_attention`` leaves it: the hand-sliced params
-    recorded on the model as ``(suffix, shard_dim)``."""
+    """A policy as ``parallelize_attention`` leaves it: hand-sliced params registered with their shard dim."""
 
     def __init__(self, register_sinks: bool = True):
         super().__init__()
@@ -58,15 +37,14 @@ class _TPModel(nn.Module):
         self.layers = nn.ModuleList([layer])
         self.lm_head = nn.Linear(HIDDEN, HIDDEN, bias=False)
         if register_sinks:
-            self._tp_sharded_non_dtensor = [("sinks", 0)]
+            register_hand_sliced(self, "sinks", 0)
 
     def forward(self, x):  # pragma: no cover - never called
         return x
 
 
 class _RecordingSender:
-    """Records every forward in order, duplicates included — sending a param twice is a failure mode
-    here, so it must be observable rather than asserted away."""
+    """Records every forward in order, duplicates included, since sending a param twice is a failure mode here."""
 
     def __init__(self):
         self.sent: list[tuple[str, torch.Tensor]] = []
@@ -74,22 +52,21 @@ class _RecordingSender:
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         self.sent.append((name, weights.clone()))
 
-    def reset_prefix_cache(self) -> None:  # pragma: no cover - the caller flushes, not the gather
+    def finish_weight_update(self) -> None:  # pragma: no cover - the caller flushes, not the gather
         pass
 
 
 def _fake_tp_drain(model: nn.Module):
-    """Stand-in for ``iter_tp_sharded_non_dtensor_full``: the TP group's all-gather of each recorded
-    hand-sliced param, with the peer rank's slice faked in. Same contract — collective, in
+    """Stand-in for ``iter_hand_sliced_full`` with the peer's slice faked in. Same contract: collective, in
     ``named_parameters`` order, yielding full tensors."""
     for name, param in model.named_parameters():
-        for suffix, shard_dim in getattr(model, "_tp_sharded_non_dtensor", None) or ():
+        for suffix, shard_dim in hand_sliced_dims(model).items():
             if name.endswith(suffix):
                 yield name, torch.cat([param.data, param.data + PEER_OFFSET], dim=shard_dim)
 
 
 def _sync(model: nn.Module, monkeypatch) -> _RecordingSender:
-    monkeypatch.setattr(weight_sync, "iter_tp_sharded_non_dtensor_full", _fake_tp_drain)
+    monkeypatch.setattr(weight_push, "iter_hand_sliced_full", _fake_tp_drain)
     sender = _RecordingSender()
     gather_and_send_weights(model, sender)
     return sender
@@ -97,7 +74,7 @@ def _sync(model: nn.Module, monkeypatch) -> _RecordingSender:
 
 def test_sinks_are_forwarded_once_gathered_and_last(monkeypatch):
     model = _TPModel()
-    assert tp_sharded_non_dtensor_suffixes(model) == ("sinks",), "the model no longer registers hand-sliced sinks"
+    assert hand_sliced_suffixes(model) == ("sinks",), "the model no longer registers hand-sliced sinks"
 
     names = [name for name, _tensor in _sync(model, monkeypatch).sent]
 
@@ -123,8 +100,8 @@ def test_the_forwarded_sinks_are_the_full_tensor_not_this_ranks_slice(monkeypatc
 
 
 def test_unregistered_sinks_still_stream(monkeypatch):
-    """Anti-over-rejection: without TP nothing is hand-sliced, so the same param must stream normally
-    — a skip keyed on the suffix instead of the registration would drop it from every dense run."""
+    """Without TP nothing is hand-sliced; a skip keyed on the suffix instead of the registration would drop the param
+    from every dense run."""
     model = _TPModel(register_sinks=False)
 
     sent = _sync(model, monkeypatch).sent

@@ -1,33 +1,21 @@
 #!/usr/bin/env python
-"""The GptOss sink policies and their gates.
-
-Pins: the two user knobs resolve to one ``SinksPolicy`` (the contradiction raises); every policy
-leaves the sink values untouched except the reset, and sets ``requires_grad`` the way its name says;
-TRAINABLE counts as live for the trainer gates and is refused under an implementation without a sink
-gradient, under an adapter run, and under weight-sync RL.
-
-Fails if: the trainable branch mutates sink values or leaves them frozen, the reset stops freezing,
-the live branch stops freezing, any of the refusals disappears, or TRAINABLE stops counting as live.
-"""
+"""The GptOss sink policies and their gates."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
-from transformers import GptOssConfig, GptOssForCausalLM
+from transformers import CONFIG_MAPPING, GptOssConfig, GptOssForCausalLM
 
-PartialState()  # the sinks policy logs through accelerate's logger, which requires live state
-
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.models.patches.gpt_oss_sinks import (
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
     has_live_attention_sinks,
     stamped_sinks_policy,
 )
-from src.trainers.grpo.rollout.weight_sync import validate_weight_sync_support
+from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
 def _tiny_gpt_oss():
@@ -65,6 +53,14 @@ def test_from_flags_resolves_the_two_knobs():
     assert not SinksPolicy.NEUTRALIZED.live and SinksPolicy.LIVE.live and SinksPolicy.TRAINABLE.live
 
 
+def test_train_sinks_is_refused_on_a_model_without_sinks():
+    config = CONFIG_MAPPING["qwen3"]()
+    with pytest.raises(ValueError, match="model_type='qwen3'.*Remove train_sinks"):
+        apply_sinks_policy(torch.nn.Linear(1, 1), config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
+    for policy in (SinksPolicy.NEUTRALIZED, SinksPolicy.LIVE):
+        apply_sinks_policy(torch.nn.Linear(1, 1), config, policy=policy, attn_implementation="eager")
+
+
 def test_trainable_branch_keeps_values_and_grads():
     model, config = _tiny_gpt_oss()
     before = [s.detach().clone() for s in _sinks(model)]
@@ -92,9 +88,8 @@ def test_live_branch_freezes_and_reset_branch_neutralizes_frozen():
 
 @pytest.mark.parametrize("attn_implementation", ["flash_attention_2", "eager"])
 def test_an_attention_without_sinks_is_refused_on_every_branch(attn_implementation):
-    """A sink-less attention (an out-of-tree or remote-code GptOss variant) must fail the same way on
-    both branches: the FA2 branch's ``attn.sinks = None`` would otherwise CREATE the attribute and
-    stamp NEUTRALIZED over a model whose attention never had a sink to disable."""
+    """The FA2 branch's ``attn.sinks = None`` would otherwise create the attribute and stamp NEUTRALIZED over a model
+    that never had a sink to disable."""
     model, config = _tiny_gpt_oss()
     for layer in model.model.layers:
         del layer.self_attn._parameters["sinks"]
@@ -125,22 +120,21 @@ def test_adapter_run_refuses_trainable_sinks():
         lora_modules_to_save=None,
     )
     with pytest.raises(ValueError, match="full fine-tuning"):
-        setup_peft_model(args, model, model_config)
+        configure_adapter_training(args, model, model_config)
 
 
 def test_weight_sync_refuses_trainable_sinks():
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
     with pytest.raises(ValueError, match="SFT-only"):
-        validate_weight_sync_support(model, "vllm")
-    # The frozen live policy on an EP-wrapped MoE — the shipped RL shape — passes the same gate
-    # (a wrapper-less MoE is refused before the sink verdict matters).
+        reject_unsyncable_model(model, "vllm")
+    # The frozen live policy on an EP-wrapped MoE, the shipped RL shape, passes. A wrapper-less MoE is refused earlier.
     model, config = _tiny_gpt_oss()
     apply_sinks_policy(model, config, policy=SinksPolicy.LIVE, attn_implementation="eager")
     layer = object.__new__(EPGptOssMoELayer)
     torch.nn.Module.__init__(layer)
     model.model.layers[0].mlp = layer
-    validate_weight_sync_support(model, "vllm")
+    reject_unsyncable_model(model, "vllm")
 
 
 if __name__ == "__main__":

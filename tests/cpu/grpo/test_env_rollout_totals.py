@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests: the env-GRPO ``async/*`` cumulative counters are JOB totals, not one rank's shard.
-
-``RolloutManager`` is built on every rank and each one collects its own DP shard, so counters kept
-manager-side under-report a 512-GPU job by ~512x while ``async/total_rollouts`` reads as
-authoritative. The totals are therefore accumulated from the gathered-global per-episode population
-:meth:`_log_rollout_metrics` already builds for its means — no second collective.
-
-Run::
-
-    python tests/cpu/grpo/test_env_rollout_totals.py
-"""
+"""The env-GRPO ``async/*`` cumulative counters are job totals, built from the world sums ``_log_rollout_metrics``
+already folds, with no second collective. Manager-side counters would under-report a 512-GPU job by ~512x."""
 
 from __future__ import annotations
 
@@ -18,14 +9,17 @@ from collections import defaultdict
 
 import pytest
 
-import src.trainers.grpo.rollout.rollout_metrics as rm
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+from halo.trainers import world_metrics
+from tests.common.world_metrics import pooled_states, rank_states
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):
-    """Minimal stand-in exposing exactly what ``_log_rollout_metrics`` reads."""
+    """Stand-in for what ``_log_rollout_metrics`` reads."""
 
     def __init__(self):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self.async_config = types.SimpleNamespace(truncation_alarm_rate=None)
 
 
 def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
@@ -34,7 +28,7 @@ def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
         generation_tokens=tokens,
         requests_expired_in_sync=requests_expired_in_sync,
         episode_length=1,
-        success=True,
+        terminated_naturally=True,
         trajectory=None,
         error=None,
         total_reward=1.0,
@@ -43,9 +37,15 @@ def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
 
 
 def _fake_dp_world(monkeypatch, world: int):
-    """Make ``gather_object`` behave like a ``world``-rank all-gather of identical shards."""
-    monkeypatch.setattr(rm, "gather_object", lambda values: [item for _ in range(world) for item in values])
-    monkeypatch.setattr(rm, "is_multi_rank_run", lambda: world > 1)
+    """Make the metrics flush fold ``world`` ranks holding this rank's identical shard."""
+    monkeypatch.setattr(
+        world_metrics,
+        "_world_states",
+        lambda records, layout, group, key_mismatch_error: (
+            pooled_states([rank_states(records)] * world, key_mismatch_error),
+            layout,
+        ),
+    )
 
 
 def _log_round(host, results: list, mode: str = "train") -> None:
@@ -67,8 +67,7 @@ def test_cumulative_totals_count_the_whole_world_not_this_rank(monkeypatch) -> N
 
 
 def test_totals_accumulate_across_steps_and_modes(monkeypatch) -> None:
-    """Cumulative since train start: a second round adds to the first rather than replacing it, and
-    the latency mean is over every episode, not over the per-step means."""
+    """The latency mean is over every episode, never over the per-step means."""
     _fake_dp_world(monkeypatch, world=2)
     host = _MetricsHost()
 
@@ -82,8 +81,7 @@ def test_totals_accumulate_across_steps_and_modes(monkeypatch) -> None:
 
 
 def test_totals_are_per_trainer_not_shared_by_the_class(monkeypatch) -> None:
-    """The counters start as class attributes so no ``__init__`` is needed; ``+=`` must rebind them
-    on the instance, or a second trainer in the same process would inherit the first's totals."""
+    """The counters start as class attributes; ``+=`` must rebind them on the instance."""
     _fake_dp_world(monkeypatch, world=1)
     first, second = _MetricsHost(), _MetricsHost()
 
@@ -103,14 +101,30 @@ def test_no_rollouts_yet_reports_zero_without_dividing_by_zero() -> None:
 
 
 def test_requests_expired_in_sync_is_the_worlds_count_not_a_mean(monkeypatch) -> None:
-    """Each expiry is a turn the engine generated twice, so the round logs how many there were across
-    the world: two ranks of (1 + 0 + 2) is 6, where a per-episode mean would read 1."""
+    """Each expiry is a turn the engine generated twice. Two ranks of (1 + 0 + 2) is 6, where a per-episode mean would
+    read 1."""
     _fake_dp_world(monkeypatch, world=2)
     host = _MetricsHost()
 
     _log_round(host, [_episode(1.0, 10, 1), _episode(1.0, 10, 0), _episode(1.0, 10, 2)])
 
     assert host._metrics["train"]["async/requests_expired_in_sync"] == [6.0]
+
+
+def test_an_environment_metric_named_like_a_total_stays_the_environments_mean(monkeypatch) -> None:
+    """The totals fold under the trainer's own ``async/total_*`` names."""
+    _fake_dp_world(monkeypatch, world=2)
+    host = _MetricsHost()
+    episode = _episode(1.0, 10)
+    episode.metrics = {"generation_tokens": 7.0, "rollouts": 3.0}
+
+    _log_round(host, [episode])
+
+    logged = host._metrics["train"]
+    assert logged["generation_tokens"] == [7.0] and logged["rollouts"] == [3.0]
+    assert not any(key.startswith("async/total_") for key in logged), sorted(logged)
+    totals = host.cumulative_rollout_metrics()
+    assert totals["async/total_rollouts"] == 2.0 and totals["async/total_generation_tokens"] == 20.0
 
 
 if __name__ == "__main__":

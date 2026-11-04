@@ -1,18 +1,8 @@
 #!/usr/bin/env python
-"""VLM Bradley-Terry reward e2e on Qwen3.5-2B: train → save → reload-and-score.
+"""VLM Bradley-Terry reward on Qwen3.5-2B, train then save then reload and score.
 
-The full deliverable loop of the vision reward path, none of which a CPU test reaches with real
-weights:
-
-  * the trainer takes the vision branch off a processor ``processing_class``, and ``pixel_values``
-    must actually reach the vision tower during training (hooked), with the Bradley-Terry loss
-    finite under 2-rank FSDP2;
-  * the gathered save must ship an artifact ``AutoModelForSequenceClassification`` +
-    ``AutoProcessor`` load back and score an image pair with — including
-    ``processor_config.json``, without which no engine can serve the reward model on images.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_reward_vlm_e2e.py
+``pixel_values`` must reach the vision tower (hooked), and the export needs ``processor_config.json``, without which no
+engine can serve the reward model on images.
 """
 
 import os
@@ -23,16 +13,17 @@ from datasets import Image as HFImage
 from transformers import AutoModelForSequenceClassification, AutoProcessor
 from trl import RewardConfig
 
-from src.data.collators.vlm_preference import DataCollatorForVLMPreference
-from src.data.pipeline.preferences import render_vlm_preference_row
-from src.distributed.parallelism_config import ParallelismConfig
-from src.models.loading.tokenizer_setup import sync_special_token_id
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.data.collators.vlm_preference import DataCollatorForVLMPreference
+from halo.data.pipeline.preferences import render_vlm_preference_row
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.tokenizer_setup import sync_special_token_id
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.datasets import digit_image
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_5_2B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_5_2B
 NUM_TRAIN_SAMPLES = 16
@@ -41,7 +32,6 @@ _VISION_TOWER_SUFFIXES = ("visual", "vision_tower", "vision_model")
 
 
 def create_vlm_reward_dataset(n: int) -> Dataset:
-    """Raw ``(prompt, chosen, rejected, images)`` rows — the shape the reward VLM map normalizes."""
     rows = []
     for i in range(n):
         d = i % 10
@@ -71,8 +61,8 @@ def run(ctx):
     log("VLM Reward Trainer E2E (Qwen3.5-2B): train -> save -> reload-and-score")
     log("=" * 70)
 
-    # Rank-shared: every rank saves into it, rank 0 reloads the artifact from it. Rank 0 clears it
-    # first — a leftover export from an earlier run would satisfy the servability check on its own.
+    # Every rank saves here and rank 0 reloads. Rank 0 clears it first: a leftover export would satisfy the servability
+    # check.
     output_dir = shared_scratch_dir("reward_vlm_e2e")
     if ctx.rank == 0:
         cleanup_dirs(output_dir)
@@ -89,9 +79,8 @@ def run(ctx):
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME, num_labels=1, dtype=torch.bfloat16, attn_implementation="sdpa"
     )
-    # The script path (apply_max_length → setup_model_and_tokenizer) records the pad id on
-    # EVERY config level; transformers' pooling reads config.get_text_config().pad_token_id,
-    # so a top-level write alone leaves a composite checkpoint refusing batches > 1.
+    # transformers' pooling reads config.get_text_config().pad_token_id, so a top-level write alone leaves a composite
+    # refusing batches > 1.
     sync_special_token_id(model, "pad_token_id", tokenizer.pad_token_id)
 
     tower_calls = []
@@ -130,7 +119,7 @@ def run(ctx):
     checks: dict[str, bool] = {}
     if ctx.rank == 0:
         checks["train_loss_finite"] = bool(torch.isfinite(torch.tensor(loss)))
-        # No tower call means pixel_values never reached the vision tower — the run trained text-only.
+        # No tower call means the run trained text-only.
         checks["pixel_values_reached_vision_tower"] = bool(tower_calls)
 
     trainer.save_model(save_dir)
@@ -144,8 +133,7 @@ def run(ctx):
         if missing:
             log(f"ISSUE: export is unservable: {missing} missing from {save_dir}")
 
-        # Serve half: free the training copy, reload the artifact, score one image pair
-        # through the exact collation layout the trainer used.
+        # Free the training copy, reload the artifact, score an image pair through the trainer's collation layout.
         del trainer, model
         cleanup_memory()
         served = AutoModelForSequenceClassification.from_pretrained(

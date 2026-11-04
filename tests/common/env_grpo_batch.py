@@ -1,22 +1,20 @@
-"""The environmental trainer's real batch build over stub rows, for CPU tests of what a step trains.
-
-``_build_training_tensors`` runs for real; tokenization, the recompute forward and the reference
-forward are stubs, so a test sets the rows, the policy's log-probs and the knobs, and reads the batch,
-the world metrics and the completions record. Single process: every gather is the identity.
-"""
+"""The environmental trainer's real batch build over stub rows, for CPU tests of what a step trains; every gather is
+the identity."""
 
 import types
 from collections import defaultdict
 
 import torch
 
-from src.configs.async_training_config import AsyncTrainingConfig, ISMaskConfig
-from src.environments.base import Message, Trajectory
-from src.environments.episode import RolloutResult
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
-from src.trainers.grpo.rollout.trajectory_tokenize import TurnRow
-from tests.common.grpo_metrics import attach_world_metrics
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
+from tests.common.world_metrics import attach_world_metrics
 
 
 def episode(reward: float, *, valid: bool = True) -> RolloutResult:
@@ -31,8 +29,8 @@ def row(
     loss_mask: list[int] | None = None,
     negative_only: bool = False,
 ) -> TurnRow:
-    """A one-token-prompt row; ``sampling`` carries the engine's per-token log-probs, ``negative_only`` tags
-    an untrainable turn's row."""
+    """A one-token-prompt row; ``sampling`` carries the engine's per-token log-probs, ``negative_only`` tags an
+    untrainable turn's row."""
     return TurnRow(
         torch.tensor([5]),
         torch.tensor(completion),
@@ -55,14 +53,13 @@ def batch_host(
     beta: float = 0.0,
     reference: torch.Tensor | None = None,
     forced_close_ids: tuple[int, ...] | None = None,
-    is_mask_config: ISMaskConfig | None = None,
+    isr_mask_config: ISRMaskConfig | None = None,
     skip_update_masked_frac: float | None = None,
     balance_token_mass: bool = False,
     save_completions: bool = False,
 ):
-    """A trainer stand-in whose ``_build_training_tensors`` is the real one; the recompute forward returns
-    ``policy`` (``[rows, completion width]``) and the reference forward ``reference``. ``scale_rewards`` and
-    ``std_floor`` are the advantage's ``scale_rewards`` and ``scale_rewards_std_floor``."""
+    """A trainer stand-in whose ``_build_training_tensors`` is real; the recompute forward returns ``policy``, the
+    reference forward ``reference``."""
     host = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     host.model = types.SimpleNamespace(training=training)
     host.args = types.SimpleNamespace(
@@ -72,17 +69,17 @@ def batch_host(
         mask_truncated_completions=False,
     )
     host.accelerator = types.SimpleNamespace(gather=lambda x: x)
-    host.async_config = AsyncTrainingConfig()
+    host.async_config = AsyncRolloutConfig(
+        train_on_sampled_tokens=False,
+        skip_update_masked_frac=skip_update_masked_frac,
+        balance_token_mass=balance_token_mass,
+        scale_rewards_std_floor=std_floor,
+    )
     host._carry_reasoning = False
-    host._train_on_sampled_tokens = False
     host._is_correction = is_correction
-    host._isr_engine_reference = False
     host._forced_close_ids = forced_close_ids
-    host._is_mask_config = is_mask_config or ISMaskConfig()
-    host._skip_update_masked_frac = skip_update_masked_frac
+    host._isr_mask_config = isr_mask_config or ISRMaskConfig()
     host._breaker_tripped_this_step = False
-    host._balance_token_mass = balance_token_mass
-    host._drop_degenerate_groups = False
     host._empty_rollout_steps = 0
     host._routing_injector = None
     host._batch_errors = BatchBuildFence()
@@ -90,14 +87,14 @@ def batch_host(
     host.num_iterations = 1
     host.beta = beta
     host.num_generations = host.num_generations_eval = num_generations
-    host._scale_rewards_std_floor = std_floor
     host.pad_token_id, host.eos_token_id = 0, 2
     host._tokenize_step_rows = lambda results: [[r] for r in rows]
-    host._get_per_token_logps_and_entropies = lambda model, ids, mask, keep, compute_entropy: (policy, None)
-    host._compute_ref_logps = lambda ids, mask, keep: reference
+    host._get_per_token_logps_and_entropies = lambda model, ids, mask, keep, compute_entropy: (policy, None, None)
+    host._compute_ref_logps = lambda ids, mask, keep, order: reference
     host._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     host._save_completions, host.log_completions = save_completions, False
     host._logs = unbounded_completion_logs()
+    host.parallelism_config = ParallelismConfig()
     return host
 
 

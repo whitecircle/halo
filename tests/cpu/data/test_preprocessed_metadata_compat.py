@@ -1,41 +1,25 @@
 #!/usr/bin/env python
-"""Startup-blocking guards on the preprocessed-dataset path must not fire on legitimate corpora.
-
-Every check here runs during dataset loading — per rank, in front of a consensus all-reduce — so an
-over-strict verdict is not a warning the operator reads later, it is a job that dies (or hangs) at
-step 0:
-
-* ``metadata.json`` is a common file name. A hub dataset shipping its own must load RAW, not be
-  judged against this build's stamp schema (which would raise on every rank that managed to read it).
-* An artifact's recorded render config can differ from the training args' own default.
-  Comparing it against the training args' own default rejects every such artifact over a knob that
-  cannot affect a preprocessed run at all — only a knob the YAML actually states is a claim.
-* A dataset LIST is a mixed corpus by design: ``tools_field`` present in some sources and absent in
-  others is the normal tool-use + plain-chat mix, not a typo.
-
-    python tests/cpu/data/test_preprocessed_metadata_compat.py
-"""
+"""Startup guards on the preprocessed-dataset path run per rank in front of a consensus all-reduce, so an
+over-strict verdict kills the job at step 0. A foreign ``metadata.json`` loads raw, only a render knob the YAML
+states is a claim, and ``tools_field`` may be absent from some sources of a list."""
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-PartialState()  # sources.loading warns through accelerate's logger
-
-from src.data.pipeline.preprocessed_metadata import (
+from halo.data.preprocessed.metadata import (
     PreprocessedDatasetMetadata,
     PreprocessingConfig,
-    _validate_render_compatibility,
+    _verify_render_knobs,
     is_preprocessed_dataset,
     load_preprocessed_metadata,
 )
-from src.data.shard_index import IncompatiblePreprocessedDataset
-from src.data.sources.loading import _require_tools_field_somewhere
-from src.data.sources.paths import METADATA_FILE
+from halo.data.preprocessed.shard_index import IncompatiblePreprocessedDataset
+from halo.data.sources.corpus import _reject_tools_field_nowhere
+from halo.data.sources.paths import METADATA_FILE
 
 
 def _write_metadata(directory, payload: dict) -> str:
@@ -45,13 +29,9 @@ def _write_metadata(directory, payload: dict) -> str:
     return str(directory)
 
 
-# --- a foreign metadata.json is a raw dataset, not a broken preprocessed one ---
-
-
 def test_a_foreign_metadata_json_loads_raw(tmp_path):
-    """A hub dataset's own metadata.json ({"license": ...}) has no 'preprocessed' field. Judged
-    against the stamp schema it would raise on every rank that read it — right before the consensus
-    all-reduce, so ranks whose read flaked would block there until the watchdog fired."""
+    """Judged against the stamp schema it would raise on every rank that read it, right before the consensus
+    all-reduce, blocking ranks whose read flaked until the watchdog."""
     path = _write_metadata(tmp_path / "hub-corpus", {"license": "mit", "language": ["en"]})
     assert is_preprocessed_dataset(path) is False
 
@@ -68,9 +48,8 @@ def test_loading_a_foreign_metadata_as_a_stamp_names_the_real_problem(tmp_path):
 
 
 def test_our_stamp_at_a_wrong_version_still_reports_preprocessed(tmp_path):
-    """Not a downgrade to raw: the dataset IS pre-tokenized, so reporting False would silently
-    re-tokenize baked rows. Reporting True keeps every rank on the same branch and lets the LOAD
-    raise the version error on all of them together."""
+    """The dataset is pre-tokenized, so False would re-tokenize baked rows. True keeps every rank on one branch and
+    lets the load raise the version error together."""
     path = _write_metadata(tmp_path / "future", {"preprocessed": True, "version": "9.9"})
     assert is_preprocessed_dataset(path) is True
     with pytest.raises(IncompatiblePreprocessedDataset, match="version"):
@@ -78,12 +57,9 @@ def test_our_stamp_at_a_wrong_version_still_reports_preprocessed(tmp_path):
 
 
 def test_our_current_stamp_is_detected(tmp_path):
-    path = _write_metadata(tmp_path / "prepared", PreprocessedDatasetMetadata().to_dict())
+    path = _write_metadata(tmp_path / "prepared", asdict(PreprocessedDatasetMetadata()))
     assert is_preprocessed_dataset(path) is True
     assert load_preprocessed_metadata(path).preprocessed is True
-
-
-# --- render-knob compatibility: only what the YAML STATES is a claim about the artifact ---
 
 
 @dataclass
@@ -101,37 +77,32 @@ def _artifact(**config_overrides) -> PreprocessedDatasetMetadata:
 
 
 def test_an_artifact_baked_under_another_default_is_not_rejected(caplog):
-    """An artifact baked with conversation_field='conversation' (the run default is 'prompt') plus a
-    YAML that states nothing must still train: rendering is baked, so
-    the run's value is inert and the prepared value is what trained."""
+    """Rendering is baked, so the run's value is inert and the prepared value is what trained."""
     metadata = _artifact(conversation_field="conversation")
     with caplog.at_level("WARNING"):
-        _validate_render_compatibility(metadata, _RenderArgs())
+        _verify_render_knobs(metadata, _RenderArgs())
     assert any("does not state" in record.message for record in caplog.records), (
         "the unstated mismatch must still be reported, just not fatally"
     )
 
 
 def test_a_stated_render_knob_that_contradicts_the_artifact_still_raises():
-    """The check's real job: a YAML that SAYS conversation_field=messages while the artifact was
-    baked from 'conversation' is a config that does not do what it says."""
+    """A YAML saying conversation_field=messages over an artifact baked from 'conversation' does not do what it
+    says."""
     metadata = _artifact(conversation_field="conversation")
     with pytest.raises(ValueError, match="do not match the training config"):
-        _validate_render_compatibility(metadata, _RenderArgs(conversation_field="messages"))
+        _verify_render_knobs(metadata, _RenderArgs(conversation_field="messages"))
 
 
 def test_a_matching_stated_knob_passes():
     metadata = _artifact(conversation_field="messages")
-    _validate_render_compatibility(metadata, _RenderArgs(conversation_field="messages"))
+    _verify_render_knobs(metadata, _RenderArgs(conversation_field="messages"))
 
 
 def test_a_stated_system_prompt_against_a_prompt_less_artifact_raises():
     metadata = _artifact(conversation_field="prompt", system_prompt=None)
     with pytest.raises(ValueError, match="system_prompt"):
-        _validate_render_compatibility(metadata, _RenderArgs(system_prompt="You are helpful."))
-
-
-# --- tools_field is a claim about the dataset LIST, not about each source ---
+        _verify_render_knobs(metadata, _RenderArgs(system_prompt="You are helpful."))
 
 
 def _split_dict(columns: dict) -> DatasetDict:
@@ -140,27 +111,26 @@ def _split_dict(columns: dict) -> DatasetDict:
 
 
 def test_tools_field_present_in_only_some_sources_is_allowed(caplog):
-    """A tool-use corpus concatenated with plain chat: the plain source renders without tools,
-    which is what those rows are. Rejecting the run makes the mixture unexpressible."""
+    """A tool-use corpus concatenated with plain chat: the plain source renders without tools, which is what those
+    rows are."""
     with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
     without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
     with caplog.at_level("WARNING"):
-        _require_tools_field_somewhere(["a", "b"], [with_tools, without], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [with_tools, without], "tools")
     assert any("render without tools" in record.message for record in caplog.records)
 
 
 def test_tools_field_absent_everywhere_raises():
-    """A knob no source can honour is a typo — and the failure it would otherwise cause is silent
-    (every row renders toolless), so it has to be loud here."""
+    """Every row would silently render toolless."""
     without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
     with pytest.raises(ValueError, match="NONE of the 2 configured dataset"):
-        _require_tools_field_somewhere(["a", "b"], [without, without], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [without, without], "tools")
 
 
 def test_tools_field_present_everywhere_is_silent(caplog):
     with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
     with caplog.at_level("WARNING"):
-        _require_tools_field_somewhere(["a", "b"], [with_tools, with_tools], "tools")
+        _reject_tools_field_nowhere(["a", "b"], [with_tools, with_tools], "tools")
     assert not [r for r in caplog.records if "tools" in r.message]
 
 

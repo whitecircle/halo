@@ -1,40 +1,15 @@
 #!/usr/bin/env python
-"""
-MoE model SFT benchmark with Expert Parallelism (EP).
+"""MoE SFT benchmark under Expert Parallelism: MFU, S-MFU, achieved TFLOPS and tokens/sec.
 
-Measures Model FLOPS Utilization (MFU), Sparse MFU (S-MFU), achieved TFLOPS,
-and tokens/sec for MoE models using DistributedSFTTrainer with EfficiencyCallback
-and Expert Parallelism via DeepEP all-to-all routing.
-
-Usage:
-    # EP=2 with default model (gpt-oss-20b), seq_len=4096, 10 steps
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 4096 --steps 10
-
-    # Short sequence benchmark
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 2048 --steps 5
-
-    # Long sequence benchmark
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 16384 --steps 20 --warmup 3
-
-    # 8 GPUs with full EP
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --steps 10
-
-    # Custom model path
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --model_path /path/to/moe/model --seq 4096
-
-    # Disable Liger kernels
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/benchmark_sft_ep.py --ep 2 --seq 4096 --no_liger
+``--measure_save`` adds the gathered save's wall time and peak host memory; ``--save_write_threads 0 1 2`` also checks
+the arms byte-identical.
 """
 
 import argparse
 import os
+import shutil
 import sys
+import time
 import traceback
 
 import torch
@@ -44,17 +19,24 @@ from peft import LoraConfig
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.profiler import TorchProfilerCallback
-from src.diagnostics.performance_monitor import get_performance_monitor
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import LOWP_PRECISIONS, ParallelismConfig
-from src.distributed.runtime import barrier
-from src.env import torch_trace_dir
-from src.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import create_benchmark_parser, pp_topology_kwargs
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.callbacks.torch_profiler import TorchProfilerCallback
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_float, torch_trace_dir
+from halo.kernels.lowp.spec import LowpSpec
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.runtime.collectives import barrier, broadcast_from_rank0
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.benchmark_args import (
+    add_lowp_precision_argument,
+    axis_tags,
+    create_benchmark_parser,
+    pp_topology_kwargs,
+)
+from tests.common.checkpoint_io import file_digests
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -63,15 +45,45 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.ep_span_timer import DropWarmupSpans, get_ep_span_timer
+from tests.common.memory import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, reset_host_peak_rss
 from tests.common.models import MODEL_CONFIGS
-from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
+from tests.common.rank_log import log
+from tests.common.reporting import emit_benchmark, emit_save_benchmark, format_benchmark_report
+from tests.common.sft_collator import build_sft_collator
 
-# Main Benchmark
+# The bench band's negative control: every EP layer holds the GPU idle this long before each forward.
+EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)
+_EP_PHASES = ("ep.dispatch", "ep.expert_compute", "ep.combine")
+
+
+def _stall_before_forward(*_) -> None:
+    """On the GPU timeline: a host sleep alone hides behind queued kernels wherever the forward never waits on the
+    host."""
+    torch.cuda.synchronize()
+    time.sleep(EP_FORWARD_DELAY_MS / 1000)
+
+
+def _log_ep_attribution(rank: int, seq: int, ep_size: int) -> None:
+    """COLLECTIVE. Every rank's split, as ranks differ: a rank's combine includes its wait for the slowest rank's
+    compute, so one rank's split, or combine read as wire time, misstates where the step goes."""
+    stats = get_ep_span_timer().stats
+    per_rank = [None] * dist.get_world_size()
+    dist.all_gather_object(per_rank, [stats[phase].avg_time if phase in stats else 0.0 for phase in _EP_PHASES])
+    if rank != 0:
+        return
+    log(f"\n  --- EP phase split past warm-up, ms per MoE layer, serialized (seq={seq}, ep={ep_size}) ---")
+    log("  rank  dispatch   compute   combine")
+    for index, (dispatch, compute, combine) in enumerate(per_rank):
+        log(f"  {index:4d}  {dispatch * 1e3:8.3f}  {compute * 1e3:8.3f}  {combine * 1e3:8.3f}")
+    means = [sum(column) / len(column) for column in zip(*per_rank, strict=True)]
+    total = sum(means)
+    if total > 0:
+        dispatch, compute, combine = (100 * mean / total for mean in means)
+        log(f"  mean share: dispatch {dispatch:4.1f}%, compute {compute:4.1f}%, combine incl. wait {combine:4.1f}%")
 
 
 def _liger_config_pairs(spec: str) -> dict[str, bool]:
-    """Parse ``key=true,key=false`` into the liger_kernel_config dict the loader takes."""
     config = {}
     for pair in spec.split(","):
         key, _, value = pair.partition("=")
@@ -82,6 +94,7 @@ def _liger_config_pairs(spec: str) -> dict[str, bool]:
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(
         description="MoE SFT benchmark with Expert Parallelism",
@@ -160,14 +173,7 @@ def main() -> int:
         "attn_implementation=sdpa when unset (FA4/FA3 are bf16/fp16-only). Refused under EP — "
         "DeepEP's dispatch buffer is sized for 2-byte tokens — so pair it with --ep 1.",
     )
-    parser.add_argument(
-        "--lowp_precision",
-        type=str,
-        default="bf16",
-        choices=list(LOWP_PRECISIONS),
-        help="Low-precision GEMM compute for the dense MLP and MoE experts; master weights and "
-        "checkpoints stay bf16. 'bf16' = off, 'fp8' = mxfp8, 'fp4' = nvfp4, 'mxfp4' = fast fp4.",
-    )
+    add_lowp_precision_argument(parser)
     parser.add_argument(
         "--profile",
         action="store_true",
@@ -189,10 +195,9 @@ def main() -> int:
     parser.add_argument(
         "--comm_profile",
         action="store_true",
-        help="Attribute EP step time to DeepEP all-to-all (dispatch+combine) vs "
-        "local expert compute via the PerformanceMonitor's per-phase CUDA "
-        "timers. Serialized/synchronized — measures the comm FRACTION, not "
-        "throughput. Prints a dispatch/compute/combine breakdown on rank 0.",
+        help="Split EP step time into dispatch, expert compute and combine with the EPSpanTimer's per-phase CUDA "
+        "timers, past the warm-up steps, for every rank. Serialized, so it measures shares, not throughput. A rank's "
+        "combine includes its wait for the slowest rank.",
     )
     parser.add_argument(
         "--ep_scope",
@@ -228,23 +233,32 @@ def main() -> int:
         "production default (and required under PP); replication is the higher-memory variant.",
     )
     parser.add_argument(
+        "--measure_save",
+        action="store_true",
+        help="After training, save the model through the trainer (the gathered EP save) and report its wall "
+        "time and each rank's peak host memory while it runs.",
+    )
+    parser.add_argument(
+        "--save_write_threads",
+        type=int,
+        nargs="+",
+        default=None,
+        help="With --measure_save: save once per HALO_CHECKPOINT_WRITE_THREADS value given, in that order, each "
+        "reported under its own `_wt<N>` key, and check that every save wrote byte-identical files (sha256).",
+    )
+    parser.add_argument(
         "--zero3",
         action="store_true",
         help="FSDP2 ZeRO-3 (reshard_after_forward=True) — params resharded after forward, lowest memory. "
         "Default off = ZeRO-2 (reshard_after_forward=False), params kept gathered fwd->bwd.",
     )
     args = parser.parse_args()
+    if args.save_write_threads and not args.measure_save:
+        parser.error("--save_write_threads needs --measure_save")
 
-    # Must be set BEFORE the EP layers are constructed (in load_distributed_model), which read
-    # it at __init__ to decide whether to wrap dispatch/compute/combine with CUDA-event timers.
-    if args.comm_profile:
-        os.environ["HALO_EP_PERF_PROFILE"] = "1"
-
-    # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
 
-    # --- Resolve model config ---
     model_cfg = MODEL_CONFIGS[args.model]
     model_name = args.model_path or model_cfg["hf_name"]
     full_params = model_cfg["full_params"]
@@ -253,11 +267,8 @@ def main() -> int:
     revision = model_cfg.get("revision")
     ep_size = args.ep
 
-    # --- Resolve LoRA targeting ---
-    # lora_r>0 enables LoRA. Default targets attention only; --lora_experts targets only the MoE
-    # expert FFNs via native grouped EP-LoRA; --lora_all_linear targets both. Expert adapters are
-    # built inside each EP layer at construction (set on parallelism_config below, before load);
-    # attention adapters go through the standard PEFT path.
+    # lora_r>0 enables LoRA. Default targets attention only; --lora_experts targets only the expert FFNs via native
+    # grouped EP-LoRA; --lora_all_linear targets both. Expert adapters are built in each EP layer at construction.
     lora_r = args.lora_r
     lora_on = lora_r > 0
     want_experts = lora_on and (args.lora_experts or args.lora_all_linear)
@@ -285,26 +296,21 @@ def main() -> int:
         dist.destroy_process_group()
         return 1
 
-    # Isolate HF cache
     output_dir, cache_dir = setup_cache_dirs("bench_ep", rank)
 
     try:
-        # --- Ensure model is downloaded ---
         log("\n[1/5] Ensuring model is downloaded...")
         ensure_model_downloaded(model_name, rank, revision=revision)
 
-        # --- Load tokenizer ---
         log("\n[2/5] Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True, revision=revision)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # --- Create dataset ---
         log(f"\n[3/5] Creating dummy dataset ({args.num_samples} samples, seq={args.seq})...")
         train_dataset = create_benchmark_dataset(tokenizer, args.seq, args.num_samples)
         log(f"  Dataset created: {len(train_dataset)} samples")
 
-        # --- Load model with EP ---
         log(f"\n[4/5] Loading model with EP={ep_size}...")
         log(f"  GPU memory before load: {gpu_mem_gb():.1f}GB")
 
@@ -326,9 +332,9 @@ def main() -> int:
             ep_buffer_backend=args.ep_buffer_backend,
             fsdp_shard_ep1_experts=not args.no_fsdp_shard_ep1_experts,
             fsdp_reshard_after_forward=args.zero3,
-            lowp_precision=args.lowp_precision,
+            lowp=LowpSpec(precision=args.lowp_precision),
         )
-        # Native grouped EP-LoRA on the expert FFNs — each EP layer reads this at construction.
+        # Each EP layer reads this at construction.
         if want_experts:
             parallelism_config.expert_lora = ExpertLoraSpec(
                 r=lora_r,
@@ -360,8 +366,7 @@ def main() -> int:
         if args.liger_config:
             liger_kernel_config = {**(liger_kernel_config or {}), **args.liger_config}
 
-        # True fp32 training (--fp32): fp32 params + no autocast. FA4/FA3 are bf16/fp16-only,
-        # so fall back to SDPA (which supports fp32) unless the user pinned an attn impl.
+        # FA4/FA3 are bf16/fp16-only, so --fp32 falls back to SDPA unless the user pinned an attn impl.
         attn_impl = args.attn_implementation
         if args.fp32 and attn_impl is None:
             attn_impl = "sdpa"
@@ -380,10 +385,18 @@ def main() -> int:
         log(f"  Model loaded: {param_count / 1e9:.2f}B parameters (local)")
         log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-        # --- Adapter run: freeze base, then restore the trainable adapters ---
-        # Expert adapters are plain grouped parameters built at load; PEFT (attention) is applied
-        # by the trainer below. Freeze everything, re-enable the native expert adapters here, and
-        # re-enable them once more after trainer init (get_peft_model re-freezes the base).
+        if EP_FORWARD_DELAY_MS:
+            for _, layer in named_ep_layers(model):
+                layer.register_forward_pre_hook(_stall_before_forward)
+            log(f"  Negative control: every EP layer holds the GPU idle {EP_FORWARD_DELAY_MS} ms before its forward")
+        if args.comm_profile:
+            # In place of each layer's profiler label: the timer syncs around every phase it times.
+            time_phase = get_ep_span_timer().time_operation
+            for _, layer in named_ep_layers(model):
+                layer._perf = time_phase
+
+        # Expert adapters are plain parameters built at load; the trainer applies PEFT below. get_peft_model re-freezes
+        # the base, so they are re-enabled again after trainer init.
         peft_config = None
         if want_attn:
             peft_config = LoraConfig(
@@ -408,19 +421,14 @@ def main() -> int:
             if want_experts:
                 _reenable_expert_lora(model)
 
-        # --- Setup EfficiencyCallback ---
-        # The callback reads every divisor off the run's ParallelismConfig: under CP the Trainer counts
-        # the full (pre-split) sequence, so per-GPU tokens divide by cp_size. Matches the production
-        # callback-wiring path.
+        # Under CP the Trainer counts the full sequence, so the rank's own tokens divide by cp_size.
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
             num_full_model_params=full_params,
         )
 
-        # Global batch arithmetic (printed so baseline-vs-PP comparisons can assert equal
-        # tokens/step): dp = world / (pp x max(tp, cp, etp)); EP is orthogonal to DP and a whole
-        # pipeline chain is one stream.
+        # dp = world / (pp x max(tp, cp, etp)); EP is orthogonal to DP and a whole pipeline chain is one stream.
         dp_size = parallelism_config.data_parallel_size
         global_seqs = dp_size * args.batch_size * args.grad_accum
         log(
@@ -428,7 +436,6 @@ def main() -> int:
             f"= {global_seqs} seqs/step ({global_seqs * args.seq:,} tokens/step)"
         )
 
-        # --- SFT Config ---
         sft_config = SFTConfig(
             output_dir=output_dir,
             max_steps=args.steps,
@@ -438,11 +445,9 @@ def main() -> int:
             optim=args.optim,
             bf16=not args.fp32,
             gradient_checkpointing=not args.no_gc,
-            # Pass the real flag and let the mixin defer it across TRL's __init__ then restore it
-            # (_init_distributed_config / _setup_distributed_modes), exactly as production does. With
-            # it off, TRL's entropy guard is off and compute_loss dereferences outputs.logits — None on
-            # every family whose Liger patch fuses the head into the loss (GLM-4 MoE Lite, Zaya default
-            # fused_linear_cross_entropy).
+            # The mixin defers this across TRL's __init__, as production does. With it off, TRL's entropy guard is off
+            # and compute_loss dereferences outputs.logits, None on every family whose Liger patch fuses the head into
+            # the loss.
             use_liger_kernel=not args.no_liger,
             logging_steps=1,
             save_strategy="no",
@@ -455,22 +460,20 @@ def main() -> int:
             dataloader_drop_last=True,
             dataloader_num_workers=0,
             ddp_find_unused_parameters=True,
-            fsdp="",
             include_num_input_tokens_seen=True,
         )
 
-        # FusedLinearCE: logits are None, need use_liger_kernel=True for TRL's
-        # entropy guard (skips logits access). The mixin defers the flag to prevent
-        # TRL from re-applying Liger to EP-wrapped modules.
+        # FusedLinearCE has no logits, so TRL's entropy guard needs use_liger_kernel=True; the mixin keeps TRL from
+        # re-applying Liger to EP-wrapped modules.
         if liger_kernel_config and liger_kernel_config.get("fused_linear_cross_entropy"):
             sft_config.use_liger_kernel = True
             sft_config.liger_kernel_config = liger_kernel_config
 
-        # --- Callbacks (+ optional torch.profiler for kernel-level bottleneck analysis) ---
         callbacks = [efficiency_cb]
+        if args.comm_profile:
+            callbacks.append(DropWarmupSpans(args.warmup, get_ep_span_timer()))
         if args.profile:
-            # Skip warmup + 1, then record 3 steady-state steps. The active window must fit
-            # inside --steps; profiling needs steps >= warmup + 5.
+            # Skip warmup + 1, then record 3 steady-state steps; profiling needs steps >= warmup + 5.
             callbacks.append(
                 TorchProfilerCallback(
                     output_dir=args.profile_dir,
@@ -478,10 +481,8 @@ def main() -> int:
                     warmup=1,
                     active=3,
                     ranks="0",
-                    # CUDA-kernel-only trace: with_stack / profile_memory / record_shapes and the
-                    # CPU op activity each add heavy per-op instrumentation that starves an 8-rank
-                    # EP run (GPUs idle, first step crawls). Disabling them keeps the top-ops kernel
-                    # table (the bottleneck signal) while letting steps run at near-normal speed.
+                    # CUDA-kernel-only trace: with_stack / profile_memory / record_shapes and CPU activity starve an
+                    # 8-rank EP run (GPUs idle, first step crawls); the top-ops kernel table survives without them.
                     record_shapes=False,
                     profile_memory=False,
                     with_stack=False,
@@ -491,29 +492,27 @@ def main() -> int:
             )
             log(f"  Profiler ON → {args.profile_dir} (Chrome trace + *.top_ops.txt on rank 0)")
 
-        # --- Create trainer ---
         log("\n[5/5] Starting benchmark training...")
         trainer_kwargs = {
             "model": model,
             "args": sft_config,
             "train_dataset": train_dataset,
             "processing_class": tokenizer,
+            "data_collator": build_sft_collator(tokenizer, sft_config, model.config, parallelism_config),
             "parallelism_config": parallelism_config,
             "callbacks": callbacks,
-            # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default
+            # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default.
             "bf16_optimizer": False if args.fp32_optimizer else None,
         }
         if args.pp > 1:
-            # No balancing callback runs in this benchmark, but the default 'auto' resolves to the
-            # aux-loss strategy for several families and the PP split rejects that (a stage severs
-            # the HF aux-loss path). 'none' is compute-identical here.
+            # The default 'auto' resolves to aux-loss for several families and the PP split rejects that (a stage
+            # severs the HF aux-loss path). 'none' is compute-identical here, since no balancing callback runs.
             trainer_kwargs["moe_balancing"] = "none"
         if peft_config is not None:
             trainer_kwargs["peft_config"] = peft_config
         trainer = DistributedSFTTrainer(**trainer_kwargs)
 
-        # get_peft_model (attention PEFT) re-freezes the base, including the native expert adapters;
-        # restore them so the expert FFNs actually train.
+        # get_peft_model re-freezes the base, native expert adapters included.
         if want_experts:
             _reenable_expert_lora(trainer.model)
 
@@ -525,32 +524,45 @@ def main() -> int:
         barrier()
         train_result = trainer.train()
 
-        # --- Report ---
         log(f"\n{'=' * 70}")
         log(f"  BENCHMARK RESULTS (EP={ep_size}, {peft_str})")
         log(f"{'=' * 70}")
         log(f"  Training loss: {train_result.training_loss:.4f}")
         log(f"  Steps completed: {train_result.global_step}")
         log("\n" + format_benchmark_report(efficiency_cb))
-        pp_tag = f"_pp{args.pp}" if args.pp > 1 else ""
-        emit_benchmark(f"sft_ep_{args.model}_ep{ep_size}{pp_tag}_s{args.seq}", efficiency_cb)
+        layout = "_".join([f"ep{ep_size}", *axis_tags(etp=args.etp, cp=args.cp, tp=args.tp, pp=args.pp)])
+        emit_benchmark(f"sft_ep_{args.model}_{layout}_s{args.seq}", efficiency_cb)
 
-        if args.comm_profile and rank == 0:
-            stats = get_performance_monitor().stats
-            disp = stats["ep.dispatch"].avg_time if "ep.dispatch" in stats else 0.0
-            comp = stats["ep.expert_compute"].avg_time if "ep.expert_compute" in stats else 0.0
-            comb = stats["ep.combine"].avg_time if "ep.combine" in stats else 0.0
-            total = disp + comp + comb
-            if total > 0:
-                comm = disp + comb
-                log("\n  --- EP step attribution (per MoE layer, serialized CUDA-event timing) ---")
-                log(f"  dispatch (all-to-all) : {disp * 1e3:7.3f} ms  ({100 * disp / total:4.1f}%)")
-                log(f"  expert compute (GEMM) : {comp * 1e3:7.3f} ms  ({100 * comp / total:4.1f}%)")
-                log(f"  combine  (all-to-all) : {comb * 1e3:7.3f} ms  ({100 * comb / total:4.1f}%)")
-                log(
-                    f"  => communication      : {comm * 1e3:7.3f} ms  ({100 * comm / total:4.1f}%)  "
-                    f"(seq={args.seq}, ep={ep_size})"
-                )
+        if args.measure_save:
+            save_key = f"sft_ep_{args.model}_{layout}_gathered_save"
+            digests = {}
+            for threads in args.save_write_threads or [None]:
+                arm = "" if threads is None else f"_wt{threads}"
+                if threads is not None:
+                    os.environ["HALO_CHECKPOINT_WRITE_THREADS"] = str(threads)
+                # Every rank names rank 0's directory: the gathered save is collective and one rank writes it.
+                save_dir = broadcast_from_rank0(os.path.join(output_dir, f"gathered_save{arm}"))
+                # The previous arm's dirty pages are flushed outside the timed window.
+                os.sync()
+                barrier()
+                reset_host_peak_rss()
+                start = time.perf_counter()
+                trainer.save_model(save_dir)
+                barrier()
+                save_seconds, peak_rss = time.perf_counter() - start, host_peak_rss_gib()
+                log(f"  Gathered save{arm}: {save_seconds:.1f}s, rank 0 peak host RSS {peak_rss:.1f} GiB")
+                emit_save_benchmark(f"{save_key}{arm}", save_seconds, peak_rss)
+                if threads is not None and rank == 0:
+                    digests[threads] = file_digests(save_dir)
+                    shutil.rmtree(save_dir)
+            if len(digests) > 1:
+                identical = all(digest == next(iter(digests.values())) for digest in digests.values())
+                log(f"  Gathered saves byte-identical across write threads {sorted(digests)}: {identical}")
+                if not identical:
+                    raise RuntimeError(f"the gathered save's files differ across write-thread counts: {digests}")
+
+        if args.comm_profile:
+            _log_ep_attribution(rank, args.seq, ep_size)
         log(f"{'=' * 70}\n")
 
     except Exception as e:

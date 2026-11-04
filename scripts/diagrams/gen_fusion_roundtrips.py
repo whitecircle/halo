@@ -103,7 +103,7 @@ def kernel(x, w, name, reads, writes, fill, edge):
 
 
 # ── Naive: three kernels, 8 tensor passes ──────────────────────────────
-ax.text(0.3, 4.82, "NAIVE — 3 kernels", fontsize=SECTION, fontweight="bold", color=INK, va="top")
+ax.text(0.3, 4.82, "NAIVE: 3 kernels", fontsize=SECTION, fontweight="bold", color=INK, va="top")
 hbm_bar(0.3, 6.1, "HBM")
 kernel(0.35, 1.9, "s=sigmoid(a)", ["a"], ["s"], AMBER_T, AMBER)
 kernel(2.4, 1.9, "t=a·s", ["a", "s"], ["t"], AMBER_T, AMBER)
@@ -114,7 +114,7 @@ ax.text(
 ax.text(
     0.3,
     0.55,
-    "5 reads + 3 writes — s and t exist only\nto be re-read by the next kernel",
+    "5 reads + 3 writes: s and t exist only\nto be re-read by the next kernel",
     fontsize=TINY,
     color=INK2,
     va="top",
@@ -122,15 +122,13 @@ ax.text(
 )
 
 # ── Fused: one kernel, 3 passes ────────────────────────────────────────
-ax.text(
-    7.1, 4.82, "FUSED — 1 kernel  (Liger / torch.compile)", fontsize=SECTION, fontweight="bold", color=INK, va="top"
-)
+ax.text(7.1, 4.82, "FUSED: 1 kernel (Liger, torch.compile)", fontsize=SECTION, fontweight="bold", color=INK, va="top")
 hbm_bar(7.1, 4.1, "HBM")
 kernel(7.75, 2.8, "y=silu(a)·b", ["a", "b"], ["y"], TEAL_T, TEAL)
 ax.text(
     7.1,
     0.95,
-    "3 tensor passes — ~2.7× less traffic",
+    "3 tensor passes, ~2.7× less traffic",
     fontsize=LABEL,
     fontweight="bold",
     color=TEAL,

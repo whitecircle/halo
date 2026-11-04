@@ -1,26 +1,10 @@
 #!/usr/bin/env python
-"""Unit tests for :func:`src.trainers.grpo.rollout.completions_logging.emit_completion_artifacts`.
-
-Locks the decoupling contract used by the online + env GRPO trainers: the durable parquet record is
-gated by ``save`` (CommonScriptArguments.save_completions) and the rich console table by ``console``
-(TRL's log_completions) — independently. Recoupling them, e.g. skipping the parquet unless the
-console prints, is the failure this forbids. The record follows the per-node writer election, the
-console table global rank 0 alone.
-
-Also pins how the record REACHES that writer (``rollout_metrics._populate_completion_logs``): the
-full trajectory render is gathered to the writer rank, never all-gathered to all of them, every
-rank enters the same gathers whether or not it accumulates the result, and each row carries its own
-episode's reward components and scored-term rationale. WHEN it is called
-relative to the env-GRPO trust-region breaker is pinned where the breaker lives
-(``test_grpo_update_breaker_and_group_effort.py``).
-
-Run::
-
-    python tests/cpu/grpo/test_completions_logging.py
-"""
+"""The completion record: ``save`` gates the parquet and ``console`` the rich table, independently. The record follows
+the per-node writer election, the table global rank 0. Also pins the environmental trainer's per-rank parts."""
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import types
@@ -30,16 +14,20 @@ import pandas as pd
 import pytest
 import torch
 
-import src.trainers.grpo.rollout.completions_logging as cl
-import src.trainers.grpo.rollout.rollout_metrics as rm
-from src.distributed import runtime
-from src.environments.base import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY, Message, Trajectory
-from src.rewards.samples import CUT_CALL_NOTE
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
-from src.trainers.mixins.base import DistributedTrainerMixin
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+import halo.trainers.grpo.rollout.completions_logging as cl
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
+from halo.environments.messages import Message, Trajectory
+from halo.rewards.samples import CUT_CALL_NOTE
+from halo.runtime import consensus, filesystem, ranks
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
+from tests.common.distributed import reset_shared_filesystem_consensus
+from tests.common.gloo import run_gloo_ranks
 
 
 class _Accel:
@@ -75,7 +63,9 @@ def _fresh_logs() -> dict:
 
 
 class _Trainer:
-    """Minimal stand-in exposing exactly what emit_completion_artifacts reads."""
+    """The online trainer's shape, whose logs hold the world's rows."""
+
+    RANK_LOCAL_COMPLETION_LOGS = False
 
     def __init__(self, output_dir, is_main=True, step=7, report_to=None):
         self.accelerator = _Accel(is_main)
@@ -87,12 +77,15 @@ class _Trainer:
         self._logs = _fresh_logs()
 
 
-def _parquet_path(output_dir, step=7):
-    return os.path.join(output_dir, "completions", f"completions_{step:05d}.parquet")
+def _parquet_path(output_dir, step=7, part=""):
+    return os.path.join(output_dir, "completions", f"completions_{step:05d}{part}.parquet")
+
+
+def _part_path(output_dir, step=9, rank=0, mode=""):
+    return os.path.join(output_dir, "completions", f"completions_{step:05d}{mode}", f"rank{rank:02d}.parquet")
 
 
 def test_save_writes_parquet_without_console(tmp_path, monkeypatch) -> None:
-    """save=True, console=False: parquet is written, console table is NOT printed."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
 
@@ -112,7 +105,6 @@ def test_save_writes_parquet_without_console(tmp_path, monkeypatch) -> None:
 
 
 def test_console_only_without_save(tmp_path, monkeypatch) -> None:
-    """console=True, save=False: console table prints, NO parquet written."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
@@ -125,23 +117,15 @@ def test_console_only_without_save(tmp_path, monkeypatch) -> None:
 
 
 def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
-    """Only the elected writer persists artifacts (else N ranks race the same file).
-
-    The election is ``fs_aware_save_rank`` — the same predicate every other output artifact uses —
-    not ``accelerator.is_main_process``: on a non-shared output filesystem each node must write its
-    own completions, and gating on the accelerator flag would lose nodes 1..N entirely.
-
-    Driven through the real flag chain (``is_global_main_process`` / ``is_local_main_process`` +
-    the env flags) rather than by patching ``fs_aware_save_rank`` itself, so the test pins WHICH
-    predicate is consulted, not merely that some boolean gates the write.
-    """
+    """Only the ``is_fs_save_rank`` writer persists artifacts, else N ranks race one file. Driven through the real flag
+    chain to pin which predicate is consulted."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=True, save=True)
@@ -151,14 +135,12 @@ def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
 
 
 def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, monkeypatch) -> None:
-    """Anti-vacuity for the test above, and the reason the election is per node: with a per-node output
-    filesystem this same non-global-main rank IS its node's writer — gating on global rank 0 would
-    silently drop that node's completions."""
+    """Anti-vacuity for the test above: gating on global rank 0 would silently drop this node's completions."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -167,15 +149,14 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
 
 
 def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_rank_zero(tmp_path, monkeypatch) -> None:
-    """The writer election is per node on a per-node output filesystem; the console is not: a table
-    printed by every node's writer would reach the log once per node."""
+    """A table printed by every node's writer would reach the log once per node."""
     printed = []
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: printed.append(a))
     monkeypatch.setattr(cl, "is_rich_available", lambda: True)
-    monkeypatch.setattr(runtime, "get_global_rank", lambda: 8)  # the second node's local rank 0
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(ranks, "get_global_rank", lambda: 8)  # the second node's local rank 0
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    reset_shared_filesystem_consensus()
 
     emit_completion_artifacts(_Trainer(str(tmp_path)), console=True, save=True)
 
@@ -184,7 +165,6 @@ def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_ran
 
 
 def test_eval_mode_writes_suffixed_parquet(tmp_path, monkeypatch) -> None:
-    """model.training=False: the parquet gets the ``_eval`` suffix and never overwrites the train file."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
 
     trainer = _Trainer(str(tmp_path))
@@ -206,8 +186,7 @@ def _buffer_lengths(logs) -> set[int]:
 
 
 def test_emit_empties_the_buffer_so_the_next_log_writes_only_its_own_rows(tmp_path, monkeypatch) -> None:
-    """The async trainer's buffers are unbounded (an eval round is the whole eval set), so a write
-    must consume them: rows would otherwise repeat in every later parquet and grow for the run."""
+    """The async trainer's unbounded buffers would repeat unconsumed rows in every later parquet and grow all run."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -219,14 +198,13 @@ def test_emit_empties_the_buffer_so_the_next_log_writes_only_its_own_rows(tmp_pa
 
 
 def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None:
-    """Non-writers hold nothing useful after the step; left alone, their unbounded slots would keep
-    every row the online trainer's generation path appends on every process."""
+    """Left alone, a non-writer's unbounded slots would keep every row the online trainer's generation path appends."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: False)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: True)
+    monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    monkeypatch.setattr(runtime, "_SHARED_FILESYSTEM_CONSENSUS", None)
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -235,8 +213,7 @@ def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None
 
 
 def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch() -> None:
-    """TRL caps each slot at ``generation_batch_size``, which keeps only the tail of an eval round
-    larger than one generation batch; the async trainer's buffers take the whole round."""
+    """TRL caps each slot at ``generation_batch_size``, which keeps only the tail of a larger eval round."""
     logs = cl.unbounded_completion_logs()
     logs["prompt"].extend(f"p{i}" for i in range(432))
     logs["rewards"]["environment_reward"].extend(range(432))
@@ -246,19 +223,24 @@ def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch
 
 
 def test_empty_logs_is_noop(tmp_path) -> None:
-    """Nothing generated yet (empty buffer): no parquet, no crash."""
     trainer = _Trainer(str(tmp_path))
     trainer._logs["prompt"] = []
     emit_completion_artifacts(trainer, console=True, save=True)
     assert not os.path.exists(_parquet_path(str(tmp_path)))
 
 
-class _MetricsHost(rm.RolloutMetricsMixin):
-    """Minimal stand-in exposing exactly what ``_populate_completion_logs`` reads."""
+class _Parallelism:
+    is_tp_mode = False
+    is_expert_tp_mode = False
+
+
+class _MetricsHost(rm.RolloutMetricsMixin, TPLeaderBroadcastMixin):
+    """Stand-in for what ``_populate_completion_logs`` reads."""
 
     def __init__(self, save=True, console=False):
         self._save_completions = save
         self.log_completions = console
+        self.parallelism_config = _Parallelism()
         self._logs = {
             "prompt": [],
             "completion": [],
@@ -272,103 +254,155 @@ def _rollouts(*prompts):
     return [types.SimpleNamespace(prompt=p, trajectory=None) for p in prompts]
 
 
-def _fake_world(monkeypatch, *, world, rank, shared_fs):
-    """Simulate a ``world``-rank job on rank ``rank``; returns the recorded collective counts.
+def _fake_world(monkeypatch, *, world: int, rank: int, shared_fs: bool) -> None:
+    """A ``world``-rank job whose every gather raises: the record must never gather another rank's rows."""
 
-    Every other rank contributes ``peer<i>``, so the writer's gathered content can be asserted to be
-    the whole world's record in rank order — the property the artifact depends on.
-    """
-    calls = {"all_gather": 0, "gather_dst": 0}
+    def refuse(*args, **kwargs):
+        raise AssertionError("the completions record gathered across ranks")
 
-    def _fake_gather_object(values, chunks=None, dst=None, **kwargs):
-        calls["gather_dst"] += 1
-        assert dst == 0, "a destination gather must target the shared-FS writer (global rank 0)"
-        if chunks is not None:
-            for i in range(world):
-                chunks[i] = list(values) if i == rank else [f"peer{i}"]
+    for name in ("gather_object", "all_gather_object", "broadcast_object_list", "all_gather"):
+        monkeypatch.setattr(torch.distributed, name, refuse)
 
-    def _fake_all_gather(values):
-        calls["all_gather"] += 1
-        return [item for i in range(world) for item in (list(values) if i == rank else [f"peer{i}"])]
+    def local_verdict(reason, what, exc_type=RuntimeError):
+        if reason:
+            raise exc_type(reason)
 
-    # A stand-in bound to the module, not a patch of the real torch.distributed: the process must
-    # not start believing it is in a 4-rank job.
-    monkeypatch.setattr(
-        rm,
-        "dist",
-        types.SimpleNamespace(
-            is_available=lambda: True,
-            is_initialized=lambda: True,
-            get_world_size=lambda group=None: world,
-            gather_object=_fake_gather_object,
-        ),
+    monkeypatch.setattr(consensus, "reject_across_ranks", local_verdict)
+    monkeypatch.setattr(ranks.dist, "is_available", lambda: True)
+    monkeypatch.setattr(ranks.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(ranks.dist, "get_world_size", lambda *a, **k: world)
+    monkeypatch.setattr(ranks.dist, "get_rank", lambda *a, **k: rank)
+    monkeypatch.setattr(filesystem, "is_local_main_process", lambda: rank % 8 == 0)
+    monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "1" if shared_fs else "0")
+    reset_shared_filesystem_consensus()
+
+
+def _logging_host(tmp_path, step=9) -> _MetricsHost:
+    host = _MetricsHost()
+    host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=step), _Model(training=True)
+    host.num_completions_to_print, host.log_unique_prompts = 2, False
+    host._logs = cl.unbounded_completion_logs()
+    return host
+
+
+@pytest.mark.parametrize("shared_fs", [True, False], ids=["shared", "per-node"])
+def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_path, monkeypatch, shared_fs):
+    """Gathered, the rendered trajectories would stage the world's text through a device and leave every writer holding
+    every rank's record."""
+    _fake_world(monkeypatch, world=16, rank=9, shared_fs=shared_fs)
+    host = _logging_host(tmp_path)
+
+    host._populate_completion_logs(_rollouts("p9"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
+    assert list(host._logs["prompt"]) == ["p9"], "a rank holds another rank's rows"
+    cl.emit_completion_artifacts(host, console=False, save=True, mode="train")
+
+    assert os.listdir(tmp_path / "completions") == ["completions_00009"], "one directory per step"
+    assert os.listdir(tmp_path / "completions" / "completions_00009") == ["rank09.parquet"]
+    assert list(pd.read_parquet(_part_path(str(tmp_path), rank=9))["prompt"]) == ["p9"]
+    assert _buffer_lengths(host._logs) == {0}
+
+
+def test_the_ranks_parts_together_are_the_steps_record(tmp_path, monkeypatch):
+    for rank in (0, 3):
+        _fake_world(monkeypatch, world=4, rank=rank, shared_fs=True)
+        host = _logging_host(tmp_path)
+        host._populate_completion_logs(_rollouts(f"p{rank}"), torch.tensor([1.0]), torch.tensor([0.0]), "train")
+        cl.emit_completion_artifacts(host, console=False, save=True, mode="train")
+
+    step_dir = tmp_path / "completions" / "completions_00009"
+    assert sorted(part.name for part in step_dir.iterdir()) == ["rank00.parquet", "rank03.parquet"]
+    assert sorted(pd.read_parquet(step_dir)["prompt"]) == ["p0", "p3"]
+
+
+def test_a_tp_follower_keeps_no_rows_so_each_episode_is_recorded_once(tmp_path, monkeypatch):
+    """Under TP or ETP every rank of a group holds its leader's broadcast rollouts. 4 ranks in TP groups of 2 write one
+    part per data-parallel rank."""
+    for rank in range(4):
+        _fake_world(monkeypatch, world=4, rank=rank, shared_fs=True)
+        host = _logging_host(tmp_path)
+        host.parallelism_config.is_tp_mode = True
+        host._get_tp_rank = lambda rank=rank: rank % 2
+        host._get_tp_or_etp_process_group = object
+        leader = rank - rank % 2
+        host._populate_completion_logs(_rollouts(f"p{leader}"), torch.tensor([1.0]), torch.tensor([0.0]), "train")
+        cl.emit_completion_artifacts(host, console=False, save=True, mode="train")
+
+    step_dir = tmp_path / "completions" / "completions_00009"
+    assert sorted(part.name for part in step_dir.iterdir()) == ["rank00.parquet", "rank02.parquet"]
+    assert sorted(pd.read_parquet(step_dir)["prompt"]) == ["p0", "p2"], "an episode was recorded per TP rank"
+
+
+_SAMPLE_WORLD = 3
+_ROWS_PER_RANK = 5
+_LONG = "x" * (cl._TABLE_CELL_CHARS + 100)
+
+
+class _FakeWandb:
+    run = object()
+
+    def __init__(self):
+        self.logged = []
+
+    @staticmethod
+    def Table(dataframe):
+        return dataframe
+
+    def log(self, payload):
+        self.logged.append(payload)
+
+
+def _sample_worker(rank: int, root: str) -> None:
+    printed = []
+    cl.print_prompt_completions_sample = lambda prompts, completions, *a, **k: printed.append(
+        {"prompts": prompts, "completions": completions, "num_samples": a[3]}
     )
-    monkeypatch.setattr(rm, "gather_object", _fake_all_gather)
-    # The multi-rank gate reads the REAL torch.distributed, which this process never initializes.
-    monkeypatch.setattr(rm, "is_multi_rank_run", lambda: world > 1)
-    # Driven through the REAL writer election, so the test pins that the gather lands where the
-    # parquet is written rather than merely that some boolean picks a rank.
-    monkeypatch.setattr(runtime, "is_global_main_process", lambda: rank == 0)
-    monkeypatch.setattr(runtime, "is_local_main_process", lambda: rank == 0)
-    monkeypatch.setattr(rm, "is_output_shared_filesystem", lambda: shared_fs)
-    monkeypatch.setattr(runtime, "is_output_shared_filesystem", lambda: shared_fs)
-    return calls
+    cl.is_rich_available = lambda: True
+    fake_wandb = _FakeWandb()
+    cl.wandb = fake_wandb
+    host = _logging_host(root)
+    host.args.report_to = ["wandb"]
+    host.num_completions_to_print = 4
+    rows = [types.SimpleNamespace(prompt=f"p{rank}-{i}", trajectory=None) for i in range(_ROWS_PER_RANK)]
+    host._render_trajectory_for_log = lambda trajectory: _LONG
+    host._populate_completion_logs(rows, torch.zeros(_ROWS_PER_RANK), torch.zeros(_ROWS_PER_RANK), "train")
+    cl.emit_completion_artifacts(host, console=True, save=True, mode="train")
+    tables = [
+        {
+            "prompts": list(entry["completions"]["prompt"]),
+            "cells": sorted({len(c) for c in entry["completions"]["completion"]}),
+        }
+        for entry in fake_wandb.logged
+    ]
+    with open(os.path.join(root, f"tables_{rank}.json"), "w") as fh:
+        json.dump(
+            {
+                "printed": [{**p, "completions": sorted({len(c) for c in p["completions"]})} for p in printed],
+                "wandb": tables,
+            },
+            fh,
+        )
 
 
-def test_shared_fs_completion_logs_reach_the_writer_only(monkeypatch) -> None:
-    """On a shared output FS the full trajectory render goes to the ONE writer, not to every rank.
+def test_the_tables_show_a_bounded_sample_of_every_ranks_rows_on_rank_zero(tmp_path):
+    """Each rank sends only its share of ``num_completions_to_print`` (ceil(4 / 3) = 2 of its 5 rows), cut to the cell
+    width. The full text and every row stay in its own part."""
+    run_gloo_ranks(_sample_worker, _SAMPLE_WORLD, str(tmp_path), pg_timeout=datetime.timedelta(seconds=60))
+    results = [json.loads((tmp_path / f"tables_{rank}.json").read_text()) for rank in range(_SAMPLE_WORLD)]
 
-    ``accelerate``'s ``gather_object`` is an all-gather: every rank receives every rank's payload and
-    (on NCCL) stages the pickle through its own CUDA device, so the transient grows with world size
-    while the only consumer is the writer rank's parquet. The writer's record must be unchanged.
-    """
-    calls = _fake_world(monkeypatch, world=4, rank=0, shared_fs=True)
-    host = _MetricsHost()
-
-    host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
-
-    assert calls["all_gather"] == 0, "the full-text payload must not be all-gathered to every rank"
-    assert calls["gather_dst"] == 6, "all six gathers must still run on every rank (lock-step)"
-    assert host._logs["prompt"] == ["p0", "peer1", "peer2", "peer3"], "the writer must hold the world record"
-    assert host._logs["completion"] == ["(empty trajectory)", "peer1", "peer2", "peer3"]
-    assert host._logs["rewards"]["environment_reward"] == [1.0, "peer1", "peer2", "peer3"]
-    assert host._logs["advantages"] == [0.25, "peer1", "peer2", "peer3"]
-    assert host._logs["extra"][REWARD_COMPONENTS_KEY] == ["{}", "peer1", "peer2", "peer3"]
-    assert host._logs["extra"][REWARD_DETAILS_KEY] == ["{}", "peer1", "peer2", "peer3"]
-
-
-def test_shared_fs_non_writer_still_runs_every_gather(monkeypatch) -> None:
-    """A non-writer rank contributes to every gather and accumulates nothing.
-
-    Skipping a gather here desyncs the world; accumulating restores the cost the split removes.
-    """
-    calls = _fake_world(monkeypatch, world=4, rank=2, shared_fs=True)
-    host = _MetricsHost()
-
-    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
-
-    assert calls["gather_dst"] == 6, "a non-writer must enter every gather its peers enter"
-    assert host._logs["prompt"] == [] and host._logs["completion"] == []
-    assert not host._logs["extra"], "a non-writer must not accumulate the reward columns either"
-
-
-def test_non_shared_fs_keeps_the_all_gather_every_node_writer_needs(monkeypatch) -> None:
-    """With a per-node output FS every node's local rank 0 writes the WORLD record, so the
-    all-gather is what feeds them — narrowing to rank 0 would empty nodes 1..N's parquet."""
-    calls = _fake_world(monkeypatch, world=4, rank=2, shared_fs=False)
-    host = _MetricsHost()
-
-    host._populate_completion_logs(_rollouts("p2"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
-
-    assert calls["gather_dst"] == 0 and calls["all_gather"] == 6
-    assert host._logs["prompt"] == ["peer0", "peer1", "p2", "peer3"]
+    sample = [f"p{rank}-{i}" for rank in range(_SAMPLE_WORLD) for i in (0, 2)]
+    cut = len(cl._cell(_LONG))
+    assert results[0]["printed"] == [{"prompts": sample, "completions": [cut], "num_samples": 4}], results[0]
+    assert results[0]["wandb"] == [{"prompts": sample, "cells": [cut]}], results[0]
+    assert all(result == {"printed": [], "wandb": []} for result in results[1:]), "a table left global rank 0"
+    for rank in range(_SAMPLE_WORLD):
+        part = pd.read_parquet(_part_path(str(tmp_path), rank=rank))
+        assert list(part["prompt"]) == [f"p{rank}-{i}" for i in range(_ROWS_PER_RANK)]
+        assert set(part["completion"]) == {_LONG}, "the record keeps the full text"
 
 
 def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationale(tmp_path, monkeypatch) -> None:
-    """The parquet row of an episode holds that episode's settled components and every scored term's
-    rationale (a veto judge's fired checks with their quotes) as JSON, aligned with its prompt: a vetoed
-    solve is told from an honest failure on the record alone. An episode that kept neither (a lost
-    rollout, no scored term) records ``{}``."""
+    """A vetoed solve is told from an honest failure on the record alone. An episode with neither (a lost rollout, no
+    scored term) records ``{}``."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     host = _MetricsHost()
     host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=True)
@@ -392,7 +426,7 @@ def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationa
     host._populate_completion_logs(rollouts, torch.tensor([-0.2, 1.1, 0.0]), torch.tensor([-1.0, 1.0, 0.0]), "train")
     emit_completion_artifacts(host, console=False, save=True, mode="train")
 
-    df = pd.read_parquet(_parquet_path(str(tmp_path), step=9))
+    df = pd.read_parquet(_part_path(str(tmp_path)))
     assert list(df["prompt"]) == ["vetoed", "solved", "lost"]
     assert [json.loads(cell) for cell in df[REWARD_COMPONENTS_KEY]] == [
         vetoed.info[REWARD_COMPONENTS_KEY],
@@ -403,8 +437,6 @@ def test_each_row_carries_its_episodes_reward_components_and_scored_term_rationa
 
 
 def test_the_record_shows_the_call_a_cut_turn_was_writing_marked_as_never_run() -> None:
-    """The completion column renders a turn cut inside its call with the partial call it was writing, tagged
-    as never run, after the calls that did; a turn without one renders as before."""
     ran = {"id": "c0", "function": {"name": "run_code", "arguments": '{"code": "print(1)"}'}}
     cut = {"id": "c1", "function": {"name": "run_code", "arguments": '{"code": "# still reasoning about n'}}
     trajectory = Trajectory(
@@ -424,8 +456,7 @@ def test_the_record_shows_the_call_a_cut_turn_was_writing_marked_as_never_run() 
 
 
 def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, monkeypatch) -> None:
-    """With ``logging_steps > 1`` an eval round can begin before the train rows since the last log were
-    written; they must reach the train parquet, not the eval one, and never disappear."""
+    """With ``logging_steps > 1`` an eval round can begin before the last train rows were written."""
     monkeypatch.setattr(cl, "print_prompt_completions_sample", lambda *a, **k: None)
     host = _MetricsHost()
     host.args, host.state, host.model = _Args(str(tmp_path)), _State(step=9), _Model(training=False)
@@ -435,24 +466,23 @@ def test_a_mode_switch_writes_the_pending_rows_under_their_own_mode(tmp_path, mo
     host._populate_completion_logs(_rollouts("train-row"), torch.tensor([1.0]), torch.tensor([0.0]), "train")
     host._populate_completion_logs(_rollouts("eval-row"), torch.tensor([0.0]), torch.tensor([0.0]), "eval")
 
-    train_df = pd.read_parquet(_parquet_path(str(tmp_path), step=9))
+    train_df = pd.read_parquet(_part_path(str(tmp_path)))
     assert list(train_df["prompt"]) == ["train-row"], "the pending train rows land in the train file"
-    assert not os.path.exists(os.path.join(str(tmp_path), "completions", "completions_00009_eval.parquet"))
+    assert not os.path.exists(_part_path(str(tmp_path), mode="_eval"))
     assert list(host._logs["prompt"]) == ["eval-row"], "the eval round's own rows wait for the eval log"
 
 
-def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(monkeypatch) -> None:
-    """Neither parquet nor console: no gather at all (the payload is the heaviest object here)."""
-    calls = _fake_world(monkeypatch, world=4, rank=0, shared_fs=True)
-    host = _MetricsHost(save=False, console=False)
+def test_completion_logs_skipped_entirely_when_no_artifact_is_wanted(tmp_path) -> None:
+    host = _logging_host(tmp_path)
+    host._save_completions = host.log_completions = False
 
     host._populate_completion_logs(_rollouts("p0"), torch.tensor([1.0]), torch.tensor([0.25]), "train")
 
-    assert calls == {"all_gather": 0, "gather_dst": 0}
+    assert _buffer_lengths(host._logs) == {0}
 
 
 class _BaseLog:
-    """Stands for the rest of the MRO the mixin delegates to: records TRL's flag as ``log`` saw it."""
+    """The rest of the MRO the mixin delegates to; records TRL's flag as ``log`` saw it."""
 
     def log(self, logs, start_time=None):
         self.seen_by_base = (dict(logs), self.log_completions)
@@ -482,7 +512,7 @@ def test_the_log_mixin_keeps_trls_block_off_and_emits_the_decoupled_artifacts(tm
 
 
 def test_both_on_policy_trainers_log_through_the_mixin_ahead_of_the_parallelism_logs():
-    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+    for cls in (DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         mro = cls.__mro__
         assert mro.index(cl.DecoupledCompletionsLogMixin) < mro.index(DistributedTrainerMixin), cls.__name__
 

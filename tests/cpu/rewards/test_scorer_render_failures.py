@@ -1,33 +1,21 @@
 #!/usr/bin/env python
-"""CPU tests: a scorer that cannot build its request books a verdict-less result, it does not raise.
-
-:class:`src.rewards.scorers.base.Scorer` promises that ``score`` never raises for a sample — "one bad
-call cannot take a rollout batch down with it". That covers the work before the request too: the
-reward model's chat-template render (under ``view: full`` the messages carry tool turns and
-``tool_calls``, which a reward model's template may refuse) and the judge's prompt build (which
-serializes the row's reference). A raise there would escape ``RewardComposer.score`` — it gathers
-without ``return_exceptions`` — then the settlement and the episode dispatcher, and land in the Ray
-actor's catch-all, which masks the WHOLE episode; for a template mismatch that is every episode of
-the run, with the launch probe green, since its sample is a plain user/assistant pair.
-
-Run: python tests/cpu/rewards/test_scorer_render_failures.py  (or pytest)
-"""
+"""A scorer that cannot build its request books a verdict-less result.
+A raise would escape the composer's gather into the Ray actor's catch-all, which masks the whole episode."""
 
 import asyncio
 
 import pytest
 
-from src.rewards.samples import ScoringSample
-from src.rewards.scorers.judge import GenerativeJudge
-from src.rewards.scorers.reward_model import ServedRewardModel
-from src.rewards.terms import JudgeTerm, Requirement, RewardModelTerm
+from halo.rewards.samples import ScoringSample
+from halo.rewards.scorers.judge import GenerativeJudge
+from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.terms import JudgeTerm, Requirement, RewardModelTerm
 
 REQUIREMENTS = (Requirement(name="correctness", description="The answer is right."),)
 
 
 class _RefusingTemplate:
-    """A reward model whose chat template refuses the conversation it is handed — the shape a
-    tool-calling transcript takes against a template with no tool branch."""
+    """A chat template with no tool branch refuses a tool-calling transcript."""
 
     def apply_chat_template(self, messages, tokenize):
         raise ValueError("template does not support the 'tool' role")
@@ -63,7 +51,6 @@ def test_a_reward_model_render_failure_scores_the_batch_with_errors():
 def test_a_judge_prompt_build_failure_scores_the_sample_with_an_error():
     term = JudgeTerm(name="quality", requirements=REQUIREMENTS, include_reference=True)
     scorer = GenerativeJudge(term)
-    # A client the test never reaches: the failure happens while building the request.
     scorer._client = object()
 
     results = asyncio.run(scorer.score([_sample(reference=_Unserializable())]))
@@ -74,8 +61,6 @@ def test_a_judge_prompt_build_failure_scores_the_sample_with_an_error():
 
 
 def test_a_scorable_sample_is_unaffected_by_the_guards():
-    """The guards must not swallow a working render: the same judge on a serializable reference gets
-    past the prompt build and fails only at the (absent) request."""
     term = JudgeTerm(name="quality", requirements=REQUIREMENTS)
     scorer = GenerativeJudge(term)
     scorer._client = object()

@@ -1,31 +1,39 @@
-"""Builders a tiny random-init model needs before it can run: a synthetic on-disk checkpoint, a filled
-routing table, and one tiny model per EP MoE family.
-
-Kept apart from :mod:`tests.common.models`, the torch-free catalogue of names and configs that the CPU
-tier and the image build scripts import.
-"""
+"""Builders a tiny random-init model needs: a synthetic checkpoint, a filled routing table and one model per EP MoE
+family. Kept apart from :mod:`tests.common.models`, the torch-free catalogue the CPU tier and image build scripts
+import."""
 
 import shutil
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import torch
 from huggingface_hub import snapshot_download
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    Cohere2Config,
+    Cohere2ForCausalLM,
     Cohere2MoeConfig,
     Cohere2MoeForCausalLM,
     Cohere2VisionConfig,
     Cohere2VisionForConditionalGeneration,
     DeepseekV4Config,
     DeepseekV4ForCausalLM,
+    Gemma2Config,
+    Gemma2ForCausalLM,
+    Gemma3ForCausalLM,
+    Gemma3TextConfig,
     Gemma4Config,
     Gemma4ForCausalLM,
     Gemma4ForConditionalGeneration,
     Gemma4TextConfig,
+    GemmaConfig,
+    GemmaForCausalLM,
     Glm4MoeLiteConfig,
     Glm4MoeLiteForCausalLM,
     Glm5NextConfig,
@@ -42,10 +50,32 @@ from transformers import (
     Lfm2MoeForCausalLM,
     Lfm2VlConfig,
     Lfm2VlForConditionalGeneration,
+    Llama4Config,
+    Llama4ForConditionalGeneration,
+    LlamaConfig,
+    LlamaForCausalLM,
+    MiniMaxM3SparseForConditionalGeneration,
+    MiniMaxM3VLConfig,
     Mistral3Config,
     Mistral3ForConditionalGeneration,
+    MistralConfig,
+    MistralForCausalLM,
+    MixtralConfig,
+    MixtralForCausalLM,
+    NemotronH_Omni_Reasoning_V3,
+    NemotronH_Omni_Reasoning_V3_Config,
+    NemotronHConfig,
+    NemotronHForCausalLM,
+    Olmo3Config,
+    Olmo3ForCausalLM,
+    PretrainedConfig,
     PreTrainedModel,
+    PreTrainedTokenizerFast,
+    Qwen2Config,
+    Qwen2ForCausalLM,
+    Qwen3_5Config,
     Qwen3_5ForCausalLM,
+    Qwen3_5ForConditionalGeneration,
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
     Qwen3_5MoeForConditionalGeneration,
@@ -55,40 +85,74 @@ from transformers import (
     Qwen3ForCausalLM,
     Qwen3MoeConfig,
     Qwen3MoeForCausalLM,
+    Qwen3NextConfig,
+    Qwen3NextForCausalLM,
+    Qwen3VLConfig,
+    Qwen3VLForConditionalGeneration,
+    Qwen4ExpConfig,
+    Qwen4ExpForCausalLM,
+    Qwen4ExpForConditionalGeneration,
+    Qwen4ExpTextConfig,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     ZayaConfig,
     ZayaForCausalLM,
 )
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
+from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextPLELayer
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
-from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
-from src.models.structure import fp32_pinned_param_names
+from halo.checkpoint.config_export import restore_model_type
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
+from halo.models.param_roles import fp32_pinned_names
+from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
+    BAILING_LING_3_TINY,
     BAILING_MOE_LING_MINI,
+    BAILING_MOE_RING_MINI,
+    LAGUNA_XS_2_1,
     MISTRAL3_119B_MOE,
+    TINY_ALTERNATING_SLIDING_CONFIG,
+    TINY_BAILING_LING3_MLA_CONFIG,
     TINY_BAILING_MOE_CONFIG,
+    TINY_BAILING_RING_CONFIG,
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,
     TINY_GEMMA4_MOE_CONFIG,
     TINY_GEMMA4_VISION_CONFIG,
+    TINY_GEMMA4_WIDE_HEAD_CONFIG,
     TINY_GLM4_MOE_LITE_CONFIG,
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
     TINY_GPTOSS_CONFIG,
     TINY_INKLING_CONFIG,
+    TINY_INKLING_PP_OVERRIDES,
     TINY_INKLING_VISION_CONFIG,
     TINY_LAGUNA_CONFIG,
+    TINY_LAGUNA_PP_OVERRIDES,
     TINY_LFM2_MOE_CONFIG,
+    TINY_LLAMA4_TEXT_CONFIG,
+    TINY_LLAMA4_VISION_CONFIG,
+    TINY_MINIMAX_M3_CONFIG,
+    TINY_MINIMAX_M3_VISION_CONFIG,
     TINY_MISTRAL4_CONFIG,
+    TINY_MISTRAL_SLIDING_CONFIG,
+    TINY_MIXTRAL_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN3_NEXT_CONFIG,
+    TINY_QWEN3_VL_TEXT_CONFIG,
+    TINY_QWEN3_VL_VISION_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+    TINY_QWEN4_EXP_VISION_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
+    TINY_RADIO_VISION_CONFIG,
     TINY_SIGLIP2_VISION_CONFIG,
     TINY_SIGLIP_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
@@ -101,18 +165,23 @@ from tests.common.models import (
 # Multiple a tiny family checkpoint pads the tokenizer's vocab to, and the shard size it is saved at.
 VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
-# Seed ``randomize_tid2eid`` fills the hash table from unless a test pins its own.
 DSV4_TID2EID_SEED = 1234
-# The :data:`TINY_MOE_FAMILIES` whose transformers class pins parameters (not only buffers) in fp32
-# through ``_keep_in_fp32_modules_strict``.
+# Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
 PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
-# The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
+# A release's router bias: far from zero with a small spread, where bf16's spacing erases its differences. A bias near
+# zero survives the cast, so a lost fp32 pin would pass.
+RELEASE_BIAS_CENTER = 42.0
+RELEASE_BIAS_SPREAD = 0.1
+# Copied from a release so ``AutoTokenizer`` loads a synthetic checkpoint offline.
 TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
+CONTENT_ONLY_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }} {% endfor %}"
+# Shorter than the documents a packed test row carries, so it masks keys inside one.
+TINY_SLIDING_WINDOW = 3
 
 
 def padded_vocab_size(tokenizer) -> int:
-    """``tokenizer``'s vocab rounded up to :data:`VOCAB_PAD_MULTIPLE`, as a release pads it so a TP-sharded
-    embedding and head divide it."""
+    """``tokenizer``'s vocab rounded up to :data:`VOCAB_PAD_MULTIPLE`, as a release pads it so TP-sharded embedding and
+    head divide it."""
     return -(-len(tokenizer) // VOCAB_PAD_MULTIPLE) * VOCAB_PAD_MULTIPLE
 
 
@@ -123,8 +192,7 @@ class _WeightLeaf(torch.nn.Module):
 
 
 def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
-    """A module tree whose state dict is exactly ``paths`` (each ending in ``.weight``): the key space a
-    checkpoint-conversion or master-replay test maps disk keys onto, without a model behind it."""
+    """A module tree whose state dict is exactly ``paths``, each ending in ``.weight``, with no model behind it."""
     root = torch.nn.Module()
     for path in paths:
         parent = root
@@ -139,12 +207,17 @@ def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
     return root
 
 
-def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
-    """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with DISTINCT experts per token id.
+def config_only_module(config) -> torch.nn.Module:
+    """A bare module carrying ``config`` and nothing else: what a gate reading ``model.config`` and walking the tree
+    sees."""
+    module = torch.nn.Module()
+    module.config = config
+    return module
 
-    Random init leaves the table all-zero, and DeepEP dispatch and the EP wrapper's init guard both
-    require distinct top-k experts per token.
-    """
+
+def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
+    """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with distinct experts per token id; DeepEP dispatch and the EP
+    init guard require it."""
     gen = torch.Generator().manual_seed(seed)
     num_experts = model.config.n_routed_experts
     for layer in model.model.layers:
@@ -154,8 +227,34 @@ def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
             table.copy_(perm[:, : table.shape[1]])
 
 
+def fill_release_scale_bias(model, slot: str = "e_score_correction_bias", seed: int = 0) -> dict[str, torch.Tensor]:
+    """Fill every ``slot`` tensor at a release's scale in fp32 and return the values by name. Raises where the model
+    holds none, or where the cast the fixture exists to catch would merge no two of them."""
+    gen = torch.Generator().manual_seed(seed)
+    filled: dict[str, torch.Tensor] = {}
+    for name, tensor in model.state_dict(keep_vars=True).items():
+        if not name.endswith(slot):
+            continue
+        values = RELEASE_BIAS_CENTER + RELEASE_BIAS_SPREAD * torch.rand(
+            tensor.shape, generator=gen, dtype=torch.float32, device="cpu"
+        )
+        if values.to(torch.bfloat16).unique().numel() == values.unique().numel():
+            raise ValueError(
+                f"{name} keeps its values apart through a bf16 cast at this scale: it would test nothing."
+            )
+        owner, _, attr = name.rpartition(".")
+        module = model.get_submodule(owner)
+        if isinstance(tensor, torch.nn.Parameter):
+            tensor.data = values.clone()
+        else:
+            module.register_buffer(attr, values.clone(), persistent=attr not in module._non_persistent_buffers_set)
+        filled[name] = values
+    if not filled:
+        raise ValueError(f"{type(model).__name__} holds no {slot}.")
+    return filled
+
+
 def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
-    """Copy ``repo_id``'s tokenizer files into ``out_dir``, downloading only those, not the weights."""
     tokenizer_dir = Path(snapshot_download(repo_id, allow_patterns=[f"{p}*" for p in TOKENIZER_FILE_PREFIXES]))
     out_dir.mkdir(parents=True, exist_ok=True)
     for src in tokenizer_dir.iterdir():
@@ -163,9 +262,51 @@ def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
             shutil.copy2(src, out_dir / src.name)
 
 
+def word_level_tokenizer(words: Sequence[str] = ()) -> PreTrainedTokenizerFast:
+    """An offline whitespace tokenizer over ``<unk>``, ``<eos>`` (also its pad) and ``words``, for a checkpoint with no
+    release tokenizer."""
+    vocab = {"<unk>": 0, "<eos>": 1, **{word: index for index, word in enumerate(words, start=2)}}
+    backend = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
+
+
+def build_wide_head_gemma4_reward_checkpoint(path: str, words: Sequence[str], *, seed: int = 0) -> None:
+    """Save a random-init single-score Gemma 4 text classifier with wide global heads, as reward scorers load one. The
+    shape whose ``sdpa`` takes the wide-head SDPA pin and, on CUDA, the flex-sliding variant."""
+    tokenizer = word_level_tokenizer(words)
+    tokenizer.chat_template = CONTENT_ONLY_CHAT_TEMPLATE
+    torch.manual_seed(seed)
+    config = Gemma4TextConfig(
+        **TINY_GEMMA4_WIDE_HEAD_CONFIG,
+        layer_types=["sliding_attention", "full_attention"],
+        num_labels=1,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    Gemma4TextForSequenceClassification(config).save_pretrained(path)
+    tokenizer.save_pretrained(path)
+
+
+class UnknownHybridConfig(PretrainedConfig):
+    """A family transformers does not know and no toolkit list names, so a gate must read linear-attention layers off
+    its fields."""
+
+    model_type = "halo_unknown_hybrid"
+
+
+def unknown_hybrid_config() -> PretrainedConfig:
+    return UnknownHybridConfig(layer_types=["linear_attention", "full_attention"])
+
+
+def remote_config(repo: str, **overrides) -> PretrainedConfig:
+    """Release ``repo``'s config, built by its remote code once the shims restore names transformers 5 dropped."""
+    apply_remote_code_compat_shims()
+    return AutoConfig.from_pretrained(repo, trust_remote_code=True, **overrides)
+
+
 def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: int) -> None:
-    """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model (Qwen3-MoE with ``moe``) at ``tokenizer``'s
-    padded vocab, with that tokenizer, as a checkpoint the production loaders read. Rank 0 only."""
+    """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model at ``tokenizer``'s padded vocab, with that tokenizer.
+    Rank 0 only."""
     torch.manual_seed(seed)
     fields = {**TINY_TIED_QWEN3_CONFIG, "vocab_size": padded_vocab_size(tokenizer)}
     if moe:
@@ -177,12 +318,8 @@ def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: 
 
 
 def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
-    """Write a random-init :data:`TINY_MISTRAL4_CONFIG` model to ``out_dir`` and return the path.
-
-    The layout ``save_pretrained`` writes (``model.safetensors`` + ``config.json``), plus the release's
-    tokenizer files, so the lazy loader and ``load_distributed_model`` run end to end without the
-    119B download.
-    """
+    """Write a random-init :data:`TINY_MISTRAL4_CONFIG` model with the release's tokenizer, so loaders run end to end
+    with no 119B download."""
     copy_release_tokenizer(MISTRAL3_119B_MOE, out_dir)
     torch.manual_seed(seed)
     model = Mistral4ForCausalLM(Mistral4Config(**TINY_MISTRAL4_CONFIG)).to(torch.bfloat16)
@@ -192,25 +329,16 @@ def build_tiny_mistral4_checkpoint(out_dir: Path, seed: int = 0) -> Path:
 
 @dataclass(frozen=True)
 class TinyFamily:
-    """How to build one family's tiny model at a tokenizer's vocab, and how a server reloads it.
-
-    ``build`` takes the text-config overrides (vocab and special-token ids) and returns the random-init
-    model; ``load_class`` is the stock class ``from_pretrained`` reads its checkpoint back with.
-    ``ulysses_cp`` is False where Ulysses CP refuses the family at load (a sequence-axis mixer or
-    compressor it cannot shard, or an attention with no flash kernel). ``attention_targets`` names the
-    attention projections LoRA adapts where the checkpoint index cannot (hub key names that differ
-    from the module tree, or projections not spelled ``*_proj``). ``cp_attn_implementation`` is the
-    label a family loads with under CP where the auto-selected flash label is refused (remote code
-    declaring only the v4 flash flag; the Ulysses wrapper calls flash through its own probe).
-    """
+    """How to build one family's tiny model at a tokenizer's vocab, and how a server reloads it. ``ulysses_cp`` is
+    True where Ulysses CP admits the family at load. ``attention_targets`` names LoRA's projections where the
+    checkpoint index cannot."""
 
     build: Callable[[dict], PreTrainedModel]
     load_class: type = AutoModelForCausalLM
     trust_remote_code: bool = False
     text_overrides: dict = field(default_factory=dict)
-    ulysses_cp: bool = True
+    ulysses_cp: bool = False
     attention_targets: tuple[str, ...] = ()
-    cp_attn_implementation: str | None = None
 
 
 def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], PreTrainedModel]:
@@ -239,8 +367,8 @@ def _tiny_gemma4(overrides: dict) -> PreTrainedModel:
 
 
 def _tiny_zaya(overrides: dict) -> PreTrainedModel:
-    """Random init zeroes Zaya's per-KV-head key scale (``ZayaQKNorm.temp``), which zeroes every key and
-    with it every gradient into the query and key projections; a released checkpoint carries it learned."""
+    """Random init zeroes ``ZayaQKNorm.temp``, which zeroes every key and every gradient into q and k; a release
+    carries it learned."""
     model = ZayaForCausalLM(ZayaConfig(**{**TINY_ZAYA_CONFIG, **overrides}))
     for module in model.modules():
         if isinstance(module, ZayaQKNorm):
@@ -248,81 +376,107 @@ def _tiny_zaya(overrides: dict) -> PreTrainedModel:
     return model
 
 
-def _tiny_bailing(overrides: dict) -> PreTrainedModel:
-    """Bailing is remote code: its config and model classes come from the module the release ships,
-    which imports names transformers 5 dropped until the toolkit's shims restore them."""
-    apply_remote_code_compat_shims()
-    config = AutoConfig.from_pretrained(BAILING_MOE_LING_MINI, trust_remote_code=True)
-    for key, value in {**TINY_BAILING_MOE_CONFIG, **overrides}.items():
-        setattr(config, key, value)
-    return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
+    """Random init zeroes every PLE depthwise conv, and every gradient into it; a release carries it learned."""
+    for module in model.modules():
+        if isinstance(module, Qwen4ExpTextPLELayer):
+            torch.nn.init.normal_(module.conv1d.weight, std=model.config.get_text_config().initializer_range)
+    return model
 
 
-# One entry per EP MoE family (``src/distributed/expert_parallel/layers``), keyed by the ``model_type``
-# its tiny model carries, which the GPU suites take as ``--family``.
-# ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the keys to the EP registry, so a new
-# family without a tiny model fails there.
+def _with_release_scale_bias(build: Callable[[dict], PreTrainedModel]) -> Callable[[dict], PreTrainedModel]:
+    """Random init zeroes a router's bias, where a release's reaches 42: a row at zero never sees it lose precision."""
+
+    def build_filled(overrides: dict) -> PreTrainedModel:
+        model = build(overrides)
+        fill_release_scale_bias(model)
+        return model
+
+    return build_filled
+
+
+def _tiny_remote(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
+    """Remote code: the classes come from release ``repo``'s module, which needs the toolkit's shims to import."""
+
+    def build(overrides: dict) -> PreTrainedModel:
+        config = remote_config(repo)
+        for key, value in {**tiny, **overrides}.items():
+            setattr(config, key, value)
+        return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
+    return build
+
+
+# One entry per EP MoE family, keyed by ``model_type``. ``test_tiny_family_roster.py`` holds the keys to the EP
+# registry.
 TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "bailing_moe": TinyFamily(
-        _tiny_bailing,
+        _tiny_remote(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
         trust_remote_code=True,
+        ulysses_cp=True,
         attention_targets=("query_key_value", "dense"),
-        cp_attn_implementation="sdpa",
     ),
-    "cohere2_moe": TinyFamily(_causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG)),
+    "cohere2_moe": TinyFamily(
+        _causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG), ulysses_cp=True
+    ),
     # The CSA/HCA compressor and indexer pool token windows along the sequence.
-    "deepseek_v4": TinyFamily(_tiny_deepseek_v4, ulysses_cp=False, attention_targets=("q_a_proj", "o_b_proj")),
-    # Its attention is not one the Ulysses wrapper implements.
-    "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}, ulysses_cp=False),
-    # Its MLA head shapes have no flash kernel, so the auto-selected attention is sdpa.
+    "deepseek_v4": TinyFamily(_tiny_deepseek_v4, attention_targets=("q_a_proj", "o_b_proj")),
+    # Not an attention the Ulysses wrapper implements.
+    "gemma4_text": TinyFamily(_tiny_gemma4, text_overrides={"max_position_embeddings": 512}),
     "glm4_moe_lite": TinyFamily(
-        _causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG), ulysses_cp=False
+        _causal(Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG), ulysses_cp=True
     ),
     # KDA linear attention: a causal conv and a recurrent scan along the sequence.
     "glm5_next": TinyFamily(
         _composite(Glm5NextConfig, Glm5NextForConditionalGeneration, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
-    "gpt_oss": TinyFamily(_causal(GptOssConfig, GptOssForCausalLM, TINY_GPTOSS_CONFIG)),
+    "gpt_oss": TinyFamily(_causal(GptOssConfig, GptOssForCausalLM, TINY_GPTOSS_CONFIG), ulysses_cp=True),
     # A depthwise causal conv inside attention and around each sublayer.
     "inkling_text": TinyFamily(
         _causal(InklingTextConfig, InklingForCausalLM, TINY_INKLING_CONFIG),
         text_overrides={"max_position_embeddings": 512},
-        ulysses_cp=False,
     ),
     # Neither attention is one the Ulysses wrapper implements.
-    "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG), ulysses_cp=False),
-    "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG), ulysses_cp=False),
-    # No AutoModelForCausalLM entry for mistral4 in transformers 5.16.
+    "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG)),
+    "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG)),
+    # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
     "mistral4": TinyFamily(
-        _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG), load_class=Mistral4ForCausalLM
+        _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG),
+        load_class=Mistral4ForCausalLM,
+        ulysses_cp=True,
+    ),
+    # Mamba: a conv and a recurrent scan along the sequence. Its layers are ``mixer``, which no attention spelling names,
+    # and most hold Mamba's two projections.
+    "nemotron_h": TinyFamily(
+        _with_release_scale_bias(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG)),
+        attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
     ),
     # Gated DeltaNet layers: a conv and a recurrent scan along the sequence.
-    "qwen3_5_moe_text": TinyFamily(
-        _causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG), ulysses_cp=False
+    "qwen3_5_moe_text": TinyFamily(_causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG)),
+    "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG), ulysses_cp=True),
+    "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG)),
+    # Gated DeltaNet layers and the PLE conv along the sequence.
+    "qwen4_exp_text": TinyFamily(
+        lambda overrides: _with_live_ple_convs(
+            _causal(Qwen4ExpTextConfig, Qwen4ExpForCausalLM, TINY_QWEN4_EXP_CONFIG)(overrides)
+        ),
     ),
-    "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG)),
-    # Its attention is not one the Ulysses wrapper implements.
+    # Not an attention the Ulysses wrapper implements.
     "step3p7": TinyFamily(
         _composite(Step3p7Config, Step3p7ForConditionalGeneration, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
-    # The CCA projection convolves and shifts along the sequence; query, key and value all come out of
-    # it, so ``o_proj`` is the attention's one plain linear.
+    # The CCA projection convolves and shifts along the sequence and yields q, k and v, so ``o_proj`` is the one plain
+    # linear.
     "zaya": TinyFamily(
         _tiny_zaya,
         text_overrides={"max_position_embeddings": 512},
-        ulysses_cp=False,
         attention_targets=("o_proj",),
     ),
 }
-# The multimodal wrappers an EP family's text tower ships under, keyed by the wrapper's ``model_type``
-# (GLM-5 Next and Step-3.7 ship no text-only class, so their roster model above is already the
-# wrapper). A ``text_config`` names its ``model_type`` where the wrapper defaults to another family's
-# tower. ``tests/cpu/checkpoint/test_ep_hub_namespace_export.py`` holds the two rosters to every
-# multimodal ``model_type`` the EP registry claims.
+# The multimodal wrappers a text tower ships under, keyed by the wrapper's ``model_type``; GLM-5 Next and Step-3.7
+# above are already wrappers. ``test_ep_hub_namespace_export.py`` holds both rosters to the EP registry.
 TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "cohere2_vision": TinyFamily(
         _composite(
@@ -334,22 +488,27 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             alignment_intermediate_size=64,
         ),
         load_class=AutoModelForImageTextToText,
+        ulysses_cp=True,
     ),
     "gemma4": TinyFamily(
-        _composite(
+        lambda overrides: _composite(
             Gemma4Config,
             Gemma4ForConditionalGeneration,
             TINY_GEMMA4_MOE_CONFIG,
             TINY_GEMMA4_VISION_CONFIG,
             audio_config=None,
+        )(
+            # Its per-layer input table embeds the same ids as the main one, as in _tiny_gemma4.
+            {
+                **overrides,
+                "vocab_size_per_layer_input": overrides.get("vocab_size", TINY_GEMMA4_MOE_CONFIG["vocab_size"]),
+            }
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "inkling_mm_model": TinyFamily(
         _composite(InklingConfig, InklingForConditionalGeneration, TINY_INKLING_CONFIG, TINY_INKLING_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "lfm2_vl": TinyFamily(
         _composite(
@@ -360,7 +519,6 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             projector_hidden_size=64,
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
     ),
     "mistral3": TinyFamily(
         _composite(
@@ -372,26 +530,172 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
             tie_word_embeddings=TINY_MISTRAL4_CONFIG["tie_word_embeddings"],
         ),
         load_class=AutoModelForImageTextToText,
+        ulysses_cp=True,
+    ),
+    "nemotron_h_omni": TinyFamily(
+        _with_release_scale_bias(
+            _composite(
+                NemotronH_Omni_Reasoning_V3_Config,
+                NemotronH_Omni_Reasoning_V3,
+                TINY_NEMOTRON_H_CONFIG,
+                TINY_RADIO_VISION_CONFIG,
+                vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
+                projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
+                image_token_id=18,
+            )
+        ),
+        load_class=AutoModelForImageTextToText,
     ),
     "qwen3_5_moe": TinyFamily(
         _composite(
             Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration, TINY_QWEN35_MOE_CONFIG, TINY_QWEN35_VISION_CONFIG
         ),
         load_class=AutoModelForImageTextToText,
-        ulysses_cp=False,
+    ),
+    "qwen4_exp": TinyFamily(
+        lambda overrides: _with_live_ple_convs(
+            _composite(
+                Qwen4ExpConfig, Qwen4ExpForConditionalGeneration, TINY_QWEN4_EXP_CONFIG, TINY_QWEN4_EXP_VISION_CONFIG
+            )(overrides)
+        ),
+        load_class=AutoModelForImageTextToText,
     ),
 }
-# The dense model the family sweeps pair with the MoE roster.
-TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
-# The dense Qwen3.5 text model (gated DeltaNet and attention layers), which the MoE roster does not carry.
+# Overrides under which a tiny model splits into two pipeline stages on a layer_types period with a MoE layer on each,
+# over the vocabulary the shared packed rows draw from.
+TINY_PP_SPLIT_OVERRIDES = {
+    "glm4_moe_lite": {"num_hidden_layers": 4},
+    "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
+    "inkling_text": TINY_INKLING_PP_OVERRIDES,
+    "laguna": TINY_LAGUNA_PP_OVERRIDES,
+    "nemotron_h": {"vocab_size": 1024},
+    "qwen3_5_moe_text": {"num_hidden_layers": 8},
+}
+
+
+def _flex_wide_heads(family: TinyFamily) -> TinyFamily:
+    return replace(family, text_overrides={**family.text_overrides, "head_dim": FLEX_MIN_HEAD_DIM})
+
+
+# Sliding heads as wide as FlexAttention runs (the roster's 8 keeps SDPA): a CUDA load builds Gemma 4 on ``sdpa`` as
+# flex-sliding.
+TINY_GEMMA4_TEXT_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_FAMILIES["gemma4_text"])
+TINY_GEMMA4_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_VLM_FAMILIES["gemma4"])
+# A window on the config alone (Mistral), NoPE full layers (Cohere2), q/k norm over the whole projection (OLMo 3).
+TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
+    "cohere2": TinyFamily(_causal(Cohere2Config, Cohere2ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
+    "mistral": TinyFamily(_causal(MistralConfig, MistralForCausalLM, TINY_MISTRAL_SLIDING_CONFIG)),
+    "olmo3": TinyFamily(_causal(Olmo3Config, Olmo3ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
+}
+TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG), ulysses_cp=True)
+# Gated DeltaNet and attention layers, which the MoE roster does not carry.
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
-# The dense roster, keyed as the dense rows name it (``--family``).
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
+# Ring-mini-linear-2.0: the Bailing family's other attention layout (Lightning Attention-2 beside softmax).
+TINY_BAILING_RING_FAMILY = TinyFamily(
+    _tiny_remote(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
+    trust_remote_code=True,
+    attention_targets=("query_key_value", "dense"),
+)
+# Laguna's pinned hub file, which the Laguna recipes load, where the roster's entry builds the in-library classes.
+TINY_LAGUNA_REMOTE_FAMILY = TinyFamily(_tiny_remote(LAGUNA_XS_2_1, TINY_LAGUNA_CONFIG), trust_remote_code=True)
+# Nemotron 3.5 Lightning's shape: no latent, so the wire and the experts run at the hidden state's width.
+TINY_NEMOTRON_H_NO_LATENT_FAMILY = TinyFamily(
+    _with_release_scale_bias(
+        _causal(NemotronHConfig, NemotronHForCausalLM, {**TINY_NEMOTRON_H_CONFIG, "moe_latent_size": None})
+    ),
+    attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
+)
+# Ling-3.0's MLA attention without its KDA layers, at the same shape.
+TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
+    _tiny_remote(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True
+)
+TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
+# A composite no family spec claims, so no EP layer wraps it, built on the classes the pinned transformers ships.
+TINY_UNWRAPPED_COMPOSITE_FAMILIES: dict[str, TinyFamily] = {
+    "minimax_m3_vl": TinyFamily(
+        _composite(
+            MiniMaxM3VLConfig,
+            MiniMaxM3SparseForConditionalGeneration,
+            TINY_MINIMAX_M3_CONFIG,
+            TINY_MINIMAX_M3_VISION_CONFIG,
+            projector_hidden_size=TINY_MINIMAX_M3_CONFIG["hidden_size"],
+        ),
+        load_class=AutoModelForImageTextToText,
+    ),
+}
+# A dense composite holding ``language_model`` at its root and embedding in its own forward.
+TINY_LLAMA4_FAMILY = TinyFamily(
+    _composite(Llama4Config, Llama4ForConditionalGeneration, TINY_LLAMA4_TEXT_CONFIG, TINY_LLAMA4_VISION_CONFIG),
+    load_class=AutoModelForImageTextToText,
+)
+# Its own text attention class behind a multimodal backbone.
+TINY_QWEN3_VL_FAMILY = TinyFamily(
+    _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),
+    load_class=AutoModelForImageTextToText,
+    ulysses_cp=True,
+)
+
+# A vision block tapped for the text layers, as Qwen3-VL's releases are: the tap reads a checkpointed block's output.
+TINY_QWEN3_VL_DEEPSTACK_FAMILY = TinyFamily(
+    _composite(
+        Qwen3VLConfig,
+        Qwen3VLForConditionalGeneration,
+        TINY_QWEN3_VL_TEXT_CONFIG,
+        {**TINY_QWEN3_VL_VISION_CONFIG, "deepstack_visual_indexes": [0]},
+    ),
+    load_class=AutoModelForImageTextToText,
+)
+# The dense Qwen3.5 text tower behind the same vision tower as its MoE sibling.
+TINY_QWEN3_5_COMPOSITE_FAMILY = TinyFamily(
+    _composite(
+        Qwen3_5Config,
+        Qwen3_5ForConditionalGeneration,
+        TINY_QWEN35_CONFIG,
+        {**TINY_QWEN35_VISION_CONFIG, "out_hidden_size": TINY_QWEN35_CONFIG["hidden_size"]},
+    ),
+    load_class=AutoModelForImageTextToText,
+)
+
+# Past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level window (Mistral), Gemma 2's softcaps
+# over alternating sliding layers, and Gemma 3's layer types at the 256-wide head FA4 runs on its dedicated kernel.
+TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
+    "llama": TinyFamily(_causal(LlamaConfig, LlamaForCausalLM, TINY_QWEN3_CONFIG)),
+    "mistral": TinyFamily(
+        _causal(MistralConfig, MistralForCausalLM, {**TINY_QWEN3_CONFIG, "sliding_window": TINY_SLIDING_WINDOW})
+    ),
+    "qwen2": TinyFamily(_causal(Qwen2Config, Qwen2ForCausalLM, TINY_QWEN3_CONFIG)),
+    "gemma2": TinyFamily(
+        _causal(
+            Gemma2Config,
+            Gemma2ForCausalLM,
+            {
+                **TINY_QWEN3_CONFIG,
+                "attn_logit_softcapping": 50.0,
+                "final_logit_softcapping": 30.0,
+                "sliding_window": TINY_SLIDING_WINDOW,
+            },
+        )
+    ),
+    "gemma3_text": TinyFamily(
+        _causal(
+            Gemma3TextConfig,
+            Gemma3ForCausalLM,
+            {
+                **TINY_QWEN3_CONFIG,
+                "head_dim": 256,
+                "layer_types": ["sliding_attention", "full_attention"] * (TINY_QWEN3_CONFIG["num_hidden_layers"] // 2),
+                "sliding_window": TINY_SLIDING_WINDOW,
+            },
+        )
+    ),
+}
+# Past that roster: no window, no softcap, and a head width of its own that the FA4 parity row sets.
+TINY_GEMMA_FAMILY = TinyFamily(_causal(GemmaConfig, GemmaForCausalLM, TINY_QWEN3_CONFIG))
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:
-    """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when one
-    is given and at the tiny config's own otherwise. ``overrides`` sets further text-config fields."""
+    """``family``'s random-init tiny model (fp32, seeded by the caller), at ``tokenizer``'s vocab when given."""
     overrides = {**family.text_overrides, **(overrides or {})}
     if tokenizer is not None:
         overrides |= {
@@ -410,27 +714,28 @@ def build_tiny_family_checkpoint(
     *,
     fp32_pins: bool = False,
     edit: Callable[[PreTrainedModel], None] | None = None,
+    overrides: dict | None = None,
 ) -> None:
-    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
-    the production loaders read. Rank 0 only.
-
-    Sharded, so the checkpoint carries the index a family's attention projection names are read from
-    (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
-    own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
-    at full fp32 precision, as a release does, rather than rounded through bf16. ``edit`` changes the
-    random-init model before it is saved (a test pinning its routing, say).
-    """
+    """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab as a checkpoint the production loaders read. Rank 0
+    only. Sharded, so it carries the index attention names are read from. ``fp32_pins`` stores pinned tensors at full
+    fp32, as a release does."""
     torch.manual_seed(seed)
-    model = tiny_family_model(family, tokenizer)
+    model = tiny_family_model(family, tokenizer, overrides=overrides)
     if edit is not None:
         edit(model)
-    pinned = fp32_pinned_param_names(model) if fp32_pins else frozenset()
-    stored = {name: param.detach().clone() for name, param in model.named_parameters() if name in pinned}
+    pinned = fp32_pinned_names(model, include_buffers=True) if fp32_pins else frozenset()
+    stored = {
+        name: tensor.detach().clone() for name, tensor in model.state_dict(keep_vars=True).items() if name in pinned
+    }
     model.to(torch.bfloat16)
-    for name, param in model.named_parameters():
+    for name, tensor in model.state_dict(keep_vars=True).items():
         if name in stored:
-            param.data = stored[name]
+            tensor.data = stored[name]
+    # Past transformers' gate to global rank 0: a multi-node launch's save rank on each machine builds its own copy.
+    model.should_save_on_this_rank = lambda is_main_process: is_main_process
     model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
+    # As a real export does, or a vendor config leaving the class attribute unset reloads family-less.
+    restore_model_type(model.config, target_dir)
     if tokenizer is not None:
         tokenizer.save_pretrained(target_dir)
 
@@ -444,13 +749,16 @@ def shared_tiny_family_checkpoint(
     *,
     fp32_pins: bool = False,
     edit: Callable[[PreTrainedModel], None] | None = None,
+    overrides: dict | None = None,
 ) -> str:
-    """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``, returned: rank 0
-    builds it (removing it at teardown) and every rank waits for it. Collective."""
+    """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``; rank 0 builds it and every rank
+    waits. Collective."""
     path = shared_scratch_dir(name)
     if ctx.rank == 0:
         shutil.rmtree(path, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(path, ignore_errors=True))
-        build_tiny_family_checkpoint(family, path, tokenizer, seed, fp32_pins=fp32_pins, edit=edit)
+        build_tiny_family_checkpoint(
+            family, path, tokenizer, seed, fp32_pins=fp32_pins, edit=edit, overrides=overrides
+        )
     ctx.barrier()
     return path

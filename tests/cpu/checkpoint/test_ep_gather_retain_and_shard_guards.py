@@ -1,24 +1,6 @@
 #!/usr/bin/env python
-"""CPU tests for the EP whole-layer gather's retain gate and for the sharded-save expert-LoRA guard.
-
-- ``gather_ep_layer_weights(..., retain=False)``: every rank must enter the SAME collectives (the
-  family gather, and ``full_tensor()`` on each replicated DTensor) while only the save rank keeps the
-  result. Without the gate every rank materializes a full host copy of the layer, taking per-node CPU
-  peak to ``local_ranks`` x one gathered layer.
-- ``retain`` reaches INSIDE the family gather: the expert all-gathers stay on every rank, but the
-  layout assembly that follows them — the per-expert split, the transpose + ``contiguous``, the host
-  copy — must not run off the writer. That assembly is the tens of GB per layer at 397B, paid on 511
-  of 512 ranks per checkpoint. A family that ignores the flag is rejected rather than obeyed.
-- The gather exports PERSISTENT buffers only: the sharded save writes persistent buffers alone, so a
-  non-persistent buffer here breaks the "merged-from-sharded == gathered" invariant the merge
-  transforms are built around.
-- ``save_sharded_ep=True`` + native expert LoRA: the shard key set comes from ``expert_named_params()``,
-  which includes ``<attr>_lora_A/_lora_B``, so those are written as ``.shard_N`` keys that
-  ``merge_ep_shards.py``'s base-root pattern never matches — they pass through dead while the merged
-  experts are the frozen base. Must be rejected up front.
-
-Run: pytest tests/cpu/checkpoint/test_ep_gather_retain_and_shard_guards.py
-"""
+"""The EP whole-layer gather's retain gate and the sharded-save expert-LoRA guard. Every rank enters the same
+collectives while only the save rank assembles; off the writer that assembly is tens of GB per layer at 397B."""
 
 from types import SimpleNamespace
 
@@ -26,15 +8,17 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.checkpoint.ep_save import _check_ep_sharded_save_supported
-from src.distributed.expert_parallel import expert_gather
-from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
+from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
+from halo.distributed.expert_parallel.moe_layer import gather as expert_gather
+from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from halo.models.moe.expert_lora_spec import EXPERT_LORA_SUFFIXES
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.runtime import collectives
 from tests.common.ep_stubs import StubEPLayerBase
 
 
 class _StubEPLayer(StubEPLayerBase):
-    """Minimal EP layer: one gathered expert tensor, one replicated router param, one persistent and
-    one non-persistent buffer. Records every gather call so the collective count can be asserted."""
+    """Records every gather call so the collective count can be asserted."""
 
     def __init__(self, *, expert_lora: bool = False):
         super().__init__()
@@ -54,18 +38,14 @@ class _StubEPLayer(StubEPLayerBase):
             ]
         return base
 
-    def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
+    def gather_expert_state_dict(self, *, device="cpu", merge_lora: bool = False, retain: bool = True) -> dict:
         self.gather_calls.append(retain)
         return {"experts.gate_up_proj": torch.zeros(4, 4, 6, device=device)} if retain else {}
-
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
 
 
 def test_retain_true_returns_the_whole_layer():
     layer = _StubEPLayer()
-    gathered = gather_ep_layer_weights("model.layers.0.mlp", layer, retain=True)
+    gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=True)
     assert set(gathered) == {
         "model.layers.0.mlp.experts.gate_up_proj",
         "model.layers.0.mlp.router.weight",
@@ -74,20 +54,43 @@ def test_retain_true_returns_the_whole_layer():
 
 
 def test_retain_false_runs_the_gather_but_keeps_nothing():
-    """Non-save ranks must still enter the family gather (a collective) yet assemble nothing."""
+    """Non-save ranks still enter the collective yet assemble nothing."""
     layer = _StubEPLayer()
-    gathered = gather_ep_layer_weights("model.layers.0.mlp", layer, retain=False)
+    gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=False)
     assert gathered == {}
     assert layer.gather_calls == [False], (
         "the expert gather is a collective — it must run on every rank, and the flag must reach it"
     )
 
 
-def test_gather_exports_persistent_buffers_only():
-    """The sharded save writes persistent buffers only; exporting a rotary cache here would break the
-    merged-from-sharded == gathered invariant."""
+class _ReverseOrderedSet(frozenset):
+    """Iterates in the one order a sorted reader cannot produce, where a real frozenset's order is per-process."""
+
+    def __iter__(self):
+        return iter(sorted(frozenset.__iter__(self), reverse=True))
+
+
+def test_expert_adapters_list_in_one_order_on_every_rank():
+    """The readers' order reaches any collective a later consumer runs over them, and a rank-dependent one hangs it."""
     layer = _StubEPLayer()
-    gathered = gather_ep_layer_weights("model.layers.0.mlp", layer, retain=True)
+    attrs = ("down_proj", "gate_up_proj")
+    layer._expert_lora_attrs = _ReverseOrderedSet(attrs)
+    for attr in attrs:
+        for suffix in EXPERT_LORA_SUFFIXES:
+            setattr(layer, f"{attr}{suffix}", nn.Parameter(torch.zeros(2, 4, 4)))
+
+    assert [name for name, _ in layer.expert_lora_named_params()] == [
+        "down_proj_lora_A",
+        "down_proj_lora_B",
+        "gate_up_proj_lora_A",
+        "gate_up_proj_lora_B",
+    ]
+
+
+def test_gather_exports_persistent_buffers_only():
+    """Exporting a rotary cache here would break merged-from-sharded == gathered."""
+    layer = _StubEPLayer()
+    gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=True)
     assert "model.layers.0.mlp.expert_bias" in gathered
     assert "model.layers.0.mlp.rotary_cache" not in gathered
 
@@ -98,9 +101,6 @@ EP_GROUP = "fake-dispatch-ep-group"
 
 
 class _FusedGatherLayer(StubEPLayerBase):
-    """Fused-GLU expert shards over a ``EP_SIZE``-rank dispatch group, gathered by the REAL base
-    methods — the path every family without a gather override takes."""
-
     def __init__(self):
         super().__init__()
         self.expert_tp_size = 1
@@ -111,25 +111,15 @@ class _FusedGatherLayer(StubEPLayerBase):
 
 
 class _PerExpertGatherLayer(_FusedGatherLayer):
-    """Same shards, split into the per-expert hub layout by the base gather (GLM-4 / LFM-2 shape)."""
-
-    _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
-
-
-class _IgnoresRetainLayer(_FusedGatherLayer):
-    """A family whose gather assembles regardless of the flag — the regression the caller must catch."""
-
-    def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
-        return super().gather_expert_state_dict(device, merge_lora=merge_lora, retain=True)
-
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
+    FAMILY = MoEFamilySpec(
+        model_types=(),
+        expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, ("gate_proj", "up_proj", "down_proj")),
+    )
 
 
 @pytest.fixture
 def ep_group(monkeypatch):
-    """Emulate the ``EP_SIZE``-rank expert-axis all-gather, counting every entry."""
+    """Emulates the ``EP_SIZE``-rank expert-axis all-gather."""
     calls: list[tuple[int, ...]] = []
 
     def fake_all_gather_into_tensor(output, tensor, group=None):
@@ -139,12 +129,11 @@ def ep_group(monkeypatch):
         for rank in range(EP_SIZE):
             output[rank * rows : (rank + 1) * rows].copy_(tensor)
 
-    monkeypatch.setattr(expert_gather.dist, "all_gather_into_tensor", fake_all_gather_into_tensor)
+    monkeypatch.setattr(collectives.dist, "all_gather_into_tensor", fake_all_gather_into_tensor)
     return calls
 
 
 def test_family_gather_assembles_only_on_the_retaining_rank(ep_group):
-    """The writer gets the full expert tensors; every other rank gets nothing to hold."""
     layer = _FusedGatherLayer()
     retained = layer.gather_expert_state_dict(device="cpu", retain=True)
     assert {key: tuple(t.shape) for key, t in retained.items()} == {
@@ -155,7 +144,7 @@ def test_family_gather_assembles_only_on_the_retaining_rank(ep_group):
 
 
 def test_non_retaining_rank_enters_every_expert_collective(ep_group):
-    """The all-gathers are group-wide: a rank that skipped one would hang the peers still in it."""
+    """A rank that skipped one would hang the peers still in it."""
     layer = _FusedGatherLayer()
     layer.gather_expert_state_dict(device="cpu", retain=True)
     retaining = list(ep_group)
@@ -165,16 +154,15 @@ def test_non_retaining_rank_enters_every_expert_collective(ep_group):
 
 
 def test_per_expert_split_never_runs_off_the_writer(ep_group, monkeypatch):
-    """The per-expert split is the allocation — one fresh contiguous tensor per expert per projection.
-    Skipping it is the whole point of the gate, so it must not run when nothing is retained."""
+    """The per-expert split is the allocation: one fresh contiguous tensor per expert per projection."""
     splits = []
-    real_split = expert_gather.EPExpertGatherMixin._unfuse_fused_to_per_expert.__func__
+    real_layout = expert_gather.to_hub_expert_tensors
 
-    def counting_split(cls, fused):
-        splits.append(len(fused))
-        return real_split(cls, fused)
+    def counting_layout(layout, tensors, *, device):
+        splits.append(len(tensors))
+        return real_layout(layout, tensors, device=device)
 
-    monkeypatch.setattr(expert_gather.EPExpertGatherMixin, "_unfuse_fused_to_per_expert", classmethod(counting_split))
+    monkeypatch.setattr(expert_gather, "to_hub_expert_tensors", counting_layout)
     layer = _PerExpertGatherLayer()
 
     assert layer.gather_expert_state_dict(device="cpu", retain=False) == {}
@@ -185,20 +173,8 @@ def test_per_expert_split_never_runs_off_the_writer(ep_group, monkeypatch):
     assert len(retained) == LOCAL_EXPERTS * EP_SIZE * 3
 
 
-def test_layer_gather_rejects_a_family_that_ignores_retain(ep_group):
-    """Silently keeping the tensors would put a whole gathered layer on every non-writing rank —
-    the memory the flag exists to avoid, with nothing in the logs."""
-    with pytest.raises(RuntimeError, match="ignored retain=False"):
-        gather_ep_layer_weights("model.layers.0.mlp", _IgnoresRetainLayer(), retain=False)
-
-
-def _ep_layers(layer):
-    ep_cfg = SimpleNamespace(expert_tp_size=1, ep_group_size=8, num_ep_groups=1)
-    layer.ep_config = ep_cfg
-    return [("model.layers.0.mlp", layer)]
-
-
 def _model_with(layer) -> nn.Module:
+    layer.ep_config = SimpleNamespace(expert_tp_size=1, ep_group_size=8, num_ep_groups=1)
     root = nn.Module()
     root.config = SimpleNamespace(model_type="gpt_oss", auto_map=None)
     root.mlp = layer
@@ -206,49 +182,40 @@ def _model_with(layer) -> nn.Module:
 
 
 def test_sharded_save_rejects_native_expert_lora(monkeypatch):
-    """The adapter shards are written under keys merge_ep_shards.py never reads, so the merged experts
-    would be the frozen base — reject before training instead of after."""
+    """``merge_ep_shards.py`` never reads the adapter shard keys, so the merged experts would be the frozen base."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=True)
     with pytest.raises(ValueError, match="expert LoRA"):
-        _check_ep_sharded_save_supported(_model_with(layer), _ep_layers(layer), world_size=8)
+        reject_unmergeable_ep_sharded_save(_model_with(layer), world_size=8)
 
 
 def test_sharded_save_allowed_without_expert_lora(monkeypatch):
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    _check_ep_sharded_save_supported(_model_with(layer), _ep_layers(layer), world_size=8)
+    reject_unmergeable_ep_sharded_save(_model_with(layer), world_size=8)
 
 
 def test_sharded_save_rejects_multiple_ep_groups(monkeypatch):
-    """Several EP groups = DP replicas, each holding the SAME experts, so the shards merge with
-    every expert duplicated. Only a single group spanning the world is mergeable."""
+    """EP groups are DP replicas holding the same experts, so the shards merge duplicated."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    ep_layers = _ep_layers(layer)
+    model = _model_with(layer)
     layer.ep_config.ep_group_size = 4
     layer.ep_config.num_ep_groups = 2
     with pytest.raises(ValueError, match="ep_group_size"):
-        _check_ep_sharded_save_supported(_model_with(layer), ep_layers, world_size=8)
+        reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 @pytest.mark.parametrize("field", ("ep_group_size", "expert_tp_size"))
 def test_topology_guards_do_not_pass_on_a_config_that_never_declared_the_field(monkeypatch, field):
-    """Neither topology guard may fall back to the value that makes it pass.
-
-    ``getattr(ep_cfg, "ep_group_size", world_size)`` / ``getattr(ep_cfg, "expert_tp_size", 1)``
-    substitute exactly the value the very next comparison accepts, so anything that is not a
-    finalized ``EPConfig`` clears both checks VACUOUSLY — the sharded save would then run on a
-    topology nothing validated and merge duplicated or expert-TP-split experts. ``EPConfig`` sets
-    both fields unconditionally, so this is unreachable through the production path today; the
-    point is that the guards must not be able to reach a pass verdict without reading the topology.
-    """
+    """``getattr(ep_cfg, "ep_group_size", world_size)`` substitutes the value the comparison accepts, clearing both
+    checks vacuously."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     layer = _StubEPLayer(expert_lora=False)
-    ep_layers = _ep_layers(layer)
+    model = _model_with(layer)
     delattr(layer.ep_config, field)
     with pytest.raises(AttributeError, match=field):
-        _check_ep_sharded_save_supported(_model_with(layer), ep_layers, world_size=8)
+        reject_unmergeable_ep_sharded_save(model, world_size=8)
 
 
 if __name__ == "__main__":

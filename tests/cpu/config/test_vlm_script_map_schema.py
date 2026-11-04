@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""The raw-VLM data paths of the training scripts keep mixed-modality rows as the row processor emits them.
-
-An image row and a text-only row infer different Arrow types for the mapped ``history`` content, so
-a ``num_proc > 1`` map whose shards split the modalities either fails to align them or coerces every
-image part into the text-part struct (``{"type": "image", "text": None}``) — unless the map pins
-``vlm_map_features``. Each script path that maps raw VLM rows with no extra kept column is driven
-here end to end through ``prepare_vlm_dataset``.
-
-Run: pytest tests/cpu/config/test_vlm_script_map_schema.py
-"""
+"""The raw-VLM prepare step keeps mixed-modality rows as the row processor emits them. Image and text rows infer
+different Arrow types for ``history``, so a ``num_proc > 1`` map either fails to align them or coerces image
+parts into the text-part struct unless it pins ``vlm_map_features``."""
 
 from types import SimpleNamespace
 from unittest import mock
@@ -18,7 +11,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 from PIL import Image
 
-from tests.common.utils import load_script_module
+from halo.entrypoints.data_setup import prepare_raw_vlm_split
 
 _ROWS_PER_MODALITY = 4
 
@@ -67,29 +60,14 @@ def _training_config() -> SimpleNamespace:
     )
 
 
-def _sft_vlm_path(ds):
-    module = load_script_module("scripts/training/sft.py", "halo_test_vlm_schema_sft")
-    with mock.patch.object(module, "VLMDataCollator"):
-        train, test, _, _ = module._prepare_vlm_data(
-            ds, False, _args(), _training_config(), None, _Processor(), _Tokenizer(), None
+def test_raw_vlm_map_keeps_mixed_modality_rows_intact():
+    ds = DatasetDict({"train": _mixed_split(), "test": _mixed_split()})
+    training_config = _training_config()
+    with mock.patch("halo.entrypoints.data_setup.VLMDataCollator"):
+        train, test, _ = prepare_raw_vlm_split(
+            ds, _args(), training_config, _Processor(), _Tokenizer(), None, desc="Processing VLM dataset"
         )
-    return train, test
-
-
-def _teacher_distill_vlm_path(ds):
-    module = load_script_module(
-        "scripts/training/distillation/teacher_distill.py", "halo_test_vlm_schema_teacher_distill"
-    )
-    with mock.patch.object(module, "VLMDataCollator"):
-        train, test, _ = module._prepare_vlm_distill_data(
-            ds, _args(), _training_config(), _Processor(), _Tokenizer(), None
-        )
-    return train, test
-
-
-@pytest.mark.parametrize("prepare", [_sft_vlm_path, _teacher_distill_vlm_path], ids=["sft", "teacher_distill"])
-def test_raw_vlm_map_keeps_mixed_modality_rows_intact(prepare):
-    train, test = prepare(DatasetDict({"train": _mixed_split(), "test": _mixed_split()}))
+    assert training_config.remove_unused_columns is False, "the mapped columns would be stripped before the collator"
     for split in (train, test):
         assert len(split) == 2 * _ROWS_PER_MODALITY
         image_row, text_row = split[0], split[-1]

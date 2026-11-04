@@ -1,20 +1,6 @@
 #!/usr/bin/env python
-"""A ragged eval batch must fail env-GRPO on EVERY rank, never on the subset that received it.
-
-``_stamp_group_efforts`` refuses a context count that is not a whole number of generation groups.
-Train mode cannot produce one (the loader gate rejects the shape at construction), but eval can:
-``dataloader_drop_last`` defaults to ``False``, so the final eval batch is split unevenly and the
-remainder lands on a SUBSET of the DP ranks. A rank-local raise there leaves its peers in the
-batch fence's gather (``BatchBuildFence.reject``) until ``DIST_NCCL_TIMEOUT_MINUTES``, with the explaining
-traceback only on the ranks that died — at 512 GPUs, 500 NCCL timeouts and 12 real tracebacks.
-
-Proven on a real 2-rank gloo group with an asymmetric batch, so the regression manifests as the hang
-it is: rank 1 can only be told the cause if rank 0 reached the gather instead of raising out of it.
-The group timeout and the join are both bounded, so a regression fails this suite rather than
-wedging it.
-
-    python tests/cpu/grpo/test_env_ragged_eval_batch_uniform_raise.py
-"""
+"""A ragged eval batch must fail env-GRPO on every rank. A rank-local raise on the ranks that got the remainder leaves
+their peers in the batch fence's gather (``BatchBuildFence.reject``) until ``DIST_NCCL_TIMEOUT_MINUTES``."""
 
 from __future__ import annotations
 
@@ -24,20 +10,19 @@ import types
 
 import pytest
 
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 NUM_GENERATIONS_EVAL = 2
 
-# A stuck rank must surface as a failed assertion, not a wedged worker: gloo aborts the blocked
-# collective at the group timeout and the runner's join deadline covers the process itself. The group
-# timeout is far above the work it bounds, because the suite runs 8-way under xdist.
+# Far above the work it bounds, because the suite runs 8-way under xdist. Gloo aborts a blocked collective at this
+# timeout, so a stuck rank surfaces as a failed assertion.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
 
 
 def _eval_trainer():
-    """Minimal stand-in exposing exactly what the batch-build path reads, in EVAL mode."""
     host = types.SimpleNamespace(
         _group_random_effort=True,
         _batch_errors=BatchBuildFence(),
@@ -52,9 +37,7 @@ def _eval_trainer():
 
 
 def _worker(rank: int, tmp_dir: str, ragged: bool) -> None:
-    """One rank of the batch build. Writes its verdict to a file — the failure under test is a rank
-    that never returns at all, so an exception here cannot be the signal."""
-    # The ragged tail: rank 0 gets an odd row count, its peer a whole number of groups.
+    """Writes its verdict to a file: the failure under test is a rank that never returns."""
     rows = 3 if (ragged and rank == 0) else 4
     host = _eval_trainer()
     try:
@@ -77,13 +60,8 @@ def _run_ranks(tmp_path, ragged: bool) -> dict[int, str]:
 
 
 def test_a_ragged_eval_tail_raises_on_every_rank(tmp_path):
-    """Rank 0's eval batch does not divide by ``num_generations_eval``, rank 1's does.
-
-    Rank 1 reaching the error is the whole proof — it can only get there if rank 0 recorded the
-    failure and still entered the gather. Raising rank-locally instead leaves rank 1 blocked in that
-    gather until the watchdog. Every rank names the failing rank and its cause, so the healthy rank's
-    traceback is as useful as the offending one's.
-    """
+    """Rank 1 can only reach the error if rank 0 recorded the failure and still entered the gather. Every rank names
+    the failing rank and its cause."""
     results = _run_ranks(tmp_path, ragged=True)
 
     for rank, result in results.items():
@@ -94,7 +72,6 @@ def test_a_ragged_eval_tail_raises_on_every_rank(tmp_path):
 
 
 def test_an_aligned_eval_batch_still_stamps_and_returns(tmp_path):
-    """Anti-vacuity: the uniform raise must not fire on a batch that divides evenly on both ranks."""
     assert _run_ranks(tmp_path, ragged=False) == {0: "NO RAISE", 1: "NO RAISE"}
 
 

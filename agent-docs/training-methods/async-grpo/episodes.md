@@ -2,33 +2,25 @@
 
 An episode is one multi-turn conversation: the engine samples an assistant turn, the environment answers it, and the
 loop runs until a final answer, `max_turns`, or a spent budget. Knobs are top-level
-[`AsyncTrainingConfig`](../../reference/configuration-reference.md#asynctrainingconfig) fields except
+[`AsyncRolloutConfig`](../../reference/configuration-reference.md#asyncrolloutconfig) fields except
 `carry_reasoning`, `max_length_cutoff_recoveries` and `length_cutoff_penalty` (`environment_kwargs`), `max_turns`
 (`EnvironmentConfig`), and `max_prompt_length`, `chat_template` and `force_chat_template` (script arguments).
 Reasoning budgets have [their own page](reasoning.md).
 
 ## Sampling
 
-| Knob | Default | Effect |
-|---|---|---|
-| `rollout_temperature` | `0.7` | sampling temperature |
-| `rollout_top_p` | `0.95` | in `(0, 1]` |
-| `rollout_top_k` | `-1` (off) | `-1` or ≥ 1; `0` is refused, since SGLang rejects it |
-| `rollout_min_p` | `0` (off) | in `[0, 1]`; vLLM rejects every request with `min_p > 0` on a server running speculative decoding (MTP) |
-| `rollout_repetition_penalty` | `1` (off) | in `(0, 2]`; another value is refused at startup under a sequence-level ratio (`isr_geo_band_*`, `isr_opsm_delta`; [Trust region masks](objective.md#trust-region-masks)), since the trainer's recomputed log-probs omit it |
-
+`rollout_temperature`, `rollout_top_p`, `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` set the
+engine's sampling; their ranges, and the cuts refused under a sequence-level ratio
+([Trust region masks](objective.md#trust-region-masks)), are in [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 Rollout and eval requests send all five, so the model's `generation_config.json` defaults never apply. TRL's own
 sampling fields reach no sampler and are refused when set ([Rollout backend](setup.md#rollout-backend)).
 
 ## Trajectory length
 
-| Knob | Default | Effect |
-|---|---|---|
-| `rollout_max_tokens` | `32768` | caps **one turn**, reasoning and answer together |
-| `max_turns` | `null`: the environment class's own (15 on `code_contests` / `codeforces`, 20 on `swe`, 8 on `exam_qa`, 10 elsewhere) | an episode that burns them ends truncated |
-| `rollout_max_episode_tokens` | `null`: `max_turns × rollout_max_tokens` | caps what an **episode's** assistant turns sample together, recovery turns included; at least `rollout_max_tokens` |
-| `max_prompt_length` | `null` | drops dataset rows whose rendered prompt exceeds it |
-| `max_train_row_tokens` | `null`: no cap beyond the context check | memory bound on a training row; must exceed `rollout_max_tokens` |
+`rollout_max_tokens` caps **one turn**, reasoning and answer together, and `rollout_max_episode_tokens` what an
+**episode's** assistant turns sample together, recovery turns included; an episode that burns its `max_turns`
+([per environment](environments/README.md#registry)) ends truncated. `max_prompt_length` drops dataset rows whose
+rendered prompt exceeds it, and `max_train_row_tokens` bounds a training row's memory.
 
 ### Episode output budget
 
@@ -44,7 +36,15 @@ sampling fields reach no sampler and are refused when set ([Rollout backend](set
 
 The trajectory is **never truncated**: a row over the model's context window raises on every rank together. The
 startup check warns when the worst-case episode overflows the served window
-([Rollout backend](setup.md#rollout-backend)); size `rollout_max_episode_tokens` so it fits.
+([Rollout backend](setup.md#rollout-backend)); size `rollout_max_episode_tokens` so it fits. The check counts the
+environment's system prompt and tool schema as the chat template renders them, and a template that cannot render
+that preamble fails the run at startup.
+
+An episode that grows past the served window closes on what it earned, as in an [eval](evaluation.md), so the longest
+failures keep their row and reward; `episode/context_overflow` counts them. SGLang refuses any request whose prompt plus
+`max_tokens` passes the window where vLLM clamps `max_tokens`, so there such an episode ends up to `rollout_max_tokens`
+earlier. Under `train_on_sampled_tokens: false` its whole render can pass the window, ending on a tool result no engine
+served, and the episode then leaves the batch instead of raising.
 
 `max_completion_length` is no knob here: the script pins it to `rollout_max_tokens` (TRL reads it only as the
 `dr_grpo` normalizer) and raises on another explicit value.
@@ -60,15 +60,16 @@ The episode budget leaves tool output between turns unbounded, so it does not re
 ## Tool calls
 
 Native-tool environments send their `tools` schema, so the server needs the matching
-`--tool-call-parser` (per-family values: [Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
+`--tool-call-parser` (per-family values: [Rollout Servers](../../infrastructure/rollout-servers.md#running-it)).
 
-- A mismatched parser fails silently: calls come back as text with no `tool_calls`, so a native-protocol episode ends on that turn as a plain-text final answer.
-- A missing parser is a 400 on vLLM; SGLang returns the call as text.
+- A server with no parser is refused at startup ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
+- A wrong parser leaves calls as text with no `tool_calls`, so each turn reads as a final answer and the episodes tie. The run raises once `tool_parser_watch_rounds` rounds (default `2`) hold the template's call opening in a turn's text with no call parsed anywhere; one parsed call stands the watch down for the run ([Tool parsers](../../infrastructure/rollout-servers.md#running-it)).
 - [ReAct](environments/protocols/react.md) environments send no `tools` and are served without a parser.
 
 `rollout_stop_tokens` (default empty) lists special-token strings sent as `stop_token_ids`. Use it for a tool-call
 terminator the model's `eos_token_id` omits: gpt-oss with harmony disabled ends a call with `<|call|>` and otherwise
-hallucinates the result (the gpt-oss recipes set `["<|call|>"]`). An unknown name raises at trainer construction.
+hallucinates the result (the gpt-oss recipes set `["<|call|>"]`), so gpt-oss on a tool environment without it is
+refused at trainer construction. An unknown name raises there too.
 
 ## Unproductive turns
 
@@ -76,9 +77,8 @@ A turn is unproductive when it is:
 
 - **cut**: the engine stopped it at its token cap;
 - **empty**: the model ended it with neither a tool call nor visible content;
-- **rejected**: every tool call named a nonexistent tool. Under the native tool-call protocol a call refused unrun
-  also counts ([Untrainable turns](environments/protocols/native-tool-use.md#untrainable-turns)); ReAct flags unknown
-  tools only.
+- **rejected**: every tool call named a nonexistent tool or was refused unrun
+  ([Untrainable turns](environments/protocols/native-tool-use.md#untrainable-turns)).
 
 What follows:
 
@@ -92,11 +92,10 @@ What follows:
   ([Native tool-use](environments/protocols/native-tool-use.md#reward)).
 - A turn past the cap, on the episode's last turn, or on the last turn the output budget affords ends the episode
   truncated, priced like a `max_turns` overflow.
-- The next turn runs under a reduced reasoning cap ([Retry reserve](reasoning.md#retry-reserve)).
 - Their rows train only under a negative advantage ([Untrainable turns](objective.md#untrainable-turns)).
 
-Under [carried reasoning](#carried-reasoning) a retry thinks on from where the cut stopped, so a per-turn budget binds
-only once cuts are priced.
+The next turn runs under the same caps as any other. Under [carried reasoning](#carried-reasoning) a retry thinks on
+from where the cut stopped, so a per-turn budget binds only once cuts are priced.
 
 ### Engine aborts
 
@@ -122,10 +121,17 @@ Two safe setups:
 - **Built-in** (default): no `chat_template:` on the trainer and no `--chat-template` on the server, so both load the
   checkpoint's.
 - **Custom**: `chat_template: <file>.jinja` plus `force_chat_template: true` on the trainer and
-  `--chat-template <same file>` on the server, the file visible inside its container.
+  `--chat-template <same file>` on the server, the file visible inside its container (`/jinja-templates/…` under
+  either compose file). A relative path raises at server start, which `restart: unless-stopped` then loops.
 
-`chat_template:` without `force_chat_template: true` is a no-op wherever the checkpoint ships a template. With it, and
-no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
+Rows train on the engine's prompt ids, so a mismatch shows in no loss. The startup probe asks each server for its render
+of a no-tool prompt under two of the run's contracts: a server whose prompt does not move with the level, where the
+trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
+difference warns with the first differing token, since an engine also derives a thinking toggle the trainer's render
+lacks.
+
+A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
+it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
 ([Training rows](objective.md#training-rows)) then score log-probs against a prompt the policy never generated under;
 per-turn rows take the engine's ids and cannot drift.
 

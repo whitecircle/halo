@@ -20,7 +20,6 @@ learning_rate: 2.0e-05
 lr_scheduler_type: cosine
 warmup_steps: 32
 weight_decay: 0.01
-seed: 42
 
 # --- Embedding-specific ---
 loss_type: mnrl
@@ -32,8 +31,6 @@ dataloader_drop_last: true
 
 # --- Output ---
 output_dir: checkpoints/embedding-qwen3-4b-nq
-save_strategy: steps
-save_steps: 500
 eval_strategy: steps
 eval_steps: 500
 report_to: wandb

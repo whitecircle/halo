@@ -1,26 +1,8 @@
 #!/usr/bin/env python
-"""
-CPU tests for SMPO VLM support (SmoothMarginPOTrainer VLM mode + DataCollatorForVLMSMPO).
+"""SMPO VLM support: ``SMPOTrainer`` VLM mode and ``DataCollatorForVLMSMPO``, what GPU tests can't cheaply exercise.
+The stub renders un-expanded placeholders; ``__call__`` expands each and emits Qwen-style ``pixel_values``."""
 
-Covers the pieces GPU tests can't cheaply exercise:
-  - ``tokenize_vlm_preference_row``: raw-row normalization, image injection/extraction, prefix-strip
-    invariant, completion tokenization parity with the text path (EOS append, truncation);
-  - ``DataCollatorForVLMSMPO``: placeholder expansion at collation, row-major vision stacking,
-    left-padded prompts, BOS handling, over-length prompt fail-loud;
-  - ``concatenated_inputs``: vision-key duplication for the chosen|rejected concat (odd/even
-    batches) with the text keys byte-identical to the no-vision batch;
-  - ``concatenated_forward``: vision tensors reach the model forward; padding_free rejects them;
-  - the VLM-mode guards (padding_free, CP);
-  - an Arrow round-trip (dataset.map keeps PIL images collatable);
-  - the real Qwen3.5 processor end-to-end (skipped when not cached locally).
-
-The stub processor mimics the real contract: ``apply_chat_template`` renders un-expanded image
-placeholders, ``__call__`` expands each placeholder to a fixed patch span and emits Qwen-style
-``pixel_values`` ([total_patches, dim], row-major) + ``image_grid_thw``.
-
-Run: python tests/cpu/trainers/test_smpo_vlm.py
-"""
-
+import inspect
 import re
 import tempfile
 from pathlib import Path
@@ -29,14 +11,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from datasets import Dataset
 from PIL import Image
 
-from src.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO
-from src.data.pipeline.preferences import tokenize_vlm_preference_row
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
+from halo.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN, tokenize_vlm_preference_row
+from halo.data.vlm_render import run_vlm_processor
+from halo.trainers.preference.preference_rules import reject_smpo_vlm_options
 from tests.common.models import QWEN3_5_9B
+from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tokenizers import load_cached_processor
 
 IMAGE_TOKEN = "<image>"
@@ -92,23 +75,17 @@ class StubTokenizer:
 
 
 class StubProcessor:
-    """Mimics a VLM processor: placeholder expansion + Qwen-style flat pixel patches."""
-
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
     def apply_chat_template(self, messages, tokenize=False, **kwargs):
         return self.tokenizer.apply_chat_template(messages, tokenize=tokenize, **kwargs)
 
-    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=True, **kwargs):
-        assert return_tensors == "pt"
-        assert add_special_tokens is False, "collator must disable special tokens (template carries them)"
-        ids = self.tokenizer(text)["input_ids"]
-        images = images or []
+    def _expand(self, text, images):
         image_token_id = self.tokenizer.vocab[IMAGE_TOKEN]
         pad_id = self.tokenizer.vocab[IMAGE_PAD_TOKEN]
         expanded, placeholders = [], 0
-        for token_id in ids:
+        for token_id in self.tokenizer(text)["input_ids"]:
             if token_id == image_token_id:
                 expanded.extend([pad_id] * PATCHES_PER_IMAGE)
                 placeholders += 1
@@ -116,42 +93,46 @@ class StubProcessor:
                 expanded.append(token_id)
         if placeholders != len(images):
             raise ValueError(f"{placeholders} image placeholders but {len(images)} images")
-        out = {
-            "input_ids": torch.tensor([expanded], dtype=torch.long),
-            "attention_mask": torch.ones(1, len(expanded), dtype=torch.long),
-        }
-        if images:
-            # Fill value = image width → tests can verify row-major patch ordering.
-            out["pixel_values"] = torch.cat(
+        return expanded
+
+    def _vision_features(self, images):
+        # The fill value is the image width, so tests can check row-major patch order.
+        return {
+            "pixel_values": torch.cat(
                 [torch.full((PATCHES_PER_IMAGE, PATCH_DIM), float(img.size[0])) for img in images], dim=0
-            )
-            out["image_grid_thw"] = torch.tensor([[1, 2, 2]] * len(images), dtype=torch.long)
+            ),
+            "image_grid_thw": torch.tensor([[1, 2, 2]] * len(images), dtype=torch.long),
+        }
+
+    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=True, padding=False, **kwargs):
+        assert return_tensors == "pt"
+        assert add_special_tokens is False, "collator must disable special tokens (template carries them)"
+        texts = [text] if isinstance(text, str) else text
+        row_images = images or [[] for _ in texts]
+        assert len(row_images) == len(texts), "one image list per text"
+        rows = [self._expand(row, row_image) for row, row_image in zip(texts, row_images, strict=True)]
+        width = max(len(row) for row in rows)
+        assert padding or len({len(row) for row in rows}) == 1, "rows of different lengths need padding"
+        out = {
+            "input_ids": torch.tensor([[0] * (width - len(row)) + row for row in rows], dtype=torch.long),
+            "attention_mask": torch.tensor(
+                [[0] * (width - len(row)) + [1] * len(row) for row in rows], dtype=torch.long
+            ),
+        }
+        flat_images = [image for row_image in row_images for image in row_image]
+        if flat_images:
+            out.update(self._vision_features(flat_images))
         return out
 
 
-def make_trainer(**attrs):
-    """Bare SmoothMarginPOTrainer with just the attributes the tested methods read."""
-    trainer = SmoothMarginPOTrainer.__new__(SmoothMarginPOTrainer)
-    defaults = {
-        "is_vlm": True,
-        "padding_free": False,
-        "max_prompt_length": 512,
-        "max_completion_length": 64,
-        "truncation_mode": "keep_start",
-        "dataset_num_proc": None,
-        # The real trainer resolves this once from tokenizer + model config.
-        "_eos_token_ids": frozenset({EOS_ID}),
-        "pad_token_id": 0,
-        # cp_size is a read-only mixin property; is_ep_mode gates dataset-map workers (EP pins 1).
-        "parallelism_config": SimpleNamespace(cp_size=1, is_ep_mode=False),
-        "cp_config": None,
-        "lower_clip_percentile": None,
-        "upper_clip_percentile": None,
-        "min_log_prob": None,
-    }
-    defaults.update(attrs)
-    for key, value in defaults.items():
-        setattr(trainer, key, value)
+def make_trainer(*, is_vlm: bool = True, max_prompt_length: int = 512, max_completion_length: int = 64, **args):
+    # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
+    trainer = smpo_trainer(parallelism_config=SimpleNamespace(cp_size=1, has_ep_group=False), **args)
+    trainer.is_vlm = is_vlm
+    trainer.max_prompt_length = max_prompt_length
+    trainer.max_completion_length = max_completion_length
+    # The real trainer resolves this once from tokenizer + model config.
+    trainer._eos_token_ids = frozenset({EOS_ID})
     return trainer
 
 
@@ -166,18 +147,14 @@ def make_features(width=7, prompt_text="Describe the picture", n_images=1):
 
 
 def prep_row(trainer, features, processor):
-    """Run the VLM row prep the trainer's dataset map runs.
-
-    ``tokenize_vlm_preference_row`` is module-level (a bound method would pickle the trainer, and
-    with it the EP process groups, into every ``dataset.map`` worker), so its tunables come from the
-    trainer's attributes exactly as ``_prepare_dataset`` threads them through ``fn_kwargs``.
-    """
+    """Run the VLM row prep with the trainer's attributes, as ``_prepare_dataset`` threads them through ``fn_kwargs``.
+    The row fn is module-level, since a method would pickle the trainer and its EP groups into each map worker."""
     return tokenize_vlm_preference_row(
         features,
         processor,
         max_prompt_length=trainer.max_prompt_length,
         max_completion_length=trainer.max_completion_length,
-        truncation_mode=trainer.truncation_mode,
+        truncation_mode=trainer.args.truncation_mode,
     )
 
 
@@ -207,7 +184,7 @@ def test_vlm_row_prep_string_prompt_and_prefix_strip():
     trainer = make_trainer()
     prompt_msg = {"role": "user", "content": "What is shown"}
     features = {
-        "prompt": "What is shown",  # string prompt → wrapped as a user turn
+        "prompt": "What is shown",  # wrapped as a user turn
         "chosen": [dict(prompt_msg), {"role": "assistant", "content": "A cat"}],  # repeats the prompt
         "rejected": [dict(prompt_msg), {"role": "assistant", "content": "A dog"}],
         "images": [Image.new("RGB", (7, 5))],
@@ -264,15 +241,14 @@ def test_vlm_row_prep_prefix_invariant_raises():
         prep_row(trainer, make_features(), BrokenTemplateProcessor(StubTokenizer()))
 
 
-def test_vlm_row_prep_completion_truncation_keeps_eos():
+def test_vlm_row_prep_completion_truncation_cuts_plainly():
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
     trainer = make_trainer(max_completion_length=3)
 
     row = prep_row(trainer, make_features(), processor)
 
-    assert len(row["chosen_input_ids"]) == 3
-    assert row["chosen_input_ids"][-1] == EOS_ID
+    assert row["chosen_input_ids"] == tokenizer._encode("[assistant] A red square [end]\n")[:3]
 
 
 def make_collator(processor, **kwargs):
@@ -339,6 +315,41 @@ def test_collator_mixed_batch_with_textonly_row():
     assert batch["prompt_input_ids"].shape[0] == 2
 
 
+class PaddedToBatchStubProcessor(StubProcessor):
+    """Pads every image to the call's largest (Pixtral), so per-row calls yield tensors that do not concatenate."""
+
+    def _vision_features(self, images):
+        height = max(image.size[1] for image in images)
+        width = max(image.size[0] for image in images)
+        return {"pixel_values": torch.zeros(len(images), 3, height, width)}
+
+
+def test_collator_takes_images_of_different_sizes_from_a_processor_padding_to_the_batch():
+    tokenizer = StubTokenizer()
+    processor = PaddedToBatchStubProcessor(tokenizer)
+    trainer = make_trainer()
+    small = make_features(width=7)
+    large = make_features(width=9)
+    large["images"] = [Image.new("RGB", (9, 11))]
+    batch = make_collator(processor)([prep_row(trainer, small, processor), prep_row(trainer, large, processor)])
+    assert batch["pixel_values"].shape == (2, 3, 11, 9)
+    assert (batch["prompt_input_ids"] == tokenizer.vocab[IMAGE_PAD_TOKEN]).sum() == 2 * PATCHES_PER_IMAGE
+
+
+def test_collator_keeps_each_row_to_its_own_tokens_when_the_processor_pads():
+    """A shorter row's pad columns are the processor's, and ``prompt_overlap`` counts real tokens only."""
+    tokenizer = StubTokenizer()
+    processor = TokenTypeStubProcessor(tokenizer)
+    trainer = make_trainer()
+    short = prep_row(trainer, make_features(prompt_text="Hi"), processor)
+    long = prep_row(trainer, make_features(prompt_text="A much longer prompt about the picture"), processor)
+    alone = make_collator(processor)([short])
+    together = make_collator(processor)([short, long])
+    real = together["prompt_attention_mask"][0].bool()
+    assert together["prompt_input_ids"][0][real].tolist() == alone["prompt_input_ids"][0].tolist()
+    assert together["mm_token_type_ids"][0][real].tolist() == alone["mm_token_type_ids"][0].tolist()
+
+
 def test_collator_overlength_prompt_raises():
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
@@ -350,11 +361,8 @@ def test_collator_overlength_prompt_raises():
 
 
 class BosPostProcessingStubTokenizer(StubTokenizer):
-    """A tokenizer whose ``add_special_tokens=True`` post-processor really prepends BOS.
-
-    The probe keys on this, not on ``bos_token_id`` — the VLM prompt is tokenized with
-    ``add_special_tokens=False``, so BOS is owed exactly when the post-processor owns it.
-    """
+    """Its ``add_special_tokens=True`` post-processor prepends BOS.
+    The prompt is tokenized with ``add_special_tokens=False``, so BOS is owed only when the post-processor owns it."""
 
     def __call__(self, text, add_special_tokens=False, **kwargs):
         ids = self._encode(text)
@@ -375,12 +383,7 @@ def test_collator_bos_prepend_when_post_processor_owns_it():
 
 
 def test_collator_no_bos_for_nominal_only_bos_token():
-    """A declared-but-never-emitted bos_token must NOT be injected (gpt-oss/Bailing shape).
-
-    ``StubTokenizer`` adds nothing on ``add_special_tokens=True``, so the probe reports no
-    post-processor BOS; prepending anyway would train VLM SMPO prompts on a token the served
-    policy never produces — the text path (`tokenize_preference_row`) already gates on the probe.
-    """
+    """A bos_token declared but never emitted (gpt-oss/Bailing) would train on a token the policy never produces."""
     tokenizer = StubTokenizer(bos_token_id=1)
     processor = StubProcessor(tokenizer)
     trainer = make_trainer()
@@ -389,6 +392,69 @@ def test_collator_no_bos_for_nominal_only_bos_token():
     batch = make_collator(processor)([row])
 
     assert batch["prompt_input_ids"][0, 0] != 1, "a nominal-only bos_token must not be prepended"
+
+
+class JoinedTurnsTokenizer(StubTokenizer):
+    """Renders turns back to back, so the prompt's closing ``[end]`` and a reply's opening ``[assistant]`` tokenize
+    as one whitespace word: the merge a byte-level tokenizer makes of a prompt's last ``\\n`` and a reply's first."""
+
+    def apply_chat_template(self, messages, tokenize=False, **kwargs):
+        return super().apply_chat_template(messages, tokenize=tokenize, **kwargs).replace("\n", "")
+
+
+class TokenTypeStubProcessor(StubProcessor):
+    """Also emits ``mm_token_type_ids`` (1 on image patches), a sequence-aligned key the collator trims and pads
+    with the prompt."""
+
+    def __call__(self, text, images=None, **kwargs):
+        out = super().__call__(text, images=images, **kwargs)
+        out["mm_token_type_ids"] = (out["input_ids"] == self.tokenizer.vocab[IMAGE_PAD_TOKEN]).long()
+        return out
+
+
+@pytest.mark.parametrize(
+    ("tokenizer_cls", "overlap"), [(StubTokenizer, 0), (JoinedTurnsTokenizer, 1)], ids=["clean", "merged"]
+)
+def test_collated_pair_is_the_conversation_tokenized_whole(tokenizer_cls, overlap):
+    """When a token merges across the boundary, the completions start one prompt token early, and the collator's prompt
+    must end before it, or that token's text appears twice."""
+    tokenizer = tokenizer_cls()
+    processor = TokenTypeStubProcessor(tokenizer)
+    features = make_features()
+    row = prep_row(make_trainer(), features, processor)
+    assert row[PROMPT_OVERLAP_COLUMN] == overlap
+
+    batch = make_collator(processor)([row])
+
+    prompt_ids = batch["prompt_input_ids"][0].tolist()
+    image_pad_id = tokenizer.vocab[IMAGE_PAD_TOKEN]
+    assert batch["mm_token_type_ids"][0].tolist() == [int(token == image_pad_id) for token in prompt_ids]
+    for side in ("chosen", "rejected"):
+        # The stub renders turn by turn, so the conversation is the prompt's render plus the reply's.
+        conversation = row["prompt_text"] + tokenizer.apply_chat_template(features[side])
+        expected = run_vlm_processor(processor, conversation, [features["images"]])["input_ids"][0].tolist()
+        assert prompt_ids + batch[f"{side}_input_ids"][0].tolist() == [*expected, EOS_ID], side
+
+
+def test_prompt_overlap_column_survives_signature_pruning():
+    """A pruned overlap would silently bring the repeated boundary token back."""
+    trainer = make_trainer()
+    trainer.data_collator = make_collator(StubProcessor(StubTokenizer()))
+    trainer._signature_columns = None
+
+    trainer._set_signature_columns_if_needed()
+
+    assert PROMPT_OVERLAP_COLUMN in trainer._signature_columns
+
+
+def test_collator_refuses_a_row_without_prompt_overlap():
+    """A row without the overlap would collate with the boundary token's text repeated, not raise."""
+    processor = StubProcessor(JoinedTurnsTokenizer())
+    row = prep_row(make_trainer(), make_features(), processor)
+    del row[PROMPT_OVERLAP_COLUMN]
+
+    with pytest.raises(KeyError, match=PROMPT_OVERLAP_COLUMN):
+        make_collator(processor)([row])
 
 
 def test_collator_requires_processor():
@@ -408,21 +474,21 @@ def make_text_batch(batch_size):
     }
 
 
-def test_concatenated_inputs_duplicates_vision_keys():
+def test_concatenate_pairs_duplicates_vision_keys():
     for batch_size in (1, 2, 3):  # odd and even
         batch = make_text_batch(batch_size)
         pixel_values = torch.randn(batch_size * PATCHES_PER_IMAGE, PATCH_DIM)
         grid = torch.tensor([[1, 2, 2]] * batch_size)
         vision_batch = {**batch, "pixel_values": pixel_values, "image_grid_thw": grid}
 
-        out = SmoothMarginPOTrainer.concatenated_inputs(vision_batch, pad_token_id=0)
+        out = concatenate_pairs(vision_batch, pad_token_id=0)
 
         assert torch.equal(out["pixel_values"], torch.cat([pixel_values, pixel_values], dim=0))
         assert torch.equal(out["image_grid_thw"], torch.cat([grid, grid], dim=0))
         assert out["num_chosen"] == batch_size
 
         # Text keys must stay byte-identical to the no-vision batch.
-        out_text = SmoothMarginPOTrainer.concatenated_inputs(batch, pad_token_id=0)
+        out_text = concatenate_pairs(batch, pad_token_id=0)
         assert set(out_text.keys()) == {"input_ids", "attention_mask", "labels", "num_chosen"}
         for key in ("input_ids", "attention_mask", "labels"):
             assert torch.equal(out[key], out_text[key])
@@ -461,7 +527,7 @@ def test_concatenated_forward_passes_vision_inputs():
     # are the real-token ones; none are passed in.
     assert "position_ids" not in model.received
 
-    # A text batch must reach the model with NO extra kwargs.
+    # A text batch reaches the model with no extra kwargs.
     model_text = RecordingModel()
     trainer.concatenated_forward(model_text, make_text_batch(batch_size))
     assert set(model_text.received.keys()) == {"input_ids", "attention_mask"}
@@ -478,34 +544,93 @@ def test_concatenated_forward_padding_free_rejects_vision():
 
 def test_vlm_mode_guards():
     with pytest.raises(ValueError, match="padding_free"):
-        make_trainer(padding_free=True)._validate_vlm_mode(None)
+        reject_smpo_vlm_options(SimpleNamespace(padding_free=True), None, is_vlm=True)
 
     with pytest.raises(ValueError, match="Context Parallelism"):
-        make_trainer()._validate_vlm_mode(SimpleNamespace(cp_size=2))
+        reject_smpo_vlm_options(SimpleNamespace(padding_free=False), SimpleNamespace(cp_size=2), is_vlm=True)
 
-    make_trainer()._validate_vlm_mode(None)
-    make_trainer()._validate_vlm_mode(SimpleNamespace(cp_size=1))
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=False), None, is_vlm=True)
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=False), SimpleNamespace(cp_size=1), is_vlm=True)
 
-    # Text mode must never trip the VLM guards.
-    make_trainer(is_vlm=False, padding_free=True)._validate_vlm_mode(SimpleNamespace(cp_size=2))
+    reject_smpo_vlm_options(SimpleNamespace(padding_free=True), SimpleNamespace(cp_size=2), is_vlm=False)
 
 
 def test_prepare_dataset_skips_prepared_rows():
-    PartialState()  # the accelerate logger in _prepare_dataset requires an initialized state
-    vlm_ds = Dataset.from_dict({"prompt_text": ["p"], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]})
-    assert make_trainer()._prepare_dataset(vlm_ds, None, "train") is vlm_ds
+    vlm_ds = Dataset.from_dict(
+        {
+            "prompt_text": ["p"],
+            PROMPT_OVERLAP_COLUMN: [0],
+            "images": [[]],
+            "chosen_input_ids": [[1, 2]],
+            "rejected_input_ids": [[3, 2]],
+        }
+    )
+    trainer = make_trainer()
+    assert trainer._prepare_dataset(vlm_ds, None, trainer.args, "train") is vlm_ds
 
     text_ds = Dataset.from_dict(
         {"prompt_input_ids": [[1]], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3, 2]]}
     )
-    assert make_trainer(is_vlm=False)._prepare_dataset(text_ds, None, "train") is text_ds
+    trainer = make_trainer(is_vlm=False)
+    assert trainer._prepare_dataset(text_ds, None, trainer.args, "train") is text_ds
 
     # A prepared TEXT dataset must not satisfy the VLM check, else a pixel-less run passes silently.
     assert not {"prompt_text"}.issubset(text_ds.column_names)
 
 
+@pytest.mark.parametrize(
+    ("is_vlm", "columns", "missing"),
+    [
+        (
+            True,
+            {"prompt_text": ["p"], "images": [[]], "chosen_input_ids": [[1, 2]], "rejected_input_ids": [[3]]},
+            PROMPT_OVERLAP_COLUMN,
+        ),
+        (False, {"prompt_input_ids": [[1]], "chosen_input_ids": [[1, 2]]}, "rejected_input_ids"),
+    ],
+    ids=["vlm-without-prompt-overlap", "text-without-rejected"],
+)
+def test_prepare_dataset_refuses_partially_prepared_rows(is_vlm, columns, missing):
+    """With the raw pair gone these rows cannot be tokenized again, so the refusal names the missing column."""
+    trainer = make_trainer(is_vlm=is_vlm)
+
+    with pytest.raises(ValueError, match=rf"lacks the prepared columns \['{missing}'\]"):
+        trainer._prepare_dataset(Dataset.from_dict(columns), None, trainer.args, "train")
+
+
+# HF's ``Dataset.map`` writes this many rows per Arrow batch, and the first batch fixes an unpinned schema.
+_MAP_WRITER_BATCH = inspect.signature(Dataset.map).parameters["writer_batch_size"].default
+
+
+@pytest.mark.parametrize(
+    ("text_rows", "num_proc"), [(_MAP_WRITER_BATCH, 1), (1, 2)], ids=["writer-batch", "map-shard"]
+)
+def test_dataset_map_types_images_before_the_first_image_row(text_rows, num_proc):
+    """A first writer batch or map shard of text-only rows would type ``images`` as ``List(null)``, and the image row
+    after it would fail the Arrow cast."""
+    processor = StubProcessor(StubTokenizer())
+    trainer = make_trainer(dataset_num_proc=num_proc)
+    text_row = {
+        "prompt": [{"role": "user", "content": "Just words"}],
+        "chosen": [{"role": "assistant", "content": "Yes"}],
+        "rejected": [{"role": "assistant", "content": "No"}],
+        "images": [],
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        image_path = str(Path(tmp) / "img.png")
+        Image.new("RGB", (7, 5)).save(image_path)
+        ds = Dataset.from_list([text_row] * text_rows + [{**text_row, "images": [image_path]}])
+
+        mapped = trainer._prepare_dataset(ds, processor, trainer.args, "train")
+
+        assert mapped[0]["images"] == []
+        assert isinstance(mapped[-1]["images"][0], Image.Image)
+        batch = make_collator(processor)([mapped[0], mapped[-1]])
+        assert batch["pixel_values"].shape == (PATCHES_PER_IMAGE, PATCH_DIM)
+
+
 def test_dataset_map_arrow_roundtrip():
-    PartialState()  # _prepare_dataset's map/logging path needs an initialized accelerate state
     tokenizer = StubTokenizer()
     processor = StubProcessor(tokenizer)
     trainer = make_trainer()
@@ -519,11 +644,11 @@ def test_dataset_map_arrow_roundtrip():
                     "prompt": [{"role": "user", "content": "Describe the picture"}],
                     "chosen": [{"role": "assistant", "content": "A red square"}],
                     "rejected": [{"role": "assistant", "content": "A blue circle"}],
-                    "images": [image_path],  # file-path form; process_image loads it
+                    "images": [image_path],  # file-path form; decode_image loads it
                 }
             ]
         )
-        mapped = trainer._prepare_dataset(ds, processor, "train")
+        mapped = trainer._prepare_dataset(ds, processor, trainer.args, "train")
 
         row = mapped[0]
         assert IMAGE_TOKEN in row["prompt_text"]
@@ -559,7 +684,7 @@ def test_real_qwen35_processor_end_to_end():
     )
     assert (batch["prompt_input_ids"][0] == image_token_id).sum() > 1
 
-    concat = SmoothMarginPOTrainer.concatenated_inputs(batch, pad_token_id=0)
+    concat = concatenate_pairs(batch, pad_token_id=0)
     assert concat["pixel_values"].shape[0] == 2 * batch["pixel_values"].shape[0]
 
 

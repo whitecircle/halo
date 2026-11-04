@@ -1,11 +1,5 @@
-"""A stand-in for HF ``Trainer._save_checkpoint`` that writes the way the real one does.
-
-The mixin's ``_save_checkpoint`` wraps the base save and reaches into it at two calls: the weights go
-through ``save_model`` (the toolkit's own, whose gathers are world collectives), and the trainer state
-through ``self.state.save_to_json``, which the mixin redirects to the withheld name until every
-sidecar is on disk. A stand-in that writes ``trainer_state.json`` any other way, or whose ``state``
-is not a ``TrainerState``, tests a base the mixin never runs over.
-"""
+"""A stand-in for HF ``Trainer._save_checkpoint`` that writes the way the real one does, since the mixin reaches into
+two of its calls."""
 
 import os
 
@@ -14,15 +8,9 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
 
 
 class BaseTrainerSave:
-    """HF's ``_save_checkpoint`` as far as files go, in its order: the weights through ``save_model``;
-    unless ``save_only_model``, the optimizer and scheduler files (``_save_optimizer_and_scheduler``);
-    the trainer state through ``self.state.save_to_json`` on the ``should_save`` rank(s); then the
-    checkpoint push and the rotation, which the mixin neutralizes for this call.
-
-    The trainer over it sets ``run_dir``, ``args`` and ``state`` (a ``transformers.TrainerState``) and
-    overrides ``save_model``, which the mixin's own would otherwise shadow. The checkpoint directory
-    is created on the ``should_save`` rank(s), where ``save_model``'s writer creates it.
-    """
+    """HF's ``_save_checkpoint`` as far as files go, in order: weights, optimizer and scheduler, RNG, trainer state,
+    then push and rotation. The trainer over it sets ``run_dir``, ``args`` and ``state`` (a real ``TrainerState``) and
+    overrides ``save_model``."""
 
     def _get_output_dir(self, trial=None):
         return self.run_dir
@@ -35,6 +23,7 @@ class BaseTrainerSave:
         self.save_model(output_dir, _internal_call=True)
         if not self.args.save_only_model:
             self._save_optimizer_and_scheduler(output_dir)
+            self._save_rng_state(output_dir)
         if self.args.should_save:
             self.state.save_to_json(os.path.join(output_dir, TRAINER_STATE_NAME))
         if self.args.push_to_hub:
@@ -49,3 +38,6 @@ class BaseTrainerSave:
 
     def _save_optimizer_and_scheduler(self, output_dir):
         """Nothing by default: a trainer whose test reads the base's rank-0 optimizer view writes it."""
+
+    def _save_rng_state(self, output_dir):
+        """Nothing by default: a trainer whose test reads the per-rank RNG files binds HF's own writer."""

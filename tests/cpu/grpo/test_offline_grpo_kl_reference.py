@@ -9,27 +9,26 @@ import types
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
-from trl import ModelConfig
 
-import scripts.training.offline_grpo as offline_grpo_script
-import src.trainers.grpo.mixins.offline_reference as reference_logps_module
-from src.checkpoint.format import REFERENCE_LOGPS_FILE
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
+import halo.trainers.grpo.offline.reference as reference_logps_module
+import scripts.training.grpo.offline as offline_grpo_script
+from halo.checkpoint.format import REFERENCE_LOGPS_FILE
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.reference_logps import LOGPROB_PRECISION_KEY
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 from tests.common.offline_grpo_reference import mapped_scores
-
-PartialState()  # the trainer's accelerate logger requires an initialized state
 
 BASE = "org/base"
 RESUMED = "/runs/offline-grpo/checkpoint-40"
@@ -54,7 +53,7 @@ def _tiny_llama():
 
 
 def _wrapped_moe_policy():
-    """A policy holding an EP layer: the shape ``deepcopy`` cannot reproduce."""
+    """A policy holding an EP layer, which ``deepcopy`` cannot reproduce."""
     policy = _tiny_llama()
     policy.model.layers[0].mlp = StubEPLayerBase()
     return policy
@@ -130,7 +129,7 @@ def test_constructor_places_and_freezes_every_external_reference(tmp_path, monke
         remove_unused_columns=False,
     )
     # Native adapter installation needs DeepEP; reference ownership is the constructor's seam.
-    monkeypatch.setattr(OfflineGRPOTrainer, "_setup_distributed_modes", lambda self: None)
+    monkeypatch.setattr(OfflineGRPOTrainer, "_configure_distributed_modes", lambda self: None)
     trainer = OfflineGRPOTrainer(
         model=policy,
         ref_model=reference,
@@ -257,13 +256,13 @@ def _tokenizer():
 
 
 def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
-    """The script's reference load for ``policy``, as ``main`` calls it."""
+    args = _script_args()
+    args.reset_sinks = reset_sinks
     return offline_grpo_script._load_kl_reference(
-        _script_args(),
+        args,
         types.SimpleNamespace(parallelism_config=parallelism or ParallelismConfig(), model_source=model_source),
         _config(),
-        ModelConfig(model_name_or_path=BASE, model_revision="abc123", trust_remote_code=False),
-        types.SimpleNamespace(reset_sinks=reset_sinks),
+        ModelArguments(model_name_or_path=BASE, model_revision="abc123", trust_remote_code=False),
         policy=policy,
         tokenizer=_tokenizer(),
         peft_config=None,
@@ -272,7 +271,6 @@ def _load(policy, *, model_source: str, reset_sinks: bool, parallelism=None):
 
 
 def test_native_expert_lora_keeps_the_original_base_when_the_policy_resumes():
-    """The unadapted base uses the policy's load settings, never its trained checkpoint."""
     with stub_frozen_loader() as caps:
         reference = _load(
             _wrapped_moe_policy(), model_source=RESUMED, reset_sinks=False, parallelism=_native_expert_lora_config()
@@ -285,7 +283,7 @@ def test_native_expert_lora_keeps_the_original_base_when_the_policy_resumes():
     assert captured.load["trust_remote_code"] is False
     assert captured.load["dtype"] is torch.bfloat16
     assert captured.resolver["attn_implementation"] == "sdpa"
-    assert captured.resolver["sinks_reset"] is False
+    assert captured.resolver["sinks_policy"] is SinksPolicy.LIVE
     captured.freeze_sinks.assert_called_once()
     assert reference.generation_config.pad_token_id == 3, "the tokenizer setup never reached the reference"
 
@@ -298,8 +296,6 @@ def test_the_script_loads_nothing_for_a_precomputed_full_finetuning_reference(po
 
 
 class _PeftPolicy:
-    """The policy's ``disable_adapter()`` switch, recording whether a forward ran with the adapters off."""
-
     def __init__(self):
         self.adapters_off = False
 
@@ -317,8 +313,7 @@ class _ReferenceReached(Exception):
 
 
 def _loss_forwards(ref_model) -> tuple[list[dict], _PeftPolicy]:
-    """Each ``_get_per_token_logps`` call ``_compute_loss_inner`` makes under ``kl_beta > 0``: the model
-    it forwarded, and whether grad and the policy's adapters were on during it."""
+    """Records each ``_get_per_token_logps`` call ``_compute_loss_inner`` makes under ``kl_beta > 0``."""
     policy = _PeftPolicy()
     forwards = []
 
@@ -326,19 +321,20 @@ def _loss_forwards(ref_model) -> tuple[list[dict], _PeftPolicy]:
         forwards.append({"model": model, "grad": torch.is_grad_enabled(), "adapters_off": policy.adapters_off})
         if len(forwards) == 2:
             raise _ReferenceReached
-        logps = torch.zeros(input_ids.size(0), 2)
-        return logps, logps
+        return torch.zeros(input_ids.size(0), 2)
 
     host = types.SimpleNamespace(
         model=policy,
-        min_log_prob=None,
+        _live_min_log_prob=None,
         beta=0.1,
         _precompute_reference=False,
         parallelism_config=ParallelismConfig(),
         ref_model=ref_model,
         accelerator=types.SimpleNamespace(unwrap_model=lambda model: model),
         _get_per_token_logps=per_token_logps,
+        _joined_rows=OfflineGRPOTrainer._joined_rows,
     )
+    host._reference_policy = types.MethodType(LogprobScoringMixin._reference_policy, host)
     inputs = {
         "prompt_input_ids": torch.zeros(1, 3, dtype=torch.long),
         "prompt_attention_mask": torch.ones(1, 3, dtype=torch.long),
@@ -364,8 +360,7 @@ def test_a_held_reference_model_forwards_with_no_grad_and_the_policy_adapters_un
 
 
 def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=False, pipeline=False, bf16=True):
-    """A trainer whose sweep scores rows off ``lm_head``; ``chunked`` and ``pipeline`` pick the scoring
-    path the reference identity records, which the stub sweep does not otherwise follow."""
+    """``chunked`` and ``pipeline`` pick the path the reference identity records; the stub sweep ignores them."""
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = _tiny_llama()
     with torch.no_grad():
@@ -375,7 +370,7 @@ def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=
     trainer.temperature = 0.75
     trainer.beta = 0.2
     trainer._use_chunked_grpo_logprobs = chunked
-    trainer._pp_runtime = object() if pipeline else None
+    trainer._pp_runner = object() if pipeline else None
     trainer.args = types.SimpleNamespace(
         disable_dropout=True, resume_from_checkpoint=checkpoint, output_dir=output_dir or checkpoint, bf16=bf16
     )
@@ -450,8 +445,7 @@ def test_explicit_reference_does_not_allow_a_resume_to_replace_its_missing_ancho
     ids=["full-logits-bf16", "full-logits-fp32", "chunked", "pipeline"],
 )
 def test_a_reference_split_records_the_precision_its_scoring_path_returns(tmp_path, scoring, precision):
-    """TRL's full-logits ``selective_log_softmax`` returns the logits' (compute) dtype; the chunked
-    kernel and the pipeline's last stage return fp32."""
+    """TRL's ``selective_log_softmax`` returns the compute dtype; the chunked kernel and last PP stage return fp32."""
     trainer = _anchor_trainer(output_dir=str(tmp_path), **scoring)
     trainer._precompute_reference_logps(_anchor_dataset(), "training")
     assert trainer._reference_logps_by_split["training"]["settings"][LOGPROB_PRECISION_KEY] == precision
@@ -478,14 +472,12 @@ def _assert_resume_refuses_the_saved_anchor(tmp_path, **scoring) -> None:
     ids=["full-to-chunked", "chunked-to-full", "full-to-pipeline", "pipeline-to-full"],
 )
 def test_a_resume_scoring_at_another_precision_refuses_the_saved_reference(tmp_path, saved, resumed):
-    """The saved scores carry their path's rounding: attached to a run that scores the policy at
-    another precision, the KL would start off zero at the first step."""
+    """Saved scores carry their path's rounding, so at another precision the KL would start the run off zero."""
     _saved_anchor(tmp_path, **saved)
     _assert_resume_refuses_the_saved_anchor(tmp_path, **resumed)
 
 
 def test_a_reference_saved_without_a_recorded_precision_is_not_restored(tmp_path):
-    """As for DPO/KTO, a split that records no precision is never assumed to match this run's."""
     saved = _saved_anchor(tmp_path)
     del saved["training"]["settings"][LOGPROB_PRECISION_KEY]
     torch.save(saved, os.path.join(tmp_path, REFERENCE_LOGPS_FILE))

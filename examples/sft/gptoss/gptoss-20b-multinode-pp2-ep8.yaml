@@ -1,0 +1,59 @@
+# GPT-OSS 20B — two-node pipeline-parallel SFT with expert parallelism inside each stage (2 nodes x 8 GPUs:
+# one stage per node, its experts across the node's 8 GPUs over NVLink).
+# See agent-docs/parallelism/pipeline-parallelism.md. On a fast link, ep8 with DP runs ahead of this recipe (18,685 tok/s/GPU).
+# Launch on EACH node (MASTER_ADDR = node0 IP; SLURM: exactly ONE srun task per node):
+#   torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+#     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
+# Per-node output storage (DIST_OUTPUT_SHARED_FILESYSTEM=0, or the DIST_SHARED_FILESYSTEM=0 umbrella) leaves
+# each node only its own stage's parts: copy both nodes' directories onto one host and merge them with
+#   python scripts/after_training/merge_pp_stages.py --input_dir <node0 dir> <node1 dir> --output_dir <merged>
+# before from_pretrained. A shared filesystem needs no merge.
+
+# --- Model ---
+# Must be a BF16 (dequantized) gpt-oss checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-20b.
+model_name_or_path: unsloth/gpt-oss-20b-BF16
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+test_size: 0.01
+conversation_field: messages
+# Renders every assistant turn with <|channel|>final and ends each with <|return|>, the completion-span
+# terminator, so completion-only masking trains every turn (see gptoss-20b-multinode-ep.yaml).
+chat_template: jinja-templates/gpt-oss/gpt-oss-multiturn.jinja
+force_chat_template: true
+assistant_message_template: <|start|>assistant<|channel|>final<|message|>
+dataset_num_proc: 32
+
+# --- Parallelism ---
+pipeline_parallel_size: 2             # 24 layers in two stages, one per node
+pipeline_microbatches: 8              # bubble (pp-1)/(m+pp-1) = 1/9 of the step
+expert_parallel_size: 8               # one dispatch group per stage, on the node's NVLink domain
+# A stage runs the backbone and applies the head itself, so the router aux loss the *ForCausalLM forward adds
+# never runs: aux_loss is refused under PP. The bias update writes GPT-OSS's router.bias, which exports.
+moe_balancing: bias_update
+
+# --- Attention & kernels ---
+# attn_implementation unset — auto-selects FA4 on Blackwell, FA3/FA2 on Hopper
+max_length: 8192                      # PP freezes the P2P buffer shapes, so every batch pads to it
+packing: true
+
+# --- Training schedule ---
+per_device_train_batch_size: 8        # split into the 8 microbatches above: one 8192-token row each
+num_train_epochs: 1.0
+gradient_checkpointing: false         # on is TRL's default; off: 15,715 tok/s/GPU against 12,796, at ~70 GiB peak per GPU (B300)
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+output_dir: checkpoints/oss-20b-pp2-ep8
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+logging_steps: 5
+report_to: wandb

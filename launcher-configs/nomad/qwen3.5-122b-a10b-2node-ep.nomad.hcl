@@ -2,7 +2,7 @@
 # pair. Experts stay on NVLink inside a node, so only the DP gradient sync crosses the fabric — no
 # cross-node all-to-all, no GIN, no gdrdrv. EP size and scope come from the training config.
 # Cross-node NCCL needs the RDMA device in the container — agent-docs/infrastructure/nomad.md#rdma-fabric.
-# Submit: nomad job run launcher-configs/nomad/qwen3.5-122b-a10b-2node-ep.nomad.hcl
+# Submit: nomad job run -var 'scratch_host_path=<large volume>' launcher-configs/nomad/qwen3.5-122b-a10b-2node-ep.nomad.hcl
 # Creds:  nomad var put nomad/jobs/halo-qwen35-122b-ep WANDB_API_KEY=... HF_TOKEN=...
 #
 # Nomad has no gang scheduling, so the two groups are placed independently and a partial placement is
@@ -18,8 +18,7 @@ variable "image" {
 
 variable "scratch_host_path" {
   type        = string
-  default     = "/mnt"
-  description = "Host dir bind-mounted at the same path in-container (HF caches, TMPDIR, scratch root, checkpoints). /mnt is a convention, not a capacity guarantee — see agent-docs/infrastructure/nomad.md#scratch-volume."
+  description = "The client's large volume, bind-mounted at the same path in-container (HF caches, TMPDIR, scratch root, checkpoints). Required: a path name proves no capacity — see agent-docs/infrastructure/nomad.md#scratch-volume."
 }
 
 variable "config_path" {

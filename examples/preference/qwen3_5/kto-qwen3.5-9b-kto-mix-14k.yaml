@@ -24,22 +24,17 @@ per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
 num_train_epochs: 1
 gradient_accumulation_steps: 4   # 2 x 4 = 8 sequences/device/step
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: false
-optim: adamw_torch_fused
 learning_rate: 5.0e-07
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Sequence Lengths (KTOConfig uses max_length only) ---
 max_length: 4096
 
 # --- Output ---
 output_dir: checkpoints/kto-qwen3.5-9b-kto-mix-14k
-save_strategy: steps
 save_steps: 200
 eval_strategy: steps
 eval_steps: 200

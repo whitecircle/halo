@@ -1,11 +1,13 @@
 # Custom Environments
 
-Subclass `BaseEnvironment` (`src/environments/base.py`) and implement three methods, then register a factory for YAML or pass the class from Python.
+Subclass `EnvironmentBase` (`halo/environments/environment_base.py`) and implement three methods, then register a factory for YAML or pass the class from Python. The base composes the tool accounting (`tool_accounting.py`), turn recovery (`turn_recovery.py`), effort profiles (`reasoning_effort.py`) and scoring (`episode_scoring.py`, `EpisodeGrade`) your class inherits.
 
 ```python
-from src.environments.base import BaseEnvironment, EpisodeGrade
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode_scoring import EpisodeGrade
+from halo.environments.messages import StepOutcome
 
-class GuessEnvironment(BaseEnvironment):
+class GuessEnvironment(EnvironmentBase):
     DEFAULT_MAX_TURNS = 6
     requires_answer = True          # the grade reads context["answer"]
 
@@ -16,7 +18,7 @@ class GuessEnvironment(BaseEnvironment):
     def _step_single(self, trajectory, action, context=None):
         done = "Final Answer:" in action
         trajectory.info["completed"] = done
-        return trajectory, 0.0, done, False, {}
+        return StepOutcome(trajectory=trajectory, reward=0.0, done=done, truncated=False, info={})
 
     def _grade_episode(self, trajectory, context=None):
         expected = trajectory.info.get("expected")
@@ -31,35 +33,35 @@ Rules that bite:
     - `shaping` maps episode-level terms to values (`{"submission": 0.25}`), each added as `reward/<name>`. Declare the names in `SHAPING_COMPONENTS`, or the first [settled](../../grpo/rewards/README.md#settlement) episode fails. `objective` and `turn_shaping` are reserved, and no reward term may reuse a declared name.
     - Protocol-level shaping goes in `_episode_shaping(trajectory) -> dict`.
     - An episode whose grade carries no signal (a grader outage, a null `answer` cell) sets `trajectory.info[EPISODE_INVALID_KEY] = True`, its cause under `EPISODE_INVALID_REASON_KEY`, and grades 0, so it leaves the group baseline.
-- **Hand a scorer what to read.** Override `_final_answer` and `_scoring_reference` for `judge` and `reward_model` terms ([What a scorer reads](../../grpo/rewards/README.md#what-a-scorer-reads)).
+- **Hand a scorer what to read.** Override `_final_answer`, `_scoring_reference` and `_episode_facts` (with `EPISODE_FACTS`) for `judge` and `reward_model` terms ([What a scorer reads](../../grpo/rewards/README.md#what-a-scorer-reads)).
 - **Forward `**kwargs` to `super().__init__`.** The base binds `rewards` (as `reward_terms`), `max_turns` and the [common knobs](README.md#common-knobs); a keyword no constructor binds raises `TypeError` at construction.
 - **Declare differing defaults on the class** (`DEFAULT_MAX_TURNS`, `DEFAULT_TOOL_SUCCESS_REWARD`, `DEFAULT_TOOL_ERROR_PENALTY`, `requires_answer`), not in the factory, so a YAML `max_turns` still wins.
 - **Build through `self._init_trajectory(...)`**, so the system turn, the task turn and the context land where the base expects them.
 - **Route an unproductive turn, never grade it** ([Unproductive turns](../episodes.md#unproductive-turns)).
-    - An engine cut arrives with `context["finish_reason"] in ENGINE_CUT_FINISH_REASONS` (`src/inference/response.py`): call `self._handle_length_cutoff(trajectory)`. A turn with neither visible content nor a tool call: call `self._handle_empty_turn(trajectory)`. Both nudge and retry within `max_turns` and the shared `max_length_cutoff_recoveries` cap.
+    - An engine cut arrives with `context["finish_reason"] in ENGINE_CUT_FINISH_REASONS` (`halo/inference/response.py`): call `self._recover_length_cutoff(trajectory)`. A turn with neither visible content nor a tool call: call `self._recover_empty_turn(trajectory)`. Both nudge and retry within `max_turns` and the shared `max_length_cutoff_recoveries` cap.
     - Declare `LENGTH_CUTOFF_NUDGE` and `EMPTY_TURN_NUDGE`, or the base raises `NotImplementedError` on the first such turn.
-    - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_handle_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
+    - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_recover_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
     - A native-protocol environment with no tools sends the `TOOLLESS_*` nudges, which ask for the final answer. A subclass with its own wording declares those too.
-- **For I/O-bound steps** subclass `AsyncBaseEnvironment` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
+- **For I/O-bound steps** subclass `AsyncEnvironmentBase` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
 - **Probe your own backend.** Extend `verify_backend` and call `super()`, so a bad URL fails the launch instead of every episode.
 
 ## Register it
 
 ```python
-from src.environments.registry import register_environment
+from halo.environments.registry import register_environment
 
 register_environment("guess", lambda env_config: GuessEnvironment(**env_config))
 ```
 
 - Forward the whole `env_config`: a factory that ignores it drops every `environment_kwargs` key silently.
-- A name resolves against the factories registered in the process that builds the environment. A training run builds it inside each Ray actor, where the registry holds only what `src/environments/registry.py` registers at import: add yours there (`_register_builtins`), then set `environment_type: guess`. A registration made only in the entry script passes the startup check and then fails every rollout with `Unknown environment type`.
+- A name resolves against the factories registered in the process that builds the environment. A training run builds it inside each Ray actor, where the registry holds only what `halo/environments/registry.py` registers at import: add yours there (`_register_builtins`), then set `environment_type: guess`. A registration made only in the entry script passes the startup check and then fails every rollout with `Unknown environment type`.
 - The eval scripts build the environment in their own process, so a module their wrapper imports is enough ([Test it](#test-it)).
 - From Python, skip the registry: `DistributedAsyncEnvironmentalGRPOTrainer(..., environment_cls=GuessEnvironment, environment_kwargs={...})`; the class itself travels to the actors.
 
 ## A custom tool
 
 ```python
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 registry = NativeToolRegistry().register(NativeTool(
     name="lookup",
@@ -92,7 +94,7 @@ To log per-episode diagnostics, override `rollout_metrics(trajectory) -> dict[st
 {"prompt": str | list[dict], "answer": Any, "difficulty": "hard"}
 ```
 
-- `answer` and the columns named in the script's `context_fields` reach `reset()` / `step()` in `context`; other columns are dropped. A `context_field` (or a renamed `answer_field`) that names no column raises at startup.
+- `answer` and the columns named in the script's `context_fields` reach `reset()` / `step()` in `context`; other columns are dropped. A `context_fields` entry (or a renamed `answer_field`) that names no column raises at startup.
 - `requires_answer = True` makes the trainer refuse a dataset without `answer` (default `False`; per-run override in `environment_kwargs`).
 - A list-valued prompt reaches the environment as its **last `user` message** only, so put framing in the environment's system prompt (`system_prompt` on the protocol classes; `_init_trajectory(system_prompt=...)` on your own).
 
@@ -103,12 +105,12 @@ A CPU test, in the shape of `tests/cpu/environments/test_environments.py`:
 ```python
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
-from src.environments.registry import register_environment, resolve_environment
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.registry import register_environment, build_environment
 
 def test_guess_env_grades_a_correct_answer(isolated_registry):
     register_environment("guess", lambda c: GuessEnvironment(**c))
-    env = resolve_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
+    env = build_environment("guess", EnvironmentConfig(environment_type="guess").to_env_config())
 
     ids, _ = env.reset(["What is 2 + 2?"], [{"answer": "4"}])
     step = env.step(ids, ["Final Answer: 4"], [{}])[0]
@@ -125,7 +127,7 @@ if __name__ == "__main__":
 Then run it end to end against a served model:
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --env_type guess --dataset <hf-id-or-dir> --split test \
     --base_url http://localhost:8000/v1 --model <served-model> \
     --num_examples 5 --save_trajectories /tmp/guess.jsonl

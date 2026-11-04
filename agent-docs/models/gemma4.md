@@ -1,20 +1,18 @@
 # Gemma 4 MoE
 
-`Gemma4ForConditionalGeneration` — Google's MoE with the router living **outside** the EP-wrapped module, plus KV-shared layers and `attention_k_eq_v` patterns. EP and pure ETP (`ep_size=1`) are supported; TP / CP wrappers are not implemented because of the attention quirks described below.
+`Gemma4ForConditionalGeneration` — Google's MoE with the router living **outside** the EP-wrapped module, plus KV-shared layers and `attention_k_eq_v` patterns. EP and ETP (pure at `ep_size=1`, or with EP) are supported; TP / CP wrappers are not implemented because of the attention quirks described below.
 
-| | EP | CP | TP | ETP |
-|---|:--:|:--:|:--:|:--:|
-| Gemma 4 MoE | Yes | **No** | **No** | Yes |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
-## EP wrapper
+## EP layer
 
-`EPGemma4MoELayer` (`src/distributed/expert_parallel/layers/gemma4.py`) replaces `Gemma4TextExperts`.
+`EPGemma4MoELayer` (`halo/distributed/expert_parallel/families/gemma4.py`) replaces `Gemma4TextExperts`.
 
 - **Router is a sibling**, not a child — `Gemma4TextRouter` lives in `Gemma4TextDecoderLayer` next to the experts. The wrapper only replaces the experts; the router stays FSDP-managed.
 - Routing input: pre-normalized weights from the sibling router (per-expert-scaled, not raw logits).
-- Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`src/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=fused_gelu_tanh_mul`.
+- Activation: tanh-GeGLU (fused gate_up), run through the fused Triton kernel (`halo/kernels/fused_glu.py`) when the activation is the genuine `gelu_pytorch_tanh`; logged as `glu_combine=gelu_tanh`.
 - Norms: `Gemma4RMSNorm` (scaled and weightless) runs torch's fused `F.rms_norm`, which normalizes and multiplies the weight in fp32 and casts once — Gemma's own order. The Liger spec takes the norm role from upstream with `rms_norm_kernel="native"` and `rms_norm_casting_mode="gemma"`.
-- Liger: every decoder layer keeps a dense `Gemma4TextMLP` beside its experts, which the wrapper never touches. The toolkit's delegating spec fuses it (`geglu`, probing the activation the same way) so it stays fused under EP, and takes the norms as above; upstream's `gemma4_text` applier serves the fused loss.
+- Liger: every decoder layer keeps a dense `Gemma4TextMLP` beside its experts, which the EP layer never touches. The toolkit's delegating spec fuses it (`geglu`, probing the activation the same way) so it stays fused under EP, and takes the norms as above; upstream's `gemma4_text` applier serves the fused loss.
 
     The fused loss is forced off for `Gemma4ForConditionalGeneration` checkpoints, whose own head runs ([Liger Kernels](../optimization/liger-kernels.md#fused-loss-under-a-multimodal-wrapper)).
 
@@ -22,17 +20,17 @@
 
 ### Precision flags
 
-The router-outside-wrapper layout changes how the precision flags behave:
+Gemma 4's router sitting outside the EP layer changes how the precision flags behave:
 
-- `fp32_router` is a no-op — it controls the EP wrapper's internal router, and Gemma 4's lives outside it. Harmless, but it buys nothing: the shipped configs leave it unset and say why.
+- `fp32_router` is a no-op — it controls the EP layer's internal router, and Gemma 4's lives outside it. Harmless, but it buys nothing: the shipped configs leave it unset and say why.
 - `fp32_experts: true` upcasts the precision-sensitive expert weights — use it.
-- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`_validate_fp32_non_ep_params` in `src/distributed/loading/model_loading.py`, driven by the EP layer's own `_supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
+- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `halo/model_loading/parallel/load_rules.py`, driven by the family spec's `supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
 
     Gemma 4's norms re-emit activations at weight dtype, so the upcast feeds fp32 tokens into DeepEP's 2-byte transport. Without the gate it surfaces as a raw C++ assert at the first dispatch, after the whole multi-GPU load. See [Precision control](../parallelism/expert-parallelism.md#precision-control).
 
-Gemma 4's softmax router has no native aux-loss term (no `router_aux_loss_coef` field, no aux term in the loss) and the EP wrapper has no bias-update path, so no load balancing is available. `auto` resolves to `none` with a warning; **set `moe_balancing: none` explicitly** to state that deliberately. An explicit `aux_loss` finds no coefficient, stays off, and stamps the config so `MoEMetricsCallback` declines to wire itself.
+Gemma 4's softmax router has no native aux-loss term (no `router_aux_loss_coef` field, no aux term in the loss) and the EP layer has no bias-update path, so no load balancing is available. `auto` resolves to `none` with a warning; **set `moe_balancing: none` explicitly** to state that deliberately. An explicit `aux_loss` finds no coefficient, stays off, and stamps the config so `MoEMetricsCallback` declines to wire itself.
 
-Under `none` nothing is stamped, but `output_router_logits: true` in `model_init_kwargs` cannot buy the `moe/*` load metrics back either: no Gemma 4 config level declares that field, so `_apply_config_overrides` rejects the override at load. See [Gemma 4 has no balancing path](../training-methods/callbacks.md#gemma-4-has-no-balancing-path).
+Under `none` nothing is stamped, but `output_router_logits: true` in `model_init_kwargs` cannot buy the `moe/*` load metrics back either: no Gemma 4 config level declares that field, so `apply_config_overrides` rejects the override at load. See [Gemma 4 has no balancing path](../training-methods/callbacks.md#gemma-4-has-no-balancing-path).
 
 The router's top-k field is spelled `top_k_experts` (not `num_experts_per_tok`) and lives on the text sub-config, along with `num_experts`. Both are covered by the toolkit's shared detection, so `moe/*` metrics and the S-MFU sparsity factor use the real top-k.
 
@@ -41,25 +39,23 @@ The router's top-k field is spelled `top_k_experts` (not `num_experts_per_tok`) 
 Gemma 4 attention uses two patterns that need bespoke wrappers:
 
 - **KV-shared layers** — the trailing `num_kv_shared_layers` decoder layers reuse an earlier layer's K/V. Naive TP would clone the cache; a CP wrapper would have to track the shared-from layer's sequence slice.
-- **`attention_k_eq_v`** — when set, the K projection is reused as V (one linear), incompatible with the standard ColwiseParallel-on-Q/K/V plan.
+- **`attention_k_eq_v`** — when set, the K projection is reused as V (one linear), incompatible with the standard colwise Q/K/V plan.
 
-No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`) or in the CP wrapper registry (`src/distributed/context_parallel/layers/`), so neither mode patches Gemma 4 attention.
+No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`) or in the CP wrapper registry (`halo/distributed/context_parallel/families.py`), so neither mode patches Gemma 4 attention.
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Pipeline parallelism refuses Gemma 4 (`GEMMA4_PP`): the per-layer embeddings are sliced by enumerate position, which a sliced layer list re-bases, and the KV-shared layers read an earlier layer's K/V through a forward-threaded dict a stage boundary breaks ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ETP only shards the expert FFN weights (gate/up/down), leaving attention untouched and the sibling `Gemma4TextRouter` FSDP-managed and replicated across ETP ranks. The fused-GLU `gate_up_proj` is split into separate `gate_proj`/`up_proj` shards at init so each rank holds matching gate/up positions on the intermediate dim. See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
 
 ## Buffer fixes
 
-`finalize_loaded_model()` (`src/models/patches/buffer_fixes.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
+`finalize_loaded_model()` (`halo/model_loading/finalization.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer (`halo/model_loading/buffer_repair.py`) restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
 
 ## Export
 
-Every exported `config.json` carries the flat `global_head_dim` / `num_global_key_value_heads` keys
-beside the per-layer fields: transformers 5.16 folds the full-attention layers' geometry into
-`per_layer_config`, which the pinned vLLM server's transformers refuses, so the EP layer declares
-the two keys (`_LEGACY_PER_LAYER_CONFIG_KEYS`) and the export rewrites them back
-([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
+An exported `config.json` states the full-attention layers' geometry as transformers 5.20's
+`per_layer_config` rather than the hub's flat `global_head_dim` / `num_global_key_value_heads`; both
+pinned engines read it ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
 
 Both pinned engines read the fused expert pair the gather emits, so RL weight sync runs on either
 `rollout_backend`. On SGLang it needs this repo's image: the router folds `scale` into its norm once
@@ -71,7 +67,13 @@ that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+`text_only_model` is refused for `gemma4`: transformers' CausalLM mapping names `Gemma4ForConditionalGeneration` itself, so no text-only sibling exists to drop the vision tower into (`resolve_auto_model_class`).
+
+The DPO and SMPO configs (`examples/preference/gemma4/`, EP=8 at 4,096 tokens) keep gradient checkpointing and reserved 47 and 62 GiB per GPU over three steps at a full-length chosen/rejected pair; without it they reserved 98 and 111 GiB. The reward config (`examples/reward/gemma4/`) trains without it, reserved 96 GiB and so needs B200/B300; on 80 GB parts pass `--gradient_checkpointing=true`. The 32k SFT config keeps it.
+
+Online GRPO: `examples/grpo/online/gemma4/online-grpo-gemma4-26b-a4b-dapo-math.yaml`. Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Either `rollout_backend` takes the weight sync ([Export](#export)).
+
+Gemma 4's bf16 log-probs carry several nats of noise at low-probability tokens on every bf16 path, the engines and the trainer alike (fp32 agrees to 0.001), and that noise enters the importance ratios, so the engine startup probe compares only the positions the model scores confidently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)). Router logits sit near 0.02 to 0.06, so top-k margins are thin and exact ties common, and vLLM keeps fp32 router logits where the trainer and SGLang round to bf16, so routing differs on about half of the (layer, token) pairs of fixed text (48.9%, stock bf16 against fp32). The family has no routing replay, and forcing routing alone would not close the gap: on CPU kernels against fp32 it moves 0.68 nats to 0.62, attention at fp32 to 0.59, and both to 0.21.
 
 **Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision tower's
 projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
@@ -88,12 +90,12 @@ the tower too.
 On CUDA the model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer, Blackwell image):
 
 - **Sliding layers** (head_dim 256, window 1,024) run compiled FlexAttention: 0.55 / 1.91 / 7.86 ms at 2,048 / 8,192 / 32,768 tokens, against 4.65 / 61.8 / 941 ms for mem-efficient SDPA with its dense mask.
-- **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row), and mem-efficient SDPA past it: 1.86 / 6.73 ms at 2,048 / 4,096 tokens against 6.53 / 19.7 ms, and the same time as SDPA at 8,192 and beyond, where the layer runs it. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
+- **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row): 1.86 / 6.73 ms at 2,048 / 4,096 tokens against 6.53 / 19.7 ms for mem-efficient SDPA. Past it, a packed row's global layers run mem-efficient attention per document (the same kernel over each document's own tiles, not the full row's), and any other row runs mem-efficient SDPA. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
 - The vision tower (bidirectional) keeps SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
 
 End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing runs 14,980 cluster tok/s at 2,048 tokens and 16,204 at 16,384 in the [framework comparison](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison). Plain SDPA, measured in a separate run set, runs 11,152 and 4,124 (1.34× and 3.93× across the two sets), at 237.6 against 225.0 GiB peak at 16,384.
 
-The KV-repeat override is not what makes the global layers legal — transformers 5.16 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+The KV-repeat override is not what makes the global layers legal — transformers 5.20 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).
 

@@ -1,57 +1,33 @@
 #!/usr/bin/env python
-"""
-SMPO with EP+CP (EP=2, CP=2) on GptOss-20B MoE: step 1's loss is the unsplit sequence's loss.
+"""SMPO with EP=2, CP=2 on GptOss-20B: step 1's loss equals an EP-only trainer's, on the initial weights.
 
-EP distributes the MoE experts across the GPUs while CP splits every sequence via Ulysses attention.
-Each CP rank all-reduces its chunk's partial log-prob and NLL sums. An in-place ``dist.all_reduce``
-there reaches autograd only through PyTorch's c10d fallback (identity backward, a warning), and a
-loss multiplied by ``cp_size`` to make up the gradient logs ``cp_size`` times the true loss. Step 1's
-microbatches, as ``compute_loss`` saw them, are scored again by an EP-only (CP=1)
-SmoothMarginPOTrainer on the initial weights, and
-
-  1. each microbatch loss and the logged step-1 loss equal the reference's;
-  2. no backward reached the c10d autograd fallback;
-
-besides the smoke checks: every step runs, and the losses and logged gradient norms are finite.
-
-The step-1 gradient is not compared: CP needs GptOss's attention sinks neutralized, and without them
-this model's gradient does not survive a change of layout (EP2 against EP1 without CP, eager attention:
-median per-parameter cosine 0.26, against 0.99 with the sinks live; the same layout twice agrees to
-0.9999). tests/gpu/trainers/preference/test_smpo_cp.py pins the CP gradient on a dense model.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_ep_cp.py
-
-Requirements:
-    - 2x GPUs with >=80GB memory each
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
-
-Note:
-    The max_length and max_prompt_length must be divisible by cp_size=2.
+An in-place ``dist.all_reduce`` reaches autograd only through c10d's fallback. The gradient isn't compared: CP needs
+the sinks neutralized, and without them it doesn't survive a layout change (median cosine 0.26, against 0.99 with sinks
+live).
 """
 
 import torch
 from transformers import AutoTokenizer
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.first_step import FirstStep, first_step_checks, score_first_step, train_recording_first_step
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
 CP_SIZE = 2
 NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
-# both lengths must be divisible by cp_size
+# Both lengths must be divisible by cp_size.
 MAX_LENGTH = 4096
 MAX_PROMPT_LENGTH = 2048
 NUM_TRAIN_STEPS = 5
@@ -59,14 +35,13 @@ BATCH_SIZE = 1
 GRADIENT_ACCUMULATION = 2
 LEARNING_RATE = 5e-6
 SEED = 42
-# Step 1 against the EP-only trainer, relative. With the sinks neutralized the two layouts' losses drift
-# apart: measured over two seeds, a microbatch loss by up to 16% and the logged step loss by up to 8%. A
-# loss counted once per CP rank is 100% off.
+# With the sinks neutralized the layouts' losses drift: measured over two seeds, a microbatch by up to 16% and the
+# logged step by up to 8%. A loss counted once per CP rank is 100% off.
 LOSS_RTOL = 0.4
 
 
-def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
-    return SmoothMarginPOConfig(
+def _smpo_config(output_dir: str) -> SMPOConfig:
+    return SMPOConfig(
         output_dir=output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -74,7 +49,7 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # already applied by load_distributed_model
+        use_liger_kernel=False,  # Already applied by load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",
@@ -84,8 +59,6 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,  # Required for EP (inactive experts)
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
 
@@ -102,7 +75,6 @@ def _load_model(parallelism_config: ParallelismConfig, attn_implementation: str)
 
 
 def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, str]:
-    """Train under EP+CP; return the smoke checks, the recorded first step and the attention kernel."""
     train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
     log(f"Train dataset: {len(train_dataset)} samples, eval dataset: {len(eval_dataset)} samples")
@@ -116,7 +88,7 @@ def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep
 
     config = _smpo_config(output_dir)
     log(f"Config: beta={config.beta}, target_margin={config.target_margin}, loss_type={config.loss_type}")
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=train_dataset,
@@ -137,9 +109,8 @@ def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep
 
 
 def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_implementation: str) -> FirstStep:
-    """Score the recorded first step with an EP-only (CP=1) trainer on the initial weights."""
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=_load_model(parallelism_config, attn_implementation),
         args=_smpo_config(output_dir),
         processing_class=tokenizer,
@@ -151,7 +122,6 @@ def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_imp
 
 
 def run(ctx) -> dict:
-    """Run SMPO trainer test with EP+CP (EP=2, CP=2)."""
     log(f"\n{'=' * 70}")
     log("SMPO EP+CP TEST: EP=2 + CP=2 with GptOss-20B")
     log(f"{'=' * 70}")

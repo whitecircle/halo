@@ -14,50 +14,39 @@ sigmoid selection + top-k renorm, 4 shared experts combined by `average` (`(rout
 tied embeddings, and a `logit_scale` multiplier on the lm_head output (the config default is
 `0.0625`).
 
-| | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Cohere2 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | — | Yes ¹ | Yes | Experimental |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism refuses the shipped checkpoints at the tie gate, before the registry check: they tie `lm_head` to `embed_tokens`.
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
-
-¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`; on an 8-GPU node that pins
-`ep_size` to 8, with `cp_size` dividing the domain (EP is orthogonal to DP — ep8+cp2 is a valid
-single-node shape).
-
-Coverage: `tests/gpu/parallelism/test_cohere2_moe_all_parallelism.py` (ep8 / cp8 / tp8 / ep8+cp2 /
-ep8+tp2 / etp8 / ep2+etp4 on a tiny synthetic checkpoint), plus EP=2 equivalence, SFT and CPU
-contract suites (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_cohere2_moe.py`,
-`tests/gpu/trainers/sft/test_sft_cohere2_moe.py`, `tests/cpu/models/test_cohere2_moe_support.py`).
-LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py`
+Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family cohere2_moe` (ep8 / cp8 / tp8 /
+ep8+cp2 / ep8+tp2 / etp8 / ep2+etp4 on a tiny synthetic checkpoint), plus EP=2 equivalence, SFT and CPU
+contract suites (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family cohere2_moe`,
+`tests/gpu/trainers/sft/test_sft_ep_roundtrip.py --family cohere2_moe`, `tests/cpu/models/test_cohere2_moe_support.py`).
+LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family cohere2_moe`
 (expert and mixed adapters at ep2 / ep1 / ep2+cp2, merged save and exact resume); no full-scale LoRA
 run.
 
-## EP wrapper
+## EP layer
 
-`EPCohere2MoELayer` (`src/distributed/expert_parallel/layers/cohere2_moe.py`) replaces
+`EPCohere2MoELayer` (`halo/distributed/expert_parallel/families/cohere2_moe.py`) replaces
 `Cohere2MoeSparseMoeBlock`. Layers whose `mlp_layer_types` entry is `dense` instantiate a plain MLP
 and are never wrapped.
 
 - Routing: `Cohere2MoeTopKRouter` picks top-k on the RAW logits, then activates only the selected
-  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The wrapper re-derives
+  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The EP layer re-derives
   exactly that from the router's logits.
 
     The router module itself is still called, so the HF `router_logits` recorder keeps firing.
 
 - Load balancing: the architecture has **no bias slot** and **no aux-loss wiring** (no
   `router_aux_loss_coef`; the loss never reads `router_logits`), so `moe_balancing: bias_update`
-  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning.
-
-    The explicit `bias_update_transient` opts into the trainer-only side-buffer: it steers
-    training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint
-    or a served copy (near-tied top-k picks flip between trainer and server).
+  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning. The explicit
+  `bias_update_transient` is the trainer-only opt-in ([balancing modes](../training-methods/callbacks.md#moe-balancing-modes)).
 
 - Routed experts: `Cohere2MoeExperts`, fused `gate_up_proj [E, 2I, H]` / `down_proj [E, H, I]` —
   the Qwen3.5/GLM-4 layout, so the shared fused-GLU helpers cover compute (grouped GEMM, 2 calls;
   fused SwiGLU Triton combine).
 - Shared experts: one fused `Cohere2MoeMLP` (intermediate = `intermediate_size *
   num_shared_experts`), replicated per rank, combined after DeepEP combine by `sum` or `average`
-  (the wrapper scales the summed output by 0.5).
+  (the EP layer scales the summed output by 0.5).
 - Checkpoints: the hub stores one tensor per expert (`experts.{i}.{gate,up,down}_proj.weight`);
   transformers fuses on load and reverts on save. The gather emits the fused pair, and
   `scripts/after_training/unfuse_moe_experts.py` rewrites a gathered save into the hub's per-expert
@@ -66,7 +55,7 @@ and are never wrapped.
 ## CP wrapper
 
 `Cohere2MoeAttention` → `Cohere2MoeUlyssesAttention`
-(`src/distributed/context_parallel/layers/cohere2_moe.py`), optimized `[B, S, H, D]` path. RoPE is
+(`halo/distributed/context_parallel/families.py`), optimized `[B, S, H, D]` path. RoPE is
 applied only where the HF layer applies it: sliding-window layers, plus the `force_rope`
 dense-prefix override — full-attention layers pass Q/K through untouched (NoPE). The rotary is the
 interleaved GPT-J form in fp32, matching `apply_rotary_pos_emb` bit-for-bit in bf16. The 8 KV heads
@@ -92,25 +81,27 @@ memory-validated shape.
 
 ## Loading and serving
 
-- Lazy loading is off (`_supports_lazy_loading = False`): no lazy load of the Command A+ checkpoint
+- Lazy loading is off (`supports_lazy_loading=False` on its spec): no lazy load of the Command A+ checkpoint
   has been checked against `from_pretrained`, so every load routes through `from_pretrained`.
 - A gathered save writes the hub namespace
   ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)): the SigLIP tower under
   `model.vision_tower.vision_model.*`, the text tower under `model.language_model.*`, no
   `lm_head.weight` (the head is tied), and the fused expert pair.
 
-    vLLM 0.26.0 registers `Cohere2VisionForConditionalGeneration` and `Cohere2MoeForCausalLM`, and
+    vLLM 0.32.0 registers `Cohere2VisionForConditionalGeneration` and `Cohere2MoeForCausalLM`, and
     its weight loader reads that save as written: the fused pair, the tower only with its
-    `vision_model` level (a flattened key raises), no top-level `lm_head.weight` (one raises). It
-    asserts `tie_word_embeddings: true`, so an export whose training untied the head does not load.
+    `vision_model` level (a flattened key raises), no top-level `lm_head.weight` (one raises in the
+    composite). Its Cohere2 MoE model computes logits from the input embeddings, so an export whose
+    training untied the head does not load as the composite, and the text-only class drops the head
+    and serves the tied one without an error.
 
-    SGLang 0.5.17 registers both too, but its Cohere2 expert loader reads per-expert keys only and
+    SGLang 0.5.22 registers both too, but its Cohere2 expert loader reads per-expert keys only and
     drops the fused pair without an error: run `unfuse_moe_experts.py` first. Its tower loader takes
     either spelling.
 
     Both verdicts come from the pinned engines' loaders; no export of this family has been served end
     to end.
-- RL weight sync is refused at construction (`_supports_weight_sync = False`): no end-to-end sync
+- RL weight sync is refused at construction (the spec's `weight_sync_refusal`): no end-to-end sync
   has been validated on either pinned engine
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 - Liger covers the fused SwiGLU (`Cohere2MoeMLP`, i.e. the dense and shared-expert path), cross-entropy,
@@ -127,6 +118,7 @@ memory-validated shape.
 
 ## Configs
 
-| Config | EP | Notes |
-|---|:--:|---|
-| `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` | 8 | VLM checkpoint, text-only SFT; `max_length: 1024` peaks ~255 of the B300's ~268 GiB at EP=8 — 4096 OOMs when DeepEP's elastic buffer resizes. Pins `model_revision` to the layout those numbers hold for and `attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads but is unmeasured here) |
+`examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` runs text-only SFT of the VLM checkpoint at
+EP=8. At `max_length: 1024` it peaks at ~255 of the B300's ~268 GiB; 4096 OOMs when DeepEP's elastic
+buffer resizes. It pins `model_revision` to the layout those numbers hold for and leaves
+attention unset, so the loader picks FA4 on Blackwell (128-wide heads, sliding window included). This shape has not run on this release.

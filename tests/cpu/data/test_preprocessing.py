@@ -1,13 +1,4 @@
 #!/usr/bin/env python3
-"""
-Tests for dataset preprocessing utilities.
-
-These tests verify the tokenization, packing, and sharding functionality.
-
-Usage:
-    python tests/cpu/data/test_preprocessing.py
-"""
-
 import json
 import logging
 import os
@@ -16,25 +7,30 @@ import tempfile
 from dataclasses import asdict
 
 import pytest
-from accelerate import PartialState
 from datasets import Dataset, load_from_disk
 from huggingface_hub.errors import EntryNotFoundError
 
-from src.data.pipeline import preprocessed_metadata as mod
-from src.data.pipeline.preprocessed_metadata import (
+from halo.data.preprocessed import metadata as mod
+from halo.data.preprocessed.metadata import (
     _RENDER_CHECKED_FIELDS,
     PreprocessedDatasetMetadata,
     PreprocessingConfig,
-    validate_preprocessing_compatibility,
+    verify_preprocessed_dataset,
 )
-from src.data.pipeline.preprocessing import _warn_on_shard_count_ceiling, shard_dataset, tokenize_dataset
-from src.data.shard_index import SHARD_INDEX_FILE, IncompatiblePreprocessedDataset, ShardIndex, ShardInfo
-from src.data.sources.paths import hub_repo_id
+from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, shard_dataset
+from halo.data.preprocessed.shard_index import (
+    SHARD_INDEX_FILE,
+    IncompatiblePreprocessedDataset,
+    ShardIndex,
+    ShardInfo,
+    write_stamped_sidecar,
+)
+from halo.data.preprocessed.tokenization import tokenize_dataset
+from halo.data.sources.paths import hub_repo_id
 from tests.common.tokenizers import load_cached_tokenizer
 
 
 def test_shard_info_and_index():
-    """Test ShardInfo and ShardIndex dataclasses."""
     print("Testing ShardInfo and ShardIndex...")
 
     shard1 = ShardInfo(id=0, path="train/shard_0000", num_examples=100, byte_size=10000)
@@ -59,7 +55,7 @@ def test_shard_info_and_index():
         temp_path = f.name
 
     try:
-        index.save(temp_path)
+        write_stamped_sidecar(temp_path, index)
         loaded_index = ShardIndex.load(temp_path)
 
         assert loaded_index.num_shards == 2
@@ -73,7 +69,6 @@ def test_shard_info_and_index():
 
 
 def test_tokenize_dataset():
-    """Test dataset tokenization."""
     print("Testing tokenize_dataset...")
 
     dataset = Dataset.from_dict(
@@ -102,20 +97,18 @@ def test_tokenize_dataset():
     tokenized = tokenize_dataset(dataset, tokenizer, config)
 
     assert "input_ids" in tokenized.column_names
-    assert "labels" in tokenized.column_names, "tokenize_dataset must add a labels column"
     assert len(tokenized) == 2
 
-    # Default (train_on_completions_only=False): labels copy input_ids, so nothing is masked out.
+    # train_on_completions_only=False: no labels are baked; the collator derives them from input_ids.
+    assert "labels" not in tokenized.column_names, "a full-sequence bake must not store a labels copy"
     row = tokenized[0]
-    assert row["labels"] == row["input_ids"], "labels must equal input_ids for full-sequence loss"
     assert len(row["input_ids"]) == len(row["attention_mask"])
 
     print("  tokenize_dataset: PASSED")
 
 
 def test_tokenize_dataset_completion_only():
-    """train_on_completions_only (PreprocessingConfig, prepare_dataset.py --train-on-completions-only)
-    must mask prompt tokens to -100 and keep assistant completions, not copy labels from input_ids."""
+    """Must mask prompt tokens to -100 and keep assistant completions, not copy labels from input_ids."""
     print("Testing tokenize_dataset completion-only...")
 
     dataset = Dataset.from_dict(
@@ -139,6 +132,8 @@ def test_tokenize_dataset_completion_only():
     tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
+    # At input width: labels inferred as int64 beside int32 input_ids would be most of the artifact's bytes.
+    assert tokenized.features["labels"] == tokenized.features["input_ids"], tokenized.features
     row = tokenized[0]
     ids, labels = row["input_ids"], row["labels"]
 
@@ -154,10 +149,7 @@ def test_tokenize_dataset_completion_only():
 
 
 def test_never_matching_template_raises_at_preprocessing_time():
-    """A template that never matches must fail HERE, not as loss=nan hours into training.
-
-    Regression: running the all-masked guard before the completion bake, where the chat processor
-    has not emitted labels yet, leaves it dead on the exact path it exists for."""
+    """A template that never matches must fail here, not as loss=nan hours into training."""
     dataset = Dataset.from_dict(
         {
             "conversation": [
@@ -182,13 +174,22 @@ def test_never_matching_template_raises_at_preprocessing_time():
         tokenize_dataset(dataset, tokenizer, config)
 
 
-def test_completion_only_validation():
-    """Completion-only preprocessing fails fast without a marker and for mode='text'.
+@pytest.mark.parametrize("knob", ["min_pixels", "max_pixels"])
+def test_a_pixel_bound_needs_the_vlm_bake(knob):
+    with pytest.raises(ValueError, match=rf"{knob}.*is_vlm=False"):
+        PreprocessingConfig(model_name_or_path="m", **{knob: 1024})
+    assert getattr(PreprocessingConfig(model_name_or_path="m", is_vlm=True, **{knob: 1024}), knob) == 1024
 
-    Both refusals live in ``PreprocessingConfig.__post_init__``, so they fire at CONFIG time — before
-    a tokenizer, a dataset or an hours-long map, and for every caller rather than only the ones that
-    reach ``tokenize_dataset``.
-    """
+
+def test_a_packing_strategy_needs_packing():
+    with pytest.raises(ValueError, match="packing_strategy='wrapped'.*pack_sequences=False"):
+        PreprocessingConfig(model_name_or_path="m", packing_strategy="wrapped")
+    config = PreprocessingConfig(model_name_or_path="m", pack_sequences=True, packing_strategy="wrapped")
+    assert config.packing_strategy == "wrapped"
+
+
+def test_completion_only_validation():
+    """Both refusals live in ``PreprocessingConfig.__post_init__``, so they fire at config time, for every caller."""
     print("Testing completion-only validation...")
 
     with pytest.raises(ValueError, match="assistant_message_template"):
@@ -213,15 +214,14 @@ def test_completion_only_validation():
 
 
 def test_invalid_mode_rejected_by_the_config():
-    """An unvalidated `mode` lets a typo'd 'txt' fall through every `mode == "text"` branch and
-    silently CHAT-TEMPLATE a raw pretraining corpus."""
+    """A typo'd 'txt' would fall through every ``mode == "text"`` branch and silently chat-template a raw corpus."""
     with pytest.raises(ValueError, match="Invalid preprocessing mode 'txt'"):
         PreprocessingConfig(model_name_or_path="m", mode="txt")
 
 
 def test_mode_inapplicable_knobs_rejected_both_directions():
-    """A knob set outside the mode that consumes it is silently ignored — the config must say so.
-    Applicability is declared on the fields, so this covers new knobs automatically."""
+    """A knob set outside the mode that consumes it is silently ignored. Applicability is declared on the fields, so
+    this covers new knobs."""
     with pytest.raises(ValueError, match="system_prompt"):
         PreprocessingConfig(model_name_or_path="m", mode="text", system_prompt="you are helpful")
     with pytest.raises(ValueError, match="tools_field"):
@@ -229,13 +229,11 @@ def test_mode_inapplicable_knobs_rejected_both_directions():
     with pytest.raises(ValueError, match="text_field"):
         PreprocessingConfig(model_name_or_path="m", mode="chat", text_field="body")
 
-    # Anti-over-rejection: the mode's own knobs, and knobs left at their defaults, must pass.
     PreprocessingConfig(model_name_or_path="m", mode="text", text_field="body", append_eos=False)
     PreprocessingConfig(model_name_or_path="m", mode="chat", system_prompt="s", tools_field="tools")
 
 
 def test_shard_dataset():
-    """Test dataset sharding."""
     print("Testing shard_dataset...")
 
     dataset = Dataset.from_dict(
@@ -259,7 +257,7 @@ def test_shard_dataset():
 
         # shard_dataset returns the index but does not save it.
         index_path = os.path.join(temp_dir, "train", SHARD_INDEX_FILE)
-        index.save(index_path)
+        write_stamped_sidecar(index_path, index)
 
         assert os.path.exists(index_path), "Shard index file not found"
 
@@ -276,7 +274,6 @@ def test_shard_dataset():
 
 
 def test_shard_dataset_single_shard():
-    """Test sharding with num_shards=1 (no sharding)."""
     print("Testing shard_dataset (single shard)...")
 
     dataset = Dataset.from_dict(
@@ -303,7 +300,6 @@ def test_shard_dataset_single_shard():
 
 
 def test_shard_remainder_distribution():
-    """Test that remainder shards are distributed correctly."""
     print("Testing shard remainder distribution...")
 
     dataset = Dataset.from_dict(
@@ -359,13 +355,8 @@ def test_shard_more_shards_than_examples():
 
 
 def test_shard_count_ceiling_warns_with_the_usable_dp_degree(caplog):
-    """A split too small to fill --num-shards caps the trainable DP degree — say so at prep time.
-
-    ``shard_dataset`` skips empty shards, so a small test split yields fewer shards than train. At
-    runtime a rank without a shard is a hard failure (train) or a rejected eval (metrics-gather hang),
-    discovered only after a full training startup. The warning must name the actual ceiling so the
-    operator can re-preprocess correctly on the first try.
-    """
+    """``shard_dataset`` skips empty shards, so a small split caps the trainable DP degree; at runtime a rank
+    without a shard fails after a full startup, so the warning names the ceiling."""
     indices = {
         "train": ShardIndex(split="train", num_shards=8, total_examples=800),
         "test": ShardIndex(split="test", num_shards=3, total_examples=3),
@@ -375,7 +366,6 @@ def test_shard_count_ceiling_warns_with_the_usable_dp_degree(caplog):
     assert "data_parallel_size <= 3" in caplog.text, caplog.text
     assert "test=3" in caplog.text and "train=8" in caplog.text
 
-    # Every split filled its shards: nothing to warn about.
     caplog.clear()
     with caplog.at_level(logging.WARNING):
         _warn_on_shard_count_ceiling(
@@ -386,9 +376,8 @@ def test_shard_count_ceiling_warns_with_the_usable_dp_degree(caplog):
 
 
 def test_max_length_compatibility_raises_both_directions():
-    """A preprocessed/configured max_length mismatch must be loud in BOTH directions: smaller
-    preprocessed rows waste the budget; larger ones exceed the activation
-    budget because the runtime preprocessed path never re-truncates (the dangerous direction)."""
+    """Smaller preprocessed rows waste the budget; larger ones exceed it, since the runtime preprocessed path never
+    re-truncates."""
     metadata = PreprocessedDatasetMetadata(
         model_name="Qwen/Qwen3-8B",
         max_length=4096,
@@ -398,17 +387,16 @@ def test_max_length_compatibility_raises_both_directions():
         total_test_examples=1,
     )
 
-    validate_preprocessing_compatibility(metadata, required_max_length=4096)
+    verify_preprocessed_dataset(metadata, required_max_length=4096)
 
     with pytest.raises(ValueError, match="less than"):
-        validate_preprocessing_compatibility(metadata, required_max_length=8192)
+        verify_preprocessed_dataset(metadata, required_max_length=8192)
 
     with pytest.raises(ValueError, match="exceeds the configured"):
-        validate_preprocessing_compatibility(metadata, required_max_length=2048)
+        verify_preprocessed_dataset(metadata, required_max_length=2048)
 
 
-# Render-knob compatibility: preprocessed rows are baked, so the run's render settings must match
-# the recorded ones or the YAML claims a render the data does not have.
+# Preprocessed rows are baked, so the run's render settings must match the recorded ones.
 
 
 class _RenderArgs:
@@ -443,18 +431,18 @@ def _metadata_with_recorded_config(**config_overrides) -> PreprocessedDatasetMet
 def test_render_knob_mismatch_raises_naming_the_knob():
     metadata = _metadata_with_recorded_config(system_prompt=None)
     with pytest.raises(ValueError, match="system_prompt"):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata, required_max_length=4096, render_args=_RenderArgs(system_prompt="You are helpful.")
         )
     with pytest.raises(ValueError, match="conversation_field"):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata, required_max_length=4096, render_args=_RenderArgs(conversation_field="messages")
         )
 
 
 def test_matching_render_knobs_pass():
     metadata = _metadata_with_recorded_config(system_prompt="sys", tools_field="tools")
-    validate_preprocessing_compatibility(
+    verify_preprocessed_dataset(
         metadata,
         required_max_length=4096,
         render_args=_RenderArgs(system_prompt="sys", tools_field="tools"),
@@ -462,10 +450,10 @@ def test_matching_render_knobs_pass():
 
 
 def test_assistant_template_only_checked_when_labels_are_masked():
-    """Without completion masking the template is inert on both sides — a mismatch must pass. With
-    masking, the baked labels were built from the recorded template, so a mismatch must raise."""
+    """Without completion masking the template is inert; with it, the baked labels were built from the recorded
+    template."""
     unmasked = _metadata_with_recorded_config(assistant_message_template="<A>")
-    validate_preprocessing_compatibility(
+    verify_preprocessed_dataset(
         unmasked,
         required_max_length=4096,
         required_train_on_completions_only=False,
@@ -474,7 +462,7 @@ def test_assistant_template_only_checked_when_labels_are_masked():
 
     masked = _metadata_with_recorded_config(train_on_completions_only=True, assistant_message_template="<A>")
     with pytest.raises(ValueError, match="assistant_message_template"):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             masked,
             required_max_length=4096,
             required_train_on_completions_only=True,
@@ -483,10 +471,9 @@ def test_assistant_template_only_checked_when_labels_are_masked():
 
 
 def test_text_mode_artifact_skips_the_render_check():
-    """A raw-text pretraining artifact renders no chat template — every render knob was inert at
-    prep time, so a differing run value has nothing baked to disagree with and must pass."""
+    """A raw-text artifact renders no chat template, so a differing run value has nothing baked to disagree with."""
     metadata = _metadata_with_recorded_config(mode="text", text_field="text")
-    validate_preprocessing_compatibility(
+    verify_preprocessed_dataset(
         metadata,
         required_max_length=4096,
         render_args=_RenderArgs(system_prompt="anything", conversation_field="messages"),
@@ -496,7 +483,7 @@ def test_text_mode_artifact_skips_the_render_check():
 def test_legacy_metadata_without_recorded_render_knobs_warns_not_raises(caplog):
     metadata = PreprocessedDatasetMetadata(max_length=4096, config={})
     with caplog.at_level(logging.WARNING):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata, required_max_length=4096, render_args=_RenderArgs(system_prompt="anything")
         )
     assert "predates recording" in caplog.text
@@ -505,25 +492,22 @@ def test_legacy_metadata_without_recorded_render_knobs_warns_not_raises(caplog):
 def test_packing_against_unpacked_artifact_warns_with_the_consequence(caplog):
     unpacked = _metadata_with_recorded_config(pack_sequences=False)
     with caplog.at_level(logging.WARNING):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             unpacked, required_max_length=4096, render_args=_RenderArgs(), required_packing=True
         )
-    assert "pack-sequences" in caplog.text, caplog.text
+    assert "pack_sequences" in caplog.text, caplog.text
 
     caplog.clear()
     packed = _metadata_with_recorded_config(pack_sequences=True)
     packed.packed = True
     with caplog.at_level(logging.WARNING):
-        validate_preprocessing_compatibility(
-            packed, required_max_length=4096, render_args=_RenderArgs(), required_packing=True
-        )
+        verify_preprocessed_dataset(packed, required_max_length=4096, render_args=_RenderArgs(), required_packing=True)
     assert caplog.text == ""
 
 
 def test_render_check_set_is_derived_from_the_config_dataclass():
-    """The checked set is read off each field's own ``render_check`` metadata, so a new render knob
-    is compared by default and an exemption has to be declared where the field is defined. Pinned
-    against an independent literal: a knob that silently stops being compared fails here."""
+    """Read off each field's ``render_check`` metadata, so a new knob is compared by default. Pinned against an
+    independent literal."""
     assert set(_RENDER_CHECKED_FIELDS) == {
         "conversation_field",
         "system_prompt",
@@ -542,55 +526,42 @@ def test_render_check_set_is_derived_from_the_config_dataclass():
     }
 
 
-# Tokenizer-mutating knobs: recorded, so the render check can see them
-
-
 def test_tokenizer_override_mismatch_raises():
-    """--pad/--eos/--bos/--chat-template mutate the tokenizer that bakes the ids, so unless they are
-    recorded the artifact is byte-indistinguishable from an unmutated one and the check passes.
-    An eos override in particular moves the completion-mask boundaries."""
+    """These knobs mutate the tokenizer that bakes the ids; unrecorded, the artifact looks unmutated. An eos
+    override moves the completion-mask boundaries."""
     metadata = _metadata_with_recorded_config(eos_token="<|im_end|>")
     with pytest.raises(ValueError, match="eos_token"):
-        validate_preprocessing_compatibility(
-            metadata, required_max_length=4096, render_args=_RenderArgs(eos_token="</s>")
-        )
+        verify_preprocessed_dataset(metadata, required_max_length=4096, render_args=_RenderArgs(eos_token="</s>"))
 
     metadata = _metadata_with_recorded_config(pad_token="<pad>")
     with pytest.raises(ValueError, match="pad_token"):
-        validate_preprocessing_compatibility(metadata, required_max_length=4096, render_args=_RenderArgs())
+        verify_preprocessed_dataset(metadata, required_max_length=4096, render_args=_RenderArgs())
 
     matching = _metadata_with_recorded_config(eos_token="</s>", bos_token="<s>")
-    validate_preprocessing_compatibility(
+    verify_preprocessed_dataset(
         matching, required_max_length=4096, render_args=_RenderArgs(eos_token="</s>", bos_token="<s>")
     )
 
 
 def test_chat_template_compared_as_resolved_text_not_as_a_path(tmp_path):
-    """The config records the RESOLVED template; the run may spell the same template as a file path.
-    Comparing the raw values would report every path-spelled template as a mismatch."""
-    # The shared path→text resolver logs through accelerate's rank-aware logger; every caller of this
-    # check runs after the toolkit has initialized the state.
-    PartialState()
-
+    """The config records the resolved template while the run may spell it as a file path."""
     template = "{% for m in messages %}{{ m.content }}{% endfor %}"
     template_file = tmp_path / "tpl.jinja"
     template_file.write_text(template)
 
     metadata = _metadata_with_recorded_config(chat_template=template)
-    validate_preprocessing_compatibility(
+    verify_preprocessed_dataset(
         metadata, required_max_length=4096, render_args=_RenderArgs(chat_template=str(template_file))
     )
 
     with pytest.raises(ValueError, match="chat_template"):
-        validate_preprocessing_compatibility(
+        verify_preprocessed_dataset(
             metadata, required_max_length=4096, render_args=_RenderArgs(chat_template="{{ 'different' }}")
         )
 
 
 def test_source_labels_column_is_not_baked_as_loss_targets():
-    """A source column named `labels` (classification/reward corpora carry one) must not survive the
-    tokenization map: the labels step only fills in a MISSING column, so those source values would
-    be baked as this dataset's loss targets."""
+    """A full-sequence bake stores no labels, so a surviving source ``labels`` column would be read as loss targets."""
     dataset = Dataset.from_dict(
         {
             "conversation": [[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]],
@@ -606,34 +577,27 @@ def test_source_labels_column_is_not_baked_as_loss_targets():
     tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
-    row = tokenized[0]
-    assert row["labels"] == row["input_ids"], f"source labels leaked into the baked targets: {row['labels']!r}"
-
-
-# metadata.json version stamp: compared, and never downgraded into a silent raw-path fallback
+    assert "labels" not in tokenized.column_names, f"source labels leaked into the baked rows: {tokenized[0]!r}"
 
 
 def test_metadata_version_mismatch_raises_a_version_message():
-    """An uncompared stamp lets a diverged schema surface as a bare TypeError from cls(**data), which
-    the detection probe would swallow into a silent raw-path downgrade that re-tokenizes
-    pre-tokenized rows."""
-    payload = PreprocessedDatasetMetadata(max_length=4096).to_dict()
+    """An uncompared stamp lets a diverged schema surface as a TypeError the detection probe swallows into a silent
+    raw-path downgrade."""
+    payload = asdict(PreprocessedDatasetMetadata(max_length=4096))
     payload["version"] = "0.9"
     with pytest.raises(IncompatiblePreprocessedDataset, match="version"):
         PreprocessedDatasetMetadata.from_dict(payload)
 
-    payload = PreprocessedDatasetMetadata(max_length=4096).to_dict()
+    payload = asdict(PreprocessedDatasetMetadata(max_length=4096))
     payload["invented_by_a_future_build"] = 1
     with pytest.raises(IncompatiblePreprocessedDataset, match="invented_by_a_future_build"):
         PreprocessedDatasetMetadata.from_dict(payload)
 
 
 def test_metadata_written_before_the_render_knob_renames_is_refused_by_name():
-    """A retired spelling is refused, not migrated. Re-spelling one would claim the current knob was
-    recorded when nothing verified it — the artifact's labels were baked under the OLD semantics.
-    The message has to carry the offending key and the re-prep command, because a preprocessed
-    dataset is an expensive S3/Hub artifact and the only fix is re-running the prep script."""
-    payload = PreprocessedDatasetMetadata(max_length=4096, train_on_completions_only=True).to_dict()
+    """A retired spelling is refused: the labels were baked under the old semantics. The message carries the key and
+    the re-prep command, the only fix."""
+    payload = asdict(PreprocessedDatasetMetadata(max_length=4096, train_on_completions_only=True))
     # Re-spell the top-level key the way a pre-rename writer stamped it.
     payload["train_only_on_completions"] = payload.pop("train_on_completions_only")
 
@@ -645,9 +609,6 @@ def test_metadata_written_before_the_render_knob_renames_is_refused_by_name():
     assert "scripts/before_training/prepare_dataset.py" in message
 
 
-# HF Hub is a documented prepare_dataset OUTPUT, so it must be readable back as one
-
-
 def test_hub_repo_id_strips_config_and_split_suffixes():
     """Hub file APIs address the repo; the loader's `org/name:config@split` spelling does not."""
     assert hub_repo_id("org/name") == "org/name"
@@ -657,9 +618,8 @@ def test_hub_repo_id_strips_config_and_split_suffixes():
 
 
 def test_hub_preprocessed_dataset_is_detected_and_its_metadata_loads(tmp_path, monkeypatch):
-    """An `hf://`-published preprocessed dataset must be detected and its metadata must load;
-    otherwise training takes the raw path and KeyErrors on pre-tokenized rows."""
-    payload = PreprocessedDatasetMetadata(max_length=4096, model_name="Qwen/Qwen3-8B").to_dict()
+    """Otherwise training takes the raw path and KeyErrors on pre-tokenized rows."""
+    payload = asdict(PreprocessedDatasetMetadata(max_length=4096, model_name="Qwen/Qwen3-8B"))
     metadata_file = tmp_path / "metadata.json"
     metadata_file.write_text(json.dumps(payload))
 
@@ -677,8 +637,7 @@ def test_hub_preprocessed_dataset_is_detected_and_its_metadata_loads(tmp_path, m
 
 
 def test_hub_dataset_without_metadata_is_raw_not_an_error(monkeypatch):
-    """Anti-over-rejection: the overwhelmingly common case is a RAW hub dataset, which must probe to
-    False silently rather than warn or raise on every run."""
+    """A raw hub dataset, the common case, probes to False silently."""
 
     def _missing(repo_id, filename, repo_type=None, **kwargs):
         raise EntryNotFoundError("no metadata.json")

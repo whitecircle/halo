@@ -24,9 +24,9 @@ from unittest import mock
 
 import torch
 
-import src.distributed.loading.model_loading as model_loading
-from src.distributed.loading.peft_setup import unfreeze_modules_by_patterns
-from src.distributed.parallelism_config import ParallelismConfig
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.freeze_patterns import unfreeze_modules_by_patterns
 from tests.common.harness import gpu_test_main
 from tests.common.pinned_params import (
     RUN_DTYPE,
@@ -35,7 +35,7 @@ from tests.common.pinned_params import (
     tiny_family_checkpoint,
     train_row,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 CASES = ("router_only", "glm5_next_mixed_uncast")
 
@@ -58,7 +58,7 @@ def _router_only(ctx) -> dict:
 def _glm5_next_mixed_uncast(ctx) -> dict:
     base_dir = tiny_family_checkpoint(ctx, "glm5_next")
     pc = ParallelismConfig(ep_size=1)
-    with mock.patch.object(model_loading, "cast_loaded_parameters", lambda *args, **kwargs: None):
+    with mock.patch.object(whole_model, "cast_loaded_parameters", lambda *args, **kwargs: None):
         model, tokenizer, peft_config = load_row_model(base_dir, "mixed", pc)
     pins = base_params_off_run_dtype(model)
     log(f"{len(pins)} base params left off {RUN_DTYPE}: {pins[:6]}")

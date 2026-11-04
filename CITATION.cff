@@ -1,12 +1,13 @@
 # Citation metadata — https://citation-file-format.github.io
 cff-version: 1.2.0
 message: "If you use this software, please cite it using these metadata."
-title: "Halo — LLM Alignment Toolkit"
+title: "Halo"
 abstract: >-
   Halo is an open-source framework built by White Circle for training large
   language and multimodal models: pre-training and post-training (SFT, SMPO,
-  GRPO, distillation, and more) with Expert, Context, Tensor, and Expert-Tensor
-  Parallelism on top of the HuggingFace stack (TRL, Accelerate, Transformers).
+  GRPO, distillation, and more) with Expert, Context, Tensor, Expert-Tensor,
+  and Pipeline Parallelism on top of the HuggingFace stack (TRL, Accelerate,
+  Transformers).
 type: software
 authors:
   - name: "White Circle"
@@ -32,8 +33,8 @@ authors:
   - family-names: "Kharlapenko"
     given-names: "Dmitrii"
 license-url: "https://github.com/whitecircle/halo/blob/main/LICENSE"
-version: 1.1.0
-date-released: "2026-10-11"
+version: 1.2.0
+date-released: "2026-11-04"
 repository-code: "https://github.com/whitecircle/halo"
 url: "https://github.com/whitecircle/halo"
 keywords:

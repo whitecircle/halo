@@ -1,28 +1,8 @@
 #!/usr/bin/env python
-"""An adapter trained through a multimodal checkpoint's text-only class must merge — or refuse loudly
-— into a checkpoint whose keys are the layout its config declares.
-
-``text_only_model: true`` trains a VLM checkpoint as its ``*ForCausalLM`` sibling, whose module tree
-spells the decoder ``model.layers``; the merge tool resolves the widest class for the same
-checkpoint, which spells it ``model.language_model.layers``. PEFT resolves no key across that gap,
-warns, and merges nothing, so the tool would write the untouched base as a finished model. The merge
-reads the adapter's keys, meets them through the class they address, and refuses a base the keys do
-not belong to.
-
-That load strips the checkpoint's ``language_model`` prefix, and a stock ``save_pretrained`` puts it
-back: a text-only config over wrapper-prefixed keys, which transformers re-strips on reload (so a
-reload through it proves nothing) while ``reattach_vision_tower.py`` nests the prefix a second time.
-The chain test therefore pins the on-disk keys to what a fresh model of each saved config writes and
-reloads every artifact through the toolkit loader.
-
-    python tests/cpu/checkpoint/test_merge_text_only_adapter_e2e.py
-"""
+"""An adapter trained through a VLM's text-only class merges in its config's layout, or refuses. PEFT resolves no
+key across the ``language_model`` gap and would write the untouched base."""
 
 from __future__ import annotations
-
-# Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import: the
-# chain test runs CPU forwards, which otherwise reach the CUDA-only causal_conv1d kernel.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
 
 import tempfile
 from pathlib import Path
@@ -33,7 +13,6 @@ import torch
 from accelerate import PartialState
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors.torch import load_file, save_file
-from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import (
     AutoConfig,
     PreTrainedTokenizerBase,
@@ -46,14 +25,15 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from scripts.after_training.reattach_vision_tower import reattach_vision_tower
-from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from src.checkpoint.tool_io import PROCESSOR_FILES, iter_checkpoint_shard_entries
-from src.models.loading.model_preparation import auto_load_model, resolve_auto_model_class
-from src.models.loading.tokenizer_setup import load_processing_class
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, PROCESSOR_FILES
+from halo.checkpoint.reading import iter_checkpoint_shard_entries
+from halo.checkpoint.tools import adapter_merge, bf16_conversion
+from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
+from halo.model_loading.model_preparation import auto_load_model, resolve_auto_model_class
+from halo.model_loading.tokenizer_setup import load_processing_class
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG
+from tests.common.tiny_models import word_level_tokenizer
 from tests.common.tokenizers import load_cached_processor
-from tests.common.utils import load_script_module
 
 _TARGET, _CONTROL = "q_proj", "o_proj"
 _WRAPPER_TEXT_PREFIX = "model.language_model."
@@ -66,7 +46,7 @@ class _Family(NamedTuple):
     text_config: dict
 
 
-# The families whose transformers text-only class loads the wrapper checkpoint by stripping its prefix.
+# Their text-only class loads the wrapper checkpoint by stripping its prefix.
 _FAMILIES = {
     "qwen3_5": _Family(Qwen3_5Config, Qwen3_5ForConditionalGeneration, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG),
     "qwen3_5_moe": _Family(
@@ -75,19 +55,13 @@ _FAMILIES = {
 }
 
 
-def _tiny_tokenizer() -> PreTrainedTokenizerFast:
-    backend = Tokenizer(models.WordLevel({"<unk>": 0, "<eos>": 1, "hello": 2, "world": 3}, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.Whitespace()
-    return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
-
-
-# What a run customizes on the tokenizer it saves beside its adapter, none of which the base carries.
+# None of which the base carries.
 _RUN_CHAT_TEMPLATE = "{% for message in messages %}<run>{{ message['content'] }}{% endfor %}"
 _RUN_SPECIAL_TOKEN = "<run_special>"
 
 
 def _run_tokenizer() -> PreTrainedTokenizerFast:
-    tokenizer = _tiny_tokenizer()
+    tokenizer = word_level_tokenizer(("hello", "world"))
     tokenizer.chat_template = _RUN_CHAT_TEMPLATE
     tokenizer.add_special_tokens({"additional_special_tokens": [_RUN_SPECIAL_TOKEN]})
     return tokenizer
@@ -107,15 +81,13 @@ def _build_multimodal_base(base_dir: Path, family: _Family) -> None:
         vision_config={**vision, "out_hidden_size": family.text_config["hidden_size"]},
     )
     family.wrapper_cls(config).save_pretrained(base_dir)
-    _tiny_tokenizer().save_pretrained(base_dir)
+    word_level_tokenizer(("hello", "world")).save_pretrained(base_dir)
 
 
 def _train_text_only_adapter(
     base_dir: Path, adapter_dir: Path, family: _Family, *, model_cls: type | None = None, processing_class=None
 ) -> dict[str, torch.Tensor]:
-    """The adapter a ``text_only_model`` run saves: keys spelled on the text-only class's tree (or on
-    ``model_cls``'s, for a run on the multimodal class), beside the run's processing class — its own
-    tokenizer unless ``processing_class`` is given."""
+    """Keys spelled on the text-only class's tree, or on ``model_cls``'s for a run on the multimodal class."""
     model = (model_cls or family.text_cls).from_pretrained(base_dir, dtype=torch.float32)
     peft_model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=[_TARGET], task_type="CAUSAL_LM"))
     deltas: dict[str, torch.Tensor] = {}
@@ -130,16 +102,11 @@ def _train_text_only_adapter(
     return deltas
 
 
-def _merge_script():
-    return load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_text_only")
-
-
 def _on_disk_keys(checkpoint_dir: Path) -> set[str]:
     return {key for _shard, _reader, key in iter_checkpoint_shard_entries(str(checkpoint_dir))}
 
 
 def _declared_layout(checkpoint_dir: Path, scratch: Path) -> set[str]:
-    """The keys a fresh model of ``checkpoint_dir``'s config writes: the layout that config declares."""
     config = AutoConfig.from_pretrained(checkpoint_dir)
     resolve_auto_model_class(config).from_config(config).save_pretrained(scratch)
     return _on_disk_keys(scratch)
@@ -153,7 +120,7 @@ def test_a_text_only_adapter_merges_into_the_class_it_was_trained_through():
         _build_multimodal_base(base, family)
         deltas = _train_text_only_adapter(base, adapter, family)
 
-        _merge_script().merge_peft_adapter(
+        adapter_merge.merge_peft_adapter(
             adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
         )
 
@@ -171,8 +138,7 @@ def test_a_text_only_adapter_merges_into_the_class_it_was_trained_through():
 
 @pytest.mark.parametrize("family_name", sorted(_FAMILIES))
 def test_a_merged_text_only_adapter_reattaches_into_a_checkpoint_the_toolkit_loader_reads_back(family_name, tmp_path):
-    """merge → reattach → reload: both artifacts carry the layout their configs declare, and both
-    reload through the toolkit loader with every tensor consumed and the merged model's logits."""
+    """transformers re-strips on reload, so a plain reload proves nothing; reattach would nest the prefix twice."""
     PartialState()
     family = _FAMILIES[family_name]
     base, adapter, merged, served = (tmp_path / name for name in ("base", "adapter", "merged", "served"))
@@ -183,7 +149,7 @@ def test_a_merged_text_only_adapter_reattaches_into_a_checkpoint_the_toolkit_loa
         text_base = family.text_cls.from_pretrained(base, dtype=torch.float32)
         reference = PeftModel.from_pretrained(text_base, adapter).merge_and_unload().eval()(input_ids=input_ids).logits
 
-    _merge_script().merge_peft_adapter(
+    adapter_merge.merge_peft_adapter(
         adapter_dir=str(adapter), output_dir=str(merged), dtype=torch.float32, verbose=False
     )
     merged_keys = _on_disk_keys(merged)
@@ -203,22 +169,25 @@ def test_a_merged_text_only_adapter_reattaches_into_a_checkpoint_the_toolkit_loa
         torch.testing.assert_close(logits, reference, rtol=1e-5, atol=1e-5)
 
 
-def test_the_bf16_merge_writes_the_text_only_layout(tmp_path):
-    """``convert_to_bf16 --peft --merge_adapter`` shares the merge's save, so it owes the same layout."""
+def test_the_fp32_norm_merge_writes_the_text_only_layout_with_fp32_norms(tmp_path):
     PartialState()
     family = _FAMILIES["qwen3_5"]
     base, adapter, out = tmp_path / "base", tmp_path / "adapter", tmp_path / "out"
     _build_multimodal_base(base, family)
     _train_text_only_adapter(base, adapter, family)
 
-    convert = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_text_only")
-    convert.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True, merge_adapter=True)
+    adapter_merge.merge_peft_adapter(str(adapter), str(out), fp32_norms=True, verbose=False)
 
     assert _on_disk_keys(out) == _declared_layout(out, tmp_path / "fresh")
+    dtypes = {
+        key: reader.get_slice(key).get_dtype() for _shard, reader, key in iter_checkpoint_shard_entries(str(out))
+    }
+    norms = {key for key in dtypes if "norm" in key}
+    assert norms and {dtypes[key] for key in norms} == {"F32"}, "a norm leaf was not written fp32"
+    assert {dtype for key, dtype in dtypes.items() if key not in norms and dtype.startswith(("F", "BF"))} == {"BF16"}
 
 
 def _build_multimodal_base_with_processor(base_dir: Path, family: _Family):
-    """A multimodal base shipping the family's full processor, as a Hub VLM checkpoint does."""
     processor = load_cached_processor(QWEN3_5_2B)
     _build_multimodal_base(base_dir, family)
     for component in (processor, processor.image_processor, processor.video_processor):
@@ -229,15 +198,7 @@ def _build_multimodal_base_with_processor(base_dir: Path, family: _Family):
 
 @pytest.mark.parametrize("text_only", [True, False], ids=["text-only-class", "multimodal-class"])
 def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_through(text_only, tmp_path):
-    """The merge ships the processing class the run saved beside its adapter, not the base's.
-
-    A text-only merge is the export a ``text_only_model`` run writes: a ``*_text`` config with no
-    vision path, so the run's tokenizer ships (its chat template and added tokens, which an embedding
-    saved under ``save_embedding_layers`` is sized to) and none of the multimodal base's processor
-    files, which would have ``AutoProcessor`` insert image tokens for a model with no tower.
-    ``reattach_vision_tower.py`` takes the processor files from the base and the tokenizer from the
-    export, so the served artifact carries both. A run on the multimodal class saves its processor,
-    and the merge keeps it."""
+    """Base processor files would have ``AutoProcessor`` insert image tokens for a model with no tower."""
     PartialState()
     family = _FAMILIES["qwen3_5"]
     base, adapter, merged, served = (tmp_path / name for name in ("base", "adapter", "merged", "served"))
@@ -248,7 +209,7 @@ def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_throu
         processor.tokenizer.add_special_tokens({"additional_special_tokens": [_RUN_SPECIAL_TOKEN]})
         _train_text_only_adapter(base, adapter, family, model_cls=family.wrapper_cls, processing_class=processor)
 
-    _merge_script().merge_peft_adapter(
+    adapter_merge.merge_peft_adapter(
         adapter_dir=str(adapter), output_dir=str(merged), dtype=torch.float32, verbose=False
     )
 
@@ -267,17 +228,14 @@ def test_the_merge_ships_the_runs_processing_class_for_the_class_it_merged_throu
 
 
 def test_an_unmerged_bf16_adapter_save_ships_what_the_merge_ships(tmp_path):
-    """``convert_to_bf16 --peft`` without ``--merge_adapter`` writes the processing class the merge
-    would: for a text-only adapter, the run's tokenizer and none of the multimodal base's processor
-    files, so merging the converted adapter later reaches the same artifact."""
+    """Merging the converted adapter later reaches the same artifact."""
     PartialState()
     family = _FAMILIES["qwen3_5"]
     base, adapter, out = tmp_path / "base", tmp_path / "adapter", tmp_path / "out"
     _build_multimodal_base_with_processor(base, family)
     _train_text_only_adapter(base, adapter, family)
 
-    convert = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_unmerged_text_only")
-    convert.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
+    bf16_conversion.convert_to_bf16(str(adapter), str(out), "causal_lm", is_peft=True)
 
     shipped = [name for name in PROCESSOR_FILES if (out / name).is_file()]
     assert not shipped, f"the text-only adapter save carries the multimodal base's processor files {shipped}"
@@ -285,7 +243,6 @@ def test_an_unmerged_bf16_adapter_save_ships_what_the_merge_ships(tmp_path):
 
 
 def test_an_adapter_whose_keys_address_no_module_of_the_base_is_refused():
-    """A relabelled key set that fits neither class must not produce a merged checkpoint at all."""
     PartialState()
     family = _FAMILIES["qwen3_5"]
     with tempfile.TemporaryDirectory() as tmp:
@@ -296,7 +253,7 @@ def test_an_adapter_whose_keys_address_no_module_of_the_base_is_refused():
         save_file({key.replace(".layers.", ".blocks."): tensor for key, tensor in load_file(weights).items()}, weights)
 
         with pytest.raises(ValueError, match="does not have"):
-            _merge_script().merge_peft_adapter(
+            adapter_merge.merge_peft_adapter(
                 adapter_dir=str(adapter), output_dir=str(out), dtype=torch.float32, verbose=False
             )
         assert not out.exists(), "a refused merge left an output directory behind"

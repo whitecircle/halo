@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""A mid-epoch resume must emit the RESUMED epoch's data order, not epoch 0's.
-
-``skip_first_batches`` wraps the sampler chain in a ``SkipBatchSampler``, one level deeper than the
-fixed shapes accelerate's ``set_epoch`` probes. The stock DP chain is rescued by the re-plant
-``prepare_data_loader`` does on a ``RandomSampler``; the two shapes below are not — a sampler the
-toolkit brings itself, and a dispatching loader whose probe is a single level. Their epoch-seeded
-sampler stays at epoch 0, so the resumed epoch re-draws epoch 0's permutation (and every later
-epoch shifts by one).
-``set_sampler_epoch`` walks the whole chain instead, and ``DataParallelDataLoaderMixin._run_epoch``
-runs it before the base's epoch body — the seam every trainer, custom loader or not, goes through.
-
-Run: python tests/cpu/parallelism/test_resume_data_order.py
-"""
+"""A mid-epoch resume emits the resumed epoch's data order. ``SkipBatchSampler`` hides epoch-seeded samplers from
+accelerate's ``set_epoch`` probes; ``set_sampler_epoch`` walks the whole chain."""
 
 import datasets
 import pytest
@@ -19,8 +8,8 @@ import torch
 from accelerate.data_loader import get_sampler, prepare_data_loader, skip_first_batches
 from torch.utils.data import DataLoader, RandomSampler, Sampler
 
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin, set_sampler_epoch
+from halo.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _ROWS = 24
 _BATCH_SIZE = 2
@@ -30,12 +19,8 @@ _DATA_SEED = 1234
 
 
 class _EpochSeededSampler(Sampler):
-    """Minimal ``set_epoch`` contract: the permutation is seeded by the epoch.
-
-    The shape of any sampler the toolkit brings itself (offline GRPO's ``MultiGroupSampler``): not a
-    ``RandomSampler``, so ``prepare_data_loader`` does not re-plant it onto the shard the way it does
-    the seedable one, and the DP shard leaves it a level lower than that rescue reaches.
-    """
+    """The shape of a toolkit sampler (``MultiGroupSampler``): no ``RandomSampler``, so ``prepare_data_loader`` does
+    not re-plant it."""
 
     def __init__(self, size: int):
         self.size = size
@@ -54,12 +39,11 @@ class _EpochSeededSampler(Sampler):
 
 
 def _dataset() -> datasets.Dataset:
-    """Rows that carry their own index, so an emitted batch names the order that produced it."""
+    """So an emitted batch names the order that produced it."""
     return datasets.Dataset.from_dict({"idx": list(range(_ROWS))})
 
 
 def _dp_sharded_loader() -> tuple[Sampler, DataLoader]:
-    """DP > 1: ``BatchSamplerShard`` over an epoch-seeded sampler."""
     sampler = _EpochSeededSampler(_ROWS)
     loader = prepare_data_loader(
         DataLoader(_dataset(), batch_size=_BATCH_SIZE, sampler=sampler),
@@ -73,11 +57,8 @@ def _dp_sharded_loader() -> tuple[Sampler, DataLoader]:
 
 
 def _dispatch_loader() -> tuple[Sampler, DataLoader]:
-    """Dispatched batches (``dispatch_batches``) over the stock ``RandomSampler``.
-
-    The re-plant does happen here — accelerate installs its ``SeedableRandomSampler`` — but the
-    dispatch loader's ``set_epoch`` probes a single level, so the skip wrapper hides even that one.
-    """
+    """The dispatch loader's ``set_epoch`` probes a single level, so the skip wrapper hides even the re-planted
+    sampler."""
     dataset = _dataset()
     loader = prepare_data_loader(
         DataLoader(dataset, batch_size=_BATCH_SIZE, sampler=RandomSampler(dataset)),
@@ -100,12 +81,7 @@ def _emitted_order(loader: DataLoader) -> list[int]:
 
 
 def _order_at_epoch(build, epoch: int) -> list[int]:
-    """The order an uninterrupted pass over ``epoch`` emits.
-
-    Stamped through the loader, as the base ``Trainer`` does it: ``__iter__`` re-stamps the chain
-    from the loader's own iteration counter, which a sampler-only stamp would leave behind. Without
-    the skip wrapper accelerate's probes still reach, so this is the unbroken reference order.
-    """
+    """``__iter__`` re-stamps from the loader's own counter, which a sampler-only stamp would leave behind."""
     _, loader = build()
     loader.set_epoch(epoch)
     return _emitted_order(loader)
@@ -117,8 +93,7 @@ def test_resumed_epoch_emits_the_resumed_epochs_order(build):
     epoch1 = _order_at_epoch(build, 1)
     assert epoch1 != epoch0, "epoch 1 draws epoch 0's order — the fixture cannot tell the two apart"
 
-    # Premise: accelerate's own set_epoch does not reach through the skip wrapper, so a resumed
-    # epoch replays epoch 0. This is what the toolkit helper below has to correct.
+    # Premise: accelerate's own set_epoch does not reach through the skip wrapper.
     sampler, loader = build()
     native = skip_first_batches(loader, _RESUMED_AT_BATCH)
     native.set_epoch(1)
@@ -135,11 +110,7 @@ def test_resumed_epoch_emits_the_resumed_epochs_order(build):
 
 
 class _ResumingBase:
-    """Stands in for ``transformers.Trainer._run_epoch``'s resume branch, and records what it saw.
-
-    The base skips the trained batches and only then sets the epoch on the rebuilt loader, so this
-    is also where the stamp has to survive: the skip wrapper keeps the same sampler object.
-    """
+    """The base skips batches and only then sets the epoch, so the stamp has to survive on the same sampler object."""
 
     def __init__(self, sampler: Sampler):
         self.sampler = sampler
@@ -156,8 +127,8 @@ class _ResumingBase:
         return "base"
 
 
-class _StubTrainer(DataParallelDataLoaderMixin, _ResumingBase):
-    """The shape every concrete trainer has: the mixin ahead of a Trainer base."""
+class _StubTrainer(DataParallelLoaderMixin, _ResumingBase):
+    """The mixin ahead of a Trainer base."""
 
 
 def test_run_epoch_stamps_the_epoch_the_base_then_resumes_into():
@@ -178,7 +149,7 @@ def test_run_epoch_stamps_the_epoch_the_base_then_resumes_into():
 def test_every_trainer_reaches_the_stamp_through_the_composed_mixin():
     """Including the plain FSDP2/DP path, whose loader the custom dataloader seam never sees."""
     owner = next(base for base in DistributedTrainerMixin.__mro__ if "_run_epoch" in base.__dict__)
-    assert owner is DataParallelDataLoaderMixin, (
+    assert owner is DataParallelLoaderMixin, (
         f"_run_epoch resolves to {owner.__name__} for the composed trainer mixin, not the dataloader mixin"
     )
 

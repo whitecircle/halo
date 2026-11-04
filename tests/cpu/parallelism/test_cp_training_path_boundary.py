@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""SFT and SMPO's actual CP forwards retain boundary supervision and gradient normalization, and SMPO's
-holds on a batch whose prompts the collator left-padded."""
+"""SFT and SMPO's CP forwards retain boundary supervision and gradient normalization, also on prompts the collator
+left-padded."""
 
 import copy
 from types import SimpleNamespace
@@ -13,12 +13,12 @@ import torch.nn.functional as F
 from torch import nn
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.context_parallel.config import CPConfig
-from src.distributed.pipeline_parallel.losses import next_token_logprobs
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, reject_left_padding
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
+from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.gloo import run_gloo_ranks
+from tests.common.smpo_trainer import smpo_trainer
 
 VOCAB, SEQ = 17, 12
 
@@ -39,13 +39,15 @@ def _sync_gradient(parameter, cp_size):
     return parameter.grad
 
 
-def _drop_boundary(logits, labels, cp_rank, cp_size):
-    chunk = labels.size(1) // cp_size
-    return logits[:, :-1], labels[:, cp_rank * chunk + 1 : (cp_rank + 1) * chunk]
+def _drop_boundary(labels, cp_rank, cp_size):
+    """Its last target, scored against the next chunk, ignored."""
+    targets = cp_local_targets(labels, cp_rank, cp_size).clone()
+    targets[:, -1] = LABEL_IGNORE_INDEX
+    return targets
 
 
 def _drop_boundary_logprobs(logits, labels, start=0):
-    """SMPO's log-probs with each chunk's last position, the one scored against the next chunk, ignored."""
+    """Each chunk's last position ignored."""
     logps, mask = next_token_logprobs(logits, labels, start)
     return logps, torch.cat([mask[:, :-1], torch.zeros_like(mask[:, -1:])], dim=1)
 
@@ -55,7 +57,7 @@ def _sft_worker(rank, cp_size):
     baseline = _LogitsModel()
     ids = torch.randint(0, VOCAB, (2, SEQ))
     labels = torch.full_like(ids, LABEL_IGNORE_INDEX)
-    # Only chunk-edge targets are supervised; their omission cannot hide inside a long-row mean.
+    # Only chunk-edge targets are supervised, so their omission cannot hide in a long-row mean.
     labels[:, SEQ // cp_size :: SEQ // cp_size] = ids[:, SEQ // cp_size :: SEQ // cp_size]
     mask = torch.ones_like(ids)
     expected = F.cross_entropy(
@@ -64,13 +66,13 @@ def _sft_worker(rank, cp_size):
         ignore_index=LABEL_IGNORE_INDEX,
     )
     expected.backward()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     for mutated in (False, True):
         model = copy.deepcopy(baseline)
         model.zero_grad()
         wrapper = unpatched_cp_wrapper(model, cp_config=config)
         if mutated:
-            with patch("src.distributed.context_parallel.wrapper.cp_shift_against_full_labels", _drop_boundary):
+            with patch("halo.distributed.context_parallel.ulysses_model.cp_local_targets", _drop_boundary):
                 loss = wrapper(ids, attention_mask=mask, labels=labels).loss
         else:
             loss = wrapper(ids, attention_mask=mask, labels=labels).loss
@@ -90,13 +92,9 @@ def _sft_worker(rank, cp_size):
 
 
 def _smpo_host(config):
-    host = object.__new__(SmoothMarginPOTrainer)
-    host.cp_config = config
-    host.parallelism_config = SimpleNamespace(cp_size=config.cp_size if config is not None else 1)
-    host.pad_token_id = 0
-    host.padding_free = False
-    host.lower_clip_percentile = host.upper_clip_percentile = host.min_log_prob = None
-    return host
+    return smpo_trainer(
+        parallelism_config=SimpleNamespace(cp_size=config.cp_size if config is not None else 1), cp_config=config
+    )
 
 
 def _smpo_worker(rank, cp_size):
@@ -117,14 +115,14 @@ def _smpo_worker(rank, cp_size):
     objective = reference["chosen_logps"].sum() - reference["rejected_logps"].sum()
     objective += 0.3 * reference["chosen_sft_loss"]
     objective.backward()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     for mutated in (False, True):
         model = copy.deepcopy(baseline)
         model.zero_grad()
         wrapper = unpatched_cp_wrapper(model, cp_config=config)
         host = _smpo_host(config)
         if mutated:
-            with patch("src.trainers.preference.smpo.next_token_logprobs", _drop_boundary_logprobs):
+            with patch("halo.trainers.preference.smpo.next_token_logprobs", _drop_boundary_logprobs):
                 actual = host.concatenated_forward(wrapper, batch)
         else:
             actual = host.concatenated_forward(wrapper, batch)
@@ -142,7 +140,6 @@ def _smpo_worker(rank, cp_size):
 
 
 def _smpo_ragged_worker(rank, cp_size):
-    """Two pairs whose prompts the collator left-pads to unequal lengths, through the real CP wrapper."""
     torch.manual_seed(97)
     baseline = _LogitsModel()
     prompt_mask = torch.tensor([[0, 0, 0, 1, 1], [1, 1, 1, 1, 1]])
@@ -162,8 +159,12 @@ def _smpo_ragged_worker(rank, cp_size):
 
     model = copy.deepcopy(baseline)
     model.zero_grad()
-    config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
-    actual = _smpo_host(config).concatenated_forward(unpatched_cp_wrapper(model, cp_config=config), batch)
+    config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
+    wrapper = unpatched_cp_wrapper(model, cp_config=config)
+    wrapper.register_forward_pre_hook(
+        lambda _module, _args, kwargs: reject_left_padding(kwargs["attention_mask"]), with_kwargs=True
+    )
+    actual = _smpo_host(config).concatenated_forward(wrapper, batch)
     loss = actual["chosen_logps"].sum() - actual["rejected_logps"].sum()
     (loss + 0.3 * actual["chosen_sft_loss"]).backward()
 
@@ -184,8 +185,7 @@ def test_smpo_concatenated_forward_loss_and_gradients_need_boundary_targets(cp_s
 
 @pytest.mark.parametrize("cp_size", [2, 4])
 def test_smpo_left_padded_prompts_train_the_unsplit_objective(cp_size):
-    """The wrapper refuses a left-padded batch, so SMPO must hand it every pad trailing, with labels
-    flushed in step: a ragged batch then scores, and backpropagates, exactly as without CP."""
+    """CP attention ignores the mask, so SMPO hands the wrapper every pad trailing, with labels flushed in step."""
     run_gloo_ranks(_smpo_ragged_worker, cp_size, cp_size)
 
 

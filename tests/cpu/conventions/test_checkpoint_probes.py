@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""The checkpoint probes in ``tests.common.checkpoint_io`` fail on the save they exist to catch.
-
-The SFT, SMPO and offline GRPO resume suites and the save smokes gate on these probes and run only on
-the GPU tiers, so a probe that stopped reading a file (or a capture field) would go unnoticed. Each is
-driven here with a directory or a capture that holds everything, then with one piece taken away.
-
-Run: python tests/cpu/conventions/test_checkpoint_probes.py
-"""
+"""The checkpoint probes in ``tests.common.checkpoint_io`` fail on the save they exist to catch. They gate GPU-only
+suites, so a probe that stopped reading a file would go unnoticed there."""
 
 from pathlib import Path
 
@@ -15,7 +9,7 @@ import torch
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
 
-from src.checkpoint.format import SAFETENSORS_WEIGHTS_FILE
+from halo.checkpoint.format import SAFETENSORS_WEIGHTS_FILE
 from tests.common.checkpoint_io import (
     OPTIMIZER_META_FILE,
     OPTIMIZER_SHARD_FILE,
@@ -29,7 +23,6 @@ SAVE_STEP = 3
 L_PRE = 1.5
 LOSS_TOL = 1e-2
 MOMENT = torch.ones(2)
-# The optimizer state a save wrote, as the resume capture must read it back.
 SAVED_STATE = {"state": {"w": {"exp_avg_sq": MOMENT, "step": SAVE_STEP}}}
 
 

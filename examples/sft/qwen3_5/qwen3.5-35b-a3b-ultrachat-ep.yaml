@@ -12,13 +12,10 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 256 routed experts → 32/rank
-moe_balancing: bias_update_transient  # aux_loss raises here (Qwen3_5MoeForConditionalGeneration reads
-                                      # output_router_logits from kwargs, never from the config, so the
-                                      # flag records router logits while router_aux_loss_coef never
-                                      # reaches the loss) and the architecture has no exportable bias
-                                      # slot, so exported checkpoints serve without the trained bias
-                                      # (near-tie top-k flips vs training)
-save_sharded_ep: false
+moe_balancing: bias_update_transient  # trainer-side bias balancing: the architecture has no exportable
+                                      # bias slot, so exported checkpoints serve without the trained bias
+                                      # (near-tie top-k flips vs training). aux_loss, which auto resolves
+                                      # to here, is the balancing that exports by construction.
 fp32_router: true
 fp32_experts: true
 fp32_non_ep_params: true
@@ -33,17 +30,13 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300
@@ -62,6 +55,10 @@ dataloader_num_workers: 2
 use_peft: false
 
 # --- Tokens & chat template ---
+# Replies render with no think block, where the hub template writes an empty one before the last reply, and system
+# turns drop. The export carries this render, so serve it under the same one.
+# A reply with no think block reads far worse on Qwen3.6-35B (agent-docs/optimization/mtp-heads.md#recipes); this
+# checkpoint's reading is not measured.
 assistant_message_template: "<|im_start|>assistant\n"
 pad_token: <|endoftext|>
 eos_token: <|im_end|>

@@ -1,37 +1,21 @@
 #!/usr/bin/env python
-"""
-VLM (Vision Language Model) SFT Training Test.
+"""DistributedSFTTrainer smoke on Qwen3-VL-2B with text-only data. It checks only finite losses; no loss is compared
+against a reference."""
 
-Smoke test: DistributedSFTTrainer trains a VLM model (AutoModelForImageTextToText) on text-only
-synthetic conversations, exercising the VLM code path without image data. It checks only that the
-logged losses are finite; no loss is compared against a reference.
-
-Test Setup:
-- Model: Qwen/Qwen3-VL-2B-Instruct (VLM with text+vision capabilities)
-- Parallelism: the mixin's FSDP2 data parallelism (no EP/CP/TP)
-- Dataset: the shared synthetic math SFT set, text-only (no images), 30% multi-turn
-
-Test Phases:
-1. Load VLM model via AutoModelForImageTextToText + AutoProcessor
-2. Create synthetic text-only dataset with chat-templated conversations
-3. Train for 5 steps with gradient checkpointing (Liger off)
-4. Validate: training completes, loss is finite
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_vlm.py
-"""
+from types import SimpleNamespace
 
 import torch
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import CommonScriptArguments, ModelArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.model_setup import load_policy_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_VL_2B
 MAX_STEPS = 5
@@ -52,7 +36,7 @@ def run(ctx):
     log(f"  Seq length: {MAX_SEQ_LENGTH}")
     log(f"{'=' * 70}")
 
-    # the loader reads dtype/liger settings off these
+    # The loader reads dtype and Liger settings off these.
     config = SFTConfig(
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
@@ -68,19 +52,21 @@ def run(ctx):
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
     parallelism_config = ParallelismConfig()
 
-    # production entry point, so VLM detection and processor load are under test too
-    log("\n[1/5] Loading VLM via load_model_for_training (production path)...")
-    model_config = ModelConfig(
+    # The production entry point, so VLM detection and processor load are under test too.
+    log("\n[1/5] Loading VLM via load_policy_model (production path)...")
+    model_config = ModelArguments(
         model_name_or_path=MODEL_NAME, attn_implementation="flash_attention_2", trust_remote_code=True
     )
-    model, processing_class, tokenizer, is_vlm = load_model_for_training(
-        model_config, config, parallelism_config, vlm_run=False
+    context = SimpleNamespace(
+        parallelism_config=parallelism_config, model_source=MODEL_NAME, policy_from_checkpoint=False
     )
-    assert is_vlm, "Qwen3-VL must be detected as a VLM by load_model_for_training"
+    model, processing_class, tokenizer, is_vlm = load_policy_model(
+        context, config, model_config, CommonScriptArguments(), vlm_run=False
+    )
+    assert is_vlm, "Qwen3-VL must be detected as a VLM by load_policy_model"
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     log(f"  Model: {type(model).__name__}, processor: {type(processing_class).__name__}")

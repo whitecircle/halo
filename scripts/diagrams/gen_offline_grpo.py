@@ -17,7 +17,7 @@ ROW2_Y, ROW2_H = 1.17, card_height(4)
 
 fig, ax = canvas(W, H)
 
-title(ax, "Offline GRPO — pre-scored data", "per-token loss = −(π · A), every row × 1/group_size")
+title(ax, "Offline GRPO: pre-scored data", "per-token loss = −(π · A), every row × 1/group_size")
 
 section(ax, M, H - 0.52, "ONCE, AT TOKENIZATION")
 
@@ -95,7 +95,7 @@ card(
     [
         "prob_weighted:  −(π · A)",
         "reinforce:      −(log π · A)",
-        "min_log_prob −3.0 on A < 0",
+        "min_log_prob floor on A < 0",
         "kl_beta > 0: + β · k3 KL",
     ],
     color=BLUE,

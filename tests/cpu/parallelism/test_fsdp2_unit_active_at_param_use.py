@@ -1,28 +1,6 @@
 #!/usr/bin/env python
-"""Every parameter is used inside the forward of the FSDP2 unit that owns it — across the roster.
-
-FSDP2 unshards a unit's parameters in that unit's forward pre-hook. ``apply_fsdp2_per_layer`` picks
-the units, so a parameter whose module runs *before* its unit's forward opens is still a sharded
-DTensor at the call: ``aten.embedding`` (or ``aten.mm``) then raises "got mixed torch.Tensor and
-DTensor" at the first training step. The multimodal wrappers are the shape that exposes it: their
-``<Family>Model.forward`` embeds the ids itself and only then calls ``language_model``, so the unit
-holding ``embed_tokens`` has to be that model or an ancestor — bare and under a ``PeftModel``, whose
-attribute forwarding moves what ``model.model`` names. A tied embedding is reserved for the root unit
-and hides the defect, except where PEFT's ``modules_to_save`` copies untie it again, or where a family
-carries a second embedding table (Gemma 4's per-layer inputs) that is never tied.
-
-The check is structural and family-agnostic: record the ``fully_shard`` calls, derive each
-parameter's owning unit, run one real CPU forward, and require the owning unit to be on the forward
-stack whenever a module with parameters of its own is called. The adapters go through the production
-seam (:func:`build_peft_config`), so the towers PEFT cannot adapt are excluded exactly as in a run.
-
-Run: pytest tests/cpu/parallelism/test_fsdp2_unit_active_at_param_use.py
-"""
-
-# The device-aware kernel-dispatch shim must land before the modeling modules below bind transformers'
-# hub-kernel fallback at import, or a CPU forward of a conv / linear-attention family reaches the
-# CUDA-only causal_conv1d kernel.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
+"""Every parameter is used inside the forward of the FSDP2 unit that owns it, across the roster. Earlier use raises
+"got mixed torch.Tensor and DTensor"; composites embedding ids expose it."""
 
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -73,11 +51,11 @@ from transformers import (
     ZayaConfig,
     ZayaForCausalLM,
 )
-from trl import ModelConfig
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import IdentityParamSet
-from src.distributed.loading.peft_setup import build_peft_config
+import halo.distributed.fsdp as fsdp
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.fsdp import IdentityParamSet
+from halo.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import (
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,
@@ -148,8 +126,8 @@ _SIGLIP2_VISION = {
     "num_patches": 16,
     "patch_size": 4,
 }
-# Gemma 4's towers spell the attention projections as `Gemma4ClippableLinear` containers — the shape
-# stock LoRA cannot adapt — so this case covers the exclusion seam and the unit resolution together.
+# ``Gemma4ClippableLinear`` containers, which stock LoRA cannot adapt, so this covers the exclusion seam and unit
+# resolution together.
 _GEMMA4_VISION = {
     "hidden_size": 32,
     "intermediate_size": 64,
@@ -202,12 +180,8 @@ def _qwen3_vl_composite(tied: bool) -> Qwen3VLForConditionalGeneration:
 
 
 class _Composite(nn.Module):
-    """A composite whose text stack is a whole ``*ForCausalLM`` — the transformers-4 wrapper layout.
-
-    It embeds the ids itself and enters the decoder-layer backbone one level deeper than the roster's
-    composites, so the unit owning ``embed_tokens`` has to be found by ancestry, not by a
-    ``language_model`` spelling.
-    """
+    """The transformers-4 wrapper layout, so the unit owning ``embed_tokens`` is found by ancestry rather than a
+    ``language_model`` spelling."""
 
     def __init__(self, language_model: Qwen3ForCausalLM):
         super().__init__()
@@ -308,53 +282,54 @@ _FAMILIES = {
 }
 
 
-def _owning_units(model: nn.Module) -> dict[int, nn.Module]:
-    """``id(parameter) -> the fully_shard unit that manages it``, from the recorded wrap calls.
-
-    A unit manages the parameters under its module that no earlier unit took and that the call did
-    not pass as ignored — the rule ``fully_shard`` itself applies.
-    """
-    calls: list[tuple[nn.Module, IdentityParamSet]] = []
+def _owning_units(model: nn.Module, layers_per_unit: int) -> dict[int, tuple[nn.Module, ...]]:
+    """The rule ``fully_shard`` itself applies: parameters under its modules no earlier unit took and not ignored."""
+    calls: list[tuple[tuple[nn.Module, ...], IdentityParamSet]] = []
 
     def record(module, **kwargs):
-        calls.append((module, kwargs.get("ignored_params") or IdentityParamSet()))
+        modules = tuple(module) if isinstance(module, list) else (module,)
+        calls.append((modules, kwargs.get("ignored_params") or IdentityParamSet()))
 
-    with patch.object(fsdp, "fully_shard", side_effect=record):
+    with patch.object(fsdp, "fully_shard", side_effect=record), patch.object(fsdp, "_install_unit_hooks"):
         fsdp.apply_fsdp2_per_layer(
             model,
             dp_mesh=None,
             mp_policy=MixedPrecisionPolicy(),
             reshard_after_forward=False,
             ignored_params=IdentityParamSet(),
+            layers_per_unit=layers_per_unit,
         )
 
-    owner: dict[int, nn.Module] = {}
-    for module, ignored in calls:
-        for param in module.parameters():
+    owner: dict[int, tuple[nn.Module, ...]] = {}
+    for modules, ignored in calls:
+        for param in (param for module in modules for param in module.parameters()):
             if id(param) not in owner and param not in ignored:
-                owner[id(param)] = module
+                owner[id(param)] = modules
     return owner
 
 
-def _params_used_outside_their_unit(model: nn.Module, owner: dict[int, nn.Module]) -> list[str]:
-    """Run one forward and name every module called while the unit owning its parameters is not open."""
+def _params_used_outside_their_unit(model: nn.Module, owner: dict[int, tuple[nn.Module, ...]]) -> list[str]:
     units = {id(unit): unit for unit in owner.values()}
     open_units: list[int] = []
     violations: list[str] = []
     names = {id(module): name for name, module in model.named_modules()}
     handles = []
 
-    for unit in units.values():
-        handles.append(unit.register_forward_pre_hook(lambda mod, _args: open_units.append(id(mod))))
+    for unit_id, unit in units.items():
         handles.append(
-            unit.register_forward_hook(lambda mod, _args, _out: open_units.remove(id(mod)), always_call=True)
+            unit[0].register_forward_pre_hook(lambda _mod, _args, unit_id=unit_id: open_units.append(unit_id))
+        )
+        handles.append(
+            unit[-1].register_forward_hook(
+                lambda _mod, _args, _out, unit_id=unit_id: open_units.remove(unit_id), always_call=True
+            )
         )
 
     def check(module, _args):
         for param in module.parameters(recurse=False):
             unit = owner.get(id(param))
             if unit is not None and id(unit) not in open_units:
-                violations.append(f"{names[id(module)]} ({type(module).__name__}) before {type(unit).__name__}")
+                violations.append(f"{names[id(module)]} ({type(module).__name__}) before {type(unit[0]).__name__}")
                 return
 
     for module in model.modules():
@@ -372,12 +347,7 @@ def _params_used_outside_their_unit(model: nn.Module, owner: dict[int, nn.Module
 
 
 def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.Module:
-    """Attention LoRA on the projection names the family's decoder layers spell, through the run's seam.
-
-    A name is taken when an ``nn.Linear`` in a decoder layer's attention carries it — what a recipe
-    lists — and is then matched over the whole tree, so a tower spelling the same name as a container
-    PEFT cannot adapt (Gemma 4) reaches :func:`build_peft_config`'s exclusion as in a run.
-    """
+    """A tower spelling the same name as a container reaches :func:`build_peft_config`'s exclusion as in a run."""
     targets = sorted(
         {
             name.rsplit(".", 1)[-1]
@@ -385,9 +355,8 @@ def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.M
             if type(module) is nn.Linear and name.endswith("_proj") and ".layers." in name and "attn" in name
         }
     )
-    # Over one name, TRL hands PEFT a bare string, which PEFT reads as a regex rather than a name.
-    assert len(targets) > 1, "fewer than two attention projections found — the case would not adapt by name"
-    model_config = ModelConfig(
+    assert targets, "no attention projection found — the case would adapt nothing"
+    model_config = ModelArguments(
         use_peft=True,
         lora_r=2,
         lora_alpha=4,
@@ -398,10 +367,11 @@ def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.M
     return get_peft_model(model, build_peft_config(model, model_config))
 
 
+@pytest.mark.parametrize("layers_per_unit", [1, 2], ids=["one_layer_units", "two_layer_units"])
 @pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied"])
 @pytest.mark.parametrize("mode", ["bare", "peft", "peft_modules_to_save"])
 @pytest.mark.parametrize("family", sorted(_FAMILIES))
-def test_every_parameter_is_used_inside_its_own_fsdp_unit(family, mode, tied):
+def test_every_parameter_is_used_inside_its_own_fsdp_unit(family, mode, tied, layers_per_unit):
     torch.manual_seed(0)
     model = _FAMILIES[family](tied).eval()
     if tied and model.get_input_embeddings().weight is not model.get_output_embeddings().weight:
@@ -409,7 +379,7 @@ def test_every_parameter_is_used_inside_its_own_fsdp_unit(family, mode, tied):
     if mode != "bare":
         model = _attention_lora(model, _MODULES_TO_SAVE if mode == "peft_modules_to_save" else None)
 
-    owner = _owning_units(model)
+    owner = _owning_units(model, layers_per_unit)
     embed_weight = model.get_input_embeddings().weight
     assert id(embed_weight) in owner, "the wrap left the input embedding in no unit"
 

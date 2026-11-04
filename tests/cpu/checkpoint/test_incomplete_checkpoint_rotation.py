@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""An incomplete checkpoint must never take a rotation slot, on any filesystem.
-
-A resume passes over a newer ``checkpoint-<N>`` whose save never completed and continues from an older
-one, so the run's next saves are numbered below that directory. Rotation orders by mtime, and on a
-mount whose mtimes it distrusts (a fuse/S3 mount reporting one value for every directory) by step —
-where the torn directory is the newest and the one it protects. Under ``save_total_limit: 1`` the next
-save then deletes the checkpoint the run resumed from and itself. The resume therefore moves every
-incomplete step directory into ``_incomplete_checkpoints/`` on each save rank, data kept.
-
-Two gloo ranks, as one shared output filesystem (one writer) and as two nodes with their own local
-disks (one writer each). On per-node storage ``checkpoint-200`` is complete on node 0 but torn on
-node 1, and ``checkpoint-250`` exists on node 1 alone: both are incomplete world-wide, and node 0's
-rotation must not keep its own complete-looking copy. Every mtime reads the same, as on such a mount;
-the resumed run saves step 150 under ``save_total_limit: 1``.
-
-    python tests/cpu/checkpoint/test_incomplete_checkpoint_rotation.py
-"""
+"""An incomplete checkpoint never takes a rotation slot: under ``save_total_limit: 1`` a torn newer directory would
+make the next save delete the resume source. Every mtime here reads the same."""
 
 import datetime
 import json
@@ -26,11 +11,13 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
-from src.distributed import runtime
-from src.distributed.runtime import fs_aware_save_rank, get_global_rank
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.environment import detect_resume_checkpoint
+from halo.entrypoints.run_setup import resume_checkpoint_from_config
+from halo.runtime import collectives, filesystem
+from halo.runtime.filesystem import is_fs_save_rank
+from halo.runtime.ranks import get_global_rank
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -45,18 +32,22 @@ FAKE_MTIME = 1_700_000_000.0
 
 
 class _ShardStore:
+    writes_shards = True
+
     def save(self, output_dir):
         with open(os.path.join(output_dir, f"optimizer_shard_{get_global_rank():05d}.pt"), "wb") as fh:
             fh.write(b"shard")
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's save over HF's, rotation left to the mixin."""
-
     def __init__(self, run_dir):
         self.run_dir = run_dir
         self.args = SimpleNamespace(
-            save_total_limit=1, save_only_model=False, should_save=fs_aware_save_rank(), push_to_hub=False
+            save_total_limit=1,
+            save_only_model=False,
+            should_save=is_fs_save_rank(),
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
         )
         self.state = TrainerState(global_step=150)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
@@ -90,28 +81,28 @@ def _worker(rank: int, root: str, per_node: bool) -> None:
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         os.path.getmtime = lambda path: FAKE_MTIME
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant(run_dir, 100, complete=True)
             _plant(run_dir, 200, complete=per_node and rank == 0)
             if per_node and rank == 1:
                 _plant(run_dir, 250, complete=True)
-        runtime.barrier()
+        collectives.barrier()
 
-        config = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
-        outcome["resumed"] = os.path.basename(detect_resume_checkpoint(config))
+        config = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
+        outcome["resumed"] = os.path.basename(resume_checkpoint_from_config(config, overwrite_output_dir=False))
         _Trainer(run_dir)._save_checkpoint(model=None, trial=None)
-        runtime.barrier()
+        collectives.barrier()
         outcome["step_dirs"] = sorted(name for name in os.listdir(run_dir) if name.startswith("checkpoint-"))
         holding = os.path.join(run_dir, HOLDING_DIR)
         outcome["held"] = sorted(os.listdir(holding)) if os.path.isdir(holding) else []
-        outcome["next_resume"] = os.path.basename(detect_resume_checkpoint(config))
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+        outcome["next_resume"] = os.path.basename(resume_checkpoint_from_config(config, overwrite_output_dir=False))
+    except Exception as e:  # The setup failing must still leave a verdict file.
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 

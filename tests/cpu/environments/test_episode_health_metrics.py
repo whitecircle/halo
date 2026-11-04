@@ -1,18 +1,12 @@
 #!/usr/bin/env python
-"""CPU tests for the two episode-health signals a natural-termination rate hides.
-
-A turn that stops inside its reasoning arrives with no visible content and no tool call, and
-reasoning that drifts into another script reads as a normal turn; both are only visible in
-transcripts unless the environment counts them.
-
-Run: python tests/cpu/environments/test_episode_health_metrics.py  (or pytest)
-"""
+"""The two episode-health signals a natural-termination rate hides: a turn stopping inside its reasoning, and
+reasoning drifting into another script."""
 
 import pytest
 
-from src.environments.base import Message, Trajectory
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.messages import Message, Trajectory
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 
 def _make_env(**kwargs):

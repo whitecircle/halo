@@ -1,24 +1,13 @@
 #!/usr/bin/env python
-"""HF's ``save_on_each_node`` must name the same writers as the toolkit's own saves.
-
-The base Trainer writes ``trainer_state.json``, ``scheduler.pt`` and ``optimizer.pt`` and rotates old
-checkpoints on ``args.should_save``; the toolkit's writers follow the output filesystem. On per-node
-storage the flag is forced on, or no checkpoint resumes on nodes 1..N. On storage shared across nodes it is
-forced off, or every node's local rank 0 writes and rotates the same files at once: two writers per
-file in one filesystem namespace. A single node has one local rank 0, so the flag is left as set.
-
-    python tests/cpu/checkpoint/test_save_on_each_node_alignment.py
-"""
+"""HF's ``save_on_each_node`` names the same writers as the toolkit's saves. Forced on for per-node storage, or nodes
+1..N cannot resume; forced off for shared, or two writers race one namespace."""
 
 from types import SimpleNamespace
 
 import pytest
-from accelerate import PartialState
 
-import src.trainers.mixins.base as base_mod
-from src.trainers.mixins.base import align_save_on_each_node
-
-PartialState()  # the mixin's accelerate logger requires an initialized state
+import halo.trainers.training_args_overrides as base_mod
+from halo.trainers.training_args_overrides import align_save_on_each_node
 
 
 @pytest.mark.parametrize(

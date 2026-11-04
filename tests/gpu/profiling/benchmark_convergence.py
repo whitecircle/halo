@@ -1,23 +1,9 @@
 #!/usr/bin/env python
-"""
-Convergence / loss-tracking comparison: stock TRL vs Halo (EP / dense).
+"""Stock TRL vs Halo loss curves on one model, seeded data, LR and global batch, showing the optimizations preserve
+training dynamics.
 
-Trains the same model (gpt-oss-20b) on the same seeded synthetic data, same LR,
-same global batch (DP=8), for a longer run, and dumps the per-step loss curve so
-Halo's optimizations (Expert Parallelism, grouped GEMM, AdamWBF16 with stochastic
-rounding) can be shown to preserve training dynamics — not just speed/memory.
-
-  --ep 0   -> stock trl.SFTTrainer + transformers FSDP + fp32-AdamW  (baseline)
-  --ep 1   -> Halo DistributedSFTTrainer, dense FSDP2 (+ AdamWBF16, grouped GEMM)
-  --ep N>1 -> Halo with Expert Parallelism size N
-
-Loss curve is printed as parseable `CONV_LOSS step=<i> loss=<x> lr=<y>` lines
-(rank 0), plus the EfficiencyCallback headline. Same seed (42) + DistributedSampler
-=> identical data order across frameworks, so curves are directly comparable.
-
-Usage (8x B300):
-    torchrun --nproc_per_node=8 \
-        tests/gpu/profiling/benchmark_convergence.py --ep 0 --seq 2048 --batch_size 2 --steps 200
+``--ep 0`` is stock TRL, ``--ep 1`` Halo dense FSDP2, ``--ep N>1`` Halo EP. Rank 0 prints `CONV_LOSS step=<i> loss=<x>
+lr=<y>` lines.
 """
 
 import sys
@@ -28,12 +14,14 @@ from accelerate import PartialState
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import create_benchmark_parser, resolve_benchmark_attn
+from halo.callbacks.efficiency import EfficiencyCallback
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp.spec import LowpSpec
+from halo.log import configure_training_logging
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.benchmark_args import add_lowp_precision_argument, create_benchmark_parser, resolve_benchmark_attn
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -42,20 +30,26 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, log
 
 _LAYER_CLS = {"gpt-oss-20b": "GptOssDecoderLayer", "qwen3-30b-a3b": "Qwen3MoeDecoderLayer"}
 
 
 def main() -> int:
+    configure_training_logging()
     failed = False
     parser = create_benchmark_parser(description="Convergence comparison (TRL vs Halo)", require_ep=False)
     parser.add_argument("--ep", type=int, default=0, help="0=stock TRL, 1=Halo dense, N>1=Halo EP size N")
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--seed", type=int, default=42)
+    add_lowp_precision_argument(parser)
     args = parser.parse_args()
+    lowp = LowpSpec(precision=args.lowp_precision)
+    if lowp.enabled and args.ep < 1:
+        parser.error("--lowp_precision needs a Halo arm (--ep >= 1); stock TRL has no low-precision path")
 
     rank, world_size, local_rank = init_distributed()
     PartialState()
@@ -65,6 +59,8 @@ def main() -> int:
     use_liger = not args.no_liger
     is_halo = args.ep >= 1
     tag = "TRL-stock" if not is_halo else (f"Halo-EP{args.ep}" if args.ep > 1 else "Halo-dense")
+    if lowp.enabled:
+        tag = f"{tag}-{lowp.precision}"
 
     log(f"\n{'=' * 70}\n  CONVERGENCE: {tag}  ({model_name})")
     log(f"  seq={args.seq} bs={args.batch_size} steps={args.steps} lr={args.lr} seed={args.seed} liger={use_liger}")
@@ -100,9 +96,8 @@ def main() -> int:
             "dataloader_num_workers": 0,
             "include_num_input_tokens_seen": True,
         }
-        # One config for both arms — the stock-TRL arm distributes nothing (args.ep == 0 => ep_size
-        # 1), the Halo arm distributes experts — because the callback needs it in both.
-        parallelism_config = ParallelismConfig(ep_size=max(args.ep, 1), use_grouped_gemm=True)
+        # The callback needs a config in both arms; the stock-TRL arm distributes nothing (args.ep == 0 => ep_size 1).
+        parallelism_config = ParallelismConfig(ep_size=max(args.ep, 1), use_grouped_gemm=True, lowp=lowp)
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,
@@ -144,7 +139,7 @@ def main() -> int:
                 attn_implementation=args.attn_implementation,
                 use_liger_kernel=use_liger,
             )
-            sft_config = SFTConfig(**common, use_liger_kernel=False, fsdp="", ddp_find_unused_parameters=True)
+            sft_config = SFTConfig(**common, use_liger_kernel=False, ddp_find_unused_parameters=True)
             trainer = DistributedSFTTrainer(
                 model=model,
                 args=sft_config,

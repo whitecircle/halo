@@ -1,6 +1,6 @@
 # ReAct Environments
 
-The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `src/environments/envs/protocols/react.py`).
+The model writes a `Thought:`, then an `Action:` or a `Final Answer:`, and the environment parses the action out of the plain text ([ReAct](https://arxiv.org/abs/2210.03629), `halo/environments/protocols/react.py`).
 
 Serve the model **without** a tool-call parser: one would lift the call out of the text, leaving no `Action:` line to parse.
 
@@ -27,8 +27,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `thought_reward` | `0.02` | Added on a turn that carries a Thought |
-| `no_thought_penalty` | `0.05` | Subtracted on a turn that acts or answers with no Thought |
-| `require_thought` | `true` | Gate for that penalty; a turn doing neither is free either way |
+| `no_thought_penalty` | `0.05` | Subtracted on a turn that acts or answers with no Thought; `0` turns it off, and a turn doing neither is free either way |
 | `tool_budgets` | `{}` | Per-tool episode caps, `{tool: cap}`; `0` disables a tool, an over-cap call is refused as a tool error |
 | `search_backend` | auto | `react_search` only: the `web_search` backend, named and validated as on [`qa_search`](../tasks/qa-benchmarks.md#configuration) |
 
@@ -53,7 +52,7 @@ Per-turn shaping, logged as `reward/turn_shaping`: `+thought_reward` or `-no_tho
 ### Refused and unproductive turns
 
 - An `Action:` naming an unregistered tool is a tool error whose observation lists the real tools; the turn trains only on a negative advantage ([Untrainable turns](../../objective.md#untrainable-turns)).
-- An `Action:` whose arguments do not bind is refused unrun ([Argument binding](native-tool-use.md#argument-binding)): `tool_error_penalty`, no `tool_budgets` spent.
+- An `Action:` whose arguments do not bind ([Argument binding](native-tool-use.md#argument-binding)) or past its `tool_budgets` cap is refused unrun: `tool_error_penalty`, no budget spent, and the turn trains only on a negative advantage. A cap of `0` disables the tool, and its turn stays trainable.
 - A call that ends on a sandbox fault is booked by its class and ends the episode ([Sandbox faults](../sandbox.md#sandbox-faults)).
 - A cut or empty turn is neither executed nor graded. It is nudged and retried ([Unproductive turns](../../episodes.md#unproductive-turns)) and trains only on a negative advantage.
 - Text with neither an Action nor a Final Answer gets the format hint and stays trainable.
@@ -65,7 +64,7 @@ Per-turn shaping, logged as `reward/turn_shaping`: `+thought_reward` or `-no_tho
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --env_type react_math --dataset <hf-id-or-dir> --split test \
     --prompt_field prompt --answer_field answer \
     --base_url http://localhost:8000/v1 --model <served-model> --num_examples 20
@@ -75,12 +74,12 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 
 ## From Python
 
-`answer_validator` is a callable, so only the Python path sets it:
+`answer_validator` is a callable, so only the Python path sets it; a YAML string raises:
 
 ```python
-from src.environments.envs.protocols.react import create_react_math_environment
+from halo.environments.protocols.react import build_react_math_environment
 
-env = create_react_math_environment(max_turns=10, answer_validator=my_validator)
+env = build_react_math_environment(max_turns=10, answer_validator=my_validator)
 ```
 
 ## Related pages

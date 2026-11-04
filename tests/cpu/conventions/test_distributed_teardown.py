@@ -1,11 +1,6 @@
 #!/usr/bin/env python
-"""``teardown_distributed`` frees every DeepEP buffer before destroying the process group.
-
-Gin frees a buffer's symmetric heap through the group communicator, so a free skipped or moved after
-``destroy_process_group`` faults the GPU suites at exit.
-
-Run: pytest tests/cpu/conventions/test_distributed_teardown.py
-"""
+"""``teardown_distributed`` frees every DeepEP buffer before destroying the process group. Gin frees a buffer's heap
+through the group communicator, so a later free faults the GPU suites at exit."""
 
 import pytest
 

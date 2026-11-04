@@ -1,25 +1,16 @@
 #!/usr/bin/env python
-"""Test: SmoothMarginPOTrainer on a VLM (Qwen3-VL-2B) — single-GPU vision-SMPO smoke.
-
-A ProcessorMixin ``processing_class`` flips the trainer into VLM mode: rows are chat-templated with
-the prefix-strip invariant, images are processed at collation (``DataCollatorForVLMSMPO``), and the
-vision tensors ride the chosen|rejected concatenated forward duplicated row-major. Runs a real model
-forward/backward on that path and checks that VLM mode is entered, the final training loss is finite
-and SMPO's ``rewards/*`` metrics are logged. It does not compare the loss to a reference.
-
-Run with 1 GPU:
-    torchrun --nproc_per_node=1 tests/gpu/trainers/preference/test_smpo_vlm.py
-"""
+"""SMPOTrainer on Qwen3-VL-2B, a single-GPU vision smoke: VLM mode entered, finite loss, ``rewards/*`` logged. Compares
+no loss against a reference."""
 
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 NUM_TRAIN_SAMPLES = 16
@@ -43,7 +34,7 @@ def run(ctx):
         MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
     )
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=2,
@@ -62,10 +53,9 @@ def run(ctx):
         max_prompt_length=512,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
 
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model,
         args=config,
         train_dataset=train_dataset,

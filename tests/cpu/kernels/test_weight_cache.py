@@ -1,21 +1,13 @@
-"""CPU tests for :class:`src.kernels.lowp.quantization.WeightVersionCache` — the shared auto-evicting
-weight cache behind the low-precision dequant cache (``quantization.cached_fake_quant``) and the
-DeepGEMM quantized-operand cache.
-
-Pins the contracts an ``id(weight)``-keyed dict violates: entries must evict when the weight is
-garbage-collected (no unbounded growth / stale-id hits in multi-model processes), and distinct
-tensors must never alias.
-
-    python tests/cpu/kernels/test_weight_cache.py
-"""
+""":class:`halo.kernels.lowp.quantization.WeightVersionCache`: entries evict on garbage collection and distinct
+tensors never alias, which an ``id(weight)`` dict violates."""
 
 import gc
 
 import pytest
 import torch
 
-from src.kernels.lowp import quantization
-from src.kernels.lowp.quantization import WeightVersionCache
+from halo.kernels.lowp import quantization
+from halo.kernels.lowp.quantization import WeightVersionCache
 
 
 def test_hit_and_fingerprint_invalidation():
@@ -35,7 +27,7 @@ def test_entry_evicts_when_weight_is_collected():
     assert len(cache) == 1
     del w
     gc.collect()
-    assert len(cache) == 0  # weakref finalizer dropped the entry (and its derived buffer)
+    assert len(cache) == 0  # The weakref finalizer dropped the entry and its derived buffer.
 
 
 def test_distinct_tensors_never_alias():
@@ -46,19 +38,18 @@ def test_distinct_tensors_never_alias():
     cache.put(b, (0, "mxfp8"), "b-value")
     assert cache.get(a, (0, "mxfp8")) == "a-value"
     assert cache.get(b, (0, "mxfp8")) == "b-value"
-    # A different tensor object never reads another's entry, fingerprint match or not.
     c = torch.nn.Parameter(torch.randn(4, 4))
     assert cache.get(c, (0, "mxfp8")) is None
 
 
 def test_cached_fake_quant_cache_evicts_end_to_end():
-    baseline = len(quantization._WEIGHT_DEQUANT_CACHE)
+    baseline = len(quantization._weight_dequant_cache)
     w = torch.nn.Parameter(torch.randn(8, 64) * 0.3)
     quantization.cached_fake_quant(w, "mxfp8", axis=-1)
-    assert len(quantization._WEIGHT_DEQUANT_CACHE) == baseline + 1
+    assert len(quantization._weight_dequant_cache) == baseline + 1
     del w
     gc.collect()
-    assert len(quantization._WEIGHT_DEQUANT_CACHE) == baseline
+    assert len(quantization._weight_dequant_cache) == baseline
 
 
 if __name__ == "__main__":

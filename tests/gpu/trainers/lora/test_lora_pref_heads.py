@@ -1,19 +1,6 @@
 #!/usr/bin/env python
-"""LoRA / QLoRA on the preference + classification-head trainers (dense FSDP2, + adapter checkpoint).
-
-One file, five trainers (``--trainer``), two modes (``--mode``): confirms every non-GRPO/non-distill
-trainer trains adapters with a frozen base and writes a round-trippable adapter checkpoint, under both
-plain LoRA (FSDP2 grad sync) and 4-bit QLoRA (AllReduce-hook grad sync). Dense Qwen3-0.6B throughout.
-
-    dpo / smpo            — preference {prompt, chosen, rejected}, CausalLM, CAUSAL_LM adapters
-    kto                   — unpaired {prompt, completion, label}, CausalLM, CAUSAL_LM adapters
-    reward                — preference, SequenceClassification(num_labels=1), SEQ_CLS adapters + score head
-    classification        — {input_ids, labels}, SequenceClassification(num_labels=2), SEQ_CLS + score head
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_pref_heads.py --trainer dpo --mode lora
-"""
+"""LoRA and QLoRA on the preference and classification-head trainers on dense Qwen3-0.6B: frozen base, trained
+adapters, a round-trippable checkpoint."""
 
 import argparse
 import math
@@ -30,28 +17,28 @@ from transformers import (
 )
 from trl import DPOConfig, KTOConfig, RewardConfig
 
-from src.args.common_script_args import CommonScriptArguments
-from src.configs.classification_config import ClassificationConfig
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
-from src.trainers.preference.dpo import DistributedDPOTrainer
-from src.trainers.preference.kto import DistributedKTOTrainer
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.reward.bradley_terry import DistributedRewardTrainer
-from src.trainers.reward.classification import ClassificationTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import (
-    assert_adapter_checkpoint,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
+from halo.configs.classification import ClassificationConfig
+from halo.configs.preference import SMPOConfig
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.runtime.collectives import barrier
+from halo.trainers.preference.dpo import DistributedDPOTrainer
+from halo.trainers.preference.kto import DistributedKTOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
+from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
+from halo.trainers.reward.classification import ClassificationTrainer
+from tests.common.adapters import (
+    check_adapters_moved,
+    check_only_adapters_trainable,
+    save_and_check_adapter_checkpoint,
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log
+from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 
 MODEL = QWEN3_0_6B
 MAX_STEPS = 3
@@ -77,8 +64,8 @@ def _pref_rows(n):
 
 
 def _pref_rows_str(tokenizer, n):
-    """SMPO tokenizes pre-templated STRING prompt/chosen/rejected (it concatenates prompt+completion),
-    unlike DPO/KTO which accept conversational message lists and template internally."""
+    """SMPO tokenizes pre-templated strings (it concatenates prompt+completion); DPO/KTO template message lists
+    internally."""
     rng = random.Random(SEED)
     rows = []
     for _ in range(n):
@@ -181,7 +168,6 @@ def _peft_config(trainer: str) -> LoraConfig:
 
 
 def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, parallelism_config):
-    """Construct the requested trainer with a tiny config + dataset. Returns the trainer."""
     common = {
         "output_dir": output_dir,
         "max_steps": MAX_STEPS,
@@ -196,7 +182,6 @@ def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, paralleli
         "dataloader_drop_last": True,
         "gradient_checkpointing": False,
         "use_liger_kernel": False,
-        "fsdp": "",
     }
     if trainer == "dpo":
         cfg = DPOConfig(beta=0.1, max_length=MAXLEN, **common)
@@ -209,8 +194,8 @@ def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, paralleli
             parallelism_config=parallelism_config,
         )
     if trainer == "smpo":
-        cfg = SmoothMarginPOConfig(beta=0.1, max_length=MAXLEN, max_prompt_length=64, **common)
-        return SmoothMarginPOTrainer(
+        cfg = SMPOConfig(beta=0.1, max_length=MAXLEN, max_prompt_length=64, **common)
+        return SMPOTrainer(
             model=model,
             args=cfg,
             train_dataset=_pref_rows_str(tokenizer, N),
@@ -265,11 +250,10 @@ def run(ctx) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = _load_model(trainer_name, mode)
-    # Through the seam the training scripts run (apply_max_length → setup_model_and_tokenizer),
-    # never a hand-written config.pad_token_id: the two seq-cls heads pool against that id, so
-    # recording it here by hand would keep this test green through a regression in the sync.
-    tokenizer = setup_model_and_tokenizer(
-        CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=input_embeddings_tp_sharded
+    # Through the scripts' seam: the seq-cls heads pool against that id, so recording it by hand would stay green
+    # through a regression in the sync.
+    tokenizer = configure_run_tokenizer(
+        CommonScriptArguments(), model, tokenizer, MAXLEN, embeddings_sharded=is_input_embedding_tp_sharded
     )
 
     parallelism_config = ParallelismConfig()
@@ -278,7 +262,7 @@ def run(ctx) -> dict:
     )
 
     wrapped = unwrap(trainer.model)
-    ok, detail = assert_only_adapters_trainable(wrapped)
+    ok, detail = check_only_adapters_trainable(wrapped)
     checks["only_adapters_trainable"] = ok
     log(f"  [trainable] {detail}")
     before = snapshot_adapters(wrapped, expert_lora=False)
@@ -290,11 +274,11 @@ def run(ctx) -> dict:
     log(f"  training_loss={result.training_loss:.5f}, steps={result.global_step}")
 
     after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
-    ok, detail = assert_adapters_moved(before, after)
+    ok, detail = check_adapters_moved(before, after)
     checks["adapters_moved"] = ok
     log(f"  [moved] {detail}")
 
-    ok, detail = assert_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=False)
+    ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=False)
     checks["adapter_checkpoint"] = ok
     log(f"  [checkpoint] {detail}")
 

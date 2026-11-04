@@ -120,23 +120,25 @@ RUN pip install "torch~=2.11.0" --index-url https://download.pytorch.org/whl/cu1
 
 # cutlass-dsl/quack pair FA4, Muon and the block-scaled MoE kernels all need; two layers
 # force-reinstall it (here and after the uv reconcile).
-ARG CUTLASS_DSL_VERSION=4.5.2
-ARG QUACK_VERSION=0.5.0
+ARG CUTLASS_DSL_VERSION=4.6.2
+ARG QUACK_VERSION=0.6.4
 
-# Throw-on-call stubs for the FA2 split-K instantiations CUDA 13.2 ptxas hangs on for sm_90
-# (split-K serves KV-cache inference paths, not training). Hopper build only.
+# Throw-on-call stubs for the FA2 split-K instantiations CUDA 13.2 ptxas hangs on for sm_90; the build pins
+# mha_fwd and mha_varlen_fwd to one split so no forward reaches them. Hopper build only.
 COPY docker/training/flash_attn_split_stubs_hopper.cpp /tmp/flash_attn_split_stubs_hopper.cpp
 
 RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Installing FlashAttention-4 (Blackwell, prebuilt CuTe DSL wheel) ===" \
-      && pip install "flash-attn-4[cu13]==4.0.0b16" \
-      # Force the pinned cutlass-dsl package set; FA4 itself declares floors only.
+      && pip install "flash-attn-4[cu13]==4.0.0b37" \
+      # Force the pinned cutlass-dsl package set; FA4 itself declares floors only. The image runs
+      # CUDA 13, so the cu12 runtime flavor the cutlass-dsl metapackage pulls in is removed.
       && pip install --force-reinstall --no-deps \
            "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
            "nvidia-cutlass-dsl-libs-base==${CUTLASS_DSL_VERSION}" \
+           "nvidia-cutlass-dsl-libs-core==${CUTLASS_DSL_VERSION}" \
            "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}" \
            "quack-kernels==${QUACK_VERSION}" \
-      && pip uninstall -y nvidia-cutlass-dsl-libs-core nvidia-cutlass-dsl-libs-cu12 \
+      && pip uninstall -y nvidia-cutlass-dsl-libs-cu12 \
       && python -c "import cutlass.cute.nvgpu; from flash_attn.cute import flash_attn_func; print('FA4 + cutlass.cute.nvgpu: OK')" \
       # Verify that the base image still provides the FA2 fallback.
       && python -c "import flash_attn; from flash_attn import flash_attn_func; \
@@ -164,13 +166,20 @@ print(f'FA2 inherited from base: {flash_attn.__version__}')"; \
       && git -C /tmp/flash-attention checkout v2.8.3.post1 \
       && cd /tmp/flash-attention \
       && echo "Hopper: replacing 24 FA2 split-K kernel files with throw-stubs" \
-      && echo "  (CUDA 13.2 ptxas hangs indefinitely on these for sm_90;" \
-      && echo "   split-K is only used by KV-cache inference paths, not training)" \
+      && echo "  (CUDA 13.2 ptxas hangs indefinitely on these for sm_90)" \
       && cp /tmp/flash_attn_split_stubs_hopper.cpp csrc/flash_attn/src/flash_fwd_split_stubs.cpp \
+      # The dense and varlen forwards pick split-K by occupancy (num_splits 0): small batches, and decode under
+      # GQA. One split keeps both on the kernels this build compiles.
+      && sed -i 's|/\*num_splits\*/ 0|/*num_splits*/ 1|' csrc/flash_attn/flash_api.cpp \
+      && test "$(grep -c '/\*num_splits\*/ 1' csrc/flash_attn/flash_api.cpp)" = 2 \
       && sed -i '/csrc\/flash_attn\/src\/flash_fwd_split_/d' setup.py \
       && sed -i '/csrc\/flash_attn\/flash_api.cpp/a\                "csrc/flash_attn/src/flash_fwd_split_stubs.cpp",' setup.py \
       && echo "Patched setup.py: removed split .cu lines, added 1 stub .cpp" \
       && pip install --no-build-isolation . \
+      # The build also installs flash_attn/cute, an old copy of FA4's CuTe DSL sources that does not
+      # import against the pinned cutlass-dsl. Hopper runs FA2 and FA3 only; removing it leaves
+      # flash_attn.cute absent, which every FA4 probe reads as not installed.
+      && rm -rf /usr/local/lib/python3.12/dist-packages/flash_attn/cute \
       && cd /tmp \
       && rm -rf /tmp/flash-attention; \
     fi
@@ -211,10 +220,7 @@ RUN if [ "$TARGET_GPU" = "hopper" ]; then \
            && echo "flash_attn_3" > "$DIST_INFO/top_level.txt" \
            && touch "$DIST_INFO/INSTALLER" \
            && echo "Created $DIST_INFO"; \
-         fi \
-      && python -c "from flash_attn_3 import flash_attn_func; print('FA3 via flash_attn_3: OK')" \
-      && python -c "from flash_attn_interface import flash_attn_func; print('FA3 via flash_attn_interface: OK')" \
-      && python -c "import importlib.metadata; print(f'FA3 version via metadata: {importlib.metadata.version(\"flash_attn_3\")}')"; \
+         fi; \
     else \
       echo "Skipping FA3 setup (Blackwell target)"; \
     fi
@@ -289,23 +295,13 @@ RUN uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra f
     && rm -rf ${UV_CACHE_DIR} /tmp/requirements.txt
 
 # gram-newton-schulz hard-pins cutlass-dsl 4.4.2, which the reconcile re-installs, breaking
-# `import cutlass` (and with it Muon/quack, block-scaled GEMMs, FA4). Restore the pinned trio.
+# `import cutlass` (and with it Muon/quack, block-scaled GEMMs, FA4). Restore the pinned set.
 RUN pip install --force-reinstall --no-deps \
       "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-base==${CUTLASS_DSL_VERSION}" \
+      "nvidia-cutlass-dsl-libs-core==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}" \
-      "quack-kernels==${QUACK_VERSION}" \
-    && python -c "import cutlass, cutlass.cute.nvgpu, cutlass._mlir; print('cutlass-dsl import OK:', cutlass.__file__)" \
-    && if [ "$TARGET_GPU" = "blackwell" ]; then \
-         python -c "from flash_attn.cute import flash_attn_func; print('FA4 flash_attn.cute import OK')"; \
-       else \
-         echo "FA4 flash_attn.cute assertion skipped (Hopper installs FA2+FA3, not FA4)"; \
-       fi
-
-# The optional extras the locked install carried: FlashAdamW (`flash-optimizers`, pure Triton) and the
-# Gigatoken Rust bulk tokenizer backend (`gigatoken`).
-RUN python -c "from flashoptim import FlashAdamW; print('flashoptim OK')" \
-    && python -c "import gigatoken; print('gigatoken OK')"
+      "quack-kernels==${QUACK_VERSION}"
 
 # Guards against a silent NCCL downgrade above: asserts the DeepEP floor, equality with uv.lock,
 # and that a live process resolves that wheel's libnccl.so.2 rather than the system copy.
@@ -318,13 +314,13 @@ ARG SOURCE_REVISION=dev
 RUN echo "Building Halo source revision: ${SOURCE_REVISION}"
 
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
-ARG VERSION=1.1.0
+ARG VERSION=1.2.0
 ARG BUILD_DATE
 LABEL version="${VERSION}"
 LABEL org.opencontainers.image.version="${VERSION}"
 LABEL org.opencontainers.image.created="${BUILD_DATE}"
 
-COPY src/ ./src/
+COPY halo/ ./halo/
 COPY scripts/ ./scripts/
 COPY launcher-configs/ ./launcher-configs/
 COPY jinja-templates/ ./jinja-templates/
@@ -334,30 +330,19 @@ COPY skills/ ./skills/
 RUN mkdir -p .claude .agents && ln -s ../skills .claude/skills && ln -s ../skills .agents/skills
 COPY README.md CLAUDE.md AGENTS.md LICENSE APACHE-2.0.txt ./
 
-# Editable install, deliberately unmasked: a swallowed failure would ship an image with no `halo`
-# CLI and no installed `src` distribution.
+# Editable install, deliberately unmasked: a swallowed failure would ship an image with neither the
+# `halo` CLI nor an installed `halo` package.
 RUN uv pip install --system -e . --no-deps
 
 # transformer_engine ships with the NGC base and is unused here. Removed after the reconcile, so
 # nothing re-pulls it.
 RUN pip uninstall -y transformer_engine || true
 
-# Build-time verification (GPU-dependent packages verify at runtime with --gpus).
+# Build-time verification, on the image that ships: the imports docker/training/verify_image.py lists
+# (GPU-dependent packages verify at runtime with --gpus), the CLI and the bubblewrap jail's id maps.
+COPY docker/training/verify_image.py /tmp/verify_image.py
 RUN echo "=== Verifying Installation (TARGET_GPU=${TARGET_GPU}) ===" \
-    && python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}')" \
-    && python -c "import transformers; print(f'Transformers: {transformers.__version__}')" \
-    && python -c "import trl; print(f'TRL: {trl.__version__}')" \
-    && python -c "import accelerate; print(f'Accelerate: {accelerate.__version__}')" \
-    && python -c "import flash_attn; print(f'Flash Attention 2: {flash_attn.__version__}')" \
-    && python -c "from flash_attn.flash_attn_interface import flash_attn_func; print('  - FA2 flash_attn_func: OK')" \
-    && if [ "$TARGET_GPU" = "hopper" ]; then \
-         python -c "import flash_attn_3; print('Flash Attention 3: OK')" \
-         && python -c "from transformers.utils import is_flash_attn_3_available; print(f'  - transformers FA3 detection: {is_flash_attn_3_available()}')"; \
-       else \
-         echo "  - FA3: skipped (Blackwell target)"; \
-       fi \
-    && python -c "import nvidia.nvshmem; print('NVSHMEM: installed')" \
-    && python -c "from src.distributed.nccl.clients.vllm import VLLMWeightSyncClient; print('Vendored NCCL client: OK')" \
+    && python /tmp/verify_image.py "$TARGET_GPU" && rm /tmp/verify_image.py \
     && halo --help >/dev/null && echo "halo CLI: $(command -v halo)" \
     && command -v newuidmap newgidmap >/dev/null && grep -q '^root:' /etc/subuid /etc/subgid \
     && echo "bubblewrap jail ids: $(grep '^root:' /etc/subuid)" \

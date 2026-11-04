@@ -1,85 +1,52 @@
 #!/usr/bin/env python
-"""
-SFT Trainer test with HSDP (Hybrid Sharded Data Parallel).
+"""SFT under HSDP over two simulated NVLink domains: the 2D FSDP mesh of a real multi-node job, replicas bit-identical.
 
-Multi-node HSDP cannot be exercised on a single node directly, so this test SIMULATES two
-NVLink domains on one box by telling ``ParallelismConfig`` that each domain is
-``world_size // 2`` GPUs (``gpus_per_node = world_size // 2``). With ``use_hsdp=True`` that yields
-a 2D ``(dp_replicate=2, dp_shard=world_size//2)`` FSDP mesh — the exact code path a real
-multi-node job takes, only with the cross-domain replicate all-reduce running over NVLink
-instead of RDMA. The math (shard placement, replica grad all-reduce, the 2D-mesh grad-norm
-reduction) is identical.
-
-Validates, on Qwen3-0.6B:
-1. HSDP engages: non-expert params are DTensors on a 2D ``(dp_replicate, dp_shard)`` mesh with
-   ``(Replicate, Shard)`` placements.
-2. Replicas stay in sync: EVERY 2D-mesh DTensor param's local shard is bit-identical across
-   the dp_replicate group after training (proves init replication + cross-domain gradient
-   all-reduce). Checked over all such params, not just the first.
-3. Training is healthy: losses and grad norms finite, the loss falling (exercises the 2D-mesh
-   grad-norm path in DistributedTrainerMixin._fsdp_shard_group).
-
-Run with 4 GPUs (simulates 2 domains of 2):
-    torchrun --nproc_per_node=4 \
-        tests/gpu/trainers/sft/test_sft_hsdp.py
+``--lora`` has each rank draw adapters from its own RNG stream, so replicas must start from the first replica's.
 """
 
+import argparse
 import sys
 
 import torch
-from torch.distributed.tensor import DTensor, Replicate, Shard
+from peft import LoraConfig, get_peft_model
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import check_adapters_moved, snapshot_adapters
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import group_max_abs_diff
+from tests.common.distributed import max_abs_diff_across
+from tests.common.dp_layout import hsdp_checks
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, max_or_nan, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10
 BATCH_SIZE = 1
 MAX_SEQ_LENGTH = 2048
 LEARNING_RATE = 2e-5
+LORA_LEARNING_RATE = 2e-4
+LORA_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 NUM_TRAIN_SAMPLES = 64
 NUM_EVAL_SAMPLES = 16
 SEED = 42
 
-
-def _hsdp_params(model):
-    """All (name, DTensor) params on a 2D HSDP mesh, in a deterministic order.
-
-    ``named_parameters`` yields the same order on every rank, so iterating this
-    list keeps the per-param all_gather collectives in lockstep across ranks.
-    """
-    return [
-        (name, param.data)
-        for name, param in model.named_parameters()
-        if isinstance(param.data, DTensor) and param.data.device_mesh.ndim == 2
-    ]
-
-
-def _check_hsdp_placements(p) -> bool:
-    """The param must be replicated on dim 0 (dp_replicate) and sharded on dim 1 (dp_shard)."""
-    names = tuple(p.device_mesh.mesh_dim_names or ())
-    placements = tuple(p.placements)
-    ok = names == ("dp_replicate", "dp_shard")
-    ok = ok and isinstance(placements[0], Replicate) and isinstance(placements[1], Shard)
-    log(f"  HSDP mesh dims={names}, placements={placements}: {'PASS' if ok else 'FAIL'}")
-    return ok
+parser = argparse.ArgumentParser()
+parser.add_argument("--lora", action="store_true", help="LoRA adapters drawn per rank instead of a full fine-tune")
+parser.add_argument("--cp-size", type=int, default=1, help="context parallelism inside each simulated domain")
+ARGS = parser.parse_args()
 
 
 def run(ctx) -> dict:
-    """Run the SFT HSDP test on a simulated 2-domain topology."""
     if ctx.world_size % 2 != 0:
-        # The SKIP: sentinel, not a bare exit 0 — the launcher counts an unmarked exit-0 as a PASS.
+        # The launcher counts an unmarked exit 0 as a PASS.
         log(f"SKIP: HSDP test needs an even world size >= 4 to simulate 2 domains; got {ctx.world_size}.")
         sys.exit(0)
 
-    # Simulate two NVLink domains on one node: each "domain" is half the GPUs.
     simulated_gpus_per_node = ctx.world_size // 2
 
     log(f"\n{'=' * 70}")
@@ -90,8 +57,7 @@ def run(ctx) -> dict:
     log(f"{'=' * 70}")
 
     log("\n[1/4] Loading model with use_hsdp=True...")
-    parallelism_config = ParallelismConfig(gpus_per_node=simulated_gpus_per_node, use_hsdp=True)
-    # The whole point of the test — confirm the topology resolved to real HSDP.
+    parallelism_config = ParallelismConfig(gpus_per_node=simulated_gpus_per_node, use_hsdp=True, cp_size=ARGS.cp_size)
     assert parallelism_config.is_hsdp, "use_hsdp=True did not resolve to HSDP (check domain simulation)"
     assert parallelism_config.dp_replicate_size == 2
     assert parallelism_config.dp_shard_size == simulated_gpus_per_node
@@ -118,7 +84,7 @@ def run(ctx) -> dict:
         max_steps=MAX_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=1,
-        learning_rate=LEARNING_RATE,
+        learning_rate=LORA_LEARNING_RATE if ARGS.lora else LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
         use_liger_kernel=False,
@@ -131,8 +97,13 @@ def run(ctx) -> dict:
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",
     )
+    drawn_apart = None
+    if ARGS.lora:
+        torch.manual_seed(SEED + ctx.rank)
+        model = get_peft_model(model, LoraConfig(r=16, lora_alpha=32, lora_dropout=0.0, target_modules=LORA_TARGETS))
+        drawn_apart = max_abs_diff_across(param.data for name, param in model.named_parameters() if "lora_A" in name)
+        log(f"  LoRA adapters drawn per rank, max|Δ| across ranks before the wrap: {drawn_apart:.2e}")
     trainer = DistributedSFTTrainer(
         model=model,
         args=config,
@@ -141,39 +112,30 @@ def run(ctx) -> dict:
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
     )
+    model = trainer.model
+    adapters_before = snapshot_adapters(model, expert_lora=False) if ARGS.lora else {}
 
     log("\n[4/4] Training...")
     train_result = trainer.train()
     checks = training_run_checks(train_result, trainer, MAX_STEPS, grad_norms=True, loss_decreased=True)
-
-    # HSDP structural checks
-    hsdp_params = _hsdp_params(model)
-    if not hsdp_params:
-        checks["hsdp_mesh_present"] = False
-        log("  HSDP 2D-mesh params found: FAIL (no 2D-mesh DTensor — HSDP did not engage)")
-    else:
-        checks["hsdp_mesh_present"] = True
-        log(f"  HSDP 2D-mesh params found: PASS ({len(hsdp_params)} params)")
-        # Placements: assert on the first (the mesh/placements are identical for
-        # all 2D params); logging every one would be noise.
-        checks["hsdp_placements"] = _check_hsdp_placements(hsdp_params[0][1])
-
-        # Replica consistency over EVERY 2D-mesh param (not just the first): each rank's local shard
-        # must be bit-identical across the dp_replicate group. All ranks iterate the same param set in
-        # the same order, so the per-param all_gather collectives stay in lockstep.
-        worst = max_or_nan(
-            group_max_abs_diff(p.to_local(), p.device_mesh["dp_replicate"].get_group()) for _, p in hsdp_params
+    if ARGS.lora:
+        reshard_fsdp2_modules(model)
+        checks["premise_lora_adapters_trained"] = bool(adapters_before)
+        checks["premise_adapters_apart_before_the_wrap"] = drawn_apart > 0
+        moved, why = check_adapters_moved(
+            adapters_before, snapshot_adapters(model, expert_lora=False), require_all=True
         )
-        checks["replica_consistency"] = worst == 0.0
-        log(
-            f"  Replica consistency over all {len(hsdp_params)} params: "
-            f"{'PASS' if checks['replica_consistency'] else 'FAIL'} (worst max|Δ|={worst:.2e})"
-        )
+        checks["every_adapter_moved"] = moved
+        log(f"  Every adapter moved: {'PASS' if moved else 'FAIL'} ({why})")
 
+    checks |= hsdp_checks(model)
     return {"checks": checks}
 
 
-main = gpu_test_main(min_world_size=4, prefix="test_sft_hsdp")(run)
+main = gpu_test_main(
+    min_world_size=4,
+    prefix=f"test_sft_hsdp{'_lora' if ARGS.lora else ''}{f'_cp{ARGS.cp_size}' if ARGS.cp_size > 1 else ''}",
+)(run)
 
 if __name__ == "__main__":
     main()

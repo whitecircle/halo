@@ -1,22 +1,15 @@
 #!/usr/bin/env python3
-"""Config-time guards on the shared raw-VLM preparation seam (``prepare_vlm_dataset``).
-
-The guards live on the seam, not per script, so every consumer (SFT and both distillation scripts)
-inherits them: a mistyped ``images_field`` names no dataset column and would otherwise train
-text-only in silence; ``interleaved_thinking`` renders nothing on any supported VLM template; a
-pinned map schema alongside kept columns can only fail, and does so inside a map worker.
-
-Run: pytest tests/cpu/data/test_vlm_prepare_guards.py
-"""
+"""Config-time guards on ``prepare_vlm_dataset``, so every consumer inherits them: a mistyped ``images_field``,
+``interleaved_thinking`` on a VLM template, and a pinned map schema beside kept columns."""
 
 import types
 
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline import vlm_dataset
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset, vlm_map_features
-from src.distributed.loading import vlm_setup
+from halo.data.pipeline import vlm_rows
+from halo.data.pipeline.vlm_rows import prepare_vlm_dataset, vlm_map_features
+from halo.entrypoints import model_setup
 
 
 def _args(**overrides) -> types.SimpleNamespace:
@@ -45,22 +38,35 @@ def test_missing_images_field_column_raises_before_any_processing():
 
 
 def test_matching_images_field_passes_the_guard(monkeypatch):
-    """Anti-over-rejection: a real column must reach the processing pipeline."""
-
     class _ReachedProcessing(Exception):
         pass
 
     def _boom(**_kwargs):
         raise _ReachedProcessing
 
-    monkeypatch.setattr(vlm_dataset, "create_vlm_processor", _boom)
+    monkeypatch.setattr(vlm_rows, "build_vlm_row_processor", _boom)
     with pytest.raises(_ReachedProcessing):
         prepare_vlm_dataset(_dataset(), _args(images_field="images"), None, None, 128, 1)
 
 
+@pytest.mark.parametrize("column", ["images", "image"])
+def test_the_map_reads_the_image_column_the_dispatch_keyed_on_without_images_field(monkeypatch, column):
+    """The dispatch routes a run with such a column to the VLM path, so a map reading only images_field drops it."""
+    seen = {}
+
+    def _capture(ds, row_processor, **kwargs):
+        seen.update(kwargs["cache_key_extras"])
+        return ds
+
+    monkeypatch.setattr(vlm_rows, "coordinated_map", _capture)
+    monkeypatch.setattr(vlm_rows, "_filter_vlm_over_length", lambda ds, *args: ds)
+    ds = Dataset.from_list([{"prompt": [{"role": "user", "content": "hi"}], column: "x"}])
+    prepare_vlm_dataset(DatasetDict({"train": ds, "test": ds}), _args(), None, None, 32, 1)
+    assert seen["images_field"] == column
+
+
 def test_completion_masking_without_a_marker_is_refused_before_the_map():
-    """The VLM collators refuse the pair too, but they are built AFTER this map — a run missing its
-    marker would otherwise pay the whole VLM tokenization before the refusal it could not avoid."""
+    """The VLM collators refuse the pair too, but only after this map has paid the whole tokenization."""
     args = _args(train_on_completions_only=True, assistant_message_template=None)
     with pytest.raises(ValueError, match="requires assistant_message_template"):
         prepare_vlm_dataset(_dataset(), args, None, None, 128, 1)
@@ -72,11 +78,8 @@ def test_interleaved_thinking_still_refused_on_the_vlm_path():
 
 
 def test_pinned_schema_with_kept_columns_is_refused_at_the_seam():
-    """``features`` pins exactly the mapped columns, so a ``keep`` column has no slot in it.
-
-    Unguarded the pair dies on an Arrow cast deep inside a map worker, naming a type rather than the
-    two arguments that cannot be combined — and the docstring's constraint stays advisory.
-    """
+    """``features`` pins exactly the mapped columns; unguarded the pair dies on an Arrow cast inside a map worker,
+    naming a type."""
     with pytest.raises(ValueError, match="pinned Arrow schema"):
         prepare_vlm_dataset(
             _dataset(),
@@ -91,13 +94,11 @@ def test_pinned_schema_with_kept_columns_is_refused_at_the_seam():
 
 
 def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeypatch):
-    """``is_vlm_model`` enters the ``vlm_probe`` c10d-store phase, and only multimodal runs reach
-    ``load_vlm_model_and_processor``. Probing again from inside that branch makes the phase count
-    rank-dependent the moment two ranks disagree on the verdict, leaving the peers waiting on a key
-    nobody writes. The caller owns the verdict, so this loader must reach the processor without it."""
+    """``probe_checkpoint`` enters the ``vlm_probe`` store phase and only multimodal runs reach this loader, so
+    probing here makes the phase count rank-dependent, leaving peers waiting on a key nobody writes."""
 
     def _must_not_probe(*args, **kwargs):
-        raise AssertionError("load_vlm_model_and_processor re-entered the vlm_probe store phase")
+        raise AssertionError("_load_vlm_model_and_processor re-entered the vlm_probe store phase")
 
     class _Sentinel(Exception):
         pass
@@ -105,12 +106,12 @@ def test_the_vlm_loader_takes_the_modality_verdict_instead_of_re_probing(monkeyp
     def _processor_reached(*args, **kwargs):
         raise _Sentinel
 
-    monkeypatch.setattr(vlm_setup, "is_vlm_model", _must_not_probe)
+    monkeypatch.setattr(model_setup, "probe_checkpoint", _must_not_probe)
     # The processor load is the loader's first step; reaching it proves no probe ran.
-    monkeypatch.setattr(vlm_setup, "load_vlm_processor", _processor_reached)
+    monkeypatch.setattr(model_setup, "load_vlm_processor", _processor_reached)
     model_config = types.SimpleNamespace(model_name_or_path="Qwen/Qwen3-4B", model_revision=None)
     with pytest.raises(_Sentinel):
-        vlm_setup.load_vlm_model_and_processor(model_config, None, None, vlm_run=True)
+        model_setup._load_vlm_model_and_processor(None, None, model_config, None, vlm_run=True, attn_default=None)
 
 
 if __name__ == "__main__":

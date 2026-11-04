@@ -1,19 +1,11 @@
 #!/usr/bin/env python
-"""The single-node nvlink_domain_size clamp must be visible in the log.
-
-A rack-wide ``NVLINK_DOMAIN_SIZE`` (e.g. 72, baked into a host environment) on a single-node job
-is legal — the domain is clamped to the job's world — but a silent clamp leaves the summary showing
-only the clamped value, so a user checking why their domain setting "did not take" has nothing to
-find.
-
-Run: python tests/cpu/parallelism/test_nvlink_domain_clamp_logging.py (or pytest -m cpu).
-"""
+"""The single-node nvlink_domain_size clamp is visible in the log, since the summary shows only the clamped value."""
 
 from unittest.mock import patch
 
 import pytest
 
-import src.distributed.parallelism_config as parallelism_config_module
+import halo.distributed.parallelism_config as parallelism_config_module
 from tests.common.parallelism import create_config
 
 

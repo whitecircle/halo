@@ -1,29 +1,6 @@
 #!/usr/bin/env python
 """Every eval row the loader draws is scored exactly once, on a real 4-rank gloo world.
-
-accelerate's even-batches shard fills every rank's last eval batch by repeating the split's first
-rows, so all ranks run the same rounds. Its own trim (``gather_for_metrics`` keeps the gathered
-final round's first ``remainder`` rows) counts that remainder over the dataset, which is wrong in
-three geometries: TRL's ``RepeatSampler`` draws each prompt ``num_generations`` times, and a
-one-process loader (offline GRPO's self-sharding sampler, a pre-sharded dataset) pads nothing yet
-is trimmed anyway. sentence-transformers' no-duplicates sampler iterates its own way, but draws
-every row once, which the embedding trainer declares. ``eval_split_rows`` and the toolkit gather read the padding off the loader's own
-``BatchSamplerShard`` instead. The pins, per geometry:
-
-* the rows ``eval_split_rows`` keeps, over every DP rank, are the drawn rows exactly once, and
-  TP-style siblings of one DP rank keep the same rows;
-* the toolkit gather returns exactly those rows on every rank, and HF's eval loss over it (a
-  real-row mean repeated ``eval_batch_size`` times) is the per-row mean wherever every batch is
-  full — a one-process loader's short last batch is weighted by HF's repeat, not by padding;
-* the object gather (``eval_use_gather_object``, or a non-tensor input) returns those rows too, in
-  the tensor gather's order, as a list;
-* accelerate's own trim, tensor and object alike, gets the geometries above wrong, so the comparison
-  is not vacuous;
-* where HF's loss repeat is narrower than the loader batch (env GRPO's rollout round), every rank
-  holding a real row keeps its loss entries and no padding rank keeps any.
-
-    python tests/cpu/trainers/test_eval_final_round_geometry.py
-"""
+accelerate's trim counts the remainder over the dataset, wrong for ``RepeatSampler`` and one-process loaders."""
 
 import math
 from collections import Counter
@@ -40,10 +17,10 @@ from sentence_transformers.base.sampler import NoDuplicatesBatchSampler
 from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
 from trl.trainer.utils import RepeatSampler
 
-from src.trainers.embedding.trainer import EmbeddingTrainer
-from src.trainers.mixins.dataloader import (
-    DataParallelDataLoaderMixin,
-    dp_representative_ranks,
+from halo.trainers.dataloaders import dp_representative_ranks
+from halo.trainers.embedding.trainer import EmbeddingTrainer
+from halo.trainers.evaluation import (
+    EvaluationMixin,
     final_round_split_rows,
     split_rows_head,
     split_rows_mean,
@@ -57,11 +34,8 @@ BATCH = 2
 ROUND = 8
 
 
-class _EvalHost(DataParallelDataLoaderMixin):
-    """The state ``eval_split_rows`` and the evaluation gather read: the accelerator, the eval mode,
-    the DP scope the install agreed on, and the embedding trainer's declared batch samplers."""
-
-    _dataset_drawing_batch_samplers = (NoDuplicatesBatchSampler,)
+class _EvalHost(EvaluationMixin):
+    DATASET_DRAWING_BATCH_SAMPLERS = (NoDuplicatesBatchSampler,)
 
     def __init__(self, accelerator, scope=None, use_gather_object=False):
         self.accelerator = accelerator
@@ -100,8 +74,7 @@ def _geometries(rank: int) -> dict[str, tuple]:
         [prompt for prompt in prompts for _ in range(generations)],
     )
 
-    # sentence-transformers' no_duplicates over distinct rows: it draws every row once, its own way,
-    # in one seeded order on every rank, as its trainer builds it.
+    # sentence-transformers' no_duplicates: every row once, in one seeded order on all ranks, as its trainer builds it.
     distinct = Dataset.from_dict({"row": list(range(11))})
     no_duplicates = NoDuplicatesBatchSampler(
         distinct, batch_size=BATCH, drop_last=False, generator=torch.Generator(), seed=0
@@ -113,8 +86,7 @@ def _geometries(rank: int) -> dict[str, tuple]:
         list(range(11)),
     )
 
-    # Offline GRPO's loader: its sampler hands each rank a disjoint full-batch slice of the whole
-    # split, and accelerate is asked for device placement only.
+    # Offline GRPO's loader: each rank gets a disjoint full-batch slice; accelerate is asked for device placement only.
     split = list(range(13))
     starts = [r * (len(split) // WORLD) + min(r, len(split) % WORLD) for r in range(WORLD)]
     mine = split[starts[rank] : starts[rank] + BATCH]
@@ -146,9 +118,6 @@ def _geometries(rank: int) -> dict[str, tuple]:
 
 
 def _one_pass(host: _EvalHost, loader) -> dict[str, list[float]]:
-    """One evaluation pass, per stream: the rows kept, the toolkit gather's rows and loss entries, its
-    object gather's rows (a non-tensor input, then the flag on tensors), and accelerate's tensor and
-    object gathers."""
     streams = ("kept", "gathered", "loss", "objects", "flagged", "accelerate", "accelerate_objects")
     out: dict[str, list[float]] = {stream: [] for stream in streams}
     flagged = _EvalHost(host.accelerator, host._dp_metric_gather_scope, use_gather_object=True)
@@ -225,8 +194,7 @@ def test_the_cut_keeps_each_ranks_own_head_rounded_up(split_rows, chunk, kept_pe
 
 
 def test_a_batch_of_real_rows_alone_is_handed_back_unsliced():
-    """Autograd records even a full-range slice, and its backward allocates and copies a gradient the
-    size of the whole tensor, a logits plane per train step at the consumers' call sites."""
+    """Autograd records even a full-range slice, whose backward allocates and copies a logits plane per train step."""
     logits = torch.randn(3, 4, requires_grad=True) * 1
 
     assert split_rows_head(logits, 3) is logits
@@ -235,9 +203,7 @@ def test_a_batch_of_real_rows_alone_is_handed_back_unsliced():
 
 
 def test_a_split_rows_mean_is_the_plain_mean_over_every_row_and_zero_over_none():
-    """Over every row it is ``mean`` itself, bit for bit, so a train batch reduces to its plain mean; over
-    the split's first rows it is the mean of their elements; over none (a rank of padding alone) it is 0,
-    not NaN."""
+    """Over every row it is ``mean`` itself, bit for bit; a rank of padding alone gets 0, not NaN."""
     values = torch.randn(5, 3, generator=torch.Generator().manual_seed(0))
 
     assert torch.equal(split_rows_mean(values, 5), values.mean())
@@ -247,7 +213,6 @@ def test_a_split_rows_mean_is_the_plain_mean_over_every_row_and_zero_over_none()
 
 
 def _rollout_round_worker(rank: int) -> None:
-    """Loss entries over a RepeatSampler loader of ``ROUND`` rows per rank, repeated once per batch."""
     accelerator = Accelerator(cpu=True)
     host = _EvalHost(accelerator)
     for prompts in (2, 11):
@@ -279,9 +244,7 @@ def test_a_loss_repeated_fewer_times_than_rows_keeps_every_real_rank():
 
 
 def _short_last_batch_worker(rank: int) -> None:
-    """``even_batches`` off: 30 rows at batch 4 over 4 ranks are 8 batches, so every rank runs two
-    rounds and rank 3's last batch holds rows 28 and 29 alone. HF still repeats each rank's scalar loss
-    ``eval_batch_size`` times, through the object gather too under ``eval_use_gather_object``."""
+    """``even_batches`` off: 30 rows at batch 4 over 4 ranks give 8 batches, the last holding rows 28 and 29 alone."""
     accelerator = Accelerator(cpu=True)
     host, flagged = _EvalHost(accelerator), _EvalHost(accelerator, use_gather_object=True)
     rows, batch_size = list(range(30)), 4
@@ -305,8 +268,7 @@ def _short_last_batch_worker(rank: int) -> None:
 
 
 def test_a_short_last_batch_weighs_its_real_rows():
-    """The loss a short final batch scores is over fewer rows than the ``eval_batch_size`` entries HF
-    repeats it into; the cut keeps one entry per real row, as a padded round's does."""
+    """HF repeats a short batch's loss into ``eval_batch_size`` entries; the cut keeps one entry per real row."""
     run_gloo_ranks(_short_last_batch_worker, WORLD)
 
 
@@ -317,7 +279,7 @@ def _sharded(batch_sampler) -> DataLoader:
 
 
 class _NoStreamBatchSampler(BatchSampler):
-    """A batch sampler with torch's iteration but no ``sampler``: it names no stream to count."""
+    """Torch's iteration but no ``sampler``, so it names no stream to count."""
 
     def __init__(self):
         self.batch_size, self.drop_last = 4, False
@@ -327,14 +289,11 @@ class _NoStreamBatchSampler(BatchSampler):
 
 
 class _FullBatchesOnly(BatchSampler):
-    """A batch sampler over a counted stream that iterates its own way, here dropping a short tail."""
-
     def __iter__(self):
         yield from (batch for batch in super().__iter__() if len(batch) == self.batch_size)
 
 
 def _st_batch_sampler(kind: str, rows):
-    """The batch sampler sentence-transformers' own trainer builds for ``batch_sampler: kind``."""
     st_trainer = pytest.importorskip("sentence_transformers.base.trainer")
     st_sampler = pytest.importorskip("sentence_transformers.base.sampler")
     host = SimpleNamespace(args=SimpleNamespace(batch_sampler=st_sampler.BatchSamplers(kind)))
@@ -344,12 +303,9 @@ def _st_batch_sampler(kind: str, rows):
 
 
 def test_only_a_known_stream_is_counted():
-    """The count is ``len(sampler)``, true only where torch's iteration draws a known sampler's rows,
-    or ``len(dataset)`` where a trainer declares its batch sampler draws each row once.
-    sentence-transformers' default batch sampler is torch's over a ``RandomSampler``, so it counts;
-    the embedding trainer declares no-duplicates; group-by-label draws 20 of 23 rows here, so a count
-    off it would cut real rows. A batch sampler with no ``sampler`` must read as no trim rather than
-    raise at the final eval batch."""
+    """The count is ``len(sampler)`` where torch's iteration draws a known sampler's rows.
+    It is ``len(dataset)`` where a trainer declares its batch sampler draws each row once.
+    Group-by-label draws 20 of 23 rows here, so a count off it would cut real rows."""
     rows = Dataset.from_dict({"anchor": [f"a{i}" for i in range(23)], "label": [i % 3 for i in range(23)]})
     grouped = _st_batch_sampler("group_by_label", rows)
     assert sum(len(batch) for batch in grouped) < len(rows), "premise: it draws fewer rows"
@@ -357,7 +313,7 @@ def test_only_a_known_stream_is_counted():
     assert final_round_split_rows(_sharded(_st_batch_sampler("batch_sampler", rows))) == 23 % 8
     assert final_round_split_rows(_sharded(grouped)) is None
     assert final_round_split_rows(_sharded(_st_batch_sampler("no_duplicates", rows))) is None, "undeclared"
-    declared = EmbeddingTrainer._dataset_drawing_batch_samplers
+    declared = EmbeddingTrainer.DATASET_DRAWING_BATCH_SAMPLERS
     assert final_round_split_rows(_sharded(_st_batch_sampler("no_duplicates", rows)), declared) == 23 % 8
     assert final_round_split_rows(_sharded(grouped), declared) is None
     assert final_round_split_rows(_sharded(_NoStreamBatchSampler())) is None
@@ -368,8 +324,7 @@ def test_only_a_known_stream_is_counted():
 
 
 class _FinalRoundAccelerator:
-    """accelerate's surface the gather reads, at the final round of ``loader``, with no backend: the
-    tensor gather concatenates fixed per-rank chunks, and each gather records its calls."""
+    """accelerate's surface the gather reads, with no backend; each gather records its calls."""
 
     def __init__(self, loader, per_rank_rows=()):
         self.gradient_state = SimpleNamespace(end_of_dataloader=True, active_dataloader=loader)
@@ -404,8 +359,7 @@ def _single_process_host(loader, per_rank_rows=(), *, use_gather_object=False) -
 
 
 def test_objects_and_the_flag_skip_the_tensor_gather():
-    """Only an all-tensor input without the flag reaches the tensor gather; with no peer to gather
-    from, the object gather is its input, as accelerate's is."""
+    """With no peer to gather from, the object gather is its input, as accelerate's is."""
     rows = [torch.tensor([0.0, 1.0]), torch.tensor([2.0, 3.0])]
     host = _single_process_host(_two_rank_loader(3), rows)  # 3 real rows: rank 0's two, rank 1's first
     flagged = _single_process_host(_two_rank_loader(3), rows, use_gather_object=True)
@@ -445,9 +399,8 @@ def test_a_dropped_tail_is_not_cut():
 
 
 def test_without_even_batches_a_rank_s_rows_are_all_real():
-    """5 rows at batch 2 over 2 ranks: rank 1 ends on its only batch, a full one from the first round,
-    while rank 0 runs a second. The rank-order count would read rank 1's rows as padding; without
-    even batches no batch carries any, and unequal batch counts take the identity gather."""
+    """5 rows at batch 2 over 2 ranks: rank 1 ends on a full batch while rank 0 runs a second.
+    The rank-order count would read rank 1's rows as padding."""
     loader = _two_rank_loader(5, process_index=1, even_batches=False)
     assert final_round_split_rows(loader) == 1, "premise: the short round is counted"
     host = _single_process_host(loader)
@@ -456,8 +409,7 @@ def test_without_even_batches_a_rank_s_rows_are_all_real():
 
 
 def test_a_padding_rank_keeps_its_rows_in_train_mode():
-    """In eval, rank 1 of a 3-row split's final round holds one real row of two; in train mode the
-    batch is a training batch, every row of which is the rank's own."""
+    """In eval, rank 1 of a 3-row split's final round holds one real row of two; in train mode every row is its own."""
     host = _single_process_host(_two_rank_loader(3, process_index=1))
     assert host.eval_split_rows(BATCH) == 1
     host.model.training = True
@@ -465,7 +417,7 @@ def test_a_padding_rank_keeps_its_rows_in_train_mode():
 
 
 def test_the_install_arms_the_toolkit_gather_on_an_unscoped_loader_too():
-    """Plain DP needs no DP scope, but its final round still owes the geometry's cut."""
+    """Plain DP needs no DP scope, but its final round still needs the geometry's cut."""
     host = _EvalHost(accelerator=None)
     host._needs_custom_dataloader = lambda: False
 

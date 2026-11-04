@@ -7,9 +7,8 @@ supports.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | No | Yes | No | No | Yes | vLLM, SGLang |
+Modes: the Gemma 4 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `google/gemma-4-26B-A4B-it`.
 - **GPUs:** eight at EP8, 16 experts per GPU, at 32,768 tokens.
@@ -52,10 +51,9 @@ This one is a full fine-tune at EP4 with two vLLM servers on GPUs 4–7.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-cp jinja-templates/gemma4/gemma4-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/gemma-4-26b-a4b-sft
-export VLLM_CHAT_TEMPLATE=/data/gemma4-reasoning-effort.jinja
-export VLLM_TOOL_PARSER=gemma4 VLLM_REASONING_PARSER=gemma4 VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_CHAT_TEMPLATE=/jinja-templates/gemma4/gemma4-reasoning-effort.jinja
+export VLLM_TOOL_PARSER=gemma4 VLLM_REASONING_PARSER=gemma4
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p gemma4-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
 VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \
@@ -67,7 +65,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 ```bash
 cp examples/grpo/environmental/gemma4/vllm/gemma4-26b-a4b-code-contests-full-ep4.yaml gemma4-grpo.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo gemma4-grpo.yaml -n 4 \
+  halo launch grpo/environmental gemma4-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/gemma-4-26b-a4b-sft \
   --output_dir=/data/checkpoints/gemma-4-26b-a4b-grpo
 ```
@@ -85,16 +83,17 @@ file and `SGLANG_REASONING_PARSER=gemma4`.
   Packing builds a dense mask over the whole batch, and its memory grows with the square of
   `batch size × max_length`.
 - **Precision.** `fp32_experts: true` is the recipe default. `fp32_non_ep_params` is refused under EP,
-  and `fp32_router` does nothing, because the router sits outside the EP wrapper.
+  and `fp32_router` does nothing, because the router sits outside the EP layer.
 - **No router balancing.** Keep `moe_balancing: none`. Gemma 4 has no auxiliary loss, and an explicit
   bias mode raises.
 - **RL.** The environment GRPO recipes set `use_chunked_grpo_logprobs: true` for the 262k-token
-  vocabulary. vLLM needs `VLLM_TOOL_PARSER=gemma4`; `hermes` leaves the tool calls as text, so every
-  episode scores zero.
+  vocabulary. vLLM needs `VLLM_TOOL_PARSER=gemma4`; `hermes` leaves the tool calls as text, and the
+  run stops by its second round.
 
 ## Limits
 
-- No CP or TP: Gemma 4 attention has no wrapper for either.
+- No CP or TP: Gemma 4 attention has no wrapper for either. No pipeline parallelism: a stage cut would
+  break its per-layer embeddings and shared key-value layers.
 - `padding_free` is refused, since no variable-length kernel serves this attention. Use `packing`.
 - No routing replay on either engine. Don't set `VLLM_ENABLE_R3` or `SGLANG_ENABLE_R3`.
 - No router balancing of any kind.

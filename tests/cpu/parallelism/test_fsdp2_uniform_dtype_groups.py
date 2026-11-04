@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Every FSDP2 shard group holds one trainable dtype: a mixed layer splits into nested groups.
-
-FSDP2 asserts one original dtype per group at the first forward. ``fp32_router`` at ep1 under
-``fsdp_shard_ep1_experts`` puts an fp32 router in its decoder layer's group beside bf16 parameters, so
-``apply_fsdp2_per_layer`` gives such a submodule a group of its own first. The split decision is
-checked on small module trees; the real wrap runs on a single-rank gloo mesh over a tiny Qwen3 MoE
-whose routers hold fp32 masters, with the router called as a module and read in place (as the LFM2,
-DeepSeek-V4 and Inkling EP wrappers read ``gate.weight``). There the router's gradient must equal a
-plain bf16 model's bit for bit, and each premise is shown: FSDP2 refuses the unsplit layer, and a
-router read in place meets its sharded DTensor unless the layer's forward unshards it.
-
-Run: pytest tests/cpu/parallelism/test_fsdp2_uniform_dtype_groups.py
-"""
+"""Every FSDP2 shard group holds one trainable dtype, asserted at the first forward, so a mixed layer splits into
+nested groups. fp32 router grads must match a plain bf16 model bit for bit."""
 
 import copy
 from unittest.mock import patch
@@ -27,13 +16,13 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-import src.distributed.fsdp as fsdp
-from src.distributed.fsdp import IdentityParamSet
+import halo.distributed.fsdp as fsdp
+from halo.distributed.fsdp import IdentityParamSet
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 
 BF16, FP32 = torch.bfloat16, torch.float32
 HIDDEN = 8
-# The toolkit's bf16 policy: compute and reduce in bf16 over bf16 or fp32 masters.
+# Compute and reduce in bf16 over bf16 or fp32 masters.
 POLICY = MixedPrecisionPolicy(param_dtype=BF16, reduce_dtype=BF16)
 ROUTER_ACCESS = ("called", "read_in_place")
 
@@ -45,7 +34,7 @@ def _linear(dtype: torch.dtype, *, trainable: bool = True) -> nn.Linear:
 
 
 class _Experts(nn.Module):
-    """An EP-wrapper stand-in: bare expert parameters on the module itself, the router as a child."""
+    """Bare expert parameters on the module itself, the router as a child."""
 
     def __init__(self, router: nn.Module | None = None, router_param: nn.Parameter | None = None):
         super().__init__()
@@ -85,7 +74,7 @@ def test_frozen_and_left_out_parameters_do_not_split():
 
 
 def test_router_owning_no_parameter_splits_whole():
-    """Zaya's router holds its projections in child modules: one group for the router, not one each."""
+    """Zaya's router holds its projections in child modules."""
     router = nn.Module()
     router.down_proj = _linear(FP32)
     router.router_mlp = nn.Sequential(_linear(FP32), _linear(FP32))
@@ -93,8 +82,7 @@ def test_router_owning_no_parameter_splits_whole():
 
 
 def test_modules_to_save_copy_splits_at_the_copy():
-    """The trainable fp32 copy is the smallest submodule holding every fp32 parameter; the frozen
-    original stays with the layer."""
+    """The smallest submodule holding every fp32 parameter."""
     wrapper = ModulesToSaveWrapper(_linear(FP32), "default")
     wrapper.original_module.requires_grad_(False)
     copy_module = wrapper.modules_to_save["default"].requires_grad_(True)
@@ -102,8 +90,7 @@ def test_modules_to_save_copy_splits_at_the_copy():
 
 
 def test_submodule_owning_another_dtype_nests_innermost_first():
-    """A module owning fp32 parameters with a bf16 child: the child splits from the module, the
-    module from the layer, and the child is wrapped first."""
+    """The child is wrapped first."""
     inner = _linear(BF16)
     outer = nn.Module()
     outer.scale = nn.Parameter(torch.ones(HIDDEN, dtype=FP32))
@@ -112,14 +99,13 @@ def test_submodule_owning_another_dtype_nests_innermost_first():
 
 
 def test_layer_keeps_the_dtype_needing_fewest_groups():
-    """Two fp32 submodules and one bf16: the layer stays fp32 and the bf16 one splits off."""
     layer = nn.Module()
     layer.a, layer.b, layer.c = _linear(FP32), _linear(FP32), _linear(BF16)
     assert _split(layer) == [layer.c]
 
 
 def test_module_owning_two_trainable_dtypes_is_refused():
-    """A bare fp32 router parameter on the module holding the bf16 experts cannot be separated."""
+    """A bare fp32 router parameter on the module holding bf16 experts cannot be separated."""
     layer = _layer(_Experts(router_param=nn.Parameter(torch.zeros(4, HIDDEN, dtype=FP32))))
     with pytest.raises(RuntimeError, match=r"_Experts .* directly owns trainable parameters of dtypes"):
         _split(layer)
@@ -135,7 +121,7 @@ def single_rank_mesh(tmp_path):
 
 
 def _read_router_in_place(block: nn.Module) -> None:
-    """Route off ``block.gate.weight`` without calling the router module."""
+    """As the LFM2, DeepSeek-V4 and Inkling EP layers read ``gate.weight``."""
 
     def forward(hidden_states):
         flat = hidden_states.view(-1, hidden_states.shape[-1])
@@ -147,7 +133,6 @@ def _read_router_in_place(block: nn.Module) -> None:
 
 
 def _moe_pair(access: str) -> tuple[nn.Module, nn.Module]:
-    """A tiny bf16 Qwen3 MoE and a copy whose routers hold fp32 masters of the same values."""
     torch.manual_seed(0)
     reference = Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)).to(BF16).train()
     model = copy.deepcopy(reference)

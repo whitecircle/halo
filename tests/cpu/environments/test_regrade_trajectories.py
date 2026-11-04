@@ -1,28 +1,23 @@
 #!/usr/bin/env python
-"""The offline re-grader must validate a trajectory's meta record before it grades anything.
-
-``regrade_trajectories.py`` consumes meta keys two different producers stamp: ``run_code_contests.py``
-adds ``adapter``/``language`` on top of the generic eval meta, ``run_env.py`` does not. Pointed at a
-``run_env.py`` file, an unvalidated selector surfaces as a bare ``KeyError`` and a report-only key as
-a ``TypeError`` in the summary line — the latter only AFTER the whole file has been graded, which is
-minutes of sandboxed execution per file.
-
-Run: python tests/cpu/environments/test_regrade_trajectories.py  (or pytest)
-"""
+"""The offline re-grader validates a trajectory's meta record before grading. ``eval_code_contests.py`` stamps
+``adapter``/``language`` and ``eval_env.py`` does not; unvalidated, a report-only key would raise ``TypeError``
+only after minutes of sandboxed grading."""
 
 import json
+import logging
 from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
-from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import contest_meta
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.datasets import ContestSelection
-from src.environments.envs.tasks.coding.grading import GradingSpec
+from halo.entrypoints import code_contests_regrade
+from halo.entrypoints.code_contests_eval import contest_meta
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.contest_datasets import ContestSelection
+from halo.environments.tasks.coding.grading import GradingSpec
+from halo.environments.tasks.coding.verdicts import FloatTolerance
 
-# What run_code_contests.py stamps (generic eval meta + its meta_extra).
+# What eval_code_contests.py stamps (generic eval meta + its meta_extra).
 _FULL_META = {
     "env_type": "code_contests",
     "adapter": "code_contests",
@@ -31,7 +26,7 @@ _FULL_META = {
     "model": "org/model",
     "language": "python",
 }
-# What run_env.py stamps: the generic eval meta only.
+# What eval_env.py stamps: the generic eval meta only.
 _RUN_ENV_META = {k: v for k, v in _FULL_META.items() if k not in ("adapter", "language")}
 
 
@@ -43,50 +38,44 @@ def _write_trajectories(path: Path, meta: dict) -> str:
 
 
 def test_full_meta_validates():
-    assert regrade_trajectories.validate_meta("f.jsonl", dict(_FULL_META)) is None
+    assert code_contests_regrade.validate_meta("f.jsonl", dict(_FULL_META)) is None
 
 
 def test_validate_meta_reports_every_missing_key_and_its_producer():
     with pytest.raises(ValueError) as excinfo:
-        regrade_trajectories.validate_meta("f.jsonl", dict(_RUN_ENV_META))
+        code_contests_regrade.validate_meta("f.jsonl", dict(_RUN_ENV_META))
 
     message = str(excinfo.value)
     assert "adapter" in message and "language" in message
-    assert "run_code_contests.py" in message, "the error must name the producer that stamps the missing keys"
+    assert "eval_code_contests.py" in message, "the error must name the producer that stamps the missing keys"
 
 
 def test_a_meta_without_its_split_is_refused():
-    """The split picks the rows whose tests the re-grade rebuilds; guessing one would grade every
-    episode of a train-split run (HLCE) against another split's problems."""
+    """Guessing a split would grade every episode of a train-split run (HLCE) against another split's problems."""
     with pytest.raises(ValueError, match="split"):
-        regrade_trajectories.validate_meta("f.jsonl", {k: v for k, v in _FULL_META.items() if k != "split"})
+        code_contests_regrade.validate_meta("f.jsonl", {k: v for k, v in _FULL_META.items() if k != "split"})
 
 
 def test_a_null_report_key_is_missing_too():
     """``model``/``language`` reach a width-formatted summary line; a null there is a TypeError."""
     with pytest.raises(ValueError, match="model"):
-        regrade_trajectories.validate_meta("f.jsonl", {**_FULL_META, "model": None})
+        code_contests_regrade.validate_meta("f.jsonl", {**_FULL_META, "model": None})
 
 
 def test_regrade_file_validates_before_it_grades_anything(tmp_path, monkeypatch):
     def unreachable(*args, **kwargs):
         raise AssertionError("the meta must be validated before the dataset load / environment build")
 
-    monkeypatch.setattr(regrade_trajectories, "_load_payloads", unreachable)
-    monkeypatch.setattr(regrade_trajectories, "resolve_environment", unreachable)
+    monkeypatch.setattr(code_contests_regrade, "_load_payloads", unreachable)
+    monkeypatch.setattr(code_contests_regrade, "build_environment", unreachable)
     path = _write_trajectories(tmp_path / "run_env.jsonl", _RUN_ENV_META)
 
     with pytest.raises(ValueError, match="trajectory meta is missing"):
-        regrade_trajectories.regrade_file(path, workers=1)
-
-
-# --- The grading contract carried across the dump ---
+        code_contests_regrade.regrade_file(path, workers=1)
 
 
 def test_every_grading_knob_reaches_the_meta_block():
-    """The block ``run_code_contests.py`` stamps must cover the WHOLE contract, derived from the
-    dataclass. A hand-typed subset silently defaults the ninth field added tomorrow — precisely the
-    re-threading :class:`GradingSpec` exists to prevent."""
+    """Derived from the dataclass: a hand-typed subset silently defaults the next field added."""
     env = CodeContestsEnvironment(language="python", sandbox_backend="local")
     meta = env.grading_spec.to_meta()
 
@@ -95,8 +84,7 @@ def test_every_grading_knob_reaches_the_meta_block():
 
 
 def test_the_regrader_rebuilds_the_run_s_contract_not_the_class_defaults():
-    """A run that raised ``timeout_per_test``/``max_time_limit`` must be re-graded at ITS limits: the
-    class defaults would TLE a solution the online run passed. The two offline overrides still win."""
+    """The class defaults would TLE a solution the online run passed. The two offline overrides still win."""
     ran_at = CodeContestsEnvironment(
         language="cpp",
         sandbox_backend="local",
@@ -118,27 +106,22 @@ def test_the_regrader_rebuilds_the_run_s_contract_not_the_class_defaults():
 
 
 def test_a_retired_meta_spelling_is_refused_rather_than_defaulted():
-    """A meta block that spells two knobs after the ENV constructor (``output_comparison``,
-    ``timeout_per_test``) is refused: silently ignoring them would re-grade at the class defaults and report a
-    solve rate the run never produced."""
+    """Silently ignoring env-constructor spellings would re-grade at the class defaults and report a solve rate the
+    run never produced."""
     spec = CodeContestsEnvironment(language="python", sandbox_backend="local").grading_spec
     with pytest.raises(ValueError, match="output_comparison"):
         spec.with_meta({"output_comparison": "tokens", "timeout_per_test": 5})
 
 
 def test_an_unstamped_run_falls_back_to_the_rebuilt_environment():
-    """Older trajectory files carry no block at all; the env's own spec must stand."""
+    """A file with no block keeps the env's own spec."""
     spec = CodeContestsEnvironment(language="python", sandbox_backend="local", timeout_per_test=4.0).grading_spec
     assert spec.with_meta({}, stop_on_first_failure=True, max_grading_seconds=None).default_timeout == 4.0
 
 
-# --- Per-submission language and the stamped submission budget ---
-
-
 def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
-    """A recorded ``submit_solution`` call the tool refused (no code, a missing or foreign language,
-    unparseable arguments) never ran and spent no budget, so it takes no slot in the re-graded prefix;
-    the admitted ones carry the language each call named."""
+    """A refused call never ran and spent no budget, so it takes no slot in the re-graded prefix; admitted ones
+    carry the language each named."""
 
     def call(arguments):
         return {"function": {"name": "submit_solution", "arguments": arguments}}
@@ -160,36 +143,34 @@ def test_submitted_solutions_keep_only_the_calls_the_environment_admitted():
         ]
     }
     choosing = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
-    assert regrade_trajectories.submitted_solutions(episode, choosing) == [
+    assert code_contests_regrade.submitted_solutions(episode, choosing) == [
         ("x", "cpp"),
         ("w", "python"),
     ]
     fixed = CodeContestsEnvironment(language="python", sandbox_backend="local")
     # A fixed-language run declares no language argument, so a call naming one is refused like any other
     # undeclared argument, and only the bare coded call binds.
-    assert regrade_trajectories.submitted_solutions(episode, fixed) == [("y", None)]
+    assert code_contests_regrade.submitted_solutions(episode, fixed) == [("y", None)]
 
 
 def test_submitted_solutions_read_arguments_the_way_the_environment_admitted_them():
-    """The environment admits a Python-literal ``arguments`` string (single quotes, ``True``/``None``)
-    and runs the submission; a re-grade reading JSON alone would drop that submission and score the
-    episode on a different prefix than the one the run graded."""
+    """The environment admits a Python-literal ``arguments`` string, so a JSON-only re-grade would score a different
+    prefix than the run graded."""
     tool_calls = [
         {"function": {"name": "submit_solution", "arguments": "{'code': 'print(1)', 'language': 'python'}"}},
         {"function": {"name": "submit_solution", "arguments": {"code": "print(2)", "language": "python"}}},
     ]
     episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
     env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
-    assert regrade_trajectories.submitted_solutions(episode, env) == [
+    assert code_contests_regrade.submitted_solutions(episode, env) == [
         ("print(1)", "python"),
         ("print(2)", "python"),
     ]
 
 
 def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_language():
-    """A submission whose code the environment refused as written in another listed language was never
-    graded and spent no budget; replayed, it would take the slot of the real first submission and
-    score s@1 on a program the run never judged."""
+    """Refused as written in another language, it was never graded; replayed, it would take the real first
+    submission's slot and score s@1 on it."""
     cpp = "#include <bits/stdc++.h>\nusing namespace std;\nint main() { cout << 1; }"
     tool_calls = [
         {"function": {"name": "submit_solution", "arguments": json.dumps({"code": cpp, "language": "python"})}},
@@ -197,25 +178,37 @@ def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_lang
     ]
     episode = {"messages": [{"role": "assistant", "tool_calls": tool_calls}]}
     env = CodeContestsEnvironment(language=["python", "cpp"], sandbox_backend="local")
-    assert regrade_trajectories.submitted_solutions(episode, env) == [(cpp, "cpp")]
+    assert code_contests_regrade.submitted_solutions(episode, env) == [(cpp, "cpp")]
+
+
+def test_an_episode_s_statement_sets_the_tolerance_it_is_re_graded_under():
+    stated = {
+        "messages": [
+            {"role": "system", "content": "error 10^-1"},
+            {"role": "user", "content": "Absolute error up to 10^{-4}."},
+        ]
+    }
+    assert code_contests_regrade.episode_stated_tolerance(stated) == FloatTolerance(absolute=1e-4, relative=None)
+    assert (
+        code_contests_regrade.episode_stated_tolerance({"messages": [{"role": "user", "content": "Print n."}]}) is None
+    )
 
 
 def test_display_language_joins_a_model_chosen_set():
-    assert regrade_trajectories.display_language("python") == "python"
-    assert regrade_trajectories.display_language(["python", "cpp"]) == "python,cpp"
+    assert code_contests_regrade.display_language("python") == "python"
+    assert code_contests_regrade.display_language(["python", "cpp"]) == "python,cpp"
 
 
 def test_episode_submission_budget_reads_the_stamped_tool_budget():
     env = CodeContestsEnvironment(language="python", sandbox_backend="local", max_submissions=2)
     stamped = {"info": {"episode_tool_budgets": {"submit_solution": 3, "python_repl": 6}}}
-    assert regrade_trajectories.episode_submission_budget(stamped, env) == 3
-    assert regrade_trajectories.episode_submission_budget({"info": {}}, env) == 2
+    assert code_contests_regrade.episode_submission_budget(stamped, env) == 3
+    assert code_contests_regrade.episode_submission_budget({"info": {}}, env) == 2
 
 
 def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_writes():
-    """Written by ``contest_meta``, read by ``rebuild_environment``: a leaderboard run re-grades at one
-    submission even where an episode stamped no budget, over a trained ladder that bound three. A meta
-    line naming no protocol ran the harness."""
+    """A leaderboard run re-grades at one submission even where an episode stamped no budget; a meta line naming no
+    protocol ran the harness."""
     profiles = {"high": {"thinking_tokens": 16384, "max_submissions": 3, "max_test_calls": 6}}
     env = CodeContestsEnvironment(
         language="python", sandbox_backend="local", eval_protocol="leaderboard", reasoning_effort_profiles=profiles
@@ -223,11 +216,11 @@ def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_wr
     written = contest_meta("livecodebench", ContestSelection(), env, "high", {"reasoning_effort_profiles": profiles})
     meta = json.loads(json.dumps({"env_type": "codeforces", **written}))
 
-    rebuilt = regrade_trajectories.rebuild_environment(meta)
+    rebuilt = code_contests_regrade.rebuild_environment(meta)
     assert (rebuilt.eval_protocol, rebuilt.max_submissions, rebuilt.max_test_calls) == ("leaderboard", 1, 0)
-    assert regrade_trajectories.episode_submission_budget({"info": {}}, rebuilt) == 1
+    assert code_contests_regrade.episode_submission_budget({"info": {}}, rebuilt) == 1
     unnamed = {key: value for key, value in meta.items() if key != "eval_protocol"}
-    assert regrade_trajectories.rebuild_environment(unnamed).eval_protocol == "harness"
+    assert code_contests_regrade.rebuild_environment(unnamed).eval_protocol == "harness"
 
 
 def _submission(code: str) -> dict:
@@ -240,11 +233,9 @@ def _submission(code: str) -> dict:
 
 
 def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatch):
-    """The eval leaves a generation-error sample out of every score; re-graded as an unsolved episode it
-    would pull ``s@1`` below the online number for an endpoint fault. The solved and the unsubmitted
-    episodes are what ``n`` counts."""
+    """Re-graded as unsolved it would pull ``s@1`` below the online number for an endpoint fault."""
     payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
-    monkeypatch.setattr(regrade_trajectories, "build_payloads", lambda meta: (payload,))
+    monkeypatch.setattr(code_contests_regrade, "build_payloads", lambda meta: (payload,))
     episodes = [
         {"type": "episode", "index": 0, "messages": [_submission("print('X')")], "generation_error": None},
         {"type": "episode", "index": 0, "messages": [], "generation_error": "NotFoundError: gone"},
@@ -253,27 +244,50 @@ def test_an_episode_the_driver_lost_leaves_n_and_is_counted(tmp_path, monkeypatc
     path = tmp_path / "run.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in [{"type": "meta", **_FULL_META}, *episodes]) + "\n")
 
-    metrics = regrade_trajectories.regrade_file(str(path), workers=1)
+    metrics = code_contests_regrade.regrade_file(str(path), workers=1)
     assert (metrics["n"], metrics["s@1"], metrics["generation_errors"]) == (2, 0.5, 1)
 
 
 def test_an_episode_past_the_rebuilt_problems_refuses_the_file(tmp_path, monkeypatch):
-    """An index the rebuilt dataset does not reach means the dataset or its selection changed since the
-    run: re-grading on would score that episode unsolved with nothing saying why."""
+    """The dataset or its selection changed since the run; re-grading on would score that episode unsolved with
+    nothing saying why."""
     payload = {"tests": [{"input": "", "output": "X"}], "checker": None, "time_limit": None}
-    monkeypatch.setattr(regrade_trajectories, "build_payloads", lambda meta: (payload,))
+    monkeypatch.setattr(code_contests_regrade, "build_payloads", lambda meta: (payload,))
     episode = {"type": "episode", "index": 3, "messages": [_submission("print('X')")], "generation_error": None}
     path = tmp_path / "run.jsonl"
     path.write_text("\n".join(json.dumps(r) for r in [{"type": "meta", **_FULL_META}, episode]) + "\n")
 
     with pytest.raises(SystemExit, match=r"index\(es\) \[3\] address none of the 1 problems"):
-        regrade_trajectories.regrade_file(str(path), workers=1)
+        code_contests_regrade.regrade_file(str(path), workers=1)
 
 
 def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
-    env = regrade_trajectories.resolve_environment("code_contests", {"language": ["python", "cpp"]})
+    env = code_contests_regrade.build_environment("code_contests", {"language": ["python", "cpp"]})
     assert env.chooses_language and env.languages == ("python", "cpp")
     assert env.grading_spec.language == "python", "the contract's language is the set's first"
+
+
+def test_each_regraded_file_is_reported_and_persisted_as_it_lands(monkeypatch, tmp_path, caplog):
+    """The report line is the tool's output: it must reach the log under the WARNING root the package leaves, and
+    each file's metrics land in the output file before the next file grades."""
+    metrics = {
+        "model": "m",
+        "adapter": "cf",
+        "language": "python",
+        "eval_protocol": "single",
+        "n": 2,
+        "s@1": 0.5,
+        "s@2": 1.0,
+        "generation_errors": 0,
+    }
+    monkeypatch.setattr(code_contests_regrade, "regrade_file", lambda path, workers: {**metrics, "model": path})
+    monkeypatch.setattr(logging.getLogger(), "level", logging.WARNING)
+    output = tmp_path / "regraded.jsonl"
+    code_contests_regrade.regrade_trajectory_files(["a.jsonl", "b.jsonl"], 1, str(output))
+    reported = [r.getMessage() for r in caplog.records if r.name == code_contests_regrade.__name__]
+    assert [line.split()[0] for line in reported] == ["a.jsonl", "b.jsonl"]
+    assert "s@1=50% s@2=100%" in reported[0]
+    assert [json.loads(line)["model"] for line in output.read_text().splitlines()] == ["a.jsonl", "b.jsonl"]
 
 
 if __name__ == "__main__":

@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""
-SFT Trainer test: Full Fine-Tune, LoRA, QLoRA, TP=2, CP=2 on Qwen3-0.6B.
+"""SFT on Qwen3-0.6B through the sft.py pipeline: full fine-tune, LoRA, QLoRA, TP=2 and CP=2, with packing and save.
 
-Mirrors the sft.py training pipeline: load_distributed_model → setup_peft_model
-→ DistributedSFTTrainer → train → save_model. Tests all parameter modes
-and parallelism configurations with packing and checkpoint verification.
-
-Run with torchrun (all modes including TP/CP):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_qwen3_modes.py
-
-Run with accelerate (FSDP, skips TP/CP/QLoRA):
-    accelerate launch --config_file launcher-configs/accelerate/multigpu_dp_config.yaml \
-        --num_processes=2 tests/gpu/trainers/sft/test_sft_qwen3_modes.py
-
-Run single-GPU (skips TP/CP):
-    torchrun --nproc_per_node=1 tests/gpu/trainers/sft/test_sft_qwen3_modes.py
+Under ``accelerate launch`` it skips TP, CP and QLoRA; on one GPU it skips TP and CP.
 """
 
 import os
@@ -24,23 +10,24 @@ from types import SimpleNamespace
 
 import torch
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig, get_quantization_config
+from trl import SFTConfig, get_quantization_config
 
-from src.data.collators.factory import select_data_collator
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.env import is_accelerate_fsdp_launch
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.factory import select_data_collator
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import is_accelerate_fsdp_launch
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import adapter_save_checks
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import adapter_save_checks
-from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
-
-# Configuration
+from tests.common.rank_log import log
+from tests.common.training_checks import LM_TRAINING_LOSS_BAND, training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 5
@@ -62,23 +49,16 @@ LORA_TARGET_MODULES = [
     "down_proj",
 ]
 
-# Minimal args stub for setup_peft_model (only needs freeze/unfreeze patterns)
+# configure_adapter_training only needs the freeze/unfreeze patterns.
 PEFT_ARGS = SimpleNamespace(
     unfreeze_layers_patterns=None,
     freeze_layers_patterns=None,
 )
 
 
-# Helpers
-
-
-# Mode runner — mirrors sft.py: load_distributed_model → setup_peft_model
-#                                → DistributedSFTTrainer → train → save_model
-
-
 def run_mode(
     mode_name: str,
-    model_config: ModelConfig,
+    model_config: ModelArguments,
     sft_config: SFTConfig,
     parallelism_config: ParallelismConfig,
     tokenizer,
@@ -88,17 +68,14 @@ def run_mode(
     save_dir: str,
     data_collator=None,
 ) -> tuple[bool, str]:
-    """Run one SFT training mode following the sft.py pipeline."""
     model = None
     trainer = None
 
     try:
-        # --- Step 1: Quantization config ---
         quantization_config = get_quantization_config(model_config)
         if quantization_config is not None:
             log(f"  Quantization: {quantization_config.quant_method}")
 
-        # --- Step 2: Load model ---
         log("  Loading model via load_distributed_model...")
         model, _ = load_distributed_model(
             model_name_or_path=model_config.model_name_or_path,
@@ -112,19 +89,16 @@ def run_mode(
         total_params = sum(p.numel() for p in model.parameters())
         log(f"  Model loaded: {total_params / 1e6:.1f}M params, GPU: {gpu_mem_gb():.2f} GB")
 
-        # Disable Liger in SFTConfig — already applied during model loading.
-        # Prevents TRL from re-applying with different defaults.
+        # Already applied during model loading; keeps TRL from re-applying with different defaults.
         if sft_config.use_liger_kernel:
             sft_config.use_liger_kernel = False
 
-        # --- Step 3: Setup PEFT ---
-        peft_config = setup_peft_model(PEFT_ARGS, model, model_config, "CAUSAL_LM")
+        peft_config = configure_adapter_training(PEFT_ARGS, model, model_config, "CAUSAL_LM")
         if peft_config is not None:
             log(f"  PEFT config: r={peft_config.r}, alpha={peft_config.lora_alpha}")
         else:
             log("  PEFT: disabled (full fine-tune)")
 
-        # --- Step 4: Create trainer ---
         trainer_kwargs = {}
         if data_collator is not None:
             trainer_kwargs["data_collator"] = data_collator
@@ -139,16 +113,13 @@ def run_mode(
             **trainer_kwargs,
         )
 
-        # --- Step 5: Train ---
         log(f"  Training for {MAX_STEPS} steps...")
         train_result = trainer.train()
 
-        # --- Step 6: Save model ---
         log(f"  Saving model to {save_dir}...")
         trainer.save_model(save_dir)
         barrier()
 
-        # --- Validate ---
         log(f"\n  --- Validation ({mode_name}) ---")
         checks = training_run_checks(train_result, trainer, MAX_STEPS, loss_band=LM_TRAINING_LOSS_BAND)
 
@@ -170,11 +141,7 @@ def run_mode(
         barrier()
 
 
-# Main
-
-
 def run(ctx) -> dict:
-    """Run all SFT mode tests."""
     rank = ctx.rank
     world_size = ctx.world_size
     base_output_dir = ctx.output_dir
@@ -198,28 +165,26 @@ def run(ctx) -> dict:
     parallelism_config = ParallelismConfig()
     results: dict[str, tuple[bool, str]] = {}
 
-    # Shared SFTConfig kwargs — mirrors sft.py settings
+    # Mirrors sft.py settings.
     shared_sft_kwargs = {
         "max_steps": MAX_STEPS,
         "per_device_train_batch_size": BATCH_SIZE,
         "bf16": True,
         "gradient_checkpointing": True,
         "logging_steps": 1,
-        "save_strategy": "no",  # Manual save after training (avoids FSDP auto-save issues)
+        "save_strategy": "no",  # Manual save after training (avoids FSDP auto-save issues).
         "report_to": "none",
         "logging_nan_inf_filter": False,
         "max_length": MAX_SEQ_LENGTH,
         "packing": True,
         "dataloader_drop_last": True,
-        "fsdp": "",  # Mixin handles FSDP wrapping
     }
 
-    # ── Test 1: Full Fine-Tune ──────────────────────────────────────────
     log(f"\n{'=' * 70}")
     log("  TEST 1: Full Fine-Tune")
     log(f"{'=' * 70}")
 
-    full_model_config = ModelConfig(
+    full_model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=False,
         trust_remote_code=True,
@@ -245,12 +210,11 @@ def run(ctx) -> dict:
     )
     results["full_finetune"] = (success, detail)
 
-    # ── Test 2: LoRA ────────────────────────────────────────────────────
     log(f"\n{'=' * 70}")
     log("  TEST 2: LoRA")
     log(f"{'=' * 70}")
 
-    lora_model_config = ModelConfig(
+    lora_model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=True,
         lora_r=64,
@@ -282,9 +246,7 @@ def run(ctx) -> dict:
     )
     results["lora"] = (success, detail)
 
-    # ── Test 3: QLoRA ───────────────────────────────────────────────────
-    # QLoRA is incompatible with accelerate-managed FSDP (integer dtype tensors
-    # from 4-bit quantization can't be flattened). Skip when FSDP is active.
+    # Accelerate-managed FSDP can't flatten the integer tensors of 4-bit quantization.
     accelerate_fsdp = is_accelerate_fsdp_launch()
     if accelerate_fsdp:
         log(f"\n{'=' * 70}")
@@ -296,7 +258,7 @@ def run(ctx) -> dict:
         log("  TEST 3: QLoRA (4-bit)")
         log(f"{'=' * 70}")
 
-        qlora_model_config = ModelConfig(
+        qlora_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=True,
             lora_r=64,
@@ -314,7 +276,7 @@ def run(ctx) -> dict:
             output_dir=os.path.join(base_output_dir, "qlora_train"),
             learning_rate=LORA_LEARNING_RATE,
             gradient_checkpointing_kwargs={"use_reentrant": False},
-            use_liger_kernel=False,  # Liger incompatible with quantized models
+            use_liger_kernel=False,  # Liger is incompatible with quantized models.
             **shared_sft_kwargs,
         )
 
@@ -331,8 +293,7 @@ def run(ctx) -> dict:
         )
         results["qlora"] = (success, detail)
 
-    # ── Test 4: TP=2 (Tensor Parallelism) ────────────────────────────────
-    # TP and CP require torchrun (not accelerate) and world_size >= 2
+    # TP and CP require torchrun and world_size >= 2.
     can_run_tp_cp = world_size >= 2 and not accelerate_fsdp
     if not can_run_tp_cp:
         log(f"\n{'=' * 70}")
@@ -347,7 +308,7 @@ def run(ctx) -> dict:
 
         tp_parallelism = ParallelismConfig(tp_size=2)
 
-        tp_model_config = ModelConfig(
+        tp_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=False,
             trust_remote_code=True,
@@ -373,7 +334,6 @@ def run(ctx) -> dict:
         )
         results["tp2"] = (success, detail)
 
-    # ── Test 5: CP=2 (Context Parallelism) ─────────────────────────────
     if not can_run_tp_cp:
         log(f"\n{'=' * 70}")
         reason = "accelerate FSDP" if accelerate_fsdp else f"world_size={world_size}"
@@ -387,14 +347,14 @@ def run(ctx) -> dict:
 
         cp_parallelism = ParallelismConfig(cp_size=2)
 
-        cp_model_config = ModelConfig(
+        cp_model_config = ModelArguments(
             model_name_or_path=MODEL_NAME,
             use_peft=False,
             trust_remote_code=True,
             attn_implementation="flash_attention_2",
         )
-        # Ulysses has no per-document boundaries, so packing is rejected under CP; CP instead needs
-        # padded sequences whose length divides cp_size. Both come from the production factory.
+        # Ulysses has no per-document boundaries, so CP rejects packing and needs padded sequences whose length divides
+        # cp_size.
         cp_sft_config = SFTConfig(
             output_dir=os.path.join(base_output_dir, "cp2_train"),
             learning_rate=LEARNING_RATE,
@@ -403,6 +363,7 @@ def run(ctx) -> dict:
         )
 
         cp_collator = select_data_collator(
+            train_on_completions_only=False,
             tokenizer=tokenizer,
             use_context_parallel=True,
             pad_to_multiple_of=2,
@@ -422,18 +383,15 @@ def run(ctx) -> dict:
         )
         results["cp2"] = (success, detail)
 
-    # ── Summary ─────────────────────────────────────────────────────────
     log(f"\n{'#' * 70}")
     log("  FINAL RESULTS")
     log(f"{'#' * 70}")
-    # None == did not run. Reporting a skipped mode as PASSED claims coverage the run never had.
+    # None means did not run: reporting a skipped mode as passed claims coverage the run never had.
     for name, (passed, detail) in results.items():
         status = "SKIPPED" if passed is None else ("PASSED" if passed else "FAILED")
         log(f"  {name:20s} {status} -- {detail}")
     log(f"{'#' * 70}")
 
-    # A mode that did not run contributes no check — reporting it as PASSED would claim
-    # coverage the run never had.
     return {"checks": {name: passed for name, (passed, _) in results.items() if passed is not None}}
 
 

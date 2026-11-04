@@ -1,26 +1,18 @@
 #!/usr/bin/env python
-"""The episode and request deadlines count engine-serving time, not the seconds a weight sync held the
-engines paused.
-
-A sync freezes every in-flight generation (vLLM ``mode=keep``) for the whole push. A wall-clock
-deadline charges that window to the episode, and a request that expires inside it is re-issued while
-its frozen original still completes server-side: the same turn is sampled twice. ``RolloutManager``
-keeps the paused-seconds clock the trainer credits after each sync, the actors read a Ray copy of it,
-and ``_await_with_deadline`` re-arms against it.
-
-    python tests/cpu/environments/test_rollout_deadline_excludes_engine_pause.py
-"""
+"""Episode and request deadlines count engine-serving time, not the seconds a weight sync held the engines paused. A
+request expiring inside the window is re-issued while its frozen original still completes: the same turn is
+sampled twice. ``RolloutManager`` keeps the clock, and ``_await_with_deadline`` re-arms against it."""
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from src.configs.rollout_config import RolloutConfig
-from src.environments import ray_actors
-from src.environments.base import Trajectory
-from src.environments.episode import RolloutResult
-from src.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
+from halo.environments import ray_actors
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Trajectory
+from halo.environments.ray_actors import EnginePauseClock, EnvironmentActor, RolloutManager, _await_with_deadline
+from halo.environments.rollout_config import RolloutConfig
 
 # The episode overruns the deadline by half a second, and a credit equal to the timeout clears it by
 # another half: a stalled event loop on a loaded runner must not flip either verdict.
@@ -129,7 +121,7 @@ async def test_an_episode_spanning_an_open_pause_is_not_cancelled():
     def _remote(*, prompt, context, server_url, config):
         async def _episode():
             await asyncio.sleep(_EPISODE_S)
-            return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), success=True)
+            return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), terminated_naturally=True)
 
         return _episode()
 
@@ -141,7 +133,7 @@ async def test_an_episode_spanning_an_open_pause_is_not_cancelled():
     manager.end_engine_pause(_EPISODE_S)
 
     assert result.error is None, result.error
-    assert result.success
+    assert result.terminated_naturally
 
 
 class _FrozenSession:
@@ -204,10 +196,7 @@ async def _episode_across_a_pause(
 
     session = _FrozenSession(request_delay, lambda: syncs.append(asyncio.create_task(_sync())))
 
-    async def _client():
-        return session
-
-    actor._get_http_client = _client
+    actor._http_client = session
     config = RolloutConfig(request_timeout=request_timeout, max_retries=max_retries, retry_base_wait=0.0)
     result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", config)
     for sync in syncs:
@@ -216,8 +205,8 @@ async def _episode_across_a_pause(
 
 
 async def test_a_request_frozen_across_a_sync_is_sampled_once():
-    # Wall clock: the 1.0 s request overruns its 0.5 s deadline. Serving time is 0.2 s — the engine sat
-    # paused for the other 0.8 s, and without the credit the turn is re-issued and sampled twice.
+    # Wall clock: the 1.0 s request overruns its 0.5 s deadline. Serving time is 0.2 s, the engine paused for the other
+    # 0.8 s; without the credit the turn is re-issued and sampled twice.
     result, posts = await _episode_across_a_pause(
         request_delay=1.0, request_timeout=0.5, pause_from=0.1, pause_s=0.8, max_retries=2
     )

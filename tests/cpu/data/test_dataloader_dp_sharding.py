@@ -1,11 +1,8 @@
-"""DP row-ownership contract of ``DataParallelDataLoaderMixin._prepare_dataloader``.
+"""DP row-ownership contract of ``DataParallelLoaderMixin._prepare_dataloader``: TP/CP/ETP siblings get identical
+rows, DP ranks partition the dataset, and ``dp_representative_ranks`` + ``_select_gathered_chunks`` invert a
+world-order gather. ``data_seed`` owns the sampler."""
 
-Covers the two halves that must agree for any DP < world_size topology: the loader hands TP/CP/ETP
-siblings IDENTICAL rows while DP ranks partition the dataset, and the gather inverse
-(``dp_representative_ranks`` + ``select_gathered_chunks``) turns a world-order gather of those rows
-back into dataset order. Also pins ``data_seed`` to the sampler, not to the ambient torch seed.
-"""
-
+import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -16,22 +13,22 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 # prepare_data_loader resolves its defaults through the accelerate state.
 PartialState()
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.dataloader import (
-    DataParallelDataLoaderMixin,
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.dataloaders import (
+    DataParallelLoaderMixin,
+    _select_gathered_chunks,
     dp_representative_ranks,
-    needs_dp_sharded_loader,
-    select_gathered_chunks,
+    uses_dp_sharded_loader,
 )
+from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
 
 WORLD_SIZE = 8
 DATASET_SIZE = 32
 BATCH_SIZE = 2
 
-# Topologies where data_parallel_size < world_size, i.e. every rank has siblings that must replay its
-# rows: attention TP, Ulysses CP, and expert-TP (whose DP rank is a dispatch-coordinate, not a
-# floor-division — so the sibling pairs are not adjacent global ranks).
+# Topologies where data_parallel_size < world_size, so every rank has siblings replaying its rows: attention TP,
+# Ulysses CP, and expert-TP, whose DP rank is a dispatch coordinate, so sibling pairs are not adjacent global ranks.
 SIBLING_TOPOLOGIES = {
     "tp2": {"tp_size": 2},
     "tp4": {"tp_size": 4},
@@ -44,9 +41,7 @@ def _parallelism_config(rank: int, **kwargs) -> ParallelismConfig:
     return make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=WORLD_SIZE, rank=rank, **kwargs)
 
 
-class _Trainer(DataParallelDataLoaderMixin):
-    """Minimal host exposing exactly what ``_prepare_dataloader`` reads off a trainer."""
-
+class _Trainer(DataParallelLoaderMixin):
     def __init__(self, parallelism_config: ParallelismConfig, data_seed: int | None = None):
         self.parallelism_config = parallelism_config
         self._dataset_presharded = False
@@ -62,15 +57,8 @@ class _Trainer(DataParallelDataLoaderMixin):
             use_stateful_dataloader=False,
         )
 
-    def get_data_parallel_size(self) -> int:
-        return self.parallelism_config.data_parallel_size
-
-    def get_data_parallel_rank(self) -> int:
-        return self.parallelism_config.get_data_parallel_rank()
-
 
 def _rank_batches(trainer: _Trainer, *, shuffle: bool) -> list[torch.Tensor]:
-    """Batches one rank consumes from a DP-prepared loader over ``range(DATASET_SIZE)``."""
     dataset = list(range(DATASET_SIZE))
     sampler = RandomSampler(dataset) if shuffle else SequentialSampler(dataset)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, sampler=sampler, collate_fn=torch.tensor)
@@ -99,18 +87,13 @@ def test_siblings_share_rows_and_dp_ranks_partition_the_dataset(topology):
         for sibling in sibling_rows[1:]:
             assert sibling == sibling_rows[0], f"DP rank {dp_rank} siblings disagree: {sibling_rows}"
 
-    # Every example exactly once across the DP ranks — no rank silently replays another's slice.
     covered = [row for sibling_rows in rows_by_dp_rank.values() for row in sibling_rows[0]]
     assert sorted(covered) == list(range(DATASET_SIZE))
 
 
 @pytest.mark.parametrize("topology", sorted(SIBLING_TOPOLOGIES))
 def test_sibling_deduplicated_gather_reproduces_dataset_order(topology):
-    """A world gather of the DP-sharded rows, deduplicated, is the dataset-ordered block per step.
-
-    This is the contract TRL's precompute sweep indexes by: ``cat(per-step gathers)[i]`` must be
-    example ``i``.
-    """
+    """The contract TRL's precompute sweep indexes by: ``cat(per-step gathers)[i]`` is example ``i``."""
     configs = [_parallelism_config(rank, **SIBLING_TOPOLOGIES[topology]) for rank in range(WORLD_SIZE)]
     dp_size = configs[0].data_parallel_size
     keep = dp_representative_ranks([config.get_data_parallel_rank() for config in configs])
@@ -124,7 +107,7 @@ def test_sibling_deduplicated_gather_reproduces_dataset_order(topology):
     for step in range(steps):
         gathered = torch.cat([per_rank[rank][step] for rank in range(WORLD_SIZE)])
         assert gathered.numel() == WORLD_SIZE * BATCH_SIZE
-        reassembled += [int(row) for row in select_gathered_chunks(gathered, keep, WORLD_SIZE)]
+        reassembled += [int(row) for row in _select_gathered_chunks(gathered, keep, WORLD_SIZE)]
 
     assert reassembled == list(range(DATASET_SIZE))
 
@@ -140,11 +123,25 @@ def test_dp_representative_ranks_keeps_the_first_holder_in_dp_order():
 
 def test_select_gathered_chunks_rejects_a_non_world_multiple():
     with pytest.raises(ValueError, match="not a multiple of world_size"):
-        select_gathered_chunks(torch.arange(7), [0, 1], 4)
+        _select_gathered_chunks(torch.arange(7), [0, 1], 4)
+
+
+def _rank_map_worker(rank: int) -> None:
+    # Expert-TP's DP rank is a dispatch coordinate, so the map is not sorted by global rank.
+    configs = [
+        make_parallelism_config(world_size=4, gpus_per_node=4, rank=r, ep_size=2, expert_tp_size=2) for r in range(4)
+    ]
+    expected = [config.get_data_parallel_rank() for config in configs]
+    assert expected == [0, 1, 0, 1], "premise: the layout interleaves DP ranks"
+    assert _Trainer(configs[rank])._data_parallel_rank_by_global_rank() == expected
+
+
+def test_the_dp_rank_map_lists_every_global_rank_s_dp_rank_in_global_order():
+    """The map ``data_parallel_sweep`` and the evaluation gather scope keep one chunk per DP rank by."""
+    run_gloo_ranks(_rank_map_worker, 4, pg_timeout=datetime.timedelta(seconds=60))
 
 
 def test_data_seed_owns_the_shuffle_order_not_the_ambient_torch_seed():
-    """``data_seed`` must reach the seedable sampler: same seed → same order under any global seed."""
     config = _parallelism_config(0, tp_size=2)
 
     torch.manual_seed(0)
@@ -162,7 +159,6 @@ def test_data_seed_owns_the_shuffle_order_not_the_ambient_torch_seed():
 
 
 def test_data_seed_unset_falls_back_to_the_ambient_torch_seed():
-    """No data_seed keeps accelerate's documented fallback — the sharding must not hardcode a seed."""
     config = _parallelism_config(0, tp_size=2)
 
     torch.manual_seed(0)
@@ -190,7 +186,7 @@ def test_data_seed_unset_falls_back_to_the_ambient_torch_seed():
 def test_the_dp_sharded_loader_takes_every_run_whose_ranks_share_batches(shape, presharded, expected):
     """DP and EP (orthogonal to DP) and HSDP keep the base flow; every axis that replicates a batch
     across ranks, and a dataset already cut per DP rank, takes the DP-sharded loader."""
-    assert needs_dp_sharded_loader(make_parallelism_config(**shape), presharded) is expected
+    assert uses_dp_sharded_loader(make_parallelism_config(**shape), presharded) is expected
 
 
 if __name__ == "__main__":

@@ -6,9 +6,8 @@ loads with no revision pin and no remote code. It is the most constrained family
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | No | Yes | No | No | Yes | No |
+Modes: the Zaya (ZAYA1) row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 Every mode runs without gradient checkpointing.
 
@@ -35,9 +34,15 @@ halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/zaya1-8b-sft-ep8
 ```
 
-Both recipes train at 4,096 tokens. For long context at EP8, raise the limit with
-`--max_length=32768`, which fits at `per_device_train_batch_size: 1` because the fused loss never builds
-the full logits tensor.
+Both recipes pack 16,384-token rows at gradient accumulation 4. Three steps on eight B300s peaked at 66 GiB
+reserved per GPU under EP8 and 80 GiB under plain FSDP2. Zaya cannot use gradient checkpointing, so other shapes
+need their own fit, computed rather than measured:
+
+- **One GPU:** a B200 or B300 (about 102–124 GB). Its ~72 GB of state leaves an 80 GB GPU no room for a useful row.
+- **Eight 80 GB GPUs:** the EP8 recipe as shipped, or plain FSDP2 with
+  `-n 8 --max_length=8192 --gradient_accumulation_steps=8`.
+- **Long context at EP8:** `--max_length=32768 --gradient_accumulation_steps=2`. The fused loss never builds the
+  full logits tensor.
 
 ### Other layouts
 
@@ -55,7 +60,7 @@ halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat.yaml \
 
 ### GRPO
 
-Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+Online and async GRPO are not available for this family (see [Limits](#limits)). Offline GRPO trains on
 pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
 ## Settings that matter
@@ -66,15 +71,16 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - **Router balancing.** `auto` picks `bias_update`, which updates the router's own `balancing_biases`
   after each step, so the final bias ships in every checkpoint. `router_balancing_rate` sets the step
   size. ZAYA1 has no auxiliary loss, which is why the recipes set `output_router_logits: false`.
-- **Packing.** The recipes pack. Attention stays within each packed document, but the CCA convolution
-  and the delayed value projection still mix neighboring documents. Add `--packing=false` where that
-  mixing is not acceptable.
+- **Packing.** The recipes pack, and each packed document stays isolated: attention, the CCA
+  convolution and the delayed value projection all restart at every document boundary.
 
 ## Limits
 
 - No gradient checkpointing, in any mode.
 - No CP or TP. CCA's sequence convolution breaks a sequence split, and its attention has no TP plan.
-- No online RL. vLLM 0.26.0 has no native ZAYA1 class, and SGLang 0.5.17's loader reads only the legacy
+- No pipeline parallelism: a stage cut would sever the fp32 residual stream and the router state each
+  layer passes to the next.
+- No online RL. vLLM 0.32.0 has no native ZAYA1 class, and SGLang 0.5.22's loader reads only the legacy
   per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
 - No routing replay.
 - The legacy checkpoint `Zyphra/ZAYA1-8B-legacy` doesn't load. Start from hub `main`.

@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""Repo pins on the image build surface: locked dependencies and provenance labels.
-
-A ``pip install`` in the training image that resolves dependencies for a package the lock names pulls
-whatever PyPI serves that day. Ahead of the locked install, that install replaces only the packages the
-lock names, so every other package the resolve brought in stays in the image, unlocked; after it, a
-resolve moves locked packages off their pins. Each such install must pass ``--no-deps``, however it
-spells the requirement, and the optional extras come from the lock export itself, which ``make install``
-exports the same way.
-
-Each image labels itself with the Halo commit, version and build date it was built from. Without
-their own labels, the rollout images report their engine's upstream revision and the training image
-reports the Ubuntu base's ``org.opencontainers.image.version``.
-
-    python tests/cpu/config/test_image_build_surface.py
-"""
+"""Repo pins on the image build surface. A ``pip install`` that resolves a locked package's dependencies pulls
+whatever PyPI serves that day, so each passes ``--no-deps`` and the extras come from the lock export. Each image
+labels itself with the Halo commit, version and build date, or it reports its base's."""
 
 import re
 import tomllib
@@ -21,7 +9,7 @@ import tomllib
 import pytest
 from packaging.utils import canonicalize_name
 
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 # The training image's locked install: the one place its dependencies are resolved from.
 LOCKED_INSTALL = "uv pip install --system --no-deps -r"
@@ -38,7 +26,6 @@ BOOTSTRAP_PACKAGES = frozenset({"ninja", "torch"})
 EXPORTED_EXTRA = re.compile(r"--extra[ =](\S+)")
 ALL_EXTRAS = "--all-extras"
 DOCKERFILES = sorted(path.name for path in REPO_ROOT.glob("Dockerfile*"))
-# Each provenance label and the build arg it is stamped from.
 PROVENANCE_LABELS = {
     "org.opencontainers.image.revision": "SOURCE_REVISION",
     "org.opencontainers.image.version": "VERSION",
@@ -118,7 +105,6 @@ def test_installs_take_their_dependencies_from_the_lock():
 
 
 def test_the_scan_flags_a_resolving_install():
-    """Guards the pin above against passing vacuously on a parser that sees nothing."""
     dockerfile = (
         "RUN export A=1 \\\n"
         "\n"
@@ -152,7 +138,7 @@ def test_the_scan_flags_a_resolving_install():
 
 def test_the_image_installs_every_optional_extra_from_the_lock():
     """An extra installed by its own ``pip install`` resolves its dependencies outside the lock, and
-    ``make install`` would then check a different requirement set than the image builds from."""
+    ``make check-lock`` would then check a different requirement set than the image builds from."""
     pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     extras = set(pyproject["project"]["optional-dependencies"])
     assert extras, "pyproject.toml declares no optional extras: the scan lost its root"

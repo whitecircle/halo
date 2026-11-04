@@ -6,14 +6,14 @@ Async GRPO metrics are namespaced by the question they answer. The rollout, `sam
 
 | Namespace | Answers | Keys to watch |
 |---|---|---|
-| `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` (multiple servers only); `requests_expired_in_sync` |
-| `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `truncation_alarm`, `error_rate`, `length_cutoff_turns`, `length_cutoff_in_call_turns`, `empty_turns`, `thinking_cap_turns`, `output_budget_exhausted`, `reasoning_cjk_rate`, `tool_calls`, `sandbox_infra_fault`, `sandbox_agent_fault`, `reward_scored` |
+| `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` (prefetching runs only); `requests_expired_in_sync` |
+| `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `truncation_alarm`, `error_rate`, `length_cutoff_turns`, `length_cutoff_in_call_turns`, `empty_turns`, `context_overflow`, `thinking_cap_turns`, `output_budget_exhausted`, `reasoning_cjk_rate`, `tool_calls`, `sandbox_infra_fault`, `sandbox_agent_fault`, `reward_scored` |
 | `outcome/*` | task success | `solve_rate`, `all_pass_group_frac` / `all_fail_group_frac`, eval `success@k`, plus per-env keys such as `test_pass_frac` |
 | `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components and `composition_residue` ([Reward decomposition](#reward-decomposition)) |
 | `judge/*`, `reward_model/*` | external reward terms | `<source>/<name>/scored` plus per-source keys: [judge](../grpo/rewards/judge.md#metrics), [reward model](../grpo/rewards/reward-model.md) |
 | `logps/*` | policy confidence | `sampling_mean`, `advantage_cov`; the related `kl`, `entropy`, `kl_clamp_frac` are unnamespaced |
 | `advantage/*` | the round's push on the sampled tokens | `net_token_mass`, `token_mass_scale`, `negative_only_mass` ([Token-mass balance](objective.md#token-mass-balance)) |
-| `sampling/*` | engine/trainer agreement | `is_correction_active`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac` |
+| `sampling/*` | engine/trainer agreement | `is_correction_active`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac`, `zero_gradient_round` |
 | `routing/*` | MoE [routing replay](objective.md#routing-replay) | `replay_flip_rate`; under R3 ([rollout replay](objective.md#routing-replay)), the capture shape classes `rollout_full_frac`, `rollout_engine_omits_last_frac`, `rollout_completion_only_frac`, `rollout_unresolved_frac`, plus `rollout_prompt_len_mismatch_frac` |
 | unnamespaced | TRL loss internals | `clip_ratio/*`, `cispo_clip_ratio` (under `loss_type: cispo`), `step_time` |
 
@@ -23,6 +23,7 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 
 | Metric | Meaning |
 |---|---|
+| `prefetch_hits` / `prefetch_misses` | Training rounds, summed over the world's ranks, whose prefetched round was delivered when the round started, against rounds that waited for it, found it failed, or ran cold (a run's first `prefetch_depth` rounds) |
 | `prefetch_input_skips` | Logged once non-zero: prefetch submissions (each a round's prompts) skipped because a wedged worker's input queue stayed full; those prompts never train |
 | `requests_expired_in_sync` | Per-round world count of request deadlines that expired across a weight sync (pause credited), each discarding a started turn. Nonzero: raise `request_timeout` |
 
@@ -32,13 +33,15 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 |---|---|
 | `thinking_cap_turns` | Turns whose counted reasoning reached a vLLM cap ([Thinking-cap metric](reasoning.md#thinking-cap-metric)) |
 | `output_budget_exhausted` | Under `rollout_max_episode_tokens` only: episodes whose output budget no longer held a turn's answer room ([Trajectory length](episodes.md#trajectory-length)) |
-| `truncation_alarm` | 1 in a round whose `truncation_rate` exceeds [`truncation_alarm_rate`](../../reference/configuration-reference.md#asynctrainingconfig), which also warns each time the rate crosses it |
+| `truncation_alarm` | 1 in a round whose `truncation_rate` exceeds [`truncation_alarm_rate`](../../reference/configuration-reference.md#asyncrolloutconfig), which also warns each time the rate crosses it |
 
 ### Group and entropy diagnostics
 
 | Metric | Meaning |
 |---|---|
 | `outcome/all_pass_group_frac` / `all_fail_group_frac` | Groups every / no valid member solved, by the environment's solve verdict (absent without one). High values: the task is too easy / too hard |
+| `outcome/reasoning_terms_waived_frac` | Training episodes whose group earned no objective, so neither reasoning term was charged ([Failed groups](reasoning.md#failed-groups)). It counts episodes by the settled objective, which a veto zeroes, so it can exceed `all_fail_group_frac`. The train `reward/reasoning_*` means average in the waived zeros |
+| `sampling/zero_gradient_round` | 1 in a train round in which no token anywhere carries a policy gradient. Tied rewards with no tool calls usually mean the server's parser leaves them as text; tied rewards with calls mean the environment scores every attempt alike. A launch that has not trained yet raises at [`zero_gradient_round_limit`](../../reference/configuration-reference.md#asyncrolloutconfig) of them in a row; past its first trained round a streak that long only warns |
 | `sampling/degenerate_group_frac` | Groups whose valid members' settled environment rewards are all equal, or with fewer than two valid members; logged in train rounds under `drop_degenerate_groups` |
 | `logps/advantage_cov` | Covariance of each loss token's pre-update log-prob with its advantage. It pools contexts, so its sign need not match the `entropy` trend, which [`advantage/net_token_mass`](objective.md#token-mass-balance) predicts |
 
@@ -98,7 +101,7 @@ The environment's components (all but the trainer's charges) sum exactly to its 
 
 ## Saved trajectories
 
-`save_completions` (default on) writes the rollouts since the previous log to `<output_dir>/completions/completions_<step>.parquet`, plus a `completions` table when wandb is in `report_to`. Eval files take an `_eval` suffix and hold the whole eval set.
+`save_completions` (default on) writes the rollouts since the previous log as one part per rank, `<output_dir>/completions/completions_<step>/rank<NN>.parquet` (the rank zero-padded to the world's width), each holding that rank's own episodes; a step's directory is its record and reads back whole with `pd.read_parquet("completions/completions_00010")`. Eval rounds write `completions_<step>_eval/`, whose parts together hold the whole eval set. Under TP or ETP each group's leader writes the group's episodes, once. A `completions` table is logged when wandb is in `report_to`.
 
 | Column | Holds |
 |---|---|
@@ -108,7 +111,7 @@ The environment's components (all but the trainer's charges) sum exactly to its 
 | `reward_components` | The settled `reward/*` components, as JSON |
 | `reward_details` | Each scored term's rationale by term name, such as a veto judge's fired checks and quotes |
 
-Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the console table, capped by `num_completions_to_print`.
+Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the console table, which prints `num_completions_to_print` rows. The console and wandb tables read a sample gathered to global rank 0, `ceil(num_completions_to_print / world size)` rows from each rank with the text cut to 8,000 characters a cell; leaving `num_completions_to_print` unset sends every row, so set it on a large run. The parquet parts keep every row and the full text.
 
 ### Cut tool calls
 
@@ -116,11 +119,11 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 
 ### Writer rank
 
-`fs_aware_save_rank` picks the writer: global rank 0 on a shared output filesystem, one per node otherwise. A failed write (a full disk, a wandb outage) fails the step on every rank.
+Every rank writes its own part into its node's `output_dir`, so no rank gathers another's trajectories and a node's directory holds its own ranks' parts on per-node storage; only the tables' sample reaches global rank 0. A failed write (a full disk, a wandb outage) fails the step on every rank.
 
 ## Early stop
 
-Off unless a condition is set. Each condition counts its consecutive breaching readings; when one reaches `early_stop_patience` (default 3), training ends on a verdict taken across ranks.
+Off unless a condition is set. A KL-free run drifts in either direction, toward entropy collapse or explosion, and both start slowly enough to stop on. Each condition counts its consecutive breaching readings; when one reaches `early_stop_patience` (default 3), training ends on a verdict taken across ranks.
 
 - **A reading** is one training log line (the window mean under `logging_steps` > 1). The gap and the [breaker](objective.md#breaker) (table below) come once per generation round, so a step reusing its round leaves their count unchanged.
 - **The stop** skips that step's save and eval (an epoch save included), logs its reason, and exits non-zero on every rank. Resume from a checkpoint taken before the drift began.
@@ -129,11 +132,11 @@ Off unless a condition is set. Each condition counts its consecutive breaching r
 |---|---|---|
 | `early_stop_entropy_band` | `entropy` stays outside `[low, high]` | TRL's `entropy` |
 | `early_stop_logratio_gap` | the trainer-vs-sampler gap stays above it | the magnitude of `sampling/logratio_mean`; needs the IS correction |
-| `early_stop_on_skipped_updates` | the breaker skipped every update | `sampling/update_skipped`; needs `skip_update_masked_frac` |
+| `early_stop_on_skipped_updates` | the breaker skipped every update, leaving the policy frozen where the rollouts disagree with it | `sampling/update_skipped`; needs `skip_update_masked_frac` |
 
 TRL's `entropy` counts a micro-batch whose loss tokens were all dropped (degenerate groups, invalid episodes, padding rows) as 0, so under drops it reads low and moves with the dropped share.
 
-Read the band and the gap off a healthy run; both are model-specific. The gap shows a drift before entropy does.
+Read the band and the gap off a healthy run; both are model-specific. The gap grows with entropy, and faster than it once the policy flattens, so it shows a drift before entropy does.
 
 - The Qwen3.6 vLLM code-contests recipes stop on a band of `[0.12, 0.40]` and a gap of `0.005`.
 - Every code-contests recipe stops on skipped updates.

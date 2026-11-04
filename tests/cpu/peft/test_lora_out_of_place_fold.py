@@ -1,31 +1,16 @@
 #!/usr/bin/env python
 """The weight sync folds each LoRA layer out of place into exactly what PEFT's merge would write.
-
-``lora_folded`` recomputes a merge one tensor at a time without touching the base, so the sync's
-memory stays at one tensor's temporaries and the frozen base is never written. That only holds if it
-reproduces PEFT's in-place ``merge_adapter`` bit for bit on every layer type it claims: plain Linear,
-Embedding and Conv, a ``lora_bias`` fold into the base bias, DoRA's variant merge, a ``ParamWrapper``
-(``target_parameters``), a LoRA'd head tied to the embedding (``named_parameters()`` lists the tensor
-under the embedding's name), both halves of that tie adapted (two layers fold into one tensor, in
-merge order), and two active adapters on one layer. Each case is pinned against PEFT's own merge of a
-copy of the model, through ``lora_folded`` and through the whole push, with the model's own
-parameters bit-identical afterwards. A layer whose merge the fold cannot reproduce must be refused by
-the trainers' construction gate, not pushed unfolded, and so must a PEFT target the dense push, the
-only path that folds PEFT adapters, does not send (an EP layer's expert bank): the push refuses it
-before streaming anything.
-
-Run: ``python tests/cpu/peft/test_lora_out_of_place_fold.py`` (or ``pytest -m cpu``).
-"""
+The frozen base is never written; a layer the fold cannot reproduce, or a target the dense push skips, is refused."""
 
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-from src.models.structure import lora_fold_targets, lora_folded
-from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights, validate_weight_sync_support
+from halo.models.peft_adapters import lora_fold_targets, lora_folded
+from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
+from tests.common.adapters import adapter_param_items, randomize_adapters
 from tests.common.ep_stubs import StubEPLayerBase
-from tests.common.peft_helpers import adapter_param_items, randomize_adapters
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
 
 _DIM = 16
@@ -78,10 +63,6 @@ class _EPExperts(StubEPLayerBase):
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
         return {"gate_up_proj": self.gate_up_proj.detach()}
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 class _EPMoeNet(nn.Module):
     """An EP expert bank beside a dense layer the push would send."""
@@ -108,7 +89,6 @@ _CASES = {
     "two_adapters": (_Net, {"target_modules": ["proj", "embed_tokens"]}),
     "param_wrapper": (_MoeNet, {"target_modules": [], "target_parameters": ["experts.gate_up_proj"]}),
 }
-# Cases that also carry a second adapter, active alongside the first.
 _SECOND_ADAPTER = {"two_adapters"}
 
 
@@ -122,8 +102,7 @@ _DTYPES = {
 
 
 def _lora_model(case: str, dtypes: tuple[torch.dtype, torch.dtype]) -> nn.Module:
-    """The case's model with every adapter tensor drawn nonzero (``lora_B`` starts at zero, which
-    folds nothing), base and adapters in ``dtypes``."""
+    """Adapter tensors drawn nonzero, since a ``lora_B`` at zero folds nothing; base and adapters in ``dtypes``."""
     torch.manual_seed(0)
     build, config = _CASES[case]
     base_dtype, adapter_dtype = dtypes
@@ -163,8 +142,7 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_the_push_carries_the_peft_merge(case):
-    """The whole push, names included: every forwarded tensor is the one PEFT's merge would hold
-    under that base-model name. A tied head's delta rides on the embedding name the push sends."""
+    """Each forwarded tensor is what PEFT's merge holds under that name; a tied head's delta rides on the embedding."""
     model = _lora_model(case, _DTYPES["bf16"])
     expected = as_pushed(model, merged_by_peft(model))
     before = local_parameters(model)
@@ -203,20 +181,17 @@ class _Attention(nn.Module):
     ids=["multihead_attention", "trainable_tokens", "alora_variant", "grouped_conv"],
 )
 def test_a_layer_the_fold_cannot_reproduce_is_refused_at_construction(build, config):
-    """PEFT's merge would fold (or refuse) these too; the out-of-place fold has no formula for them, so
-    the trainers' construction gate refuses them rather than push their base unfolded."""
+    """The fold has no formula for these, so construction refuses them before their base is pushed unfolded."""
     model = get_peft_model(build(), LoraConfig(r=4, lora_alpha=8, **config))
     with pytest.raises(ValueError, match="cannot be folded out of place"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
 
 
 def test_a_peft_target_the_dense_push_skips_is_refused():
-    """PEFT LoRA on an EP layer's expert bank: the expert gather sends the bank without PEFT's delta,
-    so the served experts would miss it. The construction gate refuses it before any sync, and a push
-    that reaches it anyway raises on every rank as it ends rather than completing unfolded."""
+    """The gather sends the bank without PEFT's delta; a push reaching it anyway raises on every rank at the end."""
     model = get_peft_model(_EPMoeNet(), LoraConfig(r=4, lora_alpha=8, target_parameters=["experts.gate_up_proj"]))
     with pytest.raises(ValueError, match="does not send through its dense push"):
-        validate_weight_sync_support(model, "vllm")
+        reject_unsyncable_model(model, "vllm")
     with pytest.raises(ValueError, match="does not send through its dense push"):
         gather_and_send_weights(model, RecordingSender())
 

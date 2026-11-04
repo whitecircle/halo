@@ -1,0 +1,64 @@
+# NVIDIA Nemotron 3.5 Super VL (nemotron_h, 120B total, 113B of it routed experts) — EP=8 full fine-tuning SFT of the
+# text tower on UltraChat 200K, one 8x B300 node. The hub release is plain bf16, no conversion step.
+# Measured on 8x B300: 3,054 tok/s per rank and 185-202 GB reserved by rank at this max_length; --max_length=32000
+# reached 268-283 GB, 99.4% of the top rank's device. Gradient checkpointing (on by default) is what makes it fit.
+# See agent-docs/models/nemotron-h.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16
+text_only_model: true                 # NemotronHForCausalLM: no vision tower or MTP head, and the fused loss applies
+# The router's own e_score_correction_bias, stored fp32 at 4-42 in the release; auto resolves here too. The forward
+# has no aux-loss route.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 512 routed experts -> 64/rank; one dispatch group on 8 GPUs
+fp32_grad_reduce: true                # fp32 grad reduction for the replicated non-expert parameters
+
+# --- Attention & sequence ---
+# Packed rows keep their documents apart: the Mamba scan and conv read seq_idx, attention cu_seq_lens.
+packing: true
+max_length: 8192                      # a starting point; raise after reading reserved memory on the node
+
+# --- Training ---
+per_device_train_batch_size: 1        # batch>1 flattens into one wider row; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000                      # each save ~241 GB; a resume checkpoint with optimizer shards ~725 GB
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/nemotron-3.5-super-vl-ep8-full
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>
+# The hub template renders every assistant turn with no reasoning as <think></think> plus its text, and the empty block
+# trains as part of the completion.
+assistant_message_template: "<|im_start|>assistant\n"

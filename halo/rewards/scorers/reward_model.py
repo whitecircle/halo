@@ -1,0 +1,104 @@
+"""A served Bradley-Terry or sequence-classification reward model, scored over its engine's HTTP
+classify route: vLLM (``--runner pooling``) or SGLang (``--is-embedding``)."""
+
+import asyncio
+import math
+from collections.abc import Sequence
+
+import httpx
+from transformers import AutoTokenizer
+
+from halo.rewards.samples import ScoringSample, scored_messages
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.terms import RewardModelBackend, RewardModelTerm
+
+
+class ServedRewardModel(Scorer):
+    """Every sample is the conversation rendered with the model's own chat template and tokenized without added special
+    tokens, so both engines score the same sequence and a template spelling its own BOS gets no second one. vLLM's
+    ``/classify`` takes text and returns raw logits; SGLang's takes ids and returns an ``embedding`` vector."""
+
+    term_type = RewardModelTerm
+    term: RewardModelTerm
+    _client: httpx.AsyncClient | None
+
+    def __init__(self, term: RewardModelTerm):
+        super().__init__(term)
+        self._tokenizer = None
+
+    @property
+    def metric_keys(self) -> tuple[str, ...]:
+        return (self._key("logit"),)
+
+    def _tokenizer_for_rendering(self):
+        """A load failure raises through the caller (the launch probe surfaces it) rather than scoring every batch as a
+        request failure."""
+        if self._tokenizer is None:
+            self._tokenizer = AutoTokenizer.from_pretrained(self.term.tokenizer or self.term.model)
+        return self._tokenizer
+
+    def _connect(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(timeout=self.term.request_timeout)
+        return self._client
+
+    async def score(self, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
+        batches = [samples[i : i + self.term.batch_size] for i in range(0, len(samples), self.term.batch_size)]
+        results = await asyncio.gather(*(self._bounded(self._score_batch, batch) for batch in batches))
+        return [result for batch in results for result in batch]
+
+    async def score_one(self, sample: ScoringSample) -> ScoreResult:
+        return (await self._score_batch([sample]))[0]
+
+    async def _score_batch(self, samples: Sequence[ScoringSample]) -> list[ScoreResult]:
+        term = self.term
+        # The load stays loud; the render does not. A reward model's template may refuse a ``full`` view's tool turns,
+        # and a raise here escapes every guard up to the actor's catch-all, masking the episode.
+        tokenizer = self._tokenizer_for_rendering()
+        try:
+            texts = [tokenizer.apply_chat_template(scored_messages(s, term.view), tokenize=False) for s in samples]
+        except Exception as e:
+            error = self._failed("render", e)
+            return [ScoreResult(None, error=error) for _ in samples]
+        client = self._connect()
+        try:
+            logits = await self._logits(client, texts)
+        except Exception as e:
+            error = self._failed("request", e)
+            return [ScoreResult(None, error=error) for _ in samples]
+        logit_key = self._key("logit")
+        return [ScoreResult(term.normalize(logit), {logit_key: logit}) for logit in logits]
+
+    async def _logits(self, client: httpx.AsyncClient, texts: list[str]) -> list[float]:
+        term = self.term
+        url = f"{term.url.rstrip('/')}/classify"
+        if term.backend is RewardModelBackend.VLLM:
+            body = {"model": term.model, "input": texts, "use_activation": False, "add_special_tokens": False}
+            response = await client.post(url, json=body)
+            response.raise_for_status()
+            rows = sorted(response.json()["data"], key=lambda row: row["index"])
+            vectors = [row["probs"] for row in rows]
+        else:
+            input_ids = self._tokenizer_for_rendering()(texts, add_special_tokens=False)["input_ids"]
+            response = await client.post(url, json={"input_ids": input_ids})
+            response.raise_for_status()
+            payload = response.json()
+            vectors = [item["embedding"] for item in (payload if isinstance(payload, list) else [payload])]
+        if len(vectors) != len(texts):
+            raise ValueError(f"reward model returned {len(vectors)} outputs for {len(texts)} inputs")
+        logits = []
+        for vector in vectors:
+            if term.label_index >= len(vector):
+                raise ValueError(
+                    f"reward model head has {len(vector)} output(s); label_index {term.label_index} is out of range"
+                )
+            logit = float(vector[term.label_index])
+            if not math.isfinite(logit):
+                raise ValueError(f"reward model returned a non-finite output: {logit}")
+            logits.append(logit)
+        return logits
+
+    async def aclose(self) -> None:
+        client, self._client = self._client, None
+        if client is not None:
+            await client.aclose()

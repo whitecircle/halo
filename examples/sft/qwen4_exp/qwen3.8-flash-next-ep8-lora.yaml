@@ -1,0 +1,97 @@
+# Qwen3.8-Flash-Next (qwen4_exp, 180B total, 123B of it routed experts) — EP=8 LoRA SFT on UltraChat 200K, one
+# 8x Blackwell node: attention and GatedDeltaNet adapters via PEFT, routed experts via native grouped expert-LoRA.
+# The 95 GiB n-gram table stays in host memory outside the module state: one page-cache copy per node, so keep that
+# much host RAM free beside the ranks' own. See agent-docs/models/qwen4_exp.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.8-Flash-Next
+text_only_model: true                 # Qwen4ExpForCausalLM: no vision tower or MTP head, and the fused loss applies
+# The class declares no flash support; the sparse (QSA) layers run the toolkit's tiled kernel on SDPA.
+attn_implementation: sdpa
+# The router stays frozen under these targets, so nothing balances; auto would warn its way to none under the
+# fused loss.
+moe_balancing: none
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 512 routed experts -> 64/rank; one dispatch group on 8 GPUs
+fp32_grad_reduce: true                # tighter gradient reduction; LoRA-cheap (adapter grads only)
+
+# --- LoRA — attention and GatedDeltaNet via PEFT; gate_up_proj/down_proj peel to native EP expert-LoRA ---
+use_peft: true
+lora_r: 32
+lora_alpha: 64                        # scaling = alpha/r = 2
+lora_target_modules:
+# Sparse attention (12/48 layers). The indexer's index_qk_proj is left out: its top-k selection passes no
+# gradient, so an adapter there never trains.
+- q_proj
+- k_proj
+- v_proj
+- o_proj
+# GatedDeltaNet (36/48 layers)
+- in_proj_qkv
+- in_proj_z
+- in_proj_a
+- in_proj_b
+- out_proj
+# Routed experts (512 x 48 layers, fused storage): peeled by split_expert_lora_targets to grouped adapters inside
+# the EP layers. The shared experts (inside the EP layer, no LoRA route), the router, the hyper-connection and PLE
+# projections stay frozen.
+- gate_up_proj
+- down_proj
+merge_expert_lora_on_save: true       # fold both halves into the base at every save -> a servable checkpoint
+                                      #   (~360 GB, ~100 GB of it the n-gram table, hard-linked from the previous
+                                      #   save); without it the mixed adapter resumes here but
+                                      #   merge_peft_adapters.py refuses it
+
+# --- Attention & sequence ---
+# Packed rows keep their documents apart in every mixer: QSA and the PLE n-gram history and conv read seq_idx, the
+# GatedDeltaNet kernels cu_seq_lens; the packing collator emits both for this family.
+packing: true
+max_length: 16384                     # a starting point; raise after measuring free memory on the node
+liger_kernel_config:
+  fused_linear_cross_entropy: true    # no [tokens x 248k] logits; refuses output_router_logits on this head
+
+# --- Training schedule ---
+per_device_train_batch_size: 1        # batch>1 flattens into one wider row; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 1.0e-04                # the generic LoRA SFT start (agent-docs/optimization/peft.md)
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/qwen3.8-flash-next-ep8-lora
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- Tokens & chat template ---
+# The tokenizer ships <|im_end|> as eos and <|endoftext|> as pad. eos_token stays unset: the run would record it
+# on the model config, whose eos_token_id (<|endoftext|>) the PLE n-gram history resets at, and every export would
+# carry the change. The hub template injects a reasoning-effort system turn whenever thinking is on and writes an empty
+# think block before every reply; this render has neither and drops system turns. The export carries this render, so
+# serve it under the same one.
+# A reply with no think block reads far worse on Qwen3.6-35B (agent-docs/optimization/mtp-heads.md#recipes); this
+# checkpoint's reading is not measured.
+assistant_message_template: "<|im_start|>assistant\n"
+chat_template: jinja-templates/qwen3/qwen3-multiturn.jinja  # ultrachat is multi-turn; drops system turns
+force_chat_template: true

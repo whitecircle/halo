@@ -1,52 +1,102 @@
 #!/usr/bin/env python
-"""CPU tests: the reward economy of the shipped async-GRPO code-contests recipes.
+"""The reward economy of the shipped async-GRPO code-contests recipes. Shaping terms are small next to the objective
+by intent, and a knob edited alone can break that silently, so these pin the relations a run depends on and that
+the prices match what the reward and task pages state."""
 
-Every shaping term is small next to the objective by intent, but "small" is a relation between the
-recipe's own numbers, and a knob edited alone can break it silently. These pin the relations a run
-depends on: the length terms stay under the resubmission price, an honest failed attempt still beats
-not attempting, at every effort level a solve paying every per-episode price beats the best
-zero-objective episode, and — per effort level — the under-use floor out-slopes the reasoning price, so
-below its floor a level is paid to reason more and never less.
-
-The length terms are the floor and, where a recipe runs one, the price: on every token, or — on the recipes whose
-budgets are soft — only on what a turn reasons past its budget. The most they can cost an episode is the price's
-cap plus the floor's weight, or past a budget the larger of the two (an episode pays one at most: a turn past its
-budget leaves it above the floor's reference). No shipped recipe prices every token, so those relations bind on a
-recipe that does, and a priced copy of a shipped recipe shows they refuse a bad one.
-
-The episode output budget (``rollout_max_episode_tokens``) is another relation: it has to bind below
-what ``max_turns`` turns of ``rollout_max_tokens`` could sample, or it bounds nothing; on vLLM the answer
-room (``rollout_max_answer_tokens``) has to be what a turn keeps past the cap the engine enforces at every level
-(the level's budget, or under a soft one the ceiling that room leaves of the turn). And the per-turn thinking budgets are
-one contract at every family, so a recipe states the same reasoning economy whichever model it trains. The audit
-judge is the last: its process flags price a scratchpad run that tested nothing and only log working-out in a
-run that did, and a verdict it never reached voids the episode.
-
-Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
-"""
-
+import re
 from pathlib import Path
 
 import pytest
 from ruamel.yaml import YAML
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.environments.base import VALID_REASONING_EFFORTS
-from src.rewards.terms import ENVIRONMENT_REWARD_SOURCES, JudgeTerm, OnError, parse_reward_terms
-from src.trainers.grpo.reasoning_terms import REASONING_TARGET_SHARE, reasoning_floor_term, reasoning_price_term
+from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
+from halo.rewards.terms import (
+    ENVIRONMENT_REWARD_SOURCES,
+    JudgeTerm,
+    OnError,
+    parse_reward_terms,
+    read_context_files,
+    resolve_environment_checks,
+)
+from halo.trainers.grpo.environmental.reasoning import (
+    REASONING_TARGET_SHARE,
+    reasoning_floor_term,
+    reasoning_price_term,
+)
+from tests.common.repo import REPO_ROOT
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
+_TASK_PAGES = REPO_ROOT / "agent-docs/training-methods/async-grpo/environments/tasks/code-contests"
+_REWARD_PAGE = _TASK_PAGES / "reward.md"
+_README_PAGE = _TASK_PAGES / "README.md"
 _yaml = YAML(typ="safe")
-_DEFAULTS = AsyncTrainingConfig()
+_DEFAULTS = AsyncRolloutConfig()
 # The most tokens a shipped recipe lets one episode sample: its worst-case trajectory beside the prompt
-# budget is what the rollout servers' context window is sized for.
+# budget is what the rollout servers' context window is sized for, and Qwen3.6 serves twice the others'.
 _EPISODE_TOKENS_CEILING = 131072
+_EPISODE_TOKENS_CEILINGS = {"qwen3_5": 160000}
+# gpt-oss-20b's served context window and its code-contests preamble (system prompt and tool schema, as the recipes'
+# template renders them): the startup check warns once a worst-case episode's budget passes their difference.
+_GPT_OSS_SERVED_WINDOW = 131072
+_GPT_OSS_PREAMBLE_TOKENS = 461
+# The audit's process checks a solved episode can never raise: each is defined on an episode that never passed.
+_FAILURE_ONLY_CHECKS = ("untested_submission",)
+# What each audit check costs fired alone, as the code-contests reward page's audit table states it: the
+# environment's check weights (7 units in all) at the recipes' judge weight.
+_DOCUMENTED_CHECK_PRICES = {
+    "reasoning_in_actions": 0.0,
+    "reasoning_in_runs": 0.0,
+    "notepad_run": 0.0,
+    "wasted_run": 0.1,
+    "untested_submission": 0.1,
+    "hardcoded_output": 0.3,
+    "environment_probe": 0.0,
+    "verdict_probe": 0.2,
+    "verdict_mining": 0.0,
+}
+# The environment's shaping prices every code-contests recipe sets, as the task page's recipe table states them.
+_DOCUMENTED_SHAPING_PRICES = {
+    "submission_reward": 0.1,
+    "resubmission_penalty": 0.2,
+    "no_tool_use_penalty": 0.2,
+    "turn_overflow_penalty": 0.35,
+    "length_cutoff_penalty": 0.08,
+    "tool_error_penalty": 0.05,
+}
+# The curriculum stages run one after another on one cluster: one economy and one set of limits.
+_STAGE_RECIPES = [p for p in RECIPES if "-stage" in p.name]
+_GPT_OSS_RECIPES = [p for p in RECIPES if p.parent.parent.name == "gptoss"]
+_STAGE_SHARED_KEYS = (
+    "rollout_max_tokens",
+    "rollout_max_answer_tokens",
+    "rollout_max_episode_tokens",
+    "max_train_row_tokens",
+    "request_timeout",
+    "episode_timeout",
+    "reasoning_floor",
+    "reasoning_price",
+    "reasoning_price_cap",
+    "reasoning_terms_in_failed_groups",
+)
 # The per-turn thinking budget of each level, one contract at every family.
 _PER_TURN_BUDGETS = {"low": 8192, "medium": 12288, "high": 16384}
 # The knobs every code-contests recipe states explicitly, so a recipe never rides on a default it does
 # not spell. The price is not among them: a recipe that runs none omits it and its cap.
 _REQUIRED_KEYS = ("reasoning_floor", "rollout_max_episode_tokens")
+
+
+def _parsed_terms(terms: list) -> tuple:
+    """A recipe's reward terms as the trainer resolves them: its config reads a judge's context file, and a veto
+    judge listing ``checks: environment`` audits with the code-contests rubric."""
+    terms = parse_reward_terms(read_context_files(terms), ENVIRONMENT_REWARD_SOURCES)
+    return resolve_environment_checks(terms, AUDIT_CHECKS)
+
+
+def _check_price(judge: JudgeTerm, name: str) -> float:
+    """The judge term's price for check ``name`` fired alone, a veto check's gate aside."""
+    return -judge.price(judge.flag_fraction({name: True}))
 
 
 def _economy(path: Path) -> dict:
@@ -65,7 +115,6 @@ def _economy(path: Path) -> dict:
         "recoveries": env.get("max_length_cutoff_recoveries"),
         "profiles": env["reasoning_effort_profiles"],
         "price": cfg.get("reasoning_price"),
-        # The cap is read only beside a price.
         "price_cap": (
             cfg.get("reasoning_price_cap", _DEFAULTS.reasoning_price_cap)
             if cfg.get("reasoning_price") is not None
@@ -79,6 +128,14 @@ def _economy(path: Path) -> dict:
         "episode_tokens": cfg.get("rollout_max_episode_tokens"),
         "answer_tokens": cfg.get("rollout_max_answer_tokens"),
         "max_turns": cfg["max_turns"],
+        # What each fired process check of a veto judge costs; a veto check's own price is left out, its gate costs more.
+        "process_prices": {
+            check.name: _check_price(judge, check.name)
+            for judge in _parsed_terms(terms)
+            if isinstance(judge, JudgeTerm) and judge.is_veto
+            for check in judge.checks
+            if not check.veto
+        },
     }
 
 
@@ -92,9 +149,8 @@ def _soft(economy: dict, level: str) -> bool:
 
 
 def _cap(economy: dict, level: str) -> int | None:
-    """The per-turn reasoning cap the engine enforces at ``level``: the level's budget, or under a soft budget
-    the ceiling the answer room leaves of the turn — none on SGLang, which runs no answer bound and caps no
-    reasoning (every recipe leaves the run-wide cap unset, which another case pins)."""
+    """The per-turn reasoning cap the engine enforces at ``level``: the level's budget, or under a soft budget the
+    ceiling the answer room leaves of the turn. None on SGLang, which runs no answer bound and caps no reasoning."""
     if not _soft(economy, level):
         return _budget(economy, level)
     return None if economy["answer_tokens"] is None else economy["max_tokens"] - economy["answer_tokens"]
@@ -106,11 +162,21 @@ def _floor_tokens(economy: dict, level: str) -> int:
 
 
 def _worst_length(economy: dict) -> float:
-    """The most the length terms can cost an episode: the price's cap (0 with the price off) and the floor's
-    whole weight (an episode that reasoned nothing) — or, priced past a budget, the larger of the two."""
+    """The most the length terms can cost an episode: the price's cap (0 with the price off) and the floor's whole
+    weight, or, priced past a budget, the larger of the two."""
     if economy["past_budget"]:
         return max(economy["price_cap"], economy["floor"])
     return economy["price_cap"] + economy["floor"]
+
+
+def _failure_only_price(economy: dict) -> float:
+    """The most one failed submission adds in failure-only prices: the failure-only checks."""
+    return sum(economy["process_prices"].get(name, 0.0) for name in _FAILURE_ONLY_CHECKS)
+
+
+def _failed_resubmission(economy: dict) -> float:
+    """One more submission that fails, at its worst honest price: the resubmission and its failure-only price."""
+    return economy["resubmission"] + _failure_only_price(economy)
 
 
 def _price(economy: dict, level: str, tokens: int) -> float:
@@ -141,10 +207,31 @@ def _prices_fall_with_level(economy: dict) -> bool:
 
 
 def _audit(path: Path) -> JudgeTerm:
-    """The recipe's veto judge, parsed as the trainer parses it."""
-    terms = parse_reward_terms(_yaml.load(path)["rewards"], ENVIRONMENT_REWARD_SOURCES)
-    (judge,) = (term for term in terms if isinstance(term, JudgeTerm))
+    (judge,) = (term for term in _parsed_terms(_yaml.load(path)["rewards"]) if isinstance(term, JudgeTerm))
     return judge
+
+
+def _page_check_prices() -> dict[str, float]:
+    """Each check's price as the reward page's audit table states it: the ``(price)`` in its effect cell, else 0."""
+    prices = {}
+    in_table = False
+    for line in _REWARD_PAGE.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            in_table = False
+        elif line.startswith("| Check | Effect |"):
+            in_table = True
+        elif in_table and (row := re.match(r"\| `([a-z_]+)` \| ([^|]*) \|", line)):
+            price = re.search(r"\((\d+(?:\.\d+)?)\)", row[2])
+            prices[row[1]] = float(price[1]) if price else 0.0
+    return prices
+
+
+def _page_shaping_prices() -> dict[str, float]:
+    """Each shaping price as the task page's recipe table states it: the ``name`` value pairs of its Shaping row."""
+    row = next(
+        line for line in _README_PAGE.read_text(encoding="utf-8").splitlines() if line.startswith("| [Shaping]")
+    )
+    return {name: float(value) for name, value in re.findall(r"`([a-z_]+)` (\d+(?:\.\d+)?)", row)}
 
 
 def _ids(paths):
@@ -152,7 +239,6 @@ def _ids(paths):
 
 
 def test_the_scan_finds_the_code_contests_recipes():
-    """Guards the scan: an empty roster would make every case below vacuously pass."""
     assert len(RECIPES) >= 20, f"only {len(RECIPES)} code-contests recipes found — the glob is broken"
     assert all(_economy(p)["floor"] > 0 for p in RECIPES), (
         "a code-contests recipe runs without the reasoning floor, which the cases below price"
@@ -161,8 +247,7 @@ def test_the_scan_finds_the_code_contests_recipes():
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_every_recipe_states_the_reasoning_economy(path):
-    """The floor and the episode budget are spelled in every recipe; a price maps exactly the effort
-    levels and brings its cap, and a recipe without one states no cap."""
+    """A price maps exactly the effort levels and brings its cap, and a recipe without one states no cap."""
     e = _economy(path)
     missing = [key for key in _REQUIRED_KEYS if key not in e["raw"]]
     assert not missing, f"{path.name} does not state {missing}"
@@ -174,10 +259,8 @@ def test_every_recipe_states_the_reasoning_economy(path):
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_per_turn_thinking_budgets_are_one_contract_at_every_family(path):
-    """Every level's ``thinking_tokens`` is the same per-turn budget whichever family the recipe trains,
-    and every one sits below the turn cap, so the turn keeps its answer room; the run's own cap is unset. Its
-    levels are all enforced or all soft, and soft budgets are priced past them (their only ceiling below the
-    engine's), which an enforced budget, never overrun, is not."""
+    """Every level's budget is the same whichever family the recipe trains and sits below the turn cap. A level set
+    is all enforced or all soft, and soft budgets are priced past them (their only ceiling below the engine's)."""
     e = _economy(path)
     budgets = {level: _budget(e, level) for level in VALID_REASONING_EFFORTS}
     assert budgets == _PER_TURN_BUDGETS, f"{path.name} states per-turn budgets {budgets}"
@@ -196,14 +279,14 @@ def test_the_per_turn_thinking_budgets_are_one_contract_at_every_family(path):
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(path):
-    """Every recipe bounds the episode, at a budget one whole turn fits in and under the ceiling the
-    servers' context is sized for; and below what ``max_turns`` turns of ``rollout_max_tokens`` could
-    sample, or it would never end an episode."""
+    """A budget one whole turn fits in, under the ceiling the servers' context is sized for, and below what
+    ``max_turns`` turns could sample, or it would never end an episode."""
     e = _economy(path)
     assert isinstance(e["episode_tokens"], int) and not isinstance(e["episode_tokens"], bool), (
         "a code-contests recipe runs without an episode output budget"
     )
-    assert e["max_tokens"] <= e["episode_tokens"] <= _EPISODE_TOKENS_CEILING
+    ceiling = _EPISODE_TOKENS_CEILINGS.get(path.parent.parent.name, _EPISODE_TOKENS_CEILING)
+    assert e["max_tokens"] <= e["episode_tokens"] <= ceiling
     uncapped = e["max_turns"] * e["max_tokens"]
     assert e["episode_tokens"] < uncapped, (
         f"the per-turn caps alone let an episode sample {uncapped} tokens over {e['max_turns']} turns, so a "
@@ -211,11 +294,18 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(pa
     )
 
 
+@pytest.mark.parametrize("path", _GPT_OSS_RECIPES, ids=_ids(_GPT_OSS_RECIPES))
+def test_a_gpt_oss_worst_case_episode_fits_the_served_window(path):
+    """The window is the model's own, so a budget at the whole of it warns at every launch of a shipped recipe."""
+    e = _economy(path)
+    worst_case = min(e["max_turns"] * e["max_tokens"], e["episode_tokens"])
+    assert worst_case + _GPT_OSS_PREAMBLE_TOKENS <= _GPT_OSS_SERVED_WINDOW
+
+
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
-    """Past its reasoning cap a turn generates at most the answer room, at every enforced level: a level whose cap
-    plus that room reached ``rollout_max_tokens`` would leave the turn its whole ceiling, room enough to carry the
-    reasoning on in a program's comments. A soft level's ceiling is where that room is left, so it binds by
+    """A level whose cap plus the room reached ``rollout_max_tokens`` would leave the turn room to carry the
+    reasoning on in a program's comments. A soft level's ceiling is where the room is left, so it binds by
     construction. SGLang forces no close at the cap, so its recipes run without the bound."""
     e = _economy(path)
     if e["raw"].get("rollout_backend") == "sglang":
@@ -224,7 +314,7 @@ def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
     assert isinstance(e["answer_tokens"], int), f"{path.name} does not state rollout_max_answer_tokens"
     for level in VALID_REASONING_EFFORTS:
         if _soft(e, level):
-            continue  # the soft ceiling is where the room is left of the turn: the room binds by construction
+            continue
         assert _cap(e, level) + e["answer_tokens"] < e["max_tokens"], (
             f"at {level}, a {_cap(e, level)}-token cap plus a {e['answer_tokens']}-token answer room does not "
             f"bind below the {e['max_tokens']}-token turn ceiling"
@@ -232,21 +322,43 @@ def test_the_answer_room_binds_below_the_turn_ceiling_at_every_level(path):
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
-def test_length_terms_stay_under_the_resubmission_price(path):
-    """Resubmitting is the decision this ladder prices hardest; the length terms together bound what
-    reasoning length can ever cost, and that bound stays under it."""
+def test_length_terms_stay_under_one_more_failed_submission(path):
+    """The length terms stay under one more failed submission at its worst honest price, so guessing again is never
+    the cheaper way to fail."""
     e = _economy(path)
-    assert _worst_length(e) < e["resubmission"], (
-        f"the length terms can cost up to {_worst_length(e)}, not under the {e['resubmission']} a resubmission "
-        "costs: how long an episode reasons would then outweigh whether it resubmits"
+    assert _worst_length(e) < _failed_resubmission(e), (
+        f"the length terms can cost up to {_worst_length(e)}, not under the {_failed_resubmission(e)} of one more "
+        "failed submission: how long an episode reasons would then outweigh whether it resubmits"
     )
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_one_turn_at_the_ceiling_leaves_the_price_its_slope(path):
+    """A price that reaches its cap inside one turn charges every longer episode the same, so more reasoning is
+    free. A soft turn reasons to its ceiling (:func:`_cap`), or through the whole turn where the engine closes
+    none."""
+    e = _economy(path)
+    if not e["past_budget"]:
+        return
+    for level in VALID_REASONING_EFFORTS:
+        ceiling = _cap(e, level) or e["max_tokens"]
+        charged = -_price(e, level, ceiling)
+        assert 0 < charged < e["price_cap"], (
+            f"{level}: one turn reasoning to the {ceiling}-token ceiling is charged {charged} under a cap of "
+            f"{e['price_cap']}"
+        )
+
+
+def test_the_curriculum_stages_run_one_economy_and_one_set_of_limits():
+    assert len(_STAGE_RECIPES) == 3, f"expected the three curriculum stages, found {[p.name for p in _STAGE_RECIPES]}"
+    stated = [{key: _yaml.load(p).get(key) for key in _STAGE_SHARED_KEYS} for p in _STAGE_RECIPES]
+    assert stated[0] == stated[1] == stated[2], dict(zip([p.name for p in _STAGE_RECIPES], stated, strict=True))
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_a_recovered_cut_costs_less_than_the_attempt_bonus_and_no_more_than_an_overflow(path):
-    """The cut price makes the per-turn budget bind without outweighing the loop it protects: a cut
-    never costs more than the graded attempt earns, and a recovered cut never costs more than the
-    cut that ends the episode."""
+    """A cut never costs more than the graded attempt earns, and a recovered cut never costs more than the cut that
+    ends the episode."""
     e = _economy(path)
     assert 0 < e["cut"] < e["submission"], f"cut price {e['cut']} against a submission bonus of {e['submission']}"
     assert e["cut"] <= e["turn_overflow"], (
@@ -264,13 +376,42 @@ def test_an_honest_failed_attempt_beats_not_attempting(path):
         f"a graded submission that passes nothing can score {worst_attempt}, not above the {best_no_attempt} of "
         "an episode that never attempts: the ladder would pay for giving up"
     )
+    # A failed attempt raising every process flag it can, at the no-attempt's length terms, still never scores below it.
+    flagged_attempt = (
+        e["submission"]
+        - sum(price for name, price in e["process_prices"].items() if name not in _FAILURE_ONLY_CHECKS)
+        - _failure_only_price(e)
+    )
+    assert flagged_attempt >= best_no_attempt, (
+        f"a failed attempt that raises every process flag scores {flagged_attempt}, below the {best_no_attempt} of "
+        "an episode that never attempts: the flags would pay for giving up"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_running_out_costs_more_than_one_more_failed_submission(path):
+    """The overflow must cost more than spending the submission left and failing at its worst honest price, or
+    thinking until the cut is the cheapest way to fail."""
+    e = _economy(path)
+    assert e["turn_overflow"] > _failed_resubmission(e), (
+        f"an overflow costs {e['turn_overflow']}, not above the {_failed_resubmission(e)} of one more failed submission"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_the_failure_only_process_checks_are_defined_on_failed_episodes(path):
+    """The worst solve leaves these out of what it pays, which holds only while the check text says so."""
+    checks = {check.name: check.description for check in _audit(path).checks}
+    for name in _FAILURE_ONLY_CHECKS:
+        if name in checks:
+            assert "an episode that never passed every test" in checks[name], f"{name} no longer excludes solves"
 
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(path):
-    """A solve costs at most every resubmission its level allows, the overflow, each recovered cut the
-    cap admits and the worst length terms; a zero-objective episode collects at most the submission
-    bonus. The first must stay above the second at every level, or a group ranks a failure over a solve."""
+    """A solve costs at most every resubmission, each recovered cut and the worst length terms; a zero-objective
+    episode collects at most the submission bonus. The first must stay above the second, or a group ranks a
+    failure over a solve."""
     e = _economy(path)
     assert e["recoveries"] is not None, "an uncapped recovery count leaves the cut price on a solve unbounded"
     best_zero_objective = e["submission"]
@@ -279,9 +420,9 @@ def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(pa
             e["solve"]
             + e["submission"]
             - e["resubmission"] * (e["profiles"][level]["max_submissions"] - 1)
-            - e["turn_overflow"]
             - e["cut"] * e["recoveries"]
             - _worst_length(e)
+            - sum(price for name, price in e["process_prices"].items() if name not in _FAILURE_ONLY_CHECKS)
         )
         assert worst_solve > best_zero_objective, (
             f"{level}: a full solve can score as low as {worst_solve}, not above the {best_zero_objective} a "
@@ -291,8 +432,7 @@ def test_at_every_level_the_worst_solve_beats_the_best_zero_objective_episode(pa
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_below_its_floor_every_level_is_paid_to_reason_more(path):
-    """The price pays for fewer tokens and the floor for more; where both act, the floor must win, or a
-    level short of its floor has no reason — or a reason not — to think."""
+    """The price pays for fewer tokens and the floor for more; where both act, the floor must win."""
     e = _economy(path)
     for level in VALID_REASONING_EFFORTS:
         reason = _not_paid_to_reason_more(e, level)
@@ -312,9 +452,8 @@ def test_a_higher_level_is_priced_lower_and_asked_for_no_less(path):
 
 @pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
 def test_the_audit_judge_prices_a_wasted_run_and_voids_a_verdict_it_never_reached(path):
-    """The judge's process flags price a scratchpad run that could test nothing and only log working-out in a
-    run that did test: a price on the second would teach a policy to submit untested. A verdict the judge
-    never reached voids the episode, so an outage trains nothing instead of every episode unjudged."""
+    """A price on working-out in a run that did test would teach a policy to submit untested. A verdict the judge
+    never reached voids the episode, so an outage trains nothing."""
     judge = _audit(path)
     assert judge.on_error is OnError.INVALID, f"{path.name}: an unjudged episode stays in training"
     assert judge.weight * judge.flag_fraction({"wasted_run": True}) < 0, f"{path.name}: a wasted run costs nothing"
@@ -323,20 +462,53 @@ def test_the_audit_judge_prices_a_wasted_run_and_voids_a_verdict_it_never_reache
     )
 
 
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_every_code_contests_recipe_prices_the_documented_checks(path):
+    """Moving a check weight or the judge weight re-prices every check while the economy's relations may still hold."""
+    judge = _audit(path)
+    prices = {check.name: _check_price(judge, check.name) for check in judge.checks}
+    assert prices == pytest.approx(_DOCUMENTED_CHECK_PRICES), (
+        f"{path.name} prices the audit checks at {prices}, not the reward page's {_DOCUMENTED_CHECK_PRICES}"
+    )
+
+
+def test_the_reward_page_states_the_pinned_check_prices():
+    """The audit table is where a recipe author reads a check's price, so the page and the pin above move together."""
+    assert _page_check_prices() == pytest.approx(_DOCUMENTED_CHECK_PRICES), (
+        f"{_REWARD_PAGE.name}'s audit table prices the checks at {_page_check_prices()}, not {_DOCUMENTED_CHECK_PRICES}"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_every_code_contests_recipe_sets_the_documented_shaping_prices(path):
+    """A price moved inside the relations' band re-prices the recipe; the pin holds each to the value the task page
+    states."""
+    env = _yaml.load(path)["environment_kwargs"]
+    prices = {name: env.get(name) for name in _DOCUMENTED_SHAPING_PRICES}
+    assert prices == pytest.approx(_DOCUMENTED_SHAPING_PRICES), (
+        f"{path.name} sets the shaping prices {prices}, not the task page's {_DOCUMENTED_SHAPING_PRICES}"
+    )
+
+
+def test_the_task_page_states_the_pinned_shaping_prices():
+    assert _page_shaping_prices() == pytest.approx(_DOCUMENTED_SHAPING_PRICES), (
+        f"{_README_PAGE.name}'s Shaping row states {_page_shaping_prices()}, not {_DOCUMENTED_SHAPING_PRICES}"
+    )
+
+
 def test_the_price_relations_pass_a_sound_price_and_refuse_a_bad_one():
-    """On a copy of a shipped recipe pricing every token (floor 0.05): the templates' example price under a 0.05
-    cap holds every relation, and each bad price breaks the one it should."""
+    """On a copy of a shipped recipe pricing every token (floor 0.05), the templates' example price holds every
+    relation and each bad price breaks the one it should."""
     base = _economy(RECIPES[0])
 
     def priced(price: dict[str, float], cap: float) -> dict:
         return {**base, "price": price, "price_cap": cap, "floor": 0.05, "past_budget": False}
 
     sound = priced({"low": 0.0037, "medium": 0.0013, "high": 0.00018}, cap=0.05)
-    assert _worst_length(sound) < sound["resubmission"] and _prices_fall_with_level(sound)
+    assert _worst_length(sound) < _failed_resubmission(sound) and _prices_fall_with_level(sound)
     assert all(_not_paid_to_reason_more(sound, level) is None for level in VALID_REASONING_EFFORTS)
-    # A cap that, with the floor, reaches the resubmission price.
-    assert _worst_length(priced(sound["price"], cap=base["resubmission"] - 0.05)) >= base["resubmission"]
-    # A higher level priced higher.
+    # A cap that, with the floor, reaches one more failed submission.
+    assert _worst_length(priced(sound["price"], cap=_failed_resubmission(base) - 0.05)) >= _failed_resubmission(base)
     assert not _prices_fall_with_level(priced({"low": 0.00018, "medium": 0.0013, "high": 0.0037}, cap=0.05))
     # 0.01 per 1k at low out-slopes a 0.05 floor over its 6144-token target (0.0081 per 1k).
     assert _not_paid_to_reason_more(priced({"low": 0.01, "medium": 0.005, "high": 0.001}, cap=0.08), "low")

@@ -1,0 +1,139 @@
+from dataclasses import dataclass, field
+from typing import ClassVar, Literal
+
+from transformers import TrainingArguments
+
+from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
+from halo.configs.script_arguments import CommonScriptArguments, DatasetNumProcArguments
+
+
+@dataclass
+class ClassificationScriptArguments(CommonScriptArguments):
+    PROJECT_NAME: ClassVar[str] = "classification"
+
+    text_field: str | None = field(
+        default=None,
+        metadata={
+            "help": "Raw-text column to classify (wrapped as a single user turn) when the dataset has "
+            "no pre-built 'prompt' conversation — e.g. text/label datasets like imdb."
+        },
+    )
+
+
+@dataclass
+class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
+    max_length: int | None = field(
+        default=1024,
+        metadata={
+            "help": "Maximum tokenized sequence length: the training script truncates to it, while a raw text/label "
+            "dataset handed to the trainer is filtered to it. Unset or non-positive = the model's context window."
+        },
+    )
+    disable_dropout: bool = field(default=True, metadata={"help": "Whether to disable dropout in the model."})
+    remove_unused_columns: bool = field(
+        default=False,
+        metadata={
+            "help": "Prune the dataset columns the model's forward does not take, at the dataloader. The trainer "
+            "tokenizes a raw text/label dataset before that, so a dataset need not be pretokenized."
+        },
+    )
+    loss_type: Literal["cross_entropy", "focal", "label_smoothing_ce"] = field(
+        default="cross_entropy",
+        metadata={
+            "help": "Loss function: 'cross_entropy' (standard CE), 'focal' (focal loss for class imbalance) or "
+            "'label_smoothing_ce' (CE with label smoothing)."
+        },
+    )
+    focal_gamma: float = field(
+        default=2.0,
+        metadata={
+            "help": "Focusing parameter (gamma) of the focal loss: higher values down-weight easy examples more. "
+            "Refused unless loss_type='focal'."
+        },
+    )
+    focal_alpha: float | None = field(
+        default=None,
+        metadata={
+            "help": "Alpha (balancing factor) of the focal loss on a multi-label (sigmoid) head; unset = no alpha "
+            "weighting. Refused on a single-label head, where a scalar alpha only rescales the loss, and unless "
+            "loss_type='focal'."
+        },
+    )
+    label_smoothing: float = field(
+        default=0.0,
+        metadata={
+            "help": "Label-smoothing epsilon of label_smoothing_ce, typically 0.05-0.1, which needs a non-zero one. "
+            "Refused unless loss_type='label_smoothing_ce'."
+        },
+    )
+    class_weights: list[float] | None = field(
+        default=None,
+        metadata={
+            "help": "Per-class loss weights ordered by label ID, applied to every loss_type and as pos_weight on "
+            "the multi-label BCE. Unset = equal weights."
+        },
+    )
+    derive_class_weights: bool = field(
+        default=False,
+        metadata={
+            "help": "Automatically compute class weights inversely proportional to class frequency "
+            "in the training set (sklearn 'balanced' strategy). Mutually exclusive with class_weights."
+        },
+    )
+    multi_label_threshold: float = field(
+        default=0.5,
+        metadata={
+            "help": "Sigmoid threshold for multi-label classification predictions: sigmoid(logit) >= threshold is "
+            "positive. Refused off its default on a single-label dataset."
+        },
+    )
+    compute_per_class_metrics: bool = field(
+        default=False,
+        metadata={
+            "help": "Log per-class precision, recall and F1 during evaluation, many metrics with many classes. "
+            "Single-label only; refused on a multi-label dataset."
+        },
+    )
+    compute_auc_roc: bool = field(
+        default=False,
+        metadata={"help": "Compute AUC-ROC during evaluation. For multiclass uses one-vs-rest macro average."},
+    )
+    compute_mcc: bool = field(
+        default=True,
+        metadata={
+            "help": "Compute the Matthews correlation coefficient during evaluation, a balanced metric under class "
+            "imbalance. Single-label only; ignored on a multi-label dataset."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        require_finite(owner, ge=0, focal_gamma=self.focal_gamma)
+        # alpha_t = alpha*y + (1-alpha)*(1-y): outside [0, 1] one class's loss is negated.
+        require_finite(owner, ge=0, le=1, **present(focal_alpha=self.focal_alpha))
+        # A non-positive length is legal: it resolves to the model's context window at launch.
+        require_int(owner, **present(max_length=self.max_length))
+        require_finite(owner, ge=0, lt=1, label_smoothing=self.label_smoothing)
+        require_finite(owner, gt=0, lt=1, multi_label_threshold=self.multi_label_threshold)
+        for weight in self.class_weights or ():
+            require_finite(owner, ge=0, class_weights=weight)
+        if self.class_weights is not None and self.derive_class_weights:
+            raise ValueError(
+                "class_weights and derive_class_weights are mutually exclusive: class_weights sets the "
+                "per-class weights explicitly, derive_class_weights derives them from the training-set "
+                "frequencies. Set exactly one."
+            )
+        self._reject_unread_loss_knobs()
+
+    def _reject_unread_loss_knobs(self) -> None:
+        context = f"Classification under loss_type={self.loss_type}"
+        if self.loss_type != "focal":
+            reject_non_default_args(context, self, "focal_gamma", "focal_alpha")
+        if self.loss_type != "label_smoothing_ce":
+            reject_non_default_args(context, self, "label_smoothing")
+        elif self.label_smoothing == 0:
+            raise ValueError(
+                "loss_type='label_smoothing_ce' at label_smoothing=0 is plain cross-entropy. Set label_smoothing "
+                "(typically 0.05-0.1), or use loss_type: cross_entropy."
+            )

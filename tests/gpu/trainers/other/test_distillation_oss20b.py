@@ -1,64 +1,77 @@
 #!/usr/bin/env python
-"""
-Distillation training test with EP/TP parallelism on GptOss-20B.
+"""Teacher distillation of GPT-OSS-20B into itself under every parallel layout of the student.
 
-Validates that DistributedDistillationTrainer works with different parallelism
-modes using GptOss-20B as both teacher and student (one checkpoint on both
-sides). The teacher is always loaded without parallelism; only the student
-gets EP/TP.
-
-Modes:
-    fsdp   — Standard FSDP2 (no EP/TP), 2 GPUs
-    ep     — Expert Parallelism (EP=2), 2 GPUs
-    tp     — Tensor Parallelism (TP=2), 2 GPUs
-    ep_tp  — Combined EP+TP (EP=2, TP=2), 2 GPUs
-    all    — Run all modes sequentially
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_distillation_oss20b.py --mode ep
-
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_distillation_oss20b.py --mode all
-
-Requirements:
-    - 2x GPUs with >=80GB memory each
-    - DeepEP installed (for EP and EP+TP modes)
+At step 1 teacher and student compute one function, so the KL is zero up to kernel noise, and a mis-combined expert or
+mis-sharded projection shows far above it. Both keep pretrained sinks live: neutralized, the model is far off its
+trained function, and the same noise reaches half a nat per token.
 """
 
 import argparse
 import math
 import os
 import random
-import traceback
+from types import SimpleNamespace
 
 import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from src.configs.distillation_config import DistillationConfig
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from tests.common.distributed import ensure_model_downloaded
+import scripts.training.distillation.teacher_distill as teacher_distill
+from halo.configs.distillation import TeacherDistillationConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import is_blackwell_gpu
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from halo.models.attention.selection import effective_attn_implementation
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
+from tests.common.checkpoint_io import loading_problems
+from tests.common.distributed import ensure_model_downloaded, shared_output_dir
+from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
-NUM_EVAL_SAMPLES = 8
 MAX_SEQ_LENGTH = 4096
 NUM_TRAIN_STEPS = 5
 BATCH_SIZE = 1
-LEARNING_RATE = 2e-5
+# Four updates move the student's distribution measurably off the teacher's.
+LEARNING_RATE = 1e-4
 SEED = 42
+# Nats per token. With live sinks the bf16 noise of two layouts is ~0.02 on these rows; the defects guarded (two
+# experts' down projections swapped, a rank holding the other's sink slice, a bias summed on both TP ranks) sit at 0.5
+# and up.
+STEP1_KL_ATOL = 0.1
+# Past the live-sink noise, so a student whose updates never landed fails it.
+KL_MOVED_MIN = 0.05
+# Live and frozen, on both models.
+RESET_SINKS = False
+# Resolved per GPU at run time (:func:`sink_carrying_attention`).
+FLASH = "flash"
+MODES = {
+    "fsdp": (2, {}, FLASH),
+    "fsdp_unsharded": (2, {"fsdp_shard_ep1_experts": False}, FLASH),
+    "ep": (2, {"ep_size": 2}, "flex_attention"),
+    "tp": (2, {"tp_size": 2, "max_concurrent_loading": 1}, FLASH),
+    "ep_tp": (2, {"ep_size": 2, "tp_size": 2}, "flex_attention"),
+    "etp": (2, {"expert_tp_size": 2}, "flex_attention"),
+    "ep_etp": (4, {"ep_size": 2, "expert_tp_size": 2}, "flex_attention"),
+    "ep_dp2": (4, {"ep_size": 2}, "flex_attention"),
+    "tp_dp2": (4, {"tp_size": 2, "max_concurrent_loading": 1}, FLASH),
+}
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=sorted(MODES), required=True)
+parser.add_argument("--gpus-per-node", type=int, default=0, help="simulated NVLink domain width (0: the launch's)")
+ARGS = parser.parse_args()
+WORLD_SIZE, MODE_FIELDS, ATTN_IMPL = MODES[ARGS.mode]
+FIELDS = {**MODE_FIELDS, **({"gpus_per_node": ARGS.gpus_per_node} if ARGS.gpus_per_node else {})}
 
 
 def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Dataset:
-    """Create synthetic math SFT data for distillation testing."""
     random.seed(seed)
 
     templates = [
@@ -87,215 +100,118 @@ def create_distillation_dataset(num_samples: int, tokenizer, seed: int = SEED) -
     return Dataset.from_list(data)
 
 
-def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int, base_output_dir: str) -> bool:
-    """Run a single distillation test with the given parallelism mode."""
-    use_gmm = has_grouped_mm()
-    if mode == "fsdp":
-        pc = ParallelismConfig()
-        attn_impl = "flash_attention_2"
-        mode_label = "FSDP2 (no EP/TP)"
-    elif mode == "ep":
-        pc = ParallelismConfig(ep_size=2, use_grouped_gemm=use_gmm)
-        attn_impl = "flex_attention"
-        mode_label = "EP=2"
-    elif mode == "tp":
-        pc = ParallelismConfig(tp_size=2, max_concurrent_loading=1)
-        attn_impl = "flash_attention_2"
-        mode_label = "TP=2"
-    elif mode == "ep_tp":
-        pc = ParallelismConfig(ep_size=2, tp_size=2)
-        attn_impl = "flex_attention"
-        mode_label = "EP=2+TP=2"
-    else:
-        log(f"Unknown mode: {mode}")
-        return False
-
-    log(f"\n{'#' * 70}")
-    log(f"  Distillation Test — {mode_label}")
-    log(f"  Model: {MODEL_NAME} (teacher and student)")
-    log(f"  World: {world_size}, GPU: {torch.cuda.get_device_name(local_rank)}")
-    log(f"{'#' * 70}")
-
-    output_dir = os.path.join(base_output_dir, mode)
-
-    trainer = None
-    try:
-        log("\nEnsuring model is downloaded...")
-        ensure_model_downloaded(MODEL_NAME, rank)
-
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        log("Creating synthetic datasets...")
-        train_dataset = create_distillation_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-        eval_dataset = create_distillation_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)
-
-        def tokenize_fn(examples):
-            return tokenizer(examples["text"], truncation=True, max_length=MAX_SEQ_LENGTH)
-
-        train_dataset = train_dataset.map(tokenize_fn, batched=True, remove_columns=["text"])
-        eval_dataset = eval_dataset.map(tokenize_fn, batched=True, remove_columns=["text"])
-        log(f"Train: {len(train_dataset)}, Eval: {len(eval_dataset)}")
-
-        log(f"\n--- Loading student model ({mode_label}) ---")
-        student_model, _ = load_distributed_model(
-            model_name_or_path=MODEL_NAME,
-            parallelism_config=pc,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation=attn_impl,
-            use_liger_kernel=True,
-        )
-        student_params = sum(p.numel() for p in student_model.parameters())
-        log(f"Student params: {student_params / 1e9:.2f}B")
-        log(f"GPU mem after student: {torch.cuda.memory_allocated() / 1e9:.1f}GB")
-
-        log("\n--- Loading teacher model (no parallelism) ---")
-        teacher_model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-            attn_implementation="flash_attention_2",
-        )
-        teacher_model.eval()
-        for p in teacher_model.parameters():
-            p.requires_grad = False
-        teacher_params = sum(p.numel() for p in teacher_model.parameters())
-        log(f"Teacher params: {teacher_params / 1e9:.2f}B")
-
-        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-
-        config = DistillationConfig(
-            output_dir=output_dir,
-            max_steps=NUM_TRAIN_STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            learning_rate=LEARNING_RATE,
-            bf16=True,
-            gradient_checkpointing=True,
-            use_liger_kernel=False,  # already applied by load_distributed_model
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            max_length=MAX_SEQ_LENGTH,
-            dataloader_drop_last=True,
-            dataloader_num_workers=0,
-            dataset_num_proc=1,
-            fsdp="",  # Mixin handles wrapping
-            ddp_find_unused_parameters=pc.is_ep_mode,
-            distill_loss="kl_divergence",
-            distill_temperature=1.0,
-            distill_alpha=0.5,
-        )
-
-        log("\n--- Creating DistributedDistillationTrainer ---")
-        trainer = DistributedDistillationTrainer(
-            student_model=student_model,
-            teacher_model=teacher_model,
-            teacher_tokenizer=tokenizer,
-            args=config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=data_collator,
-            processing_class=tokenizer,
-            parallelism_config=pc,
-        )
-
-        if pc.is_ep_mode:
-            assert trainer.parallelism_config.is_ep_mode, "Expected EP mode"
-            log("Confirmed: EP mode active")
-        if pc.is_tp_mode:
-            assert trainer.parallelism_config.is_tp_mode, "Expected TP mode"
-            log("Confirmed: TP mode active")
-
-        teacher_trainable = sum(1 for p in trainer.teacher_model.parameters() if p.requires_grad)
-        assert teacher_trainable == 0, f"Teacher has {teacher_trainable} trainable params"
-        log("Confirmed: teacher frozen")
-
-        log(f"GPU mem before train: {torch.cuda.memory_allocated() / 1e9:.1f}GB")
-
-        log(f"\n--- Training ({NUM_TRAIN_STEPS} steps) ---")
-        train_result = trainer.train()
-
-        training_loss = train_result.training_loss
-        log_history = trainer.state.log_history
-        losses = step_losses(trainer)
-        grad_norms = [e["grad_norm"] for e in log_history if "grad_norm" in e]
-        distill_losses = [e["distillation_loss"] for e in log_history if "distillation_loss" in e]
-        sft_losses = [e["sft_loss"] for e in log_history if "sft_loss" in e]
-
-        log("\n--- Metrics ---")
-        log(f"Final loss: {training_loss:.6f}")
-        log(f"Step losses: {[f'{l:.4f}' for l in losses]}")
-        if grad_norms:
-            log(f"Grad norms: {[f'{g:.2f}' for g in grad_norms]}")
-        if distill_losses:
-            log(f"Distillation losses: {[f'{l:.4f}' for l in distill_losses]}")
-        if sft_losses:
-            log(f"SFT losses: {[f'{l:.4f}' for l in sft_losses]}")
-
-        log("\n--- Checks ---")
-        checks = {}
-
-        checks["training_completed"] = len(losses) == NUM_TRAIN_STEPS
-        log(f"Training completed: {'PASS' if checks['training_completed'] else 'FAIL'}")
-
-        loss_finite = math.isfinite(training_loss) and all(math.isfinite(l) for l in losses)
-        checks["loss_finite"] = loss_finite
-        log(f"Loss finite: {'PASS' if loss_finite else 'FAIL'}")
-
-        if grad_norms:
-            grad_ok = all(math.isfinite(g) for g in grad_norms)
-            checks["grad_finite"] = grad_ok
-            log(f"Grad norms finite: {'PASS' if grad_ok else 'FAIL'}")
-
-        if distill_losses:
-            distill_ok = all(math.isfinite(l) for l in distill_losses)
-            checks["distill_loss_finite"] = distill_ok
-            log(f"Distillation losses finite: {'PASS' if distill_ok else 'FAIL'}")
-
-        teacher_trainable_after = sum(1 for p in trainer.teacher_model.parameters() if p.requires_grad)
-        checks["teacher_frozen"] = teacher_trainable_after == 0
-        log(f"Teacher frozen after training: {'PASS' if checks['teacher_frozen'] else 'FAIL'}")
-
-        all_passed = all(checks.values())
-        log(f"\n{'#' * 70}")
-        log(f"  DISTILLATION {mode_label} TEST {'PASSED' if all_passed else 'FAILED'}")
-        if not all_passed:
-            log(f"  Failed: {[k for k, v in checks.items() if not v]}")
-        log(f"{'#' * 70}\n")
-        return all_passed
-
-    except Exception as e:
-        log(f"\nFATAL ERROR: {e}")
-        if rank == 0:
-            traceback.print_exc()
-        return False
-
-    finally:
-        # DeepEP buffers outlive the trainer object: a mode that raised mid-run still releases them
-        # before the next mode builds its own.
-        if trainer is not None:
-            trainer.cleanup_ep()
+def sink_carrying_attention(kind: str) -> str:
+    """FA4 on Blackwell, eager elsewhere (FA2 and the stock FA3 build drop the sink column)."""
+    if kind != FLASH:
+        return kind
+    return "flash_attention_4" if is_blackwell_gpu() else "eager"
 
 
-@gpu_test_main(min_world_size=2, prefix="distill_oss20b")
+def load_teacher(config: TeacherDistillationConfig, attn_implementation: str, local_rank: int):
+    """The script's frozen-teacher load, on the student's request and sinks policy, unsharded."""
+    return teacher_distill._load_distill_teacher(
+        args=SimpleNamespace(teacher_model=MODEL_NAME, teacher_model_revision=None, reset_sinks=RESET_SINKS),
+        model_config=SimpleNamespace(trust_remote_code=True),
+        training_config=config,
+        requested_attn=attn_implementation,
+        is_vlm=False,
+        local_rank=local_rank,
+    )
+
+
+@gpu_test_main(exact_world_size=WORLD_SIZE, prefix=f"distill_oss20b_{ARGS.mode}")
 def run(ctx) -> dict:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", default="all", choices=["fsdp", "ep", "tp", "ep_tp", "all"])
-    args, _ = parser.parse_known_args()  # tolerate torchrun's own argv
+    pc = ParallelismConfig(**FIELDS)
+    attn_implementation = sink_carrying_attention(ATTN_IMPL)
+    log(f"Distillation {ARGS.mode}: {FIELDS}, {attn_implementation}, {MODEL_NAME} as teacher and student")
+    ensure_model_downloaded(MODEL_NAME, ctx.rank)
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    train_dataset = create_distillation_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED).map(
+        lambda rows: tokenizer(rows["text"], truncation=True, max_length=MAX_SEQ_LENGTH),
+        batched=True,
+        remove_columns=["text"],
+    )
 
-    modes = ["fsdp", "ep", "tp", "ep_tp"] if args.mode == "all" else [args.mode]
-    checks = {}
+    student_model, _ = load_distributed_model(
+        model_name_or_path=MODEL_NAME,
+        parallelism_config=pc,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation=attn_implementation,
+        use_liger_kernel=True,
+        reset_sinks=RESET_SINKS,
+    )
+    config = TeacherDistillationConfig(
+        output_dir=ctx.output_dir,
+        max_steps=NUM_TRAIN_STEPS,
+        per_device_train_batch_size=BATCH_SIZE,
+        learning_rate=LEARNING_RATE,
+        bf16=True,
+        gradient_checkpointing=True,
+        use_liger_kernel=False,  # Already applied by load_distributed_model.
+        logging_steps=1,
+        save_strategy="no",
+        report_to="none",
+        logging_nan_inf_filter=False,
+        max_length=MAX_SEQ_LENGTH,
+        dataloader_drop_last=True,
+        dataloader_num_workers=0,
+        dataset_num_proc=1,
+        distill_loss="kl_divergence",
+        distill_temperature=1.0,
+        distill_alpha=0.5,
+    )
+    teacher_model = load_teacher(config, attn_implementation, ctx.local_rank)
+    teacher_function = (stamped_sinks_policy(teacher_model), effective_attn_implementation(teacher_model.config))
+    student_function = (stamped_sinks_policy(student_model), effective_attn_implementation(student_model.config))
+    log(f"teacher (sinks, attention) {teacher_function}; student {student_function}")
+    trainer = DistributedTeacherDistillationTrainer(
+        student_model=student_model,
+        teacher_model=teacher_model,
+        teacher_tokenizer=tokenizer,
+        args=config,
+        train_dataset=train_dataset,
+        data_collator=DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False),
+        processing_class=tokenizer,
+        parallelism_config=pc,
+    )
+    ctx.on_teardown(trainer.cleanup_ep)
+    checks = parallel_shape_checks(trainer.model, pc)
+    checks["teacher_frozen"] = not any(p.requires_grad for p in trainer.teacher_model.parameters())
+    expected_function = (SinksPolicy.LIVE, attn_implementation)
+    checks["teacher_runs_the_student_sinks_and_kernel"] = teacher_function == student_function == expected_function
 
-    for mode in modes:
-        checks[mode] = run_distillation_test(mode, ctx.rank, ctx.world_size, ctx.local_rank, ctx.output_dir)
+    result = trainer.train()
+    losses = step_losses(trainer)
+    kl = [float(e["distillation_loss"]) for e in trainer.state.log_history if "distillation_loss" in e]
+    log(f"step losses {losses}; distillation (KL) per step {kl}")
+    checks["steps_completed"] = result.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
+    checks["losses_finite"] = math.isfinite(result.training_loss) and all(map(math.isfinite, losses))
+    checks["kl_logged_every_step"] = len(kl) == NUM_TRAIN_STEPS and all(map(math.isfinite, kl))
+    checks["step1_kl_is_the_identical_teacher_zero"] = bool(kl) and abs(kl[0]) < STEP1_KL_ATOL
+    checks["kl_moved_off_zero_as_the_student_trained"] = len(kl) > 1 and kl[-1] > max(kl[0], 0.0) + KL_MOVED_MIN
+    checks["teacher_still_frozen"] = not any(p.requires_grad for p in trainer.teacher_model.parameters())
+    checks |= dp_layout_checks(
+        trainer.model,
+        FIELDS,
+        world_size=ctx.world_size,
+        ep_config=trainer._ep_config,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
 
-        cleanup_memory()
-        barrier()
-
-    return {"checks": checks}
+    export = os.path.join(shared_output_dir(ctx), "student")
+    trainer.save_model(export)
+    ctx.barrier()
+    if ctx.rank == 0:
+        _, info = AutoModelForCausalLM.from_pretrained(
+            export, dtype=torch.bfloat16, trust_remote_code=True, output_loading_info=True
+        )
+        problems = loading_problems(info)
+        checks["saved_student_loads_every_weight"] = not problems
+        log(f"saved student {export}: {problems or 'complete'}")
+    return {"checks": ctx.broadcast_checks(checks), "metrics": {"step1_kl": kl[0] if kl else math.nan}}
 
 
 if __name__ == "__main__":

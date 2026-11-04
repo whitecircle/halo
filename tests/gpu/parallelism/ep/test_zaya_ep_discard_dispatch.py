@@ -1,25 +1,8 @@
 #!/usr/bin/env python
-"""Zaya's discarded picks never reach expert 0's rank, and the MoE output is unchanged.
+"""Zaya's discarded picks never reach expert 0's rank under EP, and the MoE output is unchanged.
 
-The Zaya gate masks a pick of its learned discard slot to expert 0 at weight 0. Dispatched as is, every
-discard rides the all-to-all to expert 0's rank in every layer, loading it with rows that contribute
-nothing; under EP the wrapper sends them as ``-1`` (no expert) instead. Per MoE layer of a tiny Zaya
-(two experts, top-1), against the unmasked call ``_dispatch_compute_combine(gate indices, gate probs)``:
-
-  ep2 — the layer output matches to one bf16 ulp (expert 0's grouped GEMM runs fewer rows, which a
-        kernel may tile differently), and the rows expert 0's rank receives drop by exactly the
-        discards summed over both ranks while the other rank's receive count is unchanged.
-  ep1 — the guard on the wrapper's ``ep_size > 1`` gate: nothing is dispatched and the grouped path
-        takes real local ids only, so the wrapper keeps the gate's ids. The output is bit-identical to
-        the unmasked call and expert 0 still computes every discard row.
-
-A fresh tiny gate routes near-uniformly with almost no spread across tokens, and its discard slot starts
-at a -1 selection bias no token overcomes; the gates are re-initialized at unit gain with the bias
-cleared, so each layer's tokens split between the discard slot and both experts. The run fails if a
-layer sees no discard or no real expert-0 pick.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_zaya_ep_discard_dispatch.py
+Dispatched as is, each discard loads expert 0's rank with rows that contribute nothing, so the wrapper sends ``-1``. A
+fresh gate routes near-uniformly with its discard slot at a -1 bias, so gates are re-initialized at unit gain.
 """
 
 import contextlib
@@ -29,13 +12,13 @@ import torch.distributed as dist
 import torch.nn as nn
 from transformers.models.zaya.modeling_zaya import ZayaRouter
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import log, log_all
 
 EP_SIZE = 2
 BATCH, SEQ = 4, 64
@@ -48,11 +31,9 @@ _COMPUTE = EPMoELayerBase._compute_experts
 
 @contextlib.contextmanager
 def count_received_rows(received: list[int]):
-    """Append the number of rows each ``_compute_experts`` call assigns to a local expert."""
-
-    def compute(self, tokens, experts, weights, output_dtype):
+    def compute(self, tokens, experts, weights, output_dtype, *, recv_counts):
         received.append(int(((experts >= 0) & (experts < self.experts_per_rank)).sum()))
-        return _COMPUTE(self, tokens, experts, weights, output_dtype)
+        return _COMPUTE(self, tokens, experts, weights, output_dtype, recv_counts=recv_counts)
 
     EPMoELayerBase._compute_experts = compute
     try:
@@ -95,10 +76,7 @@ def build_model(device, ep_size: int):
     torch.manual_seed(SEED)
     model = tiny_family_model(TINY_MOE_FAMILIES["zaya"])
     spread_routing(model)
-    model = patch_moe_model_for_ep(
-        model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).create_ep_config()
-    )
-    create_ep_buffers(model)
+    model = apply_ep_layers(model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).ep_config())
     return model
 
 

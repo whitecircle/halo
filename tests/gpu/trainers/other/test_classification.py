@@ -1,31 +1,12 @@
 #!/usr/bin/env python
-"""ClassificationTrainer end-to-end, with the logged loss pinned to its exact objective.
+"""ClassificationTrainer end to end, with the logged loss pinned to its exact objective.
 
-The trainer has two loss paths and both fail silently. The default is the trainer's own fp32
-cross-entropy over the head's logits pooled at each row's last non-pad token, where a wrong pooling
-position scores padding and a label misalignment trains on the wrong class — both finite, both
-step-count-clean. The ``focal`` path is halo's own code (``ClassificationTrainer._focal_loss``) and
-carries a detail that is easy to get wrong and impossible to see from finiteness: the ``(1-pt)^gamma``
-modulator is built from the UNWEIGHTED cross-entropy while the class weight scales only the summand.
-That distinction exists ONLY when class weights are configured — with ``weight=None`` the weighted and
-unweighted cross-entropies are the same object — so the focal leg runs WITH ``class_weights``, and its
-control is the same objective with the modulator taken from the weighted CE instead.
-
-So both paths are pinned here against references this test computes itself, from an independently
-constructed copy of the model holding the weight snapshot the trainer had at the pinned step:
-
-  * cross-entropy leg — the logged loss equals ``F.cross_entropy(pooled_logits, labels)``, and two
-    NEGATIVE CONTROLS (labels rolled by one row, logits pooled at the final padded column) must each
-    miss it by more than the pin's tolerance;
-  * focal leg (with class weights) — the logged loss equals the focal objective, must NOT equal plain
-    cross-entropy on the same logits (or the modulator is inert), and must NOT equal the variant whose
-    modulator is built from the WEIGHTED cross-entropy (the mistake the implementation documents).
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_classification.py
+Both loss paths fail silently: wrong pooling scores padding, label misalignment trains on the wrong class. Focal's
+``(1-pt)^gamma`` modulator comes from the unweighted cross-entropy while the class weight scales only the summand. That
+distinction exists only with class weights, so the focal leg runs with them.
 """
 
+import argparse
 import math
 import random
 
@@ -34,16 +15,18 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from src.args.common_script_args import CommonScriptArguments
-from src.configs.classification_config import ClassificationConfig
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.configs.classification import ClassificationConfig
+from halo.configs.script_arguments import CommonScriptArguments
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64
@@ -51,38 +34,27 @@ MAX_LENGTH = 128
 NUM_TRAIN_STEPS = 10
 FOCAL_STEPS = 3
 FOCAL_GAMMA = 2.0
-# Asymmetric on purpose: with equal weights the weighted and unweighted cross-entropies coincide and
-# the modulator-source control below cannot discriminate. Far enough from 1.0 that p^w differs from p.
+# Asymmetric: with equal weights the two cross-entropies coincide and the modulator-source control cannot discriminate.
 FOCAL_CLASS_WEIGHTS = [0.4, 1.8]
 NUM_LABELS = 2
-# >1 so the batch is ragged and the last-non-pad pooling rule is observable at all (the
-# `pooling_at_pad` control below only differs when some row actually carries padding).
+# >1 so the batch is ragged and the `pooling_at_pad` control has padding to differ on.
 BATCH_SIZE = 4
 LEARNING_RATE = 2e-5
 SEED = 42
 PINNED_STEP = NUM_TRAIN_STEPS
 
-# The pin compares the logged loss, the trainer's fp32 cross-entropy over the step's bf16 logits, with the
-# same fp32 cross-entropy over a rescoring of the same weights: what separates them is the two bf16
-# forwards' logits. A bound near that, not the shared relative one floored at 1.0, is what lets the
-# pooling-at-pad control, which can move this loss by 1e-2, fail it.
+# What separates the logged loss from a rescoring of the same weights is the two bf16 forwards' logits. A bound near
+# that lets the pooling-at-pad control, which can move this loss by 1e-2, fail it.
 LOSS_ABS_TOL = 5e-3
-# A control's job is to show the pin would FAIL, so its threshold IS the pin's tolerance.
+# A control shows the pin would fail, so its threshold is the pin's tolerance.
 CONTROL_MIN_GAP = LOSS_ABS_TOL
-# The focal pin is RELATIVE: the shared absolute bound is ~1% of the focal value here but would be a
-# far weaker statement at a smaller one, and the modulator errors this leg exists to catch are
-# multiplicative. What separates the logged value from the reference is the two bf16 forwards' logits,
-# as for the pin above. The modulator-source control misses by 0.31 — 27x this bound — so the leg still
-# discriminates hard.
+# Relative: the modulator errors this leg catches are multiplicative. The modulator-source control misses by 0.31, 27x
+# this bound.
 FOCAL_REL_TOL = 2e-2
 
 
 def create_classification_dataset(num_samples: int, tokenizer, max_length: int = MAX_LENGTH, seed: int = SEED):
-    """Synthetic binary sentiment data, pre-tokenized to ``input_ids``/``attention_mask``/``labels``.
-
-    Phrase lengths differ, so the collated batch is ragged — which is what makes the pooling position
-    a real question rather than a formality.
-    """
+    """Phrase lengths differ, so the collated batch is ragged and the pooling position is a real question."""
     random.seed(seed)
     positive_phrases = [
         "Great product overall",
@@ -121,9 +93,8 @@ def create_classification_dataset(num_samples: int, tokenizer, max_length: int =
 
 
 def build_model(tokenizer):
-    # The classification head is not in the checkpoint, so from_pretrained initialises it randomly.
-    # Seed before construction (which precedes the Trainer's own seeding) or the head differs run to
-    # run and the objective references below compare against a different model each time.
+    # The head is not in the checkpoint, so from_pretrained initializes it randomly. Seed first, or the objective
+    # references compare against a different model each run.
     torch.manual_seed(SEED)
     model = AutoModelForSequenceClassification.from_pretrained(
         MODEL_NAME,
@@ -132,22 +103,17 @@ def build_model(tokenizer):
         trust_remote_code=True,
         attn_implementation="flash_attention_2",
     )
-    # Through the seam the training script runs (apply_max_length → setup_model_and_tokenizer),
-    # never a hand-written config.pad_token_id: the pooling rule this test pins reads that id back,
-    # so recording it here by hand would keep the test green through a regression in the sync.
-    setup_model_and_tokenizer(
-        CommonScriptArguments(), model, tokenizer, MAX_LENGTH, embeddings_sharded=input_embeddings_tp_sharded
+    # Through the seam the training script runs: the pooling rule reads this id back, so recording it by hand would
+    # keep the test green through a regression in the sync.
+    configure_run_tokenizer(
+        CommonScriptArguments(), model, tokenizer, MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
     )
     return model
 
 
 def pooled_logits(model, input_ids, attention_mask, pad_token_id, *, at_pad: bool = False) -> torch.Tensor:
-    """Class logits ``[B, num_labels]`` in fp32, pooled at the LAST NON-PAD token.
-
-    The backbone and the head are run separately so this test owns the pooling rule (``model(...)``
-    would return already-pooled logits, hiding a wrong position). ``at_pad`` pools at the final
-    column instead — the control for exactly that bug.
-    """
+    """Class logits in fp32, pooled at the last non-pad token. Backbone and head run separately so this test owns the
+    pooling rule; ``at_pad`` pools at the final column, the control for that bug."""
     with torch.no_grad():
         hidden = model.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
         per_token = model.score(hidden).float()
@@ -164,13 +130,8 @@ def pooled_logits(model, input_ids, attention_mask, pad_token_id, *, at_pad: boo
 def focal_objective(
     logits: torch.Tensor, labels: torch.Tensor, gamma: float, weight: torch.Tensor, *, modulate_weighted: bool = False
 ) -> float:
-    """Halo's focal loss: ``mean((1-pt)^gamma * weighted_CE)`` with ``pt = exp(-UNWEIGHTED_CE)``.
-
-    The modulator source is the whole point. ``F.cross_entropy(weight=w)`` returns ``w_y * -log p_y``,
-    so ``exp(-ce)`` on the weighted value is ``p_y ** w_y`` rather than ``p_y`` — building the
-    modulator from it distorts the focusing instead of scaling the loss. ``modulate_weighted=True``
-    is that mistake, and is this leg's control.
-    """
+    """``mean((1-pt)^gamma * weighted_CE)`` with ``pt = exp(-UNWEIGHTED_CE)``. ``exp(-ce)`` on the weighted value is
+    ``p_y ** w_y``, which distorts the focusing; ``modulate_weighted=True`` is that mistake, this leg's control."""
     plain = F.cross_entropy(logits, labels, reduction="none")
     weighted = F.cross_entropy(logits, labels, weight=weight, reduction="none")
     modulator_source = weighted if modulate_weighted else plain
@@ -195,23 +156,18 @@ def make_config(output_dir: str, **overrides) -> ClassificationConfig:
         "logging_nan_inf_filter": False,
         "dataloader_drop_last": True,
         "remove_unused_columns": False,
-        "fsdp": "",  # the mixin owns FSDP wrapping
     }
     base.update(overrides)
     return ClassificationConfig(**base)
 
 
-def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
-    """Train, capturing the batch and the FULL weights held at ``pinned_step``.
-
-    Returns ``(trainer, captured_batch, weights, logged_losses)``.
-    """
+def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int, layout: dict):
     trainer = ClassificationTrainer(
         model=build_model(tokenizer),
         args=config,
         train_dataset=dataset,
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -231,10 +187,17 @@ def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
     return trainer, captured, weights, step_losses(trainer)
 
 
-@gpu_test_main(min_world_size=2, prefix="classification")
+parser = argparse.ArgumentParser()
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="classification")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = hsdp_layout(ctx.world_size) if ARGS.hsdp else {}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -243,38 +206,42 @@ def run(ctx):
         tokenizer.pad_token_id = tokenizer.eos_token_id
     dataset = create_classification_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    # ── Cross-entropy leg (the default path: the trainer's own unweighted fp32 CE) ──────────────
     trainer, captured, weights, losses = train_and_capture(
-        ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP
+        ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP, layout
     )
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
+    loss = trainer._classification_loss
     checks["cross_entropy_builds_unweighted_ce"] = (
-        isinstance(trainer._loss_fn, torch.nn.CrossEntropyLoss) and trainer._loss_fn.weight is None
+        not loss.multi_label and loss.focal_gamma is None and loss.weight is None and loss.label_smoothing == 0.0
     )
-    # Constructing with cp_size=1 and then asserting is_cp_mode is False only restates the test's own
-    # input. What matters is that the trainer REJECTS CP (_supports_cp is False), so ask it to.
-    try:
-        ClassificationTrainer(
-            model=build_model(tokenizer),
-            args=make_config(ctx.output_dir + "/cp"),
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            parallelism_config=ParallelismConfig(cp_size=ctx.world_size),
-        )
-        checks["cp_rejected_at_construction"] = False
-    except ValueError as exc:
-        checks["cp_rejected_at_construction"] = "Context Parallelism" in str(exc)
+    # The trainer must reject CP (SUPPORTS_CP is False), where the world holds a CP group at all.
+    if ctx.world_size > 1:
+        try:
+            ClassificationTrainer(
+                model=build_model(tokenizer),
+                args=make_config(ctx.output_dir + "/cp"),
+                train_dataset=dataset,
+                processing_class=tokenizer,
+                parallelism_config=ParallelismConfig(cp_size=ctx.world_size),
+            )
+            checks["cp_rejected_at_construction"] = False
+        except ValueError as exc:
+            checks["cp_rejected_at_construction"] = "Context Parallelism" in str(exc)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
-    # Early return, not a bare check: without the capture every line below raises KeyError and the
-    # harness reports `error`, so this check could never be the thing that says FAIL.
+    # Early return: without the capture every line below raises KeyError, and the harness reports `error` over FAIL.
     checks["pinned_step_captured"] = bool(captured) and bool(weights)
     if not checks["pinned_step_captured"]:
         return {"checks": checks, "metrics": metrics}
 
-    # ANTI-VACUITY, stated world-wide because the compared loss is a DP mean: padding has to exist
-    # SOMEWHERE for the pooling control to differ, and both classes have to appear somewhere for the
-    # label-roll control to be more than a no-op. Requiring it of every shard would flake on a shard
-    # whose four rows happen to tokenize to the same length.
+    # Anti-vacuity, world-wide since the compared loss is a DP mean: requiring padding and both classes on every shard
+    # would flake on a shard whose four rows tokenize to one length.
     lengths = captured["attention_mask"].sum(-1)
     labels = captured["labels"]
     checks["batch_is_ragged"] = world_any(int(lengths.min()) < int(lengths.max()), ctx.device)
@@ -288,17 +255,14 @@ def run(ctx):
     logged = losses[PINNED_STEP - 1]
     metrics["ce_logged"], metrics["ce_reference"] = logged, expected
     checks["ce_loss_matches_reference"] = abs(logged - expected) < LOSS_ABS_TOL
-    # A classifier that has learned nothing predicts uniformly and scores exactly ln(NUM_LABELS).
-    # Requiring the pinned loss to sit clear of that is a derived reference point, not a magic floor
-    # (and unlike "> 0" it can actually fail).
+    # A classifier that learned nothing scores exactly ln(NUM_LABELS), a derived reference point that can actually
+    # fail.
     uninformative = math.log(NUM_LABELS)
     metrics["uninformative_baseline"] = uninformative
     checks["ce_below_uninformative_baseline"] = expected < uninformative - CONTROL_MIN_GAP
 
     ce_controls = {
-        # Labels rolled by one row: the trainer would be scoring each row against another row's class.
         "labels_misaligned": world_mean(float(F.cross_entropy(logits, labels.roll(1))), ctx.device),
-        # Pooled at the final column, so every padded row is scored on padding.
         "pooling_at_pad": world_mean(
             float(
                 F.cross_entropy(
@@ -321,7 +285,6 @@ def run(ctx):
         log(f"  control {name}: reference={value:.6f} gap-from-logged={gap:.3e}")
         checks[f"control_{name}_breaks_the_pin"] = gap > CONTROL_MIN_GAP
 
-    # ── Focal leg (halo's own loss function, with its unweighted-CE modulator) ───────────────
     focal_trainer, focal_captured, focal_weights, focal_losses = train_and_capture(
         ctx,
         tokenizer,
@@ -334,10 +297,9 @@ def run(ctx):
             class_weights=FOCAL_CLASS_WEIGHTS,
         ),
         FOCAL_STEPS,
+        layout,
     )
-    checks["focal_selects_focal_loss_fn"] = (
-        getattr(focal_trainer._loss_fn, "func", None) is ClassificationTrainer._focal_loss
-    )
+    checks["focal_selects_focal_loss_fn"] = focal_trainer._classification_loss.focal_gamma == FOCAL_GAMMA
 
     focal_scorer = build_model(tokenizer)
     focal_scorer.load_state_dict(focal_weights)
@@ -359,16 +321,14 @@ def run(ctx):
         plain_ce,
     )
     metrics["focal_modulated_by_weighted_ce"] = modulated_by_weighted
-    # The configured weights must actually be inside the partial the trainer built, or the
-    # weighted-vs-unweighted distinction this leg exists to pin is not being exercised at all.
-    # Compared at the dtype the trainer stores them in: fp32, built once and only moved to the device.
-    configured = focal_trainer._loss_fn.keywords.get("weight")
+    # The configured weights must be inside the loss the trainer built. Compared at the trainer's stored dtype: fp32.
+    configured = focal_trainer._classification_loss.weight
     checks["focal_class_weights_reached_the_loss"] = configured is not None and torch.equal(
         configured.float().cpu(),
         torch.tensor(FOCAL_CLASS_WEIGHTS).to(configured.dtype).float(),
     )
     checks["focal_loss_matches_reference"] = abs(focal_logged - focal_expected) < FOCAL_REL_TOL * abs(focal_expected)
-    # CONTROLS: the modulator must be live at all, and must come from the UNWEIGHTED cross-entropy.
+    # Controls: the modulator must be live and come from the unweighted cross-entropy.
     checks["focal_modulator_is_live"] = abs(focal_logged - plain_ce) > FOCAL_REL_TOL * abs(focal_expected)
     checks["focal_modulator_uses_unweighted_ce"] = abs(focal_logged - modulated_by_weighted) > FOCAL_REL_TOL * abs(
         focal_expected

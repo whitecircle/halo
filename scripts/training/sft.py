@@ -1,78 +1,92 @@
 #!/usr/bin/env python
-"""Distributed SFT training (text or VLM).
+"""Distributed SFT (text or VLM): the model class follows the checkpoint, the data path the run."""
 
-Supervised fine-tuning for both language and vision-language models. The model class follows the
-checkpoint; the data path follows the run (``is_vlm_run``), so a natively-multimodal checkpoint
-trained on a text-only dataset takes the text path. That path supports packing, padding-free,
-pre-processed datasets, QLoRA and ``init_from_scratch``; the VLM path loads an
-``AutoModelForImageTextToText`` plus processor and uses the VLM collators (packing/padding-free do
-not apply to images).
+import logging
 
-Parallelism: every axis set ``ParallelismConfig`` admits (``SUPPORTED_AXIS_SETS``), CP included;
-PP is declared but not yet available in this release. CP is incompatible with padding-free, and CP
-is text-only: the CP wrapper raises on a batch carrying ``pixel_values``.
+from trl import SFTConfig
 
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/sft.py \\
-        examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml
-"""
-
-from accelerate.logging import get_logger
-from trl import ModelConfig, SFTConfig
-
-from src.args.distributed_args import DistributedArguments
-from src.args.sft_args import SFTScriptArguments
-from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.data.collators.factory import select_data_collator
-from src.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import load_preprocessed_metadata, validate_preprocessing_compatibility
-from src.data.pipeline.processing import (
-    pack_dataset_coordinated,
-    process_dataset_with_map_and_filter,
-    resolve_map_num_proc,
+from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.callbacks.mtp import MtpAcceptanceGate
+from halo.config_validation import reject_non_default_args
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
+from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
+    has_dense_kernel_row_refusal,
+    reject_context_parallel_packing,
+    reject_multi_document_rows,
+    resolve_multi_document_mode,
 )
-from src.data.pipeline.row_processors import create_llm_processor, text_render_kwargs
-from src.data.pipeline.vlm_dataset import prepare_vlm_dataset
-from src.data.probe_consensus import agree_probe_across_ranks
-from src.data.sources.loading import load_datasets_auto
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.loading.vlm_setup import load_model_for_training
-from src.distributed.runtime import barrier, init_distributed, is_global_main_process
-from src.models.loading.model_preparation import log_model_info
-from src.models.loading.tokenizer_setup import is_bounded_length
-from src.models.modality import probe_checkpoint
-from src.models.segment_markers import reject_compressed_kv_rows
-from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
-    apply_max_length,
-    build_training_callbacks,
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.data.collators.vlm import PreprocessedVLMDataCollator
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
+from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
+from halo.data.pipeline.tree_rows import prepare_tree_dataset
+from halo.data.preprocessed.metadata import (
+    PreprocessedDatasetMetadata,
+    load_preprocessed_metadata,
+    verify_preprocessed_dataset,
+)
+from halo.data.sources.loading import load_datasets_auto
+from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
+from halo.entrypoints.data_setup import (
+    apply_vision_options,
     disable_trl_dataset_prep,
-    distributed_trainer_kwargs,
-    enforce_text_path_padding_side,
-    init_training_script,
-    install_resolved_tokenizer,
     load_script_datasets,
     log_script_dataset_examples,
-    reject_non_default_args,
+    prepare_chat_text_split,
+    prepare_raw_vlm_split,
     reject_trl_dataset_prep_args,
     resolve_vlm_run,
+)
+from halo.entrypoints.model_setup import (
+    apply_max_length,
+    apply_text_path_padding_side,
+    install_resolved_tokenizer,
+    load_policy_model,
+    log_model_info,
+    plan_row_attention,
+)
+from halo.entrypoints.script import (
+    configure_balancing_and_build_callbacks,
+    distributed_trainer_kwargs,
+    init_training_script,
+    parse_script_args,
     run_trainer,
+    with_distributed_teardown,
+)
+from halo.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
+from halo.model_loading.parallel.loader import resolve_policy_attn_implementation
+from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.tree import (
+    install_tree_attention,
+    reject_unsupported_tree_attention,
+    resolve_tree_full_form,
+    resolve_tree_plan_options,
+)
+from halo.runtime.collectives import barrier
+from halo.runtime.consensus import agree_probe_across_ranks
+from halo.runtime.ranks import is_global_main_process
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.sft_rules import (
+    reject_unsupported_mtp_options,
+    reject_unsupported_sft_data_options,
+    reject_unsupported_tree_packing,
+    reject_unsupported_vlm_sft_options,
+    settle_mtp_balancing,
 )
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
 
 def _reject_empty_split(dataset, split: str, max_length: int) -> None:
-    """Raise on a split the length filter emptied, before packing fails further from the cause.
-
-    The chat processor drops rows whose tokenized length exceeds ``max_length`` rather than
-    truncating them mid-turn, and packing an empty split yields a dataset with no ``seq_lengths``
-    column. On a presharded corpus the length is per-rank, so the verdict is agreed across the world
-    and the raise lands on every rank at once.
-    """
+    """COLLECTIVE: raise on a split the length filter emptied, before packing fails further from the cause; on a
+    presharded corpus the length is per-rank, so the verdict is agreed and the raise lands on every rank at once."""
     if agree_probe_across_ranks(len(dataset) == 0, f"the {split} split", "split emptied by tokenization"):
         raise ValueError(
             f"All {split} rows were dropped after tokenization on at least one data-parallel rank: "
@@ -81,160 +95,159 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
         )
 
 
-def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, hf_config):
-    """Text dataset path: preprocessed passthrough, or raw tokenize (+ packing); returns
-    (train, eval, generate, collator)."""
-    if is_preprocessed:
-        metadata = load_preprocessed_metadata(args.dataset)
-        validate_preprocessing_compatibility(
-            metadata,
-            required_max_length=sft_config.max_length,
-            required_model=model_config.model_name_or_path,
-            required_train_on_completions_only=args.train_on_completions_only,
-            render_args=args,
-            required_packing=sft_config.packing,
+def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
+    """``processor_kwargs`` are the render and map arguments of the flat path."""
+    reject_unusable_response_marker(
+        tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
+    )
+    ds = prepare_tree_dataset(
+        ds,
+        tokenizer,
+        sft_config.max_length,
+        share_markers=tuple(args.tree_share_markers),
+        share_requires=args.tree_share_requires,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
+        assistant_message_template=args.assistant_message_template,
+        train_on_last_assistant_only=args.train_on_last_assistant_only,
+        **processor_kwargs,
+    )
+    return ds["train"], ds["test"]
+
+
+def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
+    """COLLECTIVE: ``(train, eval, generate)``, one chat-template tokenize as flat rows or trees, then the packing."""
+    render_kwargs = text_render_kwargs(args)
+    num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
+    generate_dataset = None
+    # Only for the examples callback, as the map tokenizes the whole test split; before the train map consumes it.
+    if args.generate_eval_examples:
+        generate_dataset = coordinated_map_and_filter(
+            ds["test"],
+            build_chat_row_processor(
+                tokenizer=tokenizer,
+                max_length=sft_config.max_length,
+                add_generation_prompt=True,
+                **render_kwargs,
+            ),
+            desc="Processing generate dataset",
+            cache_key_extras={**render_kwargs, "add_generation_prompt": True},
+            num_proc=num_proc,
         )
-        # Offline-packed data still needs the packing collator: without per-document position_ids from
-        # seq_lengths documents attend across pack boundaries. Keyed on metadata.packed, not the flag.
-        collator_packing = metadata.packed
+    if args.tree_packing:
+        train_dataset, eval_dataset = _prepare_tree_rows(
+            ds, args, sft_config, tokenizer, hf_config, **render_kwargs, num_proc=num_proc
+        )
+    else:
+        train_dataset, eval_dataset = prepare_chat_text_split(
+            ds, tokenizer, args, sft_config, desc="Processing dataset"
+        )
+    _reject_empty_split(train_dataset, "training", sft_config.max_length)
+    if sft_config.packing:
+        pack = {"seq_length": sft_config.max_length, "strategy": sft_config.packing_strategy, "num_proc": num_proc}
+        train_dataset = coordinated_pack(train_dataset, **pack, split="train")
+        if sft_config.eval_packing is not False:
+            _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
+            eval_dataset = coordinated_pack(eval_dataset, **pack, split="eval")
+    return train_dataset, eval_dataset, generate_dataset
+
+
+def _verify_metadata(metadata, args, sft_config, model_config, processing_class) -> None:
+    verify_preprocessed_dataset(
+        metadata,
+        required_max_length=sft_config.max_length,
+        required_model=model_config.model_name_or_path,
+        required_train_on_completions_only=args.train_on_completions_only,
+        render_args=args,
+        required_packing=sft_config.packing,
+        run_processing_class=processing_class,
+    )
+
+
+def _packs_rows(sft_config, metadata) -> bool:
+    """A pre-processed corpus as it was baked, since offline-packed rows still need the packing collator's per-document
+    position_ids; a raw one as ``packing`` says."""
+    return metadata.packed if metadata is not None else sft_config.packing
+
+
+def _prepare_text_data(
+    ds,
+    metadata: PreprocessedDatasetMetadata | None,
+    args,
+    sft_config,
+    model_config,
+    processing_class,
+    tokenizer,
+    parallelism_config,
+    hf_config,
+):
+    """Pre-processed splits as baked, or raw ones tokenized and packed; ``(train, eval, generate, collator)``."""
+    if metadata is not None:
+        _verify_metadata(metadata, args, sft_config, model_config, processing_class)
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
-        collator_packing = sft_config.packing
-        use_padding = not sft_config.padding_free
-        cache_extras = text_render_kwargs(args)
-        common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **cache_extras}
-        train_processor = create_llm_processor(**common, add_generation_prompt=False, use_padding=use_padding)
-        generate_processor = create_llm_processor(**common, add_generation_prompt=True, use_padding=True)
-        # sorted: this list feeds the coordinated-map cache key — set order is hash-randomized per process.
-        extra_columns = sorted(set(ds["train"].column_names))
-        map_kwargs = {"num_proc": resolve_map_num_proc(sft_config.dataset_num_proc)}
-        # Build the generation set from the raw test split before the train map remaps `ds`.
-        generate_dataset = process_dataset_with_map_and_filter(
-            ds["test"],
-            generate_processor,
-            desc="Processing generate dataset",
-            cache_key_extras={**cache_extras, "add_generation_prompt": True},
-            **map_kwargs,
+        train_dataset, eval_dataset, generate_dataset = _prepare_raw_text_splits(
+            ds, args, sft_config, tokenizer, hf_config
         )
-        ds = process_dataset_with_map_and_filter(
-            ds,
-            train_processor,
-            remove_columns=extra_columns,
-            desc="Processing dataset",
-            cache_key_extras={**cache_extras, "add_generation_prompt": False},
-            **map_kwargs,
-        )
-        train_dataset, eval_dataset = ds["train"], ds["test"]
-        _reject_empty_split(train_dataset, "training", sft_config.max_length)
-        if sft_config.packing:
-            eval_packing = sft_config.eval_packing if sft_config.eval_packing is not None else sft_config.packing
-            train_dataset = pack_dataset_coordinated(
-                train_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="train"
-            )
-            if eval_packing:
-                _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
-                eval_dataset = pack_dataset_coordinated(
-                    eval_dataset, seq_length=sft_config.max_length, strategy=sft_config.packing_strategy, split="eval"
-                )
 
+    if args.tree_packing:
+        if is_global_main_process():
+            logger.info(f"Using DataCollatorWithTreePacking (full layers: {args.tree_full_attention})")
+        collator = DataCollatorWithTreePacking(
+            tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
+        )
+        return train_dataset, eval_dataset, generate_dataset, collator
+    # TRL's own setting outside CP: the full-sequence route then returns the collator TRL would build.
+    pad_to_multiple_of = parallelism_config.cp_size if parallelism_config.is_cp_mode else sft_config.pad_to_multiple_of
     collator = select_data_collator(
         tokenizer=tokenizer,
         padding_free=sft_config.padding_free,
-        packing=collator_packing,
-        # Preprocessed labels are baked (completion masking included); runtime re-masking would overwrite them —
-        # re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
-        train_on_completions_only=args.train_on_completions_only and not is_preprocessed,
+        packing=_packs_rows(sft_config, metadata),
+        # Preprocessed labels are baked; re-masking a chunk whose marker landed in the previous chunk would drop
+        # trained tokens.
+        train_on_completions_only=args.train_on_completions_only and metadata is None,
         assistant_message_template=args.assistant_message_template,
-        pad_to_multiple_of=parallelism_config.cp_size if parallelism_config.is_cp_mode else None,
+        pad_to_multiple_of=pad_to_multiple_of,
         use_context_parallel=parallelism_config.is_cp_mode,
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         model_config=hf_config,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
+        allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+        emit_varlen_one_document=True,
     )
     return train_dataset, eval_dataset, generate_dataset, collator
 
 
-def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, processor, tokenizer, hf_config):
-    """VLM dataset path: preprocessed passthrough, or raw VLM map; returns
-    (train, eval, generate, collator)."""
-    if is_preprocessed:
-        metadata = load_preprocessed_metadata(args.dataset)
-        validate_preprocessing_compatibility(
-            metadata,
-            required_max_length=sft_config.max_length,
-            required_model=model_config.model_name_or_path,
-            required_train_on_completions_only=args.train_on_completions_only,
-            render_args=args,
-            required_packing=sft_config.packing,
+def _prepare_vlm_data(
+    ds, metadata: PreprocessedDatasetMetadata | None, args, sft_config, model_config, processor, tokenizer, hf_config
+):
+    """The pre-processed splits as baked, or the raw VLM map; returns ``(train, eval, None, collator)``, since
+    GenerateExamplesCallback needs tokenized input_ids."""
+    if metadata is None:
+        train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
+            ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
         )
-        if not metadata.is_vlm:
-            raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
-        collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
-        return ds["train"], ds["test"], None, collator
-
-    # Reject options the VLM path does not implement; ignoring them would train something other than
-    # the config states.
-    if sft_config.packing or sft_config.padding_free:
-        raise ValueError("packing / padding_free are not supported for VLM training (images cannot be packed).")
-    if args.train_on_last_assistant_only:
-        raise ValueError(
-            "train_on_last_assistant_only is not implemented on the VLM path (all assistant turns train)."
-        )
-
-    num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
-    ds = prepare_vlm_dataset(
-        ds,
-        args,
-        processor,
-        tokenizer,
-        sft_config.max_length,
-        num_proc,
-        desc="Processing train/eval dataset",
-    )
-    # The mapped columns (history/images/…) are not model-forward kwargs — HF's default
-    # remove_unused_columns=True would strip them before they reach the collator.
-    sft_config.remove_unused_columns = False
-    collator = VLMDataCollator(
-        processor,
-        tokenizer,
-        sft_config.max_length,
-        response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
-        train_on_completions_only=args.train_on_completions_only,
-        model_config=hf_config,
-    )
-    # No generate dataset: GenerateExamplesCallback needs tokenized input_ids and is skipped for VLM.
+        return train_dataset, eval_dataset, None, collator
+    _verify_metadata(metadata, args, sft_config, model_config, processor)
+    if not metadata.is_vlm:
+        raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
+    collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
     return ds["train"], ds["test"], None, collator
 
 
 def main():
-    parser = H4ArgumentParser((SFTScriptArguments, SFTConfig, ModelConfig, DistributedArguments))
-    args, sft_config, model_config, dist_args = parser.parse()
+    args, sft_config, model_config, dist_args = parse_script_args(
+        SFTScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
+    )
 
-    if dist_args.context_parallel_size > 1 and sft_config.padding_free:
-        raise ValueError("Context Parallelism (CP) is NOT compatible with padding_free mode. Disable padding_free.")
-    if dist_args.pipeline_parallel_size > 1 and sft_config.padding_free:
-        # The trainer mixin rejects this too, keyed on the live collator, but only after the model
-        # load and dataset prep. Check it here so the run stops before that work.
-        raise ValueError(
-            "Pipeline Parallelism (PP) is NOT compatible with padding_free mode (the flattened "
-            "width varies every step while the pipeline's P2P buffers freeze on the first). Use "
-            "packing instead."
-        )
-    if sft_config.packing and sft_config.padding_free:
-        raise ValueError("Cannot use both 'packing' and 'padding_free' simultaneously.")
-    # A null/non-positive max_length resolves to the model's context window, but packing uses it as the
-    # fixed pack size that bounds memory, so it must be explicit there.
-    if sft_config.packing and not is_bounded_length(sft_config.max_length):
-        raise ValueError(
-            "packing=True requires an explicit max_length (the fixed pack/sequence size that bounds "
-            "memory); it cannot default to the model context window. Set max_length in the config."
-        )
-    if sft_config.eval_packing and not sft_config.packing:
-        raise ValueError(
-            "eval_packing=True packs nothing without packing=True: it can only turn packing off for the "
-            "eval split. Set packing: true to pack both splits, or remove eval_packing."
-        )
+    reject_unsupported_sft_data_options(sft_config, dist_args)
+    if args.tree_packing:
+        reject_unsupported_tree_packing(args, sft_config, dist_args)
+        # A tree row's plan segments the linear-attention layers of every family tree packing admits.
+        reject_non_default_args("Halo SFT with tree_packing on", args, "allow_cross_document_linear_attention")
+    else:
+        reject_non_default_args("Halo SFT with tree_packing off", args, *TREE_PACKING_FIELDS)
     reject_trl_dataset_prep_args(
         "Halo SFT",
         sft_config,
@@ -242,78 +255,142 @@ def main():
         "scripts/before_training/prepare_dataset.py --mode text",
     )
 
-    # The checkpoint's modality names the run, which init_training_script needs before the dataset
-    # exists. Pinned like the model load: an unpinned probe reads hub `main`, whose config can
-    # name a different modality than the commit this run trains. The process group is initialized
-    # first (init_training_script's own call is then a no-op) because the main-rank-first ordering
-    # that guards transformers' unlocked remote-code module cache needs a live group; without it
-    # every rank of every node fetches at once.
-    init_distributed()
+    # The modality names the run before the dataset exists. Pinned like the model load: hub `main`'s config can name
+    # another modality than the commit this run trains.
     checkpoint_config, is_vlm_checkpoint = probe_checkpoint(
         model_config.model_name_or_path,
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    # The collator factory refuses the same rows, but only after the model load and the packing pass.
-    if sft_config.packing or sft_config.padding_free:
-        reject_compressed_kv_rows(checkpoint_config, "packing" if sft_config.packing else "padding_free")
-    runtime = init_training_script(
+    reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, checkpoint_config)
+    settle_mtp_balancing(args)
+    sinks_policy = SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks)
+    rows_plan = {
+        "sinks_policy": sinks_policy,
+        "padding_free": sft_config.padding_free,
+        "checkpoint_config": checkpoint_config,
+        "init_from_scratch": dist_args.init_from_scratch,
+    }
+    attn_default = plan_row_attention(model_config, sft_config, packing=sft_config.packing, **rows_plan).attn_default
+    mode = resolve_multi_document_mode(packing=sft_config.packing, padding_free=sft_config.padding_free)
+    # The backend the policy load resolves for rows as the packing flags shape them, read before the dataset and the
+    # weights load; a config the probe could not read leaves the row checks to the collator factory after the load.
+    planned_attn = None
+    if mode is not None and checkpoint_config is not None:
+        # Resolved only where a rule reads it, since the load resolves the backend again and repeats its warnings.
+        if args.tree_packing or has_dense_kernel_row_refusal(
+            checkpoint_config, padding_free=sft_config.padding_free, packing=sft_config.packing
+        ):
+            planned_attn = resolve_policy_attn_implementation(
+                checkpoint_config,
+                attn_default,
+                resolve_training_dtype(sft_config),
+                sinks_policy=sinks_policy,
+                init_from_scratch=dist_args.init_from_scratch,
+            )
+        if not args.tree_packing:
+            # The collator factory refuses the same rows, but only after the model load and the packing pass; the
+            # FA4 varlen rule ran in plan_row_attention, on the backend the load keeps.
+            reject_multi_document_rows(
+                checkpoint_config,
+                mode,
+                attn_impl=planned_attn,
+                allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+                keeps_packed_rows=dist_args.pipeline_parallel_size > 1,
+                varlen_rows=False,
+            )
+    context = init_training_script(
         args,
         sft_config,
         model_config,
         dist_args,
-        script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not dist_args.text_only_model else ''}",
+        script_prefix=f"sft{'-vlm' if is_vlm_checkpoint and not args.text_only_model else ''}",
         trainer_cls=DistributedSFTTrainer,
-        allow_low_precision=True,
         supports_init_from_scratch=True,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
+    if args.tree_packing:
+        # Tree rows are packed text rows, never pre-processed, so the planned backend is the one the load makes.
+        args.tree_full_attention = resolve_tree_full_form(checkpoint_config, planned_attn, args.tree_full_attention)
+        reject_unsupported_tree_attention(
+            checkpoint_config,
+            planned_attn,
+            args.tree_full_attention,
+            lora_target_modules=model_config.lora_target_modules if model_config.use_peft else None,
+            quantization_config=resolve_quantization_config(model_config, sft_config),
+        )
 
     (ds, is_preprocessed), dataset_presharded = load_script_datasets(
-        args,
-        parallelism_config,
-        loader=load_datasets_auto,
-        conversation_field=args.conversation_field,
+        args, parallelism_config, loader=load_datasets_auto, conversation_field=args.conversation_field
     )
     if is_preprocessed:
         # Both splits are used as baked, so eval_packing has nothing to decide.
         reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
+        # Baked images keep the geometry they were baked at.
+        reject_non_default_args(
+            "Halo SFT on a pre-processed dataset", args, "tree_packing", "min_pixels", "max_pixels"
+        )
 
-    # The run's data path, decided before the model load because it also decides whether the
-    # checkpoint's processor is required: a multimodal checkpoint carrying text-only rows is a text
-    # run, and packing / padding_free / train_on_last_assistant_only stay legal for it. The model
-    # class is unaffected; it follows the checkpoint.
+    # Before the model load, which needs the checkpoint's processor only for an image run: a multimodal checkpoint
+    # carrying text-only rows is a text run, its model class unchanged.
     is_vlm = resolve_vlm_run(
-        args, model_config, ds, text_only_model=dist_args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
+        args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
     )
+    if is_vlm:
+        reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
+        # Ahead of the load; the wrapper would refuse only at the first image batch.
+        if parallelism_config.is_cp_mode:
+            raise ValueError("SFT on image data does not support Context Parallelism: drop context_parallel_size.")
+    metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
+    reject_context_parallel_packing(
+        packing=_packs_rows(sft_config, metadata), use_context_parallel=parallelism_config.is_cp_mode
+    )
+    if not (_packs_rows(sft_config, metadata) or sft_config.padding_free):
+        reject_non_default_args("Halo SFT without multi-document rows", args, "allow_cross_document_linear_attention")
+    if metadata is not None:
+        attn_default = plan_row_attention(
+            model_config, sft_config, packing=_packs_rows(sft_config, metadata), **rows_plan
+        ).attn_default
 
-    model, processing_class, tokenizer, _ = load_model_for_training(
-        model_config,
+    policy = load_policy_model(
+        context,
         sft_config,
-        parallelism_config,
+        model_config,
+        args,
         vlm_run=is_vlm,
-        reset_sinks=dist_args.reset_sinks,
-        train_sinks=dist_args.train_sinks,
+        attn_default=attn_default,
         init_from_scratch=dist_args.init_from_scratch,
-        weights_source=runtime.model_source,
-        preserve_checkpoint_precision=runtime.policy_from_checkpoint,
-        text_only_model=dist_args.text_only_model,
+        mtp_head=args.mtp_head_request,
     )
+    model = policy.model
+    tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
+    processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
+    apply_text_path_padding_side(tokenizer, is_vlm)
 
-    tokenizer = apply_max_length(sft_config, args, model, tokenizer)
-    processing_class = install_resolved_tokenizer(processing_class, tokenizer)
-    enforce_text_path_padding_side(tokenizer, is_vlm)
-
-    peft_config = setup_peft_model(args, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
+    apply_vision_options(args, model, model_config, processing_class, is_vlm=is_vlm)
     log_model_info(model, tokenizer)
+    if args.tree_packing:
+        install_tree_attention(model, args.tree_full_attention)
+        warm_tree_attention_kernels(
+            model, dtype=resolve_training_dtype(sft_config), full_form=args.tree_full_attention
+        )
 
     if is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(
-            ds, is_preprocessed, args, sft_config, model_config, processing_class, tokenizer, model.config
+            ds, metadata, args, sft_config, model_config, processing_class, tokenizer, model.config
         )
     else:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_text_data(
-            ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, model.config
+            ds,
+            metadata,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            tokenizer,
+            parallelism_config,
+            model.config,
         )
 
     log_script_dataset_examples(
@@ -322,18 +399,25 @@ def main():
 
     generate_callback = GenerateExamplesCallback.from_config(args, sft_config, generate_dataset, tokenizer)
     if generate_callback is None and args.generate_eval_examples and is_global_main_process():
-        # Both paths that build no generate split: a VLM run (no tokenized input_ids) and a
-        # pre-processed dataset (baked input_ids/labels, no raw conversations to render a prompt from).
         logger.warning(
             "generate_eval_examples skipped: %s.",
             "not supported for VLM datasets" if is_vlm else "a pre-processed dataset carries no raw prompts",
         )
-    callbacks = build_training_callbacks(
-        args, sft_config, model, parallelism_config, generate_callback=generate_callback
+    callbacks = configure_balancing_and_build_callbacks(
+        args,
+        sft_config,
+        model,
+        context,
+        generate_callback=generate_callback,
+        packed_rows=_packs_rows(sft_config, metadata),
+        multimodal_rows=is_vlm,
     )
+    if args.gates_mtp_acceptance:
+        # The baseline: a resume scores the head it restored too, and the gate reads the log's first reading.
+        sft_config.eval_on_start = True
+        callbacks.append(MtpAcceptanceGate(args.mtp_min_acceptance_gain))
 
     disable_trl_dataset_prep(sft_config)
-    apply_distributed_trainer_config(sft_config, parallelism_config)
 
     barrier()
 
@@ -346,15 +430,10 @@ def main():
         peft_config=peft_config,
         data_collator=collator,
         callbacks=callbacks,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(
-        trainer,
-        runtime,
-        method_name="SFT",
-        extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"],
-    )
+    run_trainer(trainer, context, method_name="SFT", extra_start_log=[f"modality: {'vlm' if is_vlm else 'text'}"])
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

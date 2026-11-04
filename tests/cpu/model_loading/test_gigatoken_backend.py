@@ -1,0 +1,254 @@
+#!/usr/bin/env python3
+"""The gigatoken tokenizer backend. Equivalence-probe tests drive a fake backend, so the guard is pinned without the
+optional extra."""
+
+import pickle
+
+import numpy as np
+import pytest
+from datasets import Dataset
+from PIL import Image
+
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_dataset
+from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.model_loading import tokenizer_backend as tb
+from halo.model_loading.tokenizer_backend import (
+    TOKENIZER_BACKENDS,
+    GigatokenTokenizerProxy,
+    install_processor_backend,
+    resolve_tokenizer_backend,
+)
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_0_6B
+from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
+
+MODEL_NAME = QWEN3_0_6B
+VLM_MODEL_NAME = QWEN2_5_VL_3B
+VLM_MODEL_REVISION = PINNED_REVISIONS[QWEN2_5_VL_3B]
+
+
+class PreprocessingArgsStub:
+    pad_token = bos_token = eos_token = chat_template = added_special_tokens = None
+    force_chat_template = False
+
+    def __init__(self, tokenizer_backend: str) -> None:
+        self.tokenizer_backend = tokenizer_backend
+
+
+CONVERSATIONS = [
+    [
+        {"role": "user", "content": "Hello, how are you?"},
+        {"role": "assistant", "content": "I'm doing well, thank you! Ünïcodé 🚀"},
+    ],
+    [
+        {"role": "user", "content": "What is 2+2?"},
+        {"role": "assistant", "content": "2+2 equals 4."},
+    ],
+]
+
+
+def test_unknown_backend_rejected():
+    with pytest.raises(ValueError, match="tokenizer_backend"):
+        resolve_tokenizer_backend(object(), "typo")
+
+
+def test_hf_backend_is_passthrough():
+    """No wrapping, no probes."""
+    sentinel = object()
+    assert resolve_tokenizer_backend(sentinel, "hf") is sentinel
+
+
+def test_vlm_processor_backend_parity():
+    """Image pads included, with pixel_values and grid identical."""
+    pytest.importorskip("gigatoken")
+
+    processor = load_cached_processor(VLM_MODEL_NAME, revision=VLM_MODEL_REVISION)
+
+    img = Image.fromarray(np.full((64, 64, 3), [100, 150, 200], dtype=np.uint8))
+    conv = [
+        {"role": "user", "content": [{"type": "image"}, {"type": "text", "text": "What color? Ünïcodé 🚀"}]},
+        {"role": "assistant", "content": "Blue-ish."},
+    ]
+    text = processor.apply_chat_template(conv, tokenize=False)
+    base = processor(text=[text], images=[img], return_tensors="pt")
+
+    install_processor_backend(processor, "gigatoken")
+    swapped = processor(text=[text], images=[img], return_tensors="pt")
+
+    assert swapped["input_ids"].tolist() == base["input_ids"].tolist()
+    assert (swapped["pixel_values"] == base["pixel_values"]).all()
+    assert swapped["image_grid_thw"].tolist() == base["image_grid_thw"].tolist()
+
+
+def test_proxy_matches_hf_tokenizer():
+    pytest.importorskip("gigatoken")
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+    rendered = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)
+    for text in (rendered, "plain text with numbers 12345", "Ünïcodé — em—dash… 🚀🔥"):
+        for add_special_tokens in (False, True):
+            expected = tokenizer(text, add_special_tokens=add_special_tokens)["input_ids"]
+            actual = list(proxy(text, add_special_tokens=add_special_tokens)["input_ids"])
+            assert actual == expected, f"proxy diverges on {text[:40]!r}"
+
+    expected = tokenizer(rendered, truncation=True, max_length=16)["input_ids"]
+    actual = list(proxy(rendered, truncation=True, max_length=16)["input_ids"])
+    assert actual == expected, "proxy diverges under truncation"
+
+    # The dataset cache fingerprint reads these off the tokenizer.
+    assert proxy.name_or_path == tokenizer.name_or_path
+    assert proxy.vocab_size == tokenizer.vocab_size
+    assert len(proxy) == len(tokenizer)
+    assert proxy.chat_template == tokenizer.chat_template
+    assert proxy.eos_token_id == tokenizer.eos_token_id
+
+
+def test_verifier_catches_truncation_only_divergence(monkeypatch):
+    """Production paths tokenize with truncation=True."""
+    pytest.importorskip("gigatoken")
+
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    real_call = tb.GigatokenTokenizerProxy.__call__
+
+    def diverge_when_truncating(self, text=None, **kwargs):
+        out = real_call(self, text, **kwargs)
+        if kwargs.get("truncation"):
+            out["input_ids"] = list(out["input_ids"])[:-1]
+        return out
+
+    monkeypatch.setattr(tb.GigatokenTokenizerProxy, "__call__", diverge_when_truncating)
+    with pytest.raises(ValueError, match="diverges"):
+        tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+
+def test_proxy_pickle_roundtrip():
+    """datasets.map workers pickle the processor closure; the Rust backend is dropped and rebuilt lazily."""
+    pytest.importorskip("gigatoken")
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+    restored = pickle.loads(pickle.dumps(proxy))
+    text = tokenizer.apply_chat_template(CONVERSATIONS[1], tokenize=False)
+    assert list(restored(text)["input_ids"]) == tokenizer(text)["input_ids"]
+
+
+def test_proxy_transparency():
+    """Attribute writes must reach the wrapped tokenizer so its bound methods see them."""
+    pytest.importorskip("gigatoken")
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    proxy = resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+    assert isinstance(proxy, type(tokenizer))
+
+    original_side = tokenizer.padding_side
+    proxy.padding_side = "left"
+    assert tokenizer.padding_side == "left"
+    tokenizer.padding_side = original_side
+
+    assert resolve_tokenizer_backend(proxy, "gigatoken") is proxy
+
+
+def test_configure_run_tokenizer_resolves_backend():
+    """The single seam through which every training script gets the proxy."""
+    pytest.importorskip("gigatoken")
+
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    hf_args = PreprocessingArgsStub("hf")
+    assert (
+        configure_run_tokenizer(hf_args, None, tokenizer, 512, embeddings_sharded=is_input_embedding_tp_sharded)
+        is tokenizer
+    )
+
+    proxy = configure_run_tokenizer(
+        PreprocessingArgsStub("gigatoken"), None, tokenizer, 512, embeddings_sharded=is_input_embedding_tp_sharded
+    )
+    assert type(proxy) is GigatokenTokenizerProxy
+    text = tokenizer.apply_chat_template(CONVERSATIONS[0], tokenize=False)
+    assert list(proxy(text)["input_ids"]) == tokenizer(text)["input_ids"]
+
+
+@pytest.mark.parametrize("mode", ["chat", "text"])
+def test_tokenize_dataset_backend_parity(mode):
+    pytest.importorskip("gigatoken")
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+
+    if mode == "chat":
+        dataset = Dataset.from_dict({"conversation": CONVERSATIONS})
+        # The config default is the training-side "prompt"; this fixture names its column otherwise.
+        extra = {"conversation_field": "conversation"}
+    else:
+        dataset = Dataset.from_dict({"text": ["A raw pretraining document.\n\nWith newlines.", "Another one. 🚀"]})
+        extra = {"mode": "text"}
+
+    results = {}
+    for backend in TOKENIZER_BACKENDS:
+        config = PreprocessingConfig(
+            model_name_or_path=MODEL_NAME,
+            max_length=512,
+            tokenizer_backend=backend,
+            **extra,
+        )
+        tokenized = tokenize_dataset(dataset, tokenizer, config)
+        results[backend] = tokenized[:]
+
+    assert results["gigatoken"]["input_ids"] == results["hf"]["input_ids"]
+    assert results["gigatoken"] == results["hf"], "the backends baked different columns"
+
+
+class _FakeGigatoken:
+    """``corrupt=None`` is a faithful backend."""
+
+    def __init__(self, corrupt=None):
+        self._corrupt = corrupt
+        outer = self
+
+        class Tokenizer:
+            def __init__(self, hf):
+                self._hf = hf
+
+            def as_hf(self):
+                def _encode(text, **kwargs):
+                    out = dict(self._hf(text, **kwargs))
+                    if outer._corrupt is not None:
+                        out["input_ids"] = outer._corrupt(list(out["input_ids"]), kwargs)
+                    return out
+
+                return _encode
+
+        self.Tokenizer = Tokenizer
+
+
+def test_a_faithful_backend_is_accepted_without_the_package(monkeypatch):
+    """Anti-vacuity: a verifier rejecting everything could not pass both tests."""
+    monkeypatch.setattr(tb, "gigatoken", _FakeGigatoken())
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    resolved = tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
+    assert type(resolved) is tb.GigatokenTokenizerProxy
+
+
+def test_a_backend_that_diverges_only_under_truncation_is_rejected(monkeypatch):
+    """One token off at the ``max_length`` boundary silently shifts every label in a packed dataset."""
+    monkeypatch.setattr(
+        tb, "gigatoken", _FakeGigatoken(corrupt=lambda ids, kw: ids[:-1] if kw.get("truncation") and ids else ids)
+    )
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    with pytest.raises(ValueError, match="diverges"):
+        tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+
+def test_a_backend_that_diverges_on_special_tokens_is_rejected(monkeypatch):
+    """Mishandled BOS/EOS shifts every sequence by one token."""
+    monkeypatch.setattr(
+        tb,
+        "gigatoken",
+        _FakeGigatoken(corrupt=lambda ids, kw: ([0] + ids) if kw.get("add_special_tokens") else ids),
+    )
+    tokenizer = load_cached_tokenizer(MODEL_NAME)
+    with pytest.raises(ValueError, match="diverges"):
+        tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -1,16 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the code-contests evaluation protocols (``eval_protocol``).
-
-``leaderboard`` grades one program per sample with no scratchpad run. A leaderboard-labelled run that
-kept a second submission or a scratchpad would report attempts-until-accept as pass@k, so the protocol
-pins those budgets at every effort level: a config written for this run that contradicts it is
-refused, while a training config's budgets, written under another protocol, give way. ``harness``
-pins nothing. The eval script's ``--reasoning_effort none`` evaluates a non-thinking model at no level.
-
-The environments run against a stub sandbox that echoes a canned result (no subprocesses, no network).
-
-Run: python tests/cpu/environments/test_code_contests_protocols.py  (or pytest)
-"""
+"""The code-contests evaluation protocols (``eval_protocol``). ``leaderboard`` grades one program per sample with no
+scratchpad at every effort level: a config written for this run contradicting it is refused, while a training
+config's budgets give way. ``harness`` pins nothing."""
 
 import json
 import sys
@@ -18,33 +9,33 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.environments.eval_runner as eval_runner
-from scripts.environments._common import rollout_config_from_args
-from scripts.environments.inference.run_code_contests import (
+import halo.environments.eval_runner as eval_runner
+from halo.entrypoints.code_contests_eval import (
     FLAG_OWNED_ENV_KWARGS,
     SOLUTION_HEADROOM_TOKENS,
     contest_meta,
     default_max_tokens,
-    parse_args,
-    refuse_flag_owned_env_kwargs,
     resolve_env_config,
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from src.configs.rollout_config import DEFAULT_ROLLOUT_MAX_TOKENS
-from src.environments.base import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from src.environments.envs.tasks.coding.code_contests import (
+from halo.entrypoints.eval_contract import reject_flag_owned_env_kwargs, rollout_config_from_args
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     EVAL_PROTOCOL_KNOB_DEFAULTS,
     EVAL_PROTOCOLS,
-    SCRATCHPAD_BUDGET_SPENT_REPLY,
-    SUBMISSION_BUDGET_SPENT_REPLY,
     CodeContestsEnvironment,
 )
-from src.environments.envs.tasks.coding.datasets import ContestSelection
-from src.environments.envs.tasks.coding.grading import VERDICT_DETAIL_FULL
-from src.environments.episode import recovering_turn
-from src.environments.registry import resolve_environment
+from halo.environments.tasks.coding.code_contests_prompts import (
+    SCRATCHPAD_BUDGET_SPENT_REPLY,
+    SUBMISSION_BUDGET_SPENT_REPLY,
+)
+from halo.environments.tasks.coding.contest_datasets import ContestSelection
+from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
+from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from scripts.environments.inference.eval_code_contests import parse_args
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,
@@ -53,6 +44,7 @@ from tests.common.code_contests import (
     reset_episode,
     retired_budget_phrases,
 )
+from tests.common.fake_chat_client import chat_reply
 
 # The shipped recipes' interaction ladder under enforced budgets: effort buys submissions and scratchpad runs
 # as well as thinking.
@@ -109,16 +101,15 @@ def test_an_unknown_protocol_is_refused():
 
 
 def test_every_protocol_pins_only_knobs_the_environment_resolves():
-    """A pin on any other knob would be dropped without a word, and the run labelled with a protocol
-    it does not follow."""
+    """A pin on any other knob would be dropped without a word, labelling the run with a protocol it does not
+    follow."""
     for name, pins in EVAL_PROTOCOLS.items():
         assert set(pins) <= set(EVAL_PROTOCOL_KNOB_DEFAULTS), name
 
 
 def test_the_leaderboard_pins_hold_at_every_effort_level():
-    """A training config's ladder binds three submissions at ``high``; under the leaderboard the
-    episode still gets one and no scratchpad, the level keeps its thinking budget, and the task
-    message states no budget under either."""
+    """A training ladder binds three submissions at ``high``; under the leaderboard the episode still gets one and
+    no scratchpad, the level keeps its thinking budget, and the task message states no budget."""
     harness = _env(reasoning_effort_profiles=_RECIPE_PROFILES)
     traj = reset_episode(harness, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 6, "submit_solution": 3}
@@ -134,7 +125,9 @@ def test_the_leaderboard_pins_hold_at_every_effort_level():
 
 def test_a_pinned_profile_key_is_still_validated():
     """The pins supersede a profile's budgets; they do not excuse an invalid one."""
-    with pytest.raises(ValueError, match="max_submissions for effort 'high' must be >= 1"):
+    with pytest.raises(
+        ValueError, match=r"reasoning_effort_profiles\['high'\]: max_submissions must be an integer >= 1"
+    ):
         _env(eval_protocol="leaderboard", reasoning_effort_profiles={"high": {"max_submissions": 0}})
 
 
@@ -153,7 +146,6 @@ def test_a_leaderboard_episode_grades_one_program_and_refuses_the_scratchpad():
 
 
 def _scratchpad_turn(env, ids):
-    """One turn of a single scratchpad call through the protocol's step."""
     call = {
         "id": "c",
         "function": {"name": "python_repl", "arguments": json.dumps({"code": "print(1)", "stdin": "1"})},
@@ -162,17 +154,15 @@ def _scratchpad_turn(env, ids):
 
 
 def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_does():
-    """The leaderboard closes the scratchpad: a call to it gets the spent-budget reply and price, but it refuses
-    nothing the protocol offered, so its turn is not flagged and the next one gets no recovery reserve, which would
-    buy the leaderboard more output per sample than the setting it reproduces. A harness budget the episode spent
-    still flags a turn of nothing else."""
+    """A leaderboard scratchpad call gets the spent-budget reply and price, but refuses nothing the protocol
+    offered, so its turn stays trainable. A harness budget the episode spent still flags the turn."""
     leaderboard = _env(eval_protocol="leaderboard", tool_error_penalty=0.05)
     ids, _ = leaderboard.reset(["solve it"], [SINGLE_TEST_ANSWER])
     step = _scratchpad_turn(leaderboard, ids)
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
     assert step.reward == pytest.approx(-0.05)
-    assert not traj.messages[-2].calls_rejected and not recovering_turn(traj)
+    assert not traj.messages[-2].calls_rejected and not traj.messages[-2].untrainable
 
     harness = _env(max_test_calls=1, tool_error_penalty=0.05)
     ids, _ = harness.reset(["solve it"], [SINGLE_TEST_ANSWER])
@@ -181,16 +171,13 @@ def test_a_leaderboard_scratchpad_call_flags_no_turn_while_a_spent_budget_still_
     traj = step.trajectory
     assert traj.messages[-1].content == f"Error: {SCRATCHPAD_BUDGET_SPENT_REPLY}"
     assert step.reward == pytest.approx(-0.05)
-    assert traj.messages[-2].calls_rejected and recovering_turn(traj)
+    assert traj.messages[-2].calls_rejected and traj.messages[-2].untrainable
 
 
 def test_the_registry_presets_take_the_protocol():
-    env = resolve_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": StubSandbox()})
+    env = build_environment("codeforces", {"eval_protocol": "leaderboard", "sandbox": StubSandbox()})
     assert env.grading_spec.comparison == "tokens"
     assert (env.eval_protocol, *_budgets(env)) == ("leaderboard", 1, 0)
-
-
-# --- The eval script's side: the protocol flag over a training config ---
 
 
 def test_a_training_config_s_budgets_give_way_to_the_flag_s_protocol():
@@ -205,8 +192,7 @@ def test_a_training_config_s_budgets_give_way_to_the_flag_s_protocol():
 
 
 def test_the_meta_records_the_config_the_environment_was_built_from():
-    """Every flag that overrides the training config is what the meta line records, the env built
-    from the same config."""
+    """Every flag overriding the training config is what the meta line records, the env built from the same config."""
     trained = {"eval_protocol": "harness", "language": "python", "reasoning_effort": "low", "max_turns": 9}
     flags = SimpleNamespace(eval_protocol="leaderboard", language="cpp", reasoning_effort="high", max_turns=4)
     env_config = resolve_env_config(flags, trained, {"timeout_per_test": 3})
@@ -236,25 +222,23 @@ def test_a_contradiction_stated_for_this_run_is_refused():
 
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():
     with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
-        refuse_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
+        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"}, FLAG_OWNED_ENV_KWARGS)
 
 
 def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
-    """``--env_kwargs`` is laid over the flags, so an option it shares with a flag silently beats it:
-    ``{"max_turns": 3}`` would cap a ``--max_turns 16`` run at three turns. Read off the resolver, so a
-    flag added to it without a refusal fails here."""
+    """``--env_kwargs`` is laid over the flags, so ``{"max_turns": 3}`` would silently cap a ``--max_turns 16`` run.
+    Read off the resolver, so a flag added without a refusal fails here."""
     flags = SimpleNamespace(max_turns=16, language="python", eval_protocol="harness", reasoning_effort="high")
     flag_set = set(resolve_env_config(flags, {}, {}))
     assert flag_set <= set(FLAG_OWNED_ENV_KWARGS), sorted(flag_set - set(FLAG_OWNED_ENV_KWARGS))
     for key in sorted(flag_set):
         with pytest.raises(SystemExit, match=f"--{key}, not --env_kwargs"):
-            refuse_flag_owned_env_kwargs({key: 3})
-    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
+            reject_flag_owned_env_kwargs({key: 3}, FLAG_OWNED_ENV_KWARGS)
+    reject_flag_owned_env_kwargs({"timeout_per_test": 3}, FLAG_OWNED_ENV_KWARGS)
 
 
 def test_a_default_run_keeps_its_trajectory_file_name():
-    """The protocol and the selection name the file only where they depart from the defaults, so an
-    existing harness run lands where it always did."""
+    """The protocol and the selection name the file only where they depart from the defaults."""
     args = SimpleNamespace(
         save_trajectories=None, trajectory_dir="/runs", model="org/m", adapter="livecodebench", split="test"
     )
@@ -268,18 +252,14 @@ def test_a_default_run_keeps_its_trajectory_file_name():
     )
 
 
-# --- No effort level: a non-thinking model ---
-
-
 def _parse_flags(monkeypatch, *flags: str):
-    """The eval script's own parser over ``flags`` plus the two it requires."""
-    monkeypatch.setattr(sys, "argv", ["run_code_contests.py", "--dataset", "d", "--model", "m", *flags])
+    monkeypatch.setattr(sys, "argv", ["eval_code_contests.py", "--dataset", "d", "--model", "m", *flags])
     return parse_args()
 
 
 def test_the_effort_flag_spells_no_level_as_none(monkeypatch):
-    """``--env_kwargs`` may not set an option its flag owns, so the flag itself must reach no level:
-    ``none`` is ``reasoning_effort=None``, over a training config's level too."""
+    """``--env_kwargs`` may not set an option its flag owns, so ``none`` is ``reasoning_effort=None``, over a
+    training config's level too."""
     args = _parse_flags(monkeypatch, "--reasoning_effort", "none")
     assert resolve_env_config(args, {}, {})["reasoning_effort"] is None
     assert resolve_env_config(args, {"reasoning_effort": "high"}, {})["reasoning_effort"] is None
@@ -287,15 +267,12 @@ def test_the_effort_flag_spells_no_level_as_none(monkeypatch):
 
 @pytest.mark.parametrize(("flag", "max_tokens"), [(None, 12288), ("low", 8192), ("high", 20480), ("none", 32768)])
 def test_the_default_generation_budget_follows_the_flag_s_level(flag, max_tokens):
-    """A level's thinking budget plus the solution headroom; no level has no budget to size it from and
-    takes the training rollout's default instead of looking a profile up."""
+    """A level's thinking budget plus the solution headroom; no level takes the training rollout's default."""
     assert default_max_tokens(CodeContestsEnvironment(sandbox=StubSandbox()), flag) == max_tokens
 
 
 def test_the_default_generation_budget_reads_a_profile_override():
-    """``--env_kwargs reasoning_effort_profiles`` rebinds a level's thinking budget for every episode, so
-    the turn cap sized from it must follow: the class table's budget would leave the override's turns
-    capped for a budget they no longer run under."""
+    """A profile override rebinds a level's budget for every episode, so the turn cap sized from it must follow."""
     env = CodeContestsEnvironment(
         sandbox=StubSandbox(), reasoning_effort_profiles={"medium": {"thinking_tokens": 2000}}
     )
@@ -304,35 +281,32 @@ def test_the_default_generation_budget_reads_a_profile_override():
 
 def test_a_soft_budget_sizes_the_default_no_smaller_than_the_rollouts_own():
     """A turn may reason past a soft budget, so the default never shrinks to the budget plus headroom; a soft budget
-    past the rollout default still gets its headroom, or it would sit at or above its own turn cap."""
+    past the rollout default still gets its headroom."""
 
     def soft(budget):
         profiles = {"medium": {"thinking_tokens": budget, "enforce_thinking_cap": False}}
         return CodeContestsEnvironment(sandbox=StubSandbox(), reasoning_effort_profiles=profiles)
 
-    assert default_max_tokens(soft(2000), "medium") == DEFAULT_ROLLOUT_MAX_TOKENS
+    assert default_max_tokens(soft(2000), "medium") == RolloutConfig.max_tokens
     assert default_max_tokens(soft(40000), "medium") == 40000 + SOLUTION_HEADROOM_TOKENS
 
 
 async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
-    """``--reasoning_effort none`` end to end: the episode's requests carry no level, no thinking budget
-    and no template variable, so a server without a reasoning parser serves them, and the trajectory and
-    the meta line record no level."""
+    """The episode's requests carry no level, budget or template variable, so a server without a reasoning parser
+    serves them, and the records hold no level."""
     args = _parse_flags(monkeypatch, "--reasoning_effort", "none")
     env_config = resolve_env_config(args, {}, {})
     env = CodeContestsEnvironment(sandbox=StubSandbox(), **env_config)
     rollout = rollout_config_from_args(
-        args, None, default_temperature=0.2, default_max_tokens=default_max_tokens(env, args.reasoning_effort)
+        args, None, env, default_temperature=0.2, default_max_tokens=default_max_tokens(env, args.reasoning_effort)
     )
     calls = []
 
-    async def fake_generate(model, messages, **kwargs):
-        calls.append(kwargs)
-        return SimpleNamespace(
-            answer="done", finish_reason="stop", completion_tokens=3, tool_calls=None, reasoning=None, token_ids=None
-        )
+    async def fake_chat(client, **request):
+        calls.append(request)
+        return chat_reply("done", completion_tokens=3)
 
-    monkeypatch.setattr(eval_runner, "generate_openai_response", fake_generate)
+    monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
     traj = await eval_runner.run_episode(env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout)
 
     assert env.reasoning_effort is None

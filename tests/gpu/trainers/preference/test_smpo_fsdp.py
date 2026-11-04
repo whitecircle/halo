@@ -1,67 +1,36 @@
 #!/usr/bin/env python
-"""
-SMPO Trainer smoke test with standard FSDP (no EP/CP/TP).
+"""SMPO smoke on plain FSDP2, padded or ``--mode padding_free``. Compares no objective against a reference;
+test_smpo_padding_free_segments.py pins per-document isolation."""
 
-Runs SmoothMarginPOTrainer in standard FSDP mode on Qwen3-0.6B with:
-- Gradient checkpointing
-- Liger kernels (fused RMSNorm + cross-entropy)
-- BF16 mixed precision
-- Synthetic preference data with math Q&A (correct vs incorrect answers)
-- 30% multi-turn prompts
-
-Test Phases:
-1. Synthetic preference dataset creation (prompt/chosen/rejected)
-2. SMPO training for 10 steps
-3. Validation: every configured step ran, and the final and every per-step loss is finite
-
-It does not compare the SMPO objective against a reference, so a wrong-but-finite loss passes.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_fsdp.py
-"""
+import argparse
 
 import torch
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
-# Configuration
-
-MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10
-BATCH_SIZE = 1
-GRADIENT_ACCUMULATION_STEPS = 2
-LEARNING_RATE = 5e-6
-MAX_LENGTH = 4096
-MAX_PROMPT_LENGTH = 2048
-NUM_TRAIN_SAMPLES = 128
-NUM_EVAL_SAMPLES = 16
 SEED = 42
 
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=("fsdp", "padding_free"), default="fsdp")
+ARGS = parser.parse_args()
+PADDING_FREE = ARGS.mode == "padding_free"
 
+
+@gpu_test_main(min_world_size=2, prefix=f"smpo_{ARGS.mode}")
 def run(ctx):
-    log(f"\n{'=' * 70}")
-    log("  SMPO FSDP Training Test (Standard FSDP, no EP/CP/TP)")
-    log(f"  World size: {ctx.world_size}, Model: {MODEL_NAME}")
-    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
-    log(f"  Max steps: {MAX_STEPS}, Batch size: {BATCH_SIZE}")
-    log(f"  Gradient accumulation: {GRADIENT_ACCUMULATION_STEPS}")
-    log(f"  Max length: {MAX_LENGTH}, Max prompt length: {MAX_PROMPT_LENGTH}")
-    log(f"{'=' * 70}")
-
-    # ── Load model ──────────────────────────────────────────────────
-    log("\n[1/4] Loading model via load_distributed_model...")
+    log(f"SMPO {ARGS.mode} test: world size {ctx.world_size}, GPU {torch.cuda.get_device_name(ctx.local_rank)}")
     parallelism_config = ParallelismConfig()
-
     model, tokenizer = load_distributed_model(
-        model_name_or_path=MODEL_NAME,
+        model_name_or_path=QWEN3_0_6B,
         parallelism_config=parallelism_config,
         dtype=torch.bfloat16,
         trust_remote_code=True,
@@ -71,80 +40,42 @@ def run(ctx):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    param_count = sum(p.numel() for p in model.parameters())
-    log(f"  Model loaded: {param_count / 1e6:.1f}M parameters")
-    log(f"  Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
-
-    # ── Create datasets ─────────────────────────────────────────────
-    log("\n[2/4] Creating synthetic preference datasets...")
-    train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
-    eval_dataset = create_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
-    log(f"  Train: {len(train_dataset)} samples, Eval: {len(eval_dataset)} samples")
-
-    # Log a sample
-    if ctx.rank == 0:
-        sample = train_dataset[0]
-        log(f"  Sample prompt (truncated): {sample['prompt'][:150]}...")
-        log(f"  Sample chosen: {sample['chosen']}")
-        log(f"  Sample rejected: {sample['rejected']}")
-
-    # Count multi-turn samples
-    multi_turn_count = sum(1 for s in train_dataset if s["prompt"].count("user") > 1)
-    log(
-        f"  Multi-turn samples: {multi_turn_count}/{len(train_dataset)} "
-        f"({100 * multi_turn_count / len(train_dataset):.0f}%)"
-    )
-
-    # ── Configure trainer ───────────────────────────────────────────
-    log("\n[3/4] Configuring SMPO trainer...")
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
-        per_device_train_batch_size=BATCH_SIZE,
-        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
-        learning_rate=LEARNING_RATE,
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=2,
+        learning_rate=5e-6,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # Already applied in load_distributed_model
+        use_liger_kernel=False,  # Already applied in load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",
         logging_nan_inf_filter=False,
-        max_length=MAX_LENGTH,
-        max_prompt_length=MAX_PROMPT_LENGTH,
+        max_length=4096,
+        max_prompt_length=2048,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
+        padding_free=PADDING_FREE,
     )
-
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        train_dataset=create_preference_dataset(128, tokenizer, seed=SEED),
+        eval_dataset=create_preference_dataset(16, tokenizer, seed=SEED + 1),
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
     )
-    log(f"  Trainer created: {type(trainer).__name__}")
-    log(f"  Parallelism: {parallelism_config.mode_string or 'Standard FSDP'}")
-    log(f"  Loss type: {config.loss_type}, Beta: {config.beta}")
-    log(f"  Target margin: {config.target_margin}")
-
-    # ── Train ───────────────────────────────────────────────────────
-    log("\n[4/4] Training...")
+    log(f"  Loss type: {config.loss_type}, beta: {config.beta}, target margin: {config.target_margin}")
     train_result = trainer.train()
+    margins = [entry["margin"] for entry in trainer.state.log_history if "margin" in entry]
+    log(f"  Margins: {[f'{margin:.4f}' for margin in margins]}")
 
-    # ── Collect metrics ─────────────────────────────────────────────
-    log("\n  --- Training Results ---")
-    margin_metrics = [entry["margin"] for entry in trainer.state.log_history if "margin" in entry]
-    if margin_metrics:
-        log(f"  Margins: {[f'{m:.4f}' for m in margin_metrics]}")
+    checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    if PADDING_FREE:
+        checks["padding_free_active"] = trainer.args.padding_free is True
+    return {"checks": checks, "metrics": {"final_train_loss": train_result.training_loss}}
 
-    # ── Assertions ──────────────────────────────────────────────────
-    log("\n  --- Assertions ---")
-    return {"checks": training_run_checks(train_result, trainer, MAX_STEPS)}
-
-
-main = gpu_test_main(min_world_size=2, prefix="smpo_fsdp")(run)
 
 if __name__ == "__main__":
-    main()
+    run()

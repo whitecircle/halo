@@ -22,7 +22,7 @@ the whole contract on a tiny random-init model through the real trainer save/res
      warning fires naming ``ep_size``, the optimizer starts empty, training proceeds.
 
 ``--mode ep1`` (tiny Qwen3 MoE, ep_size=1): phases 1-3 on the DEFAULT MoE shape at ep_size=1 — EP
-wrappers with no expert distribution, so ``fsdp_shard_ep1_experts`` leaves the experts to FSDP2 and
+layers with no expert distribution, so ``fsdp_shard_ep1_experts`` leaves the experts to FSDP2 and
 their moments are DTensor shards rather than the ``ep`` row's plain FSDP-ignored per-rank tensors.
 Different shard layout and a different save gather (``full_tensor()``, not an EP all-gather), same
 contract. No mismatch phase: save and resume run the same topology by construction.
@@ -31,10 +31,12 @@ contract. No mismatch phase: save and resume run the same topology by constructi
 cp_size=2, ``--mode tp`` uses dense Qwen3 with native TP2, and ``--mode fsdp`` uses FSDP2 alone.
 Each runs phases 1-3.
 
-``--fp32-masters`` enables router, expert and non-expert masters together. The ``ep1`` row needs
-``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
+``--fp32-masters`` enables router, expert and non-expert masters together; a dense mode has only the last. The ``ep1``
+row needs ``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
 ``--eager-loading`` selects the non-lazy EP loader. Each master row checks live dtypes and that
-trained values outside BF16's representable set survive resume bit for bit.
+trained values outside BF16's representable set survive resume bit for bit. ``--fused-adamw`` (with
+``--fp32-masters``) turns AdamWBF16 off, so the trainer builds its tensor-type-grouped optimizer under the default
+``optim: adamw_torch_fused``: every group must step fused, and the same phases hold for it.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -42,7 +44,6 @@ Usage:
 """
 
 import argparse
-import logging
 import os
 
 import torch
@@ -52,36 +53,30 @@ from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import SFTConfig
 
-import src.distributed.checkpoint.optimizer as optimizer_store_mod
-from src.checkpoint.format import load_full_state_dict
-from src.distributed.checkpoint.fingerprint import OptimizerStateFingerprint
-from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+import halo.checkpoint.parallel.optimizer as optimizer_store_mod
+from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
+from halo.checkpoint.reading import load_full_state_dict
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
+from tests.common.fp32_masters import fp32_master_groups
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
+from tests.common.numerics import max_or_nan, relative_l2
+from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
+from tests.common.rank_log import log, logged_messages
 from tests.common.tiny_models import build_tied_qwen3_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    local_optimizer_state,
-    log,
-    max_or_nan,
-    optimizer_state_matches,
-    relative_l2,
-    snapshot_trainable,
-    step_losses,
-)
+from tests.common.training_checks import snapshot_trainable, step_losses
 
-# Modes whose tiny model is MoE — the only ones with expert weights to gather on save.
+# The only modes with expert weights to gather on save.
 MOE_MODES = ("ep", "ep1", "ep_cp")
-# The parameter groups each mode's model holds, every one of which keeps an fp32 master under
-# --fp32-masters (router, expert and non-expert flags together). An ep1 row takes it only with
-# --unsharded-ep1-experts: FSDP-managed ep1 experts and fp32_non_ep_params refuse each other.
+# Each mode's groups keep fp32 masters under --fp32-masters. An ep1 row takes it only with --unsharded-ep1-experts:
+# FSDP-managed ep1 experts and fp32_non_ep_params refuse each other.
 FP32_MASTER_GROUPS = {
     "ep": {"expert", "router", "non_expert"},
     "ep1": {"expert", "router", "non_expert"},
@@ -97,9 +92,8 @@ SAVE_AT_STEP = 3
 BATCH_SIZE = 2
 LEARNING_RATE = 1e-4
 MAX_SEQ_LENGTH = 256
-# Resumed steps 4-6 vs the continuous run: identical batches, restored weights and moments, and the
-# same rounding noise, so every row measured bit-exact (|delta| 0.0); a warm restart shifts the
-# trajectory by the full Adam-moment reset, and a replayed rounding stream by ~1e-3.
+# Identical batches, restored state and rounding noise, so every row measured bit-exact (|delta| 0.0); a warm restart
+# shifts the trajectory by the full Adam-moment reset, and a replayed rounding stream by ~1e-3.
 LOSS_TOL = TOL.replayed_resume_loss_abs
 
 
@@ -111,6 +105,9 @@ def optimizer_resume_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--unsharded-ep1-experts", action="store_true", help="keep EP1 experts outside FSDP2's shard groups"
     )
+    parser.add_argument(
+        "--fused-adamw", action="store_true", help="AdamWBF16 off: the grouped fused torch AdamW (with --fp32-masters)"
+    )
     return parser
 
 
@@ -121,18 +118,22 @@ def _parallelism_config(
     fp32_masters: bool = False,
     eager_loading: bool = False,
     unsharded_ep1_experts: bool = False,
+    fused_adamw: bool = False,
 ) -> ParallelismConfig:
     if unsharded_ep1_experts and mode != "ep1":
         raise ValueError("--unsharded-ep1-experts applies only to --mode ep1")
+    if fused_adamw and not fp32_masters:
+        raise ValueError("--fused-adamw needs --fp32-masters, the shape that builds the tensor-type-grouped optimizer")
     return ParallelismConfig(
         ep_size=world_size if mode in ("ep", "ep_cp") else 1,
         cp_size=world_size if mode in ("cp", "ep_cp") else 1,
         tp_size=world_size if mode == "tp" else 1,
-        ep_fp32_router=fp32_masters,
-        ep_fp32_experts=fp32_masters,
+        ep_fp32_router=fp32_masters and mode in MOE_MODES,
+        ep_fp32_experts=fp32_masters and mode in MOE_MODES,
         fp32_non_ep_params=fp32_masters,
         ep_lazy_loading=not eager_loading,
         fsdp_shard_ep1_experts=not unsharded_ep1_experts,
+        bf16_optimizer=False if fused_adamw else None,
     )
 
 
@@ -142,7 +143,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
         max_steps=max_steps,
         per_device_train_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
-        lr_scheduler_type="constant",  # step-count-invariant: phases with different max_steps stay comparable
+        lr_scheduler_type="constant",  # Step-count-invariant: phases with different max_steps stay comparable.
         bf16=True,
         logging_steps=1,
         save_strategy="steps" if save_at else "no",
@@ -157,8 +158,7 @@ def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConf
 
 
 def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_checkpoint_precision=False):
-    # CP rejects sdpa (Ulysses needs a Flash kernel), so let CP auto-detect (FA4 on Blackwell) and
-    # keep the cheaper sdpa path for the other modes, which do not constrain the kernel.
+    # CP rejects sdpa (Ulysses needs a Flash kernel), so CP auto-detects; the other modes keep the cheaper sdpa path.
     model, _ = load_distributed_model(
         model_name_or_path=model_path,
         parallelism_config=pc,
@@ -178,7 +178,6 @@ def _make_trainer(model_path, pc, tokenizer, train_dataset, config, *, preserve_
 
 
 def _snapshot_values(snapshot: dict) -> list[tuple[str, object]]:
-    """Every state value in a snapshot, flattened across params — for whole-snapshot scans."""
     return [(f"{fqn}.{key}", value) for fqn, entry in snapshot["state"].items() for key, value in entry.items()]
 
 
@@ -200,28 +199,15 @@ class _ResumeCapture(TrainerCallback):
 
 
 def _trainable_weights(model) -> dict[str, torch.Tensor]:
-    """Every trainable parameter, whole and at its live dtype. Collective under FSDP2."""
+    """COLLECTIVE under FSDP2. Every trainable parameter, whole and at its live dtype."""
     reshard_fsdp2_modules(model)
     return snapshot_trainable(model)
 
 
 def _configured_master_checks(model, mode: str) -> dict[str, bool]:
-    """Live parameter identities separate routers, experts and the remaining parameters; each group
-    :data:`FP32_MASTER_GROUPS` names for ``mode`` must hold fp32 masters carrying more than bf16 precision."""
-    reshard_fsdp2_modules(model)
-    layers = list(find_ep_layers(model))
-    experts = {id(parameter) for _, layer in layers for _, parameter in layer.expert_named_params()}
-    routers = {
-        id(parameter)
-        for _, layer in layers
-        if (router := layer._live_router_module()) is not None
-        for parameter in router.parameters()
-    }
-    groups = {"expert": {}, "router": {}, "non_expert": {}}
-    for name, parameter in model.named_parameters():
-        if parameter.requires_grad:
-            group = "expert" if id(parameter) in experts else "router" if id(parameter) in routers else "non_expert"
-            groups[group][name] = parameter
+    """Each group :data:`FP32_MASTER_GROUPS` names for ``mode`` holds fp32 masters carrying more than bf16
+    precision."""
+    groups = fp32_master_groups(model)
     expected = FP32_MASTER_GROUPS[mode]
     checks = {
         "master_parameter_groups_present": {group for group, parameters in groups.items() if parameters} == expected
@@ -229,7 +215,7 @@ def _configured_master_checks(model, mode: str) -> dict[str, bool]:
     for group in expected:
         parameters = groups[group].values()
         checks[f"{group}_configured_master_dtype"] = all(parameter.dtype == torch.float32 for parameter in parameters)
-        # A BF16-exact source would pass a loader that discards its stored FP32 mantissa.
+        # A bf16-exact source would pass a loader that discards its stored fp32 mantissa.
         checks[f"{group}_masters_exceed_bf16_precision"] = any(
             not torch.equal(local, local.to(torch.bfloat16).float())
             for parameter in parameters
@@ -239,7 +225,6 @@ def _configured_master_checks(model, mode: str) -> dict[str, bool]:
 
 
 def _unequal(expected: dict[str, torch.Tensor], actual: dict[str, torch.Tensor]) -> list[str]:
-    """Keys whose tensors differ in value or dtype, or are missing from ``actual``."""
     return sorted(
         key
         for key, value in expected.items()
@@ -260,8 +245,8 @@ def _verify_checkpoint_files(ckpt_dir: str, world_size: int, pc: ParallelismConf
         problems.append("missing optimizer_meta.pt")
     else:
         meta = torch.load(os.path.join(ckpt_dir, "optimizer_meta.pt"), map_location="cpu", weights_only=False)
-        saved_fp = OptimizerStateFingerprint.from_dict(meta.get("fingerprint"))
-        if saved_fp is None:
+        saved_fp = meta.get("fingerprint")
+        if not isinstance(saved_fp, dict):
             problems.append("optimizer_meta.pt carries no fingerprint")
         else:
             expected = OptimizerStateFingerprint.capture(pc, optimizer, world_size)
@@ -274,18 +259,9 @@ def _verify_checkpoint_files(ckpt_dir: str, world_size: int, pc: ParallelismConf
 
 
 def _verify_checkpoint_weights(ckpt_dir: str, source_dir: str, mode: str) -> tuple[bool, str]:
-    """Rank 0: the saved weights are the whole model, at full shapes, carrying the TRAINED values.
-
-    The source checkpoint every phase loads from is the reference layout, so a key it declares that
-    the save did not write back — or wrote at a sharded shape — is a dropped/half-gathered tensor.
-    That is the failure this shape invites: at ``ep_size=1`` the experts are FSDP2 DTensors, so the
-    save must ``full_tensor()`` them rather than write a rank's slice (or nothing at all), and a
-    reload would then silently re-init them.
-
-    Extra keys are reported, not failed: the discriminating half is that every declared key came
-    back whole, and the one extra-key spelling that IS corruption (a doubled ``experts.experts.``
-    prefix from a mis-prefixed gather) is failed explicitly.
-    """
+    """Rank 0: the whole model at full shapes with trained values. At ``ep_size=1`` a save writing a rank's slice of
+    the DTensor experts makes a reload silently re-init them. A doubled ``experts.experts.`` prefix is corruption and
+    fails."""
     saved = load_full_state_dict(ckpt_dir)
     source = load_full_state_dict(source_dir)
     if saved is None or source is None:
@@ -305,10 +281,8 @@ def _verify_checkpoint_weights(ckpt_dir: str, source_dir: str, mode: str) -> tup
     if non_finite:
         problems.append(f"{len(non_finite)} key(s) hold non-finite values, e.g. {non_finite[:3]}")
 
-    # Anti-vacuity: the save must hold the TRAINED weights. Identical-to-source everywhere means the
-    # writer emitted the initial values (or the reload source, not the live model). Per-key rather
-    # than all-keys: with top-2-of-8 routing over 3 steps an individual expert can legitimately be
-    # untouched, so the premise is that at least one expert tensor moved.
+    # Anti-vacuity: identical-to-source everywhere means the writer emitted initial values. Any-key: with top-2-of-8
+    # routing over 3 steps an individual expert can legitimately be untouched.
     changed = [k for k in set(source) & set(saved) if not torch.equal(saved[k].float(), source[k].float())]
     if not changed:
         problems.append("every saved tensor equals the untrained source — the save wrote initial weights")
@@ -330,7 +304,7 @@ def run(ctx):
     metrics: dict[str, float] = {}
     device = ctx.device
 
-    # Shared workspace: rank 0's output dir (single-node shared FS).
+    # Rank 0's output dir (single-node shared FS).
     dirs = [ctx.output_dir]
     dist.broadcast_object_list(dirs, src=0)
     shared_dir = dirs[0]
@@ -349,6 +323,7 @@ def run(ctx):
         fp32_masters=args.fp32_masters,
         eager_loading=args.eager_loading,
         unsharded_ep1_experts=args.unsharded_ep1_experts,
+        fused_adamw=args.fused_adamw,
     )
     if pc.ep_size > 1:
         pin_deterministic_ep_dispatch()
@@ -357,7 +332,6 @@ def run(ctx):
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(64, tokenizer, seed=SEED)
 
-    # ── Phase 1: continuous 6-step reference ─────────────────────────────────
     log(f"\n--- Phase 1 ({mode}): continuous {TOTAL_STEPS}-step reference ---")
     trainer = _make_trainer(tiny_dir, pc, tokenizer, train_dataset, _sft_config(train_out, TOTAL_STEPS, None))
     ctx.on_teardown(trainer.cleanup_ep)
@@ -370,7 +344,6 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 2: train to the save point, snapshot the state the shards hold ─
     log(f"\n--- Phase 2 ({mode}): train {SAVE_AT_STEP} steps + checkpoint ---")
     trainer = _make_trainer(tiny_dir, pc, tokenizer, train_dataset, _sft_config(train_out, SAVE_AT_STEP, SAVE_AT_STEP))
     ctx.on_teardown(trainer.cleanup_ep)
@@ -383,6 +356,11 @@ def run(ctx):
             f"saved_{name}": world_all(ok, device)
             for name, ok in _configured_master_checks(trainer.model, mode).items()
         }
+    if args.fused_adamw:
+        groups = trainer.optimizer.param_groups
+        checks["every_optimizer_group_fused"] = bool(groups) and all(
+            group["fused"] and not group["foreach"] for group in groups
+        )
     checks["saved_state_nonempty"] = any(
         torch.is_tensor(v) and v.dtype.is_floating_point and (v != 0).any() for _, v in _snapshot_values(snapshot_ref)
     )
@@ -400,7 +378,6 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 3: resume → optimizer state restored EXACTLY, losses track the reference ─
     log(f"\n--- Phase 3 ({mode}): resume from checkpoint-{SAVE_AT_STEP} ---")
     trainer = _make_trainer(
         ckpt_dir,
@@ -451,18 +428,9 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    # ── Phase 4 (ep only): topology mismatch → loud warm restart, run proceeds ─
     if mode == "ep":
         log("\n--- Phase 4 (ep): resume the ep_size=2 checkpoint at ep_size=1 (mismatch) ---")
-        warnings: list[str] = []
-
-        class _Grab(logging.Handler):
-            def emit(self, record):
-                warnings.append(record.getMessage())
-
-        handler = _Grab(level=logging.WARNING)
-        optimizer_store_mod.logger.addHandler(handler)
-        try:
+        with logged_messages(optimizer_store_mod.logger) as store_log:
             pc_ep1 = ParallelismConfig(ep_size=1, use_grouped_gemm=True)
             trainer = _make_trainer(
                 ckpt_dir,
@@ -476,17 +444,12 @@ def run(ctx):
             trainer_ref = {"trainer": trainer, "capture": None}
             trainer.add_callback(_ResumeCapture(trainer_ref))
             trainer.train(resume_from_checkpoint=ckpt_dir)
-        finally:
-            optimizer_store_mod.logger.removeHandler(handler)
         capture = trainer_ref["capture"]
         checks["mismatch_capture_fired"] = capture is not None
         if capture is not None:
-            # Warm restart: no TRAINED moments may carry over — every state entry must still be at
-            # its freshly-initialized value. Asserting "state is empty" would be wrong on two counts:
-            # ``optimizer.state`` is a defaultdict (a bare read inserts an empty entry) and
-            # ``get_optimizer_state_dict`` itself materializes empty state via a zero-grad init step.
-            # That init step is also why ``step`` is excluded from the zero test and asserted against
-            # the saved step instead; a wrongly loaded shard shows non-zero moments AND the saved step.
+            # Warm restart: every state entry must be at its fresh value. ``optimizer.state`` is a defaultdict, so
+            # emptiness won't do. ``step`` is held to the saved step, since torch's zero-LR init step counts; a wrongly
+            # loaded shard shows non-zero moments and the saved step.
             carried = _snapshot_values(capture["snapshot"])
             carried_moments = sorted(
                 key for key, value in carried if torch.is_tensor(value) and bool(value.abs().sum() > 0)
@@ -499,9 +462,9 @@ def run(ctx):
             if (carried_moments or carried_steps) and ctx.rank == 0:
                 log(f"mismatch resume carried: moments={carried_moments[:5]} steps={carried_steps[:5]}")
             checks["mismatch_warm_restarted"] = world_all(not carried_moments and not carried_steps, device)
-        mismatch_warned = any("fingerprint mismatch" in w and "ep_size" in w for w in warnings)
+        mismatch_warned = any("fingerprint mismatch" in w and "ep_size" in w for w in store_log)
         if ctx.rank == 0 and not mismatch_warned:
-            log(f"captured warnings: {warnings}")
+            log(f"captured optimizer-store messages: {store_log}")
         # The warning logs on the main process only; every rank must have taken the warm restart.
         checks["mismatch_warning_fired"] = world_all(mismatch_warned or ctx.rank != 0, device)
         mismatch_losses = step_losses(trainer)

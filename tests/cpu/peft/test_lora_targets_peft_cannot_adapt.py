@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""``lora_target_modules`` name matches PEFT cannot adapt must be excluded, not fatal.
-
-Two shapes are out of stock LoRA's reach, and both are reachable by an ordinary target list or by
-``all-linear``:
-
-- a wrapper holding its weight in a child module — Gemma 4's ``Gemma4ClippableLinear``, which the
-  vision and audio towers spell ``q_proj``…``o_proj`` exactly as the language model does. PEFT
-  decomposes the matched module's OWN weight, so injection raises there and takes the run with it.
-- a layer subclass computing something other than its base layer's affine map — DeepSeek-V4's
-  ``o_a_proj``, an ``nn.Linear`` subclass whose block-diagonal forward returns one group's width.
-  PEFT accepts it and the delta dies on a shape mismatch at the first forward.
-
-The counter-cases matter as much: a tower whose ``q_proj`` is a plain ``nn.Linear`` (CLIP/SigLIP/
-Pixtral-style) and a subclass that only changes HOW the affine map is computed (the low-precision
-compute drop-in) are adapted, and must stay adapted — silently changing which modules train is not an
-acceptable fix.
-
-Run: pytest tests/cpu/peft/test_lora_targets_peft_cannot_adapt.py
-"""
+"""``lora_target_modules`` matches PEFT cannot adapt are excluded, not fatal: Gemma 4's ``Gemma4ClippableLinear`` and
+DeepSeek-V4's grouped ``o_a_proj``. A plain ``nn.Linear`` tower or a same-map subclass must stay adapted."""
 
 import datetime
 import os
@@ -30,11 +13,11 @@ from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM, DeepseekV4GroupedLinear
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
-from trl import ModelConfig
 
-import src.distributed.loading.peft_setup as peft_setup
-from src.distributed.loading.peft_setup import build_peft_config, setup_peft_model
-from src.kernels.lowp.linear import LowPrecisionLinear
+import halo.model_loading.parallel.peft_setup as peft_setup
+from halo.configs.script_arguments import ModelArguments
+from halo.kernels.lowp.linear import LowPrecisionLinear
+from halo.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_DSV4_CONFIG
 
@@ -70,8 +53,8 @@ class _Multimodal(nn.Module):
         raise NotImplementedError
 
 
-def _model_config(targets=ATTENTION_TARGETS, **kwargs) -> ModelConfig:
-    return ModelConfig(model_name_or_path="dummy/vlm", use_peft=True, lora_target_modules=targets, **kwargs)
+def _model_config(targets=ATTENTION_TARGETS, **kwargs) -> ModelArguments:
+    return ModelArguments(model_name_or_path="dummy/vlm", use_peft=True, lora_target_modules=targets, **kwargs)
 
 
 def _adapted_modules(peft_model) -> set[str]:
@@ -79,8 +62,7 @@ def _adapted_modules(peft_model) -> set[str]:
 
 
 def test_wrapped_projection_is_excluded_and_injection_succeeds():
-    """Without the exclusion PEFT raises ``Target module Gemma4ClippableLinear(...) is not supported``
-    and the run never starts; the language model's adapters must survive intact."""
+    """Without the exclusion PEFT raises ``Target module Gemma4ClippableLinear(...) is not supported``."""
     model = _Multimodal(_ClippableAttention())
 
     peft_config = build_peft_config(model, _model_config())
@@ -94,8 +76,7 @@ def test_wrapped_projection_is_excluded_and_injection_succeeds():
 
 
 def test_plain_linear_tower_keeps_its_adapters():
-    """A vision tower whose projections are plain ``nn.Linear`` is adapted today. Nothing may be
-    excluded there, or existing VLM LoRA runs would silently train fewer modules."""
+    """Excluding anything there would make existing VLM LoRA runs silently train fewer modules."""
     model = _Multimodal(_PlainAttention())
 
     peft_config = build_peft_config(model, _model_config())
@@ -110,8 +91,7 @@ def test_plain_linear_tower_keeps_its_adapters():
 
 
 def test_no_adaptable_target_left_fails_loud():
-    """Excluding every match would leave an adapter run with nothing to train — the LoRA optimizer
-    accepts empty parameter groups, so this has no other symptom."""
+    """The LoRA optimizer accepts empty parameter groups, so an all-excluded run has no other symptom."""
     model = _ClippableAttention()
 
     with pytest.raises(ValueError, match="PEFT can adapt none of them"):
@@ -119,7 +99,7 @@ def test_no_adaptable_target_left_fails_loud():
 
 
 def test_unclipped_wrapper_is_excluded_too():
-    """``use_clipped_linears: false`` drops the buffers but keeps the container — PEFT still raises."""
+    """``use_clipped_linears: false`` drops the buffers but keeps the container, so PEFT still raises."""
     model = _Multimodal(_ClippableAttention(clipped=False))
 
     peft_config = build_peft_config(model, _model_config())
@@ -128,8 +108,7 @@ def test_unclipped_wrapper_is_excluded_too():
 
 
 def test_all_linear_sentinel_is_untouched():
-    """``all-linear`` is resolved to ``nn.Linear`` paths inside PEFT's own injection, which reaches
-    the inner ``linear`` of each wrapper. Excluding anything here would change what it adapts."""
+    """PEFT's injection resolves ``all-linear`` to each wrapper's inner ``linear``; an exclusion would change that."""
     model = _Multimodal(_ClippableAttention())
 
     peft_config = build_peft_config(model, _model_config(targets=["all-linear"]))
@@ -145,15 +124,14 @@ def test_regex_target_string_still_selects_by_pattern():
     """A regex target is matched with PEFT's own matcher, so the scan neither widens nor narrows it."""
     model = _Multimodal(_ClippableAttention())
 
-    peft_config = build_peft_config(model, _model_config(targets=[r"language_model\.q_proj"]))
+    peft_config = build_peft_config(model, _model_config(targets=r"language_model\.q_proj"))
 
     assert peft_config.exclude_modules is None
     assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.q_proj"}
 
 
 def test_modules_to_save_copy_of_an_unadaptable_module_still_trains():
-    """``modules_to_save`` entries are full-trained copies, not adapters: a container the scan excludes
-    from LoRA targeting must still get its trainable copy, and the run must still forward."""
+    """``modules_to_save`` entries are full-trained copies, so an excluded container still gets its trainable copy."""
     model = _Multimodal(_ClippableAttention())
 
     peft_config = build_peft_config(model, _model_config(lora_modules_to_save=["vision_tower.o_proj"]))
@@ -168,9 +146,8 @@ def test_modules_to_save_copy_of_an_unadaptable_module_still_trains():
 
 
 def test_rejection_names_the_expert_adapters_that_would_train_alone(monkeypatch):
-    """With native expert adapters live, an all-excluded attention list does not mean the run trains
-    nothing — the message must say what would train, or the user fixes the wrong half."""
-    monkeypatch.setattr(peft_setup, "has_ep_lora", lambda model: True)
+    """With native expert adapters live, the message must say what would train, or the user fixes the wrong half."""
+    monkeypatch.setattr(peft_setup, "model_has_expert_lora", lambda model: True)
     model = _ClippableAttention()
 
     with pytest.raises(ValueError, match="native expert adapters would train alone"):
@@ -187,8 +164,7 @@ class _GroupedPastEight(nn.Linear):
 
 @pytest.mark.parametrize("wide_first", [False, True])
 def test_probe_verdict_is_per_geometry_not_per_class(wide_first):
-    """A class grouped at one width and plain at another gets one verdict per width, whichever
-    instance the scan reaches first."""
+    """One verdict per width, whichever instance the scan reaches first."""
     narrow, wide = _GroupedPastEight(8, 8, bias=False), _GroupedPastEight(16, 16, bias=False)
     model = nn.Module()
     model.a_proj, model.b_proj = (wide, narrow) if wide_first else (narrow, wide)
@@ -204,8 +180,7 @@ class _FaultingLinear(nn.Linear):
 
 
 def test_a_device_fault_in_the_probe_is_not_a_verdict():
-    """An out-of-memory or accelerator fault says nothing about the layer; swallowing it would exclude
-    the module on the one rank that faulted and hang the others."""
+    """Swallowing the fault would exclude the module on the one rank that faulted and hang the others."""
     model = nn.Module()
     model.q_proj = _FaultingLinear(8, 8, bias=False)
 
@@ -214,7 +189,6 @@ def test_a_device_fault_in_the_probe_is_not_a_verdict():
 
 
 def test_preset_exclusions_are_kept_alongside_the_found_ones():
-    """A ``LoraConfig`` that already excludes modules keeps them: the scan adds, never replaces."""
     model = _Multimodal(_ClippableAttention())
     peft_config = LoraConfig(r=4, target_modules=ATTENTION_TARGETS, exclude_modules=["language_model.q_proj"])
 
@@ -225,13 +199,11 @@ def test_preset_exclusions_are_kept_alongside_the_found_ones():
 
 
 @pytest.mark.parametrize("spelling", ["all-linear", "All-Linear"])
-def test_the_all_linear_sentinel_survives_a_cli_list_override(spelling):
-    """A CLI override lands after ``ModelConfig.__post_init__``, so ``--lora_target_modules=all-linear``
-    arrives as a one-entry list; PEFT reads its sentinel only as a bare string, case-insensitively, and
-    would otherwise look for a module named ``all-linear``."""
+def test_the_all_linear_sentinel_survives_a_one_entry_list(spelling):
+    """PEFT reads its sentinel only as a bare string, case-insensitively; a list entry would name a module."""
     model = _Multimodal(_PlainAttention())
-    model_config = _model_config()
-    model_config.lora_target_modules = [spelling]  # after __post_init__, as the parser's override lands
+    model_config = _model_config([spelling])
+    assert model_config.lora_target_modules == [spelling]
 
     peft_config = build_peft_config(model, model_config)
 
@@ -239,15 +211,11 @@ def test_the_all_linear_sentinel_survives_a_cli_list_override(spelling):
     assert _adapted_modules(get_peft_model(model, peft_config)) >= {"base_model.model.language_model.q_proj"}
 
 
-# The verdict is agreed across ranks
-
 WORLD_SIZE = 2
 PG_TIMEOUT_SEC = 30
 
 
 class _FaultsOnRankOne(nn.Linear):
-    """A probe that fails on one rank only: an exclusion list that differs between ranks."""
-
     rank = 0
 
     def forward(self, x):
@@ -270,8 +238,7 @@ def _divergent_worker(rank: int, tmp_dir: str) -> None:
 
 
 def test_an_exclusion_list_that_differs_between_ranks_raises_on_every_rank(tmp_path):
-    """One rank excluding what its peers adapt would train a different parameter set and surface only
-    as a hang in the first collective; the disagreement is caught where it arises, on both ranks."""
+    """A rank excluding what its peers adapt trains a different parameter set and surfaces as a collective hang."""
     run_gloo_ranks(_divergent_worker, WORLD_SIZE, str(tmp_path), pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC))
 
     outcomes = [(tmp_path / f"result_{rank}.txt").read_text() for rank in range(WORLD_SIZE)]
@@ -280,28 +247,23 @@ def test_an_exclusion_list_that_differs_between_ranks_raises_on_every_rank(tmp_p
     )
 
 
-def test_setup_peft_model_applies_the_exclusion():
-    """The production seam every training script reaches, not just the helper under it."""
+def test_configure_adapter_training_applies_the_exclusion():
     model = _Multimodal(_ClippableAttention())
     args = types.SimpleNamespace(unfreeze_layers_patterns=None, freeze_layers_patterns=None)
 
-    peft_config = setup_peft_model(args, model, _model_config())
+    peft_config = configure_adapter_training(args, model, _model_config())
 
     assert set(peft_config.exclude_modules) == {"vision_tower.q_proj", "vision_tower.o_proj"}
 
 
 def test_wrapper_detection_reads_through_an_existing_adapter():
-    """A second adapter targets ``lora.Linear`` layers, whose weight lives in ``base_layer`` — PEFT
-    dispatches on that base layer, so they must not be mistaken for unadaptable containers."""
+    """A second adapter targets ``lora.Linear`` layers; PEFT dispatches on their ``base_layer``, so they adapt."""
     model = _Multimodal(_PlainAttention())
     adapted = get_peft_model(model, LoraConfig(r=4, target_modules=ATTENTION_TARGETS))
 
     peft_config = build_peft_config(adapted, _model_config())
 
     assert peft_config.exclude_modules is None
-
-
-# A layer subclass whose forward is not its base layer's affine map
 
 
 def _tiny_dsv4() -> DeepseekV4ForCausalLM:
@@ -312,10 +274,7 @@ def _tiny_dsv4() -> DeepseekV4ForCausalLM:
 
 
 def test_grouped_projection_is_excluded_under_all_linear_and_the_model_runs():
-    """``all-linear`` reaches DeepSeek-V4's ``o_a_proj``, an ``nn.Linear`` subclass whose grouped
-    forward returns ``out_features // n_groups``. PEFT wraps it happily and the delta then dies on a
-    shape mismatch at the first forward — the run must instead train, with that one projection skipped.
-    """
+    """PEFT wraps ``o_a_proj``, whose forward returns ``out_features // n_groups``; the delta dies at first forward."""
     model = _tiny_dsv4()
 
     peft_config = build_peft_config(model, _model_config(targets=["all-linear"]))
@@ -332,7 +291,6 @@ def test_grouped_projection_is_excluded_under_all_linear_and_the_model_runs():
 
 
 def test_grouped_projection_named_directly_is_excluded():
-    """Naming the projection is the other way in; the sibling target keeps the run alive."""
     model = _tiny_dsv4()
 
     peft_config = build_peft_config(model, _model_config(targets=["o_a_proj", "o_b_proj"]))
@@ -342,10 +300,9 @@ def test_grouped_projection_named_directly_is_excluded():
 
 
 def test_a_forward_override_that_keeps_the_affine_map_stays_adapted():
-    """The low-precision compute drop-in overrides ``nn.Linear.forward`` but computes the same map, so
-    excluding it would silently stop training the projections a fp8/fp4 run names."""
+    """The low-precision drop-in overrides ``forward`` but computes the same map; a fp8/fp4 run names these."""
     model = _Multimodal(_PlainAttention(64), width=64)  # the fake-quant block is 32 wide
-    LowPrecisionLinear.convert_(model.language_model.q_proj, "fp8")
+    LowPrecisionLinear.convert_(model.language_model.q_proj, "mxfp8")
     assert type(model.language_model.q_proj) is LowPrecisionLinear, "the retype is this test's premise"
 
     peft_config = build_peft_config(model, _model_config())
@@ -355,7 +312,7 @@ def test_a_forward_override_that_keeps_the_affine_map_stays_adapted():
 
 
 def test_the_two_reasons_are_reported_separately():
-    """One counted message per reason: a tower wrapper and a grouped projection are different fixes."""
+    """A tower wrapper and a grouped projection are different fixes."""
     model = _tiny_dsv4()
     model.model.layers[0].self_attn.q_proj = _ClippableAttention().q_proj
 
@@ -370,8 +327,7 @@ def test_the_two_reasons_are_reported_separately():
 
 
 def test_grouped_linear_is_a_linear_subclass():
-    """Pins this file's premise: the grouped projection passes PEFT's ``nn.Linear`` dispatch, which is
-    why a structural class check alone cannot catch it."""
+    """Grouped projections pass PEFT's ``nn.Linear`` dispatch, so a structural class check alone cannot catch them."""
     assert issubclass(DeepseekV4GroupedLinear, nn.Linear)
 
 

@@ -2,11 +2,11 @@
 
 The loss is TRL's GRPO objective ([Online GRPO](../grpo/online.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`: a token-sum loss divided by the step's loss-token count (the DAPO normalizer). Its `epsilon` clip (`0.2`; no recipe sets `epsilon_high`) is inert at `num_iterations: 1` and the default `steps_per_generation`.
 
-Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, plus up to one sync interval under prefetch or `sync_weights_every_n_steps > 1`. An importance ratio corrects that; the trust region is masks on the ratio, not a KL term.
+Rollouts differ from the trainer's policy by the engine↔trainer [numerics gap](#trainer-and-engine-noise), plus a weight lag: up to `prefetch_depth` rounds under prefetch (one round per optimizer step at the default `steps_per_generation`), and up to `sync_weights_every_n_steps − 1` more between syncs. An importance ratio corrects that; the trust region is masks on the ratio, not a KL term.
 
 ## Training rows
 
-`train_on_sampled_tokens` (default on) trains on the ids the model sampled. Each assistant turn is its own row (the engine's rendered prompt ids, then the turn's sampled ids), sharing the trajectory's advantage.
+`train_on_sampled_tokens` (default on) trains on the ids the model sampled, which removes every re-tokenization mismatch (tool-call rendering, argument whitespace, reasoning re-render). Each assistant turn is its own row (the engine's rendered prompt ids, then the turn's sampled ids), sharing the trajectory's advantage.
 
 vLLM returns the ids under `--return-tokens-as-token-ids` (SGLang needs no flag); the [importance-sampling correction](#importance-sampling-correction) also needs `--logprobs-mode processed_logprobs`.
 
@@ -16,7 +16,7 @@ Three kinds of turn are tagged untrainable ([Untrainable turns](#untrainable-tur
 
 - `truncated`: the engine cut the turn.
 - `empty`: neither a tool call nor visible content.
-- `calls_rejected`: every tool call named a nonexistent tool (under native tool calls, also every call refused unrun).
+- `calls_rejected`: every tool call named a nonexistent tool or was refused unrun.
 
 A tagged turn stays in the next turn's prompt.
 
@@ -27,6 +27,8 @@ A tagged row needs the turn's sampled ids; without them, or on the single-row pa
 - **Lost completion ids** on any untagged turn drop the whole trajectory to one re-tokenized row, warned once with the remedy.
 - **Lost prompt ids** alone re-render that prompt through the serving template, silently. A prefix the template rejects invalidates the episode (on an untrainable turn, only that row).
 - **A span boundary** the single-row path cannot pin **invalidates the episode** rather than training a guessed span.
+
+The single-row path locates every assistant span inside one full-conversation render, because chat templates are not prefix-monotone (harmony rewrites an archived turn's terminator and drops its reasoning; Qwen3 drops reasoning once a later user message arrives). A boundary is a prefix render verified to be an exact prefix, or the block's own length, measured by re-rendering with the message duplicated. The trained span starts where the engine's generation prompt stops agreeing with the render. No boundary carries across turns, since BPE merges a role header with each turn's first token differently.
 
 `train_on_sampled_tokens: false` forces the single-row path and disables the importance-sampling correction (batches train uncorrected, with a warning), so it is refused wherever [forced reasoning closes](#forced-reasoning-closes) need the correction.
 
@@ -47,9 +49,9 @@ Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near
 
 A reasoning close the engine forced at a turn's reasoning cap ([Reasoning budget](reasoning.md#reasoning-budget)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
 
-- **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, five for gpt-oss's `<|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
-- **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, soft ones included, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
-- **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) leaves forced closes in the loss, with a warning.
+- **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, six for gpt-oss's `<|end|><|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
+- **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, a soft one only through its ceiling, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
+- **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) is refused at construction where a cap can bind, since the forced closes could not leave the loss; a soft-only run only warns.
 
 ## Trust region masks
 
@@ -61,9 +63,9 @@ The `isr_*` stages mask rather than reweight: a masked token loses its policy-gr
 | `isr_veto_min` | Mask a trajectory if any corrected token's raw ratio drops below it. | `sampling/is_veto_masked_frac` |
 | `isr_opsm_delta` | Mask negative-advantage trajectories drifting past N nats. | `sampling/is_opsm_masked_frac` |
 
-The geometric band needs both bounds, `0 < min < 1 < max`. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
+The geometric band (NeMo-RL's seq-mask-tis, slime's MIS) needs both bounds, `0 < min < 1 < max`; `[0.99, 1.01]` is a starting point. The veto follows verl and slime (~`1e-4`), and the negative-advantage mask is DeepSeek-V3.2's off-policy sequence masking. The code-contests recipes run it at `[0.95, 1.05]` with `isr_veto_min: 1.0e-4` and `isr_opsm_delta: 0.05`.
 
-**Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks, so their mean log-ratio is negative at identical weights: ~0.002 nats/token at sampling entropy 0.4, ~0.04 at 1.0. A band inside that floor masks every step. Sustained masking at low entropy is a disagreement to fix, not a band to widen.
+**Size the geometric band above the numerical floor.** Trainer and engine are different bf16 stacks ([Trainer and engine noise](#trainer-and-engine-noise)), so their mean log-ratio is not zero at identical weights. Read `sampling/logratio_mean` on your serving shape before setting a band: one inside that floor masks every step. Sustained masking at low entropy is a disagreement to fix, not a band to widen.
 
 TRL's `off_policy_mask_threshold` is refused: this trainer never emits the batch key it reads.
 
@@ -71,11 +73,13 @@ TRL's `off_policy_mask_threshold` is refused: this trainer never emits the batch
 
 `skip_update_masked_frac` (`(0, 1]`, off by default) needs at least one stage. It trips when `sampling/is_masked_traj_frac` or `sampling/is_masked_token_frac` passes it. A tripped round zeroes its advantages and drops its gradients (`sampling/update_skipped`).
 
+Past a high masked fraction the survivors are a selection-biased sample, the rows where the drifted policy still agrees with the rollout, so training on them amplifies the drift; skipping holds the policy still until the next weight sync re-anchors the rollouts. `0.3`–`0.5` is a sane range.
+
 ### Engine reference
 
-`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it, so the band still needs room.
+`isr_engine_reference: true` (off in the recipes) takes the trainer↔engine floor out of the stages: each training round the engine re-scores every train row that carries sampling log-probs, under the weights it last received, and the stages read that log-ratio. The engine's own decode-vs-prefill gap stays in it, so the band still needs room: read `sampling/engine_logratio_mean` on your serving shape (`sampling/numerics_logratio_mean` logs the trainer-vs-engine part it leaves out, `sampling/engine_rescore_coverage` the corrected tokens re-scored).
 
-It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row ([Throughput](../../infrastructure/rollout-servers.md#throughput)). A startup probe refuses a server whose prompt log-probs are inconsistent across CUDA-graph prefill sizes, the garbage unpatched vLLM 0.26.0 returns under MTP ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
+It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). `isr_engine_rescore_per_server` (default 128) bounds the prefills in flight on each server across all ranks; a row whose re-score misses its deadline reads the trainer's log-ratio, counted in `sampling/engine_rescore_miss_frac`. A startup probe refuses a server whose prompt log-probs differ between an eager prefill and CUDA-graph prefills of its prefixes at the positions the model scores above −1.0 log-prob (bf16 noise alone reaches several nats at low-probability ones), as vLLM's V1 runner's do under MTP speculative decoding; the image's Model Runner V2 passes ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
 
 ## Advantages
 
@@ -91,7 +95,7 @@ A trajectory's advantage is its total reward minus the mean over its group's val
 
 A non-finite reward or advantage fails the step on every rank.
 
-`drop_degenerate_groups` defaults **on** here (off for online GRPO): it drops a group whose members all settled the same environment reward, which would only inflate the DAPO normalizer (`sampling/degenerate_group_frac`). The trainer's [reasoning floor and price](reasoning.md#reasoning-length-reward) are left out of that comparison, so reasoning length alone never breaks a tie.
+`drop_degenerate_groups` defaults **on** here (off for online GRPO): it drops a group whose members all settled the same environment reward, which would only inflate the DAPO normalizer (`sampling/degenerate_group_frac`), the cheap half of DAPO's dynamic sampling (drop, without resampling replacements). The trainer's [reasoning floor and price](reasoning.md#reasoning-length-reward) are left out of that comparison, so reasoning length alone never breaks a tie.
 
 `mask_truncated_completions` is enforced here, not in TRL's generation path; the recipes leave it off.
 
@@ -123,20 +127,55 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 
 ## KL and template protection
 
-`beta > 0` adds TRL's k3 KL term. An unconditional clamp (`clamp_ref_logps`) caps its log-ratio at 5 nats, bounding per-token KL at `exp(5) ≈ 148`. A persistently non-zero `kl_clamp_frac` (the clamped share of real loss tokens) means the policy sits far from the reference.
+`beta > 0` adds TRL's k3 KL term, weighted by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain term. An unconditional clamp (`clamp_ref_logps`) caps its log-ratio at 5 nats, bounding per-token KL at `exp(5) ≈ 148`. A persistently non-zero `kl_clamp_frac` (the clamped share of real loss tokens) means the policy sits far from the reference.
 
 `top_entropy_quantile < 1.0` trains only the highest-entropy tokens, which alone starves the low-entropy structural tokens (role markers, tool delimiters, BOS/EOS) until tool calls stop parsing. `ProtectedTokenEntropyMixin` unions the tokenizer's special and added tokens back in, and a mask whose shape does not match the last log-prob forward's completion ids **raises**. The code-contests recipes leave `top_entropy_quantile: 1.0` and set `tool_error_penalty: 0.05` on the reward side.
 
 ## Routing replay
 
-`routing_replay` pins the update pass's top-k expert selection to a recorded mask, so the gradient forward trains through the routing the IS ratios were computed on.
+`routing_replay` pins the top-k expert selection to a recorded mask, so the gradient forward trains through the routing the IS ratios were computed on. Gate weights are re-derived from the live router scores, so replay removes only the discontinuous routing-flip part of the divergence (Qwen's Routing Replay, DeepSeek's Keep Routing).
 
-- `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass, so it needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
-- `rollout` (R3) replays the engine's own selection; it needs `train_on_sampled_tokens` and a capture-capable server. The gpt-oss `-ep1` recipes ship it.
+- `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass and replays it in the update. Both passes are the trainer's, so it leaves the trainer-versus-engine gap where it was. It needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
+- `rollout` (R3, experimental) replays the engine's own selection through the no-grad pass and the update, so it can narrow that gap. It needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run.
 
-Both need MoE EP wrappers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
+Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of (token, layer) pairs on which the live top-k would have flipped a selection.
+
+To run R3, set `routing_replay: rollout` and serve with `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` ([R3 flags](../../infrastructure/rollout-servers.md)). Capture and replay pass in two-step rows on GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, LFM-2 and Ling 2.0 on both engines and on Laguna on vLLM ([Coverage](../../infrastructure/rollout-servers.md#coverage)). Only the gpt-oss `-ep1` recipes ship it: no long run compares it with `none`.
+
+The gradient forward replays only the positions it attends, and the flip rate counts only those, in both modes and on every loss path. Padding routes naturally, and so does the completion of a row dropped from the loss (a degenerate group, an invalid episode, a masked truncation): it rides the forward as attention padding, in a context other than the one its mask was recorded in.
 
 Under `rollout`, the step fails on every rank when a trainable batch carries no mask, or when no routed row on some rank matches an engine coverage convention. `routing/rollout_unresolved_frac` is a world share: a rank can fail the step while the share last logged sat below 1.
+
+### Trainer and engine noise
+
+Trainer and engine disagree on identical weights. bf16 round-off flips near-tie MoE top-k selections, and each flip compounds through the later layers. This is numerics, not a sync error: an unchanged push leaves the served log-probs bit-identical ([Coverage](../../infrastructure/rollout-servers.md#coverage)).
+
+Forcing the routing closes most of that floor on gpt-oss, Laguna and LFM-2, and not on GLM-4.7 or Gemma 4. Measured with no engine, on CPU kernels and fixed text, forcing the top-k takes Laguna-XS from 0.679 nats to 0.058 and LFM-2 from 0.375 to 0.050, but GLM-4.7, whose logits reach 140, only from 0.095 to 0.072 and Gemma 4 from 0.683 to 0.623. On those two most of the gap is not routing.
+
+![bf16's mean absolute gap to an fp32 forward with natural routing and with fp32's top-k forced: gpt-oss-20b 0.400 to 0.079, Laguna-XS 0.679 to 0.058 and LFM-2 0.375 to 0.050, where forcing closes most of it, and GLM-4.7 0.095 to 0.072 and Gemma 4 0.683 to 0.623, where most of it is not routing](../../assets/benchmarks/routing_forced_gap.png)
+
+On gpt-oss-20b, on six untemplated rows of 32 to 1,024 tokens (2,010 positions, mean log-prob −7.5), stock transformers' bf16 forward sits 0.400 nats (mean absolute) from its fp32 forward, and 0.079 with the fp32 forward's top-k forced. 11.8% of its token-layer selections differ, from 2.7% at the first layer to 23.5% at the last. The served model sits at 0.319 and Halo's FA4 forward at 0.392 on the same rows.
+
+Sampled tokens carry far less. Mean absolute log-ratio over the tokens the IS correction scores, at step 1 before any update: one short tool-call task, two ranks at `ep1`, 8 rows per rank, one run per arm, each arm its own rollouts. The vLLM rows run `rollout_top_p: 1.0` and `rollout_max_tokens: 128`. The SGLang row runs `rollout_top_p: 0.95`, which SGLang's reported log-probs do not see ([SGLang](../../infrastructure/rollout-servers.md#sglang)).
+
+| Engine, checkpoint | `none` | R2 | R3 | R3 `replay_flip_rate` | Tokens scored per arm |
+|---|:--:|:--:|:--:|:--:|:--:|
+| vLLM, gpt-oss-20b | 0.0300 | 0.0288 | 0.0158 | 0.027 | 1,190–1,280 |
+| vLLM, Qwen3.6-35B-A3B | 0.0279 | 0.0304 | 0.0111 | 0.148 | 2,801–2,998 |
+| vLLM, GLM-4.7-Flash | 0.0375 | 0.0388 | 0.0318 | 0.036 | 1,318–1,412 |
+| SGLang, gpt-oss-20b | 0.0289 | 0.0299 | 0.0147 | 0.027 | 1,134–1,246 |
+
+![Mean absolute log-ratio over scored tokens under no replay, R2 and R3 on four engine and checkpoint rows. R2 sits level with none on each. R3 sits 1.9× below none on vLLM gpt-oss-20b, 2.5× on Qwen3.6-35B-A3B, 1.2× on GLM-4.7-Flash and 2.0× on SGLang gpt-oss-20b. One short task at step 1, not a training result](../../assets/benchmarks/routing_replay_gap.png)
+
+- On vLLM, R3 sits about 1.9× below `none` on gpt-oss-20b, 2.5× on Qwen3.6-35B and 1.2× on GLM-4.7, where most of the gap is not routing. Its p99 falls from 0.2918 to 0.1639, 0.3485 to 0.1532 and 0.5898 to 0.5383.
+- R2 does not separate from `none`, as its two trainer passes predict: 4% under it on vLLM's gpt-oss-20b row and above it on the others.
+- Qwen3.6-35B's tokens are mostly reasoning: 87.5% of its rollouts hit `rollout_max_tokens`.
+- `routing/replay_flip_rate` counts flips per token and layer with upstream layers already forced, so it understates free-running disagreement.
+- `sampling/logratio_mean`, the signed mean, stays within 0.003 of zero on vLLM's gpt-oss-20b and Qwen3.6-35B rows in every arm.
+- vLLM reports log-probs after a top-p cut, so a vLLM row below `rollout_top_p: 1.0` carries that renormalization, which no replay touches, and does not compare with these.
+- No other family has a usable number: the LFM-2 and Laguna rows scored too few tokens to quote.
+
+This is one short task at step 1, not a training result. No row compares the modes over a long run, neither mode makes training exactly on-policy, and R3 stays experimental.
 
 ## Batch construction
 
@@ -146,15 +185,15 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 
 A rollout with no learning signal (a raised episode, an `episode_timeout` cancellation, an invalid one) enters as a zero-masked row outside its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second consecutive one**.
 
-Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed.
+Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed. A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
 
 `per_device_train_batch_size` counts rows (completions); unique prompts per step are the rollout total ÷ `num_generations` ([online-GRPO count](../grpo/online.md#data-flow-and-batch-construction)).
 
 | Knob | Sets | Sizing rule |
 |---|---|---|
 | `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and exam-QA. Trades unique prompts for samples each. |
-| `max_concurrent_rollouts` | Per-rank cap on rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
-| `num_rollout_workers` | Ray actor pool per rank (default `64`) | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
+| `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
+| `num_rollout_workers` | Ray actor pool per rank | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
 
 ## Learning rate
 

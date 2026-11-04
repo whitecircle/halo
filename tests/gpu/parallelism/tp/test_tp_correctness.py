@@ -1,27 +1,8 @@
 #!/usr/bin/env python
-"""
-Tensor Parallelism (TP) correctness test on a dense model.
+"""TP=2 on dense Qwen3-0.6B reproduces the single-GPU loss and total grad norm.
 
-Validates that TP=2 produces the same forward pass loss AND the same total
-gradient L2 norm as a single-GPU baseline on Qwen3-0.6B (dense model). This
-tests DTensor weight sharding correctness for attention and MLP layers, and
-guards the TP grad-norm aggregation path: a TP grad-norm that silently drops
-the lm_head/embedding contribution or mis-aggregates across the TP axis must fail the grad-norm
-check.
-
-Rank 0 records the baseline loss and total fp32 grad L2 norm with no TP; all ranks
-then run the SAME deterministic input through a TP=2 DistributedSFTTrainer, and both
-the loss (tight conjunctive tolerance) and the TP-aware grad norm
-(trainer._compute_global_grad_norm, the production clipping path) are compared against
-that baseline within a tight relative tolerance.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/tp/test_tp_correctness.py
-
-Requirements:
-    - 2x GPUs
-    - Model: Qwen/Qwen3-0.6B (auto-downloaded)
+A TP grad norm that drops lm_head/embedding or mis-aggregates across the TP axis must fail against the unsharded
+baseline.
 """
 
 import math
@@ -33,35 +14,35 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.distributed.tensor_parallel import gather_state_dict_for_save
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.mesh import MeshDim, mesh_dim_names
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier, materialize_dtensor
-from src.distributed.tensor_parallel.state_dict import get_tp_mesh
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh, tp_group
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import QWEN3_0_6B
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log, log_all
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan
 
 MODEL_NAME = QWEN3_0_6B
 TP_SIZE = 2
 SEQ_LEN = 128
 SEED = 42
 
-# Loss must satisfy both bounds, and they are tight — TP is a math-exact rearrangement of the same
-# compute, so only bf16 reduction-order jitter remains. Same for the grad norm: same batch/seed.
+# Tight: TP is a math-exact rearrangement of the same compute, so only bf16 reduction-order jitter remains.
 LOSS_ABS_TOL = 0.02
 LOSS_REL_TOL = 0.01
 GRAD_NORM_REL_TOL = 0.03
 
-# One representative parameter per TP *style*, because each is reduced by a different rule and a
-# wrong rule is invisible in the global norm when the tensor is small: colwise/rowwise are disjoint
-# plain slices reassembled by the plan; `*_norm` weights are `replicated_with_grad_allreduce`
-# (replicated storage, HEAD-PARTIAL gradient, needs a TP SUM); layernorm/embed are truly replicated.
+# One parameter per TP style, each reduced by a different rule: colwise/rowwise are disjoint plain slices reassembled
+# by the plan; `*_norm` weights are `replicated_with_grad_allreduce` (replicated storage, head-partial gradient, needs
+# a TP SUM); layernorm/embed are truly replicated. A wrong rule is invisible in the global norm on a small tensor.
 COMPARED_PARAMS = (
     "model.layers.0.self_attn.q_proj.weight",
     "model.layers.0.self_attn.k_proj.weight",
@@ -74,37 +55,18 @@ COMPARED_PARAMS = (
     "model.layers.0.input_layernorm.weight",
     "model.embed_tokens.weight",
 )
-# Loose next to the 3% aggregate because a single bf16 gradient tensor carries far more reassociation
-# noise than the whole-model sum, on sharded and replicated tensors alike. Still decisive: every
-# failure mode is a whole factor — a missing TP sum lands at ratio 0.5, averaging two disjoint slices
-# at rel_err ~1.0.
+# Loose next to the 3% aggregate: a single bf16 gradient carries far more reassociation noise than the whole-model sum.
+# Still decisive, since a missing TP sum lands at ratio 0.5 and averaging two disjoint slices at rel_err ~1.0.
 GRAD_TENSOR_REL_TOL = 0.20
 GRAD_TENSOR_RATIO_TOL = 0.20
 
 
 def compute_baseline_loss(tokenizer, device):
-    """Compute forward loss AND total fp32 grad L2 norm on a single GPU (no TP).
-
-    Only rank 0 loads and runs the model. It runs one forward (loss) and one
-    forward+backward, then sums every parameter's grad L2 norm in fp32 to get the
-    reference total grad norm. Both scalars are broadcast to all ranks so every
-    rank can participate in the comparison.
-
-    The grad norm is the unsharded ground truth: the TP phase must reproduce it
-    (a TP grad-norm that drops lm_head/embedding or mis-aggregates the TP axis
-    diverges from this).
-
-    It also keeps the unsharded gradient of every parameter in ``COMPARED_PARAMS`` (rank 0 only) so
-    Phase 3 can compare them one by one. The global norm alone cannot: a `q_norm` weight is a
-    head_dim-sized vector, so even a `tp_size`x error in it moves the total norm by far less than
-    the bf16 tolerance.
-
-    Returns:
-        tuple[float, float, dict]: (baseline_loss, baseline_grad_norm, per-param grads on rank 0).
-    """
+    """Rank 0's loss and fp32 grad norm with no TP, plus its gradient of each ``COMPARED_PARAMS`` entry: a `q_norm`
+    weight is head_dim-sized, so even a `tp_size`x error moves the global norm far less than the bf16 tolerance."""
     rank = dist.get_rank()
     baseline_grads: dict[str, torch.Tensor] = {}
-    result_tensor = torch.zeros(2, device=device)  # [loss, grad_norm]
+    result_tensor = torch.zeros(2, device=device)
 
     if rank == 0:
         log("  Loading baseline model (no TP) on rank 0...")
@@ -162,23 +124,8 @@ def compute_baseline_loss(tokenizer, device):
 
 
 def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
-    """Compute forward loss AND TP-aware total grad norm with TP=2.
-
-    All ranks build a ``DistributedSFTTrainer`` with ``tp_size=2`` — this is what
-    sets ``trainer._device_mesh`` and installs the TP grad-norm machinery
-    (``_sync_tp_replicated_grads`` + ``_compute_global_grad_norm``, the exact path
-    ``tp_clip_grad_norm_`` calls in production). We then run, on the SAME fixed
-    batch used by the baseline:
-
-      * a forward (no_grad) for the loss, and
-      * a forward+backward for the gradients, after which we call the trainer's
-        ``_sync_tp_replicated_grads`` then ``_compute_global_grad_norm`` — i.e. the
-        production TP grad-norm, which must reproduce the unsharded baseline.
-
-    Returns:
-        tuple: ((loss mean, loss spread), (grad-norm mean, grad-norm spread), reassembled grads,
-        (TP-synced grads bit-identical, params checked)). Means and spreads are over the world.
-    """
+    """Forward loss and TP-aware grad norm at TP=2 through ``_sync_tp_replicated_grads`` +
+    ``_compute_global_grad_norm``, the path the TP clip calls in production. Means and spreads are over the world."""
     device = f"cuda:{local_rank}"
 
     log("\n  Loading TP=2 model...")
@@ -194,15 +141,12 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
         attn_implementation="flash_attention_2",
     )
 
-    # Decisive at the source: a severed tie is two Parameter objects here, long before it surfaces
-    # downstream as a 0.63 rel_err on the reassembled embedding gradient.
+    # A severed tie is two Parameter objects here, long before it surfaces as a 0.63 rel_err on the embedding gradient.
     if model.config.tie_word_embeddings:
         assert model.get_output_embeddings().weight is model.get_input_embeddings().weight, (
             "tie_word_embeddings=True but embed_tokens and lm_head are two independent parameters"
         )
 
-    # The trainer supplies the TP-aware grad-norm path (device mesh + _sync_tp_replicated_grads /
-    # _compute_global_grad_norm) and the production FSDP2-for-TP wrapping; forward/backward is manual.
     train_dataset = create_sft_dataset(8, tokenizer, seed=SEED)
     sft_config = SFTConfig(
         output_dir=output_dir,
@@ -221,7 +165,6 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         max_grad_norm=1.0,
-        fsdp="",
     )
     trainer = DistributedSFTTrainer(
         model=model,
@@ -251,7 +194,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
     loss.backward()
 
     params = [p for p in tp_model.parameters() if p.grad is not None]
-    # Mirrors tp_clip_grad_norm_ — sync replicated grads across the TP axis, then take the global norm.
+    # Mirrors the TP clip.
     trainer._sync_tp_replicated_grads(params)
     tp_synced_identical, tp_synced_count = assert_tp_synced_grads_identical(trainer, tp_model)
     tp_grad_norm_local = float(trainer._compute_global_grad_norm(params))
@@ -270,44 +213,36 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
 
 
 def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
-    """After ``_sync_tp_replicated_grads``, every param WITHOUT a ``tp`` mesh dim must carry a
-    bit-identical gradient across the TP group: replicas are AVGed, per-head norms SUMmed, and both
-    collectives hand every rank the same result. Selection is structural (mesh dims, not the
-    trainer's own bucket sets), so a sweep that silently skips a class of params fails here.
-    Collective on every rank — the identical fixed batch keeps the walk order and grad-presence
-    pattern rank-uniform."""
+    """COLLECTIVE. After ``_sync_tp_replicated_grads``, every param without a ``tp`` mesh dim has a bit-identical
+    gradient across the TP group. Selected by mesh dims, independent of the trainer's own buckets, so a sweep skipping
+    a class of params fails here. The identical batch keeps the walk order rank-uniform."""
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
-    tp_group = trainer.parallel_dims.tp_group()
+    group = tp_group(trainer._device_mesh)
     checked, diffs = 0, []
     for _name, p in unwrapped.named_parameters():
         if p.grad is None:
             continue
         if isinstance(p.data, DTensor) and MeshDim.TP in mesh_dim_names(p.data.device_mesh):
-            continue  # plan-sharded: ranks legitimately hold different slices
+            continue  # Plan-sharded: ranks legitimately hold different slices.
         grad = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
         checked += 1
-        diffs.append(group_max_abs_diff(grad, tp_group))
+        diffs.append(group_max_abs_diff(grad, group))
     max_diff = max_or_nan(diffs, default=0.0)
     log_all(f"  TP-synced grads: {checked} params checked, max cross-TP diff {max_diff:.3e}")
     return max_diff == 0.0 and checked > 0, checked
 
 
 def reassemble_tp_grads(tp_model) -> dict[str, torch.Tensor]:
-    """Rebuild the UNSHARDED gradient of each ``COMPARED_PARAMS`` entry. Collective on every rank.
-
-    Uses the production reassembly seam — HF's own plan-keyed ``gather_state_dict_for_save``, the
-    same call the TP checkpoint save makes — so a plan the save would mis-gather is mis-gathered
-    here too rather than papered over by a hand-rolled all-gather. Under TP+DP the grads are
-    FSDP2 DTensors first, so materialize each over its dp mesh before the plan gather.
-    """
+    """COLLECTIVE. The unsharded gradient of each ``COMPARED_PARAMS`` entry through ``gather_state_dict_for_save``, the
+    call the TP checkpoint save makes, so a plan the save would mis-gather is mis-gathered here too."""
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
     named = dict(unwrapped.named_parameters())
     local = {}
     for name in COMPARED_PARAMS:
         param = named.get(name)
         assert param is not None and param.grad is not None, f"no live gradient for {name} under TP"
-        local[name] = materialize_dtensor(param.grad)  # collective under TP+DP; identity at dp=1
-    full = gather_state_dict_for_save(local, unwrapped._tp_plan, get_tp_mesh(unwrapped), TP_SIZE)
+        local[name] = materialize_dtensor(param.grad)  # Collective under TP+DP; identity at dp=1.
+    full = gather_state_dict_for_save(local, unwrapped._tp_plan, model_tp_mesh(unwrapped), TP_SIZE)
     return {name: tensor.detach().float().cpu() for name, tensor in full.items()}
 
 
@@ -320,10 +255,9 @@ def run(ctx):
     log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'#' * 70}")
 
-    # 2 GPUs → pure TP, where transformers distributes every planned parameter as a `tp` DTensor;
-    # 4 → TP+DP, where FSDP2 additionally makes the TP replicas 1D `dp` DTensors, so the mesh alone
-    # no longer separates the two. Identical batch on every rank, so the DP average reproduces the
-    # single-batch gradient and the same baseline norm.
+    # 2 GPUs: pure TP, every planned parameter a `tp` DTensor. 4: TP+DP, where FSDP2 makes the TP replicas 1D `dp`
+    # DTensors, so the mesh alone no longer separates them. An identical batch on every rank keeps the baseline norm
+    # valid.
     if ctx.world_size % TP_SIZE != 0:
         raise ValueError(f"world size {ctx.world_size} must be a multiple of TP size {TP_SIZE}")
     log(f"  Topology: tp={TP_SIZE}, dp={ctx.world_size // TP_SIZE}")
@@ -356,7 +290,6 @@ def run(ctx):
 
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
-    # Bit-identity of TP-synced grads is asserted on every rank (each gathered its own view).
     checks["tp_synced_grads_bit_identical"] = tp_synced[0]
     if ctx.rank == 0:
         log(f"  TP-synced grad bit-identity over {tp_synced[1]} params: {'PASS' if tp_synced[0] else 'FAIL'}")
@@ -369,7 +302,6 @@ def run(ctx):
         checks["tp_losses_finite"] = tp_finite
         log(f"\n  TP losses finite (all ranks): {'PASS' if tp_finite else 'FAIL'}")
 
-        # Every TP rank computes the loss from the same all-reduced activations.
         tp_consistent = tp_spread < TOL.all_reduced_rank_spread_abs
         checks["tp_rank_consistency"] = tp_consistent
         log(f"  TP rank consistency (spread={tp_spread:.8f}): {'PASS' if tp_consistent else 'FAIL'}")
@@ -394,15 +326,13 @@ def run(ctx):
         checks["tp_grad_norm_finite"] = gn_finite
         log(f"\n  TP grad norms finite (all ranks): {'PASS' if gn_finite else 'FAIL'}")
 
-        # The TP-aware norm is a global all-reduced scalar, so every TP rank must agree.
         gn_consistent = gn_spread < TOL.all_reduced_rank_spread_abs
         checks["tp_grad_norm_consistency"] = gn_consistent
         log(f"  TP grad norm consistency (spread={gn_spread:.8f}): {'PASS' if gn_consistent else 'FAIL'}")
 
-        # Equality against the UNSHARDED norm, not a band: HF-native TP shards planned projections
-        # into PLAIN slices, so a classifier keying on tensor type reads them as TP replicas and
-        # averages across the group. That lands at ratio ~0.5 while keeping every rank in
-        # agreement — invisible to the cross-rank check above, inside any order-of-magnitude band.
+        # Equality against the unsharded norm: HF-native TP shards projections into plain slices, so a classifier
+        # keying on tensor type reads them as replicas and averages. That lands at ratio ~0.5 with every rank in
+        # agreement.
         gn_ratio = tp_gn_avg / max(abs(baseline_grad_norm), 1e-10)
         gn_matches = abs(gn_ratio - 1.0) <= GRAD_NORM_REL_TOL
         checks["grad_norm_matches_baseline"] = gn_matches
@@ -412,9 +342,7 @@ def run(ctx):
         log(f"  Ratio (TP/baseline): {gn_ratio:.4f} (tol: {GRAD_NORM_REL_TOL:.1%})")
         log(f"  Match: {'PASS' if gn_matches else 'FAIL'}")
 
-        # The global norm is dominated by the big projections, so a small tensor reduced by the
-        # wrong rule hides inside its tolerance — mis-reducing `q_norm`/`k_norm` barely moves the
-        # total. Only a per-tensor comparison sees it; failures there are whole factors.
+        # The big projections dominate the global norm, so mis-reducing `q_norm`/`k_norm` hides inside its tolerance.
         worst_rel_name, worst_rel = "", 0.0
         worst_ratio_name, worst_ratio_dev = "", 0.0
         per_param_lines = []
@@ -425,7 +353,7 @@ def run(ctx):
             rel = (got - ref).norm().item() / ref_norm
             ratio = got.norm().item() / ref_norm
             per_param_lines.append(f"    {name}: rel_err={rel:.2e} norm_ratio={ratio:.4f}")
-            # A NaN compares false against the trackers below, so a non-finite error counts as infinite.
+            # A NaN compares false against the trackers below.
             rel = rel if math.isfinite(rel) else math.inf
             ratio_dev = abs(ratio - 1.0) if math.isfinite(ratio) else math.inf
             if rel > worst_rel:

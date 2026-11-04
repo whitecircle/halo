@@ -1,0 +1,71 @@
+# Offline GRPO — NVIDIA Nemotron 3.5 Super VL's text tower on GSM8K (pre-computed completions + rewards), EP=8, one 8x
+# B300 node. Measured: 169-179 GB reserved by rank on this recipe's rows.
+# Dataset rows need prompt/completions/rewards — generate via
+# scripts/inference/reward_model/rejection_sample.py --output_format offline_grpo (the default is preference).
+# See agent-docs/models/nemotron-h.md and agent-docs/training-methods/grpo/offline.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/grpo/offline.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16
+text_only_model: true                 # NemotronHForCausalLM: no vision tower or MTP head
+moe_balancing: none                   # the release's bias still routes; none leaves it where it ships
+
+# --- Parallelism (EP=8: one dispatch group, DP=8) ---
+expert_parallel_size: 8               # 512 routed experts -> 64/rank
+
+# --- Dataset ---
+# The file the rejection-sampling step above wrote: <output_dir>/<prompts stem>_<model>_offline_grpo.jsonl
+# (keep --output_dir off the small root FS).
+dataset:
+- path/to/gsm8k_<model>_offline_grpo.jsonl
+test_size: 0.05
+
+# --- Offline GRPO Hyperparameters ---
+loss_type: bnpo                       # global token average
+initial_min_log_prob: -0.5            # schedules to -3.0
+use_chunked_grpo_logprobs: true       # no [tokens x 131k] logits plane
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 1.0
+gradient_accumulation_steps: 8
+gradient_checkpointing: true
+gradient_checkpointing_kwargs:
+  use_reentrant: true                 # EP requires reentrant GC (the trainer force-promotes false)
+learning_rate: 5.0e-06
+weight_decay: 0.01
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Sequence Lengths ---
+max_prompt_length: 512
+max_completion_length: 6144
+
+# --- Output ---
+output_dir: checkpoints/offline-grpo-nemotron-3.5-super-vl-gsm8k-ep8
+save_steps: 1000                      # each save ~241 GB
+eval_strategy: steps
+eval_steps: 50
+save_total_limit: 1
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Generation Callback ---
+num_eval_examples: 10
+
+# --- Data ---
+dataloader_num_workers: 2
+remove_unused_columns: false
+dataloader_drop_last: true
+
+# --- PEFT (optional) ---
+use_peft: false
+
+# --- Tokens ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>

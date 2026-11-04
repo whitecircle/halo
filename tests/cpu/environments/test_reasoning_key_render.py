@@ -1,21 +1,7 @@
 #!/usr/bin/env python
-"""Pinning tests: an assistant turn carrying CoT must render its reasoning on EVERY roster family.
-
-``Message.to_dict(include_thinking=True)`` must emit every key spelling the roster reads. Harmony
-(gpt-oss) reads only ``thinking``; Qwen3/3.5/3.6, Zaya, GLM-4, Gemma 4, Mistral4 and Bailing read
-``reasoning_content``; a permissive template (LFM-2) accepts either. Handed the spelling it does not
-know, a template renders the reasoning scaffolding with NOTHING in it — an empty
-``<think>\\n\\n</think>`` — so every reasoning turn of an env-GRPO trajectory trains those families
-to skip reasoning entirely.
-
-Real tokenizers on purpose: the key spelling lives in the shipped jinja, so a hand-built template
-would agree with whatever the code emits and could never catch this. ``_single_key_to_dict``
-holds a single-key emission verbatim, and
-:func:`test_single_key_emission_loses_reasoning_on_most_of_the_roster` asserts it still loses the CoT
-on several cached families — so the assertions here are demonstrably non-vacuous.
-
-    python tests/cpu/environments/test_reasoning_key_render.py
-"""
+"""An assistant turn carrying CoT renders its reasoning on every roster family. Harmony reads only ``thinking``,
+most read ``reasoning_content``; handed the wrong spelling a template renders an empty block, training the family
+to skip reasoning. Real tokenizers on purpose, since the spelling lives in the shipped jinja."""
 
 import functools
 import os
@@ -24,7 +10,7 @@ import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from src.environments.base import REASONING_KEYS, Message
+from halo.environments.messages import REASONING_KEYS, Message
 from tests.common.models import (
     BAILING_MOE_RING_MINI,
     GEMMA3_4B_IT,
@@ -73,11 +59,7 @@ def _load(model):
 
 
 def _single_key_to_dict(message):
-    """The single-key emission: assistant CoT under ``thinking`` alone.
-
-    Held verbatim, independent of ``to_dict``, so the assertions in this file are shown to reject a
-    real regression rather than restating whatever ``to_dict`` currently does.
-    """
+    """Assistant CoT under ``thinking`` alone, held verbatim so the assertions reject a real failure."""
     d = {"role": message.role, "content": message.content}
     if message.thinking:
         d["thinking"] = message.thinking
@@ -85,7 +67,6 @@ def _single_key_to_dict(message):
 
 
 def _render(tok, assistant_dict):
-    """Render user -> assistant through the shipped chat template, or ``None`` if it is rejected."""
     try:
         return tok.apply_chat_template(
             [{"role": "user", "content": USER}, assistant_dict], tokenize=False, add_generation_prompt=False
@@ -108,11 +89,8 @@ def _case(model):
 
 @functools.cache
 def _reads_reasoning(model):
-    """True when the family's template renders CoT under SOME spelling — i.e. it is a reasoning family.
-
-    Probed per key rather than declared, so a family that reads a third spelling counts as a reasoning
-    family here and then fails the assertions below instead of being skipped.
-    """
+    """True when the template renders CoT under some spelling; probed per key, so a third spelling fails the
+    assertions instead of being skipped."""
     tok = _load(model)
     if tok is None:
         return False
@@ -124,11 +102,7 @@ def _reads_reasoning(model):
 
 
 def _diff_region(bare, with_cot):
-    """The substrings of ``bare`` and ``with_cot`` that differ, once the shared prefix/suffix is cut.
-
-    Isolates the reasoning slot: ``bare``'s region is the empty block, ``with_cot``'s region the
-    same block carrying the CoT.
-    """
+    """The differing substrings once the shared prefix and suffix are cut, isolating the reasoning slot."""
     head = 0
     while head < min(len(bare), len(with_cot)) and bare[head] == with_cot[head]:
         head += 1
@@ -140,11 +114,7 @@ def _diff_region(bare, with_cot):
 
 @pytest.mark.parametrize("model", ROSTER)
 def test_reasoning_survives_the_render_for_every_reasoning_family(model):
-    """A reasoning family must see the CoT in its render, exactly once.
-
-    Exactly once is the other half: the emission hands every template both key spellings, so a
-    template that reads both would duplicate the reasoning into the trained row.
-    """
+    """Exactly once: every template gets both key spellings, so one reading both would duplicate the reasoning."""
     if not _reads_reasoning(model):
         pytest.skip(f"{model}'s template renders no CoT under any spelling")
     _tok, with_cot, _bare = _case(model)
@@ -155,12 +125,8 @@ def test_reasoning_survives_the_render_for_every_reasoning_family(model):
 
 @pytest.mark.parametrize("model", ROSTER)
 def test_no_family_renders_an_empty_reasoning_block(model):
-    """The specific harm: reasoning present, yet the render's reasoning slot holds nothing.
-
-    The slot is located by diffing the CoT render against the no-CoT render, so this makes no
-    assumption about a family's markers. Under a single-key emission the two renders are IDENTICAL
-    for every family except gpt-oss — an empty ``<think>`` block is the training target.
-    """
+    """The slot is located by diffing against the no-CoT render. Under a single-key emission the renders are
+    identical for all but gpt-oss."""
     if not _reads_reasoning(model):
         pytest.skip(f"{model}'s template renders no CoT under any spelling")
     _tok, with_cot, bare = _case(model)
@@ -185,21 +151,13 @@ def test_non_reasoning_family_renders_the_same_turn_with_or_without_cot(model):
 
 
 def test_matrix_covers_the_reasoning_roster():
-    """Anti-vacuity control: enough reasoning families must be cached for the assertions to bite."""
     reasoning = [model for model in ROSTER if _reads_reasoning(model)]
     assert len(reasoning) >= MIN_REASONING_FAMILIES, f"only {reasoning} reachable; the matrix proves too little"
 
 
 def test_single_key_emission_loses_reasoning_on_most_of_the_roster():
-    """Anti-vacuity control for the emission itself: the single-key dict must still lose the CoT.
-
-    Asserting that ``_single_key_to_dict`` fails on several reasoning families is what makes the two
-    tests above non-tautological. Harmony must survive it (gpt-oss reads ``thinking``), which pins
-    that serving the rest of the roster does not cost harmony its CoT. Only harmony's survival is
-    pinned: which *other* families survive is a property of their shipped jinja, and one permissive
-    enough to accept every spelling (LFM-2 reads ``thinking``, ``reasoning_content`` and
-    ``reasoning``) is not a regression.
-    """
+    """Its failure on several families is what makes the tests above non-tautological. Only harmony's survival is
+    pinned, since a permissive template (LFM-2) surviving is fine."""
     message = Message.assistant(ANSWER, thinking=COT)
     lost, kept = [], []
     for model in ROSTER:
@@ -219,12 +177,7 @@ def test_single_key_emission_loses_reasoning_on_most_of_the_roster():
 
 
 def test_reasoning_keys_stay_out_of_the_default_dict():
-    """``to_dict`` emits NO reasoning key under any spelling unless asked (``include_thinking``).
-
-    The engine request carries reasoning only where the env opts in: ``carry_reasoning`` renders the
-    last assistant turn's CoT through ``include_thinking=True``, every other message goes out plain.
-    An unknown field can 400 a request, so widening the training emission must not widen the default.
-    """
+    """The engine request carries reasoning only where the env opts in, and an unknown field can 400 a request."""
     plain = Message.assistant(ANSWER, thinking=COT).to_dict()
 
     assert not set(plain) & set(REASONING_KEYS)
@@ -232,8 +185,7 @@ def test_reasoning_keys_stay_out_of_the_default_dict():
 
 
 def test_dict_round_trip_preserves_reasoning_under_either_spelling():
-    """``from_dict`` is the inverse of ``to_dict`` and must also accept a server-shaped message, whose
-    CoT arrives as ``reasoning_content`` (what ``ray_actors`` parses responses from)."""
+    """``from_dict`` also accepts a server-shaped message, whose CoT arrives as ``reasoning_content``."""
     original = Message.assistant(ANSWER, thinking=COT)
 
     assert Message.from_dict(original.to_dict(include_thinking=True)).thinking == COT

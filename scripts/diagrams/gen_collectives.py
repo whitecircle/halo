@@ -99,7 +99,7 @@ panel(
     X0,
     Y0,
     "all-gather",
-    "FSDP forward — everyone gets every shard",
+    "FSDP forward: everyone gets every shard",
     ag_before,
     ag_after,
     "(R−1)/R × D per GPU",
@@ -111,7 +111,7 @@ panel(
     X1,
     Y0,
     "reduce-scatter",
-    "FSDP backward — sum, keep your shard",
+    "FSDP backward: sum, keep your shard",
     rs_before,
     rs_after,
     "(R−1)/R × D per GPU  ·  all-gather's dual",
@@ -138,7 +138,7 @@ panel(
     "EP dispatch · CP Ulysses (seq↔head)",
     rs_before,
     a2a_after,
-    "a transpose — each chunk has one destination",
+    "a transpose: each chunk has one destination",
     AMBER,
     AMBER_T,
 )
@@ -149,7 +149,7 @@ ax.add_patch(foot)
 ax.text(
     6.75,
     0.31,
-    "backward runs the dual:  the gradient of an all-gather is a reduce-scatter (and vice versa) —"
+    "backward runs the dual: the gradient of an all-gather is a reduce-scatter and vice versa;"
     " an all-to-all's is another all-to-all",
     ha="center",
     va="center",

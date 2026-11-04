@@ -1,29 +1,13 @@
-"""``EfficiencyCallback``'s attention term must describe what THIS RANK computes, on both axes.
+"""The attention term must describe what this rank computes: ``/tp_size`` under TP, the stage's own layers under PP.
+The default PP partition is head-weighted, so a pp_size average is wrong. Expected counts come from the splitter."""
 
-The ``6*N`` half of the FLOPs estimate is already per-rank — ``local_numel`` reads each shard off its
-DTensor under TP, and each stage's own parameters under PP. The attention-score half is derived from
-the config's layer layout instead, so both corrections have to be explicit:
-
-* **TP** — ``H`` stays global on every rank, so the term is divided by ``tp_size``. Without it a TP
-  rank is credited with the whole model's attention scores and MFU over-reports by up to
-  ``tp_size``x on the attention share of the estimate. The parameter term must NOT be divided again.
-* **PP** — ``L`` is the rank's own decoder-layer count, never ``num_hidden_layers / pp_size``. The
-  default partition is head-weighted, not even (the last stage gives up layer budget for the
-  ``lm_head`` matmul), so a pp_size average makes the two halves of the estimate describe different
-  models, and the error is large and one-sided.
-
-The expected per-stage layer counts come from the PP splitter itself, not from constants restated
-here, so these tests keep policing the callback if the partitioning heuristic changes.
-
-    python tests/cpu/callbacks/test_efficiency_attention_flops.py
-"""
+from types import SimpleNamespace
 
 import pytest
 from torch import nn
 
-from src.callbacks.efficiency import EfficiencyCallback
-from src.callbacks.model_flops import rank_attention_flops, resolve_attention_layout
-from src.distributed.pipeline_parallel.split import (
+from halo.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
+from halo.distributed.pipeline_parallel.partition import (
     compute_layer_partition,
     head_cost_layer_equivalents,
     layer_types_period,
@@ -61,11 +45,7 @@ class _Config:
 
 
 class _Model(nn.Module):
-    """A causal-LM-shaped model whose backbone holds this rank's slice of the decoder-layer list.
-
-    Layers are allocated on ``meta``: the estimators read parameter SHAPES and never values, so a
-    full-width stack costs nothing here.
-    """
+    """Layers are on ``meta`` because the estimators read parameter shapes and never values."""
 
     def __init__(self, n_layers: int):
         super().__init__()
@@ -77,7 +57,6 @@ class _Model(nn.Module):
 
 
 def _default_partition(pp_size: int) -> list[tuple[int, int]]:
-    """The partition the toolkit would actually use, from the splitter."""
     config = _Config()
     return compute_layer_partition(
         NUM_LAYERS,
@@ -88,38 +67,38 @@ def _default_partition(pp_size: int) -> list[tuple[int, int]]:
 
 
 def _attention_flops(n_layers: float) -> float:
-    """QK^T and Attn*V, forward plus backward, for an unsharded ``n_layers`` stack of the alternating
-    sliding/full pattern: half the layers attend the sequence, half their window, at width
-    ``heads * (d_qk + d_v)``. Linear in ``n_layers`` because the pattern's period is 2 and every
-    stage the splitter produces holds whole periods."""
+    """QK^T and Attn*V, forward plus backward, for an unsharded alternating sliding/full stack at width
+    ``heads * (d_qk + d_v)``. Linear in ``n_layers``, as every stage the splitter makes holds whole periods of 2."""
     per_pair = 6.0 * HEADS * (2 * HEAD_DIM) * (SEQ_LEN + min(SEQ_LEN, SLIDING_WINDOW))
     return per_pair * n_layers / 2
 
 
 def _param_term(n_layers: int) -> float:
-    """The ``6*N`` term for :class:`_Model`, which TP shards through ``local_numel``, not through here."""
     return 6.0 * n_layers * HIDDEN * HIDDEN
 
 
 def _tp_parallelism(tp_size: int):
-    """A TP-only config on a world of exactly ``tp_size`` — one TP group, no data parallelism."""
     return make_parallelism_config(tp_size=tp_size, world_size=tp_size, gpus_per_node=tp_size)
 
 
-def _callback_state(tp_size: int, model: nn.Module | None = None):
-    """The estimates ``EfficiencyCallback`` stores for a TP-``tp_size`` rank holding ``model``."""
-    callback = EfficiencyCallback(_tp_parallelism(tp_size))
-    callback._initialize_model_flops(_Model(NUM_LAYERS) if model is None else model, SEQ_LEN)
-    return callback.state
+def _callback_state(tp_size: int, model: nn.Module | None = None) -> RankFlopsModel:
+    return estimate_rank_flops(
+        _Model(NUM_LAYERS) if model is None else model,
+        seq_len=SEQ_LEN,
+        parallelism_config=_tp_parallelism(tp_size),
+        full_model_params=None,
+    )
 
 
 def _stage_attention_flops(model, pp_size: int, tp_size: int = 1) -> float:
-    """A pipeline stage's attention term, off the layout pair the callback composes it from."""
-    return rank_attention_flops(*resolve_attention_layout(model, pp_size), SEQ_LEN, tp_size)
+    """The estimate reads only these axis sizes."""
+    parallelism = SimpleNamespace(pp_size=pp_size, tp_size=tp_size, ep_size=1, expert_tp_size=1)
+    return estimate_rank_flops(
+        model, seq_len=SEQ_LEN, parallelism_config=parallelism, full_model_params=None
+    ).attention_flops_per_token
 
 
 def test_premise_attention_is_a_material_share_of_the_estimate():
-    """Guard the premise: at this geometry the attention term is large enough for the bug to matter."""
     assert _attention_flops(NUM_LAYERS) > 0.25 * _param_term(NUM_LAYERS), (
         "the attention term is negligible at this geometry, so halving it would be unmeasurable and "
         "these tests would prove nothing — re-derive the geometry"
@@ -127,7 +106,6 @@ def test_premise_attention_is_a_material_share_of_the_estimate():
 
 
 def test_premise_default_partition_is_uneven():
-    """Guard the premise: if the default split ever became even, dividing by pp_size would be correct."""
     sizes = [hi - lo for lo, hi in _default_partition(4)]
     assert sum(sizes) == NUM_LAYERS
     assert len(set(sizes)) > 1, (
@@ -138,7 +116,6 @@ def test_premise_default_partition_is_uneven():
 
 @pytest.mark.parametrize("tp_size", TP_SIZES)
 def test_the_attention_term_scales_inversely_with_tp_size(tp_size):
-    """A TP rank computes scores for 1/tp_size of the heads — against the formula AND the tp1 value."""
     got = _callback_state(tp_size).attention_flops_per_token
     expected = _attention_flops(NUM_LAYERS) / tp_size
 
@@ -163,11 +140,7 @@ def test_only_the_attention_term_moves_with_tp_size(tp_size):
 
 @pytest.mark.parametrize("tp_size", TP_SIZES)
 def test_the_callback_applies_tp_size_to_both_estimates(tp_size):
-    """The dense and active FLOPs/token the callback stores must both carry the division.
-
-    They are computed at two separate call sites; a fix applied to only one leaves MFU or S-MFU
-    over-reporting under TP.
-    """
+    """Dense and active are computed at two call sites; dividing at only one leaves MFU or S-MFU over-reporting."""
     baseline = _callback_state(1)
     state = _callback_state(tp_size)
 
@@ -183,7 +156,6 @@ def test_the_callback_applies_tp_size_to_both_estimates(tp_size):
 
 @pytest.mark.parametrize("pp_size", PP_SIZES)
 def test_attention_flops_track_the_stages_own_layer_count(pp_size):
-    """Every stage's attention term must match its real layer count, not the pp_size average."""
     for stage_index, (lo, hi) in enumerate(_default_partition(pp_size)):
         stage_layers = hi - lo
         got = _stage_attention_flops(_Model(stage_layers), pp_size)
@@ -197,13 +169,11 @@ def test_attention_flops_track_the_stages_own_layer_count(pp_size):
 
 @pytest.mark.parametrize("pp_size", [size for size in PP_SIZES if size > 1])
 def test_stage_terms_sum_to_the_whole_model(pp_size):
-    """No layer's attention may be double-counted or dropped across the pipeline."""
     total = sum(_stage_attention_flops(_Model(hi - lo), pp_size) for lo, hi in _default_partition(pp_size))
     assert total == pytest.approx(_stage_attention_flops(_Model(NUM_LAYERS), 1), rel=1e-9)
 
 
 def test_both_axes_default_to_one():
-    """The common path — neither axis enabled — must keep the full-depth, full-width attention term."""
     state = _callback_state(1)
 
     assert state.attention_flops_per_token == pytest.approx(_attention_flops(NUM_LAYERS))
@@ -212,20 +182,17 @@ def test_both_axes_default_to_one():
 
 @pytest.mark.parametrize(("pp_size", "tp_size"), [(1, 1), (4, 1), (1, 4), (2, 4)])
 def test_the_config_depth_fallback_carries_both_divisors(pp_size, tp_size):
-    """A module tree exposing no layer list falls back to config depth — which is the FULL model's,
-    so it needs the stage share (``/pp_size``) and the head share (``/tp_size``) applied to it."""
-
-    class _Bare:
-        config = _Config()
-
-    got = _stage_attention_flops(_Bare(), pp_size, tp_size)
+    """Config depth is the full model's, so the fallback needs the stage share (``/pp_size``) and head share
+    (``/tp_size``)."""
+    bare = nn.Module()
+    bare.config = _Config()
+    got = _stage_attention_flops(bare, pp_size, tp_size)
     assert got == pytest.approx(_attention_flops(NUM_LAYERS / pp_size) / tp_size), (
         f"the fallback at pp{pp_size}/tp{tp_size} is {got:.6e}, expected the full-depth term divided by both axes"
     )
 
 
 def test_no_config_and_no_layers_omits_the_term():
-    """Neither source available: omit the term rather than guess (documented under-estimate)."""
     state = _callback_state(1, nn.Linear(HIDDEN, HIDDEN, bias=False, device="meta"))
 
     assert state.attention_layout is None

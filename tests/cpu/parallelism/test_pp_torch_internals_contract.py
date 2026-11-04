@@ -1,0 +1,179 @@
+#!/usr/bin/env python
+"""The pipeline runner against real ``torch.distributed.pipelining``, on one CPU rank.
+A torch upgrade renaming a private member or changing a signature fails here, before a PP GPU run."""
+
+import copy
+from types import SimpleNamespace
+from typing import get_args
+
+import pytest
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import fully_shard
+from torch.distributed.pipelining import Schedule1F1B, ScheduleGPipe
+
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_rules import PPSchedule
+from halo.distributed.pipeline_parallel import runner
+from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss, causal_lm_token_loss
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
+
+VOCAB = 16
+HIDDEN = 8
+ROWS = 6
+MICROBATCHES = 3
+ABSENT_MEMBER = "_member_no_torch_defines"
+SCHEDULES = sorted(runner._SCHEDULES)
+
+
+class _TinyCausalLM(nn.Module):
+    # A one-stage chain hands no token ids beside its activation.
+    token_ids_kwarg = None
+
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Embedding(VOCAB, HIDDEN)
+        self.head = nn.Linear(HIDDEN, VOCAB)
+
+    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.head(self.embed(input_ids))
+
+
+@pytest.fixture
+def single_rank_gloo(tmp_path):
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
+    try:
+        yield
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.fixture
+def models(single_rank_gloo):
+    torch.manual_seed(0)
+    stage_root = _TinyCausalLM()
+    reference = copy.deepcopy(stage_root)
+    fully_shard(stage_root, mesh=init_device_mesh("cpu", (1,)), reshard_after_forward=False)
+    return stage_root, reference
+
+
+def _runner(stage_root: nn.Module, schedule: str, loss: object = None) -> runner.PipelineRunner:
+    """``ParallelismConfig`` refuses a pipeline schedule at ``pp_size=1``, so a namespace carries the five fields
+    read."""
+    config = SimpleNamespace(pp_rank=0, pp_size=1, pp_schedule=schedule, is_first_pp_stage=True, is_last_pp_stage=True)
+    return runner.PipelineRunner(
+        stage_root, config, dist.group.WORLD, torch.device("cpu"), MICROBATCHES, TokenLoss() if loss is None else loss
+    )
+
+
+def _batch() -> tuple[torch.Tensor, torch.Tensor]:
+    """Unequal target counts, so normalizing per microbatch would change the loss."""
+    input_ids = torch.randint(VOCAB, (ROWS, 7), generator=torch.Generator().manual_seed(1))
+    labels = input_ids.clone()
+    for row in range(ROWS):
+        labels[row, : row + 1] = LABEL_IGNORE_INDEX
+    return input_ids, labels
+
+
+def _reference_loss_and_grads(reference: nn.Module, input_ids: torch.Tensor, labels: torch.Tensor):
+    loss = causal_lm_token_loss(reference(input_ids), labels) / loss_token_counts_per_row(labels).sum()
+    loss.backward()
+    return loss.detach(), {name: param.grad for name, param in reference.named_parameters()}
+
+
+def _assert_grads_match(stage_root: nn.Module, expected_grads: dict[str, torch.Tensor]) -> None:
+    # An eval drive leaves unsharded params registered; reduced gradients sit on the shards.
+    reshard_fsdp2_modules(stage_root)
+    for name, param in stage_root.named_parameters():
+        assert param.grad is not None, f"{name} received no reduced gradient"
+        torch.testing.assert_close(param.grad.full_tensor(), expected_grads[name], msg=name)
+
+
+@pytest.mark.parametrize("schedule,schedule_cls", [("1f1b", Schedule1F1B), ("gpipe", ScheduleGPipe)])
+def test_the_runner_builds_the_configured_schedule_without_grad_scaling(schedule, schedule_cls, models):
+    engine = _runner(models[0], schedule)
+
+    assert type(engine.schedule) is schedule_cls
+    # The loss already divides by the step's token count.
+    assert engine.schedule.scale_grads is False
+
+
+@pytest.mark.parametrize(
+    "required", ["_REQUIRED_FSDP_INTERNALS", "_REQUIRED_SCHEDULE_INTERNALS", "_REQUIRED_STAGE_INTERNALS"]
+)
+def test_construction_fails_naming_a_member_torch_lacks(required, models, monkeypatch):
+    monkeypatch.setattr(runner, required, (*getattr(runner, required), ABSENT_MEMBER))
+
+    with pytest.raises(RuntimeError, match=ABSENT_MEMBER):
+        _runner(models[0], "1f1b")
+
+
+def test_every_configurable_schedule_has_an_engine():
+    assert set(runner._SCHEDULES) == set(get_args(PPSchedule))
+
+
+@pytest.mark.parametrize(
+    "loss", [causal_lm_token_loss, TokenLoss, FusedHeadLoss, "fused"], ids=["bare-fn", "class", "fused-class", "name"]
+)
+def test_construction_refuses_a_loss_that_is_not_a_loss_value(loss, models):
+    """Only an instance says which form every stage runs."""
+    with pytest.raises(TypeError, match=r"TokenLoss\(fn\)"):
+        _runner(models[0], "1f1b", loss)
+
+
+def test_construction_refuses_a_stage_root_outside_fully_shard(single_rank_gloo):
+    with pytest.raises(RuntimeError, match="not an FSDPModule"):
+        _runner(_TinyCausalLM(), "1f1b")
+
+
+@pytest.mark.parametrize("eval_first", [False, True], ids=["step_first", "eval_first"])
+@pytest.mark.parametrize("schedule", SCHEDULES)
+def test_a_one_stage_chain_matches_the_unsplit_model(schedule, eval_first, models):
+    """Eval first must leave the following step training; step first must leave eval scoring the same model."""
+    stage_root, reference = models
+    input_ids, labels = _batch()
+    expected_loss, expected_grads = _reference_loss_and_grads(reference, input_ids, labels)
+    engine = _runner(stage_root, schedule)
+
+    def assert_eval_drives_match():
+        torch.testing.assert_close(engine.eval_loss(input_ids, labels), expected_loss)
+        torch.testing.assert_close(engine.forward_only(input_ids), reference(input_ids).detach())
+
+    if eval_first:
+        assert_eval_drives_match()
+    torch.testing.assert_close(engine.step(input_ids, labels).detach(), expected_loss)
+    if not eval_first:
+        assert_eval_drives_match()
+
+    _assert_grads_match(stage_root, expected_grads)
+
+
+@pytest.mark.parametrize("schedule", SCHEDULES)
+def test_dict_targets_reach_the_loss_with_their_own_rows(schedule, models):
+    """Per-example side tensors go through the schedule's own microbatch step."""
+    stage_root, reference = models
+    input_ids, labels = _batch()
+    expected_loss, expected_grads = _reference_loss_and_grads(reference, input_ids, labels)
+    targets_seen = []
+
+    def token_loss_fn(logits, target):
+        targets_seen.append(target)
+        return causal_lm_token_loss(logits, target["labels"])
+
+    engine = _runner(stage_root, schedule, TokenLoss(token_loss_fn))
+    extra_targets = {"row": torch.arange(ROWS)}
+
+    torch.testing.assert_close(engine.eval_loss(input_ids, labels, extra_targets=extra_targets), expected_loss)
+    torch.testing.assert_close(engine.step(input_ids, labels, extra_targets=extra_targets).detach(), expected_loss)
+
+    microbatch_rows = [split.tolist() for split in torch.tensor_split(torch.arange(ROWS), MICROBATCHES)]
+    assert [target["row"].tolist() for target in targets_seen] == microbatch_rows * 2, "eval, then step"
+    for target in targets_seen:
+        assert torch.equal(target["labels"], labels[target["row"]])
+    _assert_grads_match(stage_root, expected_grads)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

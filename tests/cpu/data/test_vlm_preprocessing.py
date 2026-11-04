@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""
-Test VLM dataset preprocessing with Qwen2.5-VL-3B-Instruct.
-
-This test verifies the VLM preprocessing pipeline:
-1. Preprocessing with full tokenization (input_ids, pixel_values, etc.)
-2. Loading preprocessed dataset
-3. Using PreprocessedVLMDataCollator for batching
-
-Usage:
-    python tests/cpu/data/test_vlm_preprocessing.py
-"""
+"""VLM dataset preprocessing and ``PreprocessedVLMDataCollator`` batching."""
 
 import base64
 import io
@@ -25,13 +15,17 @@ from PIL import Image
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
-from src.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import preprocess_dataset, tokenize_vlm_dataset
-from src.data.vlm import VLM_IMAGE_COLUMNS, VLM_OUTPUT_FEATURES, is_vlm_run
-from src.models import modality
-from src.models.modality import is_vlm_model
-from tests.common.models import QWEN2_5_VL_3B
+from halo.data.collators.self_distill import SelfDistillVLMDataCollator
+from halo.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.preparation import preprocess_dataset
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
+from halo.data.vlm_render import VLM_OUTPUT_FEATURES, extract_conversation_images
+from halo.model_loading.parallel import model_source
+from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.models.modality import is_vlm_model
+from tests.common.models import QWEN2_5_VL_3B, QWEN3_5_MOE_35B
 from tests.common.tokenizers import load_cached_processor
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
@@ -43,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 
 def test_vlm_preprocessing_without_images():
-    """Test VLM preprocessing with text-only conversations."""
     logger.info("=" * 60)
     logger.info("Testing VLM Preprocessing (text-only conversations)")
     logger.info("=" * 60)
@@ -99,9 +92,6 @@ def test_vlm_preprocessing_without_images():
     logger.info("Text-only VLM preprocessing test passed!")
 
 
-# PreprocessedVLMDataCollator tests run without a model download: only pad_token_id is read.
-
-
 class _FakeTokenizer:
     """Minimal stand-in: the collator only reads pad_token_id."""
 
@@ -109,16 +99,27 @@ class _FakeTokenizer:
         self.pad_token_id = pad_token_id
 
 
-def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
-    """The offline writer's Arrow schema and the collator's ``required_dataset_columns`` are one
-    declaration, checked here against an independent literal rather than against each other.
+@pytest.mark.parametrize("model_name", [QWEN3_5_MOE_35B, QWEN2_5_VL_3B])
+def test_a_row_system_turn_renders_alone_beside_a_configured_prompt(model_name):
+    """Qwen3.5's template raises on the stacked pair and Qwen2.5-VL's renders both."""
+    processor = load_cached_processor(model_name, trust_remote_code=True)
+    conversation = [
+        {"role": "system", "content": "row rules"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
 
-    Both sides matter: the writer pins the schema on the map (an all-None batch would otherwise
-    infer null Arrow columns), and the trainer's dataloader mixin unions the collator's declaration
-    into HF's signature-column set — without it TRL's SFT signature list prunes the stored columns
-    (pixel_values_shape, attention_mask, …) before collation and the first batch crashes. Changing
-    the stored schema means changing this literal, deliberately.
-    """
+    history, _ = extract_conversation_images(conversation, system_prompt="configured prompt")
+    text = processor.apply_chat_template(history, tokenize=False)
+
+    assert "row rules" in text
+    assert "configured prompt" not in text
+
+
+def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
+    """The writer pins the schema on the map, and the dataloader mixin unions the collator's declaration into HF's
+    signature columns, or TRL prunes stored columns before collation. Changing the schema means changing this
+    literal."""
     expected = {
         "input_ids",
         "attention_mask",
@@ -126,6 +127,7 @@ def test_the_preprocessed_vlm_schema_is_the_declared_column_set():
         "pixel_values",
         "pixel_values_shape",
         "image_grid_thw",
+        "image_grid_hw",
     }
     assert set(VLM_OUTPUT_FEATURES) == expected, "the offline writer's Arrow schema changed"
     assert set(PreprocessedVLMDataCollator.required_dataset_columns) == expected, (
@@ -152,14 +154,8 @@ def test_collator_right_pads_to_batch_max():
 
 
 def test_collator_does_not_truncate_preprocessed_data():
-    """Preprocessed VLM data is NOT re-truncated to max_length here.
-
-    Capping the batch at self.max_length truncates input_ids while pixel_values / image_grid_thw pass
-    through whole — desyncing the image-placeholder count from the vision patches (a vision-merge
-    shape mismatch) whenever a preprocessed example is longer than the collator's max_length. The
-    data is already length-bounded (image-token-aware) at preprocessing, so the collator must only
-    pad. A shorter budget comes from re-preprocessing.
-    """
+    """Capping at max_length truncates input_ids while pixel_values pass through whole, desyncing placeholders from
+    patches. The data is already length-bounded at preprocessing."""
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=0), max_length=3)
     ex = {"input_ids": [1, 2, 3, 4, 5], "attention_mask": [1] * 5, "labels": [1, 2, 3, 4, 5]}
     batch = collator([ex])
@@ -169,8 +165,7 @@ def test_collator_does_not_truncate_preprocessed_data():
 
 
 def test_collator_keeps_image_tokens_aligned_when_over_max_length():
-    """The core safety property: an over-max_length example with pixel_values keeps ALL its image
-    placeholder tokens, so the count still matches the (whole, untruncated) pixel_values."""
+    """An over-length example with pixel_values keeps all its placeholders, matching its whole pixel_values."""
     image_token = 99
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=0), max_length=4)
     pv = np.arange(6, dtype=np.float16).reshape(3, 2)  # 3 patches; one placeholder token each
@@ -190,7 +185,6 @@ def test_collator_keeps_image_tokens_aligned_when_over_max_length():
 
 
 def test_collator_respects_nonzero_pad_id():
-    """A non-zero pad_token_id is used for input padding (mask/labels unaffected)."""
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=42), max_length=2048)
     batch = collator(
         [
@@ -224,7 +218,6 @@ def test_collator_deserializes_pixel_values_and_grid():
 
 
 def test_collator_text_only_has_no_pixel_keys():
-    """Text-only stored examples (no pixel_values) collate without image keys."""
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=0), max_length=2048)
     batch = collator([{"input_ids": [1, 2], "attention_mask": [1, 1], "labels": [1, 2]}])
     assert "pixel_values" not in batch
@@ -236,9 +229,8 @@ def test_collator_text_only_has_no_pixel_keys():
 
 
 class _FakeVLMProcessor(FakeVLMProcessorBase):
-    """Declares the truncation/max_length kwargs explicitly and accepts NO ``**kwargs`` — so
-    a caller that passes ``truncation=True`` silently cuts sequences here and these
-    regression tests see it, instead of the drop/raise the collator owes."""
+    """Accepts no ``**kwargs``, so a caller passing ``truncation=True`` silently cuts sequences here and these tests
+    see it."""
 
     def __call__(
         self,
@@ -255,19 +247,17 @@ class _FakeVLMProcessor(FakeVLMProcessorBase):
 
 
 def test_vlm_collator_raises_on_over_length_instead_of_truncating():
-    """VLMDataCollator must refuse to truncate: cutting expanded image placeholder tokens while
-    pixel_values/image_grid_thw keep every patch desyncs the two silently. It must raise."""
+    """Cutting placeholders while pixel_values keep every patch desyncs the two silently."""
     tok = FakeVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=4)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=4, train_on_completions_only=False)
     ex = {"history": [{"role": "user", "content": "one two three four five six"}], "images": []}
     with pytest.raises(ValueError, match="cannot be truncated at collation"):
         collator([ex])
 
 
 def test_vlm_collator_within_budget_pads_and_builds_labels():
-    """Under the budget the collator pads and builds labels: right-padded batch + pad-masked labels."""
     tok = FakeVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=16)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=16, train_on_completions_only=False)
     examples = [
         {
             "history": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello there"}],
@@ -283,17 +273,18 @@ def test_vlm_collator_within_budget_pads_and_builds_labels():
 
 
 def test_self_distill_vlm_teacher_overflow_raises():
-    """The teacher branch (student history + privileged hint) must refuse truncation too: right-
-    truncating it cuts trailing response tokens the student keeps, breaking the byte-identical
-    response invariant OPD row alignment relies on. It must raise, naming the teacher branch."""
+    """Right-truncating the teacher cuts response tokens the student keeps, breaking the byte-identical response
+    invariant OPD alignment relies on."""
     tok = FakeVLMTokenizer()
     collator = SelfDistillVLMDataCollator(
         _FakeVLMProcessor(tok),
         tok,
         max_length=8,
+        train_on_completions_only=False,
         hint_template=" hint hint hint hint hint {answer}",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
     )
     ex = {
         # Student renders to exactly 8 tokens (fits); the teacher adds the 6-token hint (overflows).
@@ -309,9 +300,7 @@ def test_self_distill_vlm_teacher_overflow_raises():
 
 
 def test_vlm_preprocessing_drops_over_length_rows_instead_of_truncating():
-    """process_vlm_example must DROP an over-length row, never truncate it: input_ids cut to
-    max_length beside FULL pixel_values/image_grid_thw writes desynced rows to disk. Dropping
-    mirrors the text path's none-example filtering."""
+    """input_ids cut beside full pixel_values would write desynced rows to disk; dropping mirrors the text path."""
     tok = FakeVLMTokenizer()
     processor = _FakeVLMProcessor(tok)
     short_row = {
@@ -340,10 +329,8 @@ def test_vlm_preprocessing_drops_over_length_rows_instead_of_truncating():
 
 
 def test_vlm_preprocessing_error_row_alongside_success_row():
-    """Every row — successful, dropped or failed — must carry ONE fixed schema, the error row being
-    filtered out afterwards. The Arrow writer requires uniform keys within a write batch, so an
-    error path returning a bare {"input_ids": None} crashes the map (KeyError: 'attention_mask') as
-    soon as a failing row shares a batch with a good one."""
+    """The Arrow writer requires uniform keys within a write batch, so an error path returning a bare
+    ``{"input_ids": None}`` crashes the map beside a good row."""
     tok = FakeVLMTokenizer()
     processor = _FakeVLMProcessor(tok)
     good_row = {
@@ -367,9 +354,8 @@ def test_vlm_preprocessing_error_row_alongside_success_row():
 
 
 class _AllImageTokenVLMProcessor(_FakeVLMProcessor):
-    """Renders every attended position as the image-pad id, so the unconditional image masking
-    leaves no trainable token — the same all-ignore artifact a mistyped assistant_message_template
-    bakes on this path."""
+    """Renders every attended position as the image-pad id, so masking leaves no trainable token, the all-ignore
+    artifact a mistyped template bakes."""
 
     def encode_batch(self, text, max_length=None):
         batch = super().encode_batch(text, max_length=max_length)
@@ -380,11 +366,8 @@ class _AllImageTokenVLMProcessor(_FakeVLMProcessor):
 
 
 def test_vlm_preprocessing_refuses_a_bake_that_trains_zero_tokens():
-    """The VLM bake owes the same zero-trainable-tokens refusal as the text bake.
-
-    Its row filter keys on ``input_ids``/``attention_mask``, never on labels, so a fully-masked
-    artifact passes every other check and ships: the run then trains on nothing at full cost.
-    """
+    """The row filter keys on ``input_ids``/``attention_mask``, so a fully-masked artifact would otherwise ship and
+    train on nothing."""
     processor = _AllImageTokenVLMProcessor(FakeVLMTokenizer())
     row = {"conversation": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]}
     config = PreprocessingConfig(
@@ -399,21 +382,17 @@ def test_vlm_preprocessing_refuses_a_bake_that_trains_zero_tokens():
 
 
 class _ImageCountingVLMProcessor(_FakeVLMProcessor):
-    """Fake processor whose OUTPUT length encodes how many images it was handed.
-
-    The merge is asserted on the baked row rather than on a recorded call, because
-    ``coordinated_map`` caches its result to disk and a cache hit replays the row while a side
-    channel would come back empty.
-    """
+    """Output length encodes how many images it was handed. Asserted on the baked row, since a ``coordinated_map``
+    cache hit replays the row and a side channel would come back empty."""
 
     def __call__(self, text, images=None, **kwargs):
-        marker = " ".join(["<image>"] * len(images or []))
-        return super().__call__([f"{marker} {t}" for t in text], images=images, **kwargs)
+        row_images = images or [[] for _ in text]
+        marked = [f"{' '.join(['<image>'] * len(one))} {t}" for t, one in zip(text, row_images, strict=True)]
+        return super().__call__(marked, images=images, **kwargs)
 
 
 def _tiny_image_data_uri() -> str:
-    """A 64x64 PNG as a base64 data URI — an image spelling ``process_image`` accepts and Arrow can
-    store (a bare path could not survive the Arrow round trip)."""
+    """A 64x64 PNG as a base64 data URI, which ``decode_image`` accepts and Arrow can store."""
     buffer = io.BytesIO()
     Image.fromarray(np.zeros((64, 64, 3), dtype=np.uint8)).save(buffer, format="PNG")
     return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
@@ -434,7 +413,7 @@ _IMAGELESS_TURNS = [{"role": "user", "content": "describe"}, {"role": "assistant
 
 
 class _VocabCountingVLMTokenizer(FakeVLMTokenizer):
-    """Records every full-vocab read — the cost the image-token resolution must pay once, not per row."""
+    """Records every full-vocab read, a cost the image-token resolution pays once and not per row."""
 
     def __init__(self):
         self.vocab_reads = 0
@@ -445,10 +424,10 @@ class _VocabCountingVLMTokenizer(FakeVLMTokenizer):
 
 
 def test_image_token_ids_are_resolved_once_per_collator_not_per_batch():
-    """``get_image_token_ids`` unions the tokenizer's WHOLE vocab dict. Resolved per batch it is a
-    per-step cost of the vocabulary's size (~150k entries) for a verdict fixed at construction."""
+    """``resolve_image_token_ids`` unions the whole vocab dict, a per-step cost of ~150k entries for a verdict fixed
+    at construction."""
     tok = _VocabCountingVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=32)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=32, train_on_completions_only=False)
     example = {"history": _IMAGELESS_TURNS, "images": []}
 
     for _ in range(3):
@@ -470,12 +449,8 @@ def test_image_token_ids_are_resolved_once_per_bake_not_per_row(tmp_path, monkey
 
 
 def test_vlm_preprocessing_merges_a_separate_images_column():
-    """Offline ``--vlm`` must read the images column, not conversation_field alone: a dataset keeping
-    its images in their own column — the hub VLM shape the runtime twin (``create_vlm_processor`` →
-    ``normalize_vlm_conversation``) supports — otherwise reaches the processor with ZERO images,
-    baking text rows into an artifact stamped is_vlm=True that the training side accepts as
-    multimodal.
-    """
+    """A dataset keeping images in their own column otherwise reaches the processor with zero images, baking text
+    rows into an artifact stamped is_vlm=True."""
     processor = _ImageCountingVLMProcessor(FakeVLMTokenizer())
 
     text_only = tokenize_vlm_dataset(
@@ -497,8 +472,8 @@ def test_vlm_preprocessing_merges_a_separate_images_column():
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 @pytest.mark.parametrize("is_vlm", [True, False])
 def test_preprocessing_refuses_an_image_column_nothing_consumes(column, is_vlm):
-    """The backstop for the same silent drop when no ``images_field`` is set: tokenization removes every source
-    column, so an image column no ``images_field`` names is deleted without a word."""
+    """Tokenization removes every source column, so an image column no ``images_field`` names would be deleted
+    without a word."""
     dataset = DatasetDict({"train": Dataset.from_list([{"conversation": _IMAGELESS_TURNS, column: "img"}])})
     config = _vlm_config() if is_vlm else PreprocessingConfig(model_name_or_path="fake/vlm", num_proc=1)
 
@@ -507,7 +482,6 @@ def test_preprocessing_refuses_an_image_column_nothing_consumes(column, is_vlm):
 
 
 def test_a_consumed_images_column_passes_the_backstop():
-    """Anti-vacuity: the refusal is about columns nothing consumes, not about image data."""
     row = {"conversation": _IMAGELESS_TURNS, "images": _tiny_image_data_uri()}
     dataset = DatasetDict({"train": Dataset.from_list([row])})
     result = preprocess_dataset(
@@ -523,37 +497,35 @@ def test_images_field_without_vlm_mode_is_refused():
 
 
 def test_is_vlm_model_detects_via_config_mapping():
-    """A model_type registered under AutoModelForImageTextToText is a VLM regardless of its name."""
     mt = next(iter(MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES))
     assert is_vlm_model("org/some-text-named-checkpoint", config=SimpleNamespace(model_type=mt))
 
 
 def test_is_vlm_model_detects_via_vision_config():
-    """A config carrying a vision_config is a VLM even if its model_type isn't in the mapping."""
     cfg = SimpleNamespace(model_type="custom_thing", vision_config=SimpleNamespace(hidden_size=8))
     assert is_vlm_model("org/whatever", config=cfg)
 
 
 def test_is_vlm_model_text_config_is_not_vlm():
-    """A plainly text-only config with no VLM name hint is not a VLM."""
     assert not is_vlm_model("Qwen/Qwen3-4B", config=SimpleNamespace(model_type="qwen3"))
 
 
 def test_is_vlm_model_name_fallback_for_unmapped_vlm():
-    """Name heuristic still catches a VLM whose (text-looking) config isn't in the mapping — e.g. a
-    remote-code VLM — so config-miss does not force a false negative."""
+    """A remote-code VLM whose config is unmapped still gets caught, so a config miss does not force a false
+    negative."""
     assert is_vlm_model("org/My-Custom-VL-7B", config=SimpleNamespace(model_type="custom"))
     assert is_vlm_model("llava-hf/llava-1.5-7b-hf", config=SimpleNamespace(model_type="custom"))
 
 
-def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
-    """A path substring must not override a config transformers can vouch for as text-only.
+def test_is_vlm_model_refuses_a_missing_config_naming_the_probe():
+    """The verdict reads no hub: a caller without a config takes the collective probe instead."""
+    with pytest.raises(TypeError, match="probe_checkpoint"):
+        is_vlm_model("org/My-Custom-VL-7B", None)
 
-    The hints are unanchored, so ``vision`` matches ``revision-8472618`` and ``-vl`` matches
-    ``-vllm``. A text-only verdict that fell through to them would route a registered text-only
-    checkpoint into the VLM path, where the image collator and the packing / padding-free rejection
-    make it fail.
-    """
+
+def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
+    """The hints are unanchored: ``vision`` matches ``revision-8472618`` and ``-vl`` matches ``-vllm``, which would
+    route a registered text-only checkpoint into the VLM path."""
     text_only = SimpleNamespace(model_type="qwen3_5_moe_text", vision_config=None)
     for path in (
         "/ckpt/revision-8472618112abcbd45acbcdc58436aff4233c23f7",
@@ -564,12 +536,8 @@ def test_a_registered_text_only_config_beats_a_name_hint_matching_mid_word():
 
 
 def test_an_unregistered_model_type_still_defers_to_the_name_hint():
-    """The text-only shortcut is gated on transformers KNOWING the model_type.
-
-    For a remote-code architecture, "no ITT entry and no vision_config" carries no information, so
-    silence there must not be read as text-only — that would drop a VLM's images silently, where a
-    false positive from the name heuristic fails loud.
-    """
+    """For a remote-code architecture no ITT entry and no vision_config carries no information; reading it as
+    text-only would silently drop a VLM's images."""
     assert "custom_remote_vlm" not in CONFIG_MAPPING_NAMES
     unregistered = SimpleNamespace(model_type="custom_remote_vlm", vision_config=None)
     assert is_vlm_model("org/Custom-VL-7B", config=unregistered)
@@ -577,49 +545,42 @@ def test_an_unregistered_model_type_still_defers_to_the_name_hint():
 
 
 def test_a_coordination_failure_propagates_instead_of_degrading_to_the_name_heuristic(monkeypatch):
-    """The store phase around the probe is collective-equivalent; its failures are not a missing
-    config. Swallowed into the name-heuristic fallback, a rank whose ``vlm_probe`` wait timed out
-    answers off the path while its peers answer off the real config — the two can disagree, and
-    ranks that build different model classes hang rather than fail. Only the hub read may degrade.
-    """
+    """A rank whose ``vlm_probe`` wait timed out would answer off the path while peers answer off the config, and
+    ranks building different model classes hang. Only the hub read may degrade."""
 
     def _timed_out(tag, fetch):
         raise RuntimeError(f"Store coordination 'main_first/hub_meta/{tag}/shared' timed out")
 
-    monkeypatch.setattr(modality, "hub_metadata_main_first", _timed_out)
+    monkeypatch.setattr(model_source, "hub_metadata_main_first", _timed_out)
     with pytest.raises(RuntimeError, match="timed out"):
-        is_vlm_model("org/My-Custom-VL-7B")
+        probe_checkpoint("org/My-Custom-VL-7B")
 
 
 def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch):
-    """The other half: an absent or unreachable config is a real fallback case, and it must resolve
-    the same on every rank — each runs the same fetch against the same path, so the verdict is a
-    pure function of ``model_name_or_path``."""
+    """It resolves the same on every rank, since each runs the same fetch against the same path."""
 
     def _unreachable(*_args, **_kwargs):
         raise OSError("hub unreachable")
 
-    monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _unreachable)
-    assert is_vlm_model("org/My-Custom-VL-7B")
-    assert not is_vlm_model("Qwen/Qwen3-4B")
+    monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _unreachable)
+    assert probe_checkpoint("org/My-Custom-VL-7B")[1]
+    assert not probe_checkpoint("Qwen/Qwen3-4B")[1]
 
 
 @pytest.mark.parametrize("trust_remote_code", [False, True])
 def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch, trust_remote_code):
-    """The probe is a run's first hub contact, so it must not execute a checkpoint's own config code
-    under ``trust_remote_code: false``, nor refuse a config the run trusted. Unset means off, the
-    training default."""
+    """The probe is a run's first hub contact, so it must not run a checkpoint's config code under
+    ``trust_remote_code: false``, nor refuse a config the run trusted."""
     seen = []
 
     def _record(*_args, **kwargs):
         seen.append(kwargs["trust_remote_code"])
         return SimpleNamespace(model_type="qwen3")
 
-    monkeypatch.setattr(modality.AutoConfig, "from_pretrained", _record)
-    is_vlm_model("org/checkpoint", trust_remote_code=trust_remote_code)
-    is_vlm_run(SimpleNamespace(images_field="images"), "org/checkpoint", trust_remote_code=trust_remote_code)
-    is_vlm_model("org/checkpoint")
-    assert seen == [trust_remote_code, trust_remote_code, False]
+    monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _record)
+    probe_checkpoint("org/checkpoint", trust_remote_code=trust_remote_code)
+    probe_checkpoint("org/checkpoint")
+    assert seen == [trust_remote_code, False]
 
 
 if __name__ == "__main__":

@@ -1,0 +1,131 @@
+#!/usr/bin/env python
+"""Text-only Inkling under PP: stage-aware loading of the TM-layout checkpoint is bitwise equal to the full load, with
+EP=2 inside the stage."""
+
+import json
+import os
+import tempfile
+
+import torch
+from transformers import AutoConfig
+from transformers.models.inkling.configuration_inkling import (
+    InklingConfig,
+    InklingTextConfig,
+    InklingVisionConfig,
+)
+from transformers.models.inkling.modeling_inkling import InklingForCausalLM, InklingForConditionalGeneration
+
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.pp import _load_stage_lazy
+from tests.common import pp_equivalence as ppeq
+from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.rank_log import log
+
+PP_SIZE = 2
+DTYPE = torch.bfloat16
+# Period 2: the pp2 boundary at layer 2 is a whole pattern period, which validate_partition requires for Inkling's
+# enumerate-indexed masks.
+TEXT_CONFIG = {**TINY_INKLING_CONFIG, "num_hidden_layers": 4, "local_layer_ids": [0, 2]}
+# The default vision config builds ~600k-wide projection layers; this tower's TM-namespace keys also cover the
+# tower-drop on the text-only load.
+TINY_VISION = {"temporal_patch_size": 2, "patch_size": 4, "n_layers": 4, "hidden_size": 32, "text_hidden_size": 256}
+
+
+def _write_checkpoint(ctx) -> str:
+    path = os.path.join(tempfile.gettempdir(), "pp_inkling_text_only_ckpt")
+    if ctx.rank == 0:
+        torch.manual_seed(1234)
+        composite = InklingConfig(
+            text_config=dict(TEXT_CONFIG),
+            vision_config=InklingVisionConfig(**TINY_VISION).to_dict(),
+            image_token_id=500,
+        )
+        InklingForConditionalGeneration(composite).to(DTYPE).save_pretrained(path)
+        text_config = InklingTextConfig(**TEXT_CONFIG)
+        text_config.architectures = ["InklingForCausalLM"]
+        with open(os.path.join(path, "config.json"), "w") as f:
+            json.dump(text_config.to_dict(), f)
+    ctx.barrier()
+    return path
+
+
+def run(ctx):
+    checks: dict[str, bool] = {}
+    metrics: dict[str, float] = {}
+    device = torch.device("cuda", ctx.local_rank)
+    torch.cuda.set_device(device)
+    ckpt = _write_checkpoint(ctx)
+
+    # One EP group spanning the world: the two ranks are one stage's, and both walk the virtual pipeline.
+    ep_config = EPConfig(
+        ep_size=2,
+        stage_world_size=ctx.world_size,
+        stage_base_rank=0,
+        node_local=True,
+        nvlink_domain_size=2,
+        experts_fsdp_managed=False,
+    )
+    ctx.broadcast_seed(1234)
+
+    total_compared = 0
+    for pp_rank in range(PP_SIZE):
+        reference_model = load_ep_model_lazy(
+            ckpt,
+            ep_config,
+            AutoConfig.from_pretrained(ckpt),
+            dtype=DTYPE,
+            model_class=InklingForCausalLM,
+            attn_implementation="eager",
+        )
+        reference = build_pipeline_stage(reference_model, pp_rank, PP_SIZE)
+        ref_tensors, ref_stranded = ppeq.snapshot_stage(reference)
+        ref_range = reference.layer_range
+        destroy_all_dispatchers()
+        cleanup_memory()
+
+        stage_model = _load_stage_lazy(
+            ckpt,
+            pp_rank,
+            PP_SIZE,
+            config=AutoConfig.from_pretrained(ckpt),
+            ep_config=ep_config,
+            dtype=DTYPE,
+            model_class=InklingForCausalLM,
+            attn_implementation="eager",
+        )
+        stage = build_pipeline_stage(stage_model, pp_rank, PP_SIZE)
+        new_tensors, new_stranded = ppeq.snapshot_stage(stage)
+        new_range = stage.layer_range
+        destroy_all_dispatchers()
+        cleanup_memory()
+
+        checks[f"stage{pp_rank}_same_layer_range"] = ref_range == new_range
+        checks[f"stage{pp_rank}_no_meta_tensors"] = not ref_stranded and not new_stranded
+        shared = sorted(set(ref_tensors) & set(new_tensors))
+        mismatched = [name for name in shared if not torch.equal(ref_tensors[name], new_tensors[name])]
+        total_compared += len(shared)
+        # An empty comparison signals a broken name map.
+        checks[f"stage{pp_rank}_bitwise_identical"] = bool(shared) and not mismatched
+        checks[f"stage{pp_rank}_covers_its_layers"] = sum(1 for n in shared if ".layers." in n) >= (
+            new_range[1] - new_range[0]
+        )
+        log(
+            f"[stage {pp_rank}] layers={new_range} compared={len(shared)} "
+            f"mismatched={len(mismatched)} first={mismatched[:3]}"
+        )
+        del ref_tensors, new_tensors
+        cleanup_memory()
+
+    metrics["total_compared"] = float(total_compared)
+    return {"checks": checks, "metrics": metrics}
+
+
+main = gpu_test_main(min_world_size=2, exact_world_size=2, prefix="pp_inkling_text_only")(run)
+
+if __name__ == "__main__":
+    main()

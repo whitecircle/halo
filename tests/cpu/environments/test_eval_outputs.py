@@ -1,21 +1,17 @@
-"""``write_eval_outputs`` runs once every episode has been paid for, so the ``--output`` dump must
-not be the step that loses the run: a missing parent directory is created, and the values the
-trajectory JSONL writer serializes are accepted here too.
-
-    python tests/cpu/environments/test_eval_outputs.py
-"""
+"""``write_eval_outputs`` runs once every episode has been paid for, so the ``--output`` dump must not lose the run:
+a missing parent is created, and values the trajectory JSONL writer serializes are accepted."""
 
 import argparse
 import json
 
 import pytest
 
-from scripts.environments._common import write_eval_outputs
-from src.configs.rollout_config import RolloutConfig
+from halo.entrypoints.eval_contract import write_eval_outputs
+from halo.environments.rollout_config import RolloutConfig
 
 
 def _write(output: str, results: list[dict]) -> None:
-    args = argparse.Namespace(output=output, model="m", dataset="d", config=None, training_config=None)
+    args = argparse.Namespace(output_path=output, model="m", dataset="d", config=None, training_config=None)
     write_eval_outputs(
         args,
         results,

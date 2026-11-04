@@ -1,18 +1,10 @@
 #!/usr/bin/env python
-"""EP, EP+CP, EP+TP, TP-MoE and PP+EP checkpoint construction retains stored fp32 masters before any forward.
-
-The real gathered writer, safetensors readers, expert fusion and EP/CP wrappers run on CPU without
-any forward. Communication buffers and device placement are replaced, and CP's flash label is set
-after CPU materialization. Fractional masters are off the bf16 grid, so widening a rounded load
-cannot satisfy the exact-value oracle. Configured masters preserve checkpoint precision for both
-fresh stages and resumes; only resumes require strict coverage of every configured master. A PP
-stage's routers and experts load only at construction (the stage reload skips EP layers), so the
-stage loader is held to the same oracle on each stage's own slice. The attention-TP loaders run on two
-gloo ranks with a CPU mesh, so their sharded attention is compared whole.
-"""
+"""EP, EP+CP, EP+TP, TP-MoE and PP+EP construction retains stored fp32 masters, with no forward run. Fractional
+masters sit off the bf16 grid, so widening a rounded load cannot pass."""
 
 import datetime
 import re
+from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,33 +16,32 @@ from safetensors.torch import save_file
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, Qwen3MoeForSequenceClassification
 
-import src.distributed.context_parallel.loading as cp_loading
-import src.distributed.expert_parallel.lazy_loader as lazy_loading
-import src.distributed.expert_parallel.loading as eager_loading
-import src.distributed.loading.model_loading as model_loading
-import src.distributed.pipeline_parallel.lazy_loader as pp_lazy_loading
-from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.format import StreamingCheckpointReader, load_full_state_dict
-from src.distributed.checkpoint.context import CheckpointLoadContext
-from src.distributed.checkpoint.loader import CheckpointLoader, built_from_checkpoint, weights_read_from
-from src.distributed.checkpoint.write import chunked_saveable_tensors, stream_gathered_checkpoint
-from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper, patch_model_for_cp
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
-from src.distributed.loading.model_loading import (
-    _load_ep_cp_model,
-    _load_ep_model,
-    _load_ep_tp_model,
-    _load_pp_stage_model,
-    _load_tp_moe_model,
-    _load_undistributed_model,
-)
-from src.distributed.mesh import create_dp_tp_mesh
-from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+import halo.model_loading.parallel.cp as cp_loading
+import halo.model_loading.parallel.loader as model_loading
+import halo.model_loading.parallel.tp as tp_loading
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.checkpoint.parallel.resume_weights import load_resume_weights
+from halo.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
+from halo.checkpoint.reading import StreamingCheckpointReader, load_full_state_dict
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_checkpoint, weights_read_from
+from halo.checkpoint.writing import normalize_gathered_state_dict
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
+from halo.distributed.mesh import build_dp_tp_mesh
+from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
+from halo.model_loading.parallel.cp import load_ep_cp_model
+from halo.model_loading.parallel.ep import load_ep_model
+from halo.model_loading.parallel.loader import _load_undistributed_model
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.model_loading.parallel.pp import load_pp_stage_model
+from halo.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
+from halo.trainers.parallelism.mode_setup import ModeSetupMixin
+from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
 PartialState()
@@ -76,13 +67,13 @@ TINY_OVERRIDES = {
 }
 MASTER_OFFSET = 1e-5
 PP_SIZE = 2
-# Every stage starts on a whole period of gpt-oss's alternating sliding/full layer_types.
+# Every stage starts on a whole period of gpt-oss's alternating layer_types.
 PP_LAYERS = 4
 _LAYER_KEY = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
 
 
 def _ownership(model):
-    """Checkpoint scopes derived from the same family registry that constructs the EP wrappers."""
+    """Derived from the family registry that constructs the EP layers."""
     routers, experts, blocks = [], [], []
     for path, block in ep_claimed_blocks(model):
         wrapper = MOE_LAYER_MAP[type(block).__name__]
@@ -122,7 +113,7 @@ def _checkpoint(tmp_path, family, *, stored_fp32=True, tied=False, legacy_bin=Fa
         output_dir,
         is_save_rank=True,
         max_shard_size="64KB",
-        keep_live_dtype=True,
+        normalize=partial(normalize_gathered_state_dict, model, keep_live_dtype=True),
     )
     state = load_full_state_dict(output_dir)
     if stored_fp32:
@@ -141,20 +132,17 @@ def _checkpoint(tmp_path, family, *, stored_fp32=True, tied=False, legacy_bin=Fa
 
 
 def _patch_cpu_loading(monkeypatch):
-    """No forward or distributed collective runs; the actual checkpoint materialization does."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
-    monkeypatch.setattr(model_loading, "create_ep_buffers", lambda model: 0)
-    verified = model_loading.from_pretrained_verified
+    monkeypatch.setattr(whole_model, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(model_loading, "get_local_rank", lambda: 0)
+    verified = whole_model.from_pretrained_verified
 
     def cpu_pretrained(model_class, source, **kwargs):
         kwargs["device_map"] = "cpu"
         return verified(model_class, source, **kwargs)
 
-    monkeypatch.setattr(model_loading, "from_pretrained_verified", cpu_pretrained)
-    for module in (eager_loading, lazy_loading, pp_lazy_loading):
-        monkeypatch.setattr(module, "create_ep_buffers", lambda model: 0)
-    monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
+    monkeypatch.setattr(whole_model, "from_pretrained_verified", cpu_pretrained)
+    monkeypatch.setattr(cp_loading, "UlyssesModel", _cpu_cp_wrap)
 
 
 @pytest.fixture
@@ -164,20 +152,13 @@ def cpu_loading(monkeypatch):
 
 def _cpu_cp_wrap(model, config):
     # HF materializes on CPU without flash; CP construction validates its own flash-only forward.
-    # No attention forward runs in this weight-construction test.
     model.config._attn_implementation = "flash_attention_2"
-    return patch_model_for_cp(model, config)
+    return UlyssesModel(model, config)
 
 
 def _ep_config(*, fp32_router, fp32_experts, fp32_non_ep, managed_experts):
-    return EPConfig(
-        ep_size=1,
-        world_size=1,
-        gpus_per_node=1,
-        fp32_router=fp32_router or fp32_non_ep,
-        fp32_experts=fp32_experts,
-        fsdp_shard_ep1_experts=managed_experts,
-        use_grouped_gemm=False,
+    return single_process_ep_config(
+        fp32_router=fp32_router or fp32_non_ep, fp32_experts=fp32_experts, experts_fsdp_managed=managed_experts
     )
 
 
@@ -199,46 +180,41 @@ def _construct(
     pc = SimpleNamespace(
         ep_size=1,
         cp_size=2,
-        is_node_local_ep=True,
+        ep_scope="node",
         ep_lazy_loading=lazy,
         max_concurrent_loading=1,
         fp32_non_ep_params=fp32_non_ep,
-        create_ep_config=lambda: ep_config,
-        create_cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
+        ep_config=lambda: ep_config,
+        cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
-    loader = {"ep_cp": _load_ep_cp_model, "ep": _load_ep_model, "ep1": _load_undistributed_model}[mode]
+    loader = {"ep_cp": load_ep_cp_model, "ep": load_ep_model, "ep1": _load_undistributed_model}[mode]
     config = AutoConfig.from_pretrained(path)
-    extra = {"local_rank": 0, "ep_wrappers": True} if mode == "ep1" else {}
+    extra = {"wraps_experts": True, "init_from_scratch": False} if mode == "ep1" else {}
     model = loader(
-        path,
+        ModelSource(path, None, path),
         pc,
         model_class or TINY_MOE_FAMILIES[config.model_type].load_class,
-        {
-            "config": config,
-            "dtype": torch.bfloat16,
-            "trust_remote_code": False,
-            "preserve_checkpoint_precision": preserve,
-        },
+        {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False},
+        preserve_checkpoint_precision=preserve,
         **extra,
     )
-    assert isinstance(model, UlyssesCPModelWrapper) == (mode == "ep_cp")
+    assert isinstance(model, UlyssesModel) == (mode == "ep_cp")
     return model
 
 
 def _loaded_checkpoint_layout(model):
-    """Inspect constructed parameters in their disk layout without a trainer restore or forward."""
     # Collective for the TP loaders' attention shards; every rank walks the same parameters.
     state = {
         name: tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
         for name, tensor in model.named_parameters()
     }
-    # Attention sinks stay plain tensors under TP, each rank holding its contiguous run of heads.
-    for suffix in tp_sharded_non_dtensor_suffixes(model):
+    # Attention sinks stay plain under TP, each rank holding its contiguous run of heads.
+    for suffix in hand_sliced_suffixes(model):
         for name in [name for name in state if name.endswith(suffix)]:
             shards = [torch.empty_like(state[name]) for _ in range(dist.get_world_size())]
             dist.all_gather(shards, state[name].detach().contiguous())
             state[name] = torch.cat(shards)
-    inner = model.model if isinstance(model, UlyssesCPModelWrapper) else model
+    inner = model.model if isinstance(model, UlyssesModel) else model
     layers = [(name, module) for name, module in inner.named_modules() if isinstance(module, EPMoELayerBase)]
     assert layers, "the real EP constructors must run"
     for path, layer in layers:
@@ -247,7 +223,6 @@ def _loaded_checkpoint_layout(model):
 
 
 def _assert_values(model, stored, ownership, *, router, experts, non_ep, managed_experts=False, local_names=None):
-    """``local_names`` maps each checked checkpoint key to its name on ``model`` (all of them by default)."""
     actual = _loaded_checkpoint_layout(model)
     local_names = local_names or {name: name for name in stored}
     assert set(local_names.values()) <= set(actual), sorted(set(local_names.values()) - set(actual))
@@ -443,7 +418,7 @@ def test_resume_missing_selected_master_is_never_randomly_initialized(
         "fp32_non_ep": True,
         "model_class": Qwen3MoeForSequenceClassification,
     }
-    # A fresh classification load is allowed to add a trainable head; a saved-master resume is not.
+    # A fresh classification load may add a trainable head; a saved-master resume may not.
     fresh = _construct(path, preserve=False, **kwargs)
     assert not fresh.score.weight.is_meta and torch.isfinite(fresh.score.weight).all()
     with pytest.raises(RuntimeError, match=r"FP32.master.*score\.weight"):
@@ -462,25 +437,24 @@ def _construct_pp_stage(
         pp_split=None,
         ep_size=1,
         data_parallel_size=1,
-        needs_ep_wrappers=True,
+        needs_ep_layers=True,
         fp32_non_ep_params=fp32_non_ep,
-        create_ep_config=lambda: ep_config,
+        ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
-    common = {
-        "config": config,
-        "dtype": torch.bfloat16,
-        "trust_remote_code": False,
-        "preserve_checkpoint_precision": preserve,
-    }
-    return _load_pp_stage_model(
-        path, pc, model_class or TINY_MOE_FAMILIES[config.model_type].load_class, common, is_moe=True
+    return load_pp_stage_model(
+        ModelSource(path, None, path),
+        pc,
+        model_class or TINY_MOE_FAMILIES[config.model_type].load_class,
+        {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False},
+        preserve_checkpoint_precision=preserve,
+        wraps_experts=True,
     )
 
 
 def _stage_names(stage, stored, pp_rank):
-    """Checkpoint key → stage key for what ``pp_rank`` holds: its layers re-based to 0, plus the
-    embeddings, final norm and head every stage materializes before the stage build drops them."""
+    """Its layers re-based to 0, plus the embeddings, final norm and head every stage materializes before the build
+    drops them."""
     lo, hi = getattr(stage, PP_STAGE_PARTITION_ATTR)[pp_rank]
     names = {}
     for name in stored:
@@ -548,23 +522,20 @@ def test_pp_stage_fsdp_managed_experts_do_not_gain_fp32_masters(tmp_path, cpu_lo
 def test_pp_resume_reload_of_a_constructed_stage_writes_exactly_its_values(
     tmp_path, cpu_loading, family, pp_rank, fp32_router, fp32_experts, fp32_non_ep
 ):
-    """A Path-B PP resume skips the stage reload because the stage was built from the checkpoint. That
-    is lossless only if the reload would write back exactly what construction read: the same values
-    at the same dtypes, configured FP32 masters included. The stage's checkpoint-mapped state is
-    zeroed first, so the comparison holds only if the reload really wrote every tensor."""
+    """The state is zeroed first, so the comparison holds only if the reload really wrote every tensor."""
     path, _stored, _ = _checkpoint(tmp_path, family, layers=PP_LAYERS)
     model = _construct_pp_stage(
         path, pp_rank, fp32_router=fp32_router, fp32_experts=fp32_experts, fp32_non_ep=fp32_non_ep, preserve=True
     )
-    setattr(model, LOADED_WEIGHTS_FROM_ATTR, path)  # load_distributed_model's stamp
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, path)  # load_distributed_model's stamp.
     stage = build_pipeline_stage(model, pp_rank, PP_SIZE)
     assert built_from_checkpoint(weights_read_from(stage), path), "the stage must carry the construction source"
     if fp32_non_ep:
-        # The trainer's own upcast runs between construction and resume; a master construction read
-        # at bf16 would reach the comparison as rounded FP32.
-        ep_param_ids = {id(param) for _, layer in stage.ep_moe_layers() for param in layer.parameters()}
+        # The trainer's upcast runs between construction and resume; a bf16 read would reach the comparison as rounded
+        # FP32.
+        ep_param_ids = {id(param) for _, layer in named_ep_layers(stage) for param in layer.parameters()}
         trainer = SimpleNamespace(_top_level_model=lambda: stage, _get_ep_param_ids=lambda: ep_param_ids)
-        EpIntrospectionMixin._upcast_non_ep_params_to_fp32(trainer)
+        ModeSetupMixin._upcast_non_ep_params_to_fp32(trainer)
     constructed = {name: tensor.detach().clone() for name, tensor in stage.state_dict().items()}
     mapped = set(stage.checkpoint_name_map().values())
     assert mapped, "the reload must cover the stage's non-expert state"
@@ -573,23 +544,11 @@ def test_pp_resume_reload_of_a_constructed_stage_writes_exactly_its_values(
             if name in mapped:
                 tensor.zero_()
 
-    context = CheckpointLoadContext(
-        model=stage,
-        optimizer=None,
-        lr_scheduler=None,
-        parallelism_config=SimpleNamespace(pp_size=PP_SIZE, pp_rank=pp_rank, tp_size=1, cp_size=1),
-        is_pp_mode=True,
-        is_cp_mode=False,
-        is_tp_mode=False,
-        has_ep_layers=True,
-        fsdp_wrapped=False,
-        tp_rank=0,
-        tp_size=1,
-        super_load_from_checkpoint=None,
-        super_load_optimizer_and_scheduler=None,
+    pc = SimpleNamespace(
+        pp_size=PP_SIZE, pp_rank=pp_rank, tp_size=1, cp_size=1, is_pp_mode=True, is_cp_mode=False, is_tp_mode=False
     )
     # The read the resume skips; a best-model load takes it unconditionally.
-    CheckpointLoader(context).load_model(path, for_best_model=True)
+    load_resume_weights(load_context(stage, pc, has_ep_layers=True), path, for_best_model=True)
 
     reloaded = stage.state_dict()
     assert reloaded.keys() == constructed.keys()
@@ -618,18 +577,17 @@ def test_pp_stage_resume_missing_selected_master_is_never_randomly_initialized(t
         _construct_pp_stage(path, PP_SIZE - 1, preserve=True, **kwargs)
 
 
-# The attention-TP loaders: EP+TP (lazy safetensors or sequential from_pretrained) and TP on a MoE.
 TP_MODES = ("ep_tp_eager", "ep_tp_lazy", "tp_moe")
 TP_SIZE = 2
 
 
 def _patch_cpu_tp_loading(monkeypatch):
-    """:func:`_patch_cpu_loading` for the TP loaders on gloo ranks, with the TP mesh laid on CPU devices."""
+    """With the TP mesh laid on CPU devices."""
     _patch_cpu_loading(monkeypatch)
     monkeypatch.setattr(
-        model_loading,
-        "create_dp_tp_mesh",
-        lambda tp_size, dp_size: create_dp_tp_mesh(tp_size, dp_size, device_type="cpu"),
+        tp_loading,
+        "build_dp_tp_mesh",
+        lambda tp_size, dp_size: build_dp_tp_mesh(tp_size, dp_size, device_type="cpu"),
     )
 
 
@@ -644,21 +602,19 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
         ep_lazy_loading=mode == "ep_tp_lazy",
         max_concurrent_loading=1,
         fp32_non_ep_params=fp32_non_ep,
-        needs_ep_wrappers=True,
-        create_ep_config=lambda: ep_config,
+        needs_ep_layers=True,
+        ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
-    common = {
-        "config": config,
-        "dtype": torch.bfloat16,
-        "trust_remote_code": False,
-        "preserve_checkpoint_precision": preserve,
-    }
+    source = ModelSource(path, None, path)
+    kwargs = {"config": config, "dtype": torch.bfloat16, "trust_remote_code": False}
     load_class = model_class or TINY_MOE_FAMILIES[config.model_type].load_class
     if mode == "tp_moe":
-        model = _load_tp_moe_model(path, pc, load_class, common)
+        model = load_tp_moe_model(
+            source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve, wraps_experts=pc.needs_ep_layers
+        )
     else:
-        model = _load_ep_tp_model(path, pc, load_class, common)
+        model = load_ep_tp_model(source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve)
     assert any(isinstance(param, DTensor) for param in model.parameters()), "attention must be TP-sharded"
     return model
 

@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: native grouped-LoRA on EP experts with a NON-SFT trainer (SmoothMarginPOTrainer, EP=2).
-
-Expert-LoRA mechanics (adapter build, grad-sync, save) live in the shared DistributedTrainerMixin /
-EP layers, so this confirms they ride a preference trainer's path end to end — frozen base + only
-expert adapters trainable, adapters move, and trainer.save_model writes a standalone adapter file.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_ep_experts.py
-"""
+"""Native grouped LoRA on EP experts through a non-SFT trainer (SMPOTrainer, EP=2): frozen base, adapters move,
+standalone adapter file."""
 
 import math
 import os
@@ -19,19 +10,20 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.preference.smpo import SMPOTrainer
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -39,7 +31,7 @@ NUM_TRAIN_SAMPLES = 64
 MAX_LENGTH = 2048
 MAX_PROMPT_LENGTH = 1024
 NUM_TRAIN_STEPS = 5
-LEARNING_RATE = 1e-3  # large so adapters move clearly
+LEARNING_RATE = 1e-3  # Large so adapters move clearly.
 SEED = 42
 
 
@@ -66,7 +58,7 @@ def run(ctx) -> dict:
     freeze_base_keep_expert_adapters(model)
     log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-    checks = {"has_expert_lora": has_ep_lora(model)}
+    checks = {"has_expert_lora": model_has_expert_lora(model)}
     non_adapter_trainable = []
     for module in ep_layers(model):
         native = {f"{a}_lora_{w}" for a in module._expert_lora_attrs for w in ("A", "B")}
@@ -74,9 +66,9 @@ def run(ctx) -> dict:
     checks["only_adapters_trainable_in_ep"] = not non_adapter_trainable
 
     base_before = {k: v.clone() for k, v in ep_layers(model)[0].gather_expert_state_dict().items()}
-    adapters_before = gather_ep_lora_adapters(model)
+    adapters_before = gather_expert_lora_adapters(model)
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=1,
@@ -94,10 +86,8 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
         remove_unused_columns=False,
         dataloader_num_workers=0,
-        ddp_find_unused_parameters=True,
-        fsdp="",
     )
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=train_dataset,
@@ -115,14 +105,13 @@ def run(ctx) -> dict:
     base_after = ep_layers(unwrapped)[0].gather_expert_state_dict()
     checks["base_frozen"] = all(torch.equal(base_before[k].cpu(), base_after[k].cpu()) for k in base_before)
 
-    adapters_after = gather_ep_lora_adapters(unwrapped)
+    adapters_after = gather_expert_lora_adapters(unwrapped)
     b_moved = any(
         k.endswith(".lora_B") and not torch.equal(adapters_before[k].cpu(), adapters_after[k].cpu())
         for k in adapters_before
     )
     checks["adapters_moved"] = b_moved
 
-    # trainer.save_model adapter-only write (save_ep_checkpoint → save_ep_lora_adapters)
     save_dir = os.path.join(ctx.output_dir, "adapter")
     trainer.save_model(save_dir)
     ctx.barrier()

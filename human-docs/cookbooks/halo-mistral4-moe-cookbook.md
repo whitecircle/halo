@@ -7,16 +7,13 @@ its language-model weights in FP8, so convert it to BF16 once before training.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes | No |
-
-`partial`: EP+CP is a valid shape, but its only GPU test on this family is a tiny-model LoRA run. Try a
-short run before a long one.
+Modes: the Mistral4 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `mistralai/Mistral-Small-4-119B-2603`, converted to BF16.
-- **GPUs:** eight at EP8, 16 experts per GPU, at 32,000 tokens. Plan for about 500 GB of disk for the FP8
-  download and the BF16 copy together.
+- **GPUs:** eight at EP8, 16 experts per GPU, at 32,000 tokens. This shape has not run on the full-size
+  model, and its fit is computed, not measured.
+- **Disk:** by arithmetic the BF16 copy takes about 240 GB (119B parameters at two bytes), beside the FP8 download.
 
 ## Recipes
 
@@ -34,7 +31,7 @@ The converter streams one shard at a time and writes a standard BF16 Hugging Fac
 ### Full fine-tune
 
 ```bash
-halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+HALO_EP_SHARED_OVERLAP=1 halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
   --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
   --output_dir=/data/checkpoints/mistral-small-4-sft
 ```
@@ -43,7 +40,8 @@ halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 
 
 Add one of these to the full fine-tune command:
 
-- EP8 + CP2, for long sequences (`partial`, see above): `--context_parallel_size=2 --packing=false`
+- EP8 + CP2, for long sequences, which passes a tiny-model LoRA test only:
+  `--context_parallel_size=2 --packing=false`
 - EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`. TP shards the MLA
   expansion and output projections and keeps the compression projections whole.
 - Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
@@ -52,7 +50,7 @@ Add one of these to the full fine-tune command:
 ### LoRA
 
 ```bash
-halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+HALO_EP_SHARED_OVERLAP=1 halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
   --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
   --use_peft=true --learning_rate=1e-4 \
   --lora_target_modules=q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj \
@@ -61,7 +59,7 @@ halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 
 
 ### GRPO
 
-Online GRPO is not available for this family (see [Limits](#limits)). Offline GRPO trains on
+Online and async GRPO are not available for this family (see [Limits](#limits)). Offline GRPO trains on
 pre-generated, scored completions and needs no server: see [Offline GRPO](../training-methods/offline-grpo.md).
 
 ## Settings that matter
@@ -73,16 +71,22 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - **Chat template.** The recipe forces `jinja-templates/mistral4/mistral4-multiturn.jinja`, because
   `mistral4-instruct.jinja` accepts only single-turn rows and UltraChat is multi-turn. It marks
   completions with `assistant_message_template: "[/INST]"`.
-- **Attention.** The recipe pins `flash_attention_2`.
+- **Shared expert.** Launch with `HALO_EP_SHARED_OVERLAP=1`, as the commands above do. The shared expert is
+  as wide as a routed one, and the setting runs it on a side stream while the tokens travel to their
+  experts, instead of after they return.
+- **Attention.** The recipe leaves `attn_implementation` unset, so Halo picks FA4 on Blackwell and FA3
+  on Hopper. MLA's query/key and value widths are both 128 here, so FA4's general kernel runs it; the
+  head_dim-256 kernel limits do not apply.
 
 ## Limits
 
-- No online RL. Neither vLLM 0.26.0 nor SGLang 0.5.17 has a `mistral4` model class, so Halo refuses
+- No online RL. Neither vLLM 0.32.0 nor SGLang 0.5.22 has a `mistral4` model class, so Halo refuses
   online and async GRPO when it builds the trainer.
 - Neither pinned engine serves a Halo export. vLLM serves the public repo only through its
   Mistral-native `params.json` layout, which a Halo export does not have. vLLM's generic transformers
   backend (`--model-impl transformers`) is untested here.
 - LoRA is refused under TP, and attention TP can't combine with ETP.
+- No pipeline parallelism: Mistral 4 is not a registered pipeline family.
 
 ## Export and serve
 

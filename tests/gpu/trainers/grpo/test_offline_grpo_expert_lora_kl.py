@@ -1,9 +1,6 @@
 #!/usr/bin/env python
-"""Native EP8 expert LoRA: KL stays anchored to the configured base through resume/export.
-
-Uses the training script's reference loader and a local tiny Qwen3-MoE, with no Hub downloads.
-Run: torchrun --nproc_per_node=8 tests/gpu/trainers/grpo/test_offline_grpo_expert_lora_kl.py
-"""
+"""Native EP8 expert LoRA: KL stays anchored to the configured base through resume and export, on a local tiny
+Qwen3-MoE."""
 
 import math
 import os
@@ -15,17 +12,24 @@ import torch.distributed as dist
 from peft import PeftModel
 from transformers import AutoModelForCausalLM
 
-from scripts.training.offline_grpo import _load_kl_reference
-from src.args.distributed_args import DistributedArguments
-from src.args.offline_grpo_args import OfflineGRPOScriptArguments
-from src.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.training.environment import resolve_resume_weights_source
-from src.training.script_runner import ScriptRuntime
+from halo.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.configs.grpo_offline import OfflineGRPOScriptArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.script import ScriptContext
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from scripts.training.grpo.offline import _load_kl_reference
+from tests.common.adapters import (
+    check_only_adapters_trainable,
+    load_peft_model_from_config,
+    peft_model_config,
+    snapshot_adapters,
+)
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     completion_logps,
     doubled_head_kl_verdict,
@@ -39,22 +43,10 @@ from tests.common.offline_grpo import (
     save_offline_moe_base,
     token_logps,
 )
-from tests.common.peft_helpers import (
-    assert_only_adapters_trainable,
-    is_expert_lora_active,
-    load_peft_model_from_config,
-    peft_model_config,
-    snapshot_adapters,
-)
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    finish_phase,
-    log,
-    optimizer_state_matches,
-    resumed_loss_deltas,
-    step_losses,
-)
+from tests.common.training_checks import resumed_loss_deltas, step_losses
 
 SEED = 913
 STEPS = 3
@@ -85,14 +77,13 @@ def _build(ctx, base, output, train, evaluation, *, checkpoint=None):
         sequence_length=16,
         lr_scheduler_type="constant",
     )
-    # A trained runtime source must not replace model_name_or_path as the reference's base.
-    runtime = ScriptRuntime(parallelism, "ep8", ctx.local_rank, checkpoint, checkpoint or base)
+    # A trained resume source must not replace model_name_or_path as the reference's base.
+    context = ScriptContext(parallelism, ctx.local_rank, checkpoint, checkpoint or base, OfflineGRPOTrainer)
     reference = _load_kl_reference(
         OfflineGRPOScriptArguments(),
-        runtime,
+        context,
         args,
         configured,
-        DistributedArguments(expert_parallel_size=8),
         policy=model,
         tokenizer=tokenizer,
         peft_config=peft_config,
@@ -155,9 +146,9 @@ def run(ctx):
     dist.barrier()
     train, evaluation = offline_grpo_dataset(24), offline_grpo_dataset(8, 4)
     trainer = _build(ctx, base, output, train, evaluation)
-    only_adapters, reason = assert_only_adapters_trainable(trainer.model)
+    only_adapters, reason = check_only_adapters_trainable(trainer.model)
     checks = {
-        "native_expert_only_no_peft_wrapper": is_expert_lora_active(trainer.model)
+        "native_expert_only_no_peft_wrapper": model_has_expert_lora(trainer.model)
         and not isinstance(trainer.model, PeftModel),
         "only_native_adapters_train": only_adapters,
         "native_lora_keeps_live_frozen_reference": trainer.ref_model is not None and not trainer._precompute_reference,

@@ -1,6 +1,6 @@
 # FlashAdamW (Quantized Optimizer States)
 
-FlashAdamW is a drop-in replacement for AdamW that cuts per-parameter optimizer memory ~57% via 8-bit quantized Adam moments and a 24-bit master weight, with quantize/dequantize fused into the update by Triton kernels. Convergence matches AdamW.
+FlashAdamW is a drop-in replacement for AdamW that cuts per-parameter optimizer memory ~58% via 8-bit quantized Adam moments and a 24-bit master weight, with quantize/dequantize fused into the update by Triton kernels. Convergence matches AdamW.
 
 Per-param state: AdamW 12 B (4B exp_avg + 4B exp_avg_sq + 4B master, all fp32) vs FlashAdamW ~5 B (1B int8 exp_avg + 1B int8 exp_avg_sq + 3B master = bf16 param as the high bits + an 8-bit low-bit correction). At 20B params: 240 GB vs ~100 GB optimizer state.
 
@@ -26,17 +26,17 @@ uv pip install -e ".[flash-optimizers]"   # or: pip install flashoptim
 
 Without the package, `optim: flash_adamw` raises an import error stating what to install.
 
-The YAML/trainer path (`build_flash_adamw_optimizer` in `src/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `create_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `src/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
+The YAML/trainer path (`flash_adamw_optimizer_from_args` in `halo/optimizers/flash_adamw.py`) wires `learning_rate`, `weight_decay`, `betas` (from `adam_beta1`/`adam_beta2`), and `eps` (from `adam_epsilon`). Only `master_weight_bits` is not read from `TrainingArguments`, so over YAML it stays at its default. To override it, construct directly: `build_flash_adamw_optimizer(model, lr=..., weight_decay=..., master_weight_bits=24)` in `halo/optimizers/flash_adamw.py`. The wrapper splits parameters into weight-decay groups (`decay_parameters` get `weight_decay`, the rest `0.0`).
 
-`create_flash_adamw_optimizer` defaults: `lr=1e-3`, `betas=(0.9, 0.999)`, `eps=1e-8`, `weight_decay=0.01`, `master_weight_bits=24` (24 = bf16 + 8-bit correction, 32 = full fp32, `None` = no master weights).
+`build_flash_adamw_optimizer` defaults: `lr=1e-3`, `betas=(0.9, 0.999)`, `eps=1e-8`, `weight_decay=0.01`, `master_weight_bits=24` (24 = bf16 + 8-bit correction, 32 = full fp32, `None` = no master weights).
 
 ## Benchmark
 
 The value is memory, and it scales with model size — tens of GB at 70B+ params, where it is the lever.
 
-Optimizer micro-benchmark on B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the same shape, see [Muon](muon-optimizer.md#benchmark).
+Optimizer micro-benchmark on B300, Halo 1.1.0 or earlier (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the same shape, see [Muon](muon-optimizer.md#benchmark).
 
-That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
+That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k, Halo 1.1.0 or earlier: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
 
 A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qwen3.5-2B). Correctness is covered by `tests/gpu/optimizers/test_flash_adamw.py` — creation, loss descent, decay filtering, memory savings, and a bit-exact state-dict round-trip.
 
@@ -51,13 +51,15 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 ## Compatibility
 
-`optim: flash_adamw` routes through `create_optimizer` in `src/trainers/mixins/base.py` for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 4`.
+`optim: flash_adamw` routes through `create_optimizer` (`build_optimizer`, `halo/trainers/optimizer_selection.py`) for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 8`.
 
-Nothing gates `flash_adamw` on a parallelism mode. The only guard is the shared one in `_configure_mixed_precision`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
+Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `halo/trainers/parallelism/pipeline_rules.py`): no PP run validates it. The other guard is the shared `reject_conflicting_optimizer_choice`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage: `test_flash_adamw.py` on one GPU, and `test_flash_adamw_parallel.py` on two through the trainer (EP2 with a mixed DTensor/plain group, FSDP2, and the uneven-shard save refusal).
+
+The [non-finite step guard](../reference/trainer-architecture.md#non-finite-steps) reads the gradient norm back before every FlashAdamW step and skips a non-finite one on the host: `flashoptim`'s fused kernel takes no device skip flag, so FlashAdamW keeps the one host sync per step that AdamWBF16 and Muon avoid.
 
 The wrapper registers a step post-hook that advances each stepped param's version counter — `flashoptim`'s fused Triton update stores through raw pointers ATen never sees, and the low-precision weight-quant cache keys on that counter (see [Low-Precision MoE](low-precision-moe-kernels.md)).
 
-**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`src/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.
+**Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`halo/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.
 
 ## References
 

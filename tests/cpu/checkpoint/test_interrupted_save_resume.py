@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""A checkpoint save stopped partway must never be what resume detection picks, on any filesystem.
-
-``trainer_state.json`` is the file resume detection takes a checkpoint by, and the base Trainer
-writes it before the toolkit's sidecars and per-rank optimizer shards. The mixin's save therefore
-removes an earlier save's copy before writing anything (a resumed run re-saving a step rewrites that
-step's directory in place) and publishes the base save's copy only once every other file is on
-disk. Two ranks on a gloo group, as one shared output filesystem (one writer) and as two nodes with
-their own local disks (one writer each), pin, for a save stopped while it writes its weights (before
-the base save's trainer state) or its optimizer shards (after it):
-
-1. **A fresh step.** The stopped ``checkpoint-2`` holds no ``trainer_state.json`` on any node, and
-   ``resume_from_checkpoint: true`` resumes every rank from the complete ``checkpoint-1``.
-2. **A rewritten step.** ``checkpoint-2`` already held an abandoned run's complete save; stopped
-   midway, the rewrite leaves no trainer state vouching for the mix of old and new files, and
-   detection again resumes from ``checkpoint-1``.
-3. **An explicit path** to the stopped step is refused on every rank, naming it.
-4. **No trainer state to commit.** A save rank the base save wrote no trainer state for (a base save
-   that wrote none, or writers that are not the output filesystem's save ranks) fails the save on
-   every rank before rotation, which under ``save_total_limit: 1`` would otherwise remove
-   ``checkpoint-1`` for a ``checkpoint-2`` no resume takes.
-
-    python tests/cpu/checkpoint/test_interrupted_save_resume.py
-"""
+"""A save stopped partway is never what resume detection picks, on any filesystem. The mixin removes an earlier
+``trainer_state.json`` first and publishes the new one only when every other file is on disk."""
 
 import datetime
 import json
@@ -32,11 +11,13 @@ import pytest
 from accelerate import PartialState
 from transformers import TrainerState
 
-from src.distributed import runtime
-from src.distributed.runtime import fs_aware_save_rank, get_global_rank
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.environment import detect_resume_checkpoint
+from halo.entrypoints.run_setup import resume_checkpoint_from_config
+from halo.runtime import collectives, filesystem
+from halo.runtime.filesystem import is_fs_save_rank
+from halo.runtime.ranks import get_global_rank
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -52,37 +33,36 @@ class _Preempted(RuntimeError):
 
 
 class _StateWriteThenStop(TrainerState):
-    """A trainer state whose write is the last thing the save does before it is stopped."""
-
     def save_to_json(self, json_path):
         super().save_to_json(json_path)
         raise _Preempted("stopped right after the trainer state was written (simulated preemption)")
 
 
 class _StateNeverWritten(TrainerState):
-    """A base save that leaves no trainer state behind."""
-
     def save_to_json(self, json_path):
         return None
 
 
 class _ShardSaveStopped:
-    """Stands in for ``OptimizerShardStore.save``, stopping the way a preemption would."""
+    def __init__(self, writes_shards: bool):
+        self.writes_shards = writes_shards
 
     def save(self, output_dir):
         raise _Preempted("optimizer shard save stopped (simulated preemption)")
 
 
 class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
-    """The mixin's save over HF's: the weights, the rank-0 optimizer view and the trainer state, written
-    by the ``should_save`` rank(s) — or stopped on every rank mid-weights, or on the writer(s) right
-    after the trainer state."""
+    """Stopped on every rank mid-weights, or on the writers right after the trainer state."""
 
     def __init__(self, run_dir, stop: str):
         self.run_dir = run_dir
         self.stop = stop
         self.args = SimpleNamespace(
-            save_total_limit=2, save_only_model=False, should_save=fs_aware_save_rank(), push_to_hub=False
+            save_total_limit=2,
+            save_only_model=False,
+            should_save=is_fs_save_rank(),
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
         )
         self.state = (_StateWriteThenStop if stop == "state" else TrainerState)(global_step=2)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
@@ -103,7 +83,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
                 fh.write(b"new run")
 
     def _optimizer_store(self):
-        return _ShardSaveStopped()
+        return _ShardSaveStopped(self._fsdp_wrapped)
 
     def _persist_trainer_sidecars(self, checkpoint_dir):
         pass
@@ -123,13 +103,13 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant_complete_checkpoint(run_dir, 1, "abandoned" if rewrite else "new")
             if rewrite:
                 _plant_complete_checkpoint(run_dir, 2, "abandoned")
-        runtime.barrier()
+        collectives.barrier()
 
         try:
             _Trainer(run_dir, stop)._save_checkpoint(model=None, trial=None)
@@ -139,19 +119,19 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
         stopped = os.path.join(run_dir, "checkpoint-2")
         outcome["trainer_state_in_stopped_step"] = os.path.exists(os.path.join(stopped, TRAINER_STATE))
 
-        # The explicit path first: an accepted resume moves the stopped step out of the namespace.
-        explicit = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=stopped, overwrite_output_dir=False)
+        # An accepted resume moves the stopped step out of the namespace, so the explicit path goes first.
+        explicit = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=stopped)
         try:
-            detect_resume_checkpoint(explicit)
+            resume_checkpoint_from_config(explicit, overwrite_output_dir=False)
             outcome["explicit"] = "accepted"
         except RuntimeError as e:
             outcome["explicit"] = str(e)
-        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
-        outcome["auto_resume"] = os.path.basename(detect_resume_checkpoint(auto))
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
+        outcome["auto_resume"] = os.path.basename(resume_checkpoint_from_config(auto, overwrite_output_dir=False))
+    except Exception as e:  # The setup failing must still leave a verdict file.
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 
@@ -188,15 +168,15 @@ def test_a_stopped_save_is_passed_over_by_resume_detection(tmp_path, per_node, r
 
 
 def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> None:
-    """Save step 2 under ``save_total_limit: 1`` with no trainer state for some save rank to commit."""
+    """Under ``save_total_limit: 1`` rotation would otherwise remove ``checkpoint-1`` for a step no resume takes."""
     outcome = {}
     try:
         PartialState()
-        runtime.resolve_shared_filesystem_consensus()
+        filesystem.resolve_shared_filesystem_consensus()
         run_dir = os.path.join(root, f"node_{rank}" if per_node else "shared", "out")
-        if fs_aware_save_rank():
+        if is_fs_save_rank():
             _plant_complete_checkpoint(run_dir, 1, "previous")
-        runtime.barrier()
+        collectives.barrier()
 
         trainer = _Trainer(run_dir, stop="none")
         trainer._fsdp_wrapped = False
@@ -211,13 +191,13 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
         except RuntimeError as e:
             outcome["save"] = str(e)
         outcome["previous_kept"] = os.path.isfile(os.path.join(run_dir, "checkpoint-1", TRAINER_STATE))
-        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True, overwrite_output_dir=False)
-        resumed = detect_resume_checkpoint(auto)
+        auto = SimpleNamespace(output_dir=run_dir, resume_from_checkpoint=True)
+        resumed = resume_checkpoint_from_config(auto, overwrite_output_dir=False)
         outcome["auto_resume"] = resumed and os.path.basename(resumed)
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+    except Exception as e:
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        runtime.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 

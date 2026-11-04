@@ -1,25 +1,9 @@
 #!/usr/bin/env python
-"""End-to-end SGLang rollout + NCCL weight sync against a live server.
+"""SGLang rollout and NCCL weight sync against a live server (``make test-gpu-sglang`` sets it up).
 
-Covers the two halves of the SGLang backend that only a running engine can prove:
-
-1. **Sampled-token capture.** SGLang's OpenAI ``logprobs`` reports each token as text and drops the
-   id; the ids survive only in the ``meta_info`` it echoes per choice under ``return_meta_info``.
-   The test drives the production payload builder and capture reader, so a regression in either
-   spelling shows up as missing ids rather than a silent fall back to re-tokenization.
-2. **Weight sync.** The trainer joins the engine's c10d group as rank 0 and broadcasts. The check is
-   behavioural — greedy output must change after a sync — because a sync can return ``200 OK`` on
-   every call and still not land the weights.
-
-Prerequisites (``make test-gpu-sglang`` sets both up):
-    SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=Qwen/Qwen3-0.6B docker compose -f docker-compose.sglang.yml up -d
-    # the trainer must own a GPU the server does not; the compose file gives the server the cuMem
-    # parity the cross-container group needs (NCCL_CUMEM_ENABLE=1)
-
-Usage (the trainer and the server must agree on the NCCL net — the socket recipe below, or EFA on
-both ends; a mismatch blocks both ranks in the first broadcast):
-    CUDA_VISIBLE_DEVICES=0 NCCL_NET=Socket NCCL_IB_DISABLE=1 torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_sglang_weight_sync_e2e.py
+SGLang's ``logprobs`` drop token ids, which survive only in the per-choice ``meta_info``. A sync can return ``200 OK``
+and not land the weights, so greedy output must change. The trainer needs its own GPU, and both ends must agree on the
+NCCL net or both block in the first broadcast.
 """
 
 import json
@@ -28,18 +12,15 @@ import urllib.request
 import torch
 from transformers import AutoModelForCausalLM
 
-from src.distributed.nccl.clients.sglang import SGLangWeightSyncClient
-from src.env import env_str
-from src.environments.engine_wire import capture_generation_tokens
-from src.environments.ray_actors import EnvironmentActor, RolloutConfig
+from halo.environments.engine_wire import capture_generation_tokens
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
-from tests.common.weight_sync import weight_transfer_port
+from tests.common.rank_log import log
+from tests.common.weight_sync import SGLANG_SERVER_URL, push, weight_transfer_port
 
-# ``or`` (not an env_str default): an exported-but-empty SGLANG_SERVER_URL passes the conftest gate,
-# which reads it the same way, so the client must fall back to the same URL rather than to "".
-SGLANG_SERVER_URL = env_str("SGLANG_SERVER_URL") or "http://localhost:30000"
 PROBE_PROMPT = "Count: 1 2 3"
 
 
@@ -51,7 +32,7 @@ def _post(path: str, payload: dict, timeout: float = 180.0) -> dict:
 
 
 def _greedy_probe() -> list[tuple[int, float]]:
-    """Greedy sampled (token_id, logprob) pairs — the served policy's fingerprint."""
+    """Greedy sampled (token_id, logprob) pairs, the served policy's fingerprint."""
     data = _post(
         "/v1/chat/completions",
         {
@@ -68,7 +49,6 @@ def _greedy_probe() -> list[tuple[int, float]]:
 
 
 def test_capture_via_production_path():
-    """The real payload builder + capture reader must recover ids, logprobs and prompt ids."""
     cls = EnvironmentActor.__ray_metadata__.modified_class
     actor = cls.__new__(cls)
     actor.__init__(actor_id=0, env_type="native_math", env_config={"max_turns": 3})
@@ -88,16 +68,15 @@ def test_capture_via_production_path():
     assert ids, "no sampled token ids captured — train_on_sampled_tokens would silently re-tokenize"
     assert logprobs and len(logprobs) == len(ids)
     assert prompt_ids, "no engine-rendered prompt ids captured"
-    # The id count is the engine's own accounting, so a truncated capture cannot pass unnoticed.
+    # The engine's own accounting, so a truncated capture cannot pass.
     assert len(ids) == choice["meta_info"]["completion_tokens"], (
         f"captured {len(ids)} ids but the engine generated {choice['meta_info']['completion_tokens']}"
     )
 
 
 def test_weight_sync_changes_the_served_policy():
-    """A sync must actually land: greedy output before != after a perturbation."""
     baseline, repeat = _greedy_probe(), _greedy_probe()
-    # Anti-vacuity: greedy decoding is deterministic, so a later difference is the sync, not sampling.
+    # Greedy decoding is deterministic, so a later difference is the sync, not sampling.
     assert baseline == repeat, "greedy probe is not deterministic; a post-sync difference would prove nothing"
 
     model = AutoModelForCausalLM.from_pretrained(QWEN3_0_6B, dtype=torch.bfloat16).to("cuda:0")
@@ -112,17 +91,14 @@ def test_weight_sync_changes_the_served_policy():
         with torch.no_grad():
             for name in targets:
                 params[name].mul_(1.02)
-        for name in targets:
-            client.update_named_param(name, params[name].detach())
-        client.reset_prefix_cache()
+        push(client, [(name, params[name].detach()) for name in targets])
 
         after = _greedy_probe()
         assert after != baseline, "served policy unchanged after weight sync — the broadcast did not land"
     finally:
         client.close_communicator()
 
-    # The engine must still be usable: a failed update leaves SGLang partially written, and its own
-    # docs say to discard such a server rather than keep serving from it.
+    # A failed update leaves SGLang partially written, and its docs say to discard such a server.
     assert _greedy_probe(), "server unusable after weight sync"
 
 

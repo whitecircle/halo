@@ -1,27 +1,20 @@
 #!/usr/bin/env python
-"""DPO's ``images_field`` must reach TRL's vision route under the spelling TRL probes for.
-
-``is_vlm_run`` calls a run multimodal as soon as ``images_field`` is set, while TRL 1.6's
-``DPOTrainer`` decides its own vision branch by probing the first sample for an ``image``/``images``
-key and lists only those two among its signature columns. A hub dataset storing its images under any
-other name therefore has no way in without the alias: the knob does not parse, and parsed alone the
-column would still be pruned to text on a run the toolkit already calls multimodal.
-
-Driven through ``main()``: the point is that the alias lands BEFORE the dispatch, so the script's
-verdict and TRL's probe read the same dataset.
-
-Run: pytest tests/cpu/config/test_dpo_images_field.py
-"""
+"""DPO's ``images_field`` reaches TRL's vision route under the spelling TRL probes for. ``is_vlm_run_across_ranks``
+calls a run multimodal off the field alone while TRL 1.14 probes for an ``image``/``images`` key, so the alias must
+land before the dispatch, or the column is pruned to text."""
 
 import sys
 import types
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from tests.common.utils import load_script_module
+from halo.entrypoints.model_setup import PreferenceModels
+from tests.common.repo import load_script_module
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 # The name heuristic reads this as multimodal, so the checkpoint verdict holds offline too.
 _VLM_MODEL_ID = "stub/qwen3.5-9b"
@@ -30,7 +23,7 @@ _TURNS = [{"role": "user", "content": "hi"}]
 
 
 class _TextPathReached(Exception):
-    """Raised by the stubbed preference prep — the run dispatched to the TEXT branch."""
+    """Raised by the stubbed preference prep: the run dispatched to the text branch."""
 
 
 class _VisionPathReached(Exception):
@@ -54,11 +47,8 @@ def _dataset(image_column: str | None) -> DatasetDict:
 
 
 def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
-    """Run ``preference/dpo.py:main()`` up to its data dispatch on a multimodal checkpoint.
-
-    Returns the ``{split: dataset}`` the vision branch handed on; raises ``_TextPathReached`` when
-    the run took the text branch instead, and any config-time guard error unchanged.
-    """
+    """Run ``preference/dpo.py:main()`` up to its data dispatch on a multimodal checkpoint; returns the ``{split:
+    dataset}`` the vision branch handed on, and raises ``_TextPathReached`` on the text branch."""
     module = _dpo_module()
     config = tmp_path / "config.yaml"
     config.write_text(
@@ -68,7 +58,8 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         f"bf16: false\nuse_cpu: true\nmax_length: 512\n{yaml_body}"
     )
 
-    model = types.SimpleNamespace(config=CONFIG_MAPPING["gemma3"]())
+    model = torch.nn.Module()
+    model.config = CONFIG_MAPPING["gemma3"]()
     tokenizer = types.SimpleNamespace(padding_side="left")
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),
@@ -84,27 +75,22 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
         reached.update(log_examples)
         raise _VisionPathReached
 
-    def load_model(*_args, **kwargs):
-        assert kwargs["preserve_checkpoint_precision"] is False
-        return model, types.SimpleNamespace(tokenizer=None), tokenizer, True
+    def load_models(context, *_args, **kwargs):
+        assert context is runtime, "the policy load must read the checkpoint identity off the script context"
+        return PreferenceModels(model, None, None, tokenizer, types.SimpleNamespace(tokenizer=None))
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=runtime),
-        mock.patch.object(module, "load_model_for_training", side_effect=load_model),
-        mock.patch.object(module, "load_reference_model_for_preference", return_value=None),
-        mock.patch.object(module, "apply_max_length", side_effect=lambda cfg, args, model, tok: tok),
-        mock.patch.object(module, "install_resolved_tokenizer", side_effect=lambda pc, tok: pc),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
-        mock.patch.object(module, "log_model_info"),
+        mock.patch.object(module, "load_preference_models", side_effect=load_models),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        # Both live in the shared script_runner helper the script calls — patch its globals.
-        mock.patch("src.training.script_runner.prepare_preference_datasets", side_effect=_TextPathReached),
-        mock.patch("src.training.script_runner.log_dataset_examples", side_effect=capture),
-        mock.patch("src.training.parser.install_log_tee"),
+        # Both live in the shared data_setup helper the script calls, so patch its globals.
+        mock.patch("halo.entrypoints.data_setup.prepare_preference_datasets", side_effect=_TextPathReached),
+        mock.patch("halo.entrypoints.data_setup.log_dataset_examples", side_effect=capture),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
 
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -117,20 +103,35 @@ def _run_dpo(tmp_path, dataset: DatasetDict, yaml_body: str = "") -> dict:
     raise AssertionError("main() returned without reaching either data branch")
 
 
+def test_an_image_run_of_a_family_trls_vision_path_does_not_carry_is_refused_ahead_of_the_load(tmp_path):
+    config = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]).config
+    with mock.patch("halo.entrypoints.data_setup.probe_checkpoint", return_value=(config, True)):
+        with pytest.raises(ValueError, match="DPO on image data cannot train"):
+            _run_dpo(tmp_path, _dataset("images"))
+
+
 def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:
-    """TRL 1.6's own probe, verbatim (``DPOTrainer.__init__``: ``_is_vision_dataset``)."""
+    """TRL 1.14's own probe, verbatim (``DPOTrainer.__init__``: ``_is_vision_dataset``)."""
     sample = next(iter(dataset))
     return "image" in sample or "images" in sample
 
 
+def test_a_vision_run_refuses_a_media_part_ahead_of_trls_collator(tmp_path):
+    """TRL's collator renders a video placeholder with no pixels: its render never reads this row's part."""
+    video = [{"role": "user", "content": [{"type": "video", "video": "a.mp4"}, {"type": "text", "text": "hi"}]}]
+    text = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    rows = [{"prompt": prompt, "chosen": _TURNS, "rejected": _TURNS, "images": []} for prompt in (text, video)]
+    dataset = DatasetDict({"train": Dataset.from_list(rows), "test": Dataset.from_list(rows)})
+    with pytest.raises(ValueError, match="no Halo collator feeds"):
+        _run_dpo(tmp_path, dataset)
+
+
 def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
-    """The failure mode is a DISAGREEMENT. ``is_vlm_run`` calls the run multimodal off
-    ``images_field`` alone, so reaching the vision branch at all is the first verdict; TRL then takes
-    its own from the column names, and without the alias it reads the same rows as text and prunes
-    the images away. Both verdicts, on the one dataset the trainer receives."""
+    """``is_vlm_run_across_ranks`` and TRL's probe must agree on the one dataset the trainer receives; without the
+    alias TRL reads the rows as text and prunes the images."""
     reached = _run_dpo(tmp_path, _dataset("image_bytes"), "images_field: image_bytes\n")
 
-    # The shared script_runner helper logs every non-None split, generate included.
+    # The shared data_setup helper logs every non-None split, generate included.
     assert set(reached) == {"train", "test", "generate"}
     assert "images" in reached["train"].column_names
     assert "image_bytes" not in reached["train"].column_names
@@ -139,14 +140,12 @@ def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
 
 
 def test_images_column_is_left_exactly_as_it_is(tmp_path):
-    """``images_field: images`` is already TRL's spelling — no rename, no copy."""
     reached = _run_dpo(tmp_path, _dataset("images"), "images_field: images\n")
 
     assert reached["train"].column_names == ["prompt", "chosen", "rejected", "images"]
 
 
 def test_text_dataset_without_the_knob_still_takes_the_text_path(tmp_path):
-    """Anti-vacuity: the alias is a no-op for the ordinary text preference run."""
     with pytest.raises(_TextPathReached):
         _run_dpo(tmp_path, _dataset(None))
 

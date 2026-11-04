@@ -1,15 +1,14 @@
 # Contributing to Halo
 
-Halo is actively developed and maintained by **White Circle**, and we genuinely want your bug
-reports, ideas, and pull requests. Because Halo is itself built with AI — and AI makes plausible-looking
-but ill-fitting contributions cheap to produce — **contributions are gated**: a light process that keeps
-quality high, keeps AI-slop out, and keeps direction under maintainer control. Think of it as routing,
-not a wall. Read this before opening an issue or PR; the full dev guide (build, test, docs) lives in
+Halo is actively developed and maintained by **White Circle**, and we want your bug reports, ideas, and
+pull requests. Halo is itself built with AI, and AI makes plausible-looking but ill-fitting contributions
+cheap to produce, so **contributions are gated**: a light process that keeps quality high and direction
+under maintainer control. Read this before opening an issue or PR; the full dev guide (build, test, docs) lives in
 [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).
 
 ## The gate (read first)
 
-1. **Open an issue first.** Everything starts as an issue — pick the right template: **Bug report** for a
+1. **Open an issue first.** Everything starts as an issue. Pick the right template: **Bug report** for a
    reproducible bug, **Feature request / proposal** to propose a change, **Question / support** for a
    usage or design question, **Documentation** for a docs error or gap. A maintainer may reject it, build
    it directly, ask for detail, or accept it as work to be done.
@@ -19,58 +18,41 @@ not a wall. Read this before opening an issue or PR; the full dev guide (build, 
    [`.github/APPROVED_CONTRIBUTORS`](https://github.com/whitecircle/halo/blob/allowlist/.github/APPROVED_CONTRIBUTORS)
    (kept on the `allowlist` branch) by commenting `/approve @your-handle` on an accepted issue. **PRs from anyone not on that list (and without write access) are auto-commented
    and closed.** A reaction, comment, branch, or draft does **not** reserve the work or approve your
-   PR path. Land one PR and you're added automatically — repeat contributors skip the gate. Once you're
+   PR path. Land one PR and you're added automatically, so repeat contributors skip the gate. Once you're
    approved, reopen a PR the gate closed earlier, or ask on the issue and a maintainer will; the gate
    re-runs on reopen.
 4. **Demand ≠ implementation.** Reactions and comments show interest; they don't guarantee implementation,
    priority, or maintainer attention.
 
-The gate exists to keep review focused on work that fits and to keep AI-slop out of the tree — it's
-quality control, not a barrier. Good bug reports, well-argued proposals, and code you understand are all
-welcome.
+Good bug reports, well-argued proposals, and code you understand are all welcome.
 
 ## The one rule
 
 **You must understand your code.** If you can't explain what your change does, how it behaves at the
-edges, and how it fits Halo's design, the PR is closed. **Using AI to write code is fine — submitting
-code you don't understand is not.** Halo is itself built with AI (see the README's *Built with AI*); the
-bar is comprehension and ownership, not avoidance of AI.
+edges, and how it fits Halo's design, the PR is closed. **Using AI to write code is fine. Submitting
+code you don't understand is not.** The bar is comprehension and ownership, not avoidance of AI (see the
+README's *Built with AI*).
 
 If you used AI, **disclose it** in the PR (the template has a checkbox): the scaffold and the models.
-Coding agents working in this repo must respect this gate — see [`AGENTS.md`](AGENTS.md) and
-[`CLAUDE.md`](CLAUDE.md).
+Coding agents working in this repo must respect this gate ([`AGENTS.md`](AGENTS.md),
+[`CLAUDE.md`](CLAUDE.md)).
 
-## If you're approved — the engineering bar
+## The engineering bar once you're approved
 
-Once your PR path is approved, the normal bar applies (full detail in
-[`agent-docs/contributing/README.md`](agent-docs/contributing/README.md)):
+Once your PR path is approved, the normal bar applies:
 
-- **Everything runs in the Docker image.** The host has no usable Python. Pull the prebuilt image
-  (`docker pull public.ecr.aws/whitecircle/halo:blackwell`, then tag it `halo:blackwell` — or `hopper`)
-  or build it (`make build-blackwell`), then use the `make` targets (`make test-cpu`, ...); only
-  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (a link and anchor check)
-  run on the host. `make test-cpu` needs Docker, not a GPU.
-- **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
-  `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (and
-  `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs only `ruff`,
-  `actionlint` and the docs checks on a PR; the test tiers run on your machine, so state their
-  result in the PR.
-- **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no
-  tautologies, smoke-only "didn't raise" checks, vacuous `assert x is not None`, or mock-the-thing-under-test.
-  See the anti-slop test guide in [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).
-- **Follow the test conventions.** A CPU test ends in `raise SystemExit(pytest.main([__file__, "-v"]))`
-  and a GPU test runs under `gpu_test_main` (`tests/common/harness.py`); a CPU test never re-declares
-  its `cpu` marker in `pytestmark` (the marker comes from its path), neither edits `sys.path`, and a
-  CPU test never imports a GPU script (put a shared fixture in `tests/common/`).
-  `tests/cpu/conventions/` fails the suite on a violation. Never hardcode
-  `--master_port`; the launcher picks a free one.
-- **Proof of value.** No-op/refactor → bitwise-identical loss (fixed seed); behavior change → an e2e
-  test; perf → before/after tokens/s/GPU + peak memory. The PR template has a checkbox per case.
-- **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred — split it.
+- **[The gates](agent-docs/contributing/README.md#submitting-a-pr) pass** before you open the PR. A PR
+  that changes a path listed in `.github/sensitive-paths` also needs the `sensitive` label, which a
+  maintainer adds once the change is approved.
+- **Tests ship with behavior and must not be slop**: see the
+  [test conventions](agent-docs/contributing/README.md#tests).
+- **[Proof of value](agent-docs/contributing/README.md#proof-of-value)** for every change; the PR
+  template has a checkbox per case.
+- **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred, so split it.
 - **Work from a fork.** Outside contributors have no push access here: fork the repo, clone your
   fork, branch off `main`, push to your fork, and open the PR against `whitecircle/halo`'s `main`.
 - **Every PR is squash-merged, and every commit in it must carry a verified signature** (SSH or
-  GPG — the *Verified* badge), forks included: GitHub does not merge a PR while any of its commits
+  GPG, the *Verified* badge), forks included: GitHub does not merge a PR while any of its commits
   lacks one. Merge commits and rebase merges are disabled, so a PR's commit structure is never
   preserved. One-time setup: add your SSH or GPG key to your GitHub account as a **signing key**,
   then `git config --global gpg.format ssh` (SSH keys only),
@@ -79,16 +61,10 @@ Once your PR path is approved, the normal bar applies (full detail in
   `git rebase --exec 'git commit --amend --no-edit -S' <base>` (the `main` commit the branch starts
   from) and force-push.
 
-## Markdown locations
-
-Source-tree markdown belongs in `agent-docs/` (the reference), `human-docs/` (the user guide), or
-`skills/` (the agent skills). The GitHub-convention root files (`README`, `CONTRIBUTING`, `SECURITY`,
-`CODE_OF_CONDUCT`, `AGENTS.md`, `CLAUDE.md`, `.github/*`) are the documented exception.
-
 ## Security
 
-Never commit `keys/`, `.env`, or `*.pem`. Report vulnerabilities **privately** — see
-[`SECURITY.md`](SECURITY.md), never a public issue.
+Never commit `keys/`, `.env`, or `*.pem`. Report vulnerabilities **privately** through
+[`SECURITY.md`](SECURITY.md), never in a public issue.
 
 ## Code of conduct
 

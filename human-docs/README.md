@@ -2,11 +2,11 @@
 
 Halo is a distributed training toolkit for large language models, built on the
 HuggingFace stack (Transformers, TRL, Accelerate). It adds expert, context,
-tensor and expert-tensor parallelism to native HuggingFace models.
+tensor, expert-tensor and pipeline parallelism to native HuggingFace models.
 
 It covers supervised fine-tuning through asynchronous multi-turn RL, on dense
-models and fifteen MoE families. A HuggingFace model goes in, and a HuggingFace
-model you can load with `from_pretrained` comes out.
+models and eighteen MoE families. You start from a HuggingFace model, and the
+result loads with `from_pretrained`.
 
 Read the guide in order for a first run, or jump to the section you need. Links
 marked ↗ go to [`agent-docs/`](../agent-docs/README.md), the detailed reference
@@ -59,20 +59,20 @@ mechanism.
 
 ## Scale
 
-- [Parallelism](parallelism.md): EP, CP, TP and ETP, and the layout rules that
+- [Parallelism](parallelism.md): EP, CP, TP, ETP and PP, and the layout rules that
   reject a bad shape before it costs you a run.
 - [Clusters and multi-node](clusters.md): one torchrun per node, fabric,
   storage, SkyPilot, RunPod, Nomad.
 - [Performance](performance.md): the throughput to expect, the levers that move
   it, and the ones that don't.
 - [Supported matrix](supported-matrix.md): model family × mode, runtime
-  versions and the standing limits.
+  versions, what is validated and the standing limits.
 
 ## Operate
 
 - [Checkpoints](checkpoints.md): save, resume, merge, quantize, serve, upload.
-- [Monitoring](monitoring.md): the log file, W&B or ClearML, and the metrics
-  worth turning on.
+- [Monitoring](monitoring.md): the log file, W&B or ClearML, and the opt-in
+  metrics.
 - [Troubleshooting](troubleshooting.md): OOM, rejected configs, hangs, and
   RL-specific failures.
 

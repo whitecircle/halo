@@ -1,22 +1,10 @@
 #!/usr/bin/env python
-"""CPU tests for class-declared EP-layer contracts.
-
-* ``_supports_gradient_checkpointing``: Zaya declares ``False`` (EDA/CCA recompute recursion) and
-  ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` must RAISE when GC is enabled on a
-  declaring layer instead of silently corrupting backward; supporting families pass through.
-* GptOss activation constants: ``EPGptOssMoELayer`` must read ``alpha``/``limit`` from the wrapped
-  experts (1.702 / swiglu_limit) — a missing attribute is an ``AttributeError``, never a silently
-  substituted wrong constant.
-* ``_ROUTER_ATTR`` / ``_EXPERTS_CONTAINER_ATTRS``: the router and expert-container probes must read
-  the family's own declaration, not guess from a global name ladder, and the per-layer construction
-  INFO must be rank-gated.
-
-Run: ``python tests/cpu/parallelism/test_ep_layer_contracts.py`` (or ``pytest -m cpu``).
-"""
+"""Class-declared EP-layer contracts: GC support, activation constants, router and container probes, mixin rules."""
 
 from __future__ import annotations
 
 import logging
+from abc import ABC
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,17 +14,23 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.fused_glu import GluCombine
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
-from tests.common.parallelism import make_parallelism_config
+from tests.common.parallelism import make_parallelism_config, single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 
@@ -47,40 +41,32 @@ def _parallelism_config(world: int = 2, **kwargs) -> ParallelismConfig:
 
 
 class _EPStub(EPMoELayerBase):
-    """Minimal EP layer the introspection mixin recognizes.
+    """A real subclass since the mixin identifies EP modules by ``isinstance``; ``__init__`` needs a wrapped HF
+    layer + DeepEP, so it is bypassed."""
 
-    A real ``EPMoELayerBase`` subclass, not a duck-typed stand-in: the mixin identifies EP modules by
-    ``isinstance``, so a bare ``nn.Module`` carrying ``ep_config`` would not exercise the live path.
-    ``EPMoELayerBase.__init__`` needs a wrapped HF layer + DeepEP, so it is bypassed deliberately.
-    """
-
-    def __init__(self, supports_gc: bool | None):
+    def __init__(self, supports_gc: bool = True):
         nn.Module.__init__(self)
         self.ep_config = SimpleNamespace(is_deferred_dp=False)
-        if supports_gc is not None:
-            self._supports_gradient_checkpointing = supports_gc
+        self.FAMILY = MoEFamilySpec(model_types=(), supports_gradient_checkpointing=supports_gc)
 
-    def forward(self, hidden_states):  # abstract on the base; never called by these tests
+    def forward(self, hidden_states):  # Abstract on the base; never called by these tests.
         raise NotImplementedError
 
 
 class _GCSequential(nn.Sequential):
-    """Stub policy model: records the GC kwargs the EP path forces on it.
+    """Installing ``_gradient_checkpointing_func`` mirrors ``PreTrainedModel``: the EP path re-points it at the
+    scoped wrapper its dispatch replay hangs off."""
 
-    ``enable_ep_gradient_checkpointing`` raises on a model with no
-    ``gradient_checkpointing_enable`` — returning quietly would leave GC off on BOTH sides,
-    since the EP path has already disabled HF Trainer's own. Installing
-    ``_gradient_checkpointing_func`` mirrors ``PreTrainedModel``: the EP path re-points it at the
-    scoped wrapper its dispatch replay hangs off.
-    """
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
+    def gradient_checkpointing_enable(
+        self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+    ):
         self.gc_kwargs = gradient_checkpointing_kwargs
         self.every_n_layers = every_n_layers
+        self.offload = offload
         self._gradient_checkpointing_func = checkpoint
 
 
-class _Trainer(EpIntrospectionMixin):
+class _Trainer(EPLayersMixin):
     def __init__(
         self, layer: nn.Module, gradient_checkpointing: bool, gradient_checkpointing_kwargs=None, **config_kwargs
     ):
@@ -96,91 +82,84 @@ class _Trainer(EpIntrospectionMixin):
 
 
 def test_zaya_declares_gc_unsupported_and_base_default_is_supported():
-    assert EPZayaMoELayer._supports_gradient_checkpointing is False
-    # Absent declaration = supported (base contract default).
-    assert getattr(EPGptOssMoELayer, "_supports_gradient_checkpointing", True) is True
+    assert EPZayaMoELayer.FAMILY.supports_gradient_checkpointing is False
+    assert EPGptOssMoELayer.FAMILY.supports_gradient_checkpointing is True
 
 
 def test_gc_on_declaring_false_layer_raises():
     trainer = _Trainer(_EPStub(supports_gc=False), gradient_checkpointing=True)
-    with pytest.raises(ValueError, match="_supports_gradient_checkpointing"):
-        trainer._setup_ep_gradient_checkpointing()
+    with pytest.raises(ValueError, match="supports_gradient_checkpointing=False"):
+        trainer._install_ep_gradient_checkpointing()
 
 
 def test_gc_disabled_skips_the_contract_check():
     trainer = _Trainer(_EPStub(supports_gc=False), gradient_checkpointing=False)
-    trainer._setup_ep_gradient_checkpointing()
+    trainer._install_ep_gradient_checkpointing()
 
 
 def test_gc_on_supporting_layer_passes():
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is True
-    assert trainer.args.gradient_checkpointing is False  # HF Trainer re-enable prevented
+    assert trainer.args.gradient_checkpointing is False
 
 
 def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
-    """No EP/CP axis (ep_size=1 grouped-GEMM wrappers): the MoE verdict comes from the backbone's
-    config alone, and a router re-run in non-reentrant recompute can flip a near-tie pick."""
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
+    """A router re-run in non-reentrant recompute can flip a near-tie pick."""
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
-    assert not trainer.parallelism_config.is_ep_mode, "fixture must leave only the config to decide"
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    assert not trainer.parallelism_config.has_ep_group, "fixture must leave only the config to decide"
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
 
 def test_gc_under_pp_is_non_reentrant():
     # PP needs non-reentrant GC: a reentrant forward runs under no_grad, so FSDP2 registers no pre-backward hooks.
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
-    with patch("src.trainers.mixins.ep_introspection.enable_ep_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
+    with patch("halo.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
 
 
-def test_every_n_layers_is_lifted_out_of_the_checkpoint_kwargs():
-    """``every_n_layers`` is ``gradient_checkpointing_enable``'s own keyword (which decoder layers
-    checkpoint); left inside the kwargs dict it reaches ``torch.utils.checkpoint``. The EP enable
-    lifts it, and so does the re-enable seam TRL drives with the raw args dict after generation."""
+def test_enable_keywords_are_lifted_out_of_the_checkpoint_kwargs():
+    """Left inside the kwargs dict they reach ``torch.utils.checkpoint``."""
     trainer = _Trainer(
-        _EPStub(supports_gc=None), gradient_checkpointing=True, gradient_checkpointing_kwargs={"every_n_layers": 2}
+        _EPStub(),
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"every_n_layers": 2, "offload": True},
     )
-    trainer._setup_ep_gradient_checkpointing()
+    trainer._install_ep_gradient_checkpointing()
     model = trainer.model
-    assert (model.gc_kwargs, model.every_n_layers) == ({"use_reentrant": True}, 2)
-    assert trainer.args.gradient_checkpointing_kwargs == {"every_n_layers": 2, "use_reentrant": True}
+    assert (model.gc_kwargs, model.every_n_layers, model.offload) == ({"use_reentrant": True}, 2, True)
+    assert trainer.args.gradient_checkpointing_kwargs == {"every_n_layers": 2, "offload": True, "use_reentrant": True}
 
-    model.every_n_layers = None
-    model.gradient_checkpointing_enable(trainer.args.gradient_checkpointing_kwargs)  # TRL's raw re-enable
-    assert (model.gc_kwargs, model.every_n_layers) == ({"use_reentrant": True}, 2)
+    model.every_n_layers, model.offload = None, None
+    model.gradient_checkpointing_enable(trainer.args.gradient_checkpointing_kwargs)  # TRL's raw re-enable.
+    assert (model.gc_kwargs, model.every_n_layers, model.offload) == ({"use_reentrant": True}, 2, True)
 
 
 def test_gc_enable_requires_a_real_checkpoint_function():
-    # A no-op gradient_checkpointing_enable leaves EP issuing a SECOND dispatch inside backward.
+    # A no-op gradient_checkpointing_enable leaves EP issuing a second dispatch inside backward.
     class _Silent(nn.Sequential):
-        def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1):
+        def gradient_checkpointing_enable(
+            self, gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False
+        ):
             pass
 
     with pytest.raises(RuntimeError, match="installed no checkpoint function"):
-        enable_ep_gradient_checkpointing(
-            _Silent(_EPStub(supports_gc=None)), gradient_checkpointing_kwargs={"use_reentrant": True}
-        )
+        enable_scoped_gradient_checkpointing(_Silent(_EPStub()), gradient_checkpointing_kwargs={"use_reentrant": True})
 
 
 def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
-    """Re-enabling GC must not strip the EP scopes, however many times it happens.
-
-    Online GRPO re-enables every step: TRL wraps generation in ``disable_gradient_checkpointing``,
-    whose exit calls the model's ``gradient_checkpointing_enable`` again. That installs HF's bare
-    checkpoint function, and an EP layer entering backward without a scope raises rather than issue
-    the second DeepEP dispatch that would corrupt every gradient.
-    """
-    model = _GCSequential(_EPStub(supports_gc=None))
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    """TRL's ``disable_gradient_checkpointing`` exit re-enables every step of online GRPO, and an EP layer entering
+    backward without a scope raises."""
+    model = _GCSequential(_EPStub())
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     wrapper = model.gradient_checkpointing_enable
 
     for _ in range(3):
@@ -191,17 +170,11 @@ def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
 
 
 def test_a_second_full_enable_is_idempotent_not_a_raise():
-    """A mode switch re-runs the FULL ``enable_ep_gradient_checkpointing``. The rescope hook has
-    already wrapped the fresh install by then, so ``install_ep_checkpoint_scopes`` finds only
-    already-scoped functions — which must read as "scopes in place", never as the no-checkpoint
-    RuntimeError."""
-    model = _GCSequential(_EPStub(supports_gc=None))
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": False})
+    """The rescope hook has already wrapped the fresh install, so already-scoped functions read as scopes in place."""
+    model = _GCSequential(_EPStub())
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert getattr(model._gradient_checkpointing_func, "_ep_scoped", False)
-
-
-# GptOss activation constants (alpha / limit)
 
 
 class _GptOssRouter(nn.Module):
@@ -233,47 +206,29 @@ class _GptOssBlock(nn.Module):
         self.experts = _GptOssExperts(with_activation_constants)
 
 
-def _ep1_config() -> EPConfig:
-    cfg = EPConfig(ep_size=1, world_size=1, gpus_per_node=1, use_grouped_gemm=False)
-    cfg.finalize_expert_assignment(E)
-    return cfg
-
-
 def test_gptoss_layer_reads_activation_constants_from_experts():
-    layer = EPGptOssMoELayer(_GptOssBlock(), _ep1_config())
-    assert layer.alpha == 1.702
-    assert layer.limit == 7.0
+    layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
+    assert layer._gptoss_glu == GluCombine.gptoss(1.702, 7.0)
 
 
 def test_gptoss_layer_fails_loud_on_missing_activation_constants():
     with pytest.raises(AttributeError, match="alpha"):
-        EPGptOssMoELayer(_GptOssBlock(with_activation_constants=False), _ep1_config())
+        EPGptOssMoELayer(_GptOssBlock(with_activation_constants=False), single_process_ep_config(E))
 
 
 def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoELayer:
-    """A layer carrying only what ``_grouped_mm_enabled`` reads — the method is pure, and a real
-    ``__init__`` needs DeepEP groups and a device."""
+    """A real ``__init__`` needs DeepEP groups and a device."""
     layer = EPGptOssMoELayer.__new__(EPGptOssMoELayer)
     layer._use_grouped_mm = use_grouped_mm
     layer.expert_tp_size = expert_tp_size
+    layer._gptoss_glu = GluCombine.gptoss(1.702, 7.0)
+    layer.hidden_dim = H
     return layer
 
 
-def test_gptoss_etp_disables_grouped_mm():
-    """Expert-TP drops GptOss expert compute to the per-expert loop: ETP stores gate/up under the
-    plain names, not the de-interleaved ``*_gmm`` pair ``_compute_experts_gmm`` reads."""
-    assert _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=2)._grouped_mm_enabled() is False
-    assert _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=1)._grouped_mm_enabled() is True
-    assert _grouped_mm_probe(use_grouped_mm=False, expert_tp_size=1)._grouped_mm_enabled() is False
-
-
-def test_init_summary_reports_the_effective_grouped_mm_decision(caplog):
-    """The construction-time line must report what the layer WILL run, not what was requested.
-
-    Reporting ``_use_grouped_mm`` would advertise grouped GEMM on a GptOss ETP layer that silently
-    runs the per-expert loop — an unexplained throughput cliff on a run asking for grouped GEMM.
-    """
-    layer = _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=2)
+@pytest.mark.parametrize("use_grouped_mm", [True, False])
+def test_init_summary_reports_the_effective_grouped_mm_decision(caplog, use_grouped_mm):
+    layer = _grouped_mm_probe(use_grouped_mm=use_grouped_mm, expert_tp_size=2)
     layer.ep_rank, layer.expert_start, layer.expert_end, layer.num_experts = 0, 0, E, E
     layer.fp32_router = layer.fp32_experts = False
 
@@ -281,20 +236,33 @@ def test_init_summary_reports_the_effective_grouped_mm_decision(caplog):
         layer._log_init_summary("extra=1")
 
     (record,) = [r for r in caplog.records if r.levelno == logging.INFO]
-    assert "grouped_mm=False" in record.getMessage(), record.getMessage()
+    assert f"grouped_mm={use_grouped_mm}" in record.getMessage(), record.getMessage()
     assert "extra=1" in record.getMessage(), record.getMessage()
+
+
+@pytest.mark.parametrize("family", TINY_MOE_FAMILIES)
+def test_the_construction_line_states_what_the_family_runs(family, caplog):
+    with caplog.at_level(logging.INFO, logger=EPMoELayerBase.__module__):
+        model = apply_ep_layers(tiny_family_model(TINY_MOE_FAMILIES[family]), single_process_ep_config())
+    (_, layer), *_ = named_ep_layers(model)
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith(f"{type(layer).__name__}: "))
+    assert f"wire_width={layer.hidden_dim}" in line, line
+    assert ("top_k=" in line) == hasattr(layer, "top_k"), line
+    if isinstance(layer, EPGroupLimitedMoELayerBase):
+        assert f"n_group={layer.n_group}" in line, line
+        assert f"routed_scaling_factor={layer.routed_scaling_factor}" in line, line
+    assert ("glu_combine=none (gateless)" in line) == isinstance(layer, EPNemotronHMoELayer), line
 
 
 @pytest.mark.parametrize("is_main", [True, False])
 def test_init_summary_is_rank_gated(caplog, is_main):
-    """One INFO line per MoE layer per rank is ~47k lines on a 92-layer model at 512 ranks, so only
-    the main process emits it — and it may therefore carry only rank-uniform fields."""
+    """~47k lines on a 92-layer model at 512 ranks, and it may carry only rank-uniform fields."""
     layer = _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=1)
     layer.ep_rank, layer.expert_start, layer.expert_end, layer.num_experts = 0, 0, E, E
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.base_layer.is_global_main_process", return_value=is_main),
+        patch("halo.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.INFO, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()
@@ -306,14 +274,13 @@ def test_init_summary_is_rank_gated(caplog, is_main):
 
 @pytest.mark.parametrize("is_main", [True, False])
 def test_every_rank_debug_logs_the_expert_range_it_owns(caplog, is_main):
-    """The one rank-specific fact must survive the INFO gate: printed only on rank 0 it says nothing
-    about the actual split, so every rank emits its own range at DEBUG."""
+    """Printed only on rank 0 the range says nothing about the actual split."""
     layer = _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=1)
     layer.ep_rank, layer.expert_start, layer.expert_end, layer.num_experts = 1, E // 2, E, E
     layer.fp32_router = layer.fp32_experts = False
 
     with (
-        patch("src.distributed.expert_parallel.base_layer.is_global_main_process", return_value=is_main),
+        patch("halo.distributed.expert_parallel.moe_layer.layer.is_global_main_process", return_value=is_main),
         caplog.at_level(logging.DEBUG, logger=EPMoELayerBase.__module__),
     ):
         layer._log_init_summary()
@@ -322,33 +289,30 @@ def test_every_rank_debug_logs_the_expert_range_it_owns(caplog, is_main):
     assert f"EP rank 1 owns experts {E // 2}-{E - 1} of {E}" in record.getMessage(), record.getMessage()
 
 
-# router resolution (_ROUTER_ATTR)
+def test_a_top_k_nothing_spells_names_the_fields_it_tried():
+    block = SimpleNamespace(gate=nn.Linear(2, 2))
+    with pytest.raises(AttributeError, match="num_experts_per_tok") as refusal:
+        EPQwen3MoELayer._find_top_k(block)
+    assert "ROUTER_TOPK_FIELDS" in str(refusal.value)
 
 
 def test_router_probe_reads_the_declared_attribute_not_a_name_ladder():
-    """A block exposing BOTH names must resolve to the family's declaration.
-
-    A ``("gate", "router")`` ladder would hand GptOss the ``gate`` submodule — silently overriding
-    ``_ROUTER_ATTR = "router"`` and hooking / upcasting a different module than the forward reads.
-    """
+    """A ``("gate", "router")`` ladder would hand GptOss the ``gate`` submodule, hooking a different module than the
+    forward reads."""
     both = SimpleNamespace(gate=nn.Linear(2, 2), router=nn.Linear(2, 2))
 
-    assert EPGptOssMoELayer._find_gate_or_router(both) is both.router
-    assert EPMoELayerBase._find_gate_or_router(both) is both.gate, "the default declaration is 'gate'"
+    assert EPGptOssMoELayer._declared_router(both) is both.router
+    assert EPMoELayerBase._declared_router(both) is both.gate, "the default declaration is 'gate'"
 
 
 def test_router_probe_fails_loud_and_names_the_declaration():
-    """A renamed upstream router must say which declaration went stale, not 'no gate/router found'."""
+    """A renamed upstream router must say which declaration went stale."""
     with pytest.raises(AttributeError, match="_ROUTER_ATTR='router'"):
-        EPGptOssMoELayer._find_gate_or_router(SimpleNamespace(gate=nn.Linear(2, 2)))
+        EPGptOssMoELayer._declared_router(SimpleNamespace(gate=nn.Linear(2, 2)))
 
 
 def test_top_k_probe_reads_the_declared_router_not_a_name_ladder():
-    """``_find_top_k`` descends through the SAME declaration the hooks and the upcast use.
-
-    A ``("gate", "router")`` ladder would read GptOss's top-k off a ``gate`` submodule while the
-    forward routes through ``router`` — a silent expert-count mismatch on any block carrying both.
-    """
+    """A name ladder would read top-k off a ``gate`` submodule while the forward routes through ``router``."""
     both = SimpleNamespace(
         gate=SimpleNamespace(num_experts_per_tok=2),
         router=SimpleNamespace(num_experts_per_tok=7),
@@ -358,41 +322,42 @@ def test_top_k_probe_reads_the_declared_router_not_a_name_ladder():
     assert EPMoELayerBase._find_top_k(both) == 2, "the default declaration is 'gate'"
 
 
-# expert-container resolution (_EXPERTS_CONTAINER_ATTRS)
-
-
 def test_expert_container_probe_reads_the_family_declaration_in_its_own_order():
-    """A block exposing BOTH spellings must resolve to the family's declaration, in its order.
-
-    GLM-4 (and Laguna, which inherits it) is the one family served under two container spellings; every
-    other family declares the single ``experts``. A global name ladder would let a block that happened
-    to expose a second name decide for all of them.
-    """
+    """GLM-4 (and Laguna) is the one family served under two container spellings."""
     both = SimpleNamespace(experts=nn.Linear(2, 2), routed_experts=nn.Linear(2, 2))
 
     assert EPGlm4MoELayer._find_experts_container(both) is both.experts
-    assert EPMoELayerBase._find_experts_container(both) is both.experts, "the default declaration is 'experts'"
+    assert EPQwen3MoELayer._find_experts_container(both) is both.experts, "the default declaration is 'experts'"
 
 
 def test_expert_container_probe_accepts_only_the_spellings_the_family_declares():
-    """A spelling the family does not declare must fail LOUD and name the declaration.
-
-    The same declarations are unioned into the lazy loader's checkpoint-key regexes, so a container
-    resolved off a name outside them builds a layer whose expert keys the planner never matches.
-    """
+    """The lazy loader's key regexes union these declarations, so a container outside them builds a layer whose keys
+    the planner never matches."""
     routed_only = SimpleNamespace(routed_experts=nn.Linear(2, 2))
     assert EPGlm4MoELayer._find_experts_container(routed_only) is routed_only.routed_experts
 
-    with pytest.raises(AttributeError, match="_EXPERTS_CONTAINER_ATTRS"):
+    with pytest.raises(AttributeError, match="experts_container_attrs"):
         EPQwen3MoELayer._find_experts_container(routed_only)
 
 
 def test_the_gptoss_wrapper_stores_its_router_under_the_declared_attribute():
-    """The declaration names one attribute on BOTH sides — the HF block it is read from and the
-    wrapper it is re-registered on — so the fp32 upcast and the grad-sync hook (both keyed off
-    ``_ROUTER_ATTR``) reach the module the forward actually routes through."""
-    layer = EPGptOssMoELayer(_GptOssBlock(), _ep1_config())
+    """The fp32 upcast and grad-sync hook key off ``_ROUTER_ATTR``, so both must reach the module the forward routes
+    through."""
+    layer = EPGptOssMoELayer(_GptOssBlock(), single_process_ep_config(E))
     assert getattr(layer, EPGptOssMoELayer._ROUTER_ATTR) is layer.router
+
+
+def test_the_layer_mixins_define_no_init():
+    """A mixin ``__init__`` would run out of order or be skipped by the ``nn.Module.__init__`` the base calls."""
+    mixins = [base for base in EPMoELayerBase.__bases__ if base not in (nn.Module, ABC)]
+    assert len(mixins) == 6, f"premise: EPMoELayerBase composes its six concerns as mixins, got {mixins}"
+    assert [m.__name__ for m in mixins if "__init__" in vars(m)] == []
+
+
+def test_expert_lora_mixin_is_mixed_only_into_the_layer_base():
+    """Adapter helpers select by ``isinstance(m, EPExpertLoraMixin)``, equal to ``EPMoELayerBase`` only while the
+    base is its sole direct subclass."""
+    assert EPExpertLoraMixin.__subclasses__() == [EPMoELayerBase]
 
 
 if __name__ == "__main__":

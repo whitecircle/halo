@@ -1,28 +1,9 @@
 #!/usr/bin/env python
-"""The TP gathered save must write every hand-sliced GptOss sink ONCE, at full head width.
+"""The TP gathered save writes every hand-sliced GptOss sink once, at full head width.
 
-GptOss attention sinks cannot be DTensors (the forward concatenates them with already-sharded
-logits), so ``shard_sinks_param`` slices the parameter by hand into this rank's head range and
-records the suffix on ``model._tp_sharded_non_dtensor``. ``full_tensor()`` therefore never
-reconstructs them, and ``_tp_chunks`` gives them a collective pass of their own AFTER the parameter
-walk — which is exactly why that walk must DROP them: it emits the LIVE parameter, this rank's
-``[heads/tp]`` slice, and the streamed writer has flushed it long before the gathered full-width
-tensor arrives under the same key.
-
-Without that exclusion the save claims one key from two sources. The streaming writer refuses the
-second claim outright; were that refusal relaxed, the checkpoint would carry ``self_attn.sinks``
-twice at two shapes with ``total_size`` counting both — readable through the index, wrong to every
-tool that walks the shard files. This test fails on either outcome: the save must complete, and the
-artifact must hold exactly one full-width sink per layer, an index whose ``total_size`` is what the
-shards actually contain, and the pre-save sink values after a ``from_pretrained`` round trip.
-
-A tiny random-init ``GptOssForCausalLM`` on a real 2-rank ``tp`` mesh, sharded through the real
-selective-TP entry point. No forward runs, so nothing here needs a hub checkpoint, DeepEP or a flash
-kernel. ``max_shard_size`` is small enough to force a multi-part save: a single part is written as a
-bare ``model.safetensors`` with no index at all, and the ``total_size`` assertion needs one.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 tests/gpu/parallelism/tp/test_tp_gathered_save_sinks.py
+Sinks can't be DTensors (the forward concatenates them with sharded logits), so ``_tp_chunks`` gathers them after the
+parameter walk, which must drop them: it would emit this rank's slice under the same key. ``max_shard_size`` forces a
+multi-part save, since a single part has no index for the ``total_size`` assertion.
 """
 
 import json
@@ -35,24 +16,20 @@ from safetensors.torch import load_file
 from torch.distributed.device_mesh import init_device_mesh
 from transformers import GptOssConfig, GptOssForCausalLM
 
-# Registers the EP export roster the config writer at the end of every gathered save demands —
-# a hand-built model reaches save_tp_model without the load path that pulls this in.
-import src.distributed.expert_parallel.layers.roster  # noqa: F401
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.checkpoint.tp_save import save_tp_model
-from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
-from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
-from tests.common.checkpoint_io import weight_files
+# A hand-built model reaches save_tp_checkpoint without the load path that registers the EP export roster.
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.parallel.save import save_tp_checkpoint
+from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
+from tests.common.checkpoint_io import save_context, weight_files
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 TP_SIZE = 2
 NUM_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]
 NUM_HEADS = TINY_GPTOSS_CONFIG["num_attention_heads"]
-# The tiny model is ~29 MB in bf16, so this splits it over several parts and the save writes the
-# multi-shard index the total_size check reads.
 MAX_SHARD_SIZE = "4MB"
 DISK_CHECKS = (
     "every_key_written_once",
@@ -75,16 +52,11 @@ def _full_sinks(layer_idx: int, device: torch.device) -> torch.Tensor:
 
 
 def _shard_contents(save_dir: str) -> dict[str, dict[str, torch.Tensor]]:
-    """Every ``model*.safetensors`` part the save left, read FILE BY FILE.
-
-    Not through ``load_full_state_dict``: a key claimed by two parts collapses into one entry there,
-    which is the corruption under test.
-    """
+    """File by file: ``load_full_state_dict`` collapses a key claimed by two parts, the corruption under test."""
     return {name: load_file(os.path.join(save_dir, name)) for name in weight_files(save_dir)}
 
 
 def _checkpoint_problems(save_dir: str, expected: dict[str, torch.Tensor]) -> dict[str, list[str]]:
-    """Problems found in the written checkpoint, per check name (an empty list is a pass)."""
     shards = _shard_contents(save_dir)
     owners: dict[str, list[str]] = {}
     for part, tensors in shards.items():
@@ -117,8 +89,8 @@ def _checkpoint_problems(save_dir: str, expected: dict[str, torch.Tensor]) -> di
         total_size = declared["metadata"]["total_size"]
         weight_map = declared["weight_map"]
         stored_bytes = sum(t.numel() * t.element_size() for tensors in shards.values() for t in tensors.values())
-        # Both sums, because they fail on opposite defects: against the parts, total_size misses a
-        # file the index never named; against the index's own entries, it counts a key written twice.
+        # Both sums: against the parts, total_size misses a file the index never named; against its entries, a key
+        # written twice.
         named_bytes = sum(
             shards[part][key].numel() * shards[part][key].element_size() for key, part in weight_map.items()
         )
@@ -144,7 +116,6 @@ def _checkpoint_problems(save_dir: str, expected: dict[str, torch.Tensor]) -> di
 
 
 def _reload_problems(save_dir: str, expected: dict[str, torch.Tensor]) -> list[str]:
-    """``from_pretrained`` must accept the artifact and hand back the pre-save sinks."""
     reloaded = GptOssForCausalLM.from_pretrained(save_dir, dtype=torch.bfloat16, attn_implementation="eager")
     problems = []
     for index, layer in enumerate(reloaded.model.layers):
@@ -156,10 +127,9 @@ def _reload_problems(save_dir: str, expected: dict[str, torch.Tensor]) -> list[s
 
 
 def _disk_checks(save_dir: str, expected: dict[str, torch.Tensor], save_error: str | None) -> dict[str, bool]:
-    """Rank 0's verdict on the artifact — never a raise, which its peers would wait out at the
-    broadcast below until the watchdog fires."""
+    """Rank 0's verdict, never a raise, which its peers would wait out at the broadcast until the watchdog fires."""
     if save_error is not None:
-        log(f"save_tp_model raised, so there is no artifact to inspect: {save_error}")
+        log(f"save_tp_checkpoint raised, so there is no artifact to inspect: {save_error}")
         return dict.fromkeys(DISK_CHECKS, False)
     try:
         problems = _checkpoint_problems(save_dir, expected)
@@ -190,22 +160,20 @@ def run(ctx) -> dict:
     model._device_mesh = mesh
     patched = apply_tp_to_attention_only(model, mesh)
 
-    # Anti-vacuity: with no attention sharded and no hand-sliced suffix registered there is nothing
-    # for _tp_chunks to exclude, and every assertion below would hold for the wrong reason.
+    # Anti-vacuity: with nothing for _tp_chunks to exclude, every assertion below holds for the wrong reason.
     checks = {
         "tp_sliced_the_sinks_by_hand": patched == NUM_LAYERS
         and {layer.self_attn.sinks.shape[0] for layer in model.model.layers} == {NUM_HEADS // TP_SIZE}
-        and tp_sharded_non_dtensor_suffixes(model) == ("self_attn.sinks",)
+        and hand_sliced_suffixes(model) == ("self_attn.sinks",)
     }
 
-    ctx.barrier()  # rank 0's wipe of the shared scratch dir must land before the save writes into it
+    ctx.barrier()  # Rank 0's wipe of the shared scratch dir must land before the save writes into it.
 
     save_error = None
     try:
-        save_tp_model(model, save_dir, max_shard_size=MAX_SHARD_SIZE)
+        save_tp_checkpoint(save_context(model, max_shard_size=MAX_SHARD_SIZE), save_dir)
     except Exception as exc:
-        # The writer defers a rank-local failure to a collective, so every rank lands here together
-        # and the checks below stay in lockstep.
+        # The writer defers a rank-local failure to a collective, so every rank lands here together.
         save_error = f"{type(exc).__name__}: {exc}"
     checks["save_completed"] = save_error is None
 

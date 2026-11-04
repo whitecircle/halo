@@ -1,17 +1,11 @@
 #!/usr/bin/env python
-"""Distillation divergences must evaluate in fp32 even when the logits arrive bf16.
-
-Models load bf16 by default, and every one of these objectives subtracts nearly equal quantities
-(``log p - log q``, ``1 - cos``). In bf16 that cancellation dominates the result exactly in the
-converged regime distillation ends in — far enough to flip the sign of a provably non-negative
-divergence. These tests pin the fp32 evaluation, not a tolerance: a bf16 input scores bit for bit
-like its fp32 copy, and the non-negativity a bf16 evaluation breaks survives.
-"""
+"""Distillation divergences evaluate in fp32 even when the logits arrive bf16.
+They subtract nearly equal quantities; near convergence bf16 cancellation can flip a non-negative divergence's sign."""
 
 import pytest
 import torch
 
-from src.trainers.distillation.losses import (
+from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
     forward_kl_loss,
@@ -30,7 +24,6 @@ INEXACT_TEMPERATURE = 0.7
 
 
 def _near_converged_pair(seed: int = 0):
-    """(student, teacher) bf16 logits for a student that has nearly matched its teacher."""
     generator = torch.Generator().manual_seed(seed)
     teacher = torch.randn(2, 8, VOCAB, generator=generator) * 3.0
     student = teacher + torch.randn(teacher.shape, generator=generator) * CONVERGED_SIGMA
@@ -39,8 +32,7 @@ def _near_converged_pair(seed: int = 0):
 
 @pytest.mark.parametrize("name", sorted(DIVERGENCES))
 def test_every_divergence_scores_bf16_logits_exactly_as_their_fp32_copy(name):
-    """Bit-exact, so the upcast precedes every arithmetic step, the temperature divide included: a
-    bf16 step anywhere would differ (the fixture's own check shows a bf16 divide does)."""
+    """Bit-exact, so the upcast precedes every step; the first assert shows a bf16 temperature divide would differ."""
     student, teacher = _near_converged_pair()
     assert not torch.equal((student / INEXACT_TEMPERATURE).float(), student.float() / INEXACT_TEMPERATURE)
     hard_labels = torch.randint(0, VOCAB, student.shape[:2], generator=torch.Generator().manual_seed(1))
@@ -60,25 +52,16 @@ def test_the_kl_divergences_stay_non_negative_on_bf16_logits(loss_fn):
 
 
 def test_unnormalized_kl_stays_non_negative_elementwise_on_bf16_logits():
-    """UKL's (Q - P) mass correction makes it non-negative elementwise — bf16 cancellation breaks that.
-
-    The floor is ``-1e-6``, not ``0``: ``p*log(p/q) + (q - p)`` is analytically non-negative but
-    both terms are O(p*delta) while their sum is O(p*delta**2), so fp32 arithmetic leaves residual
-    negatives around ``-5e-9``. bf16 arithmetic on the same inputs reaches ``-5e-4`` — five orders
-    of magnitude away, so this threshold discriminates the two rather than tracking fp32 noise.
-    """
+    """Floor ``-1e-6``: fp32 leaves residual negatives near ``-5e-9`` (terms O(p*delta), their sum O(p*delta**2)).
+    bf16 on the same inputs reaches ``-5e-4``, so the threshold separates the two."""
     student, teacher = _near_converged_pair()
     assert unnormalized_kl_loss(student, teacher, 1.0).min().item() >= -1e-6
 
 
 @pytest.mark.parametrize("count", [1500, 3000, 12345])
 def test_masked_mean_token_count_is_exact_for_bf16_losses(count):
-    """The kept-token denominator (and the divide itself) must stay fp32, not the loss dtype.
-
-    None of these counts is bf16-representable (1500 -> 1504, 3000 -> 3008, 12345 -> 12352), so a
-    denominator or quotient rounded to bf16 rescales the mean by ~0.3%. A single exactly
-    representable nonzero token makes the numerator exact, isolating the denominator's rounding.
-    """
+    """None of these counts is bf16-representable (1500 -> 1504, 3000 -> 3008, 12345 -> 12352).
+    A denominator rounded to bf16 rescales the mean ~0.3%; one exact nonzero token isolates it from the numerator."""
     loss = torch.zeros(1, count, dtype=torch.bfloat16)
     loss[0, 0] = 1024.0
     mask = torch.ones(1, count, dtype=torch.bfloat16)

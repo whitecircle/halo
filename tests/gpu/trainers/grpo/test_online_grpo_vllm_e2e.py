@@ -1,666 +1,169 @@
 #!/usr/bin/env python
-"""
-End-to-end test for Online GRPO with a live vLLM server (Docker).
+"""Online GRPO / SDPG (and, in one process, Environmental GRPO) against live vLLM servers.
 
-Tests the full training loop with DistributedGRPOTrainer against a real
-vLLM server with native NCCL weight transfer. Validates:
+Every row asserts on the SERVER's behaviour, not on the trainer's tensors: the gather-side weight-sync
+tests check what ``gather_and_send_weights`` produces, never that a real engine applied it, and a server
+that accepts an update and silently reverts it makes every sync a no-op — the served policy frozen for a
+whole RL run while the training loss moves normally. ``--mode`` picks the policy, and with it the server:
 
-1. vLLM server health and weight transfer endpoints
-2. vLLM-powered generation during training
-3. Packed NCCL weight synchronization back to vLLM after gradient steps
-4. Full training loop completes without errors
+    MoE (Qwen3-30B-A3B, ``VLLM_SERVER_URL``, two ranks unless noted, GPUs of >=140 GB):
+    full_ep2            full fine-tune at ``ep_size=2`` — the EP expert gather into the engine
+    lora_ep2            attention PEFT under EP — the sync's fold → strip
+    expert_lora_ep2     native grouped expert LoRA — the ``merge_lora=True`` fold in the expert gather,
+                        the only route an expert adapter has into the engine
+    lora_etp2           attention PEFT at ``ep_size=1, expert_tp_size=2``, plus the config-time refusal
+                        of native expert LoRA under expert TP
+    full_ep1            full fine-tune at ``ep_size=1``, the experts DTensors in the FSDP2 shard
+    full_ep1_unsharded  the same with ``fsdp_shard_ep1_experts=False``: whole, FSDP-ignored experts
+    full_ep2_tp2        EP with attention TP: DTensor attention beside plain expert tensors
+    full_ep2_dp2        four ranks, two EP groups in one NVLink domain (the deferred replica sweep)
+    full_ep2x2dom       four ranks, one EP group per simulated two-GPU NVLink domain
+    full_ep2_etp2       four ranks, EP x expert TP: each rank a slice of half the experts
 
-Prerequisites:
-    # Start vLLM server in Docker (--gpus all required for NCCL P2P):
-    docker run --gpus all --network=host --ipc=host -e VLLM_USE_V2_MODEL_RUNNER=0 \
-        vllm-server:0.26.0 Qwen/Qwen3-0.6B --port 8000 --dtype bfloat16 \
-        --max-model-len 512 --enforce-eager --reasoning-parser qwen3 \
-        --weight-transfer-config '{"backend": "nccl"}'
+    dense (Qwen3-0.6B, ``HALO_TEST_VLLM_DENSE_SERVER_URL``, two ranks):
+    full_tp2            full fine-tune at ``tp_size=2`` — the sync gathers DTensor shards
+    lora_fsdp           attention PEFT under plain FSDP2 DP — the merge path over DTensor adapters
+    lora_tp2_rejected   ``tp_size=2`` + attention LoRA must raise at construction, naming TP
+    full_fsdp_kl        full fine-tune under plain FSDP2 DP at ``beta=0.01`` — TRL scores the KL against the
+                        frozen reference the trainer hands it
+    full_fsdp_zero3     full fine-tune under FSDP2 FULL_SHARD (``fsdp_reshard_after_forward``)
+    full_tp2_dp2        four ranks, TP x DP
+    full_hsdp           four ranks, HSDP over two simulated NVLink domains of two
 
-One leg per invocation, and ``--mode`` is required: each leg binds its own trainer-side
-weight-transfer port — the online legs hold it until the client's atexit ``close_communicator``
-(``src/distributed/nccl/clients/vllm.py``), the environmental legs close it when ``train()`` ends and
-additionally stand up Ray actors. The manifest's args_matrix gives each leg
-its own invocation; there is no mode that runs several. Every leg first checks server connectivity.
+    one process, no FSDP wrap (Qwen3-0.6B, the first ``--servers`` URLs of ``HALO_TEST_VLLM_SERVER_URLS``):
+    full_world1, lora_world1   ``--trainer environmental`` runs the ReAct math environment through
+                        :mod:`tests.common.env_grpo_e2e`, pushing through a WeightSyncPool; each row
+                        first probes every server it drives. ``--prefetch-depth N`` prefetches N rounds
+                        deep (``enable_prefetch: true``, on any server count): the run must open with N
+                        cold rounds, pop a prefetched round on every later step, and score the IS
+                        log-ratio on every step
+
+Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
+resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
+
+``--resume`` (multi-rank modes only) drives the two-phase resume invariant: the checkpoint's weights must generate
+the first resumed rollout. Each server must serve the SAME checkpoint the row trains, with ``--moe-backend triton``
+for MoE, on a GPU outside ``CUDA_VISIBLE_DEVICES`` (a rank cannot NCCL broadcast to itself).
 
 Usage:
-    # Run on GPU 1 (different from vLLM):
-    CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode online
-
-    # Pool push: one server per URL, each serving the same model on its own GPU.
-    HALO_TEST_VLLM_SERVER_URLS=http://localhost:8000,http://localhost:8001 \
-        CUDA_VISIBLE_DEVICES=1 torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --mode environmental
+    VLLM_SERVER_URL=http://localhost:8000 NCCL_IB_DISABLE=1 NCCL_NET=Socket \
+    CUDA_VISIBLE_DEVICES=0,1 torchrun --nproc_per_node=2 \
+        tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py --trainer online --mode lora_ep2
 """
 
 import argparse
-import json
-import math
-import os
-import random
-import shutil
-import tempfile
-import urllib.request
-from urllib.parse import urlparse
+import sys
 
-import torch
-from accelerate.utils import is_peft_model
-from datasets import Dataset
-from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from trl import GRPOConfig
+import requests
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-from src.rewards.graders.matching import extract_last_boxed
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.online import DistributedGRPOTrainer
+from halo.env import env_str
+from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.models import QWEN3_0_6B
-from tests.common.on_policy_e2e import frozen_base_weights, probe_top_logprobs, served_policy_moved
+from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B
+from tests.common.on_policy_e2e import PolicyLayout
+from tests.common.online_grpo_e2e import MODES, modes_for, run_online_grpo_e2e
 from tests.common.ports import free_port
-from tests.common.utils import cleanup_memory, log, step_losses
-from tests.common.weight_sync import moved_parameters
+from tests.common.rank_log import log
+from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 
-MODEL_NAME = QWEN3_0_6B
-VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-# Rollout endpoints the environmental legs drive, comma-separated. The single process always pushes
-# through an InferenceClientManager; two or more URLs make it pause every server together and stream
-# each chunk to all of them concurrently. Every server must serve MODEL_NAME.
-VLLM_SERVER_URLS = [
-    url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_SERVER_URL).split(",") if url.strip()
+MOE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)
+DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_DENSE_MODEL", QWEN3_0_6B)
+MOE_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
+# Comma-separated, each serving DENSE_MODEL on a GPU of its own; every one-process row drives the first.
+SERVER_URLS = [
+    url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_DENSE_SERVER_URL).split(",") if url.strip()
 ]
-NUM_TRAIN_SAMPLES = 16
-MAX_STEPS = 3
-SEED = 42
-
-
-def rollout_server_configs() -> list[dict]:
-    """The leg's ``rollout_server_configs``: one entry per configured server, each on its own
-    :func:`free_port` (never re-issued within the process, so the ports cannot overlap)."""
-    return [{"url": url, "group_port": free_port()} for url in VLLM_SERVER_URLS]
-
-
-def accuracy_reward(completions, answer, **kwargs):
-    """Graded accuracy: exact answers score 1, near-misses decay with relative error.
-
-    The gradation is what keeps this e2e trainable: GRPO's advantage is the within-group reward
-    spread, and a binary exact-match reward ties every group the moment the task is uniformly easy
-    (all 1) or uniformly hard (all 0) for the served model — three steps of zero loss and the
-    zero-gradient assert below fires on a healthy stack. Two temperature-0.7 samples almost never
-    produce the same wrong product, so graded credit keeps the spread alive at any difficulty."""
-    rewards = []
-    for completion, gt in zip(completions, answer, strict=False):
-        content = (completion[-1]["content"] if completion else "") if isinstance(completion, list) else completion
-        extracted = (extract_last_boxed(content) or "").strip().replace(",", "")
-        gt_int = int(str(gt).strip())
-        try:
-            value = int(extracted)
-        except ValueError:
-            rewards.append(0.0)
-            continue
-        relative_error = abs(value - gt_int) / max(1, abs(gt_int))
-        rewards.append(1.0 if value == gt_int else max(0.0, 0.8 - relative_error))
-    return rewards
-
-
-def create_grpo_dataset(num_samples: int, seed: int = SEED) -> Dataset:
-    """Create synthetic math dataset for GRPO."""
-    rng = random.Random(seed)
-    data = []
-    for _ in range(num_samples):
-        # Three-digit products: easier arithmetic ties every group, leaving zero advantage/gradient.
-        a = rng.randint(101, 999)
-        b = rng.randint(101, 999)
-        answer = a * b
-
-        data.append(
-            {
-                "prompt": [
-                    {"role": "user", "content": f"What is {a} * {b}? Put your answer in \\boxed{{}}. /no_think"}
-                ],
-                "answer": str(answer),
-            }
-        )
-    return Dataset.from_list(data)
-
-
-def assert_syncs_left_the_base_alone(trainer, before: dict[str, torch.Tensor]) -> None:
-    moved = moved_parameters(before, frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model)))
-    assert before and not moved, f"the weight syncs moved {len(moved)}/{len(before)} frozen base weights: {moved[:3]}"
-    log(f"  {len(before)} frozen base weights bit-identical across the training syncs")
-
-
-def test_vllm_server_reachable():
-    """Verify vLLM server is running and healthy with weight transfer endpoints."""
-    url = f"{VLLM_SERVER_URL}/health"
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        assert resp.status == 200, f"Health check failed: {resp.status}"
-
-    url = f"{VLLM_SERVER_URL}/openapi.json"
-    req = urllib.request.Request(url)
-    with urllib.request.urlopen(req, timeout=10) as resp:
-        spec = json.loads(resp.read())
-        paths = list(spec.get("paths", {}).keys())
-        assert "/init_weight_transfer_engine" in paths, f"Missing /init_weight_transfer_engine. Paths: {paths}"
-        assert "/update_weights" in paths, "Missing /update_weights endpoint"
-        assert "/get_world_size" in paths, "Missing /get_world_size endpoint"
-
-    log(f"  vLLM server at {VLLM_SERVER_URL} is healthy with native weight transfer endpoints")
-
-
-def test_vllm_generation():
-    """Test that vLLM can generate text."""
-    url = f"{VLLM_SERVER_URL}/v1/chat/completions"
-    payload = json.dumps(
-        {
-            "model": MODEL_NAME,
-            "messages": [{"role": "user", "content": "What is 1+1?"}],
-            "max_tokens": 64,
-            "temperature": 0.7,
-        }
-    ).encode()
-
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        result = json.loads(resp.read())
-        assert "choices" in result, f"No choices in response: {result}"
-        message = result["choices"][0]["message"]
-        # The required VLLM_REASONING_PARSER routes plain replies into ``reasoning``, leaving
-        # ``content`` null — read it as ``src.inference.response.get_reasoning_text`` does instead of
-        # assuming the unparsed shape.
-        content = message.get("content") or message.get("reasoning") or message.get("reasoning_content") or ""
-        assert len(content) > 0, f"Empty generation: {message}"
-
-    log(f"  vLLM generation works: '{content[:80]}...'")
-
-
-def test_online_grpo_e2e():
-    """End-to-end online GRPO training with live vLLM server.
-
-    This is the main test: instantiates DistributedGRPOTrainer with
-    use_vllm=True pointing to the Docker vLLM server, runs a few
-    training steps, and verifies completion.
-    """
-    output_dir = tempfile.mkdtemp(prefix="test_grpo_vllm_e2e_")
-
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-        )
-
-        parsed = urlparse(VLLM_SERVER_URL)
-        vllm_host = parsed.hostname or "localhost"
-        vllm_port = parsed.port or 8000
-
-        config = GRPOConfig(
-            output_dir=output_dir,
-            max_steps=MAX_STEPS,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-6,
-            bf16=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            use_vllm=True,
-            vllm_mode="server",
-            vllm_server_host=vllm_host,
-            vllm_server_port=vllm_port,
-            vllm_server_timeout=60.0,
-            # Allocated, never a literal: a fixed port collides with foreign holders on a shared host.
-            vllm_group_port=free_port(),
-            num_generations=2,
-            max_completion_length=256,
-            beta=0.0,
-            generation_kwargs={"temperature": 0.7},
-            fsdp="",
-        )
-
-        dataset = create_grpo_dataset(NUM_TRAIN_SAMPLES, seed=SEED)
-        parallelism_config = ParallelismConfig()
-
-        log(f"  Creating DistributedGRPOTrainer with vLLM at {vllm_host}:{vllm_port}...")
-
-        trainer = DistributedGRPOTrainer(
-            model=model,
-            reward_funcs=[accuracy_reward],
-            args=config,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-        log(f"  Trainer created. Starting training for {MAX_STEPS} steps...")
-
-        trainer.train()
-
-        log("  Training completed successfully!")
-
-        losses = step_losses(trainer)
-        log(f"  Per-step losses: {[f'{v:.4f}' for v in losses]}")
-        assert losses, f"no per-step loss was logged in {MAX_STEPS} steps: {trainer.state.log_history}"
-        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
-        assert any(v != 0.0 for v in losses), "every step logged a zero loss — no gradient signal reached the policy"
-
-    finally:
-        cleanup_memory()
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-
-def test_online_sdpg_e2e():
-    """End-to-end online SDPG (DistributedSDPGTrainer) with live vLLM server.
-
-    SDPG = online GRPO + a privileged-teacher reverse-KL OPD term on positive-advantage rollouts
-    (the faithful arXiv:2606.04036 method, run via ``scripts/training/online_grpo/rlvr.py
-    --use_sdpg=true``). This validates the full path: vLLM rollouts → verifier advantages →
-    privileged-teacher forward → OPD term.
-    It asserts the OPD term actually fired (the ``opd_loss``/``opd_beta`` metrics are recorded), so a
-    regression that silently drops OPD fails here.
-    """
-    output_dir = tempfile.mkdtemp(prefix="test_sdpg_vllm_e2e_")
-
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True)
-
-        parsed = urlparse(VLLM_SERVER_URL)
-        vllm_host = parsed.hostname or "localhost"
-        vllm_port = parsed.port or 8000
-
-        config = GRPOConfig(
-            output_dir=output_dir,
-            max_steps=MAX_STEPS,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-6,
-            bf16=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            use_vllm=True,
-            vllm_mode="server",
-            vllm_server_host=vllm_host,
-            vllm_server_port=vllm_port,
-            vllm_server_timeout=60.0,
-            # Allocated per leg (see the fixed-port note above).
-            vllm_group_port=free_port(),
-            num_generations=2,
-            max_completion_length=256,
-            beta=0.0,
-            generation_kwargs={"temperature": 0.7},
-            fsdp="",
-        )
-
-        dataset = create_grpo_dataset(NUM_TRAIN_SAMPLES, seed=SEED)
-
-        log(f"  Creating DistributedSDPGTrainer with vLLM at {vllm_host}:{vllm_port}...")
-
-        trainer = DistributedSDPGTrainer(
-            model=model,
-            reward_funcs=[accuracy_reward],
-            args=config,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            parallelism_config=ParallelismConfig(),
-            sdpg_answer_field="answer",
-            sdpg_loss="reverse_kl",
-            sdpg_beta_base=1.0,
-        )
-
-        log(f"  Trainer created. Starting SDPG training for {MAX_STEPS} steps...")
-        trainer.train()
-        log("  SDPG training completed successfully!")
-
-        # opd_loss is legitimately 0.0 when no rollout earns a positive advantage (the >0 gate masks
-        # every token), so pin presence + finiteness, not >0.
-        opd_steps = [h for h in trainer.state.log_history if "opd_beta" in h]
-        assert opd_steps, "SDPG OPD term never fired (no opd_beta in log_history)"
-        opd_losses = [float(h["opd_loss"]) for h in opd_steps if "opd_loss" in h]
-        assert opd_losses, "opd_beta logged but opd_loss missing"
-        assert all(torch.isfinite(torch.tensor(v)) for v in opd_losses), f"Non-finite opd_loss: {opd_losses}"
-        log(
-            f"  OPD term fired across {len(opd_steps)} step(s); opd_loss={opd_losses}, "
-            f"opd_beta={[h['opd_beta'] for h in opd_steps]}"
-        )
-
-        losses = step_losses(trainer)
-        assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
-        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
-        log(f"  Final loss: {losses[-1]:.4f}")
-
-    finally:
-        cleanup_memory()
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-
-def test_environmental_grpo_e2e():
-    """End-to-end environmental GRPO with live vLLM server.
-
-    Tests DistributedAsyncEnvironmentalGRPOTrainer with a ReAct math environment,
-    using the Docker vLLM server for generation and weight sync.
-    """
-    output_dir = tempfile.mkdtemp(prefix="test_env_grpo_vllm_e2e_")
-
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-
-        model = AutoModelForCausalLM.from_pretrained(
-            MODEL_NAME,
-            dtype=torch.bfloat16,
-            trust_remote_code=True,
-        )
-
-        grpo_config = GRPOConfig(
-            output_dir=output_dir,
-            max_steps=2,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-6,
-            bf16=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            num_generations=2,
-            max_completion_length=256,
-            beta=0.01,
-            fsdp="",
-            reward_weights=[1.0],
-        )
-
-        async_config = AsyncTrainingConfig(
-            rollout_server_configs=rollout_server_configs(),
-            rollout_connection_timeout=60.0,
-            num_rollout_workers=2,
-            max_concurrent_rollouts=4,
-            rollout_temperature=0.7,
-            rollout_max_tokens=128,
-            enable_prefetch=False,
-            sync_weights_every_n_steps=1,
-            model_name=MODEL_NAME,
-        )
-
-        registry = create_native_math_tools()
-        for tool in create_native_python_tools().list_tools():
-            registry.register(tool)
-
-        environment_kwargs = {"tool_registry": registry, "max_turns": 3}
-
-        dataset = Dataset.from_list(
-            [
-                {"prompt": [{"role": "user", "content": f"What is {a} + {b}?"}], "answer": str(a + b)}
-                for a, b in [(2, 3), (5, 7), (10, 15), (3, 8), (6, 4), (9, 1), (12, 8), (7, 13)]
-            ]
-        )
-
-        log(f"  Creating DistributedAsyncEnvironmentalGRPOTrainer with vLLM at {VLLM_SERVER_URL}...")
-
-        trainer = DistributedAsyncEnvironmentalGRPOTrainer(
-            model=model,
-            args=grpo_config,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            async_config=async_config,
-            environment_cls=ReActEnvironment,
-            environment_kwargs=environment_kwargs,
-            parallelism_config=ParallelismConfig(),
-            # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
-            ref_model=load_frozen_auxiliary_model(
-                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="sdpa"
-            ),
-        )
-
-        log("  Trainer created. Starting training for 2 steps...")
-
-        trainer.train()
-
-        log("  Environmental GRPO training completed successfully!")
-
-        # Without these, "train() did not raise" is the whole assertion — a weight sync that never
-        # landed (stale served policy, zero advantage) still produces a clean run.
-        losses = step_losses(trainer)
-        log(f"  Per-step losses: {[f'{v:.4f}' for v in losses]}")
-        assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
-        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
-
-        # The sync has to reach EVERY configured server: a pool push whose chunks stop at the first
-        # leaves the others generating from a stale policy with no error at all.
-        # Perturbed deliberately: a GRPO group whose samples tie has zero advantage and leaves the
-        # weights bit-identical, and "the logprobs did not change" would then prove nothing.
-        before = {url: probe_top_logprobs(url, MODEL_NAME) for url in VLLM_SERVER_URLS}
-        with torch.no_grad():
-            for name, param in trainer.model.named_parameters():
-                if "layers.0" in name and name.endswith(".weight") and param.dtype.is_floating_point:
-                    param.mul_(1.05)
-        assert trainer._sync_weights_to_engine(force=True), "the forced weight sync pushed nothing"
-        assert trainer._multi_server_mode and trainer._weight_sync_client.num_servers == len(VLLM_SERVER_URLS), (
-            f"the leg drove {getattr(trainer._weight_sync_client, 'num_servers', None)} client(s) for "
-            f"{len(VLLM_SERVER_URLS)} configured server(s)"
-        )
-        for url in VLLM_SERVER_URLS:
-            after = probe_top_logprobs(url, MODEL_NAME)
-            assert served_policy_moved(after, before[url]), (
-                f"{url} still serves the pre-sync policy, or non-finite logprobs — the sync never reached it"
-            )
-        log(f"  forced sync moved the served policy on all {len(VLLM_SERVER_URLS)} server(s)")
-
-    finally:
-        cleanup_memory()
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-
-def test_online_grpo_lora_e2e():
-    """Online GRPO + LoRA against the live vLLM server — validates the PEFT-aware NCCL weight sync.
-
-    With a peft_config the trainer must merge the adapter into the base before each sync and forward
-    the merged weights under plain (non-PEFT) names. Forwarding ``base_model.*`` / ``lora_*`` names
-    instead makes the vendored client reject unknown params (and vLLM then generates from the
-    un-adapted base — broken on-policy RL). A clean multi-step run with finite loss,
-    on a confirmed PeftModel, exercises the fold→strip sync path end-to-end, and the frozen
-    base must come out of it bit-identical.
-    """
-    output_dir = tempfile.mkdtemp(prefix="test_grpo_lora_vllm_e2e_")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True)
-
-        parsed = urlparse(VLLM_SERVER_URL)
-        config = GRPOConfig(
-            output_dir=output_dir,
-            max_steps=MAX_STEPS,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-6,
-            bf16=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            use_vllm=True,
-            vllm_mode="server",
-            vllm_server_host=parsed.hostname or "localhost",
-            vllm_server_port=parsed.port or 8000,
-            vllm_server_timeout=60.0,
-            # Allocated per leg (see the fixed-port note above).
-            vllm_group_port=free_port(),
-            num_generations=2,
-            max_completion_length=256,
-            beta=0.0,
-            generation_kwargs={"temperature": 0.7},
-            fsdp="",
-        )
-        trainer = DistributedGRPOTrainer(
-            model=model,
-            reward_funcs=[accuracy_reward],
-            args=config,
-            train_dataset=create_grpo_dataset(NUM_TRAIN_SAMPLES, seed=SEED),
-            processing_class=tokenizer,
-            parallelism_config=ParallelismConfig(),
-            peft_config=LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM"),
-        )
-        assert is_peft_model(trainer.accelerator.unwrap_model(trainer.model)), (
-            "peft_config did not produce a PeftModel"
-        )
-        log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
-        base_before = frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model))
-        trainer.train()
-        log("  Online GRPO+LoRA training completed (PEFT weight sync OK)!")
-        assert_syncs_left_the_base_alone(trainer, base_before)
-
-        losses = step_losses(trainer)
-        assert losses, f"no per-step loss was logged: {trainer.state.log_history}"
-        assert all(math.isfinite(v) for v in losses), f"non-finite loss: {losses}"
-        log(f"  Final loss: {losses[-1]:.4f}")
-    finally:
-        cleanup_memory()
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-
-def test_environmental_grpo_lora_e2e():
-    """Environmental GRPO + LoRA against the live vLLM server — PEFT weight sync via the env path."""
-    output_dir = tempfile.mkdtemp(prefix="test_env_grpo_lora_vllm_e2e_")
-    try:
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-        if tokenizer.pad_token is None:
-            tokenizer.pad_token = tokenizer.eos_token
-        model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True)
-
-        grpo_config = GRPOConfig(
-            output_dir=output_dir,
-            max_steps=2,
-            per_device_train_batch_size=2,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-6,
-            bf16=True,
-            logging_steps=1,
-            save_strategy="no",
-            report_to="none",
-            logging_nan_inf_filter=False,
-            num_generations=2,
-            max_completion_length=256,
-            beta=0.01,
-            fsdp="",
-            reward_weights=[1.0],
-        )
-        async_config = AsyncTrainingConfig(
-            rollout_server_configs=rollout_server_configs(),
-            rollout_connection_timeout=60.0,
-            num_rollout_workers=2,
-            max_concurrent_rollouts=4,
-            rollout_temperature=0.7,
-            rollout_max_tokens=128,
-            enable_prefetch=False,
-            sync_weights_every_n_steps=1,
-            model_name=MODEL_NAME,
-        )
-        registry = create_native_math_tools()
-        for tool in create_native_python_tools().list_tools():
-            registry.register(tool)
-        dataset = Dataset.from_list(
-            [
-                {"prompt": [{"role": "user", "content": f"What is {a} + {b}?"}], "answer": str(a + b)}
-                for a, b in [(2, 3), (5, 7), (10, 15), (3, 8), (6, 4), (9, 1), (12, 8), (7, 13)]
-            ]
-        )
-        trainer = DistributedAsyncEnvironmentalGRPOTrainer(
-            model=model,
-            args=grpo_config,
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            async_config=async_config,
-            environment_cls=ReActEnvironment,
-            environment_kwargs={"tool_registry": registry, "max_turns": 3},
-            parallelism_config=ParallelismConfig(),
-            peft_config=LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM"),
-        )
-        assert is_peft_model(trainer.accelerator.unwrap_model(trainer.model)), (
-            "peft_config did not produce a PeftModel"
-        )
-        log("  Trainer created (PeftModel). Training + syncing merged LoRA weights to vLLM...")
-        base_before = frozen_base_weights(trainer.accelerator.unwrap_model(trainer.model))
-        trainer.train()
-        log("  Environmental GRPO+LoRA training completed (PEFT weight sync OK)!")
-        assert_syncs_left_the_base_alone(trainer, base_before)
-    finally:
-        cleanup_memory()
-        shutil.rmtree(output_dir, ignore_errors=True)
-
-
-def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--mode",
-        required=True,
-        choices=("online", "sdpg", "online_lora", "environmental", "environmental_lora"),
-        help="which leg to run; exactly one per invocation (each leg binds its own weight-transfer port)",
-    )
-    return parser.parse_args()
-
-
-def run(ctx) -> dict:
-    """Drive the leg named by ``--mode`` against the live vLLM server."""
-    log(f"\n{'=' * 70}")
-    log("  Online GRPO End-to-End Test (Live vLLM Server)")
-    log(f"  Model: {MODEL_NAME}")
-    log(f"  vLLM Server: {VLLM_SERVER_URL}")
-    log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
-    log(f"  CUDA_VISIBLE_DEVICES: {os.environ.get('CUDA_VISIBLE_DEVICES', 'all')}")
-    log(f"{'=' * 70}")
-
+WEIGHT_TRANSFER_ROUTES = ("/init_weight_transfer_engine", "/update_weights", "/get_world_size")
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--trainer", choices=("online", "sdpg", "environmental"), required=True)
+parser.add_argument("--mode", choices=sorted(MODES), required=True)
+parser.add_argument("--resume", action="store_true", help="drive the two-phase resume invariant")
+parser.add_argument("--servers", type=int, default=1, help="environmental: the WeightSyncPool's server count")
+parser.add_argument("--prefetch-depth", type=int, default=None, help="environmental: prefetch at this depth")
+ARGS = parser.parse_args()
+POLICY = MODES[ARGS.mode].family
+if POLICY != "world1" and (ARGS.trainer == "environmental" or ARGS.servers != 1):
+    parser.error("--trainer environmental and --servers run in one process: a *_world1 mode")
+if POLICY == "world1" and ARGS.resume:
+    parser.error("--resume drives a two-rank mode; the one-process body has no resume row")
+if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
+    parser.error("--prefetch-depth drives the environmental trainer's prefetch")
+
+
+def _row_index() -> int:
+    """A pinned group port is offset by this, so back-to-back rows of one pass never bind the same port. A resume row
+    rebinds its own for phase 2, which phase 1's close_communicator frees on both ends."""
+    rows = [(t, m, r) for t in ("online", "sdpg") for m in modes_for(POLICY) for r in (False, True)]
+    return rows.index((ARGS.trainer, ARGS.mode, ARGS.resume))
+
+
+def probe_server(url: str) -> None:
+    """Healthy, exposes the native weight-transfer routes, and answers a chat request."""
+    requests.get(f"{url}/health", timeout=10).raise_for_status()
+    routes = requests.get(f"{url}/openapi.json", timeout=10).json()["paths"]
+    missing = [route for route in WEIGHT_TRANSFER_ROUTES if route not in routes]
+    assert not missing, f"{url} lacks the weight-transfer routes {missing}"
+    reply = requests.post(
+        f"{url}/v1/chat/completions",
+        json={"model": DENSE_MODEL, "messages": [{"role": "user", "content": "What is 1+1?"}], "max_tokens": 64},
+        timeout=30,
+    ).json()["choices"][0]["message"]
+    # A reasoning parser routes a plain reply into ``reasoning``, leaving ``content`` empty.
+    assert reply.get("content") or reply.get("reasoning") or reply.get("reasoning_content"), f"{url}: {reply}"
+
+
+def _run_one_process(ctx) -> dict:
+    servers = SERVER_URLS[: ARGS.servers]
     checks: dict[str, bool] = {}
-    test_mode = _parse_args().mode
+    for url in servers:
+        record_check(checks, f"server_ready:{url}", lambda url=url: probe_server(url))
+    if ARGS.trainer == "environmental":
+        result = run_env_grpo_e2e(
+            ctx,
+            backend="vllm",
+            server_url=servers[0],
+            group_port=free_port(),
+            layout=PolicyLayout(),
+            peft=MODES[ARGS.mode].adapter,
+            model_name=DENSE_MODEL,
+            environment_type="react_math",
+            pool_urls=tuple(servers),
+            prefetch_depth=ARGS.prefetch_depth,
+        )
+    else:
+        result = run_online_grpo_e2e(
+            ctx,
+            trainer_kind=ARGS.trainer,
+            mode=ARGS.mode,
+            resume=False,
+            server_url=servers[0],
+            group_port=free_port(),
+            model_name=DENSE_MODEL,
+        )
+    return {**result, "checks": checks | result["checks"]}
 
-    log("\n--- vLLM Server Connectivity ---")
-    record_check(checks, "vLLM server reachable", test_vllm_server_reachable)
-    record_check(checks, "vLLM generation works", test_vllm_generation)
 
-    if test_mode == "online":
-        log("\n--- Online GRPO E2E (DistributedGRPOTrainer + vLLM) ---")
-        record_check(checks, "Online GRPO training (3 steps)", test_online_grpo_e2e)
+@gpu_test_main(exact_world_size=MODES[ARGS.mode].world_size, prefix=f"online_grpo_vllm_{POLICY}_e2e")
+def run(ctx) -> dict:
+    if POLICY == "world1":
+        return _run_one_process(ctx)
+    server_url, model_name = (MOE_SERVER_URL, MOE_MODEL) if POLICY == "moe" else (VLLM_DENSE_SERVER_URL, DENSE_MODEL)
+    return run_online_grpo_e2e(
+        ctx,
+        trainer_kind=ARGS.trainer,
+        mode=ARGS.mode,
+        resume=ARGS.resume,
+        server_url=server_url,
+        group_port=weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT", offset=_row_index()),
+        model_name=model_name,
+    )
 
-    if test_mode == "sdpg":
-        log("\n--- Online SDPG E2E (DistributedSDPGTrainer + vLLM) ---")
-        record_check(checks, "Online SDPG training (3 steps)", test_online_sdpg_e2e)
-
-    if test_mode == "online_lora":
-        log("\n--- Online GRPO + LoRA E2E (DistributedGRPOTrainer + PEFT + vLLM) ---")
-        record_check(checks, "Online GRPO+LoRA training (3 steps)", test_online_grpo_lora_e2e)
-
-    if test_mode == "environmental_lora":
-        log("\n--- Environmental GRPO + LoRA E2E (DistributedAsyncEnvironmentalGRPOTrainer + PEFT + vLLM) ---")
-        record_check(checks, "Environmental GRPO+LoRA training (2 steps)", test_environmental_grpo_lora_e2e)
-
-    if test_mode == "environmental":
-        log("\n--- Environmental GRPO E2E (DistributedAsyncEnvironmentalGRPOTrainer + vLLM) ---")
-        record_check(checks, "Environmental GRPO training (2 steps)", test_environmental_grpo_e2e)
-
-    return {"checks": checks}
-
-
-main = gpu_test_main(exact_world_size=1, prefix="online_grpo_vllm_e2e", partial_state=False)(run)
 
 if __name__ == "__main__":
-    main()
+    if len(SERVER_URLS) < ARGS.servers:
+        log(
+            f"SKIP: --servers {ARGS.servers} needs {ARGS.servers} URLs in HALO_TEST_VLLM_SERVER_URLS, got {SERVER_URLS}"
+        )
+        sys.exit(0)
+    run()

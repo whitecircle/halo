@@ -1,23 +1,17 @@
 #!/usr/bin/env python
-"""CPU tests for the per-call tool reward and its episode cap, owned by ``BaseEnvironment``.
-
-``tool_success_reward`` / ``tool_error_penalty`` price every executed call through one accounting
-(``_credit_tool_call``) under both protocols, and ``tool_reward_cap`` bounds what an episode earns
-from successful calls in total — default one paid call per turn of the budget. Without the cap five
-paid calls a turn over ten turns pay 2.5 against a 1.0 solve, so call spam out-earns the objective.
-
-Run: python tests/cpu/environments/test_tool_reward_cap.py
-"""
+"""The per-call tool reward and its episode cap, owned by ``EnvironmentBase``: ``_credit_tool_call`` prices every
+call under both protocols, and ``tool_reward_cap`` defaults to one paid call per turn. Without it five paid calls
+a turn over ten turns pay 2.5 against a 1.0 solve."""
 
 import pytest
 
-from src.environments.base import TOOL_REWARD_PAID_KEY
-from src.environments.envs.protocols.mcp import NativeMCPClientEnvironment
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.registry import resolve_environment
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.protocols.mcp import NativeMCPClientEnvironment
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.registry import build_environment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tool_accounting import TOOL_REWARD_PAID_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 
 def _echo_registry():
@@ -38,7 +32,7 @@ def _native(**kwargs):
 
 
 def _react(**kwargs):
-    return ReActEnvironment(tool_registry=_echo_registry(), thought_reward=0.0, require_thought=False, **kwargs)
+    return ReActEnvironment(tool_registry=_echo_registry(), thought_reward=0.0, no_thought_penalty=0.0, **kwargs)
 
 
 def _native_call(name: str, cid: str):
@@ -122,7 +116,7 @@ def test_code_contests_turns_per_call_pay_off():
 
 @pytest.mark.parametrize("env_type", ["react_math", "native_math"])
 def test_yaml_spellings_reach_the_base_through_the_registry(env_type):
-    env = resolve_environment(
+    env = build_environment(
         env_type, {"tool_success_reward": 0.2, "tool_error_penalty": 0.3, "tool_reward_cap": 0.5, "max_turns": 3}
     )
     assert (env.tool_success_reward, env.tool_error_penalty, env.tool_reward_cap) == (0.2, 0.3, 0.5)

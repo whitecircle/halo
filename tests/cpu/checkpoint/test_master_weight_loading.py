@@ -1,10 +1,6 @@
 #!/usr/bin/env python
-"""Real pre-wrap dense/CP/EP1 loads and 1-D TP replay retain off-BF16-grid checkpoint masters.
-
-The actual loader, key planner and streamed reads run. Only GPU placement and native communication
-buffers are substituted on CPU. Gloo ranks exercise native HF TP construction, packed placements,
-tied owner replacement, and a one-rank read failure after the real node loading throttle.
-"""
+"""Pre-wrap dense/CP/EP1 loads and 1-D TP replay retain off-bf16-grid checkpoint masters.
+Only GPU placement and native buffers are substituted on CPU."""
 
 import datetime
 from pathlib import Path
@@ -21,19 +17,21 @@ from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
 from transformers import AutoConfig, BitsAndBytesConfig, Qwen3Config, Qwen3ForCausalLM
-from transformers.core_model_loading import Chunk, WeightConverter, WeightRenaming
+from transformers.core_model_loading import WeightRenaming
 from transformers.quantizers.quantizer_bnb_4bit import Bnb4BitHfQuantizer
 
-import src.distributed.context_parallel.loading as cp_loading
-import src.distributed.expert_parallel.loading as eager_loading
-import src.distributed.expert_parallel.master_weights as master_loading
-import src.distributed.filesystem as filesystem
-import src.distributed.loading.model_loading as loading
-from src.distributed.context_parallel.wrapper import patch_model_for_cp
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.fp32_masters import fp32_master_param_keys
-from src.distributed.expert_parallel.hub_conversion import resolve_loaded_conversion_steps
-from src.distributed.expert_parallel.lazy_loader import ExpertFuser, build_family_key_mapping
+import halo.model_loading.parallel.cp as cp_loading
+import halo.model_loading.parallel.fp32_masters as master_loading
+import halo.model_loading.parallel.loader as loading
+import halo.model_loading.parallel.tp as tp_loading
+import halo.model_loading.parallel.whole_model as whole_model
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
+from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
+from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.runtime import consensus, load_coordination
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import module_with_weight_keys
 
@@ -74,16 +72,16 @@ def _cpu_pretrained(verified):
 
 def _cpu_cp_wrap(model, config):
     model.config._attn_implementation = "flash_attention_2"
-    return patch_model_for_cp(model, config)
+    return UlyssesModel(model, config)
 
 
 def _dense_pc(*, keep=True):
     return SimpleNamespace(
         max_concurrent_loading=1,
         fp32_non_ep_params=keep,
-        needs_ep_wrappers=False,
+        needs_ep_layers=False,
         cp_size=2,
-        create_cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
+        cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )
 
 
@@ -93,22 +91,27 @@ def _dense_pc(*, keep=True):
 def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, monkeypatch, mode, strict, keep):
     expected = _dense_checkpoint(tmp_path / "source")
     source = str(tmp_path / "source")
-    monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
-    monkeypatch.setattr(eager_loading, "move_model_to_local_device", lambda model: model)
-    monkeypatch.setattr(cp_loading, "patch_model_for_cp", _cpu_cp_wrap)
+    monkeypatch.setattr(whole_model, "from_pretrained_verified", _cpu_pretrained(whole_model.from_pretrained_verified))
+    monkeypatch.setattr(whole_model, "move_model_to_local_device", lambda model: model)
+    monkeypatch.setattr(loading, "get_local_rank", lambda: 0)
+    monkeypatch.setattr(cp_loading, "UlyssesModel", _cpu_cp_wrap)
     kwargs = {
         "config": AutoConfig.from_pretrained(source),
         "dtype": torch.bfloat16,
         "attn_implementation": "eager",
         "trust_remote_code": False,
-        "preserve_checkpoint_precision": strict,
     }
-    if mode == "cp":
-        model = loading._load_cp_model(source, _dense_pc(keep=keep), Qwen3ForCausalLM, kwargs)
-    else:
-        model = loading._load_undistributed_model(
-            source, _dense_pc(keep=keep), Qwen3ForCausalLM, kwargs, 0, ep_wrappers=False
-        )
+    rung = cp_loading.load_cp_model if mode == "cp" else loading._load_undistributed_model
+    extra = {} if mode == "cp" else {"init_from_scratch": False}
+    model = rung(
+        ModelSource(source, None, source),
+        _dense_pc(keep=keep),
+        Qwen3ForCausalLM,
+        kwargs,
+        preserve_checkpoint_precision=strict,
+        wraps_experts=False,
+        **extra,
+    )
     actual = model.state_dict(keep_vars=True)
     for key, value in expected.items():
         oracle = value if keep else value.bfloat16()
@@ -121,13 +124,13 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
 def _native_tp_rank(rank, source, strict, keep):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
-            loading,
-            "create_dp_tp_mesh",
+            tp_loading,
+            "build_dp_tp_mesh",
             lambda tp_size, dp_size: init_device_mesh("cpu", (tp_size,), mesh_dim_names=("tp",)),
         )
         pc = SimpleNamespace(tp_size=2, data_parallel_size=1, fp32_non_ep_params=keep, max_concurrent_loading=None)
-        model = loading._load_tp_model(
-            source,
+        model = tp_loading.load_tp_model(
+            ModelSource(source, None, source),
             pc,
             Qwen3ForCausalLM,
             {
@@ -135,8 +138,8 @@ def _native_tp_rank(rank, source, strict, keep):
                 "dtype": torch.bfloat16,
                 "attn_implementation": "eager",
                 "trust_remote_code": False,
-                "preserve_checkpoint_precision": strict,
             },
+            preserve_checkpoint_precision=strict,
         )
     oracle = Qwen3ForCausalLM.from_pretrained(source, dtype=torch.float32 if keep else torch.bfloat16)
     expected = oracle.state_dict(keep_vars=True)
@@ -162,7 +165,7 @@ def test_native_tp_load_preserves_checkpoint_masters_and_local_storage(tmp_path,
 
 def _placement_rank(rank, path, stored_fp32):
     mesh = init_device_mesh("cpu", (2,), mesh_dim_names=("tp",))
-    # Packed row order must differ from an ordinary contiguous Shard(0) oracle.
+    # Packed row order must differ from a contiguous Shard(0) oracle.
     expected = torch.arange(64).reshape(8, 8).float() / 16 + (1e-5 if stored_fp32 else 0)
     for placement in (Shard(0), Shard(1), Replicate(), _StridedShard(0, split_factor=2)):
         model = nn.Module()
@@ -185,8 +188,7 @@ def _placement_rank(rank, path, stored_fp32):
             local = expected
         assert torch.equal(model.weight.to_local().detach(), local)
         if isinstance(placement, _StridedShard):
-            # This synthetic 1-D packed placement has no TP/DP shard_order for full_tensor().
-            # Reconstruct independently through Gloo: ranks own [chunk0, chunk2]/[chunk1, chunk3].
+            # This 1-D packed placement has no TP/DP shard_order for full_tensor(), so it is rebuilt through Gloo.
             gathered = [torch.empty_like(local) for _ in range(2)]
             dist.all_gather(gathered, model.weight.to_local().detach())
             left, right = (shard.chunk(2, dim=0) for shard in gathered)
@@ -207,8 +209,12 @@ def test_tp_replay_preserves_each_placement_and_all_tied_owners(tmp_path, stored
 
 def _read_failure_rank(rank, source, outcomes):
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(loading, "from_pretrained_verified", _cpu_pretrained(loading.from_pretrained_verified))
-        monkeypatch.setattr(filesystem, "get_store_timeout", lambda: datetime.timedelta(seconds=10))
+        monkeypatch.setattr(
+            whole_model, "from_pretrained_verified", _cpu_pretrained(whole_model.from_pretrained_verified)
+        )
+        monkeypatch.setattr(loading, "get_local_rank", lambda: rank)
+        monkeypatch.setattr(load_coordination, "store_timeout", lambda: datetime.timedelta(seconds=10))
+        monkeypatch.setattr(consensus, "store_timeout", lambda: datetime.timedelta(seconds=10))
         original_get = master_loading.StreamingCheckpointReader.get
 
         def get(reader, key):
@@ -219,7 +225,7 @@ def _read_failure_rank(rank, source, outcomes):
         monkeypatch.setattr(master_loading.StreamingCheckpointReader, "get", get)
         try:
             loading._load_undistributed_model(
-                source,
+                ModelSource(source, None, source),
                 _dense_pc(),
                 Qwen3ForCausalLM,
                 {
@@ -227,10 +233,10 @@ def _read_failure_rank(rank, source, outcomes):
                     "dtype": torch.bfloat16,
                     "attn_implementation": "eager",
                     "trust_remote_code": False,
-                    "preserve_checkpoint_precision": True,
                 },
-                rank,
-                ep_wrappers=False,
+                preserve_checkpoint_precision=True,
+                wraps_experts=False,
+                init_from_scratch=False,
             )
         except RuntimeError as error:
             outcome = str(error)
@@ -301,7 +307,7 @@ def test_fused_master_replay_preserves_live_device_instead_of_staging_device(tmp
     state = {f"experts.{rank}.down_proj.weight": expected[rank] for rank in range(2)}
     save_file(state, str(tmp_path / "model.safetensors"))
     tasks = [
-        (
+        FusionTask(
             "experts.down_proj",
             "down",
             {
@@ -311,7 +317,7 @@ def test_fused_master_replay_preserves_live_device_instead_of_staging_device(tmp
         )
     ]
     with master_loading.StreamingCheckpointReader(str(tmp_path), state) as reader:
-        # A distinct requested device catches relocation even on a CPU-only test runner.
+        # A distinct requested device catches relocation on a CPU-only runner.
         restored = ExpertFuser(0, 2).execute(
             tasks, model, str(tmp_path), torch.float32, "meta", reader=reader, preserve_parameters=True
         )
@@ -330,7 +336,7 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
     model.base_model_prefix = "model"
     model.config = SimpleNamespace(model_type="qwen3_moe")
     rename = WeightRenaming(source_patterns=r"^wq_du\.", target_patterns="q_proj.")
-    rename.scope_prefix = "vision_model"
+    rename.scope_prefix, rename.base_model_prefix = "vision_model", "model"
     model._weight_conversions = [rename]
     stored = {disk_vision_key: torch.tensor([1.00001]), text_key: torch.tensor([2.00001])}
     assert all(not torch.equal(value, value.bfloat16().float()) for value in stored.values())
@@ -338,9 +344,14 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
     state = model.state_dict(keep_vars=True)
     for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
         state[key].data.copy_(stored[disk_key])
-    plain_mapping, _ = build_family_key_mapping(model, list(stored))
+    plain_mapping, _ = family_key_mapping(model, list(stored))
     assert plain_mapping[disk_vision_key] not in state, "the declared lazy family cannot do this nested rename"
-    master_loading.restore_fp32_master_parameters(model, str(tmp_path), EPConfig(ep_size=1), keep_non_ep=True)
+    master_loading.restore_fp32_master_parameters(
+        model,
+        str(tmp_path),
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True),
+        keep_non_ep=True,
+    )
     restored = model.state_dict(keep_vars=True)
     for key, disk_key in ((vision_key, disk_vision_key), (text_key, text_key)):
         assert restored[key] is state[key]
@@ -349,12 +360,8 @@ def test_eager_fp32_reread_uses_the_loaded_nested_rename_and_its_scope(tmp_path)
 
 @pytest.mark.parametrize("deserialize_first", (False, True))
 def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_path, deserialize_first):
-    """The real HF broad deserializer also matches plain weights, which it leaves unchanged.
-
-    Packed floating-storage Params4bit and their quantization statistics come from a real bnb
-    serialization. The streamed master replay must leave them intact without dropping a separate
-    recorded vendor rename or rounding the ordinary master's checkpoint value.
-    """
+    """HF's broad deserializer also matches plain weights; the replay leaves packed Params4bit and their statistics
+    intact."""
     model = module_with_weight_keys(["norm.weight"]).to(torch.bfloat16)
     model.config = SimpleNamespace(model_type="qwen3")
     model.quantized = Linear4bit(64, 64, bias=False, quant_storage=torch.bfloat16, quant_type="nf4")
@@ -380,18 +387,13 @@ def test_prequantized_float_storage_keeps_codes_and_restores_plain_masters(tmp_p
     model._weight_conversions = [deserialize, rename] if deserialize_first else [rename, deserialize]
     model.norm.weight.data.copy_(original)
     assert not torch.equal(model.norm.weight.float(), original)
-    # The actual op's identity branch is the premise for skipping only this storage conversion.
+    # The op's identity branch is the premise for skipping this conversion.
     assert deserialize.operations[0].convert({"weight": original})["weight"] is original
 
     master_loading.restore_fp32_master_parameters(model, str(tmp_path), keep_non_ep=True, strict=True)
 
     assert model.quantized.weight is packed and torch.equal(packed.data.view(torch.uint8), codes)
     assert model.norm.weight.dtype == torch.float32 and torch.equal(model.norm.weight, original)
-    model._weight_conversions.append(
-        WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
-    )
-    with pytest.raises(ValueError, match="multi-source.*qwen3"):
-        resolve_loaded_conversion_steps(model)
 
 
 if __name__ == "__main__":

@@ -1,11 +1,5 @@
-"""CPU tests for reasoning-effort resolution (incl. "random") and the per-level CoT budget.
-
-Covers the general facility on BaseEnvironment (validation, the resolve_reasoning_effort helper,
-the thinking_budget_for_effort hook), the eval's stable per-task draw, which no process's hash seed
-moves, and the CodeContestsEnvironment override that binds each level to a token budget.
-
-    python tests/cpu/environments/test_reasoning_effort.py
-"""
+"""Reasoning-effort resolution (incl. random) and the per-level CoT budget: the base facility, the eval's stable
+per-task draw, and the CodeContestsEnvironment override."""
 
 import json
 import os
@@ -14,26 +8,23 @@ import sys
 
 import pytest
 
-from src.environments.base import (
-    VALID_REASONING_EFFORTS,
-    BaseEnvironment,
-    EpisodeGrade,
-    resolve_reasoning_effort,
-    stable_reasoning_effort,
-)
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from tests.common.utils import REPO_ROOT
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode_scoring import EpisodeGrade
+from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from tests.common.repo import REPO_ROOT
 
 _DRAWN_PROBLEMS = [f"problem {i}" for i in range(24)]
 # Prints the stable draw of each of ``_DRAWN_PROBLEMS`` as JSON, for a fresh interpreter under a chosen hash seed.
 _STABLE_DRAW_PROBE = (
-    "import json; from src.environments.base import stable_reasoning_effort; "
+    "import json; from halo.environments.reasoning_effort import stable_reasoning_effort; "
     f"print(json.dumps([stable_reasoning_effort(p) for p in {_DRAWN_PROBLEMS!r}]))"
 )
 
 
-class _MinimalEnv(BaseEnvironment):
-    """Concrete BaseEnvironment for exercising the base reasoning-effort plumbing."""
+class _MinimalEnv(EnvironmentBase):
+    """Concrete EnvironmentBase for exercising the base reasoning-effort plumbing."""
 
     def _reset_single(self, prompt, context):  # pragma: no cover
         raise NotImplementedError

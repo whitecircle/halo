@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""GRPO step metrics read the tokens and the ranks they describe.
-
-* ``kl_clamp_frac`` counts the k3 cap over the loss mask the KL term is averaged on (TRL's ``kl``:
-  completion mask times tool mask, after the drops), on both on-policy trainers: a cap biting on
-  padding or on a tool-output token is no KL the loss trains, so it is in neither side of the ratio.
-* ``sampling/forced_close_frac`` is over the tokens that carry sampling log-probs: a fallback row
-  without them can never hold a forced close, and its tool tokens only dilute the share.
-* ``routing/replay_flip_rate`` and the ``async/prefetch_*`` counters are world totals, a rank with no
-  count of its own sending zeros, read on a real 2-rank gloo group.
-
-    python tests/cpu/grpo/test_grpo_metric_reads.py
-"""
+"""GRPO step metrics read the tokens and the ranks they describe: ``kl_clamp_frac`` the KL term's loss mask,
+``sampling/forced_close_frac`` the tokens with sampling log-probs. Routing and prefetch counters are world totals."""
 
 import datetime
 import json
@@ -20,18 +10,15 @@ from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
-from src.trainers.grpo.rollout.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
+from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
+from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.routing import BareEPLayer
-
-PartialState()  # the world-metrics flush gathers through accelerate, which reads the process state
 
 # Row 0 is three completion tokens, the middle one tool output; row 1 is one token right-padded to three.
 _LOSS_MASK = torch.tensor([[1, 0, 1], [1, 0, 0]])
@@ -58,7 +45,7 @@ def test_online_kl_clamp_frac_reads_the_post_drop_loss_mask():
         "old_per_token_logps": torch.zeros(2, 3),
         "ref_per_token_logps": _OVER_THE_CAP.clone(),
     }
-    DistributedGRPOTrainer._clamp_kl_reference(host, result)
+    DistributedOnlineGRPOTrainer._clamp_kl_reference(host, result)
     assert host._metrics["train"][KL_CLAMP_FRAC_KEY] == [pytest.approx(_TRAINED_SHARE)]
     assert result["ref_per_token_logps"].max().item() == pytest.approx(KL_LOGRATIO_CLAMP), "the cap still applies"
 
@@ -67,8 +54,7 @@ _FORCED_CLOSE = 77
 
 
 def _eval_build(rows: list[TurnRow], *, beta: float, is_correction: bool, policy: torch.Tensor):
-    """The real eval-mode batch build over ``rows``, the policy's log-probs ``policy`` and a reference over
-    the cap on the tokens ``_OVER_THE_CAP`` marks; returns the host whose metrics it logged."""
+    """The real eval-mode batch build; returns the host whose metrics it logged."""
     host = batch_host(
         rows,
         policy,
@@ -90,8 +76,7 @@ def test_env_kl_clamp_frac_reads_the_loss_tokens():
 
 
 def test_env_forced_close_frac_reads_the_tokens_with_sampling_logprobs():
-    """Row 0 is a sampled turn of four tokens whose last is a forced close (sampling log-prob 0); row 1 a
-    fallback re-render of four tool and assistant tokens with no sampling log-probs."""
+    """Row 1 is a fallback re-render with no sampling log-probs, which can never hold a forced close."""
     rows = [
         row([6, 7, 8, _FORCED_CLOSE], sampling=[-1.0, -1.0, -1.0, 0.0]),
         row([9, 10, 11, 12], loss_mask=[1, 0, 0, 1]),
@@ -116,7 +101,7 @@ def _counters_worker(rank: int, tmp_dir: str) -> None:
         layer._replay_flip_counts = torch.tensor([3.0, 12.0])
     injector = RoutingReplayInjector([layer], engine_layers=1, layer_indices=[0])
     with open(os.path.join(tmp_dir, f"{rank}.json"), "w") as fh:
-        json.dump({"prefetch": host.prefetch_metrics(), "flip": injector.flip_rate()}, fh)
+        json.dump({"prefetch": host.prefetch_metrics(), "flip": injector.drain_flip_rate()}, fh)
 
 
 def test_the_counter_metrics_are_world_totals(tmp_path):
@@ -136,7 +121,7 @@ def test_the_counter_metrics_are_world_totals(tmp_path):
 def test_a_single_process_reads_its_own_counters():
     assert _PrefetchHost(hits=0, misses=0, skips=0).prefetch_metrics() == {}
     injector = RoutingReplayInjector([BareEPLayer(top_k=2, num_experts=4)], engine_layers=1, layer_indices=[0])
-    assert injector.flip_rate() is None, "nothing forced reads as no rate, not 0"
+    assert injector.drain_flip_rate() is None, "nothing forced reads as no rate, not 0"
 
 
 if __name__ == "__main__":

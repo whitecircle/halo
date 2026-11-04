@@ -7,8 +7,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 
 
 def _params(n: int) -> list[nn.Parameter]:
@@ -23,14 +23,13 @@ def _named(params: list[nn.Parameter]) -> list[tuple[str, nn.Parameter]]:
 
 
 def _target(trainer, params):
-    return GradientSyncMixin._grad_scale_deferring_optimizer(trainer, params)
+    return GradientClippingMixin._grad_scale_deferring_optimizer(trainer, params)
 
 
 def test_adamw_bf16_owning_every_param_takes_the_scale():
     params = _params(3)
     optimizer = AdamWBF16(_named(params))
     assert _target(SimpleNamespace(optimizer=optimizer), params) is optimizer
-    # accelerate wraps the optimizer; the inner one is the target
     assert _target(SimpleNamespace(optimizer=SimpleNamespace(optimizer=optimizer)), params) is optimizer
 
 
@@ -59,8 +58,7 @@ def test_an_optimizer_without_deferral_keeps_in_place_scaling():
 
 
 def test_a_group_added_after_the_first_clip_is_weighed_too():
-    """A parameter group added mid-training must block deferral when the clip did not select it, or the
-    fused step would scale a gradient the clip never measured."""
+    """The fused step would scale a gradient the clip never measured."""
     params = _params(2)
     optimizer = AdamWBF16(_named(params[:1]))
     trainer = SimpleNamespace(optimizer=optimizer)

@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""The environmental trainer's KL reference forward reads the one reference rule.
-
-A run holding a frozen ``ref_model`` forwards it with the policy's adapters untouched; a PEFT run with
-none forwards the policy itself with its adapters disabled, and only for that forward (the offline
-trainer's side of the same rule is pinned in ``test_offline_grpo_kl_reference.py``).
-
-    python tests/cpu/grpo/test_reference_policy.py
-"""
+"""The environmental trainer's KL reference forward: a frozen ``ref_model`` runs with the policy's adapters untouched;
+a PEFT run with none forwards the policy itself with its adapters disabled, for that forward only."""
 
 import contextlib
 import types
@@ -14,7 +8,8 @@ import types
 import pytest
 import torch
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 
 
 class _PeftPolicy:
@@ -37,7 +32,7 @@ def _ref_forward(ref_model):
 
     def forward(model, ids, mask, keep, compute_entropy):
         seen.update(model=model, adapters_off=policy.adapters_off)
-        return torch.zeros(1, keep), None
+        return torch.zeros(1, keep), None, None
 
     host = types.SimpleNamespace(
         beta=0.04,
@@ -46,6 +41,8 @@ def _ref_forward(ref_model):
         accelerator=types.SimpleNamespace(unwrap_model=lambda model: model),
         _get_per_token_logps_and_entropies=forward,
     )
+    host._reference_policy = types.MethodType(LogprobScoringMixin._reference_policy, host)
+    host._scored_rows = types.MethodType(DistributedAsyncEnvironmentalGRPOTrainer._scored_rows, host)
     DistributedAsyncEnvironmentalGRPOTrainer._compute_ref_logps(host, torch.zeros(1, 3), torch.ones(1, 3), 2)
     return seen, policy
 

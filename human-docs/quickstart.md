@@ -70,13 +70,18 @@ metrics are opt-in. See [Monitoring](monitoring.md).
 ## 4. Use the result
 
 Checkpoints land in `output_dir` as standard HuggingFace models. Load them with
-`from_pretrained` or upload them to the Hub as they are. Most families also serve
-on vLLM directly; a few need a conversion first or have no serving path.
+`from_pretrained`, or upload a checkpoint directory to the Hub without its
+training state ([Uploading to the HuggingFace Hub](checkpoints.md#uploading-to-the-huggingface-hub)).
+Most families also serve on vLLM directly; a few need a conversion first or have
+no serving path.
 
-Two kinds of run need one more step:
+Three kinds of run need one more step:
 
-- A LoRA run saves an adapter. Serve it as an adapter or merge it into the base.
+- A LoRA run saves an adapter. Load it with `PeftModel.from_pretrained`, or merge
+  it into the base.
 - The opt-in sharded EP save (`save_sharded_ep: true`) needs
   `halo run merge-ep-shards` first.
+- A pipeline-parallel run on per-node storage needs `halo run merge-pp-stages`
+  first.
 
 [Checkpoints](checkpoints.md) covers saving, resuming, export and serving.

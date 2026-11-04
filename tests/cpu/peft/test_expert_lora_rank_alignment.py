@@ -1,14 +1,7 @@
 #!/usr/bin/env python
-"""A native expert adapter's rank has to satisfy the grouped GEMM's stride contract, at construction.
-
-``torch._grouped_mm`` contracts the expert delta over the adapter's rank dimension and reads that
-stride as a multiple of 16 bytes; a rank off it (``lora_r: 4`` in bf16) fails at the first expert
-matmul with ``strides should be multiple of 16 bytes``, after the model loaded and the run started.
-The adapter GEMMs run at the activation dtype, bf16 at the narrowest, so the multiple is 8 whatever
-the experts are stored in; the EP layer refuses any other rank where the adapters are built.
-
-Run: pytest tests/cpu/peft/test_expert_lora_rank_alignment.py
-"""
+"""A native expert adapter's rank must satisfy the grouped GEMM's stride contract, at construction.
+``torch._grouped_mm`` reads the rank stride as a multiple of 16 bytes, and adapter GEMMs run at bf16 at the narrowest,
+so the multiple is 8 whatever the experts are stored in."""
 
 from types import SimpleNamespace
 
@@ -16,9 +9,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.base_layer import EXPERT_LORA_RANK_MULTIPLE
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.kernels.grouped_mm_autograd import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
+from halo.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 NUM_LOCAL_EXPERTS, HIDDEN, INTERMEDIATE = 2, 8, 16

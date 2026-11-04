@@ -1,27 +1,6 @@
 #!/usr/bin/env python
-"""
-Offline GRPO test with BNPO loss, production-like hyperparameters, and GenerateExamplesCallback.
-
-Runs two modes sequentially:
-1. FSDP (standard data parallelism, no TP)
-2. TP=2 (tensor parallelism)
-
-Both modes use the same config matching production training:
-- loss_type: bnpo
-- per_device_train_batch_size: 2
-- gradient_accumulation_steps: 8
-- gradient_checkpointing with non-reentrant
-- cosine LR schedule with warmup
-- best_completion_emphasis: 1.5 (a real boost; values in (0, 1] are refused at config time)
-- initial_min_log_prob scheduling: -0.2 -> -3.0
-- GenerateExamplesCallback for text generation during eval
-
-Model: Qwen/Qwen3-0.6B (dense, supports tp_plan="auto")
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo_bnpo.py
-"""
+"""Offline GRPO with BNPO on production-like hyperparameters and GenerateExamplesCallback, under FSDP then TP=2 in one
+process."""
 
 import argparse
 import math
@@ -31,17 +10,19 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from src.callbacks.generate_examples import GenerateExamplesCallback
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.callbacks.generate_examples import GenerateExamplesCallback
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 20
@@ -56,12 +37,11 @@ NUM_EVAL_SAMPLES = 32
 NUM_GEN_EXAMPLES = 3
 MAX_GEN_TOKENS = 64
 SEED = 42
-# 30% of prompts carry a prior exchange, so the collator sees multi-turn prompts too.
+# So the collator sees multi-turn prompts too.
 MULTI_TURN_RATIO = 0.3
 
 
 def create_generate_dataset(tokenizer, eval_dataset: Dataset) -> Dataset:
-    """Tokenize eval prompts for GenerateExamplesCallback."""
     records = []
     for sample in eval_dataset:
         encoded = tokenizer(
@@ -81,7 +61,7 @@ def create_generate_dataset(tokenizer, eval_dataset: Dataset) -> Dataset:
 
 
 def merge_checks(checks: dict[str, bool], mode_checks: dict[str, bool]) -> None:
-    """AND one mode's results into the run's checks — both modes report the same check names."""
+    """AND one mode's results in: both modes report the same check names."""
     for name, ok in mode_checks.items():
         checks[name] = ok and checks.get(name, True)
 
@@ -94,7 +74,6 @@ def run_training(
     generate_dataset: Dataset,
     output_dir: str,
 ) -> tuple[dict[str, bool], float]:
-    """Run a single training pass (FSDP or TP). Returns (checks, training loss)."""
     is_tp = mode == "tp"
     mode_label = "TP=2" if is_tp else "FSDP"
 
@@ -158,7 +137,6 @@ def run_training(
         report_to="none",
         logging_nan_inf_filter=False,
         dataloader_drop_last=True,
-        fsdp="",
     )
 
     callbacks = []
@@ -224,7 +202,7 @@ def run(ctx) -> dict:
     log("  GRPO: loss=bnpo, bce=1.5, init_min_log_prob=-0.2")
     log(f"{'#' * 70}")
 
-    # One output dir for the whole world (ctx.output_dir is per-rank).
+    # ctx.output_dir is per-rank.
     output_dir = shared_scratch_dir("offline_grpo_bnpo")
     ctx.on_teardown(lambda: cleanup_dirs(output_dir))
 

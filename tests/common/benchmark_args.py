@@ -1,15 +1,14 @@
-"""Shared argparse setup for the profiling benchmarks.
-
-Individual benchmarks extend the parser with add_argument() before calling
-parse_args().
-"""
+"""Shared argparse setup and baseline-key spelling for the profiling benchmarks."""
 
 import argparse
+from typing import get_args
 
 import torch
 from transformers import AutoConfig
 
-from src.models.patches.attention import resolve_attn_implementation
+from halo.kernels.lowp.spec import LowpPrecision
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import resolve_attn_implementation
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
 
 
@@ -17,14 +16,7 @@ def create_benchmark_parser(
     description: str,
     require_ep: bool = True,
 ) -> argparse.ArgumentParser:
-    """Create ArgumentParser with common benchmark arguments.
-
-    Common args: --model, --model_path, --attn_implementation, --no_liger,
-                 --ep, --seq, --steps, --warmup, --batch_size, --grad_accum, --pp,
-                 --pp_microbatches, --num_samples.
-
-    Returns parser that benchmarks can extend with custom args.
-    """
+    """ArgumentParser with the common benchmark arguments, for benchmarks to extend."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--model",
@@ -89,14 +81,16 @@ def create_benchmark_parser(
         "--grad_accum",
         type=int,
         default=1,
-        help="Gradient accumulation steps",
+        help="Gradient accumulation steps. Under PP leave at 1 and set --pp_microbatches instead "
+        "(the pipeline's microbatches are the accumulation); >1 matches a baseline's global batch "
+        "to a PP run's.",
     )
     parser.add_argument(
         "--pp",
         type=int,
         default=1,
-        help="Pipeline parallel size. Pipeline parallelism is not yet available in this release; "
-        "a benchmark that reads this rejects a value above 1 before the model loads.",
+        help="Pipeline parallel size (stages). Splits decoder layers into pp contiguous stages; "
+        "data_parallel_size divides by pp (a whole pipeline chain consumes one batch).",
     )
     parser.add_argument(
         "--pp_microbatches",
@@ -114,34 +108,36 @@ def create_benchmark_parser(
     return parser
 
 
-def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
-    """ParallelismConfig topology kwargs for a benchmark's ``--pp``: none at ``--pp 1``.
-
-    Pipeline parallelism is not yet available in this release. The benchmarks build
-    ``ParallelismConfig`` directly, bypassing the config-time rejection in
-    ``parallelism_config_from_args``, so this helper rejects ``--pp > 1`` up front rather than
-    failing after model load.
-    """
-    if pp_size <= 1:
-        return {}
-    raise NotImplementedError(
-        "Pipeline parallelism is not yet available in this release — run the benchmark with "
-        "--pp 1 (see agent-docs/parallelism/pipeline-parallelism.md)."
+def add_lowp_precision_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lowp_precision",
+        type=str,
+        default="bf16",
+        choices=get_args(LowpPrecision),
+        help="Low-precision GEMM compute for the dense MLP and MoE experts; master weights and "
+        "checkpoints stay bf16. 'bf16' = off, 'fp8' = mxfp8, 'fp4' = nvfp4, 'mxfp4' = fast fp4.",
     )
 
 
-def resolve_benchmark_attn(
-    model_name: str,
-    attn_implementation: str | None,
-    dtype: torch.dtype = torch.bfloat16,
-) -> str:
-    """Concrete attention backend for a benchmark that calls ``from_pretrained`` directly.
+def axis_tags(**sizes: int) -> list[str]:
+    """``<axis><size>`` for every parallel axis wider than one rank: how a baseline key spells its layout."""
+    return [f"{axis}{size}" for axis, size in sizes.items() if size > 1]
 
-    ``load_distributed_model`` resolves ``attn_implementation=None`` through
-    :func:`resolve_attn_implementation` (GPU auto-detect, per-family limits and the sinks
-    validator), but a direct ``from_pretrained`` falls back to transformers' own default,
-    ``sdpa``. Benchmarks that bypass the loader resolve the backend here, or they measure a
-    different kernel than production runs.
-    """
+
+def pp_topology_kwargs(pp_size: int, world_size: int) -> dict:
+    """ParallelismConfig kwargs for benchmarking PP on one physical NVLink domain, simulating one domain per stage. PP
+    needs stage boundaries on domain boundaries. P2P boundary activations ride NVLink instead of RDMA: an upper bound
+    on cross-node throughput."""
+    if pp_size <= 1:
+        return {}
+    stage_world = world_size // pp_size
+    return {"gpus_per_node": stage_world, "nvlink_domain_size": stage_world}
+
+
+def resolve_benchmark_attn(model_name: str, attn_implementation: str | None) -> str:
+    """Concrete attention backend for a benchmark calling ``from_pretrained`` directly, whose own default ``sdpa`` is a
+    different kernel than production."""
     model_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    return resolve_attn_implementation(model_config, attn_implementation, dtype)
+    return resolve_attn_implementation(
+        model_config, attn_implementation, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+    )

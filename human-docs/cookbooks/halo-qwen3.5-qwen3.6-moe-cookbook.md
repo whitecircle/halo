@@ -8,14 +8,15 @@ model on text.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | Yes, up to 2 | Yes | No | Yes | Yes | vLLM, SGLang |
+Modes: the Qwen3.5 / Qwen3.6 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `Qwen/Qwen3.6-35B-A3B` at revision `995ad96eacd98c81ed38be0c5b274b04031597b0` and
   `Qwen/Qwen3.5-35B-A3B` at `59d61f3ce65a6d9863b86d2e96597125219dc754`. The 122B-A10B trains from
-  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node, or EP16 across two Hopper nodes.
-- **GPUs:** eight at EP8, 32 experts per GPU, at 33,000 tokens.
+  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node. Across two nodes, add
+  `--expert_parallel_size=16 --ep_scope=global --max_length=8192`.
+- **GPUs:** eight at EP8, 32 experts per GPU, at 33,000 tokens: about 17,200 tok/s per GPU at 155.5 GiB peak on a warm
+  Triton cache.
 
 ## Recipes
 
@@ -53,6 +54,25 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-lora
 ```
 
+### MTP head
+
+Train the `mtp.*` head the release ships, so a server can draft with it: over a frozen trunk, or inside a fine-tune
+with `qwen3.6-35b-a3b-mtp-joint.yaml`. A fit repairs a stale head and holds a healthy one. The recipe fits chat rows
+under the think render, not a server's own samples. Its 150 steps served at 0.834 acceptance on vLLM against the
+release head's 0.831, on 64 first-turn prompts, and that head alone reads 0.83 to 0.84 across launches, so no served
+gain is measured. What the `joint` recipe does over a fine-tune is not measured.
+
+```bash
+halo launch sft examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml -n 8 \
+  --output_dir=/data/checkpoints/qwen3.6-35b-a3b-mtp-head
+```
+
+The fit scores held-out rows before its first step and at its last, and exits non-zero if acceptance fell. Its last
+checkpoint then holds the rejected head, so serve the one the fit started from. `mtp_train_scope: detached` keeps a
+head current during a fine-tune without changing the trunk's objective. Serve with
+`VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'`, or on SGLang with
+[its one-draft flags](../../agent-docs/optimization/mtp-heads.md#serving) ↗.
+
 ### GRPO
 
 The shipped recipes train Qwen3.6, most of them on code contests. Read
@@ -62,10 +82,9 @@ servers on GPUs 4–7.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-cp jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja "$HALO_SCRATCH/"
 export VLLM_MODEL=/data/checkpoints/qwen3.6-35b-a3b-sft
-export VLLM_CHAT_TEMPLATE=/data/qwen3.6-reasoning-effort.jinja
-export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0
+export VLLM_CHAT_TEMPLATE=/jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja
+export VLLM_TOOL_PARSER=qwen3_xml VLLM_REASONING_PARSER=qwen3
 VLLM_CUDA_DEVICES=4,5 VLLM_TP=2 VLLM_PORT=8000 \
   docker compose -p qwen36-rollout-0 -f docker-compose.vllm.yml up -d vllm-server
 VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 VLLM_PORT=8001 \
@@ -77,7 +96,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 ```bash
 cp examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep4.yaml qwen3.6-grpo.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo.yaml -n 4 \
+  halo launch grpo/environmental qwen3.6-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo
 ```
@@ -91,7 +110,7 @@ and a six-GPU trainer:
 
 ```bash
 export SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3.6-35b-a3b-sft"
-export SGLANG_CHAT_TEMPLATE="$HALO_SCRATCH/qwen3.6-reasoning-effort.jinja" SGLANG_REASONING_PARSER=qwen3
+export SGLANG_CHAT_TEMPLATE=/jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja SGLANG_REASONING_PARSER=qwen3
 SGLANG_CUDA_DEVICES=6 SGLANG_PORT=30000 \
   docker compose -p qwen36-sglang-0 -f docker-compose.sglang.yml up -d sglang-server
 SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
@@ -101,46 +120,53 @@ SGLANG_CUDA_DEVICES=7 SGLANG_PORT=30001 \
 ```bash
 cp examples/grpo/environmental/qwen3_5/sglang/qwen3.6-35b-a3b-code-contests-full-ep1.yaml qwen3.6-grpo-sglang.yaml
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
-  halo launch environmental-grpo qwen3.6-grpo-sglang.yaml -n 6 \
+  halo launch grpo/environmental qwen3.6-grpo-sglang.yaml -n 6 \
   --model_name_or_path=/data/checkpoints/qwen3.6-35b-a3b-sft \
   --output_dir=/data/checkpoints/qwen3.6-35b-a3b-grpo-sglang
 ```
 
 ## Settings that matter
 
-- **Attention.** The SFT recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on this
-  family, so Halo replaces an FA4 pick with SDPA. The GRPO recipes pin `sdpa`.
-- **Packing, not padding-free.** Keep `padding_free: false`. Its variable-length path crashes FA2 on this
-  family's multimodal RoPE.
+- **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
+  Blackwell runs FA4, and FA2 on packed SFT rows
+  ([Attention backends](../supported-matrix.md#attention-backends)).
+- **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
+  crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
+  (`tree_packing: true`;
+  [Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
 - **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes
-  set `none`. The router has no bias slot, so plain `bias_update` raises, and `aux_loss` is refused on
-  the multimodal class. The transient bias balances training only: exported checkpoints serve without
-  it, so near-tied expert picks can differ between trainer and server.
+  set `none`. The router has no bias slot, so plain `bias_update` raises. In SFT, `aux_loss` (what `auto`
+  picks) balances through the loss and exports by construction. The transient bias balances training
+  only: exported checkpoints serve without it, so near-tied expert picks can differ between trainer and
+  server.
+- **Chat template.** The SFT recipes render `qwen3-multiturn.jinja`, which writes assistant turns with no think block.
+  `eval_loss` reads about 3.3 at step 0 on Qwen3.6-35B-A3B and about 0.83 after two updates. Train and serve under the
+  same render.
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
 - **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
-  leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
-  thinking budgets: the template states each level's `thinking_tokens` as a target, and on vLLM the
-  engine closes the reasoning only at its ceiling, `rollout_max_tokens − rollout_max_answer_tokens`
-  (30,000 − 8,192 tokens). That ceiling needs `VLLM_REASONING_PARSER=qwen3` and
-  `VLLM_USE_V2_MODEL_RUNNER=0`, or every request fails with a 400
+  leaves the XML tool calls as text, and the run stops by its second round. The code-contests recipes run soft
+  thinking budgets, whose ceiling needs `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
   ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
-- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup. The
-  soft budgets are stated and priced as on vLLM, but no engine cap closes the reasoning there: only
-  `rollout_max_tokens` bounds a turn.
+- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and
+  only `rollout_max_tokens` bounds a turn.
 
 ## Limits
 
 - No CP: the linear-attention layers can't split the sequence across ranks.
+- Pipeline parallelism takes the text tower only (`text_only_model: true`), with `moe_balancing: none`;
+  packed rows keep their documents apart, one packed row per microbatch
+  ([Qwen3.5 / Qwen3.6 model notes](../../agent-docs/models/qwen3_5.md) ↗).
 - TP stops at 2 because the checkpoints have two KV heads. TP shards only the 10 full-attention layers,
   so per-GPU memory drops much less than `1/tp_size`.
 - Online RL refuses `text_only_model: true`.
-- Saves drop the hub checkpoint's `mtp.*` multi-token-prediction head. `reattach-vision-tower` restores
-  it for a text-only export; no tool restores it on a multimodal save.
+- Saves drop the hub checkpoint's `mtp.*` multi-token-prediction head unless the run
+  [trains it](../../agent-docs/optimization/mtp-heads.md). `reattach-vision-tower` restores the base's untrained head for a
+  text-only export.
 
 ## Export and serve
 
 Gathered saves keep the language-model experts fused, like the hub checkpoints. Transformers and vLLM
-0.26.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
+0.32.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
 needs that layout.
 
 Smoke-test with `AutoModelForImageTextToText` and `AutoTokenizer`
@@ -153,10 +179,8 @@ VLLM_TOOL_PARSER=qwen3_xml \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-`text_only_model: true` trains through the text-only class and drops the vision tower from the export.
-Its export, and a merge of its LoRA adapter, carry the run's tokenizer but no processor files. SGLang
-serves that export as it is. vLLM needs the vision tower back first, which also restores the processor
-files:
+`text_only_model: true` drops the vision tower and processor files from the export. To rebuild the
+multimodal checkpoint:
 
 ```bash
 halo run reattach-vision-tower --input_dir /data/checkpoints/<text-only-export> \

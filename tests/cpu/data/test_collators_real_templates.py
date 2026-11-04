@@ -1,36 +1,21 @@
 #!/usr/bin/env python3
-"""Completion-only masking against REAL tokenizers + ORIGINAL chat templates.
-
-The synthetic tests in ``test_collators.py`` use a fake tokenizer. This file exercises the production
-masking on the actual shipped chat templates of several model families, where the assistant-turn
-terminator is frequently NOT ``tokenizer.eos_token_id``:
-
-  - Qwen3 / Qwen3.5 — turns end with ``<|im_end|>`` (Qwen3.5 exposes eos only via ``text_config``);
-  - GLM-4 — no per-turn ``<|endoftext|>``; turns delimited by role markers in ``config.eos_token_id``;
-  - Gemma-3 — turns end with ``<end_of_turn>`` (106), distinct from ``tokenizer.eos_token_id`` (1).
-
-For each model it asserts the shared builder and every completion collator (standard, packing,
-flattening/padding-free) unmask the assistant content and mask the user content, and that a
-single-eos search gets GLM/Gemma wrong (whole instance masked, or user content leaked).
-
-Run: python tests/cpu/data/test_collators_real_templates.py
-Requires the model tokenizers/configs in the HF cache (offline-friendly).
-"""
-
-import os
+"""Completion-only masking against real tokenizers and original chat templates, where the turn terminator is often
+not ``tokenizer.eos_token_id`` (Qwen3's ``<|im_end|>``, GLM-4's role markers, Gemma-3's ``<end_of_turn>``).
+Requires the model tokenizers and configs in the HF cache."""
 
 import pytest
 
-from src.data.collators.completions_only import DataCollatorForCompletionOnlyLM
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from src.data.spans import build_completion_only_labels, resolve_eos_token_ids
+from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
+from halo.data.completion_spans import build_training_labels
+from halo.data.turn_markers import resolve_eos_token_ids
 from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
-# Distinctive content so decode-based assertions are unambiguous after templating/tokenization.
 U1, A1 = "Question alpha numero uno", "Response bravo the first answer"
 U2, A2 = "Question charlie numero dos", "Response delta the second answer"
 ASST_MARKERS = {  # the assistant generation marker per family (matches the production YAML configs)
@@ -44,8 +29,8 @@ ASST_MARKERS = {  # the assistant generation marker per family (matches the prod
 SFT_TEMPLATE_FILES = {
     GLM4_FLASH: "jinja-templates/glm/glm-chat.jinja",
 }
-# Families whose assistant turns end in a token that is NOT ``tokenizer.eos_token_id`` — exactly the
-# ones a single-eos search gets wrong.
+# Families whose assistant turns end in a token other than ``tokenizer.eos_token_id``, the ones a single-eos search
+# gets wrong.
 NON_EOS_TERMINATED = (GLM4_FLASH, GEMMA3_4B_IT)
 # One family per template shape (im_end / role marker / end_of_turn); Qwen3.5 shares Qwen3's.
 COLLATOR_FAMILIES = (QWEN3_0_6B, GLM4_FLASH, GEMMA3_4B_IT)
@@ -55,8 +40,7 @@ def _apply_sft_template(tok, model_id):
     """Use the framework SFT jinja template when the native template lacks a final-turn terminator."""
     path = SFT_TEMPLATE_FILES.get(model_id)
     if path:
-        with open(os.path.join(os.path.dirname(__file__), "../../..", path)) as f:
-            tok.chat_template = f.read()
+        tok.chat_template = (REPO_ROOT / path).read_text()
 
 
 CONVO = [
@@ -68,7 +52,6 @@ CONVO = [
 
 
 def _load(model_id):
-    """Tokenizer + config for ``model_id``, skipping the test when the HF cache lacks them."""
     tok = load_cached_tokenizer(model_id, trust_remote_code=True)
     cfg = load_cached_config(model_id, trust_remote_code=True)
     if tok.pad_token_id is None:
@@ -92,10 +75,9 @@ def _unmasked_text(tok, ids, labels):
 
 
 def _check_masking(tok, cfg, model_id):
-    """Shared builder: assistant content unmasked, user content masked, not-all-masked."""
     ids, marker = _render_ids(tok, model_id)
     eos_set = resolve_eos_token_ids(tok, cfg)
-    labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=eos_set)
+    labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=eos_set)
     n_unmasked = int((labels != -100).sum())
     assert n_unmasked > 0, f"{model_id}: completion masking masked the WHOLE instance"
     decoded = _unmasked_text(tok, ids, labels)
@@ -118,12 +100,11 @@ def test_single_eos_search_would_be_wrong(model_id):
     tok, cfg = _load(model_id)
     ids, marker = _render_ids(tok, model_id)
     old_set = frozenset({tok.eos_token_id})
-    old_labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=old_set)
+    old_labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=old_set)
     new_set = resolve_eos_token_ids(tok, cfg)
-    new_labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=new_set)
+    new_labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=new_set)
     old_n = int((old_labels != -100).sum())
     new_n = int((new_labels != -100).sum())
-    # These families terminate turns with a token that is NOT tokenizer.eos.
     assert new_n > 0, f"{model_id}: resolved-set masking unexpectedly empty"
     decoded_new = _unmasked_text(tok, ids, new_labels)
     assert "bravo" in decoded_new, f"{model_id}: assistant content missing under resolved set"

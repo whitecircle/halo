@@ -1,23 +1,15 @@
 #!/usr/bin/env python
-"""The PP stage loader's missing-shard gate for per-expert fusion tasks.
-
-Per-expert checkpoint keys never ride through the plan list (they map to no fused model key), so the
-plan-level missing-shard gate cannot see them. Ungated, a wrong-topology per-node resume of an
-INDIVIDUAL-format checkpoint dies rank-local in the fuser's ``safe_open`` between two collectives,
-stranding the other stages until the NCCL watchdog. :func:`_missing_fusion_shards_reason` routes that
-verdict through ``reject_across_ranks`` instead.
-
-Run: ``python tests/cpu/parallelism/test_pp_missing_shard_gates.py`` (or ``pytest -m cpu``).
-"""
+"""The PP stage loader's missing-shard gate for per-expert fusion tasks. Those keys skip the plan list, so a
+wrong-topology resume dies rank-local in ``safe_open`` between collectives, stranding other stages."""
 
 import pytest
 
-from src.distributed.pipeline_parallel.lazy_loader import _missing_fusion_shards_reason
+from halo.model_loading.parallel.expert_fuser import FusionTask
+from halo.model_loading.parallel.pp import _missing_fusion_shards_reason
 
 
 def _task(shard_file: str, expert_idx: int = 0):
-    """One fusion task in the fuser's shape: (model_key, fusion_type, {idx: {suffix: (disk, shard)}})."""
-    return (
+    return FusionTask(
         "model.layers.0.mlp.experts.gate_up_proj",
         "gate_up",
         {expert_idx: {"gate_proj.weight": (f"model.layers.0.mlp.experts.{expert_idx}.gate_proj.weight", shard_file)}},

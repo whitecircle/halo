@@ -2,11 +2,6 @@
   "architectures": [
     "Step3p7ForConditionalGeneration"
   ],
-  "auto_map": {
-    "AutoConfig": "configuration_step3p7.Step3p7Config",
-    "AutoModelForCausalLM": "modeling_step3p7.Step3p7ForConditionalGeneration",
-    "AutoProcessor": "processing_step3.Step3VLProcessor"
-  },
   "im_end_token": "<im_end>",
   "im_patch_token": "<im_patch>",
   "im_start_token": "<im_start>",
@@ -156,6 +151,7 @@
     "num_key_value_heads": 8,
     "num_nextn_predict_layers": 3,
     "num_sliding_attention_heads": 96,
+    "output_router_logits": false,
     "pad_token_id": 1,
     "per_layer_config": {
       "01": {
@@ -406,7 +402,7 @@
     "pool_type": "none",
     "rope_parameters": {
       "rope_theta": 10000.0,
-      "rope_type": "default"
+      "rope_type": "axial"
     },
     "use_cls_token": false,
     "use_ln_post": false

@@ -1,18 +1,7 @@
 #!/usr/bin/env python
-"""Text-only training methods must REFUSE an image-carrying dataset, not quietly drop it.
-
-RLVR online GRPO, embedding training, environmental GRPO, offline GRPO and classification have no
-vision path at all, and each prunes its dataset to the columns it names
-(``remove_unused_columns``, the trainer's signature filter, an explicit ``remove_columns``,
-env-GRPO's ``keep_columns``). A vision dataset handed to one of them therefore trains on the rows'
-text alone — no warning, full cost, a checkpoint that never saw a pixel. The guard reads the shared
-``VLM_IMAGE_COLUMNS`` spellings, so it refuses exactly what a VLM-capable method routes on.
-
-Driven through each ``main()``: the guard is only worth anything where the script reaches it with
-the dataset in hand, before the map that drops the column.
-
-Run: pytest tests/cpu/config/test_text_only_image_column_refusal.py
-"""
+"""Text-only training methods refuse an image-carrying dataset. Each prunes its dataset to the columns it names, so
+a vision dataset would train on its text alone with no warning. Driven through each ``main()``, before the map
+that drops the column."""
 
 import sys
 import types
@@ -22,8 +11,8 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.vlm import VLM_IMAGE_COLUMNS
-from tests.common.utils import load_script_module
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
+from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"
 
@@ -31,7 +20,7 @@ _TEXT_TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content
 
 
 class _PastTheGuard(Exception):
-    """Raised by the first stub past the guard — the dataset was accepted."""
+    """Raised by the first stub past the guard: the dataset was accepted."""
 
 
 @pytest.fixture(autouse=True)
@@ -47,7 +36,7 @@ def _script_module(relative_path: str):
 def _runtime():
     return types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(
-            cp_size=1, is_cp_mode=False, pp_size=1, is_ep_mode=False, non_dp_replication_factor=1
+            cp_size=1, is_cp_mode=False, pp_size=1, has_ep_group=False, non_dp_replication_factor=1
         ),
         model_source=_MODEL_ID,
         mode_suffix="",
@@ -72,10 +61,10 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
     )
     patches = [
         *patches,
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
     ]
-    with mock.patch.object(module, "run_training", lambda fn: fn):
+    with mock.patch.object(module, "with_distributed_teardown", lambda fn: fn):
         for patch in patches:
             patch.start()
         try:
@@ -85,25 +74,25 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
                 patch.stop()
 
 
-def _run_rlvr(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``online_grpo/rlvr.py:main()`` to its dataset stage."""
-    module = _script_module("online_grpo/rlvr.py")
+def _run_online_grpo(tmp_path, dataset: DatasetDict) -> None:
+    module = _script_module("grpo/online.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
         mock.patch.object(module, "apply_prompt_completion_window", return_value=(tokenizer, None)),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
-        mock.patch.object(module, "process_dataset_with_map_and_filter", side_effect=_PastTheGuard),
+        mock.patch.object(module, "coordinated_map_and_filter", side_effect=_PastTheGuard),
     ]
     _run(module, tmp_path, "max_completion_length: 64\n", patches)
 
 
 def _run_embedding(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``embedding.py:main()`` to its dataset stage."""
     module = _script_module("embedding.py")
 
     patches = [
@@ -115,15 +104,17 @@ def _run_embedding(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``environmental_grpo.py:main()`` to its dataset stage."""
-    module = _script_module("environmental_grpo.py")
+    module = _script_module("grpo/environmental.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
-        mock.patch.object(module, "apply_context_window", side_effect=lambda args, model, tok: tok),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
+        mock.patch.object(module, "resolve_model_context_window", return_value=None),
+        mock.patch.object(module, "apply_tokenizer_window", side_effect=lambda args, model, tok, window: tok),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "process_dataset", side_effect=_PastTheGuard),
@@ -132,15 +123,16 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
 
 
 def _run_offline_grpo(tmp_path, dataset: DatasetDict) -> None:
-    """Run ``offline_grpo.py:main()`` to its dataset stage."""
-    module = _script_module("offline_grpo.py")
+    module = _script_module("grpo/offline.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
 
     patches = [
         mock.patch.object(module, "init_training_script", return_value=_runtime()),
-        mock.patch.object(module, "load_script_model", return_value=(types.SimpleNamespace(config=None), tokenizer)),
+        mock.patch.object(
+            module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
+        ),
         mock.patch.object(module, "apply_prompt_completion_window", return_value=(tokenizer, None)),
-        mock.patch.object(module, "setup_peft_model", return_value=None),
+        mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),
         mock.patch.object(module, "load_script_datasets", return_value=(dataset, False)),
         mock.patch.object(module, "coordinated_map", side_effect=_PastTheGuard),
@@ -162,10 +154,10 @@ def _run_classification(tmp_path, dataset: DatasetDict) -> None:
 
 # Each text-only method with the dataset shape it actually consumes, and the name its refusal uses.
 _CASES = {
-    "rlvr": (_run_rlvr, {"prompt": ["2+2?"], "answer": ["4"]}, "RLVR Online GRPO"),
+    "grpo/online": (_run_online_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "RLVR Online GRPO"),
     "embedding": (_run_embedding, {"anchor": ["question"], "positive": ["answer"]}, "Embedding training"),
-    "environmental_grpo": (_run_environmental_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "Environmental GRPO"),
-    "offline_grpo": (
+    "grpo/environmental": (_run_environmental_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "Environmental GRPO"),
+    "grpo/offline": (
         _run_offline_grpo,
         {"prompt": [_TEXT_TURNS], "completions": [[_TEXT_TURNS]], "rewards": [[1.0]]},
         "Offline GRPO",
@@ -176,12 +168,8 @@ _CASES = {
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_image_column_is_refused_before_it_can_be_pruned(case, tmp_path):
-    """Every method that cannot serve images refuses a declared image column in its own pipeline.
-
-    One representative spelling per script: the refusal is a single shared set-intersection against
-    ``VLM_IMAGE_COLUMNS`` (``reject_image_columns``), so the spelling axis is swept once below
-    rather than per script.
-    """
+    """One spelling per script: the refusal is a shared intersection against ``VLM_IMAGE_COLUMNS``, so the spelling
+    axis is swept once below."""
     runner, columns, method = _CASES[case]
     with pytest.raises(ValueError, match=f"{method} is text-only"):
         runner(tmp_path, _dataset(columns, VLM_IMAGE_COLUMNS[0]))
@@ -189,7 +177,6 @@ def test_image_column_is_refused_before_it_can_be_pruned(case, tmp_path):
 
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 def test_every_image_column_spelling_is_refused(column, tmp_path):
-    """The spelling set is policed on one representative script (shared intersection, see above)."""
     runner, columns, method = _CASES["classification"]
     with pytest.raises(ValueError, match=f"{method} is text-only"):
         runner(tmp_path, _dataset(columns, column))
@@ -197,7 +184,6 @@ def test_every_image_column_spelling_is_refused(column, tmp_path):
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_clean_text_dataset_still_reaches_training(case, tmp_path):
-    """Anti-vacuity: the guard rejects image columns, not datasets."""
     runner, columns, _ = _CASES[case]
     with pytest.raises(_PastTheGuard):
         runner(tmp_path, _dataset(columns, None))

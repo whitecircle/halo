@@ -1,22 +1,20 @@
-"""A resubmission identical to a program this episode already graded, comments aside, is refused unrun as a
-tool error with the submission returned to its budget and the turn flagged like any refusal; a changed program
-grades; a grade the backend lost records no program; a repeat beside the accept in one turn takes the free
-post-accept reply; the offline re-grader takes no slot for the repeat."""
+"""A resubmission identical to a graded program, comments aside, is refused unrun as a tool error with the
+submission returned to its budget; a changed program grades, and a grade the backend lost records no program."""
 
 import json
 
 import pytest
 
-from scripts.environments.inference.regrade_trajectories import submitted_solutions
-from src.environments.envs.tasks.coding.code_contests import (
+from halo.entrypoints.code_contests_regrade import submitted_solutions
+from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.code_contests_prompts import (
     IDENTICAL_RESUBMISSION_REPLY,
     SUBMISSION_AFTER_ACCEPT_REPLY,
-    CodeContestsEnvironment,
-    normalized_program,
 )
-from src.environments.envs.tasks.coding.comments import strip_comments
-from src.environments.episode import recovering_turn
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult
+from halo.environments.tasks.coding.program_source import normalized_program, strip_comments
+from halo.rewards.samples import REFUSED_CALL_IDS_KEY
 from tests.common.code_contests import SINGLE_TEST_ANSWER
 
 WRONG = "n = int(input())\nprint(n)\n"
@@ -102,11 +100,26 @@ def test_an_identical_resubmission_is_refused_unrun_and_a_changed_one_grades():
         assert len(sandbox.runs) == 1, "a refused program never reaches the sandbox"
         assert env._submissions(traj) == 1 and traj.info["submission_result"] == first_result
         assert traj.info["submission_pass_fracs"] == [0.0]
-        assert traj.messages[-2].untrainable and recovering_turn(traj)
+        assert traj.messages[-2].calls_rejected and traj.messages[-2].untrainable
     assert traj.info["identical_resubmissions"] == 2
     step = env.step(ids, [""], [{"tool_calls": [_call("submit_solution", code=RIGHT)]}])[0]
     assert step.done and env._submissions(traj) == 2 and len(sandbox.runs) == 2
     assert env.rollout_metrics(traj)["episode/identical_resubmissions"] == 2.0
+
+
+def test_a_refused_repeat_reaches_the_judge_marked_as_never_run():
+    """The turn records the refused call's id, and the scorer's sample carries it, so a judge reads the call as
+    never run and no quote of it is evidence."""
+    sandbox = _ScriptedSandbox(SandboxResult(stdout="X\n", returncode=0))
+    env = _env(sandbox, max_submissions=2)
+    ids, _ = env.reset(["solve it"], [{"answer": {"tests": [{"input": "", "output": "Y"}]}}])
+    env.step(ids, [""], [{"tool_calls": [_call("submit_solution", code=WRONG)]}])
+    repeat = {**_call("submit_solution", code=WRONG_COMMENTED), "id": "repeat"}
+    traj = env.step(ids, [""], [{"tool_calls": [repeat]}])[0].trajectory
+    assert traj.messages[-2].refused_call_ids == ("repeat",)
+    assert traj.messages[-4].refused_call_ids == ()
+    sample = env._scoring_sample(traj)
+    assert [m.get(REFUSED_CALL_IDS_KEY) for m in sample.completion if m["role"] == "assistant"] == [None, ["repeat"]]
 
 
 def test_a_repeat_beside_the_accept_in_one_turn_takes_the_free_post_accept_reply():

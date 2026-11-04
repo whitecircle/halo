@@ -8,9 +8,9 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.distributed.context_parallel.autograd import cp_sum_rows
-from src.distributed.context_parallel.config import CPConfig
-from src.trainers.grpo.objective.offline import offline_loss, offline_loss_normalizer, offline_loss_numerator
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.sequence_chunks import cp_sum_rows
+from halo.trainers.grpo.objective.offline_loss import offline_loss, offline_loss_normalizer, offline_loss_numerator
 from tests.common.gloo import run_gloo_ranks
 
 COEFFICIENTS = torch.tensor([[0.0, 0.0, 0.0], [2.0, -3.0, 4.0], [-1.0, 5.0, 2.0], [3.0, 1.0, -2.0]])
@@ -39,7 +39,7 @@ MAX_COMPLETION_LENGTH = 12
 
 
 class _ForwardOnlySum(torch.autograd.Function):
-    """Mutation control: correct SUM value but the backward collective is deliberately absent."""
+    """Mutation control: correct SUM value, no backward collective."""
 
     @staticmethod
     def forward(ctx, values, group):
@@ -53,7 +53,7 @@ class _ForwardOnlySum(torch.autograd.Function):
 
 
 def _worker(rank: int, cp_size: int) -> None:
-    cp_config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    cp_config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     weight = torch.nn.Parameter(torch.tensor(INITIAL_WEIGHT))
     local_rows = weight * COEFFICIENTS[rank]
     global_rows = cp_sum_rows(local_rows, cp_config)
@@ -69,7 +69,7 @@ def _worker(rank: int, cp_size: int) -> None:
     local_expected = cp_size * (COEFFICIENTS[rank] * ROW_WEIGHTS).sum()
     torch.testing.assert_close(weight.grad, local_expected, atol=0, rtol=0)
     dist.all_reduce(weight.grad, op=dist.ReduceOp.SUM)
-    weight.grad /= cp_size  # The toolkit's world-wide mean parameter-gradient synchronization.
+    weight.grad /= cp_size  # The toolkit's world-wide mean gradient sync.
     torch.testing.assert_close(weight.grad, baseline.grad, atol=0, rtol=0)
 
     with torch.no_grad():
@@ -77,9 +77,8 @@ def _worker(rank: int, cp_size: int) -> None:
         baseline.add_(baseline.grad, alpha=-LR)
     torch.testing.assert_close(weight, baseline, atol=0, rtol=0)
 
-    # Mutation sensitivity: rank 0 has no local targets, so a missing forward SUM would
-    # return all zeros there; a missing backward SUM would leave every rank's gradient low
-    # by CP (or zero on rank 0). The correct result above cannot pass either mutation.
+    # Rank 0 has no local targets, so a missing forward SUM returns all zeros there; a missing backward SUM leaves
+    # every rank's gradient low by CP (or zero on rank 0).
     if rank == 0:
         assert (global_rows.detach() - local_rows.detach()).abs().max() >= 2.0
         assert baseline.grad.abs() >= 1.0
@@ -114,7 +113,6 @@ def test_cp1_is_an_identity_in_fp32():
 
 
 def _reference_offline_loss(losses, mask, loss_type):
-    """Plain full-row offline formula, independent of the CP reducer under test."""
     group_weights = 1.0 / GROUP_SIZES.float()
     numerators = (losses * mask).sum(dim=1) * group_weights
     counts = mask.sum(dim=1)
@@ -126,7 +124,7 @@ def _reference_offline_loss(losses, mask, loss_type):
 
 
 def _offline_worker(rank: int, cp_size: int) -> None:
-    cp_config = CPConfig(cp_size=cp_size, world_size=cp_size, gpus_per_node=cp_size)
+    cp_config = CPConfig(cp_size, stage_world_size=cp_size, stage_base_rank=0, nvlink_domain_size=cp_size)
     full_coefficients = TOKEN_COEFFICIENTS[:cp_size].permute(1, 0, 2).reshape(3, -1)
     full_mask = SUPERVISION[:cp_size].permute(1, 0, 2).reshape(3, -1)
     for loss_type in ("grpo", "bnpo", "dr_grpo"):

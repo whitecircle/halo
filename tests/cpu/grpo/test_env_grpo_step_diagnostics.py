@@ -1,13 +1,6 @@
 #!/usr/bin/env python
-"""The environmental GRPO step diagnostics, each pinned to its value on a hand-computed batch.
-
-They change no numerics, so a wrong one only misleads: a solve-group split that counts invalid
-episodes, an effective sample size that skips the masked weights, a covariance whose sign flips, a
-truncation alarm that never fires or fires every round. Each is folded across ranks from sums, so the
-world value is checked with peers standing in for the other ranks.
-
-    python tests/cpu/grpo/test_env_grpo_step_diagnostics.py
-"""
+"""The environmental GRPO step diagnostics, each pinned to its value on a hand-computed batch. They change no numerics,
+so a wrong one only misleads. Each folds across ranks from sums, so peers stand in for the other ranks."""
 
 import logging
 import math
@@ -17,21 +10,24 @@ from collections import defaultdict
 import pytest
 import torch
 
-import src.trainers.grpo.rollout.rollout_metrics as rm
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.environments.base import SOLVE_RATE_KEY, Trajectory
-from src.environments.episode import RolloutResult
-from src.trainers.grpo.environmental import BatchRows, DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.rollout.rollout_metrics import group_solve_counts
-from src.trainers.grpo.world_metrics import WorldMetrics
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+import halo.trainers.grpo.environmental.rollout_metrics as rm
+from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import SOLVE_RATE_KEY
+from halo.environments.messages import Trajectory
+from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
+from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
+from tests.common.world_metrics import attach_world_metrics, fake_world, flushed_metrics
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer
 
 
 def _fold(world: WorldMetrics, *peers: WorldMetrics) -> dict[str, list[float]]:
     target = defaultdict(list)
-    world.flush(target, gather_fn=lambda own: [*own, *(peer._materialized() for peer in peers)])
+    with fake_world(world, *peers):
+        world.flush(target)
     return target
 
 
@@ -113,9 +109,8 @@ def test_a_training_round_logs_no_success_at_k_and_an_env_without_a_verdict_logs
 
 
 def test_the_log_prob_advantage_covariance_reads_the_loss_tokens():
-    # Row 0 (advantage +1) is confident, row 1 (advantage -1) is not: the policy is sharpening where it is
-    # rewarded, a positive covariance. Loss tokens: -0.1, -0.3 at +1 and -2.0 at -1; the padded tail and
-    # the masked tool token are left out. E[xy] = (-0.4 + 2.0) / 3, E[x] = -0.8, E[y] = 1/3.
+    # Loss tokens: -0.1, -0.3 at advantage +1 and -2.0 at -1; the padded tail and masked tool token are left out.
+    # E[xy] = (-0.4 + 2.0) / 3, E[x] = -0.8, E[y] = 1/3.
     logps = torch.tensor([[-0.1, -0.3, -9.0], [-2.0, -5.0, 0.0]])
     loss_mask = torch.tensor([[True, True, False], [True, False, False]])
     host = _diagnostics_host()
@@ -127,9 +122,18 @@ def _is_host(clip_max: float):
     return attach_world_metrics(
         types.SimpleNamespace(
             vllm_importance_sampling_clip_max=clip_max,
-            _is_mask_config=types.SimpleNamespace(any_mask_active=False),
+            _is_correction=True,
+            _isr_mask_config=types.SimpleNamespace(any_mask_active=False),
             _metrics={"train": defaultdict(list)},
         )
+    )
+
+
+def _step(sampling):
+    return types.SimpleNamespace(
+        sampling_logps=sampling,
+        has_sampling=torch.ones(sampling.size(0), dtype=torch.bool),
+        completion_mask=torch.ones_like(sampling, dtype=torch.bool),
     )
 
 
@@ -137,28 +141,19 @@ def _two_rows():
     # Sampled at log-prob -1 everywhere; the trainer's ratios are 1, 4, 1/4 and 2, 1, 1.
     sampling = torch.full((2, 3), -1.0)
     recompute = torch.tensor([[0.0, math.log(4), -math.log(4)], [math.log(2), 0.0, 0.0]]) - 1.0
-    rows = BatchRows([_episode(None), _episode(None)], [1, 1], 0, True)
+    rows = TrajectoryRowMap([_episode(None), _episode(None)], [1, 1], 0, True)
     return sampling, recompute, rows
 
 
 def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
     host = _is_host(clip_max=3.0)
     sampling, recompute, rows = _two_rows()
-    ratio, _, corrected, _ = _Trainer._apply_is_correction(
-        host,
-        True,
-        recompute,
-        sampling,
-        torch.ones(2, dtype=torch.bool),
-        torch.ones(2, 3, dtype=torch.bool),
-        rows,
-        torch.device("cpu"),
-    )
-    _Trainer._score_is_correction(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
+    ratio, _, corrected, _ = _Trainer._apply_is_correction(host, recompute, _step(sampling), rows)
+    _Trainer._narrow_corrected_mask_and_record(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
     logged = flushed_metrics(host)
 
     assert logged["sampling/is_ratio_extreme_frac"] == [pytest.approx(2 / 6)], "4 and 1/4 are past 3 and 1/3"
-    # The applied weights are the truncated ratios 1, 3, 1/4, 2, 1, 1.
+    # The truncated ratios.
     applied = [1.0, 3.0, 0.25, 2.0, 1.0, 1.0]
     ess = sum(applied) ** 2 / (len(applied) * sum(w * w for w in applied))
     assert logged["sampling/is_ess_frac"] == [pytest.approx(ess, rel=1e-5)]
@@ -167,23 +162,14 @@ def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
 def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction():
     host = _is_host(clip_max=1.0)
     sampling, recompute, rows = _two_rows()
-    _Trainer._apply_is_correction(
-        host,
-        True,
-        recompute,
-        sampling,
-        torch.ones(2, dtype=torch.bool),
-        torch.ones(2, 3, dtype=torch.bool),
-        rows,
-        torch.device("cpu"),
-    )
+    _Trainer._apply_is_correction(host, recompute, _step(sampling), rows)
     assert "sampling/is_ratio_extreme_frac" not in flushed_metrics(host)
 
 
 class _RoundHost(rm.RolloutMetricsMixin):
     def __init__(self, alarm_rate, *, mask_truncated: bool = False):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        self._truncation_alarm_rate = alarm_rate
+        self.async_config = types.SimpleNamespace(truncation_alarm_rate=alarm_rate)
         self.args = types.SimpleNamespace(mask_truncated_completions=mask_truncated)
 
 
@@ -194,7 +180,7 @@ def _round(truncated: int, total: int = 4):
             generation_tokens=1,
             requests_expired_in_sync=0,
             episode_length=1,
-            success=i >= truncated,
+            terminated_naturally=i >= truncated,
             trajectory=Trajectory(done=True, truncated=i < truncated),
             error=None,
             total_reward=0.0,
@@ -209,8 +195,7 @@ def _log_round(host, results: list, mode: str = "train") -> None:
     host._log_rollout_metrics(results, mode, [[] for _ in results])
 
 
-def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypatch, caplog):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
+def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(caplog):
     host = _RoundHost(alarm_rate=0.25)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         for truncated in (2, 3, 0, 2):
@@ -231,9 +216,8 @@ def test_the_truncation_alarm_fires_on_a_crossing_and_logs_every_round(monkeypat
     ids=["kept", "masked"],
 )
 def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episode(
-    monkeypatch, caplog, mask_truncated, said, unsaid
+    caplog, mask_truncated, said, unsaid
 ):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
     host = _RoundHost(alarm_rate=0.25, mask_truncated=mask_truncated)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         _log_round(host, _round(2))
@@ -244,11 +228,10 @@ def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episo
 @pytest.mark.parametrize("rate", [1.0, -0.1])
 def test_a_truncation_alarm_rate_that_could_never_or_always_fire_is_refused(rate):
     with pytest.raises(ValueError, match="truncation_alarm_rate"):
-        AsyncTrainingConfig(truncation_alarm_rate=rate)
+        AsyncRolloutConfig(truncation_alarm_rate=rate)
 
 
-def test_the_truncation_alarm_off_logs_nothing(monkeypatch, caplog):
-    monkeypatch.setattr(rm, "gather_object", lambda values: list(values))
+def test_the_truncation_alarm_off_logs_nothing(caplog):
     host = _RoundHost(alarm_rate=None)
     with caplog.at_level(logging.WARNING, logger=rm.__name__):
         _log_round(host, _round(4))

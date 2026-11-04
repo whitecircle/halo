@@ -1,21 +1,7 @@
 #!/usr/bin/env python3
-"""Offline-baked VLM tokenization must equal what the runtime VLM path renders for the same row.
-
-The two paths exist so a run can skip tokenization at startup — the artifact is an OPTIMIZATION of
-the runtime render, so a row prepared offline must train on exactly the ids the untouched runtime
-path would produce from the same row with the same processor. Both sides here are the production
-entry points (``tokenize_vlm_dataset`` offline; ``create_vlm_processor`` + ``VLMDataCollator`` at
-runtime) driven over the same Arrow dataset: re-implementing either side would certify nothing, and
-the Arrow round-trip is load-bearing — it unions the content-parts struct over the split, so a text
-part gains a null ``image`` key as soon as any row anywhere carries an image.
-
-Image rows have no baked form to compare against: the stored schema holds four processor keys, and
-every current VLM processor also emits ``mm_token_type_ids``, so the offline path refuses image rows
-by design. What must hold there is that the refusal is REACHED — the row's images have to be
-extracted by the same extractor the runtime uses, not by a vision scan that aborts the map first.
-
-Run: pytest tests/cpu/data/test_vlm_render_equivalence.py
-"""
+"""Offline-baked VLM tokenization equals what the runtime VLM path renders for the same row, over one Arrow dataset:
+any image row gives every text part a null ``image`` key. Image rows have no baked form, since every VLM
+processor emits ``mm_token_type_ids``, so they must reach the schema refusal."""
 
 import base64
 import io
@@ -25,11 +11,10 @@ import pytest
 from datasets import Dataset, Features, Value
 from PIL import Image
 
-from src.data.collators.vlm import VLMDataCollator
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import tokenize_vlm_dataset
-from src.data.pipeline.row_processors import create_vlm_processor
-from src.data.pipeline.vlm_dataset import _vlm_extra_columns, vlm_map_features
+from halo.data.collators.vlm import VLMDataCollator
+from halo.data.pipeline.vlm_rows import _VLM_SIGNATURE_COLUMNS, build_vlm_row_processor, vlm_map_features
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_VL_2B
 from tests.common.tokenizers import load_cached_processor
 
@@ -39,8 +24,8 @@ PROCESSORS = [(name, PINNED_REVISIONS[name]) for name in (QWEN2_5_VL_3B, QWEN3_V
 
 MAX_LENGTH = 8192
 
-# A conversation column whose content parts declare the image key every part of a mixed dataset
-# carries after the Arrow round-trip — text parts included, where it is null.
+# A conversation column whose content parts declare the image key every part of a mixed dataset carries after the Arrow
+# round-trip, null on text parts.
 _UNIONED_CONVERSATION_FEATURES = Features(
     {
         "conversation": [
@@ -192,23 +177,19 @@ def _preprocessing_config(images_field: str | None) -> PreprocessingConfig:
 def _runtime_batch(processor, dataset: Dataset, images_field: str | None) -> dict:
     """The batch an untouched runtime VLM SFT run builds from this dataset's single row."""
     mapped = dataset.map(
-        create_vlm_processor(conversation_field="conversation", images_field=images_field),
-        remove_columns=_vlm_extra_columns(dataset),
+        build_vlm_row_processor(conversation_field="conversation", images_field=images_field),
+        remove_columns=sorted(set(dataset.column_names) - set(_VLM_SIGNATURE_COLUMNS)),
         features=vlm_map_features(),
         load_from_cache_file=False,
     )
-    collator = VLMDataCollator(processor, processor.tokenizer, MAX_LENGTH)
+    collator = VLMDataCollator(processor, processor.tokenizer, MAX_LENGTH, train_on_completions_only=False)
     return collator([mapped[0]])
 
 
 @pytest.mark.parametrize("model_name,revision", PROCESSORS)
 @pytest.mark.parametrize("case", sorted(TEXT_DATASETS))
 def test_offline_bake_matches_runtime_render(model_name, revision, case):
-    """Same row, same processor: the baked ids and labels must equal the runtime render's.
-
-    A mismatch means a preprocessed dataset trains on a different tokenization than the config it
-    was prepared from renders at runtime — silently, since both artifacts are well-formed.
-    """
+    """A mismatch means a preprocessed dataset trains on another tokenization than its config renders, silently."""
     processor = load_cached_processor(model_name, revision=revision)
     dataset = TEXT_DATASETS[case]()
 
@@ -228,15 +209,8 @@ def test_offline_bake_matches_runtime_render(model_name, revision, case):
 @pytest.mark.parametrize("model_name,revision", PROCESSORS)
 @pytest.mark.parametrize("case", sorted(IMAGE_DATASETS))
 def test_image_rows_reach_the_schema_capability_refusal(model_name, revision, case):
-    """An image row must reach the stored-schema refusal, whatever shape it arrives in.
-
-    The refusal ("this family emits keys the artifact cannot store") is the offline path's only
-    defined outcome for an image row today, and it fires per row AFTER the images are extracted —
-    so it is reachable only if extraction handles every shape the runtime path handles. An
-    extractor keying on an ``image`` key's presence instead of the part TYPE trips over the null key
-    Arrow adds to text parts and aborts the whole map with a third-party ``AttributeError`` before
-    any refusal, turning a precise capability message into an opaque crash.
-    """
+    """An extractor keying on an ``image`` key's presence trips over Arrow's null key and aborts the map with an
+    ``AttributeError`` before the refusal."""
     processor = load_cached_processor(model_name, revision=revision)
     build_dataset, images_field = IMAGE_DATASETS[case]
 
@@ -247,12 +221,8 @@ def test_image_rows_reach_the_schema_capability_refusal(model_name, revision, ca
 @pytest.mark.parametrize("model_name,revision", PROCESSORS)
 @pytest.mark.parametrize("case", sorted(IMAGE_DATASETS))
 def test_image_rows_render_and_collate_at_runtime(model_name, revision, case):
-    """The runtime path must render every image shape into a batch whose vision tensors line up.
-
-    The counterpart to the refusal above: the shapes the artifact cannot store are exactly the ones
-    the runtime path does carry, so a regression there would leave image training with no path at
-    all. The expanded image placeholders are what pair the text with ``pixel_values``.
-    """
+    """The shapes the artifact cannot store are what the runtime carries; the expanded placeholders pair the text
+    with ``pixel_values``."""
     processor = load_cached_processor(model_name, revision=revision)
     build_dataset, images_field = IMAGE_DATASETS[case]
 

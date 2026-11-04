@@ -12,8 +12,8 @@ from accelerate import PartialState
 from datasets import Dataset
 from torch import nn
 
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.grpo.reference_cache import ReferenceScoreCache
+from halo.trainers.grpo.offline.reference_cache import ReferenceScoreCache
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 
 PartialState()
@@ -46,7 +46,7 @@ def _ranked_sweep(rank: int, siblings: int, mode: str, root: str, shared: bool) 
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = nn.Linear(1, 1)
     trainer.ref_model = None
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=mode == "cp", is_pp_mode=mode == "pp")
     trainer.cp_config = SimpleNamespace(cp_size=siblings)
     if not shared:
@@ -72,8 +72,8 @@ def _ranked_sweep(rank: int, siblings: int, mode: str, root: str, shared: bool) 
         row_ids = batch["row_id"].tolist()
         calls.append(row_ids)
         if mode == "native":
-            # Exercise the production per-row backbone loop, as FA4/FSDP/EP does. Equalizing
-            # only batch count strands one peer when the final actual batch has one row.
+            # The production per-row backbone loop, as under FA4/FSDP/EP. Equalizing only batch count strands one peer
+            # when the final batch has one row.
             ids = torch.ones(len(row_ids), 4, dtype=torch.int64)
             mask = torch.tensor([[1] + [1] * (row % 3 + 1) + [0] * (2 - row % 3) for row in row_ids])
             trainer._dense_last_hidden_state(trainer.model, ids, mask, 3)
@@ -109,8 +109,8 @@ def _ranked_sweep(rank: int, siblings: int, mode: str, root: str, shared: bool) 
     if actual_batches < required_batches:
         assert calls[-1] == calls[actual_batches - 1], "the shorter shard did not replay its final batch"
 
-    # Reverse the ownership labels at the actual writer seam; neither row count nor finite
-    # scores can expose the bug, but the row-length validator and numeric oracle must.
+    # Reverse the ownership labels at the writer seam. Row counts and finite scores can't expose this; the row-length
+    # validator and numeric oracle must.
     original_collect = ReferenceScoreCache.collect_batch
 
     def reverse_dp_labels(cache, rows, representatives):
@@ -145,14 +145,14 @@ def test_node_local_cache_writers_receive_the_same_ordered_scores(tmp_path):
 
 
 class _ScoringFailure(RuntimeError):
-    """An original forward failure must escape, not become a deferred local-write verdict."""
+    """An original forward failure must escape instead of becoming a deferred local-write verdict."""
 
 
 def _failure_trainer(output_dir):
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = nn.Linear(1, 1).train()
     trainer.ref_model = None
-    trainer._pp_runtime = None
+    trainer._pp_runner = None
     trainer.parallelism_config = SimpleNamespace(is_cp_mode=False, is_pp_mode=False)
     trainer.args = SimpleNamespace(per_device_train_batch_size=1, output_dir=output_dir)
     trainer.dp_shard_geometry = lambda: (1, 0)
@@ -230,8 +230,8 @@ def _ranked_forward_failure(rank, root):
 
 
 def test_a_rank_failing_before_forward_collectives_stops_peers_without_the_pg_timeout(tmp_path):
-    """The failing rank raises its own forward error at once, entering no consensus collective first, so
-    its exit (not the 30-second watchdog) is what releases the peer waiting in the forward's collective."""
+    """The failing rank raises at once with no consensus collective first, so its exit, never the 30-second watchdog,
+    releases the peer waiting in the forward's collective."""
     run_gloo_ranks(_ranked_forward_failure, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
     failed, peer = ((tmp_path / f"forward_failure_{rank}.txt").read_text() for rank in range(2))
     assert failed == "_ScoringFailure: injected reference forward OOM", failed
@@ -254,8 +254,7 @@ def _empty_replica_sweep(rank: int, root: str) -> None:
 
 
 def test_a_replica_with_no_rows_refuses_the_sweep_on_every_rank(tmp_path):
-    """Rank 0 has nothing to score while rank 1 heads into the batch-count all-reduce; a raise on rank 0
-    alone parks rank 1 there until the group timeout."""
+    """Rank 1 heads into the batch-count all-reduce; a raise on rank 0 alone parks it there until the group timeout."""
     run_gloo_ranks(_empty_replica_sweep, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=90))
     for rank in range(2):
         path = tmp_path / f"result_{rank}.txt"

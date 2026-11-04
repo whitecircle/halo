@@ -1,53 +1,36 @@
 #!/usr/bin/env python
-"""CPU tests for unproductive turns: recoverable and priced, never a silent episode death.
+"""Unproductive turns are recoverable and priced, never a silent episode death. A cut turn, or one with neither a
+call nor visible content, would otherwise finalize as a natural termination; the episode nudges and retries
+within ``max_turns``, and the turn exhausting the cap pays the overflow price."""
 
-When the engine cuts a turn short before it produced anything — at its token cap
-(``finish_reason == "length"``) or by aborting it (``"abort"``) — the text is a fragment. Finalizing
-it as a plain-text answer ends the episode and books the failure as a NATURAL termination —
-invisible in every health metric. Instead the episode nudges (in its own protocol's words) and
-retries within ``max_turns``; the trainer never rewards the fragment. A turn the model ends with
-neither a tool call nor visible content recovers the same way, under the same cap, and is never
-rewarded for the same reason. A recovered turn is unpriced by default and pays ``length_cutoff_penalty``
-where a protocol configures it; the turn that exhausts the recovery cap pays the overflow price instead.
-
-Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
-"""
-
-import importlib
 import json
-import pkgutil
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
-import src.environments.envs
-from src.environments.base import (
-    CUT_TOOL_CALLS_KEY,
-    REWARD_COMPONENTS_KEY,
-    TOOL_CALL_COUNTS_KEY,
-    BaseEnvironment,
-    Message,
-    Trajectory,
-    engine_view,
-)
-from src.environments.envs.protocols.native import NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment
-from src.environments.episode import TurnGeneration, step_context_from_generation
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
-from src.trainers.grpo.environmental import BatchBuildFence, DistributedAsyncEnvironmentalGRPOTrainer
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode import TurnGeneration, step_context_from_generation
+from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.messages import Message, Trajectory, engine_view
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.tasks.qa import ExamQAEnvironment
+from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
+from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
-def _environment_classes(cls: type = BaseEnvironment) -> list[type]:
+def _environment_classes(cls: type = EnvironmentBase) -> list[type]:
     found = []
     for sub in cls.__subclasses__():
         found += [sub, *_environment_classes(sub)]
     return found
 
 
-for _module in pkgutil.walk_packages(src.environments.envs.__path__, f"{src.environments.envs.__name__}."):
-    importlib.import_module(_module.name)
 _NUDGES = {
     f"{cls.__name__}.{name}": getattr(cls, name)
     for cls in _environment_classes()
@@ -124,8 +107,7 @@ def test_length_cutoff_keeps_the_episode_alive_and_is_unpriced():
 
 
 def test_react_length_cutoff_keeps_the_episode_alive_and_is_unpriced():
-    """The ReAct protocol recovers a cut-off turn too, instead of hinting at a format the model got
-    right — an unrecoverable turn there is indistinguishable in the logs from a format failure."""
+    """An unrecoverable turn there would be indistinguishable in the logs from a format failure."""
     env = _make_react_env()
     ids, _ = env.reset(["task"], [{}])
     eid = ids[0]
@@ -144,9 +126,7 @@ def test_react_length_cutoff_keeps_the_episode_alive_and_is_unpriced():
 
 @pytest.mark.parametrize("finish_reason", ENGINE_CUT_FINISH_REASONS)
 def test_every_engine_cut_reason_takes_the_recovery_path(finish_reason):
-    """An aborted turn is as unfinished as a length-capped one, and the recovery is what keeps it out
-    of the grade: flagging the message alone still lets the fragment terminate the episode as the
-    model's final answer."""
+    """Flagging the message alone still lets the fragment terminate the episode as the final answer."""
     env = _make_env()
     eid = _reset(env)
     step = env.step([eid], ["a fragment"], [{"finish_reason": finish_reason}])[0]
@@ -169,11 +149,9 @@ def _generation(finish_reason: str) -> TurnGeneration:
 
 @pytest.mark.parametrize("finish_reason", ENGINE_CUT_FINISH_REASONS)
 def test_a_cut_turn_executes_nothing_the_parser_salvaged(finish_reason):
-    """A turn cut inside its tool call reaches the driver with the call's name and empty arguments.
-    Executed, it books a malformed call the model never finished, and because the label says the
-    turn completed, the fragment trains as a normal row and the model retries into the same cap. A turn
-    that hit its token cap is told its call ran past the length limit (the plain nudge's "before you made
-    a tool call" is untrue there); an abort names no cause, so it keeps the plain nudge."""
+    """A turn cut inside its call reaches the driver with the call's name and empty arguments; executed, it books a
+    malformed call and trains as a normal row. A cap cut is told its call ran past the limit; an abort names no
+    cause."""
     ctx = step_context_from_generation({}, _generation(finish_reason))
     assert "tool_calls" not in ctx
 
@@ -208,9 +186,8 @@ def test_a_completed_turn_keeps_its_tool_calls():
 
 @pytest.mark.parametrize("carry_reasoning", [False, True])
 def test_a_cut_turn_keeps_the_calls_it_was_writing_for_the_judge_alone(carry_reasoning):
-    """What a turn cut inside its call wrote stays on its message, where a judge's view reads it, and
-    nowhere else: the call never runs or spends budget, and the conversation the engine is told on the next
-    turn, like the training render, is byte for byte the one the turn renders without it."""
+    """What a cut turn wrote stays on its message for a judge's view: it never runs or spends budget, and the next
+    turn's conversation is byte for byte the one without it."""
     ran = []
     registry = NativeToolRegistry()
     registry.register(
@@ -263,8 +240,8 @@ def test_react_every_engine_cut_reason_takes_the_recovery_path(finish_reason):
     "text", ['Thought: ready\nAction: echo(text="hi")', "Thought: done\nFinal Answer: 42"], ids=["action", "answer"]
 )
 def test_react_cut_turn_executes_nothing_the_parser_salvaged(text):
-    """The base flags every cut turn untrainable, so an Action executed or a Final Answer graded off
-    a cut turn earns a reward on the one turn the trainer never rewards."""
+    """The base flags every cut turn untrainable, so an Action run or Final Answer graded off one rewards the turn
+    the trainer never rewards."""
     env = _make_react_env()
     eid = _reset(env)
     step = env.step([eid], [text], [{"finish_reason": "length"}])[0]
@@ -370,9 +347,8 @@ def test_a_completed_text_turn_still_ends_the_episode():
 
 @pytest.mark.parametrize("action", ["", "  \n"], ids=["empty", "whitespace"])
 def test_an_empty_turn_is_recovered_like_a_cut_and_flagged_untrainable(action):
-    """The model closed its reasoning and stopped with nothing visible and no call. Finalized, that is a
-    natural termination graded on nothing; recovered, the stop is a turn the trainer trains only on a
-    negative advantage — rewarded, a recovering episode would reinforce it."""
+    """Finalized, the stop is a natural termination graded on nothing; recovered, the trainer trains it only on a
+    negative advantage."""
     env = _make_env()
     eid = _reset(env)
     step = env.step([eid], [action], [{"finish_reason": "stop", "reasoning": "a thought that reached no plan"}])[0]
@@ -418,8 +394,8 @@ def test_a_recovered_empty_turn_pays_the_cut_price():
     ids=["empty", "cut"],
 )
 def test_an_unproductive_last_turn_pays_the_overflow_price_and_not_the_cut_price(action, ctx):
-    """No turn is left to retry into, so the episode ends truncated at once: no dangling nudge, and the
-    turn is not booked as recovered — recovered and overflow would otherwise both be charged."""
+    """No turn is left to retry into, so the episode ends truncated at once, and the turn is not also booked as
+    recovered."""
     env = _make_env(length_cutoff_penalty=0.05, turn_overflow_penalty=0.1, max_turns=1)
     eid = _reset(env)
     step = env.step([eid], [action], [ctx])[0]
@@ -505,12 +481,8 @@ def test_partially_valid_turn_is_not_flagged():
 
 
 def test_a_tools_own_not_found_message_is_not_a_model_rejection():
-    """The rejection channel is structural, never the error text.
-
-    A tool's ``error`` is free text its backend controls — the MCP client re-raises the SERVER's
-    message verbatim — so a server answering "Tool not found: x" describes a REAL tool failing. Read
-    as the env's own invented-tool rejection it would silently drop the turn from training and book a
-    broken tool as a model mistake."""
+    """A tool's ``error`` is free text its backend controls, so a server answering Tool not found describes a real
+    tool failing. The rejection channel is structural."""
     env = _make_env()
 
     def _server_error(**_kwargs):
@@ -532,9 +504,8 @@ def _turns_trainer():
     trainer._rollout_routing_replay = False
     trainer._batch_errors = BatchBuildFence()
     trainer._warned_once = set()
-    trainer._rollout_template_kwargs = {}
+    trainer.async_config = SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
     trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = None
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer.eos_token_id = 2
@@ -558,15 +529,12 @@ def test_trainer_tags_every_unproductive_turn_row_negative_only():
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
     assert [r.completion_ids.tolist() for r in rows] == [[1, 2, 3], [6], [7, 8], [4, 5]]
     assert [r.negative_only for r in rows] == [True, True, True, False]
-    assert all(r.completion_mask.all() for r in rows)
+    assert all(r.loss_mask.all() for r in rows)
 
 
 def _flat_render(msgs, add_generation_prompt, _include_thinking):
-    """A minimal prefix-monotone chat template: ``<role> <content chars> <end>`` per message.
-
-    Stands in for a real tokenizer so the span locator anchors every boundary by construction and the
-    assertions below are about the loss mask alone.
-    """
+    """A minimal prefix-monotone chat template, so the span locator anchors every boundary and the assertions are
+    about the loss mask alone."""
     ids = []
     for m in msgs:
         ids.append(_ROLE_TOKENS[m.role])
@@ -580,9 +548,8 @@ def _flat_render(msgs, add_generation_prompt, _include_thinking):
 def _render_trainer():
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._batch_errors = BatchBuildFence()
-    trainer._rollout_template_kwargs = {}
+    trainer.async_config = SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
     trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = None
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer._tokenizer = type("T", (), {"name_or_path": "fake"})()
@@ -612,13 +579,9 @@ def _two_turn_trajectory(first_truncated: bool = False, first_empty: bool = Fals
 
 @pytest.mark.parametrize("first", [{"first_truncated": True}, {"first_empty": True}], ids=["cut", "empty"])
 def test_whole_trajectory_render_does_not_weight_an_unproductive_turn(first):
-    """The re-tokenized path never weights an untrainable turn, at any advantage.
-
-    It is the fallback whenever the engine returned no sampled ids, and it is the only path at
-    ``train_on_sampled_tokens: false`` — weighting the fragment there reinforces exactly the runaway
-    the exclusion exists to suppress, and its re-render is closed by template tokens the engine never
-    sampled, which not even a negative advantage may train.
-    """
+    """The fallback when the engine returned no ids, and the only path at ``train_on_sampled_tokens: false``; its
+    re-render is closed by template tokens the engine never sampled, which not even a negative advantage may
+    train."""
     trained = _trained_tokens(_render_trainer(), _two_turn_trajectory(**first))
 
     assert ord("a") not in trained  # the unproductive turn's own tokens carry no loss
@@ -627,7 +590,7 @@ def test_whole_trajectory_render_does_not_weight_an_unproductive_turn(first):
 
 def test_whole_trajectory_row_over_the_train_row_cap_is_one_masked_row():
     trainer = _render_trainer()
-    trainer._max_train_row_tokens = 5
+    trainer.async_config.max_train_row_tokens = 5
     _prompt, completion_ids, mask = trainer._tokenize_trajectory(
         type("R", (), {"trajectory": _two_turn_trajectory()})()
     )
@@ -660,8 +623,8 @@ def test_whole_trajectory_render_of_an_all_cut_episode_is_one_masked_row():
 
 
 def test_an_all_unproductive_episode_trains_only_negative_only_rows():
-    """Every turn untrainable: the rows are all tagged, and the whole-trajectory render — which weights
-    no untrainable span but would re-render the fragment — is never taken. Not a batch error."""
+    """Every turn untrainable: the rows are all tagged, and the whole-trajectory render, which would re-render the
+    fragment, is never taken. No batch error."""
     trainer = _turns_trainer()
     trainer._tokenize_trajectory = lambda result: pytest.fail("captured untrainable turns must not re-render")
     traj = Trajectory(
@@ -693,7 +656,7 @@ def test_all_unproductive_turns_without_ids_train_a_zero_weight_row():
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
 
     assert len(rows) == 1 and not rows[0].negative_only
-    assert rows[0].completion_mask.sum().item() == 0
+    assert rows[0].loss_mask.sum().item() == 0
     assert trainer._batch_errors.reason is None
 
 
@@ -809,7 +772,7 @@ def test_recovery_cap_of_zero_ends_the_episode_at_the_first_cut_and_negative_is_
     eid = _reset(env)
     step = env.step([eid], ["a fragment"], [{"finish_reason": "length"}])[0]
     assert step.done and step.truncated
-    with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be >= 0"):
+    with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be an integer >= 0"):
         _make_env(max_length_cutoff_recoveries=-1)
 
 

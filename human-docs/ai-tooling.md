@@ -2,7 +2,7 @@
 
 The training images ship with skills that teach coding agents this codebase's
 configs, limits, and footguns. [Claude Code](https://github.com/anthropics/claude-code)
-itself is not installed by default — build with
+itself is not installed by default. Build with
 `--build-arg INSTALL_CLAUDE_CODE=1` to bake it in, or install it in a running
 container with `curl -fsSL https://claude.ai/install.sh | bash`.
 
@@ -14,22 +14,22 @@ From a shell inside the container (bring your own subscription or API key):
 cd /workspace && claude
 ```
 
-Describe the task. Four skills — `parallelism`, `optimize`, `debug`, `docs` — fire on
+Describe the task. Four skills (`parallelism`, `optimize`, `debug`, `docs`) fire on
 their own when relevant. The other six are user-invoked only: name them with
 `/launch`, `/checkpoints`, `/data`, `/add-model`, `/rl-setup`, `/write-tests`.
 
 | Skill | What it does |
 | --- | --- |
-| `launch` | assembles and runs a training/test job — image, mounts, GPU count, detach |
-| `parallelism` | produces a *valid* EP/CP/TP/ETP layout for your model and hardware, and rejects invalid ones before they cost a run |
-| `optimize` | recommends throughput/memory levers for a config — and tells you which famous levers don't help at Halo's MoE shapes |
+| `launch` | assembles and runs a training/test job: image, mounts, GPU count, detach |
+| `parallelism` | produces a *valid* EP/CP/TP/ETP/PP layout for your model and hardware, and rejects invalid ones before they cost a run |
+| `optimize` | recommends throughput/memory levers for a config, and names the ones that don't help at Halo's MoE shapes |
 | `debug` | routes a hang, OOM, NaN, or NCCL/DeepEP fault to the right helper and fix |
 | `checkpoints` | merging shards and adapters, converting, resuming, loading into vLLM |
 | `data` | dataset format per method, and offline tokenize/pack/shard when worth it |
 | `rl-setup` | wires up the online RL methods: rollout container, NCCL weight sync, environments |
-| `add-model` | integrates a new model family (EP wrapper, registries, tests) |
+| `add-model` | integrates a new model family (EP layer, registries, tests) |
 | `write-tests` | writes CPU/GPU tests that actually fail when behavior breaks |
-| `docs` | maintains both doc trees — `agent-docs/` and this guide — under the style charter |
+| `docs` | maintains `agent-docs/`, this guide and `skills/` under the style charter |
 
 ## What the agent reads
 

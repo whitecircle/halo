@@ -1,21 +1,14 @@
 #!/usr/bin/env python
-"""The shared fixed test batch must not move with the calendar.
-
-gpt-oss's harmony template stamps ``strftime_now("%Y-%m-%d")`` into its system message, so an
-unpinned :func:`tests.common.ep_reference.fixed_chat_batch` tokenizes to different ids — and a
-different loss — on every new day, silently re-deriving the EP/TP correctness thresholds that are
-measured against it (at 2025-01-01 the rotated-expert control drops below ``control_min_loss_shift``).
-``fixed_chat_batch`` shadows the template's clock with :data:`CHAT_TEMPLATE_NOW`; these tests fail
-the moment that pin stops reaching the renderer.
-
-Run: python tests/cpu/conventions/test_fixed_batch_date_pin.py
-"""
+"""The shared fixed test batch and the synthetic datasets must not move with the calendar. gpt-oss's template stamps
+``strftime_now`` into its system message, so an unpinned render changes ids and loss daily and re-derives the
+EP/TP thresholds measured against it."""
 
 from datetime import datetime
 
 import pytest
 
-from tests.common.ep_reference import CHAT_TEMPLATE_NOW, fixed_chat_batch
+from tests.common.datasets import CHAT_TEMPLATE_NOW, create_preference_dataset, create_sft_dataset
+from tests.common.ep_reference import fixed_chat_batch
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -59,6 +52,19 @@ def test_pin_covers_other_date_formats():
     assert f"Date: {expected}" in _batch_text(tokenizer), (
         f"a template asking for '%d %B %Y' did not render {expected!r}: the pin must be a clock the "
         "template formats itself, not one pre-formatted date string."
+    )
+
+
+@pytest.mark.parametrize(
+    ("generator", "field"),
+    [(create_preference_dataset, "prompt"), (create_sft_dataset, "text")],
+    ids=["preference", "sft"],
+)
+def test_synthetic_datasets_carry_the_pinned_date(generator, field):
+    text = generator(4, _tokenizer(GPT_OSS_20B), seed=42)[0][field]
+    assert f"Current date: {PINNED_DATE}" in text, (
+        f"{generator.__name__} does not render the pinned date {PINNED_DATE} through gpt-oss's template. "
+        f"Rendered: {text[:300]!r}"
     )
 
 

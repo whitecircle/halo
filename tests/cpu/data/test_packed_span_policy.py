@@ -1,31 +1,20 @@
 #!/usr/bin/env python
-"""CPU tests: the packed routes and the offline bake resolve completion spans under ONE named policy.
-
-The packed collator, the padding-free collator and the offline label bake all mask assistant
-completions. They agree on every row that carries a turn terminator; the row that does not is where
-they diverge — the packed runtime collators add an end-of-sequence fallback to the collator policy,
-so baking the padded policy into a packed artifact makes the SAME YAML train different tokens
-depending on whether its dataset was pre-processed.
-
-:data:`PACKED_SPAN_POLICY` names that policy, both packed collators take it, and the bake takes
-it exactly when the artifact it writes will be packed — which is exactly when the packing collator is
-the one that would have masked those rows at runtime.
-
-Run: python tests/cpu/data/test_packed_span_policy.py  (or pytest)
-"""
+"""The packed routes and the offline bake resolve completion spans under one named policy,
+:data:`PACKED_SPAN_POLICY`. The packed collators add an end-of-sequence fallback for a row with no terminator, so
+baking the padded policy into a packed artifact makes one YAML train different tokens when pre-processed."""
 
 import pytest
 import torch
 from datasets import Dataset
 
-from src.data.collators.packing import (
+from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from src.data.pipeline import preprocessing as preprocessing_mod
-from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
-from src.data.pipeline.preprocessing import _completion_only_labels, tokenize_dataset
-from src.data.spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, mask_batch_to_completion_spans
+from halo.data.preprocessed import tokenization as tokenization_mod
+from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.tokenization import _completion_only_labels, tokenize_dataset
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -42,8 +31,8 @@ TERMINATED_ROWS = [
     pytest.param([20, RESP_1, RESP_2, 30, EOS, 40], id="trailing-context"),
 ]
 
-# The divergent shape: a marker whose turn has no terminator anywhere in the sequence —
-# a chunk whose terminator landed in the next one, or a final turn the length filter clipped.
+# The divergent shape, a marker with no terminator anywhere in the sequence: a chunk whose terminator landed in the
+# next one, or a final turn the length filter clipped.
 UNTERMINATED_ROW = [20, RESP_1, RESP_2, 30, 31]
 
 
@@ -68,19 +57,18 @@ def _isolated_datasets_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
 
 
-def _bake(input_ids: list[int], span_policy) -> list[int]:
+def _bake(input_ids: list[int], **span_policy) -> list[int]:
     return _completion_only_labels(
         input_ids,
         _Tokenizer(),
         assistant_template="<resp>",
         response_token_ids=TEMPLATE_IDS,
         eos_token_ids=frozenset({EOS}),
-        span_policy=span_policy,
+        **span_policy,
     )
 
 
 def _packed_collator_labels(input_ids: list[int]) -> list[int]:
-    """What the packed SFT collator trains for one document."""
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         tokenizer=_Tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
@@ -95,19 +83,17 @@ def _flattened_collator_labels(input_ids: list[int]) -> list[int]:
         tokenizer=_Tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
         eos_token_ids=frozenset({EOS}),
-        return_flash_attn_kwargs=True,
     )
     return collator([{"input_ids": list(input_ids)}])["labels"][0].tolist()
 
 
 def _padded_route_labels(input_ids: list[int]) -> list[int]:
-    """The batch masker under its default (padded) policy — the route that must NOT gain a fallback."""
+    """The batch masker under its default (padded) policy, the route that must not gain a fallback."""
     ids = torch.tensor([input_ids])
     batch = mask_batch_to_completion_spans(
         {"input_ids": ids, "labels": ids.clone()},
         TEMPLATE_IDS,
         frozenset({EOS}),
-        ignore_index=IGNORE,
         train_on_last_assistant_only=False,
         response_prompt_template="<resp>",
         tokenizer=None,
@@ -117,54 +103,49 @@ def _padded_route_labels(input_ids: list[int]) -> list[int]:
 
 @pytest.mark.parametrize("input_ids", TERMINATED_ROWS)
 def test_every_route_masks_a_terminated_row_identically(input_ids):
-    """Equivalence where the policies must agree: naming the packed policy changes nothing for a row
-    whose turns all close, on any of the four routes."""
     expected = _padded_route_labels(input_ids)
 
     assert _packed_collator_labels(input_ids) == expected
     assert _flattened_collator_labels(input_ids) == expected
-    assert _bake(input_ids, COLLATOR_SPAN_POLICY) == expected
-    assert _bake(input_ids, PACKED_SPAN_POLICY) == expected
+    assert _bake(input_ids, span_policy=PADDED_SPAN_POLICY) == expected
+    assert _bake(input_ids, span_policy=PACKED_SPAN_POLICY) == expected
 
 
 def test_the_packed_bake_and_the_packed_collators_agree_on_a_terminator_less_turn():
-    """The divergent row: a packed artifact's baked labels equal what the packed
-    collator would have produced for the same row — the turn trains to the sequence end instead of
-    dropping out of the loss on one of the two paths."""
+    """A packed artifact's baked labels equal what the packed collator would produce: the turn trains to the
+    sequence end on both paths."""
     packed_runtime = _packed_collator_labels(UNTERMINATED_ROW)
 
     assert packed_runtime == [IGNORE, RESP_1, RESP_2, 30, 31], packed_runtime
-    assert _bake(UNTERMINATED_ROW, PACKED_SPAN_POLICY) == packed_runtime
+    assert _bake(UNTERMINATED_ROW, span_policy=PACKED_SPAN_POLICY) == packed_runtime
     assert _flattened_collator_labels(UNTERMINATED_ROW) == packed_runtime
 
 
 def test_the_padded_route_still_drops_a_terminator_less_turn():
-    """Anti-vacuity, and the reason the fallback cannot simply become universal: on a padded row the
-    sequence end is pad, so the padded route masks the turn out rather than training to it. The two
-    policies genuinely differ on this row — which is what makes the agreement above load-bearing."""
+    """On a padded row the sequence end is pad, so the padded route masks the turn out. The fallback cannot become
+    universal."""
     padded = _padded_route_labels(UNTERMINATED_ROW)
 
     assert padded == [IGNORE] * len(UNTERMINATED_ROW), padded
-    assert _bake(UNTERMINATED_ROW, COLLATOR_SPAN_POLICY) == padded
-    assert _bake(UNTERMINATED_ROW, None) == padded, "the bake's default stays the padded policy"
+    assert _bake(UNTERMINATED_ROW, span_policy=PADDED_SPAN_POLICY) == padded
+    assert _bake(UNTERMINATED_ROW) == padded, "the bake's default stays the padded policy"
 
 
 @pytest.mark.parametrize("pack_sequences", [False, True], ids=["unpacked", "packed"])
 def test_the_bake_selects_the_policy_its_artifact_will_be_collated_under(
     monkeypatch, pack_sequences, _isolated_datasets_cache
 ):
-    """Wiring: ``tokenize_dataset`` hands the bake the policy of the collator that will read the
-    artifact. Baking one policy into an artifact collated under the other is the divergence itself."""
+    """``tokenize_dataset`` hands the bake the policy of the collator that will read the artifact."""
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
 
     seen = []
-    real_bake = preprocessing_mod._completion_only_labels
+    real_bake = tokenization_mod._completion_only_labels
 
     def recording(*args, span_policy=None, **kwargs):
         seen.append(span_policy)
         return real_bake(*args, span_policy=span_policy, **kwargs)
 
-    monkeypatch.setattr(preprocessing_mod, "_completion_only_labels", recording)
+    monkeypatch.setattr(tokenization_mod, "_completion_only_labels", recording)
 
     dataset = Dataset.from_dict(
         {
@@ -188,7 +169,7 @@ def test_the_bake_selects_the_policy_its_artifact_will_be_collated_under(
 
     tokenize_dataset(dataset, tokenizer, config, split_name=f"pack_{pack_sequences}")
 
-    expected = PACKED_SPAN_POLICY if pack_sequences else COLLATOR_SPAN_POLICY
+    expected = PACKED_SPAN_POLICY if pack_sequences else PADDED_SPAN_POLICY
     assert seen and all(policy == expected for policy in seen), f"baked under {seen}, expected {expected}"
 
 

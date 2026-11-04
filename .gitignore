@@ -23,15 +23,15 @@ checkpoints/*
 
 # Distribution / packaging
 .Python
-build/
+/build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
-parts/
+/parts/
 sdist/
 var/
 wheels/
@@ -60,13 +60,9 @@ coverage.xml
 .pytest_cache/
 cover/
 .gradio/
-.mergekitenv/
 
 # Logs
 *.log
-
-# Docs build output
-agent-docs/_build/
 
 # Jupyter Notebook
 .ipynb_checkpoints
@@ -77,16 +73,14 @@ ipython_config.py
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
-.hfcache/
-env/
+/env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-
-# Rendered site output
-/site
 
 # mypy
 .mypy_cache/
@@ -105,15 +99,13 @@ cython_debug/
 # PyCharm
 .idea/
 
-models/
-!src/models/
-!agent-docs/models/
-!tests/cpu/models/
+/models/
 
 # Run output (training scripts and profiling write these at the repo root)
-out/
-performance_logs/
+/out/
 trainer_output/
+# Equivalence harness records (make verify-move / verify-artifacts), one per head commit
+/evidence/
 
 # Local-only signing keys / credentials (never commit)
 keys/

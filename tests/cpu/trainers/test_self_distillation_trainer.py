@@ -1,32 +1,24 @@
 #!/usr/bin/env python
-"""The SDPG self-distillation trainer's objective (arXiv:2606.04036) on stub models, and its
-vision-feature reuse gate.
+"""The SDPG self-distillation trainer's objective (arXiv:2606.04036) on stub models, and its vision-feature reuse gate.
+``L = L_sft + beta(k) * L_OPD + alpha * L_ref``, each term a per-sample token mean.
+The stub scores a token by its position and sequence length, so a misaligned branch pairing lands on another number."""
 
-``L = L_sft + beta(k) * L_OPD + alpha * L_ref``: each term a per-sample token mean, SFT and (under
-``confidence_weight_opd``) OPD weighted per sample by the confidence weights, OPD over the response
-tokens both branches supervise less EOS/stop under ``opd_exclude_eos``, and the teacher reading its
-own longer, hinted sequence. The oracle below pairs each branch's response positions by hand; the
-stub model scores a token by its position and its sequence's length, so the teacher's rows differ
-from the student's and a misaligned pairing lands on a different number.
-
-The divergences themselves are covered by test_distillation_losses.py.
-
-Run: python tests/cpu/trainers/test_self_distillation_trainer.py
-"""
-
-import logging
 import types
-from unittest.mock import patch
+from unittest import mock
 
 import pytest
 import torch
 from torch import nn
 from torch.nn.functional import cross_entropy
 
-import src.trainers.distillation.self_distillation as sd
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.trainers.distillation.losses import reverse_kl_loss, unnormalized_kl_loss
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+import halo.kernels.logprobs as logprob_kernels
+from halo.configs.distillation import SDPGArguments
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers import world_metrics
+from halo.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 VOCAB = 13
 EOS = 2
@@ -54,8 +46,7 @@ def _branch(rows, hinted):
 
 
 class _PositionTable(nn.Module):
-    """Logits from a random table keyed by token, position and sequence length, so the two branches
-    score a shared response token differently."""
+    """Keyed by token, position and sequence length, so the two branches score a shared response token differently."""
 
     def __init__(self, seed: int):
         super().__init__()
@@ -71,8 +62,7 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer = object.__new__(DistributedSelfDistillationTrainer)
     trainer.model = _PositionTable(seed=0)
     trainer._reference_model = _PositionTable(seed=1)
-    trainer.sdpg_beta_base, trainer.sdpg_beta_warmup_steps, trainer.sdpg_beta_decay_steps = BETA, 0, 0
-    trainer.sdpg_temperature = TEMPERATURE
+    trainer.sdpg = SDPGArguments(sdpg_beta_base=BETA, sdpg_temperature=TEMPERATURE)
     trainer.sdpg_loss_fn = reverse_kl_loss
     trainer.reference_kl_coef = reference_kl_coef
     trainer.reference_kl_loss_fn = unnormalized_kl_loss
@@ -83,16 +73,18 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer.state = types.SimpleNamespace(global_step=4, max_steps=10)
     trainer._warned_empty_labels = True
     trainer._vision_reuse_setup, trainer._vision_reuse_active = True, False
+    trainer.stored = []
+    mixin_store = trainer.store_metrics
+    trainer.store_metrics = lambda metrics, train_eval="train", rows=1: (
+        trainer.stored.append((metrics, train_eval, rows)),
+        mixin_store(metrics, train_eval, rows),
+    )
     return trainer
 
 
 def _stored(trainer, train_eval: str = "train") -> dict:
-    """The latest value of each metric in StoredMetricsMixin's buffer, the one ``log`` drains.
-
-    Read through the mixin rather than a stub, so a trainer that stops storing through it (or stops
-    inheriting it) fails here. Each entry is ``(value, rows)``.
-    """
-    return {key: entries[-1][0] for key, entries in trainer._stored_metrics[train_eval].items()}
+    """The latest value of each metric stored. A trainer that stops storing through the mixin fails here."""
+    return {key: value for metrics, mode, _ in trainer.stored if mode == train_eval for key, value in metrics.items()}
 
 
 def _inputs():
@@ -121,8 +113,7 @@ def _response_rows(logits, labels, exclude_eos):
 
 
 def _oracle(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_coef=ALPHA, real_rows=None):
-    """``(loss, sft, opd, ref)`` from per-row loops over the hand-paired response positions of the
-    batch's first ``real_rows`` rows."""
+    """``(loss, sft, opd, ref)`` from per-row loops over the hand-paired response positions of ``real_rows`` rows."""
     model, reference = _PositionTable(seed=0), _PositionTable(seed=1)
     inputs = _inputs()
     with torch.no_grad():
@@ -166,13 +157,12 @@ def test_the_loss_is_sft_plus_scheduled_opd_plus_the_reference_anchor(confidence
     assert all(not value.requires_grad for value in stored.values() if torch.is_tensor(value)), (
         "metrics must be detached"
     )
-    train_rows = {rows for entries in trainer._stored_metrics["train"].values() for _, rows in entries}
+    train_rows = {rows for _, mode, rows in trainer.stored if mode == "train"}
     assert train_rows == {1}, "a train micro-batch weighs 1, whatever its row count"
 
 
 def test_an_eval_split_s_padding_rows_leave_every_term():
-    """Row 2 pads the eval split's final round: each per-sample mean (SFT, OPD, the reference anchor)
-    runs over rows 0 and 1, and the metrics are stored with their two rows as the weight."""
+    """Row 2 pads the eval split's final round."""
     trainer = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 2
@@ -184,16 +174,34 @@ def test_an_eval_split_s_padding_rows_leave_every_term():
     torch.testing.assert_close(stored["sft_loss"], sft)
     torch.testing.assert_close(stored["opd_loss"], opd)
     torch.testing.assert_close(stored["reference_kl"], ref)
-    assert {rows for entries in trainer._stored_metrics["eval"].values() for _, rows in entries} == {2}
+    assert {rows for _, mode, rows in trainer.stored if mode == "eval"} == {2}
 
 
 def test_a_rank_of_eval_padding_alone_scores_zero():
-    """Its every row pads the final round: each term means over no sample, which is 0, not NaN."""
+    """Each term means over no sample, which is 0, not NaN."""
     trainer = _trainer()
     trainer.model.eval()
     trainer.eval_split_rows = lambda num_rows: 0
 
     assert trainer.compute_loss(trainer.model, _inputs()).item() == 0.0
+
+
+def test_backward_holds_no_fp32_vocab_plane(monkeypatch):
+    """Each term scores token chunks under a checkpoint, so bf16 logits keep no fp32 ``[tokens, V]`` autograd plane."""
+    monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", 2 * VOCAB)
+    trainer = _trainer()
+    trainer.model.to(torch.bfloat16)
+    trainer._reference_model.to(torch.bfloat16)
+    saved = []
+
+    def record(tensor):
+        saved.append(tensor)
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(record, lambda tensor: tensor):
+        trainer.compute_loss(trainer.model, _inputs())
+    planes = [tuple(t.shape) for t in saved if t.dtype == torch.float32 and t.dim() and t.size(-1) == VOCAB]
+    assert not planes, f"fp32 vocab-wide tensors held for backward: {planes}"
 
 
 def test_the_anchor_is_off_at_a_zero_coefficient():
@@ -203,9 +211,19 @@ def test_the_anchor_is_off_at_a_zero_coefficient():
     assert "reference_kl" not in _stored(trainer)
 
 
+def _opd(trainer, student_logits, student_labels, teacher_logits, teacher_labels, weights):
+    return trainer._response_divergence(
+        trainer.sdpg_loss_fn,
+        student_logits,
+        trainer._opd_mask(student_labels),
+        teacher_logits,
+        trainer._opd_mask(teacher_labels),
+        weights,
+    )
+
+
 def _loop_opd(student_logits, student_labels, teacher_logits, teacher_labels, weights, stop_ids):
-    """A per-row reference loop over each row's response rows, on batches whose two branches carry
-    equal per-row counts."""
+    """A per-row reference loop, on batches whose two branches carry equal per-row counts."""
     student_shift, teacher_shift = student_logits[:, :-1], teacher_logits[:, :-1]
     student_ids = student_labels[:, 1:]
     student_mask = student_ids != LABEL_IGNORE_INDEX
@@ -233,7 +251,7 @@ def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
     weights = torch.rand(len(rows), generator=generator)
 
     trainer = _trainer()
-    got = trainer._opd_loss(student, labels, teacher, teacher_labels, weights)
+    got = _opd(trainer, student, labels, teacher, teacher_labels, weights)
     (got_grad,) = torch.autograd.grad(got, student)
     expected = _loop_opd(student, labels, teacher, teacher_labels, weights, torch.tensor([EOS]))
     (expected_grad,) = torch.autograd.grad(expected, student)
@@ -243,8 +261,7 @@ def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
 
 @pytest.mark.parametrize("totals_match", [False, True], ids=["one-row-longer", "rows-swap-a-token"])
 def test_misaligned_branches_raise_instead_of_pairing_different_tokens(totals_match):
-    """Per row, not in total: a batch whose rows' counts differ with equal totals would pair rows
-    across samples without any raise."""
+    """Per row, not in total: counts that differ with equal totals would pair rows across samples without any raise."""
     trainer = _trainer(opd_exclude_eos=False)
     _, _, labels = _branch(ROWS, hinted=False)
     _, _, teacher_labels = _branch(ROWS, hinted=True)
@@ -255,12 +272,11 @@ def test_misaligned_branches_raise_instead_of_pairing_different_tokens(totals_ma
         teacher_labels[1, last_supervised] = LABEL_IGNORE_INDEX
     logits = torch.zeros(len(ROWS), teacher_labels.size(1), VOCAB)
     with pytest.raises(RuntimeError, match="response alignment contract"):
-        trainer._opd_loss(logits[:, : labels.size(1)], labels, logits, teacher_labels, None)
+        _opd(trainer, logits[:, : labels.size(1)], labels, logits, teacher_labels, None)
 
 
 def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
-    """The reference term pairs the student with the reference over one mask; comparing it with itself
-    is a host sync for a verdict that cannot fail."""
+    """The reference term uses one mask for both sides, so comparing it with itself is a wasted host sync."""
     trainer = _trainer()
     _, _, labels = _branch(ROWS, hinted=False)
     logits = torch.zeros(len(ROWS), labels.size(1), VOCAB)
@@ -269,23 +285,32 @@ def test_one_mask_on_both_sides_skips_the_count_check(monkeypatch):
     monkeypatch.setattr(torch, "equal", lambda a, b: compared.append(True) or real_equal(a, b))
     trainer._reference_loss(logits, logits, labels)
     assert compared == []
-    trainer._opd_loss(logits, labels, logits, labels.clone(), None)
+    _opd(trainer, logits, labels, logits, labels.clone(), None)
     assert compared == [True]
 
 
-def _vision_reuse_probe(model_type):
-    """Run ``_maybe_setup_vision_reuse`` against a fake VLM of ``model_type``.
+@pytest.mark.parametrize(
+    "trainer_cls,flushes", [(DistributedSFTTrainer, 1), (DistributedSelfDistillationTrainer, 0)], ids=["sft", "self"]
+)
+def test_only_a_loss_recording_the_sft_metrics_flushes_them_per_log(trainer_cls, flushes):
+    """That loss records nothing for the per-log flush, which would add a world collective carrying nothing."""
+    trainer = object.__new__(trainer_cls)
+    trainer.model = types.SimpleNamespace(training=True)
+    trainer._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
+    with mock.patch.object(world_metrics, "_world_states", return_value=({}, ())) as folded:
+        trainer._drain_loss_metrics()
+    assert folded.call_count == flushes
 
-    Returns ``(activated, wrapper_installed)``.
-    """
+
+def _vision_reuse_probe(model_type):
+    """Returns ``(activated, wrapper_installed)`` for a fake VLM of ``model_type``."""
 
     def original_get_image_features(*args, **kwargs):
         return "features"
 
-    inner = types.SimpleNamespace(
-        config=types.SimpleNamespace(model_type=model_type),
-        model=types.SimpleNamespace(get_image_features=original_get_image_features),
-    )
+    inner = nn.Module()
+    inner.config = types.SimpleNamespace(model_type=model_type)
+    inner.model = types.SimpleNamespace(get_image_features=original_get_image_features)
     me = types.SimpleNamespace(
         _vision_reuse_setup=False,
         _vision_reuse_active=False,
@@ -293,16 +318,13 @@ def _vision_reuse_probe(model_type):
         _vision_replay=False,
         _vision_cache=None,
     )
-    # accelerate's logger needs a PartialState; a plain one keeps this call unit-level.
-    with patch.object(sd, "logger", logging.getLogger(__name__)):
-        activated = DistributedSelfDistillationTrainer._maybe_setup_vision_reuse(me, inner)
+    activated = DistributedSelfDistillationTrainer._install_vision_reuse(me, inner)
     return activated, inner.model.get_image_features is not original_get_image_features
 
 
 def test_vision_reuse_only_for_validated_families():
-    """The get_image_features cache replays the student's features on the teacher pass — sound only
-    where both passes are known to call it exactly once with identical inputs (LFM2-VL). Any other
-    VLM exposing get_image_features must be left alone."""
+    """Replaying the student's features on the teacher pass is sound only where both passes call ``get_image_features``
+    once with identical inputs (LFM2-VL)."""
     assert _vision_reuse_probe("lfm2_vl") == (True, True)
     for model_type in ("qwen3_vl", "gemma4", "mistral3", None):
         assert _vision_reuse_probe(model_type) == (False, False), model_type

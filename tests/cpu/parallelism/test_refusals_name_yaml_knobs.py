@@ -1,28 +1,20 @@
 #!/usr/bin/env python
-"""Parallelism refusals name the knobs a user sets and print launch lines that run as written; the
-ep1 expert-sharding refusal links the docs for its trade-off.
-
-A run is configured through ``expert_parallel_size`` / ``tensor_parallel_size`` /
-``expert_tensor_parallel_size`` / ``context_parallel_size`` / ``pipeline_*``; ``ep_size`` /
-``tp_size`` / ``expert_tp_size`` / ``cp_size`` / ``pp_*`` are the dataclass fields behind them, and a
-refusal that prints those names points at a key no YAML accepts. ``ep_group_size`` is derived, not
-set, so the messages may keep it. Each case trips its real gate, one per message family.
-
-Run: python tests/cpu/parallelism/test_refusals_name_yaml_knobs.py
-"""
+"""Parallelism refusals name the knobs a user sets and print launch lines that run as written.
+``ep_size`` etc. are dataclass fields no YAML accepts; ``ep_group_size`` is derived, so the messages may keep it."""
 
 import re
 from types import SimpleNamespace
 
 import pytest
 
-from src.distributed.context_parallel.config import CPConfig, cp_chunk_bounds
-from src.distributed.expert_parallel.config import reject_expert_lora_with_expert_tp
-from src.distributed.parallelism_config import accelerate_launch_rejection
-from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
-from src.trainers.mixins.base import DistributedTrainerMixin
+from halo.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
+from halo.distributed.parallelism_rules import reject_custom_parallelism_under_accelerate
+from halo.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
+from halo.trainers.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import REPO_ROOT, load_script_module
 
 INTERNAL_FIELD = re.compile(
     r"\b(ep_size|tp_size|expert_tp_size|cp_size|pp_size|pp_split|pp_schedule|pp_microbatches)\b|\b(CP|TP) size\b"
@@ -31,7 +23,7 @@ EP1_SHARDING_DOC = "agent-docs/parallelism/data-parallelism.md#ep1-expert-shardi
 
 
 class _ModelConfig:
-    """A stand-in HF config carrying only the fields a gate reads."""
+    """Only the fields a gate reads."""
 
     def __init__(self, **fields):
         self.__dict__.update(fields)
@@ -161,7 +153,7 @@ def test_config_refusal_names_the_yaml_knobs(shape, knobs):
 def test_model_shape_refusal_names_the_yaml_knobs(shape, model_config, knob):
     config = make_parallelism_config(world_size=2, gpus_per_node=2, **shape)
     with pytest.raises(ValueError) as err:
-        config.validate_against_model_config(model_config)
+        reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
     _assert_names_knobs(str(err.value), (knob,))
 
 
@@ -169,9 +161,9 @@ def test_model_shape_refusal_names_the_yaml_knobs(shape, model_config, knob):
     ("refuse", "knob"),
     [
         pytest.param(
-            lambda: CPConfig(cp_size=16, world_size=16, gpus_per_node=8),
-            "context_parallel_size (16) cannot exceed the NVLink-domain size",
-            id="cp_config",
+            lambda: make_parallelism_config(world_size=16, gpus_per_node=8, cp_size=16),
+            "context_parallel_size (16) cannot exceed the NVLink domain (8)",
+            id="cp_locality",
         ),
         pytest.param(
             lambda: cp_chunk_bounds(7, 0, 2), "divisible by context_parallel_size 2", id="cp_sequence_length"
@@ -195,30 +187,26 @@ def test_runtime_refusal_names_the_yaml_knobs(refuse, knob):
 
 
 def test_ep1_sharding_refusal_points_at_the_docs_instead_of_a_benchmark():
-    """The trade-off figure lives in the owning doc; the refusal links it rather than restating a
-    number that drifts from the table."""
+    """The figure lives in the owning doc rather than a number that drifts."""
     with pytest.raises(ValueError) as err:
         make_parallelism_config(fsdp_shard_ep1_experts=False, tp_size=2, world_size=8, gpus_per_node=8)
     message = str(err.value)
     assert EP1_SHARDING_DOC in message, message
     assert "%" not in message, message
-    page, anchor = EP1_SHARDING_DOC.split("#")
-    check_links = load_script_module("scripts/docs/check_links.py")
-    assert anchor in check_links.parse_markdown((REPO_ROOT / page).read_text()).anchors
 
 
 def test_stock_adamw_refusal_names_the_yaml_knobs():
-    stub = SimpleNamespace(parallelism_config=SimpleNamespace(ep_group_size=8))
     with pytest.raises(ValueError, match="mixed torch.Tensor and DTensor") as err:
-        DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(stub, "adamw_torch_fused")
+        reject_stock_adamw_on_mixed_params("adamw_torch_fused", SimpleNamespace(ep_group_size=8), None)
     _assert_names_knobs(str(err.value), ("expert_parallel_size=1",))
 
 
 def test_accelerate_refusal_launch_lines_pass_the_config(monkeypatch):
-    """The entry scripts take the YAML config as their positional, so a printed torchrun line
-    without it fails before the run starts."""
+    """The entry scripts take the YAML config as their positional."""
     monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
-    message = accelerate_launch_rejection(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+    with pytest.raises(ValueError) as err:
+        reject_custom_parallelism_under_accelerate(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+    message = str(err.value)
     script_lines = [line for line in message.splitlines() if "scripts/training/" in line]
     assert len(script_lines) == 3, message
     assert all("<config>" in line for line in script_lines), message

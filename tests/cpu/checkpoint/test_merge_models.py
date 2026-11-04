@@ -1,17 +1,5 @@
 #!/usr/bin/env python
-"""Tests for scripts/after_training/merge_models.py.
-
-Five layers: (1) the pre-I/O input gates — method↔knob, knob ranges, finite weights; (2) the per-tensor
-merge math (linear / slerp / task_arithmetic / ties) on known values; (3) the key-set gate — every input
-carries the reference keys at one shape, except a Hub base's keys the shipped model never reads (a
-stored tied head, the keys its class drops at load); (4) the RAM preflight — each
-method's declared float32 working set against the allocator's peak, and the estimate the preflight
-builds from it; (5) an end-to-end merge of two tiny **Qwen3.5 MoE** checkpoints through the streaming
-pipeline — write → reload with the real model class → verify the merged weights match the expected
-interpolation and the model forwards.
-
-Run: ``python tests/cpu/checkpoint/test_merge_models.py`` (or ``pytest -m cpu``).
-"""
+"""scripts/after_training/merge_models.py: input gates, merge math, key-set gate, RAM preflight, end-to-end merge."""
 
 from __future__ import annotations
 
@@ -31,7 +19,7 @@ from transformers import CONFIG_MAPPING, Gemma3Config, Qwen3Config, Qwen3ForCaus
 from transformers.models.qwen3_5_moe import Qwen3_5MoeForCausalLM, Qwen3_5MoeTextConfig
 from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
-from src.checkpoint.format import (
+from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     REFERENCE_LOGPS_FILE,
@@ -39,22 +27,20 @@ from src.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
     prefetch_pending_filename,
-    write_resume_adapter_marker,
 )
-from src.checkpoint.tool_io import iter_checkpoint_shard_entries
+from halo.checkpoint.reading import iter_checkpoint_shard_entries
+from halo.checkpoint.tools import model_merge as mm
+from halo.checkpoint.writing import resolve_checkpoint_write_threads
+from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import load_script_module
-
-mm = load_script_module("scripts/after_training/merge_models.py")
 
 _WORKING_SET_NUMEL = 1 << 20
-# The ops also allocate a few 0-d results (norms, the slerp dot); they are not tensor-sized copies.
+# The ops also allocate a few 0-d results (norms, the slerp dot).
 _SCALAR_SLACK_BYTES = 4096
 
 
 def _write_tiny_checkpoint(path: Path, tensors: dict[str, torch.Tensor], config=None) -> Path:
-    """A one-shard checkpoint beside a real config (the aux copy round-trips it through AutoConfig),
-    Qwen3's default unless ``config`` is given."""
+    """The aux copy round-trips the config through AutoConfig, so it has to be a real one."""
     path.mkdir(parents=True, exist_ok=True)
     save_file(tensors, str(path / "model.safetensors"))
     (config or CONFIG_MAPPING["qwen3"]()).save_pretrained(str(path))
@@ -62,18 +48,15 @@ def _write_tiny_checkpoint(path: Path, tensors: dict[str, torch.Tensor], config=
 
 
 def test_parse_model_spec():
-    # None (not 1.0) when no weight was given: the method↔knob gate must see explicitness.
+    # None when no weight was given: the method↔knob gate must see explicitness.
     assert mm._parse_model_spec("/a/b") == ("/a/b", None)
     assert mm._parse_model_spec("/a/b:0.25") == ("/a/b", 0.25)
-    # A trailing non-float colon segment is part of the path (e.g. an HF id), not a weight.
     assert mm._parse_model_spec("org/model") == ("org/model", None)
 
 
 def test_a_knob_the_method_ignores_is_refused():
-    """Ungated, `--models a:0.1 b:0.9` under slerp is silently IGNORED (slerp reads only --t), and
-    --t/--density/--lambda are dead under the methods that never consume them — the merge then
-    produces something other than what was asked, with no error. The gate raises before any I/O, so
-    the model paths here deliberately do not exist."""
+    """Ungated, `--models a:0.1 b:0.9` under slerp is silently ignored. The model paths deliberately do not exist,
+    so the gate raises before any I/O."""
     with pytest.raises(ValueError, match="does not use models:weight"):
         mm.merge_models(["/nope/a:0.1", "/nope/b:0.9"], "/nope/out", method="slerp")
     with pytest.raises(ValueError, match="does not use t"):
@@ -84,7 +67,7 @@ def test_a_knob_the_method_ignores_is_refused():
         mm.merge_models(["/nope/a", "/nope/b"], "/nope/out", method="slerp", base_model="/nope/base")
 
 
-# The full method↔knob contract, spelled out independently of the table the code reads.
+# Spelled out independently of the table the code reads, so a table change has to be deliberate.
 _METHOD_KNOBS = {
     "linear": {"models:weight"},
     "slerp": {"t"},
@@ -97,12 +80,6 @@ _ALL_KNOBS = sorted(set().union(*_METHOD_KNOBS.values()))
 @pytest.mark.parametrize("method", sorted(_METHOD_KNOBS))
 @pytest.mark.parametrize("knob", _ALL_KNOBS)
 def test_every_method_knob_pair_accepts_or_refuses_as_declared(method, knob):
-    """Every (method, knob) pair, accept and refuse alike.
-
-    The gate is the only thing between a knob the method never reads and a merge that is silently
-    not the one asked for — and over-rejecting a knob the method *does* read is just as wrong. The
-    matrix is written out here so a change to the method table has to be a deliberate one.
-    """
     if knob in _METHOD_KNOBS[method]:
         mm._check_method_knobs(method, {knob})
     else:
@@ -111,12 +88,11 @@ def test_every_method_knob_pair_accepts_or_refuses_as_declared(method, knob):
 
 
 def test_the_method_table_declares_every_method_and_default():
-    """The knob defaults have one home, and every method the CLI offers is in it."""
-    assert set(mm._METHODS) == set(_METHOD_KNOBS)
-    assert mm._KNOB_DEFAULTS == {"t": 0.5, "density": 0.6, "lambda": 1.0}
+    assert set(mm.MERGE_METHODS) == set(_METHOD_KNOBS)
+    assert mm.KNOB_DEFAULTS == {"t": 0.5, "density": 0.6, "lambda": 1.0}
     for method, knobs in _METHOD_KNOBS.items():
         assert mm._method_knobs(method) == frozenset(knobs)
-        mm._check_method_knobs(method, set())  # nothing explicit is always fine (defaults apply)
+        mm._check_method_knobs(method, set())
 
 
 @pytest.mark.parametrize(
@@ -134,10 +110,8 @@ def test_the_method_table_declares_every_method_and_default():
     ],
 )
 def test_a_knob_outside_its_domain_is_refused_before_any_io(method, knob, value):
-    """None of these raise inside the ops: a density outside (0, 1] skips the trim and keeps every
-    delta, a t outside [0, 1] extrapolates past both models, and a non-finite value writes non-finite
-    weights — each a merge other than the one asked for. The paths do not exist, so the refusal must
-    come before any read."""
+    """None raise inside the ops: each merges something other than what was asked. The paths do not exist, so the
+    refusal precedes any read."""
     base = "/nope/base" if method == "ties" else None
     with pytest.raises(ValueError, match=re.escape(f"--{knob} must be")):
         mm.merge_models(["/nope/a", "/nope/b"], "/nope/out", method=method, base_model=base, knobs={knob: value})
@@ -145,34 +119,30 @@ def test_a_knob_outside_its_domain_is_refused_before_any_io(method, knob, value)
 
 @pytest.mark.parametrize("weight", ["nan", "inf", "-inf"])
 def test_a_non_finite_model_weight_is_refused_before_any_io(weight):
-    """``path:nan`` parses as a weight, and every merge that reads weights would write it into the
-    checkpoint as non-finite tensors."""
+    """``path:nan`` parses as a weight and would write non-finite tensors."""
     with pytest.raises(ValueError, match="--models weights must be finite"):
         mm.merge_models([f"/nope/a:{weight}", "/nope/b"], "/nope/out", method="linear")
 
 
 def test_the_domain_edges_and_defaults_are_accepted():
-    """Over-refusing is as wrong as under-refusing: both slerp endpoints, a full-density TIES (no
-    trim), a zero or negative lambda (the base, or the task vector negated) and every default merge."""
+    """Over-refusing is as wrong as under-refusing."""
     mm._check_knob_domains("slerp", {"t": 0.0})
     mm._check_knob_domains("slerp", {"t": 1.0})
     mm._check_knob_domains("ties", {"density": 1.0, "lambda": 0.0})
     mm._check_knob_domains("ties", {"density": 1e-6, "lambda": -1.0})
-    for method in mm._METHODS:
-        mm._check_knob_domains(method, mm._KNOB_DEFAULTS)
-    assert set(mm._KNOB_DOMAINS) == set(mm._KNOB_DEFAULTS), "every knob needs a domain, and nothing else"
+    for method in mm.MERGE_METHODS:
+        mm._check_knob_domains(method, mm.KNOB_DEFAULTS)
+    assert set(mm.KNOB_DOMAINS) == set(mm.KNOB_DEFAULTS), "every knob needs a domain, and nothing else"
 
 
 def test_an_unknown_knob_is_refused():
-    """A knob no merge op declares is a typo, not a no-op: silently dropping it would merge with the
-    method's default instead of the value the caller asked for."""
+    """Silently dropping a typo would merge with the method's default."""
     with pytest.raises(ValueError, match=r"unknown merge knob\(s\) \['lam'\]"):
         mm.merge_models(["/nope/a", "/nope/b"], "/nope/out", method="ties", knobs={"lam": 1.0})
 
 
 def test_dispatch_passes_each_op_the_knobs_its_signature_names():
-    """The registry dispatch must reach the op with the caller's knob, not the default: a ties merge
-    at ``lambda=0`` is exactly the base model, and at ``lambda=1`` it is the task vector on top."""
+    """A ties merge at ``lambda=0`` is exactly the base model, and at ``lambda=1`` the task vector on top."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         base = _write_tiny_checkpoint(Path(tmp) / "base", {"w": torch.zeros(4)})
         model = _write_tiny_checkpoint(Path(tmp) / "m", {"w": torch.ones(4)})
@@ -199,40 +169,35 @@ def test_linear_weighted_average():
     # Always normalized by the weight sum: weights 1 and 3 → 0.25*a + 0.75*b = 0.25
     out = mm._merge_linear([a, b], [1.0, 3.0])
     assert torch.allclose(out, torch.full((4,), 0.25))
-    # Default (equal) weights → a plain average, not a scale-doubling sum.
     out = mm._merge_linear([a, b], [1.0, 1.0])
     assert torch.allclose(out, torch.full((4,), 0.5))
 
 
 def test_slerp_endpoints_and_midpoint():
     a = torch.tensor([1.0, 0.0, 0.0, 0.0])
-    b = torch.tensor([0.0, 1.0, 0.0, 0.0])  # orthogonal unit vectors
+    b = torch.tensor([0.0, 1.0, 0.0, 0.0])
     assert torch.allclose(mm._merge_slerp(a, b, 0.0), a, atol=1e-5)
     assert torch.allclose(mm._merge_slerp(a, b, 1.0), b, atol=1e-5)
     mid = mm._merge_slerp(a, b, 0.5)
-    # Halfway on the unit circle between two orthonormal vectors: both coords = cos(45°).
     assert torch.allclose(mid, torch.tensor([0.70710677, 0.70710677, 0.0, 0.0]), atol=1e-5)
     assert torch.allclose(mid.norm(), torch.tensor(1.0), atol=1e-5)
 
 
 def test_slerp_colinear_falls_back_to_lerp():
     a = torch.tensor([1.0, 2.0, 3.0])
-    b = 2.0 * a  # colinear → lerp path
+    b = 2.0 * a
     out = mm._merge_slerp(a, b, 0.5)
     assert torch.allclose(out, torch.lerp(a, b, 0.5), atol=1e-5)
 
 
 def test_slerp_of_neutralized_sinks_stays_finite():
-    """Two gpt-oss checkpoints trained under ``reset_sinks`` (the SFT default) carry every sink at
-    ``bfloat16.min``, whose square overflows fp32: a raw norm reads ``inf``, the cosine of two
-    identical vectors reads 0, and the "orthogonal" arc sums to ``-inf`` — a non-finite sink in a
-    checkpoint whose inputs were finite. Identical inputs must slerp to themselves, at any scale."""
+    """Sinks at ``bfloat16.min`` square past fp32's range, so a raw norm reads ``inf`` and the arc sums to ``-inf``;
+    identical inputs must slerp to themselves."""
     sinks = torch.full((64,), torch.finfo(torch.bfloat16).min, dtype=torch.bfloat16)
     out = mm._merge_slerp(sinks, sinks.clone(), 0.5)
     assert torch.isfinite(out).all(), "slerp of finite inputs produced a non-finite tensor"
     assert torch.equal(out, sinks.float())
-    # The magnitude normalization must not leak into the result: an ordinary non-colinear pair still
-    # lands on the great-circle arc at its own scale.
+    # The magnitude normalization must not leak into the result.
     a = torch.tensor([3.0, 0.0, 0.0, 0.0])
     b = torch.tensor([0.0, 3.0, 0.0, 0.0])
     mid = mm._merge_slerp(a, b, 0.5)
@@ -243,7 +208,6 @@ def test_task_arithmetic_adds_task_vectors():
     base = torch.zeros(3)
     m1 = torch.tensor([1.0, 0.0, 0.0])
     m2 = torch.tensor([0.0, 2.0, 0.0])
-    # base + 1.0*(m1-base) + 0.5*(m2-base) = [1, 1, 0]
     out = mm._merge_task_arithmetic(base, [m1, m2], [1.0, 0.5])
     assert torch.allclose(out, torch.tensor([1.0, 1.0, 0.0]))
 
@@ -259,15 +223,13 @@ def test_ties_sign_election_and_disjoint_merge():
 
 def test_ties_density_trims_small_deltas():
     base = torch.zeros(4)
-    delta = torch.tensor([0.05, 0.1, 5.0, 10.0])  # top-50% magnitudes are the last two
+    delta = torch.tensor([0.05, 0.1, 5.0, 10.0])
     out = mm._merge_ties(base, [delta], [1.0], density=0.5, lambda_=1.0)
     assert torch.allclose(out, torch.tensor([0.0, 0.0, 5.0, 10.0]), atol=1e-6)
 
 
 def test_reference_keys_uses_base_for_task_methods():
-    """task_arithmetic/ties merge over the BASE key set (vectors are base-relative), so a key in base
-    but absent from model[0] is included — iterating model[0] instead would silently drop it.
-    linear/slerp have no base (the knob gate refuses one) and use model[0]."""
+    """Task vectors are base-relative, so iterating model[0] would silently drop a base-only key."""
 
     class _StubReader:
         def __init__(self, ks):
@@ -278,8 +240,7 @@ def test_reference_keys_uses_base_for_task_methods():
 
     m0 = _StubReader({"x"})
     m1 = _StubReader({"x", "y"})
-    base = _StubReader({"x", "y"})  # 'y' is absent from model[0]
-    # base-relative methods cover 'y' (would be dropped if iterating m0)
+    base = _StubReader({"x", "y"})
     assert mm._reference_keys([m0, m1], base) == ["x", "y"]
     assert mm._reference_keys([m0, m1], None) == ["x"]
 
@@ -310,11 +271,8 @@ def _build_tiny_qwen35(out_dir: Path, seed: int) -> None:
 
 
 def test_end_to_end_linear_merge_qwen3_5():
-    """Merge two tiny Qwen3.5 checkpoints (linear 0.5/0.5), reload, verify average + a forward pass.
-    Also pins that resume state planted beside the tokenizer source does NOT ship: it describes one
-    input run, and the merged artifact has no such run. That covers a merge-on-save checkpoint's
-    resume adapter too, whose marker would resume the merge from the base plus that one input's
-    adapter."""
+    """Resume state beside the tokenizer source must not ship: it describes one input run, and a resume adapter's
+    marker would resume from one input."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         _build_tiny_qwen35(a, seed=0)
@@ -332,7 +290,7 @@ def test_end_to_end_linear_merge_qwen3_5():
         (a / RESUME_ADAPTER_DIR).mkdir()
         (a / RESUME_ADAPTER_DIR / ADAPTER_CONFIG_FILE).write_text("{}")
         save_file({"lora_A": torch.ones(2, 2)}, str(a / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE))
-        write_resume_adapter_marker(str(a))
+        mark_resume_adapter(str(a))
 
         mm.merge_models(
             model_specs=[str(a), str(b)],
@@ -347,7 +305,7 @@ def test_end_to_end_linear_merge_qwen3_5():
         for entry in (*sidecars, RESUME_ADAPTER_MARKER_FILE, RESUME_ADAPTER_DIR):
             assert not (out / entry).exists(), f"{entry} is one input run's resume state, not the merge's"
 
-        # Reload as the real Qwen3.5 class — proves config/shards/index are valid.
+        # Proves config, shards and index are valid.
         merged = Qwen3_5MoeForCausalLM.from_pretrained(out, dtype=torch.bfloat16)
         ma = Qwen3_5MoeForCausalLM.from_pretrained(a, dtype=torch.bfloat16)
         mb = Qwen3_5MoeForCausalLM.from_pretrained(b, dtype=torch.bfloat16)
@@ -363,9 +321,8 @@ def test_end_to_end_linear_merge_qwen3_5():
             checked += 1
         assert checked > 0
 
-        # A weight-space average is not a logit-space average (the net is nonlinear), so parity is
-        # checked against an INDEPENDENTLY averaged reference — proving the merge pipeline carries
-        # the averaged weights into compute, not just onto disk.
+        # A weight-space average is not a logit-space average, so parity is checked against an independently averaged
+        # reference.
         ids = torch.randint(0, _TINY_QWEN35["vocab_size"], (1, 8))
         reference = Qwen3_5MoeForCausalLM.from_pretrained(a, dtype=torch.bfloat16)
         independent_avg = {
@@ -376,16 +333,14 @@ def test_end_to_end_linear_merge_qwen3_5():
         with torch.no_grad():
             merged_logits = merged(input_ids=ids, use_cache=False).logits
             reference_logits = reference(input_ids=ids, use_cache=False).logits
-        # bf16 round-trip through the merge pipeline vs a direct average: allow a tiny tolerance.
+        # bf16 round-trip through the merge pipeline vs a direct average.
         assert torch.allclose(merged_logits, reference_logits, atol=1e-2), (
             "reloaded merged model's forward diverges from an independently-averaged reference"
         )
 
 
 def test_balancing_biases_keep_their_trained_dtype():
-    """`--dtype bfloat16` must not quantize router balancing tensors: the ALF sign-update biases are
-    trained fp32, near-tied top-k picks flip under a bf16 round-trip, and every other merge path
-    (merge_ep_shards, the direct gathered save) already keeps them at trained dtype."""
+    """ALF biases are trained fp32 and near-tied top-k picks flip under a bf16 round-trip."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         a, b, out = Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         for path, seed in ((a, 0), (b, 1)):
@@ -412,9 +367,7 @@ def test_balancing_biases_keep_their_trained_dtype():
 
 
 def test_a_base_only_key_names_the_model_that_lacks_it():
-    """``task_arithmetic``/``ties`` merge over the BASE key set. A base key no fine-tune carries under
-    a config that does not tie it (a base saved untied, the runs saved tied) is genuinely missing:
-    refused up front naming the model that lacks it, with no output directory left behind."""
+    """Refused up front with no output directory left behind."""
     with tempfile.TemporaryDirectory(dir="/tmp") as tmp:
         base, a, b, out = Path(tmp) / "base", Path(tmp) / "a", Path(tmp) / "b", Path(tmp) / "merged"
         shared = {"model.embed_tokens.weight": torch.zeros(4, 4)}
@@ -435,13 +388,11 @@ def test_a_base_only_key_names_the_model_that_lacks_it():
         assert not out.exists()
 
 
-# The methods that take a base, read off the method table: each merges over the base's key set.
-_BASE_METHODS = sorted(name for name, spec in mm._METHODS.items() if "base" in spec.tensor_args)
+_BASE_METHODS = sorted(name for name, spec in mm.MERGE_METHODS.items() if "base" in spec.tensor_args)
 
 
 def _tied_qwen3(path: Path, seed: int, *, store_head: bool, tie: bool = True) -> dict[str, torch.Tensor]:
-    """A tiny Qwen3 saved as transformers saves it: a tied head is left out unless ``store_head``
-    writes it back beside the embedding, as some Hub checkpoints ship it."""
+    """A tied head is left out unless ``store_head`` writes it back, as some Hub checkpoints ship it."""
     torch.manual_seed(seed)
     model = Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, "tie_word_embeddings": tie}))
     model.save_pretrained(path)
@@ -454,9 +405,7 @@ def _tied_qwen3(path: Path, seed: int, *, store_head: bool, tie: bool = True) ->
 
 @pytest.mark.parametrize("method", _BASE_METHODS)
 def test_a_tied_hub_base_storing_its_head_merges_into_a_tied_checkpoint(method, tmp_path):
-    """A Hub base that stores its tied head (Qwen3-0.6B does) carries ``lm_head.weight`` no tied
-    fine-tune saves. Under the tying config the merge ships, that head is the merged embedding: the
-    merge leaves it out, and the reload ties it to the merged embedding with nothing missing."""
+    """Under the tying config that head is the merged embedding, so the merge leaves it out and the reload ties it."""
     base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
     base_tensors = _tied_qwen3(base, seed=0, store_head=True)
     tuned = [_tied_qwen3(path, seed, store_head=False) for path, seed in ((a, 1), (b, 2))]
@@ -474,10 +423,10 @@ def test_a_tied_hub_base_storing_its_head_merges_into_a_tied_checkpoint(method, 
 
     merged_tensors = load_file(str(out / "model.safetensors"))
     assert "lm_head.weight" not in merged_tensors
-    spec = mm._METHODS[method]
+    spec = mm.MERGE_METHODS[method]
     embed = "model.embed_tokens.weight"
     per_key = {"base": base_tensors[embed], "tensors": [t[embed] for t in tuned], "weights": [1.0, 1.0]}
-    knobs = {mm._knob_dest(knob): default for knob, default in spec.knobs.items()}
+    knobs = {mm.knob_dest(knob): default for knob, default in spec.knobs.items()}
     expected = spec.op(**{name: per_key[name] for name in spec.tensor_args}, **knobs)
     torch.testing.assert_close(merged_tensors[embed], expected)
 
@@ -493,10 +442,8 @@ def test_a_tied_hub_base_storing_its_head_merges_into_a_tied_checkpoint(method, 
     ids=["untied-config", "a-fine-tune-lacks-the-embedding", "no-fine-tune-stores-either-half"],
 )
 def test_a_stored_base_head_is_missing_unless_the_tie_rebuilds_it(tie, lacking_embedding, tmp_path):
-    """The tie excuses the base's head only where it holds: a shipped config that does not tie
-    (the head would load random-initialized), or fine-tunes that do not all store the embedding the
-    tie rebuilds the head from, down to none of them storing either half, leave the head genuinely
-    missing and the merge refuses it."""
+    """Without a tying config the head loads random-initialized, and without the embedding in every fine-tune the
+    tie has nothing to rebuild from."""
     base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
     _tied_qwen3(base, seed=0, store_head=True, tie=tie)
     for path, seed in ((a, 1), (b, 2)):
@@ -524,10 +471,8 @@ def test_a_stored_base_head_is_missing_unless_the_tie_rebuilds_it(tie, lacking_e
     ids=["both", "text-only", "wrapper-only"],
 )
 def test_a_stored_base_head_is_excused_only_where_both_config_levels_tie(wrapper_ties, text_ties, tmp_path):
-    """transformers ties a multimodal wrapper's head on the wrapper's own ``tie_word_embeddings`` and a
-    text-only class's head on the text sub-config's, and Gemma 3's config lets the two disagree. A
-    base's stored head is the merged embedding again only where both levels tie; otherwise one of the
-    two classes loads the head random-initialized from the merged checkpoint."""
+    """transformers ties a wrapper's head on the wrapper's flag and a text-only class's on the text sub-config's,
+    and Gemma 3's config lets the two disagree."""
     config = Gemma3Config(text_config={"tie_word_embeddings": text_ties}, tie_word_embeddings=wrapper_ties)
     assert (config.tie_word_embeddings, config.get_text_config().tie_word_embeddings) == (wrapper_ties, text_ties)
     embedding = {"model.language_model.embed_tokens.weight": torch.randn(8, 4)}
@@ -554,10 +499,8 @@ def test_a_stored_base_head_is_excused_only_where_both_config_levels_tie(wrapper
     assert not out.exists()
 
 
-# A key each family's Hub base stores and its transformers class drops at load
-# (``_keys_to_ignore_on_load_unexpected``), so no fine-tune of that base carries it: Qwen3.5/3.6's MTP
-# head under the multimodal wrapper the Hub config resolves to and under the text-only class, and
-# GLM-4.7-Flash's MTP layer.
+# A key each family's Hub base stores and its class drops at load (``_keys_to_ignore_on_load_unexpected``), so no
+# fine-tune carries it.
 _LOAD_DROPPED_BASE_KEYS = {
     "qwen3_5_moe": "mtp.layers.0.mlp.experts.gate_up_proj",
     "qwen3_5_moe_text": "mtp.fc.weight",
@@ -568,9 +511,7 @@ _LOAD_DROPPED_BASE_KEYS = {
 @pytest.mark.parametrize("model_type", sorted(_LOAD_DROPPED_BASE_KEYS))
 @pytest.mark.parametrize("method", _BASE_METHODS)
 def test_base_keys_the_shipped_class_drops_at_load_are_left_out(method, model_type, tmp_path):
-    """A base key no fine-tune stores is excused where the shipped config's model class drops it at
-    load: the merge leaves it out, as every export of the fine-tunes does. A base-only key the class
-    does not drop stays a refusal."""
+    """A base-only key the class does not drop stays a refusal."""
     config = CONFIG_MAPPING[model_type]()
     dropped = _LOAD_DROPPED_BASE_KEYS[model_type]
     shared = {"model.embed_tokens.weight": torch.zeros(8, 4), "model.layers.0.mlp.down_proj.weight": torch.zeros(4, 4)}
@@ -601,9 +542,6 @@ def test_base_keys_the_shipped_class_drops_at_load_are_left_out(method, model_ty
 
 
 def test_a_qwen3_5_base_storing_its_mtp_head_merges_into_a_checkpoint_that_loads_whole(tmp_path):
-    """The Hub Qwen3.5/3.6 checkpoints store an MTP head their transformers class drops at load, so
-    no fine-tune of them carries it. A TIES merge onto such a base reloads through the family's class
-    with nothing missing, unexpected or left over."""
     base, a, b, out = (tmp_path / name for name in ("base", "a", "b", "merged"))
     for path, seed in ((base, 0), (a, 1), (b, 2)):
         _build_tiny_qwen35(path, seed=seed)
@@ -623,9 +561,7 @@ def test_a_qwen3_5_base_storing_its_mtp_head_merges_into_a_checkpoint_that_loads
 
 @pytest.mark.parametrize("mismatched", ["fine-tune", "base"])
 def test_a_shape_mismatch_is_refused_before_any_output(mismatched, tmp_path):
-    """A key whose stored shape differs between contributors has no merge. Read from the headers with
-    the key-set gate, so the refusal comes before the output directory exists, and the base is held
-    to it too: its task vector would otherwise broadcast into a tensor of neither shape."""
+    """The base is held to it too: its task vector would otherwise broadcast into a tensor of neither shape."""
     good, odd = {"w": torch.zeros(4, 4)}, {"w": torch.zeros(4)}
     base = _write_tiny_checkpoint(tmp_path / "base", odd if mismatched == "base" else good)
     a = _write_tiny_checkpoint(tmp_path / "a", good)
@@ -645,13 +581,8 @@ def test_a_shape_mismatch_is_refused_before_any_output(mismatched, tmp_path):
 
 
 def _peak_allocated_bytes(fn: Callable[[], object], trace_path: Path) -> int:
-    """Peak bytes the CPU allocator holds live while ``fn`` runs, over what was live before it.
-
-    Read from the ``[memory]`` events of the profiler's exported trace: each carries the allocator's
-    running ``Total Allocated``, kernel-internal buffers (``kthvalue``'s copy and indices) included.
-    The figure is exact and independent of thread count, host load and process RSS, whose high-water
-    mark the kernel samples from per-CPU counters and undercounts once faults spread across CPUs.
-    """
+    """Read from the profiler's ``[memory]`` events: exact and independent of threads and host load, whereas RSS
+    undercounts once faults spread across CPUs."""
     with warnings.catch_warnings():
         # Emitted at profiler start about multi-cycle schedules; this is one un-scheduled cycle.
         warnings.filterwarnings("ignore", message="Warning: Profiler clears events", category=UserWarning)
@@ -678,12 +609,9 @@ def _peak_allocated_bytes(fn: Callable[[], object], trace_path: Path) -> int:
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, tmp_path):
-    """The RAM preflight sizes a merge by each method's declared float32 working set, which grows with
-    the model count under TIES: every model's delta, their stacked copy, the sign-masked copy and the
-    int64 cast of the agreement mask coexist. A bound below the peak lets a merge OOM without the
-    warning; one above it warns on merges that fit — so bf16 inputs, the worst case, must also land
-    within 10% of the bound."""
-    spec = mm._METHODS[method]
+    """A bound below the peak lets a merge OOM without the warning; above it warns on merges that fit, so bf16, the
+    worst case, lands within 10%."""
+    spec = mm.MERGE_METHODS[method]
     tensors = [torch.randn(_WORKING_SET_NUMEL).to(dtype) for _ in range(n_models)]
     per_key = {
         "tensors": tensors,
@@ -692,7 +620,7 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
         "weights": [1.0] * n_models,
         "base": torch.randn(_WORKING_SET_NUMEL).to(dtype),
     }
-    knobs = {mm._knob_dest(knob): value for knob, value in spec.knobs.items()}
+    knobs = {mm.knob_dest(knob): value for knob, value in spec.knobs.items()}
 
     op_args = {name: per_key[name] for name in spec.tensor_args}
     peak = _peak_allocated_bytes(lambda: spec.op(**op_args, **knobs), tmp_path / "trace.json")
@@ -706,10 +634,8 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
 
 
 def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tmp_path, monkeypatch):
-    """The RAM estimate is the costliest key — every contributor's copy as stored (a fp32 base beside
-    bf16 fine-tunes here) plus the method's working set for the model count (not the contributor count)
-    over it — and the writer's pending shard. The working set is float32 whatever the stored dtype, so
-    key ``b``, with more elements, outweighs ``a``, which stores more bytes (fp32)."""
+    """The working set is float32 whatever the stored dtype, so key ``b``, with more elements, outweighs ``a``,
+    which stores more bytes."""
     captured = {}
     monkeypatch.setattr(mm, "preflight_resource_warning", lambda *_, ram_bytes, **__: captured.update(ram=ram_bytes))
     wide_bytes, large = torch.randn(600), torch.randn(64, 16)
@@ -728,14 +654,15 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
 
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
-    working = mm._METHODS["ties"].fp32_copies(3) * 4 * numel
-    shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
+    working = mm.MERGE_METHODS["ties"].fp32_copies(3) * 4 * numel
+    shard = (1 + resolve_checkpoint_write_threads()) * mm.StreamingShardWriter(
+        str(tmp_path), "1MB", enabled=False
+    ).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
 def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, monkeypatch):
-    """Keys of equal element count can store different bytes: here only ``b``'s base copy is fp32. The
-    estimate is the largest per-key total, not the first key with the most elements."""
+    """The estimate is the largest per-key total, not the first key with the most elements."""
     captured = {}
     monkeypatch.setattr(mm, "preflight_resource_warning", lambda *_, ram_bytes, **__: captured.update(ram=ram_bytes))
     tensor = torch.randn(32, 32)
@@ -756,15 +683,15 @@ def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, mon
 
     numel = tensor.numel()
     stored = 2 * numel * 2 + numel * 4
-    working = mm._METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
-    shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
+    working = mm.MERGE_METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
+    shard = (1 + resolve_checkpoint_write_threads()) * mm.StreamingShardWriter(
+        str(tmp_path), "1MB", enabled=False
+    ).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
 def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_path, monkeypatch):
-    """The RAM preflight counts one key's inputs: a binding that outlives its iteration (``per_key``
-    holds every input, and an integer key is passed through on its own branch) keeps the previous
-    key's tensors alive beside the next key's reads. The one copy the writer stages is its output."""
+    """A binding that outlives its iteration keeps the previous key's tensors alive beside the next key's reads."""
     keys = ["i0", *(f"w{i}" for i in range(3))]
     models = [
         _write_tiny_checkpoint(
@@ -777,7 +704,7 @@ def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_pa
     staged: list[weakref.ref] = []
     held_over: list[tuple[str, str]] = []
     read_tensor = mm._TensorReader.get
-    stage_tensor = mm.StageShardWriter.add
+    stage_tensor = mm.StreamingShardWriter.add
 
     def tracked_get(self, key):
         held_over.extend(
@@ -794,7 +721,7 @@ def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_pa
         return stage_tensor(self, key, tensor)
 
     monkeypatch.setattr(mm._TensorReader, "get", tracked_get)
-    monkeypatch.setattr(mm.StageShardWriter, "add", tracked_add)
+    monkeypatch.setattr(mm.StreamingShardWriter, "add", tracked_add)
     mm.merge_models(
         [str(model) for model in models],
         str(tmp_path / "out"),

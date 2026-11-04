@@ -35,7 +35,7 @@ title(ax, "Ulysses attention", "cp 4 · 64 Q / 8 KV heads → 16 Q / 2 KV per ra
 
 card_row(ax, CARD_XS, CARD_Y, CARD_W, CARD_H, STAGES, mono_lines=True)
 
-section(ax, 0.3, GRID_Y + 0.5, "Who holds what — rank × sequence chunk")
+section(ax, 0.3, GRID_Y + 0.5, "Who holds what: rank × sequence chunk")
 
 per_rank = HEADS // CP
 before = [[f"0–{HEADS - 1}" if c == r else "" for c in range(CP)] for r in range(CP)]
@@ -86,8 +86,8 @@ footnote(
     0.3,
     0.3,
     11.8,
-    "Exact, not approximate — attention is independent across heads; the layer issues three all-to-alls:"
-    " q, the fused k|v, and the output.",
+    "Exact, not approximate: attention is independent across heads. The layer issues two all-to-alls:"
+    " q, k and v in one buffer, and the output.",
 )
 
 save(fig, "ulysses_attention_flow")

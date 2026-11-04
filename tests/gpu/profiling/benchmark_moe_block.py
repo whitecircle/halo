@@ -1,21 +1,8 @@
 #!/usr/bin/env python
-"""Gemma 4 26B-A4B routed-expert block, forward + backward, on one GPU with all 128 experts local.
+"""Gemma 4 26B-A4B routed-expert block, forward + backward on one GPU with all 128 experts local.
 
-Compares the implementations a user can pick for this block at the checkpoint's real shapes (hidden 2816,
-expert intermediate 704, 128 experts, top-8):
-
-- ``hf_eager`` / ``hf_grouped_mm``: transformers' ``Gemma4TextExperts`` under ``experts_implementation``
-  ``eager`` (per-expert loop) and ``grouped_mm``.
-- ``halo``: this tree's grouped expert path (sort, grouped GEMM, fused GLU, atomic-free weighted unpermute),
-  driven through ``EPMoELayerBase``'s own methods.
-- ``halo+<combine>``: the same path with the GeGLU combine swapped for eager PyTorch, ``torch.compile`` or
-  Liger, isolating the activation kernel.
-- ``halo_padded_gather``: the same path, its sort included, with a padded-gather permute: the routing
-  weights multiplied separately, the unpermute a padded ``[N, top_k, H]`` gather-sum, and the permute's
-  backward the same.
-
-Usage (inside the Halo image, one GPU):
-    python tests/gpu/profiling/benchmark_moe_block.py --out results.json [--tokens 2048 8192 32768]
+Compares transformers' ``eager`` and ``grouped_mm`` against this tree's grouped path, with the GeGLU combine swapped to
+isolate the activation kernel, and a padded-gather baseline.
 """
 
 import argparse
@@ -33,11 +20,11 @@ from liger_kernel.ops.geglu import LigerGELUMulFunction
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 
-from src.distributed.expert_parallel import base_layer
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.kernels.fused_glu import PACKED_GLU_MULS, fused_gelu_tanh_mul
-from src.kernels.grouped_gemm import grouped_gemm
-from src.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
+from halo.distributed.expert_parallel.moe_layer import compute
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.fused_glu import GluCombine
+from halo.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
 
@@ -108,34 +95,33 @@ class _PaddedGatherUnpermute(torch.autograd.Function):
 
 
 def _sort(x: torch.Tensor, idx: torch.Tensor, w: torch.Tensor):
-    """``_sort_tokens_for_grouped_mm`` at ``ep_size`` 1: the expert-sorted tokens and routing."""
-    return EPMoELayerBase._sort_tokens_for_grouped_mm(_LAYER, x, idx, w)
+    return EPMoELayerBase._sort_tokens_for_grouped_mm(_LAYER, x, idx, w, recv_counts=None)
 
 
-# The sort's own permute swapped for the padded one, so the baseline differs from ``halo`` in the permute alone.
-padded_permute = partial(patch.object, base_layer, "MoEGatherPermute", _PaddedGatherPermute)
+# So the baseline differs from ``halo`` in the permute alone.
+padded_permute = partial(patch.object, compute, "MoEGatherPermute", _PaddedGatherPermute)
 
 
 def padded_gather_block():
     """:func:`halo_block` with the padded-gather permute (run under :data:`padded_permute`) and a separate
     routing-weight multiply."""
-    glu = PACKED_GLU_MULS[fused_gelu_tanh_mul]
+    glu = GluCombine.gelu_tanh().packed
 
     def run(x, idx, w, gate_up_w, down_w):
         tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
-        y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
+        y = expert_gemm(glu(expert_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return _PaddedGatherUnpermute.apply(y * weights.unsqueeze(-1).to(y.dtype), token_idx, inv_map)
 
     return run
 
 
 def halo_block(combine=None):
-    """This tree's grouped expert compute (``_compute_experts_with_grouped_mm`` at ``ep_size`` 1)."""
-    glu = combine or PACKED_GLU_MULS[fused_gelu_tanh_mul]
+    """``_compute_experts_grouped`` at ``ep_size`` 1."""
+    glu = combine or GluCombine.gelu_tanh().packed
 
     def run(x, idx, w, gate_up_w, down_w):
         tokens, offs, token_idx, weights, _, inv_map = _sort(x, idx, w)
-        y = grouped_gemm(glu(grouped_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
+        y = expert_gemm(glu(expert_gemm(tokens, gate_up_w, offs=offs)), down_w, offs=offs)
         return MoEWeightedUnpermute.apply(y.contiguous(), weights.to(y.dtype), token_idx, inv_map)
 
     return run

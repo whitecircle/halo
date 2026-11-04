@@ -1,0 +1,183 @@
+"""Reference pieces the tree-packing tests share; dense keep-masks state tree attention independently of any kernel
+plan. :func:`reference_varlen` is the kernel contract in plain torch: it stands in on CPU and is pinned to the CUDA
+kernels on GPU."""
+
+from collections.abc import Callable, Sequence
+
+import numpy as np
+import torch
+from transformers.modeling_layers import GradientCheckpointingLayer
+
+from halo.data.tree_layout import (
+    DEPTH_COLUMN,
+    POSITION_COLUMN,
+    TRAINED_COLUMN,
+    build_trie,
+    serialize_tree,
+    share_limit,
+)
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention.tree_plan import NodeTable, build_node_table
+
+
+def tree_attention_masks(
+    position_ids: torch.Tensor, depth: torch.Tensor, sliding_window: int | None
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """Dense ``[N, N]`` keep-masks (full, sliding): a query keeps keys on its own path at or before it; the window is
+    in path positions."""
+    table = build_node_table(position_ids, depth)
+    on_path = np.eye(len(table.starts), dtype=bool)
+    for node, parent in enumerate(table.parents.tolist()):
+        if parent != -1:
+            on_path[node] |= on_path[parent]
+    node_of = torch.from_numpy(np.repeat(np.arange(len(table.starts)), table.lengths))
+    position = position_ids.flatten()
+    full = torch.from_numpy(on_path)[node_of][:, node_of] & (position[None, :] <= position[:, None])
+    if sliding_window is None:
+        return full, None
+    return full, full & (position[:, None] - position[None, :] < sliding_window)
+
+
+def additive_mask(keep: torch.Tensor) -> torch.Tensor:
+    """A keep-mask as the ``[1, 1, N, N]`` additive fp32 mask an eager forward takes."""
+    return torch.zeros(keep.shape).masked_fill(~keep, torch.finfo(torch.float32).min)[None, None]
+
+
+def leaf_chains(parents: Sequence[int]) -> dict[int, list[int]]:
+    """Leaf index -> node indices from the root down to it, leaves in row order."""
+    has_child = set(parents)
+    chains = {}
+    for leaf in range(len(parents)):
+        if leaf in has_child:
+            continue
+        chain = [leaf]
+        while parents[chain[-1]] != -1:
+            chain.append(parents[chain[-1]])
+        chains[leaf] = chain[::-1]
+    return chains
+
+
+def example_rows(table: NodeTable) -> list[torch.Tensor]:
+    """Row indices along every root-to-leaf path, one tensor per example, leaves in row order."""
+    return [
+        torch.cat([torch.arange(table.starts[node], table.starts[node] + table.lengths[node]) for node in chain])
+        for chain in leaf_chains(table.parents.tolist()).values()
+    ]
+
+
+def tree_columns(paths: list[list[int]], trained: list[list[bool]]) -> dict[str, torch.Tensor]:
+    """The per-token columns of the one tree over ``paths``, plus the ``labels`` a collator derives."""
+    nodes = build_trie(paths, [share_limit(mask) for mask in trained], 1)
+    columns = {name: torch.tensor(values) for name, values in serialize_tree(nodes, paths, trained).items()}
+    columns["labels"] = columns["input_ids"].masked_fill(~columns[TRAINED_COLUMN], LABEL_IGNORE_INDEX)
+    return columns
+
+
+def reference_varlen(calls: list[dict]):
+    """A flash varlen kernel in plain torch: per sequence a bottom-right causal/window softmax with the sink in the
+    normalizer; returns ``(out, lse)``."""
+
+    def varlen(
+        q,
+        k,
+        v,
+        *,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        max_seqlen_q,
+        max_seqlen_k,
+        causal,
+        softmax_scale,
+        window_size=(None, None),
+        learnable_sink=None,
+        dropout_p=0.0,
+        deterministic=False,
+        return_lse=False,
+    ):
+        calls.append(
+            {
+                "causal": causal,
+                "window": window_size,
+                "sink": learnable_sink is not None,
+                "queries": q.shape[0],
+                "keys": k.shape[0],
+                "max_seqlen": (max_seqlen_q, max_seqlen_k),
+            }
+        )
+        group = q.shape[1] // k.shape[1]
+        outs, lses = [], []
+        for b in range(len(cu_seqlens_q) - 1):
+            queries = q[cu_seqlens_q[b] : cu_seqlens_q[b + 1]]
+            keys = k[cu_seqlens_k[b] : cu_seqlens_k[b + 1]].repeat_interleave(group, dim=1)
+            values = v[cu_seqlens_k[b] : cu_seqlens_k[b + 1]].repeat_interleave(group, dim=1)
+            scores = torch.einsum("qhd,khd->hqk", queries, keys) * softmax_scale
+            i = torch.arange(len(queries), device=q.device)[:, None] + len(keys) - len(queries)
+            j = torch.arange(len(keys), device=q.device)[None, :]
+            keep = torch.ones(len(queries), len(keys), dtype=torch.bool, device=q.device)
+            if causal:
+                keep &= j <= i
+            if window_size[0] is not None:
+                keep &= j >= i - window_size[0]
+            scores = scores.masked_fill(~keep, float("-inf"))
+            if learnable_sink is not None:
+                scores = torch.cat([scores, learnable_sink.view(-1, 1, 1).expand(-1, len(queries), 1)], dim=-1)
+            lses.append(torch.logsumexp(scores, dim=-1))
+            outs.append(torch.einsum("hqk,khd->qhd", torch.softmax(scores, dim=-1)[..., : len(keys)], values))
+        return torch.cat(outs), torch.cat(lses, dim=1)
+
+    return varlen
+
+
+def randomize_sinks(model: torch.nn.Module) -> None:
+    """Give every sink its own value, so a path that drops the sink moves the output."""
+    with torch.no_grad():
+        for module in model.modules():
+            if hasattr(module, "sinks"):
+                module.sinks.normal_(0.0, 1.0)
+
+
+def randomize_indexer_pools(model: torch.nn.Module) -> None:
+    """Give every DSA indexer's pool compression its own values: zero init weighs tokens alike, so a misordered pool
+    scores the same."""
+    with torch.no_grad():
+        for module in model.modules():
+            if hasattr(module, "index_kpool_compress_ape"):
+                module.index_kpool_compress_ape.normal_(0.0, 0.5)
+                module.index_kpool_compress_gate.normal_(0.0, 0.5)
+
+
+def checkpointing_gaps(
+    model: torch.nn.Module, step: Callable[[], torch.Tensor], *, use_reentrant: bool
+) -> tuple[float, float]:
+    """``(logit gap, gradient gap)`` between one step without GC and the same step with it; it must re-run every
+    decoder layer, or they compare nothing."""
+    layers = [module for module in model.modules() if isinstance(module, GradientCheckpointingLayer)]
+    passes = []
+    hooks = [layer.register_forward_pre_hook(lambda *_: passes.append(None)) for layer in layers]
+    runs = []
+    model.train()
+    try:
+        for checkpointing in (False, True):
+            if checkpointing:
+                model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
+            passes.clear()
+            model.zero_grad(set_to_none=True)
+            logits = step()
+            grads = {name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None}
+            runs.append((logits, grads, len(passes)))
+    finally:
+        model.gradient_checkpointing_disable()
+        for hook in hooks:
+            hook.remove()
+    (logits, grads, plain_passes), (checkpointed_logits, checkpointed_grads, checkpointed_passes) = runs
+    assert layers and checkpointed_passes == 2 * plain_passes, "the checkpointed step recomputed no decoder layer"
+    assert checkpointed_grads.keys() == grads.keys()
+    gradient_gap = max((checkpointed_grads[name] - grad).abs().max().item() for name, grad in grads.items())
+    return (checkpointed_logits - logits).abs().max().item(), gradient_gap
+
+
+def concat_columns(trees: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+    return {
+        name: torch.cat([tree[name] for tree in trees])
+        for name in ("input_ids", "labels", POSITION_COLUMN, DEPTH_COLUMN)
+    }

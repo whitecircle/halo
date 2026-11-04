@@ -7,7 +7,7 @@ Three methods learn from comparisons and KTO from per-row binary labels. Pick by
 | `prompt` / `chosen` / `rejected` | [SMPO](smpo.md) | No reference model; the margin loss stops once a pair separates |
 | `prompt` / `chosen` / `rejected` | [DPO](dpo.md) | Reference-based; 15 TRL loss types, combinable |
 | `prompt` / `completion` / `label` | [KTO](kto.md) | Unpaired thumbs-up/down feedback |
-| `prompt` / `chosen` / `rejected` → scorer | [Reward modeling](reward-modeling.md) | A Bradley-Terry score head for rejection sampling or RL |
+| `prompt` / `chosen` / `rejected` → scorer | [Reward modeling](../reward-modeling.md) | A Bradley-Terry score head for rejection sampling or RL |
 
 Other shapes: several scored completions per prompt → [Offline GRPO](../grpo/offline.md); generation during training → [Online GRPO](../grpo/online.md) or [Async GRPO with Environments](../async-grpo/README.md); one good completion per prompt → [SFT](../sft.md).
 
@@ -23,7 +23,7 @@ The three pairwise methods share one format, all fields `list[dict]` messages:
 
 ## Parallelism
 
-All four run EP, TP, ETP and EP+TP. SMPO alone declares CP support: it CP-aggregates its per-sequence log-prob sums, while DPO and KTO run TRL's CP-unaware loss path and the reward head needs the whole sequence to pool. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
+All four run EP, TP, ETP, EP+TP and PP (DPO and KTO precompute-only). SMPO alone declares CP support: it CP-aggregates its per-sequence log-prob sums, while DPO and KTO run TRL's CP-unaware loss path and the reward head needs the whole sequence to pool. Full matrix: [Trainer Compatibility](../../reference/trainer-architecture.md#trainer-compatibility).
 
 ## Launch
 
@@ -33,4 +33,4 @@ torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
     --expert_parallel_size=8
 ```
 
-`halo launch smpo <config> --nproc 8` builds the same line; the other methods are `dpo`, `kto` and `preference/rewards`.
+`halo launch smpo <config> --nproc 8` builds the same line; the other methods are `dpo`, `kto` and `reward/reward-model`.

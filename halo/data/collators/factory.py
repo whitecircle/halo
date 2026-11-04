@@ -1,0 +1,117 @@
+import logging
+
+from halo.data.collators.collator_rules import reject_unsupported_collator_options, supports_one_document_varlen_set
+from halo.data.collators.packing import (
+    DataCollatorForCompletionOnlyLMWithPacking,
+    DataCollatorWithFlattening,
+    DataCollatorWithFlatteningAndCompletionMask,
+    DataCollatorWithPacking,
+)
+from halo.data.collators.padded import (
+    DataCollatorForCausalLMWithPadding,
+    DataCollatorForCompletionOnlyLM,
+    DataCollatorForLanguageModelingWithVarlen,
+)
+from halo.data.turn_markers import resolve_eos_token_ids
+from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
+from halo.models.segment_markers import segment_markers_for
+from halo.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
+
+
+def select_data_collator(
+    tokenizer,
+    *,
+    train_on_completions_only: bool,
+    padding_free: bool = False,
+    packing: bool = False,
+    assistant_message_template: str | None = None,
+    pad_to_multiple_of: int | None = None,
+    use_context_parallel: bool = False,
+    train_on_last_assistant_only: bool = False,
+    model_config=None,
+    per_device_train_batch_size: int = 1,
+    keeps_packed_rows: bool = False,
+    allow_cross_document_linear_attention: bool = False,
+    per_device_eval_batch_size: int = 0,
+    emit_varlen_one_document: bool = False,
+):
+    """The collator matching the config, ``None`` for TRL's own; raises on a combination no collator can serve.
+    ``model_config`` supplies the eos set that ends assistant turns (GLM-4's role-marker templates).
+
+    ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it, outside PP (whose
+    stages build their own) and the CP routes (Ulysses hands the kernel its own ``cu_seqlens``). Only for a caller
+    whose batches reach this model alone: the set moves every flash model a batch reaches onto the varlen kernel."""
+    reject_unsupported_collator_options(
+        tokenizer,
+        padding_free=padding_free,
+        packing=packing,
+        train_on_completions_only=train_on_completions_only,
+        assistant_message_template=assistant_message_template,
+        use_context_parallel=use_context_parallel,
+        train_on_last_assistant_only=train_on_last_assistant_only,
+        model_config=model_config,
+        per_device_train_batch_size=per_device_train_batch_size,
+        keeps_packed_rows=keeps_packed_rows,
+        allow_cross_document_linear_attention=allow_cross_document_linear_attention,
+        per_device_eval_batch_size=per_device_eval_batch_size,
+        pad_to_multiple_of=pad_to_multiple_of,
+    )
+    markers = segment_markers_for(model_config)
+    completion_kwargs = {
+        "response_prompt_template": assistant_message_template,
+        "tokenizer": tokenizer,
+        "train_on_last_assistant_only": train_on_last_assistant_only,
+        "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
+    }
+    last_only = ", last-only" if train_on_last_assistant_only else ""
+    one_document = (
+        emit_varlen_one_document and not keeps_packed_rows and supports_one_document_varlen_set(model_config)
+    )
+    flat_markers = {"return_seq_idx": markers.seq_idx}
+    packed_markers = {
+        "return_seq_idx": markers.seq_idx,
+        "emit_varlen_always": markers.cu_seq_lens,
+        "emit_varlen_on_flash_restart": is_flash_attn_implementation(effective_attn_implementation(model_config)),
+        "emit_varlen_one_document": one_document,
+    }
+    if use_context_parallel and train_on_completions_only:
+        # pad_to_multiple_of keeps seqs divisible by cp_size.
+        prefix, name = "📊", f"DataCollatorForCompletionOnlyLM (CP mode, pad_to={pad_to_multiple_of}{last_only})"
+        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs, pad_to_multiple_of=pad_to_multiple_of)
+    elif use_context_parallel:
+        prefix, name = "📊", f"DataCollatorForCausalLMWithPadding (CP mode, pad_to={pad_to_multiple_of})"
+        collator = DataCollatorForCausalLMWithPadding(
+            tokenizer=tokenizer, mlm=False, pad_to_multiple_of=pad_to_multiple_of
+        )
+    elif padding_free and train_on_completions_only:
+        prefix, name = "⚡", f"DataCollatorWithFlatteningAndCompletionMask (padding-free, varlen{last_only})"
+        collator = DataCollatorWithFlatteningAndCompletionMask(**completion_kwargs, **flat_markers)
+    elif padding_free:
+        prefix, name = "⚡", "DataCollatorWithFlattening (padding-free, varlen)"
+        collator = DataCollatorWithFlattening(tokenizer=tokenizer, **flat_markers)
+    elif packing and train_on_completions_only:
+        prefix, name = "📦", f"DataCollatorForCompletionOnlyLMWithPacking{last_only}"
+        collator = DataCollatorForCompletionOnlyLMWithPacking(**completion_kwargs, **packed_markers)
+    elif packing:
+        prefix, name = "📦", "DataCollatorWithPacking"
+        collator = DataCollatorWithPacking(tokenizer=tokenizer, **packed_markers)
+    elif train_on_completions_only:
+        prefix, name = "📝", f"DataCollatorForCompletionOnlyLM{last_only}"
+        collator = DataCollatorForCompletionOnlyLM(
+            **completion_kwargs, emit_varlen_one_document=one_document, pad_to_multiple_of=pad_to_multiple_of
+        )
+    elif one_document:
+        prefix, name = "ℹ️", "DataCollatorForLanguageModelingWithVarlen (TRL's, with the one-document varlen set)"
+        collator = DataCollatorForLanguageModelingWithVarlen(
+            pad_token_id=tokenizer.pad_token_id, pad_to_multiple_of=pad_to_multiple_of
+        )
+    else:
+        prefix, name, collator = "ℹ️", "None (default TRL behavior)", None
+    if isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):
+        collator.allow_cross_document_linear_attention = allow_cross_document_linear_attention
+
+    if is_global_main_process():
+        logger.info(f"{prefix} Using {name}")
+    return collator

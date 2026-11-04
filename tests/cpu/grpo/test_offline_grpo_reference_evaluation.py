@@ -8,9 +8,9 @@ import torch
 from datasets import Dataset
 from torch import nn
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.runtime import DeferredRankFailure
-from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.runtime.consensus import DeferredRankFailure
+from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import mapped_scores
 
@@ -47,7 +47,7 @@ class _Trainer(OfflineGRPOReferenceMixin, _Base):
         self.model = nn.Linear(1, 1)
         self.ref_model = None
         self.parallelism_config = SimpleNamespace(is_cp_mode=False)
-        self._pp_runtime = None
+        self._pp_runner = None
         self._reference_settings = lambda: dict(_SETTINGS)
         dataset = _dataset()
         self.train_dataset = self._attach_scored_reference_logps(
@@ -69,8 +69,7 @@ def test_reordered_subset_and_duplicate_rows_reuse_exact_original_scores(tmp_pat
 
 
 def test_reevaluating_the_same_rows_reuses_their_scores_without_storing_them_again(tmp_path):
-    """Evaluation scores stay on disk for the launch, so the same rows evaluated again (a fresh object,
-    as a periodic callback builds) must reuse them rather than add another copy per call."""
+    """Evaluation scores stay on disk for the launch, so each evaluation of the same rows would add another copy."""
     trainer = _Trainer(tmp_path)
     trainer.evaluate(_dataset().select([2, 0]))
     caches = _cache_directories(tmp_path)
@@ -126,7 +125,7 @@ def test_invalid_original_reference_is_rejected_before_scoring(tmp_path, kind):
     elif kind == "cp":
         trainer.parallelism_config.is_cp_mode = True
     else:
-        trainer._pp_runtime = object()
+        trainer._pp_runner = object()
     with pytest.raises(ValueError, match="trained/live|frozen|CP/PP"):
         trainer.evaluate(_dataset(), original_reference_model=reference)
 
@@ -239,8 +238,7 @@ def _ranked_original_reference_branch(rank, root):
 
 
 def test_rows_missing_on_one_rank_send_every_rank_through_the_original_reference(tmp_path):
-    """Only rank 1 lacks stored scores for these rows. The sweep and the stored-score reuse enter
-    different collectives, so a rank-local choice strands the ranks in mismatched ones."""
+    """The sweep and the stored-score reuse enter different collectives, so a rank-local choice strands the ranks."""
     run_gloo_ranks(_ranked_original_reference_branch, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=30))
 
 

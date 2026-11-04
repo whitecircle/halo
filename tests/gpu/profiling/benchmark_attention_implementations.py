@@ -1,41 +1,5 @@
 #!/usr/bin/env python
-"""
-Benchmark attention implementations on Qwen3-8B: forward + backward on 16k sequences.
-
-Compares performance and memory across attention backends:
-  - flash_attention_2 (FlashAttention v2)
-  - flash_attention_3 (FlashAttention v3, Hopper+, if installed)
-  - flex_attention (PyTorch built-in, torch >=2.5)
-  - sdpa (PyTorch scaled_dot_product_attention)
-  - eager (no attention optimization)
-
-Each backend is loaded fresh, warmed up, then timed over multiple iterations.
-Reports: forward time, backward time, peak memory, throughput.
-
-Usage (1 GPU):
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_attention_implementations.py
-
-    # Custom seq length and iterations
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_attention_implementations.py \
-        --seq 16384 --iters 10 --warmup 3
-
-    # Only test specific backends
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_attention_implementations.py \
-        --backends flash_attention_2 sdpa eager
-
-    # With gradient checkpointing (saves memory, adds recompute overhead)
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_attention_implementations.py \
-        --gradient_checkpointing
-
-    # Different model
-    torchrun --nproc_per_node=1 \
-        tests/gpu/profiling/benchmark_attention_implementations.py \
-        --model qwen3-0.6b --seq 32768
-"""
+"""Attention backends on Qwen3-8B: forward and backward time, peak memory and throughput on 16k sequences."""
 
 import argparse
 import contextlib
@@ -50,10 +14,9 @@ from accelerate import PartialState
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tests.common.distributed import init_distributed, teardown_distributed
+from tests.common.memory import cleanup_memory, gpu_mem_gb, gpu_peak_mem_gb
 from tests.common.models import MODEL_CONFIGS
-from tests.common.utils import cleanup_memory, gpu_mem_gb, gpu_peak_mem_gb, log
-
-# Configuration
+from tests.common.rank_log import log
 
 ALL_BACKENDS = [
     "flash_attention_4",
@@ -73,14 +36,9 @@ DEFAULT_BACKENDS = [
 ]
 
 
-# Helpers
-
-
 def check_backend_available(backend: str) -> bool:
-    """Check if an attention backend is available."""
     if backend == "flash_attention_4":
-        # FA4 (Blackwell, CuTe DSL) lives in the flash_attn.cute submodule and
-        # co-exists with FA2 under the same flash_attn namespace.
+        # FA4 lives in the flash_attn.cute submodule and co-exists with FA2 under the same namespace.
         try:
             import flash_attn.cute  # noqa: PLC0415
 
@@ -111,7 +69,6 @@ def check_backend_available(backend: str) -> bool:
 
 
 def can_load_with_backend(model_name: str, backend: str) -> bool:
-    """Check if model config accepts this attention implementation."""
     try:
         config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         config._attn_implementation = backend
@@ -121,8 +78,7 @@ def can_load_with_backend(model_name: str, backend: str) -> bool:
 
 
 def create_input_batch(tokenizer, seq_len: int, batch_size: int, device: str):
-    """Create a fixed input batch for benchmarking."""
-    # Generate token IDs directly (faster than encoding text)
+    # Direct token IDs are faster than encoding text.
     vocab_size = tokenizer.vocab_size
     torch.manual_seed(42)
     input_ids = torch.randint(1, vocab_size, (batch_size, seq_len), device=device)
@@ -141,7 +97,6 @@ def benchmark_single_backend(
     gradient_checkpointing: bool,
     device: str,
 ) -> dict:
-    """Load model with given backend and benchmark forward + backward."""
     result = {
         "backend": backend,
         "status": "ok",
@@ -154,7 +109,6 @@ def benchmark_single_backend(
         "total_tokens_per_sec": 0.0,
     }
 
-    # Check availability
     if not check_backend_available(backend):
         result["status"] = "skipped (not installed)"
         return result
@@ -168,7 +122,6 @@ def benchmark_single_backend(
     torch.cuda.reset_peak_memory_stats()
 
     try:
-        # Load model
         log(f"    Loading model with attn_implementation={backend}...")
         t0 = time.perf_counter()
         model = AutoModelForCausalLM.from_pretrained(
@@ -186,12 +139,10 @@ def benchmark_single_backend(
         result["mem_after_load_gb"] = gpu_mem_gb()
         log(f"    Loaded in {load_time:.1f}s, GPU mem: {result['mem_after_load_gb']:.2f} GB")
 
-        # Create input
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
         input_ids, attention_mask, labels = create_input_batch(tokenizer, seq_len, batch_size, device)
         total_tokens = batch_size * seq_len
 
-        # Warmup
         log(f"    Warmup ({num_warmup} iterations)...")
         for _ in range(num_warmup):
             out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
@@ -199,10 +150,8 @@ def benchmark_single_backend(
             model.zero_grad(set_to_none=True)
         torch.cuda.synchronize()
 
-        # Reset peak memory after warmup
         torch.cuda.reset_peak_memory_stats()
 
-        # Timed iterations
         log(f"    Benchmarking ({num_iters} iterations)...")
         fwd_times = []
         bwd_times = []
@@ -210,13 +159,11 @@ def benchmark_single_backend(
         for _ in range(num_iters):
             torch.cuda.synchronize()
 
-            # Forward
             t_fwd_start = time.perf_counter()
             out = model(input_ids=input_ids, attention_mask=attention_mask, labels=labels)
             torch.cuda.synchronize()
             t_fwd_end = time.perf_counter()
 
-            # Backward
             t_bwd_start = time.perf_counter()
             out.loss.backward()
             torch.cuda.synchronize()
@@ -227,7 +174,7 @@ def benchmark_single_backend(
 
             model.zero_grad(set_to_none=True)
 
-        # Compute stats (drop first iteration which may have residual warmup effects)
+        # Drops the first iteration, which may have residual warmup effects.
         drop = min(1, num_iters - 1)
         fwd_times = fwd_times[drop:]
         bwd_times = bwd_times[drop:]
@@ -258,7 +205,6 @@ def benchmark_single_backend(
         log(f"    ERROR: {e}")
         traceback.print_exc()
     finally:
-        # Cleanup model
         if "model" in locals():
             del model
         if "out" in locals():
@@ -266,9 +212,6 @@ def benchmark_single_backend(
         cleanup_memory()
 
     return result
-
-
-# Main
 
 
 def main():
@@ -325,7 +268,6 @@ def main():
     )
     args = parser.parse_args()
 
-    # --- Distributed init (required by torchrun) ---
     rank, world_size, local_rank = init_distributed()
     PartialState()
     device = f"cuda:{local_rank}"
@@ -340,7 +282,6 @@ def main():
         log(f"\n  FATAL: attention benchmark crashed: {exc}")
         traceback.print_exc()
     finally:
-        # Cleanup
         with contextlib.suppress(Exception):
             dist.barrier()
         teardown_distributed()
@@ -349,8 +290,6 @@ def main():
 
 
 def _run_backends(args, rank, world_size, local_rank, device) -> bool:
-    """Run the configured backends; return True if at least one succeeded."""
-    # --- Resolve model ---
     model_cfg = MODEL_CONFIGS[args.model]
     model_name = args.model_path or model_cfg["hf_name"]
     full_params = model_cfg["full_params"]
@@ -370,14 +309,12 @@ def _run_backends(args, rank, world_size, local_rank, device) -> bool:
     log(f"  Backends to test: {backends}")
     log(f"{'=' * 70}")
 
-    # --- Ensure model is downloaded ---
     log("\nDownloading model (if needed)...")
     if rank == 0:
         AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     dist.barrier()
 
-    # --- Run benchmarks ---
     results = []
     for backend in backends:
         r = benchmark_single_backend(
@@ -392,14 +329,12 @@ def _run_backends(args, rank, world_size, local_rank, device) -> bool:
         )
         results.append(r)
 
-    # --- Summary table ---
     log(f"\n{'=' * 70}")
     log("  RESULTS SUMMARY")
     log(f"  Model: {model_name} | Seq: {args.seq:,} | Batch: {args.batch_size}")
     log(f"  Gradient checkpointing: {args.gradient_checkpointing}")
     log(f"{'=' * 70}")
 
-    # Header
     log(
         f"  {'Backend':<22} {'Status':<12} {'Fwd (ms)':>10} {'Bwd (ms)':>10} "
         f"{'Total (ms)':>11} {'Peak Mem':>10} {'Tok/s (fwd)':>13} {'Tok/s (total)':>14}"
@@ -416,7 +351,6 @@ def _run_backends(args, rank, world_size, local_rank, device) -> bool:
         else:
             log(f"  {r['backend']:<22} {r['status']:<12}")
 
-    # --- Relative comparison (vs best) ---
     ok_results = [r for r in results if r["status"] == "ok"]
     if len(ok_results) >= 2:
         best_total = min(r["total_ms"] for r in ok_results)
@@ -434,8 +368,7 @@ def _run_backends(args, rank, world_size, local_rank, device) -> bool:
 
     log(f"\n{'=' * 70}\n")
 
-    # A run is only successful if at least one backend produced timings;
-    # if every backend errored/OOMed the process must exit nonzero.
+    # If every backend errored or OOMed the process must exit nonzero.
     succeeded = len(ok_results) > 0
     if not succeeded:
         log("  ERROR: no backend completed successfully")

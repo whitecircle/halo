@@ -1,20 +1,15 @@
 #!/usr/bin/env python
-"""A completion without ``usage.completion_tokens`` counts its captured token ids, never a word count.
-
-``len(text.split())`` would fabricate a length for ``episode/generation_tokens``; the captured ids are
-the only honest length, and their absence is 0 plus one warning.
-
-    python tests/cpu/environments/test_ray_generation_token_count.py
-"""
+"""A completion without ``usage.completion_tokens`` counts its captured token ids, never a word count; their absence
+is 0 plus one warning."""
 
 import logging
 from types import SimpleNamespace
 
 import pytest
 
-import src.environments.ray_actors as ray_actors
-from src.configs.rollout_config import RolloutConfig
-from src.environments.ray_actors import EnvironmentActor
+import halo.environments.engine_wire as engine_wire
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
 
 
 class _Session:
@@ -62,15 +57,15 @@ _NO_USAGE_BODY = {
 
 @pytest.fixture
 def _rearm_warning():
-    ray_actors._COMPLETION_TOKENS_MISSING_WARNED.discard("vllm")
+    engine_wire._completion_tokens_missing_warned.discard("vllm")
     yield
-    ray_actors._COMPLETION_TOKENS_MISSING_WARNED.discard("vllm")
+    engine_wire._completion_tokens_missing_warned.discard("vllm")
 
 
 async def test_captured_ids_are_the_length_when_usage_is_missing(_rearm_warning, caplog):
     actor = _actor()
     messages = [{"role": "user", "content": "2+2?"}]
-    with caplog.at_level(logging.WARNING, logger=ray_actors.__name__):
+    with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
         captured = await actor._generate(
             _Session(_NO_USAGE_BODY), "server:8000", messages, RolloutConfig(max_retries=0, capture_token_ids=True)
         )

@@ -1,14 +1,14 @@
 # Multi-Node Launch Recipes
 
-Runnable launches for multi-node training: torchrun and SLURM commands, EP checkpoint save/load, filesystem setup, and sharded data loading. For the process-group layout, node-local vs cross-node scope, and the `ParallelismConfig` API, see [Multi-Node Training](multi-node.md). For SkyPilot cluster provisioning, see [SkyPilot](../infrastructure/skypilot.md).
+Runnable launches for multi-node training: torchrun and SLURM commands, EP checkpoint save/load and filesystem setup. For the process-group layout, node-local vs cross-node scope, and the `ParallelismConfig` API, see [Multi-Node Training](multi-node.md). For SkyPilot cluster provisioning, see [SkyPilot](../infrastructure/skypilot.md).
 
-These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or AWS EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)). Launch one `torchrun` per node (it forks the 8 per-GPU ranks); EP all-to-all uses NVLink within a node and RDMA only when `ep_scope="global"` makes the EP group span nodes. A ready-to-run example covering cross-node EP, node-local EP + DP, EP+TP, and the NVL72 variant ships at `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
+These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or AWS EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)). Launch one `torchrun` per node (it forks the 8 per-GPU ranks); EP all-to-all uses NVLink within a node and RDMA only when `ep_scope="global"` makes the EP group span nodes. A ready-to-run example covering cross-node EP, node-local EP + DP, EP+TP, and the NVL72 variant ships at `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`; the two pipeline-parallel recipes, one stage per node, launch the same way ([Pipeline Parallelism → Launching](pipeline-parallelism.md#launching)).
 
 ## torchrun
 
 One `torchrun` per node, incrementing `--node_rank`. The config sets the parallelism layout — it ships `expert_parallel_size: 16` / `ep_scope: global`, cross-node EP across both nodes — and every parallelism field overrides on the command line:
 
-- **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node`.
+- **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true`. The config pins the per-expert loop for `ep16`, and at `ep8` that loop is 28% slower (14,402 against 20,066 tok/s/GPU on one 8× B300 host).
 
 ```bash
 # Node 0 (master): --node_rank=0 ; Node 1: --node_rank=1
@@ -21,6 +21,12 @@ torchrun \
     scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
 ```
+
+On one node the launch drops `--nnodes`, `--node_rank` and `--master_*`: `torchrun --nproc_per_node=8 scripts/training/sft.py <config> --expert_parallel_size=8 --use_grouped_gemm=true`. Each axis is one `--*_parallel_size` flag, in the YAML or on the CLI, combinable where [Supported combinations](README.md#supported-combinations) allows, and each needs `torchrun` ([Two launchers](data-parallelism.md#two-launchers)): `accelerate launch`, detected through `ACCELERATE_MIXED_PRECISION` or `ACCELERATE_USE_FSDP` (`is_accelerate_launch`), raises on any of them. A plain `python` launch trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel`. `halo launch` is single-node only.
+
+On a multi-socket host, add `--numa-binding node` to each `torchrun`: it runs every rank on its GPU's NUMA node, a gain on host-bound TP, CP and small-batch EP runs ([NUMA binding](../optimization/throughput-benchmarks.md#numa-binding)).
+
+The log-writing rank (global rank 0 on a shared output filesystem, each node's local rank 0 otherwise) tees its stdout and stderr to `<output_dir>/log/run.log`, so a detached run keeps its console without a redirect. Redirecting the launch (`> "$D/<job>.log" 2>&1`, as the [detached Docker launch](../infrastructure/docker.md#standard-training-launch) does) also captures the other ranks, such as a crash off rank 0. A log directory or `tee` that cannot be set up is warned on that rank, and the run continues without the file.
 
 ## SLURM
 
@@ -39,15 +45,17 @@ Ranks must sit `gpus_per_node` per machine in rank order: every node-local EP/CP
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1)
 export MASTER_PORT=29500
 
-srun torchrun \
+srun bash -c 'torchrun \
     --nnodes=$SLURM_NNODES \
     --node_rank=$SLURM_NODEID \
     --nproc_per_node=$SLURM_GPUS_PER_NODE \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
+    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml'
 ```
+
+The single quotes make each task expand its own `$SLURM_NODEID`. Unquoted, the batch shell expands it once, to `0`, so every node claims rank 0 and the rendezvous times out with `DistStoreError`.
 
 ## Other schedulers
 
@@ -67,36 +75,21 @@ Managed cloud recipes: [SkyPilot](../infrastructure/skypilot.md) (AWS EFA / Nebi
 ```bash
 export DIST_SHARED_FILESYSTEM=1      # default; "0" for per-node local storage
 export DIST_NCCL_TIMEOUT_MINUTES=60  # NCCL watchdog; toolkit default 30 (PyTorch's own is 10)
-export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-first download, load gate)
+export DIST_STORE_TIMEOUT_HOURS=4    # default; bounds c10d-store waits (main-first download, load gate, checkpoint write joins)
 export NCCL_SOCKET_IFNAME=<your fast NIC>  # multi-homed node: `ib0` on IB, the ENA iface on AWS
-# The image bakes the InfiniBand / RoCE defaults: NCCL_IB_HCA=mlx5, NCCL_IB_DISABLE=0,
-# NCCL_NET_GDR_LEVEL=2 (GPU Direct RDMA for inter-node EP), NCCL_P2P_LEVEL=NVL (NVLink intra-node P2P),
-# NCCL_DEBUG=WARN, and CUDA_DEVICE_MAX_CONNECTIONS=1 (the setting EP is validated with, no throughput
-# cost — agent-docs/infrastructure/deepep.md#environment-variables; the driver latches it at cuInit,
-# so a launch outside the image must export it before the process starts).
-# On IB, leave NCCL_NET_PLUGIN unset: the OFI plugin yields to NCCL's built-in IB transport. Set
-# NCCL_IB_HCA only for a non-default HCA.
-# AWS EFA: set the plugin explicitly — the base's shinit_v2 sets it only for a shell that sources
-# /etc/shinit_v2 — and name its net so a missing plugin fails instead of falling back to sockets:
-# export NCCL_NET_PLUGIN=ofi
-# export NCCL_NET=Libfabric
-# NCCL_PROTO=simple is optional; if set, set it on every rank of a communicator, a rollout server
-# joining a weight-sync group included (multi-node.md#rdma-fabrics). FI_PROVIDER=efa and
-# FI_EFA_USE_DEVICE_RDMA=1 are the plugin's and libfabric's defaults.
-# Cross-node EP (ep_scope=global) over EFA additionally needs proxy GIN + GDRCopy:
-# export NCCL_GIN_TYPE=2             # proxy GIN (EFA has no IBGDA)
-# and run the container with `--device /dev/gdrdrv` (host loads the gdrdrv module).
-# A rollout server on another node (online / async GRPO): the server under its compose EFA overlay,
-# the trainer with `make ... EFA=1` — agent-docs/infrastructure/rollout-servers.md#servers-on-other-nodes-efa.
+# The image bakes the IB/RoCE NCCL defaults and CUDA_DEVICE_MAX_CONNECTIONS=1
+# (agent-docs/infrastructure/docker.md#baked-in-environment-variables); InfiniBand/RoCE needs no fabric env.
 # export NVLINK_DOMAIN_SIZE=72        # GB200/GB300 NVL72 only; leave unset on ≤8-GPU nodes
 # export NCCL_DEBUG=INFO              # optional; overrides the image's WARN
 ```
 
-Per-fabric env and the `aws-ofi-nccl` plugin nuance:
-[Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics).
+The per-fabric launch env — AWS EFA's plugin variables, the proxy GIN cross-node EP needs over EFA, a rollout
+server on another node: [Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics).
 
-`init_distributed` pins `DIST_NCCL_TIMEOUT_MINUTES` as the default for every later
-`dist.new_group()`. EP/CP/PP subgroups pass it explicitly; the pin is what carries it onto the
+`DIST_NCCL_TIMEOUT_MINUTES` is the one NCCL watchdog setting: the process group starts before the
+config is parsed, so a training config that sets `ddp_timeout` away from its default is refused. Set
+it alike on every node. `init_distributed` pins it as the default for every later
+`dist.new_group()`. EP/CP/PP subgroups pass it explicitly (`new_group` or `split_group`); the pin is what carries it onto the
 DTensor meshes, since `init_device_mesh` takes no timeout — that is the DP/HSDP/TP axes. It does
 **not** bound the DeepEP dispatch/combine kernels, which carry the `ElasticBuffer` GPU-side barrier
 rather than the PyTorch watchdog.
@@ -105,12 +98,9 @@ Inter-node EP runs the DeepEP V2 NCCL **Gin** (RDMA) backend; intra-node EP runs
 path. The dispatcher sets `EP_DISABLE_GIN` from the EP topology (honoring an explicit value).
 
 `EP_SUPPRESS_NCCL_CHECK=1` is baked into both images as an `ENV` and must reach the process
-environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late, and the
-dispatcher can only warn. Without it DeepEP's duplicate-NCCL guard flags the image's HPC-X transport
-plugin as a second NCCL runtime.
-
-Cross-node EP over EFA also rides the GIN-capable `aws-ofi-nccl` + GDRCopy the image bakes. Full
-prerequisites: [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa).
+environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late. Without it
+DeepEP's duplicate-NCCL guard flags the image's HPC-X transport plugin as a second NCCL runtime and
+fails the import.
 
 ## Checkpointing with EP
 
@@ -120,47 +110,26 @@ prerequisites: [DeepEP → AWS EFA](../infrastructure/deepep.md#expert-paralleli
 python scripts/after_training/merge_ep_shards.py --input_dir checkpoint/ --output_dir merged/
 ```
 
-The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [Expert Parallelism → Checkpointing & state dict](expert-parallelism.md#checkpointing); resume semantics are on [Checkpoints & Resume](../reference/checkpoints.md).
+The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [Expert Parallelism → Checkpointing](expert-parallelism.md#checkpointing); resume semantics are on [Checkpoints & Resume](../reference/checkpoints.md).
 
 ## File system
 
-The toolkit coordinates file operations (model downloads, dataset loading, directory creation, checkpoint saves) based on whether nodes share a filesystem. Set `DIST_SHARED_FILESYSTEM=1` (default) for shared storage (NFS, Lustre, GPFS) or `0` for per-node local storage; the read and write sides can be split with `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` (e.g. per-node input caches with shared-mount checkpoints on a slow NFS export). Full details: [Filesystem Handling](../data/filesystem-handling.md).
+Set `DIST_SHARED_FILESYSTEM=1` (default) for shared storage (NFS, Lustre, GPFS) or `0` for per-node local storage, and split the read and write sides with `DIST_INPUT_SHARED_FILESYSTEM` / `DIST_OUTPUT_SHARED_FILESYSTEM` where they differ (per-node input caches beside shared-mount checkpoints on a slow NFS export). What per-node output storage changes for a parallel run: [Multi-Node → Shared vs node-local storage](multi-node.md#shared-vs-node-local-storage); the coordination and the startup probes: [Filesystem Handling](../data/filesystem-handling.md).
 
 Weights take ~2 bytes/param in bf16 (7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 140 GB), the size of a `save_model` export; per-rank sharded is roughly `full / ep_size`. A training checkpoint keeps fp32 masters (`fp32_router`, `fp32_experts`, `fp32_non_ep_params`) at 4 bytes per element and adds the optimizer state (4 bytes/param for AdamWBF16) unless `save_only_model: true`.
 
-## Sharded data loading
+## Preflight
 
-For large-scale multi-node training, pre-process and shard SFT datasets offline so each rank loads only its `1/data_parallel_size` slice. Pre-processing is **SFT-only** — DPO, SMPO, and GRPO require on-the-fly processing.
-
-```bash
-python scripts/before_training/prepare_dataset.py \
-    --input "s3://my-bucket/raw/my_sft_data" \
-    --output "s3://my-bucket/preprocessed/my_sft_data" \
-    --model-name "Qwen/Qwen3-8B" \
-    --max-length 8192 \
-    --test-size 0.01 \
-    --num-shards 64 \
-    --pack-sequences \
-    --conversation-field conversation \
-    --assistant-message-template $'<|im_start|>assistant\n'
-```
-
-The SFT trainer auto-detects the sharded layout and loads each rank's shards via `ShardedDatasetLoader` keyed on the **data-parallel** rank/size, not global world, and refuses `num_shards < data_parallel_size`. Layout and shard assignment: [Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
-
-## Troubleshooting
-
-**Preflight NVLink health** — EP all-to-all rides NVLink intra-node, so a marginal lane silently caps throughput or hangs a run. `scripts/profiling/nvlink_health.py` reads `nvidia-smi` counters (no GPU allocation, safe alongside a live job), separates hard faults from FEC-absorbed correctable churn, and exits non-zero on any unhealthy link — run it as a gate before a long multi-node launch:
+EP all-to-all rides NVLink inside a node, so a marginal lane silently caps throughput or hangs a run.
+`scripts/profiling/nvlink_health.py` reads `nvidia-smi` counters (no GPU allocation, safe beside a live
+job), separates hard faults from FEC-absorbed churn, and exits non-zero on an unhealthy or down link;
+run it before a long launch:
 
 ```bash
-python scripts/profiling/nvlink_health.py            # summary, exit 1 if unhealthy
-python scripts/profiling/nvlink_health.py --per-link  # every link
-python scripts/profiling/nvlink_health.py --json      # raw report, for a wrapper to parse
+python scripts/profiling/nvlink_health.py            # summary, exit 1 if unhealthy or down
 ```
 
-**NVSHMEM not found for inter-node EP** — DeepEP V2 links NVSHMEM for device linking only (`nvidia-nvshmem-cu13` on CUDA 13.x, a transitive dep of `torch 2.11+cu130`; `nvidia-nvshmem-cu12` on CUDA 12.x — never both). Rebuild DeepEP with the full env the build needs: [DeepEP → Build from source](../infrastructure/deepep.md#build-from-source), which clones upstream at the pinned commit.
-
-**RDMA connection timeout** — verify the fabric first (`ibstat` on IB/RoCE, `fi_info -p efa` on EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)), then re-run with `NCCL_DEBUG=INFO` for the transport logs.
-
-**`context_parallel_size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `ParallelismConfig._validate_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP, TP and ETP (not CP) and needs an RDMA fabric for its all-to-all.
-
-**Rendezvous never completes / one node hangs at startup** — every node must pass the identical `--nnodes`, `--master_addr`, `--master_port` and a distinct `--node_rank`, and every rank must reach `init_distributed` in the same order. Symptom-to-cause table for the rest: [Troubleshooting](../reference/troubleshooting.md).
+Pre-tokenized, per-rank sharded datasets (`num_shards >= data_parallel_size`):
+[Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
+Symptoms and fixes for a failed launch (rendezvous, RDMA, config rejections):
+[Troubleshooting](../reference/troubleshooting.md).

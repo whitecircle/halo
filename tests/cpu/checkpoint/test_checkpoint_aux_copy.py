@@ -1,32 +1,5 @@
-"""copy_checkpoint_aux_files: weight artifacts are skipped, resume sidecars survive, module
-directories ride whole.
-
-A merged directory is the mandated resume source for sharded EP checkpoints
-(resolve_resume_weights_source), so the copy must keep ``trainer_state.json``, ``scheduler.pt``,
-``router_balancing_biases.pt``, ``reference_logps.pt``, every ``rng_state_<rank>.pth`` and every
-``prefetch_pending-<rank>-of-<world>.pt`` — dropping them leaves resume detection nothing to take the
-directory by, re-warms the LR schedule from step 0,
-zeroes the router balancing biases, leaves a precompute run no untrained reference to restore,
-re-draws every shuffle and dropout mask, and skips the batch an async GRPO prefetch had not trained —
-while still refusing to carry weight files that would shadow the freshly written safetensors. The
-refusal covers foreign-framework exports (``consolidated.*.pth``, ``.gguf``, ``.h5``,
-``rust_model.ot``, ``*.tflite``) a hub source ships beside them: those are weights too, and
-copying them bloats every converted checkpoint. That ``.pth`` sits on both sides is exactly why the
-sidecar exemption is by name, not by suffix.
-
-Subdirectories are part of the artifact and copy whole, their own weights included: a
-SentenceTransformer module directory (``1_Pooling/``, ``2_Dense/``) or
-``original_adapter_config/`` carries weights no merge rewrites, so skipping the directory (or
-filtering weights inside it) leaves ``modules.json`` naming modules that no longer exist — exactly
-what an embedding EP merge produces. Four kinds of directory stay behind: a nested
-``checkpoint-N`` (a run's resume state, not the artifact's), a run's own ``_``-prefixed state
-(``_reference_cache/``, ``_incomplete_checkpoints/``), a vendor weight dump (``original/``,
-``metal/`` — the same weights again, which the hub-download ignore list drops off the same tuple)
-and a hidden directory (``.git``, ``.cache``). ``include_resume_sidecars=False`` is the seam for
-artifacts that describe no single training run (an N-way model merge).
-
-    python tests/cpu/checkpoint/test_checkpoint_aux_copy.py
-"""
+"""copy_checkpoint_aux_files: weight artifacts are skipped, resume sidecars survive, module directories ride whole.
+``.pth`` sits on both sides, so the sidecar exemption is by name."""
 
 import pytest
 import torch
@@ -34,19 +7,20 @@ from huggingface_hub.constants import REPOCARD_NAME
 from safetensors.torch import load_file, save_file
 from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 
-from src.checkpoint.atomic import atomic_torch_save, create_staged_file
-from src.checkpoint.format import (
+from halo.checkpoint.atomic import atomic_torch_save, create_staged_file
+from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
-    WEIGHT_FILE_IGNORE_PATTERNS,
-    copy_checkpoint_aux_files,
+    RUN_PLAN_FILE,
+    WEIGHT_DUMP_IGNORE_PATTERNS,
     prefetch_pending_filename,
-    write_resume_adapter_marker,
 )
+from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files
+from tests.common.checkpoint_io import mark_resume_adapter
 
 SKIPPED = (
     "model.safetensors",
@@ -56,7 +30,7 @@ SKIPPED = (
     "training_args.bin",
     "optimizer.pt",
     "optimizer_shard_0.pt",
-    # Foreign-framework exports a hub repo ships beside the safetensors — weights, not metadata.
+    # Foreign-framework exports a hub repo ships beside the safetensors.
     "consolidated.00.pth",
     "model.gguf",
     "tf_model.h5",
@@ -64,6 +38,7 @@ SKIPPED = (
     "rust_model.ot",
     "64.tflite",
     "model.onnx",
+    RUN_PLAN_FILE,
 )
 KEPT = (
     "config.json",
@@ -82,11 +57,10 @@ SIDECARS = (
     REFERENCE_LOGPS_FILE,
     prefetch_pending_filename(0, 2),
 )
-# The SentenceTransformer module layout an embedding EP save produces: modules.json names these
-# directories, and 2_Dense carries its OWN weights that no merge rewrites.
+# modules.json names these directories, and 2_Dense carries weights no merge rewrites.
 MODULE_DIRS = ("1_Pooling", "2_Dense", "original_adapter_config")
-# Distinct payloads for the two same-named trainer_state.json files — the artifact's own and the one
-# inside the nested checkpoint — so a copy that flattened the nested directory in is visible.
+# Distinct payloads for the two same-named trainer_state.json files, so a copy that flattened the nested directory in
+# is visible.
 ARTIFACT_AUX_BYTES = b"x"
 NESTED_RUN_STATE = b"the nested run's state, not the artifact's"
 # Spelled literally: each is a name a crash left on disk, which outlives a later rename of its writer.
@@ -94,7 +68,6 @@ _STAGE_TOKEN = "0123456789abcdef0123456789abcdef"
 LEFTOVER_STAGES = (
     ".trainer_state.json.uncommitted",
     f".reference_logps.pt.{_STAGE_TOKEN}.tmp",
-    "prefetch_pending-0-of-2.pt.staged",
 )
 
 
@@ -112,15 +85,12 @@ def checkpoint_dir(tmp_path):
     save_file({"linear.weight": torch.ones(2, 2)}, str(src / "2_Dense" / "model.safetensors"))
     (src / "original_adapter_config").mkdir()
     (src / "original_adapter_config" / "adapter_config.json").write_bytes(b"{}")
-    # A nested checkpoint is a run's resume state, never the artifact's aux data. Its aux files
-    # shadow the artifact's own by name, which is what a recurse-and-filter "fix" would flatten in.
+    # Its aux files shadow the artifact's own by name.
     (src / "checkpoint-500").mkdir()
     (src / "checkpoint-500" / "optimizer.pt").write_bytes(b"x")
     (src / "checkpoint-500" / "trainer_state.json").write_bytes(NESTED_RUN_STATE)
-    # A Llama/Mistral-style vendor weight dump: the raw format beside the transformers one.
     (src / "original").mkdir()
     save_file({"tok_embeddings.weight": torch.ones(2, 2)}, str(src / "original" / "consolidated.safetensors"))
-    # gpt-oss's Metal-runtime dump of the same weights.
     (src / "metal").mkdir()
     (src / "metal" / "model.bin").write_bytes(b"x")
     return src
@@ -144,17 +114,14 @@ def test_resume_sidecars_survive_merge_copy(checkpoint_dir, tmp_path):
     assert (out / SCHEDULER_NAME).exists(), "LR schedule must survive into the merged resume source"
     assert (out / ROUTER_BALANCING_BIASES_FILE).exists(), "router biases must survive into the merged resume source"
     assert (out / REFERENCE_LOGPS_FILE).exists(), "a precompute run's reference log-probs must survive the merge"
-    # Same suffix as the foreign exports below, opposite verdict: a per-rank RNG state is what a
-    # bit-reproducible resume replays from.
+    # Same suffix as the foreign exports, opposite verdict: a bit-reproducible resume replays from this.
     assert (out / "rng_state_0.pth").exists(), "per-rank RNG state must survive into the resume source"
     assert not (out / "optimizer.pt").exists()
     assert not (out / "pytorch_model.bin").exists()
 
 
 def test_resume_sidecars_can_be_excluded(checkpoint_dir, tmp_path):
-    """The new-base seam: an N-way merged artifact describes no single run, so its aux copy passes
-    include_resume_sidecars=False — the resume state, ``trainer_state.json`` included, dropped and
-    everything else identical."""
+    """An N-way merged artifact describes no single run."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out), include_resume_sidecars=False)
@@ -166,16 +133,14 @@ def test_resume_sidecars_can_be_excluded(checkpoint_dir, tmp_path):
 
 @pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
 def test_a_merged_checkpoint_resume_adapter_travels_with_the_sidecars(tmp_path, include_resume_sidecars):
-    """A merge-on-save checkpoint resumes from ``resume_adapter/``, which its marker names. Both are
-    resume state like ``scheduler.pt``: a tool writing a resume source keeps them, and an N-way merge
-    drops them — carried into a merge of several runs, the marker would resume one run's adapters
-    over the base and ignore the merged weights."""
+    """Carried into a merge of several runs, the marker would resume one run's adapters over the base and ignore the
+    merged weights."""
     src = tmp_path / "checkpoint"
     (src / RESUME_ADAPTER_DIR).mkdir(parents=True)
     save_file(
         {"a.experts.down_proj.lora_A": torch.ones(2, 2)}, str(src / RESUME_ADAPTER_DIR / ADAPTER_SAFETENSORS_FILE)
     )
-    write_resume_adapter_marker(str(src))
+    mark_resume_adapter(str(src))
     (src / "config.json").write_text("{}")
     out = tmp_path / "out"
     out.mkdir()
@@ -188,9 +153,7 @@ def test_a_merged_checkpoint_resume_adapter_travels_with_the_sidecars(tmp_path, 
 
 
 def test_module_directories_copy_whole_with_their_weights(checkpoint_dir, tmp_path):
-    """The embedding EP merge failure: modules.json points at 1_Pooling/ and 2_Dense/, and 2_Dense's
-    weights are the module — a copy that skips directories (or strips weights inside them) ships a
-    modules.json naming modules that do not exist."""
+    """A copy that skips directories ships a modules.json naming modules that do not exist."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
@@ -202,12 +165,7 @@ def test_module_directories_copy_whole_with_their_weights(checkpoint_dir, tmp_pa
 
 
 def test_nested_checkpoint_directories_stay_behind(checkpoint_dir, tmp_path):
-    """The exclusion is one directory NAME, not a retreat from copying directories at all — the
-    blanket skip the module-directory case above exists to forbid. Both
-    halves are asserted off the same call, so a copy that simply skipped every directory cannot pass
-    here. The content check is the third way this can go wrong: the nested run ships a
-    ``trainer_state.json`` of its own, so a copy that recursed into the directory instead of leaving
-    it can shadow the artifact's."""
+    """A copy that recursed in could shadow the artifact's ``trainer_state.json``."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
@@ -220,22 +178,19 @@ def test_nested_checkpoint_directories_stay_behind(checkpoint_dir, tmp_path):
 
 
 def test_a_vendor_weight_dump_directory_stays_behind(checkpoint_dir, tmp_path):
-    """``original/`` is the vendor's own copy of the SAME weights (hundreds of GB on a Mistral/Llama
-    source). Copying directories whole must not start duplicating it into every converted
-    checkpoint — the hub-download ignore list drops it for exactly this reason, off the same tuple."""
+    """Hundreds of GB on a Mistral/Llama source; the hub-download ignore list drops it off the same tuple."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     for dump in ("original", "metal"):
         assert not (out / dump).exists(), f"the {dump}/ vendor weight dump is weights, not aux data"
-        assert f"{dump}/*" in WEIGHT_FILE_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
-    # Not a prefix match: original_adapter_config/ IS aux data (asserted copied above).
+        assert f"{dump}/*" in WEIGHT_DUMP_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
+    # Not a prefix match: original_adapter_config/ is aux data.
     assert (out / "original_adapter_config").exists()
 
 
 def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
-    """A crash between staging a tagged card and swapping it in leaves the staged copy behind; carried
-    over, it would ship in every export built from that directory."""
+    """A crash between staging and swap leaves the copy behind, which would ship in every export."""
     leftover = create_staged_file(checkpoint_dir, REPOCARD_NAME).name
     (checkpoint_dir / leftover).write_text("---\ntags:\n- halo\n---\n")
     out = tmp_path / "merged"
@@ -250,8 +205,6 @@ def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
     "sidecar", [REFERENCE_LOGPS_FILE, prefetch_pending_filename(0, 2), OPTIMIZER_META_FILE], ids=lambda name: name
 )
 def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars, sidecar):
-    """Every atomic writer stages beside its target; a crash before the swap leaves the stage, which an
-    export must not ship whichever writer left it."""
     target = checkpoint_dir / sidecar
     atomic_torch_save(str(target), lambda: {"values": torch.tensor([-1.0, -2.0])})
     stage = create_staged_file(checkpoint_dir, sidecar)
@@ -269,9 +222,8 @@ def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, i
 
 @pytest.mark.parametrize("leftover", LEFTOVER_STAGES)
 def test_every_staging_spelling_a_crash_leaves_stays_out_of_an_export(checkpoint_dir, tmp_path, leftover):
-    """The withheld trainer state of a save that never committed, a current stage, and the two spellings
-    earlier releases staged under: none is a published file, and an export from an interrupted
-    directory must not ship one beside the files it does publish."""
+    """The withheld trainer state of a save that never committed, a current stage, and two spellings earlier
+    releases staged under."""
     (checkpoint_dir / leftover).write_bytes(b"an unpublished stage")
     (checkpoint_dir / f".{REFERENCE_LOGPS_FILE}.notes").write_text("a hidden file no writer stages")
     out = tmp_path / "merged"
@@ -285,8 +237,7 @@ def test_every_staging_spelling_a_crash_leaves_stays_out_of_an_export(checkpoint
 
 
 def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):
-    """A hub source's TF/Flax/GGUF/ONNX/CoreML/rust exports are weights: copying them bloats the
-    converted checkpoint by tens of GB and can shadow nothing useful."""
+    """They bloat the converted checkpoint by tens of GB and shadow nothing useful."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
@@ -294,13 +245,8 @@ def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):
         assert not (out / name).exists(), f"{name} is a weight export and must not be carried over"
 
 
-# --- Directory-copy blast radius: a denylist of two names is not a filter on what may be copied. ---
-
-
 def test_hidden_directories_stay_behind(checkpoint_dir, tmp_path):
-    """A model source is often a working directory, so ``.git``/``.cache``/``.ipynb_checkpoints`` sit
-    beside the weights. Copying subdirectories whole with only a two-name denylist duplicates a whole
-    repository history into every converted artifact."""
+    """A model source is often a working directory, so a whole repository history would land in every artifact."""
     (checkpoint_dir / ".git").mkdir()
     (checkpoint_dir / ".git" / "HEAD").write_text("ref: refs/heads/main")
     (checkpoint_dir / ".cache" / "huggingface").mkdir(parents=True)
@@ -316,8 +262,7 @@ def test_hidden_directories_stay_behind(checkpoint_dir, tmp_path):
 
 
 def test_a_runs_own_directories_stay_behind(checkpoint_dir, tmp_path):
-    """A run's ``output_dir`` is also an export source (its final save lands there). Its reference scratch
-    and the torn checkpoints a resume set aside are run state, gigabytes of it, not the artifact's."""
+    """A run's ``output_dir`` is also an export source; this state is gigabytes and not the artifact's."""
     (checkpoint_dir / "_reference_cache" / "launch").mkdir(parents=True)
     (checkpoint_dir / "_reference_cache" / "launch" / "merged.values").write_bytes(b"scores")
     (checkpoint_dir / "_incomplete_checkpoints" / "checkpoint-200").mkdir(parents=True)
@@ -333,8 +278,7 @@ def test_a_runs_own_directories_stay_behind(checkpoint_dir, tmp_path):
 
 
 def test_an_output_directory_inside_the_input_is_refused(checkpoint_dir):
-    """The walk copies subdirectories whole, so a destination nested in the source copies itself into
-    itself — it fills the disk instead of failing."""
+    """It would copy itself into itself and fill the disk."""
     nested = checkpoint_dir / "merged"
     nested.mkdir()
     with pytest.raises(ValueError, match="inside input_dir"):
@@ -342,7 +286,6 @@ def test_an_output_directory_inside_the_input_is_refused(checkpoint_dir):
 
 
 def test_a_sibling_output_directory_is_allowed(checkpoint_dir, tmp_path):
-    """Anti-over-rejection: the guard is about NESTING, not about sharing a parent."""
     out = tmp_path / "merged"
     out.mkdir()
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))

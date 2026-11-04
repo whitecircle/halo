@@ -1,14 +1,14 @@
 """Stored run-start scores and the scheduled floor determine the actual trainer loss."""
 
-from collections import defaultdict
 from types import SimpleNamespace
 
 import pytest
 import torch
 from torch import nn
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 
 class _Policy(nn.Module):
@@ -68,9 +68,9 @@ def test_loss_consumes_stored_raw_reference_at_the_live_scheduled_floor(loss_typ
     trainer.ref_model = None
     trainer.beta = 0.2
     trainer.loss_type = loss_type
-    trainer.policy_gradient_formulation = formulation
+    trainer.args = SimpleNamespace(policy_gradient_formulation=formulation)
     trainer.max_completion_length = 4
-    trainer._sign_metric_buffer = {"train": defaultdict(list), "eval": defaultdict(list)}
+    trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     batch = _batch()
     raw_reference = batch[REF_PER_TOKEN_LOGPS_COLUMN].clone()
     oracle_scores = trainer.model.scores.detach().clone().requires_grad_()

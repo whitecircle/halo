@@ -4,7 +4,7 @@ A code-contests row carries the problem statement as `prompt` and its test set a
 
 ## Payload
 
-- `answer` is the grading payload, a JSON string or dict, and is required (`requires_answer`). A bare test list,
+- `answer` is the grading payload, a JSON string or dict, and is required (`requires_answer: false` raises). A bare test list,
   `{"test_cases": [...]}` and the full form below are accepted.
 - A payload that holds no tests or does not parse fails the episode at reset as a rollout error, which the trainer
   drops from the group baseline.
@@ -19,12 +19,12 @@ A code-contests row carries the problem statement as `prompt` and its test set a
 
 ## Adapters
 
-Adapters live in `src/environments/envs/tasks/coding/datasets.py`:
+Adapters live in `halo/environments/tasks/coding/contest_datasets.py`:
 
 | Adapter | Source | Role | Notes |
 |---|---|---|---|
 | `codeforces` | `open-r1/codeforces` | RL pool | `verifiable` config; `generated_checker` judges; interactive rows dropped; generated tests join via `--tests_table`; marks [examples-only problems](#examples-only-problems) |
-| `hardtests` | `sigcp/hardtests_problems` + `_tests` | RL pool | Difficulty mapped to Codeforces ratings; needs `--tests_table`; judging function becomes the checker |
+| `hardtests` | `sigcp/hardtests_problems` + `_tests` | RL pool | Codeforces ratings kept; Luogu's 7 levels (also used by AtCoder, SPOJ and UVa) map to 800-2900, so every non-Codeforces problem of the 2600-3500 band sits at 2900; needs `--tests_table`; judging function becomes the checker |
 | `deepcoder` | `agentica-org/DeepCoder-Preview-Dataset` | RL pool | stdin/stdout tests; functional specs skipped; no report bucket |
 | `livecodebench` | `livecodebench/code_generation_lite` | benchmark | Functional rows skipped; [contest-date window and platform filter](evaluation.md#livecodebench-window) |
 | `icpc` | `RUC-AIBOX/ICPC-Eval` | benchmark | Streamed; `traditional` graded, `spj` skipped |
@@ -44,13 +44,16 @@ python scripts/environments/preparation/prepare_code_dataset.py \
 
 | Flag | Effect |
 |---|---|
-| `--min_rating` / `--max_rating` | Bound difficulty; unrated rows are dropped with them |
-| `--exclude_keys` | Removes listed ids |
+| `--min_rating` / `--max_rating` | Bound difficulty; unrated rows are dropped with them. A source with no rating (`deepcoder`) refuses them |
+| `--exclude_keys` | Removes listed ids before the hold-out is carved (held-out and benchmark ids) |
+| `--drop_train_keys` | Removes listed ids from the train split after the hold-out is carved, so the test split stays the same: `scripts/environments/preparation/hardtests_train_exclusions.txt` lists the known defects of the HardTests extra-hard band |
 | `--holdout_per_band` | Carves a deterministic `test` split |
 | `--push_bands` | Publishes `full` plus one config per rating band (`medium` 1500-1999, `hard` 2000-2599, `extra-hard` 2600-3500) over a shared test split. A curriculum stage selects its pool this way (`your-org/code-contests-hardtests-rl:hard`) |
-| `--verify_checkers` | On by default. Drops a problem whose checker rejects its own reference output or accepts garbage. Needs a sandbox backend on the preparation host |
+| `--config_name` | Pushes one named config instead. Stage 1 of the curriculum builds `your-org/code-contests-codeforces-verifiable-rl:r1500-2600` from `--adapter codeforces --dataset open-r1/codeforces --config verifiable --min_rating 1500 --max_rating 2600`: 3,538 `train` and 79 `test` problems with no `--tests_table` |
+| `--verify_checkers` | On by default. Drops a problem whose checker rejects a test's own reference output, or accepts garbage. Needs a sandbox backend on the preparation host |
+| `--reject_constant_answers` | On by default. Drops a problem whose suite accepts one constant answer (`0`, `1`, `-1`, `YES`, `NO`, ...) on every test: a lax checker or a suite of identical answers pays its reward to a program that never reads the input |
 | `--tests_table` | Joins a compacted test corpus by problem id. A table may cover some splits only; one matching no row of any split exits before any split is filtered |
-| `--include_examples_only` | Keeps the [examples-only problems](#examples-only-problems), dropped and counted per split by default |
+| `--include_examples_only` | Keeps the [examples-only problems](#examples-only-problems), dropped and counted per split by default; an adapter marking none refuses it |
 
 A bulky test corpus goes through `scripts/environments/preparation/compact_code_tests.py` first. It reduces
 open-r1's generated tests or HardTests' encoded suites to one row per problem: at most 40 tests of up to 256 KB

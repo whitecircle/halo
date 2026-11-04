@@ -1,25 +1,18 @@
 #!/usr/bin/env python
-"""CLI-override edge cases a naive cast gets wrong.
-
-Two classes of bug live here: a ``float | str`` field whose string sentinel (``"auto"``) cannot
-survive a blind ``float(val)`` cast, and a ``__post_init__`` cross-field guard the override must
-meet. Both are exercised through the real ``H4ArgumentParser`` override path.
-
-Run: ``python tests/cpu/config/test_cli_override_edge_cases.py`` (or ``pytest -m cpu``).
-"""
+"""CLI-override edge cases a naive cast gets wrong: a ``float | str`` field whose sentinel cannot survive
+``float(val)``, and a ``__post_init__`` cross-field guard the override must meet."""
 
 from __future__ import annotations
 
 import os
 import tempfile
-import typing
 from dataclasses import dataclass
 from typing import Literal
 
 import pytest
 
-from src.configs.classification_config import ClassificationConfig
-from src.training.parser import H4ArgumentParser, _union_permits_str
+from halo.configs.classification import ClassificationConfig
+from halo.configs.parser import HaloArgumentParser
 
 
 @dataclass
@@ -30,48 +23,38 @@ class _ScalarUnionArgs:
     plain_float: float = 0.0
 
 
-def test_union_permits_str_detects_the_string_member():
-    hints = typing.get_type_hints(_ScalarUnionArgs)
-    assert _union_permits_str(hints["best_completion_emphasis"])
-    assert not _union_permits_str(hints["plain_float"])
-    assert not _union_permits_str(float)
-
-
 def _override(parser, args):
     """Drive the YAML+CLI override path with an empty YAML file so only the CLI values apply."""
-
     with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
         f.write("{}\n")
         yaml_path = f.name
     try:
-        return parser.parse_yaml_and_args(yaml_path, args)
+        return parser.parse_dict(parser.load_values([yaml_path, *args]))
     finally:
         os.unlink(yaml_path)
 
 
 def test_float_or_str_field_keeps_a_non_numeric_cli_override():
-    parser = H4ArgumentParser((_ScalarUnionArgs,))
+    parser = HaloArgumentParser((_ScalarUnionArgs,))
     (parsed,) = _override(parser, ["--best_completion_emphasis=auto"])
     assert parsed.best_completion_emphasis == "auto", "string sentinel must survive, not crash on float('auto')"
 
 
 def test_float_or_str_field_still_casts_a_numeric_cli_override():
-    parser = H4ArgumentParser((_ScalarUnionArgs,))
+    parser = HaloArgumentParser((_ScalarUnionArgs,))
     (parsed,) = _override(parser, ["--best_completion_emphasis=1.5"])
     assert parsed.best_completion_emphasis == pytest.approx(1.5)
     assert isinstance(parsed.best_completion_emphasis, float)
 
 
 def test_plain_float_still_rejects_a_non_numeric_override():
-    parser = H4ArgumentParser((_ScalarUnionArgs,))
+    parser = HaloArgumentParser((_ScalarUnionArgs,))
     with pytest.raises(ValueError):
         _override(parser, ["--plain_float=auto"])
 
 
 def test_classification_mutual_exclusion_guard_fires_on_cli_override():
-    """The YAML path already rejects setting both; the CLI path must too."""
-
-    parser = H4ArgumentParser((ClassificationConfig,))
+    parser = HaloArgumentParser((ClassificationConfig,))
     with pytest.raises(ValueError, match="mutually exclusive"):
         _override(
             parser,
@@ -80,8 +63,8 @@ def test_classification_mutual_exclusion_guard_fires_on_cli_override():
 
 
 def test_classification_single_class_weight_override_is_accepted():
-    parser = H4ArgumentParser((ClassificationConfig,))
-    (parsed,) = _override(parser, ["--output_dir=/tmp/x", "--derive_class_weights=true"])
+    parser = HaloArgumentParser((ClassificationConfig,))
+    (parsed,) = _override(parser, ["--output_dir=/tmp/x", "--bf16=false", "--derive_class_weights=true"])
     assert parsed.derive_class_weights is True
     assert parsed.class_weights is None
 
@@ -98,50 +81,44 @@ class _OptionalUnionArgs:
 
 @pytest.mark.parametrize("spelling", ["none", "None", "null"])
 def test_optional_container_union_clears_to_none(spelling):
-    """--report_to=none must clear the field: it is the standard smoke-run override, and the
-    None | str | list[str] union has no confident value cast to hide behind."""
-
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    """--report_to=none is the standard smoke-run override; the None | str | list[str] union has no confident value
+    cast to hide behind."""
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, [f"--report_to={spelling}"])
     assert parsed.report_to is None
 
 
 def test_optional_container_union_still_rejects_a_value_override():
-    """Setting a VALUE on the container union stays unsupported — a raw string in a list field
-    is iterated char-wise downstream, so the guard must survive the clearing feature."""
-
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    """A raw string in a list field is iterated char-wise downstream, so the guard survives the clearing feature."""
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     with pytest.raises(ValueError, match="not supported"):
         _override(parser, ["--report_to=wandb"])
 
 
 @pytest.mark.parametrize("spelling", ["none", "None", "null"])
 def test_optional_bool_refuses_none_clearing(spelling):
-    """--bf16=none must RAISE, not clear: an optional bool reads any none-spelling as a mistyped
-    boolean, and clearing it would silently flip the run's precision or re-arm an auto-default."""
-
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    """An optional bool reads any none-spelling as a mistyped boolean; clearing it would silently flip the run's
+    precision or re-arm an auto-default."""
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     with pytest.raises(ValueError, match="boolean"):
         _override(parser, [f"--bf16={spelling}"])
 
 
 def test_optional_bool_still_parses_true_false():
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, ["--bf16=false"])
     assert parsed.bf16 is False
 
 
 def test_optional_int_clears_to_none():
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, ["--max_len=None"])
     assert parsed.max_len is None
 
 
 def test_literal_choice_spelled_none_outranks_clearing():
-    """A field whose Literal includes the string "none" must get the string from --mode=none;
-    the capitalized spellings still clear the Optional."""
-
-    parser = H4ArgumentParser((_OptionalUnionArgs,))
+    """The capitalized spellings still clear the Optional."""
+    parser = HaloArgumentParser((_OptionalUnionArgs,))
     (parsed,) = _override(parser, ["--mode=none"])
     assert parsed.mode == "none"
     (parsed,) = _override(parser, ["--mode=None"])

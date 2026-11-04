@@ -1,22 +1,5 @@
 #!/usr/bin/env python
-"""The shared checkpoint walk the standalone checkpoint tools read through.
-
-``iter_checkpoint_shard_entries`` / ``iter_checkpoint_tensors`` are the single open-every-shard loop
-every standalone checkpoint tool reads through. Two properties are
-load-bearing and easy to lose in a per-tool re-derivation:
-
-* the shard a key came from — ``merge_models`` builds its whole read plan out of that mapping, and a
-  key attributed to the wrong file reads another tensor with no error;
-* the key filter applying BEFORE the tensor read, and one shard being open at a time — the
-  selective walks (sink verification, the fused-key scan) exist precisely so a header scan does not
-  pull expert banks into host RAM, which only holds while the walk stays lazy.
-
-``detect_model_type``'s ``text_config`` fallback is here too: it is what lets the expert-layout gates
-resolve a composite VLM checkpoint whose family lives one level down. ``detect_model_types`` reads
-both spellings from the same file, the nested language family first.
-
-Run: pytest tests/cpu/checkpoint/test_checkpoint_io_iteration.py
-"""
+"""The single open-every-shard loop standalone checkpoint tools read through, plus ``detect_model_type``'s fallback."""
 
 import contextlib
 import json
@@ -27,8 +10,8 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from src.checkpoint import tool_io
-from src.checkpoint.tool_io import (
+from halo.checkpoint import reading
+from halo.checkpoint.reading import (
     detect_model_type,
     detect_model_types,
     iter_checkpoint_shard_entries,
@@ -40,7 +23,7 @@ _SHARD_B = "model-00002-of-00002.safetensors"
 
 
 class _ReaderSpy:
-    """The live safetensors reader, recording the tensor reads a walk actually performs."""
+    """Records the tensor reads a walk actually performs."""
 
     def __init__(self, reader, events: list[tuple[str, str]]):
         self._reader = reader
@@ -55,8 +38,7 @@ class _ReaderSpy:
 
 
 def _record_shard_io(monkeypatch) -> list[tuple[str, str]]:
-    """Record ``(open|close|read, shard name | key)`` at the walk's real seam: the ``safe_open``
-    ``tool_io`` calls per shard, and the reader it hands out."""
+    """``(open|close|read, shard name | key)`` at the walk's real seam."""
     events: list[tuple[str, str]] = []
 
     @contextlib.contextmanager
@@ -69,12 +51,11 @@ def _record_shard_io(monkeypatch) -> list[tuple[str, str]]:
         finally:
             events.append(("close", name))
 
-    monkeypatch.setattr(tool_io, "safe_open", _recording_open)
+    monkeypatch.setattr(reading, "safe_open", _recording_open)
     return events
 
 
 def _sharded_checkpoint(tmp_path: Path) -> Path:
-    """A two-shard checkpoint whose index names which file holds which key."""
     first = {"model.layers.0.self_attn.sinks": torch.zeros(4), "model.layers.0.mlp.weight": torch.ones(2, 3)}
     second = {"model.layers.1.self_attn.sinks": torch.zeros(4), "model.layers.1.mlp.weight": torch.ones(2, 3) * 2}
     save_file(first, str(tmp_path / _SHARD_A), metadata={"format": "pt"})
@@ -87,8 +68,7 @@ def _sharded_checkpoint(tmp_path: Path) -> Path:
 
 
 def test_entries_attribute_every_key_to_the_shard_that_actually_holds_it(tmp_path):
-    """The mapping merge_models' read plan is built from — a key pointed at the wrong shard reads a
-    different tensor and the merge is silently wrong."""
+    """A key pointed at the wrong shard reads a different tensor and silently breaks merge_models."""
     root = _sharded_checkpoint(tmp_path)
 
     by_key = {key: Path(shard).name for shard, _reader, key in iter_checkpoint_shard_entries(str(root))}
@@ -116,12 +96,7 @@ def test_tensors_come_back_whole_across_shards(tmp_path):
 
 
 def test_the_predicate_decides_before_the_tensor_is_read(tmp_path, monkeypatch):
-    """The whole point of the key filter: a selective walk must not materialize what it discards.
-
-    Asserted on the reads the walk performs, not only on what it returns — an implementation that
-    loads each shard whole and filters afterwards returns exactly these two tensors while reading
-    all four.
-    """
+    """Asserted on the reads: loading each shard whole and filtering afterwards returns the same two tensors."""
     root = _sharded_checkpoint(tmp_path)
     events = _record_shard_io(monkeypatch)
     offered: list[str] = []
@@ -149,8 +124,7 @@ def test_a_predicate_matching_nothing_reads_nothing(tmp_path, monkeypatch):
 
 
 def test_each_shard_is_opened_only_while_the_walk_is_on_it(tmp_path, monkeypatch):
-    """Streaming, not a materialized read plan: the tools walk checkpoints far larger than host RAM,
-    so a shard is opened when the walk reaches it and closed before the next one opens."""
+    """The tools walk checkpoints far larger than host RAM."""
     root = _sharded_checkpoint(tmp_path)
     events = _record_shard_io(monkeypatch)
 
@@ -171,8 +145,7 @@ def test_each_shard_is_opened_only_while_the_walk_is_on_it(tmp_path, monkeypatch
 
 
 def test_an_early_stop_opens_no_further_shard(tmp_path, monkeypatch):
-    """The key-only scans (``unfuse_moe_experts``' fused-key ``any``) stop at the first hit; a walk
-    that pre-opened every shard would pay the whole checkpoint for that one question."""
+    """A walk pre-opening every shard pays the whole checkpoint for one question."""
     root = _sharded_checkpoint(tmp_path)
     events = _record_shard_io(monkeypatch)
 
@@ -184,15 +157,13 @@ def test_an_early_stop_opens_no_further_shard(tmp_path, monkeypatch):
 
 
 def test_detect_model_type_falls_back_to_the_text_config(tmp_path):
-    """A composite VLM config carries the language family one level down; the expert-layout gates
-    ask this reader for it, and an empty answer refuses a convertible checkpoint."""
+    """An empty answer refuses a convertible checkpoint."""
     (tmp_path / "config.json").write_text(json.dumps({"architectures": ["X"], "text_config": {"model_type": "qwen3"}}))
 
     assert detect_model_type(str(tmp_path)) == "qwen3"
 
 
 def test_a_declared_top_level_model_type_still_wins(tmp_path):
-    """Anti-regression for the fallback: it must not re-label a VLM whose wrapper declares itself."""
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
     )
@@ -201,8 +172,7 @@ def test_a_declared_top_level_model_type_still_wins(tmp_path):
 
 
 def test_detect_model_types_leads_with_the_language_family(tmp_path):
-    """The fused-expert layout is the language family's, so a quantizer resolving its contraction axis
-    tries the nested spelling first and the wrapper's second; a ``null`` sub-config has none."""
+    """The fused-expert layout is the language family's; a ``null`` sub-config has none."""
     (tmp_path / "config.json").write_text(
         json.dumps({"model_type": "gemma4", "text_config": {"model_type": "gemma4_text"}})
     )

@@ -1,33 +1,29 @@
 #!/usr/bin/env python
-"""Feasibility of sub-bf16 master weights / optimizer states. Trains a small regression with the master
-weight stored at fp32 / bf16 / fp8(e4m3), each with round-to-nearest (RTN) and stochastic rounding (SR),
-and reports the final loss. Demonstrates *why* the codebase floors the master at bf16 (AdamWBF16) /
-24-bit (FlashAdamW) and does NOT offer an fp8/fp4 master: at fine-tune learning rates the Adam update is
-far below the fp8 ULP, so RTN drops it entirely and even SR injects ~12% per-step noise (3-bit mantissa)
-vs bf16's ~0.4% — fp8 master stalls or degrades, off the validated bf16-master recipe.
+"""Why master weights floor at bf16 (AdamWBF16) / 24-bit (FlashAdamW), with no fp8/fp4 master.
 
-Run: torchrun --nproc_per_node=1 tests/gpu/optimizers/test_lowp_master_feasibility.py
+At fine-tune LRs the Adam update is far below the fp8 ULP, so round-to-nearest drops it and even stochastic rounding
+injects ~12% per-step noise (3-bit mantissa) vs bf16's ~0.4%.
 """
 
 import torch
 
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 DEV = "cuda"
 
 
 def quant(w, kind, sr):
-    """Store-and-reload w at `kind` precision. SR = stochastic rounding (dither one ULP before rounding)."""
+    """Store and reload at `kind` precision. SR dithers one ULP before rounding."""
     if kind == "fp32":
         return w
     if kind == "bf16":
         ws, scale, mant = w, 1.0, 7
         dt = torch.bfloat16
-    else:  # fp8 e4m3, per-row absmax scale into [-448, 448]
+    else:  # fp8 e4m3, per-row absmax scale into [-448, 448].
         scale = w.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12) / 448.0
         ws, mant, dt = w / scale, 3, torch.float8_e4m3fn
-    if sr:  # dither by U(-0.5, 0.5) * local ULP (ULP at v ~ 2^(floor(log2|v|) - mantissa_bits))
+    if sr:  # Dither by U(-0.5, 0.5) * local ULP (ULP at v ~ 2^(floor(log2|v|) - mantissa_bits)).
         ulp = torch.exp2(torch.floor(torch.log2(ws.abs().clamp(min=1e-30))) - mant)
         ws = ws + (torch.rand_like(ws) - 0.5) * ulp
     return ws.to(dt).to(torch.float32) * (scale if kind == "fp8" else 1.0)
@@ -45,7 +41,7 @@ def train(kind, sr, steps=400, lr=1e-3):
         opt.zero_grad(set_to_none=True)
         ((X @ W - Y).pow(2).mean()).backward()
         opt.step()
-        with torch.no_grad():  # store the master at `kind` precision, reload for the next step
+        with torch.no_grad():  # Store the master at `kind` precision, reload for the next step.
             W.copy_(quant(W.detach(), kind, sr))
     return (X @ W - Y).pow(2).mean().item()
 
@@ -62,11 +58,9 @@ def run(ctx) -> dict:
         out[(kind, sr)] = loss
         tag = f"{kind} master{' + SR' if sr else ' (RTN)':8}"
         log(f"  {tag:22}: {loss:.2e}  ({loss / ref:.1f}x reference)")
-    # Checks encoding the conclusion: bf16+SR ~ fp32 (shipped AdamWBF16); a low-precision master
-    # without stochastic rounding is catastrophic. (SR rescues even fp8 on this convex toy — fp8+SR is
-    # ~1.6x ref — but the 3-bit mantissa is too fragile for real non-convex LLM training, FP8-LM Tab. 6,
-    # and buys nothing over bf16+SR, so bf16 is the shipped floor. The toy can't gate that, so don't
-    # assert a large fp8+SR gap here — assert the SR-less collapse, which is the real signal.)
+    # bf16+SR ~ fp32; a low-precision master without SR collapses. SR rescues even fp8 on this convex toy (~1.6x ref),
+    # but the 3-bit mantissa is too fragile for real non-convex training (FP8-LM Tab. 6), which the toy can't gate, so
+    # only the SR-less collapse is asserted.
     return {
         "checks": {
             "bf16_sr_master_tracks_fp32": out[("bf16", True)] < 5 * ref,

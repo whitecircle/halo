@@ -1,29 +1,27 @@
 #!/usr/bin/env python
-"""CPU tests: reward terms parsed from a ``rewards:`` list and priced as ``weight * score ** exponent``.
-
-Run: python tests/cpu/rewards/test_reward_terms.py  (or pytest)
-"""
+"""Reward terms parsed from a ``rewards:`` list and priced as ``weight * score ** exponent``."""
 
 import math
 
 import pytest
 
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.configs.environment_config import EnvironmentConfig
-from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
-from src.rewards.composer import RewardComposer
-from src.rewards.graders.verifiable import AccuracyTerm, FormatTerm
-from src.rewards.terms import (
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
+from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
+from halo.rewards.composer import RewardComposer
+from halo.rewards.graders.verifiable import AccuracyTerm, FormatTerm
+from halo.rewards.terms import (
     Check,
     EnvironmentTerm,
+    JudgeReasoningEffort,
     JudgeTerm,
     OnError,
-    ReasoningEffort,
     Requirement,
     RewardModelBackend,
     RewardModelTerm,
     View,
     parse_reward_terms,
+    resolve_environment_checks,
     sources_of,
 )
 
@@ -53,7 +51,7 @@ def test_terms_parse_with_their_defaults():
     assert isinstance(environment, EnvironmentTerm) and environment.name == "objective"
     assert isinstance(judge, JudgeTerm) and not judge.is_veto
     assert (judge.model, judge.base_url) == ("openai/gpt-5.6-luna", DEFAULT_OPENROUTER_BASE_URL)
-    assert judge.reasoning_effort is ReasoningEffort.MEDIUM
+    assert judge.reasoning_effort is JudgeReasoningEffort.MEDIUM
     assert judge.view is View.FINAL and judge.on_error is OnError.INVALID
     assert judge.temperature is None and judge.scale == 10 and judge.max_view_chars == 60_000
     assert judge.requirements == (Requirement(name="correctness", description="The answer is right."),)
@@ -72,7 +70,7 @@ def test_enum_fields_are_coerced_from_config_strings():
         SOURCES,
     )
     assert judge.view is View.DIGEST and judge.on_error is OnError.NEUTRAL
-    assert judge.reasoning_effort is ReasoningEffort.HIGH
+    assert judge.reasoning_effort is JudgeReasoningEffort.HIGH
     assert reward_model.backend is RewardModelBackend.SGLANG and reward_model.view is View.FULL
     # Direct construction coerces too: the renderers dispatch on the view by identity.
     assert JudgeTerm(name="q", requirements=judge.requirements, view="full").view is View.FULL
@@ -110,7 +108,7 @@ def test_price_is_weight_times_shaped_score():
 
 @pytest.mark.parametrize("score", [-0.1, 1.5, float("nan"), True, "0.5"])
 def test_scores_outside_the_unit_interval_are_refused(score):
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+    with pytest.raises(ValueError, match=r"score must be (in \[0, 1\]|a finite number), got"):
         EnvironmentTerm().shape(score)
 
 
@@ -182,18 +180,18 @@ def test_a_checks_term_from_config_is_unpriced_and_neutral_by_default():
         Check(name="sloppy", description="The policy skipped a required step."),
         Check(name="rude", description="The policy insulted the user."),
     )
-    # A negative weight prices the fired process flags as a penalty; the config may also keep on_error strict.
+    # A negative weight prices the fired process flags as a penalty.
     (penalty,) = parse_reward_terms(
         [{"source": "judge", "name": "gate", "checks": CHECKS, "weight": -0.2, "on_error": "invalid"}], SOURCES
     )
     assert penalty.weight == -0.2 and penalty.on_error is OnError.INVALID and penalty.price(0.5) == -0.1
-    # The constructor's own weight default is a scoring judge's 1.0: a direct veto build must say 0.
+    # The constructor's weight default is a scoring judge's 1.0, so a direct veto build must say 0.
     with pytest.raises(ValueError, match="never adds reward"):
         JudgeTerm(name="gate", checks=penalty.checks)
 
 
 def test_an_empty_checks_list_beside_requirements_leaves_a_scoring_judge_as_it_is():
-    """``checks: []`` is no veto judge: the veto defaults (weight 0, on_error neutral) must not apply."""
+    """The veto defaults (weight 0, on_error neutral) must not apply."""
     (term,) = parse_reward_terms([{**JUDGE_SPEC, "checks": []}], SOURCES)
     assert not term.is_veto and term.weight == 1.0 and term.on_error is OnError.INVALID
 
@@ -226,13 +224,32 @@ def test_flag_fraction_weighs_each_process_check():
             Check(name="sloppy", description="d", weight=3.0),
         ),
     )
-    # A zero-weight flag is logged, never priced: firing alone it leaves the score at 0.
+    # A zero-weight flag is logged, never priced.
     assert term.flag_fraction({"logged": True, "cheat": True}) == 0.0
     assert term.flag_fraction({"wasted": True}) == 0.25
     assert term.flag_fraction({"wasted": True, "sloppy": True, "logged": True}) == 1.0
     assert term.price(term.flag_fraction({"wasted": True})) == -0.05
     only_logged = JudgeTerm(name="gate", weight=-0.2, checks=(Check(name="logged", description="d", weight=0.0),))
     assert only_logged.flag_fraction({"logged": True}) == 0.0
+
+
+def test_a_veto_check_given_a_weight_also_prices():
+    """Each fired check costs its own share of the term weight on top of its gate, so the prices add."""
+    term = JudgeTerm(
+        name="gate",
+        weight=-0.7,
+        checks=(
+            Check(name="guess", description="d", veto=True, weight=3.0),
+            Check(name="probe", description="d", veto=True, weight=2.0),
+            Check(name="gate_only", description="d", veto=True),
+            Check(name="wasted", description="d"),
+            Check(name="untested", description="d"),
+        ),
+    )
+    assert [check.share for check in term.checks] == [3.0, 2.0, 0.0, 1.0, 1.0]
+    assert term.price(term.flag_fraction({"guess": True})) == pytest.approx(-0.3)
+    assert term.price(term.flag_fraction({"guess": True, "untested": True})) == pytest.approx(-0.4)
+    assert term.flag_fraction({"gate_only": True}) == 0.0
 
 
 def test_a_check_weight_parses_from_config():
@@ -254,7 +271,8 @@ def test_a_check_weight_parses_from_config():
         ({"name": "a", "description": "d", "weight": -1.0}, "weight must be >= 0"),
         ({"name": "a", "description": "d", "weight": float("nan")}, "weight must be a finite number"),
         ({"name": "a", "description": "d", "weight": True}, "weight must be a finite number"),
-        ({"name": "a", "description": "d", "veto": True, "weight": 1.0}, "takes no weight"),
+        ({"name": "a", "description": "d", "veto": True, "weight": -1.0}, "weight must be >= 0"),
+        ({"name": "a", "description": "d", "unless": " "}, "unless must be a non-blank string"),
     ],
 )
 def test_check_validation(kwargs, message):
@@ -291,7 +309,6 @@ def test_judge_score_is_the_weighted_fraction_of_the_scale_with_clamping():
     )
     assert term.score_from(term.requirement_fractions({"a": 10, "b": 10})) == 1.0
     assert term.score_from(term.requirement_fractions({"a": 10, "b": 0})) == pytest.approx(0.25)
-    # Out-of-scale replies are clamped, never extrapolated into a score above 1 or below 0.
     assert term.requirement_fractions({"a": 25, "b": -4}) == {"a": 1.0, "b": 0.0}
     assert term.score_from(term.requirement_fractions({"a": 25, "b": -4})) == pytest.approx(0.25)
     # Fractional weights round a full score past 1 by an ulp; the term must still price it.
@@ -319,10 +336,7 @@ def test_reward_model_normalization_is_a_shifted_scaled_logistic():
 
 
 def test_a_reward_with_no_terms_is_refused():
-    """``rewards: []`` leaves the episode reward as turn shaping alone — a run with no objective at
-    all, which trains on shaping and reports nothing wrong. The composer refuses it wherever it is
-    built (including inside a Ray actor), and the term parser refuses it for both arms' configs
-    before the cluster comes up."""
+    """With no terms a run would train on turn shaping alone and report nothing wrong."""
     with pytest.raises(ValueError, match="at least one term"):
         RewardComposer([])
     with pytest.raises(ValueError, match="at least one reward term"):
@@ -330,11 +344,54 @@ def test_a_reward_with_no_terms_is_refused():
     with pytest.raises(ValueError, match="at least one reward term"):
         EnvironmentConfig(rewards=[])
     with pytest.raises(ValueError, match="at least one reward term"):
-        RLVROnlineGRPOScriptArguments(rewards=[])
-    # The upper bound and the lower bound are the same guard's two sides.
+        OnlineGRPOScriptArguments(rewards=[])
     with pytest.raises(ValueError, match="at most one environment term"):
         RewardComposer([EnvironmentTerm(), EnvironmentTerm()])
     assert len(RewardComposer([EnvironmentTerm()]).terms) == 1
+
+
+def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
+    """The RLVR arm has no environment whose grade an environment term would read."""
+    args = OnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, {"source": "format"}, JUDGE_SPEC, RM_SPEC])
+    assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
+    with pytest.raises(ValueError, match="unknown reward source 'environment'"):
+        OnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
+
+
+def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
+    """Refused where no environment's objective gates it or it stays unbound."""
+    spec = {"source": "judge", "name": "audit", "checks": "environment"}
+    term, judge = parse_reward_terms([spec, JUDGE_SPEC], SOURCES)
+    assert term.is_veto and term.checks == "environment"
+    assert (term.weight, term.on_error) == (0.0, OnError.NEUTRAL)
+    checks = tuple(Check(**check) for check in CHECKS)
+    bound, kept = resolve_environment_checks([term, judge], checks)
+    assert bound.checks == checks and bound.name == "audit" and bound.weight == 0.0
+    assert kept is judge
+    assert resolve_environment_checks([term], ()) == (term,)
+    with pytest.raises(ValueError, match=r"\['audit'\] list 'checks'"):
+        OnlineGRPOScriptArguments(rewards=[spec])
+    with pytest.raises(ValueError, match="declares none"):
+        RewardComposer([EnvironmentTerm(), term])
+
+
+def test_a_judge_context_file_is_read_into_its_context_when_a_config_parses(tmp_path):
+    """The config forwarded to the actors holds the text, never a path another node cannot resolve."""
+    setting = tmp_path / "setting.txt"
+    setting.write_text("The policy has a scratchpad.\n", encoding="utf-8")
+    spec = {**JUDGE_SPEC, "context_file": str(setting)}
+    env_config = EnvironmentConfig(rewards=[{"source": "environment"}, spec])
+    forwarded = env_config.to_env_config()["reward_terms"][1]
+    assert forwarded["context"] == "The policy has a scratchpad.\n" and "context_file" not in forwarded
+    assert env_config.reward_terms[1].context == "The policy has a scratchpad.\n"
+    online = OnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, spec])
+    assert online.reward_terms[1].context == "The policy has a scratchpad.\n"
+    with pytest.raises(ValueError, match="not both"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**spec, "context": "inline"}])
+    with pytest.raises(ValueError, match="is not a file"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**spec, "context_file": str(tmp_path / "missing.txt")}])
+    with pytest.raises(ValueError, match=r"unknown option\(s\) \['context_file'\]"):
+        EnvironmentConfig(rewards=[{"source": "environment"}, {**RM_SPEC, "context_file": str(setting)}])
 
 
 if __name__ == "__main__":

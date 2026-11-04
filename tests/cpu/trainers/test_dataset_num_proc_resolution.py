@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""Test that trainer-side ``dataset.map`` passes honour ``dataset_num_proc`` the toolkit way.
-
-An UNSET ``dataset_num_proc`` means "toolkit default" (``DATASET_NUM_PROC``), not "one
-worker": handing the raw ``None`` to ``coordinated_map`` overrides that default and runs
-the heaviest tokenize single-process. Every parallelism mode gets the same count — which only holds
-because the mapped callables are module-level functions that take their state through ``fn_kwargs``.
-A bound method would ship its ``self`` (the model, and under EP the DeepEP/NCCL process groups) to
-every worker; ``reject_self_capturing_fn`` rejects that at the map seam, and the tokenize functions
-are exercised here through a real multi-worker ``Dataset.map``.
-
-Run: python tests/cpu/trainers/test_dataset_num_proc_resolution.py
-"""
+"""Trainer-side ``dataset.map`` passes resolve an unset ``dataset_num_proc`` to ``DATASET_NUM_PROC``, not one worker.
+A bound method would ship the model and EP process groups to workers, so ``reject_self_capturing_fn`` refuses it."""
 
 import inspect
 import types
@@ -19,17 +9,17 @@ from functools import partial
 import pytest
 from datasets import Dataset
 
-import src.trainers.preference.smpo as smpo_module
-from src.data.pipeline.preferences import tokenize_preference_row
-from src.data.pipeline.processing import (
+import halo.trainers.preference.smpo as smpo_module
+from halo.data.pipeline.coordinated_map import (
     DATASET_NUM_PROC,
     coordinated_filter,
     coordinated_map,
     reject_self_capturing_fn,
     resolve_map_num_proc,
 )
-from src.trainers.grpo.offline import tokenize_offline_grpo_rows
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.data.pipeline.preferences import tokenize_preference_row
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
+from halo.trainers.preference.smpo import SMPOTrainer
 
 # >1 is what makes datasets pickle the mapped callable.
 _WORKERS = 2
@@ -45,7 +35,7 @@ def test_explicit_value_wins():
 
 
 class _Unpicklable:
-    """Stands in for a trainer holding a ProcessGroup: dill cannot send it to a worker."""
+    """Stands in for a trainer holding a ProcessGroup."""
 
     def __reduce__(self):
         raise TypeError("cannot pickle 'ProcessGroup' object")
@@ -85,10 +75,9 @@ class _FakeDataset:
 def _smpo_self(*, dataset_num_proc, is_vlm=False):
     return types.SimpleNamespace(
         is_vlm=is_vlm,
-        dataset_num_proc=dataset_num_proc,
+        args=types.SimpleNamespace(dataset_num_proc=dataset_num_proc, truncation_mode="keep_end"),
         max_prompt_length=17,
         max_completion_length=23,
-        truncation_mode="keep_end",
         _eos_token_ids=frozenset({2}),
     )
 
@@ -105,7 +94,7 @@ def _run_smpo_prepare(me):
     original = smpo_module.coordinated_map
     smpo_module.coordinated_map = _fake_map
     try:
-        SmoothMarginPOTrainer._prepare_dataset(me, _FakeDataset(), None, "train")
+        SMPOTrainer._prepare_dataset(me, _FakeDataset(), None, me.args, "train")
     finally:
         smpo_module.coordinated_map = original
     return captured
@@ -120,7 +109,7 @@ def test_smpo_tokenize_honours_explicit_value():
 
 
 def test_smpo_passes_a_self_free_callable_with_state_in_fn_kwargs():
-    # Tunables must ride fn_kwargs: the map cache key fingerprints those, never values off self.
+    # Tunables go in fn_kwargs: the map cache key fingerprints those, never values off self.
     for is_vlm in (False, True):
         captured = _run_smpo_prepare(_smpo_self(dataset_num_proc=4, is_vlm=is_vlm))
         assert not inspect.ismethod(captured["fn"]), f"is_vlm={is_vlm}: bound method reached the map"
@@ -132,7 +121,7 @@ def test_smpo_passes_a_self_free_callable_with_state_in_fn_kwargs():
 
 
 class PicklableTokenizer:
-    """Whitespace tokenizer with a BOS-emitting post-processor (module-level so workers can load it)."""
+    """Module-level so workers can load it."""
 
     bos_token_id = 1
     eos_token_id = 2

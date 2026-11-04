@@ -1,39 +1,28 @@
-"""Pytest support for the environments CPU suite.
-
-Several environment / Ray-actor tests are ``async def`` (they exercise the
-async reset/step API and the asyncio-based rollout manager). The image ships
-no ``pytest-asyncio`` plugin, so without this hook pytest would collect those
-coroutine tests and fail them with "async def functions are not natively
-supported". This ``pytest_pyfunc_call`` hook runs any coroutine test through
-``asyncio.run`` and reports the real result.
-
-The environment registry is process-global module state. Tests that register a
-stub factory take ``isolated_registry`` to drop it again, so a later test that
-sweeps the registered types resolves real environments rather than the stubs.
-"""
+"""Environments CPU suite support. The image ships no ``pytest-asyncio``, so ``pytest_pyfunc_call`` runs coroutine
+tests through ``asyncio.run``. The registry is process-global, so a test registering a stub takes
+``isolated_registry``."""
 
 import asyncio
 import inspect
 
 import pytest
 
-from src.environments.registry import _ENVIRONMENT_REGISTRY
+from halo.environments.registry import _environment_registry
 
 
 @pytest.fixture
 def isolated_registry():
     """Undo whatever env types the test registers, keeping other entries as the test left them."""
-    before = dict(_ENVIRONMENT_REGISTRY)
+    before = dict(_environment_registry)
     yield
-    for name in set(_ENVIRONMENT_REGISTRY) - set(before):
-        del _ENVIRONMENT_REGISTRY[name]
-    _ENVIRONMENT_REGISTRY.update({k: v for k, v in before.items() if _ENVIRONMENT_REGISTRY.get(k) is not v})
+    for name in set(_environment_registry) - set(before):
+        del _environment_registry[name]
+    _environment_registry.update({k: v for k, v in before.items() if _environment_registry.get(k) is not v})
 
 
 def pytest_pyfunc_call(pyfuncitem):
     test_fn = pyfuncitem.obj
     if inspect.iscoroutinefunction(test_fn):
-        # Only pass through the fixture-resolved args the test actually declares.
         kwargs = {name: pyfuncitem.funcargs[name] for name in pyfuncitem._fixtureinfo.argnames}
         asyncio.run(test_fn(**kwargs))
         return True  # signal to pytest that we ran the test

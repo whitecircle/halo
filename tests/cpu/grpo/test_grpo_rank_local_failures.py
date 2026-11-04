@@ -1,21 +1,6 @@
 #!/usr/bin/env python
-"""A GRPO step that fails on one rank between two collectives must raise on EVERY rank.
-
-Each case is a rank-local failure ahead of a collective the peers are already headed for, so a lone
-raise leaves them there until the watchdog, with a traceback naming the collective instead of the cause:
-
-* component start (``_init_async_components``): every rank builds its own rollout manager and, under
-  ``isr_engine_reference``, its own score-only clients, whose constructor checks a server this rank may
-  not reach, and the main process its weight-sync client; the start's verdict and then the client
-  formation's join them.
-* the fenced weight sync: the collective gather runs on every rank and can fail on a non-main one.
-* the completions record: only the writer rank writes it, and the step's next collective follows.
-
-Proven on a real 2-rank gloo group with the external pieces (Ray, the actors, the engine) stubbed, so a
-regression is the hang it would be in production, bounded by the group timeout.
-
-    python tests/cpu/grpo/test_grpo_rank_local_failures.py
-"""
+"""A GRPO step that fails on one rank between two collectives must raise on every rank. A lone raise leaves the peers
+at the collective until the watchdog. Run on a real 2-rank gloo group with Ray, the actors and the engine stubbed."""
 
 import datetime
 import os
@@ -24,14 +9,14 @@ import types
 
 import pytest
 
-import src.trainers.grpo.rollout.async_rollouts as async_mod
-from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
-from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+import halo.trainers.grpo.environmental.async_rollouts as async_mod
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
 FAILING_RANK = 1
-# A stuck peer must surface as a failed assertion, not a wedged suite; generous for an 8-way xdist host.
+# A stuck peer surfaces as a failed assertion; generous for an 8-way xdist host.
 PG_TIMEOUT = datetime.timedelta(seconds=90)
 _PUSH_SECONDS = 0.05
 
@@ -41,16 +26,18 @@ class _Manager:
 
     max_concurrent = 4
 
-    def __init__(self, fail_start: bool):
+    def __init__(self, fail_start: bool, fail_loopback: bool = False):
         self._fail_start = fail_start
+        self._fail_loopback = fail_loopback
         self.credited: list[float] = []
 
     async def start(self):
         if self._fail_start:
             raise RuntimeError("no node can place the rollout actors")
 
-    def warn_if_servers_unreachable_from_actors(self, multinode: bool) -> None:
-        pass
+    def reject_loopback_servers(self, num_nodes: int) -> None:
+        if self._fail_loopback:
+            raise ValueError("a loopback URL in a run spanning several nodes")
 
     def begin_engine_pause(self) -> None:
         pass
@@ -66,7 +53,9 @@ def _scorer_cls(fail: bool):
         def __init__(self, base_url, connection_timeout):
             if fail:
                 raise ConnectionError(f"rollout server {base_url} unreachable from this node")
-            self.session = types.SimpleNamespace(close=lambda: None)
+
+        def close_http_session(self) -> None:
+            pass
 
     return _Scorer
 
@@ -77,6 +66,7 @@ class _Host(AsyncRolloutMixin):
     def __init__(self, rank: int, fail_client: bool = False):
         self._fail_client = fail_client
         self.accelerator = types.SimpleNamespace(is_main_process=rank == 0, num_processes=WORLD_SIZE)
+        self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: rank)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
             num_rollout_workers=1,
@@ -94,11 +84,9 @@ class _Host(AsyncRolloutMixin):
         self._engine_rescore_clients = None
         self._rollout_start_callback = None
         self._rollout_stop_token_ids = None
+        self._reasoning_end_ids = None
         self._loop = None
         self.callbacks: list = []
-
-    def _resolve_reasoning_end_token_id(self):
-        return None
 
     def _init_weight_sync_client(self):
         if self._fail_client and self.accelerator.is_main_process:
@@ -125,7 +113,9 @@ def _record(tmp_dir: str, rank: int, step) -> None:
 def _start_worker(rank: int, tmp_dir: str, failure: str, failing_rank: int) -> None:
     failing = rank == failing_rank
     async_mod.ray = types.SimpleNamespace(is_initialized=lambda: True)
-    async_mod.RolloutManager = lambda **kwargs: _Manager(fail_start=failing and failure == "actors")
+    async_mod.RolloutManager = lambda **kwargs: _Manager(
+        fail_start=failing and failure == "actors", fail_loopback=failing and failure == "loopback"
+    )
     async_mod.resolve_weight_sync_client = lambda backend: _scorer_cls(failing and failure == "rescore_client")
     _record(tmp_dir, rank, _Host(rank, fail_client=failing and failure == "sync_client")._init_async_components)
 
@@ -146,14 +136,21 @@ def _sync_worker(rank: int, tmp_dir: str) -> None:
         fh.write(" ".join(str(seconds) for seconds in host._rollout_manager.credited))
 
 
-def _completions_worker(rank: int, tmp_dir: str) -> None:
-    # A file where the completions directory goes: the writer's makedirs fails, as on a read-only mount.
-    blocked = os.path.join(tmp_dir, "blocked")
+def _completions_worker(rank: int, tmp_dir: str, rank_local: bool) -> None:
+    # A file where the completions directory goes: the writer's makedirs fails, as on a read-only mount. Rank-local
+    # parts are written by every rank, so only the failing rank's node is blocked.
+    blocked = os.path.join(tmp_dir, f"blocked_{rank}")
     with open(blocked, "w"):
         pass
+    unblocked = rank_local and rank != FAILING_RANK
     trainer = types.SimpleNamespace(
+        RANK_LOCAL_COMPLETION_LOGS=rank_local,
         state=types.SimpleNamespace(global_step=7),
-        args=types.SimpleNamespace(output_dir=os.path.join(blocked, "out"), report_to=[]),
+        args=types.SimpleNamespace(
+            output_dir=os.path.join(tmp_dir, f"out_{rank}") if unblocked else os.path.join(blocked, "out"),
+            # A wandb table is wanted, so the per-rank parts' path gathers its sample after the write.
+            report_to=["wandb"],
+        ),
         model=types.SimpleNamespace(training=True),
         num_completions_to_print=1,
         log_unique_prompts=False,
@@ -189,6 +186,7 @@ def _assert_raised_everywhere(results: dict[int, str], cause: str, failing_rank:
     [
         ("rescore_client", "unreachable from this node", FAILING_RANK),
         ("actors", "no node can place the rollout actors", FAILING_RANK),
+        ("loopback", "a loopback URL in a run spanning several nodes", FAILING_RANK),
         ("sync_client", "the NCCL group to the engine did not form", 0),
     ],
 )
@@ -201,8 +199,8 @@ def test_a_rank_local_component_start_failure_raises_on_every_rank(tmp_path, fai
 
 
 def test_the_rescore_clients_are_built_at_component_start(monkeypatch):
-    """At start, under the start verdict: the batch build that reads them sits between collectives that
-    could no longer report a server this rank cannot reach."""
+    """At start, under the start verdict: the batch build that reads them sits between collectives that could not
+    report a server this rank cannot reach."""
     monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
     monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _Manager(fail_start=False))
     monkeypatch.setattr(async_mod, "resolve_weight_sync_client", lambda backend: _scorer_cls(False))
@@ -226,10 +224,14 @@ def test_a_non_main_rank_weight_sync_failure_raises_on_every_rank(tmp_path):
     assert credits[0] == credits[1] >= _PUSH_SECONDS, f"the ranks credited different pauses: {credits}"
 
 
-def test_a_completions_writer_failure_raises_on_every_rank(tmp_path):
-    """Only the writer rank (rank 0, shared output filesystem) touches the disk."""
-    run_gloo_ranks(_completions_worker, WORLD_SIZE, str(tmp_path), pg_timeout=PG_TIMEOUT)
-    _assert_raised_everywhere(_results(tmp_path), "NotADirectoryError", failing_rank=0)
+@pytest.mark.parametrize(
+    ("rank_local", "failing_rank"), [(False, 0), (True, FAILING_RANK)], ids=["world-record", "per-rank-parts"]
+)
+def test_a_completions_writer_failure_raises_on_every_rank(tmp_path, rank_local, failing_rank):
+    """The world's record has one writer (rank 0, shared output filesystem); per-rank parts are written by every
+    rank, here failing on one rank's node only, which must still join the sample gather that follows."""
+    run_gloo_ranks(_completions_worker, WORLD_SIZE, str(tmp_path), rank_local, pg_timeout=PG_TIMEOUT)
+    _assert_raised_everywhere(_results(tmp_path), "NotADirectoryError", failing_rank=failing_rank)
 
 
 if __name__ == "__main__":

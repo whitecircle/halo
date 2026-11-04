@@ -1,57 +1,70 @@
 #!/usr/bin/env python
-"""The embedding save path is the shared checkpoint ladder.
-
-``EmbeddingTrainer`` owns one genuine difference from every other trainer: its top-level model is a
-``SentenceTransformer`` ``nn.Sequential``, so the checkpoint context has to be re-pointed at the
-``auto_model`` backbone. Everything downstream of that — save dtype, hub expert layout, shard size,
-the ``.bin`` fallback, and the single retaining rank on a gathered save — must come from
-``save_checkpoint`` and the shared gather/write leaves rather than a local re-implementation. A run
-with nothing to gather is the mixin's save alone, so every save step (reshard, router-balancing
-sidecar, writer) runs once on either branch.
-
-Run: pytest tests/cpu/trainers/test_embedding_save_routing.py
-"""
+"""The embedding save path is the shared checkpoint ladder, re-pointed at the ``auto_model`` backbone.
+Every save step (reshard, router-balancing sidecar, writer) runs once on either branch."""
 
 import contextlib
+import os
+import weakref
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
+from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformerTrainer
 
-import src.trainers.mixins.checkpointing as checkpointing_mod
-from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.trainers.embedding import trainer as embedding_module
-from src.trainers.embedding.trainer import EmbeddingTrainer
+import halo.checkpoint.writing as writing_mod
+import halo.models.peft_adapters as peft_adapters
+import halo.trainers.checkpointing as checkpointing_mod
+from halo.checkpoint.parallel.writing import conversion_chunk_key
+from halo.checkpoint.reading import load_full_state_dict
+from halo.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.trainers.embedding import trainer as embedding_module
+from halo.trainers.embedding.injected_lora import has_injected_lora
+from halo.trainers.embedding.trainer import EmbeddingTrainer
+from tests.common.adapters import randomize_adapters
 from tests.common.ep_stubs import StubEPLayerBase
-from tests.common.peft_helpers import randomize_adapters
+from tests.common.gloo import run_gloo_ranks
+
+WORLD_SIZE = 2
 
 
-class _Backbone(nn.Module):
+class _Block(nn.Module):
     def __init__(self):
         super().__init__()
         self.linear = nn.Linear(4, 4, bias=False)
 
 
-class _SharedExpertEPLayer(StubEPLayerBase):
-    """An EP layer holding the block's shared experts, which the EP layers adopt as a child."""
+class _Backbone(nn.Module):
+    def __init__(self, bare: bool = False):
+        super().__init__()
+        self.linear = nn.Linear(4, 4, bias=False)
+        blocks = nn.ModuleList([_Block(), _Block()])
+        if bare:
+            self.layers = blocks
+        else:
+            self.encoder = nn.Module()
+            self.encoder.layers = blocks
 
+
+class _SharedExpertEPLayer(StubEPLayerBase):
     def __init__(self):
         super().__init__()
         self.shared_experts = nn.Linear(4, 4, bias=False)
 
 
 class _SentenceTransformerLike(nn.Module):
-    """Stands in for the ST Sequential: the backbone is a CHILD, not the model itself."""
+    """The backbone is a child, not the model itself."""
 
     def __init__(self, backbone: nn.Module):
         super().__init__()
         self.transformer = backbone
 
 
-def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: str = "3GB"):
-    backbone = _Backbone()
+def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: str = "3GB", bare: bool = False):
+    backbone = _Backbone(bare)
     if has_lora:
         inject_adapter_in_model(LoraConfig(r=2, lora_alpha=8, target_modules=["linear"]), backbone)
         randomize_adapters(backbone, lora_b_only=True)
@@ -60,13 +73,14 @@ def _host(*, has_lora: bool = False, is_save_rank: bool = True, max_shard_size: 
     host = object.__new__(EmbeddingTrainer)
     host.parallelism_config = _ParallelismStub()
     host.model = top
-    host.args = _ArgsStub(max_shard_size)
+    host.args = SimpleNamespace()
+    host.save_max_shard_size = max_shard_size
     host.processing_class = _TokenizerStub()
     host._fsdp_wrapped = True
     host._accelerate_manages_fsdp = False
     host.save_sharded_ep = False
     host._top_level_model = lambda: top
-    host._get_unwrapped_model = lambda: backbone
+    host._backbone_model = lambda: backbone
     host._get_tp_rank = lambda: 0
     host._find_cp_wrapper = lambda: None
     host._is_save_rank = is_save_rank
@@ -77,15 +91,9 @@ class _ParallelismStub:
     is_pp_mode = False
     is_cp_mode = False
     is_tp_mode = False
-    is_ep_tp_mode = False
-    is_ep_mode = False
+    has_ep_group = False
     tp_size = 1
     merge_expert_lora_on_save = False
-
-
-class _ArgsStub:
-    def __init__(self, max_shard_size):
-        self.save_max_shard_size = max_shard_size
 
 
 class _TokenizerStub:
@@ -97,14 +105,13 @@ class _TokenizerStub:
 
 
 def _context(host, monkeypatch):
-    monkeypatch.setattr(embedding_module, "fs_aware_save_rank", lambda: host._is_save_rank)
-    monkeypatch.setattr("src.trainers.mixins.checkpointing.fs_aware_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
     return EmbeddingTrainer._checkpoint_context(host)
 
 
 def test_checkpoint_context_points_at_the_backbone_not_the_st_sequential(monkeypatch):
-    # The base factory snapshots _top_level_model(); a strategy handed the Sequential would gather
-    # and write "transformer.*"-prefixed keys no loader accepts.
+    # A strategy handed the Sequential would gather and write "transformer.*"-prefixed keys no loader accepts.
     host, backbone, top = _host()
     ctx = _context(host, monkeypatch)
 
@@ -125,79 +132,131 @@ def test_non_lora_save_delegates_to_the_registry_with_the_configured_shard_size(
 
     assert seen["ctx"] is ctx
     assert seen["out"] == str(tmp_path)
-    # The ladder carries max_shard_size through to the EP/TP savers.
     assert seen["ctx"].max_shard_size == "1GB"
     assert seen["ctx"].model is backbone
 
 
 def test_gathered_lora_save_retains_only_on_the_writer(monkeypatch, tmp_path):
-    # retain defaults True, so an unqualified gather leaves a full CPU state dict on EVERY rank.
+    # retain defaults True, so an unqualified gather leaves a full CPU state dict on every rank.
     host, _, _ = _host(has_lora=True, is_save_rank=False)
     ctx = _context(host, monkeypatch)
     seen = {}
 
-    def _gather(model, retain: bool = True, items=None):
+    def _chunks(model, *, retain):
         seen["retain"] = retain
-        return {}
+        return iter(())
 
-    monkeypatch.setattr(embedding_module, "gather_saveable_tensors", _gather)
-    monkeypatch.setattr(embedding_module, "write_gathered_checkpoint", lambda *a, **k: seen.setdefault("wrote", True))
+    monkeypatch.setattr(embedding_module, "folded_backbone_chunks", _chunks)
+    monkeypatch.setattr(
+        embedding_module, "stream_gathered_checkpoint", lambda *a, is_save_rank, **k: seen.update(writes=is_save_rank)
+    )
 
     EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
 
-    assert seen["retain"] is False
-    assert "wrote" not in seen  # a non-writer rank runs the collective and nothing else
+    assert seen == {"retain": False, "writes": False}  # a non-writer rank runs the collectives and writes nothing
 
 
-def test_gathered_lora_save_writes_the_fold_through_the_shared_writer(monkeypatch, tmp_path):
-    """The folded tensors must go through ``write_gathered_checkpoint``, under the plain names.
-
-    Writing them straight to ``save_sharded_state_dict`` skips ``normalize_gathered_state_dict``, so an
-    fp32-master run exports fp32 while the same model under EP/TP exports the save dtype, a MoE
-    backbone exports module-fused expert keys vLLM rejects, and there is no ``.bin`` recovery.
-    """
-    host, backbone, _ = _host(has_lora=True, is_save_rank=True)
+@pytest.mark.parametrize("bare", [False, True], ids=["prefixed-layers", "bare-layers"])
+def test_injected_lora_save_streams_the_fold_one_conversion_chunk_at_a_time(monkeypatch, tmp_path, bare):
+    """One conversion chunk (a decoder block) at a time, so the save rank never holds the whole backbone."""
+    host, backbone, _ = _host(has_lora=True, bare=bare)
     ctx = _context(host, monkeypatch)
-    layer = backbone.linear
-    expected = layer.base_layer.weight + layer.get_delta_weight("default")
-    assert not torch.equal(expected, layer.base_layer.weight), "premise: the adapter moves its base"
-    written = {}
+    expected = {
+        f"{name}.weight": cast_to_save_dtype((module.base_layer.weight + module.get_delta_weight("default")).detach())
+        for name, module in backbone.named_modules()
+        if isinstance(module, LoraLayer)
+    }
+    chunks = []
 
-    def _write(model, state_dict, output_dir, max_shard_size=None):
-        written["model"] = model
-        written["state_dict"] = state_dict
-        written["max_shard_size"] = max_shard_size
+    def recording(model, chunk, **kwargs):
+        chunks.append({conversion_chunk_key(key) for key in chunk})
+        return normalize_gathered_state_dict(model, chunk, **kwargs)
 
-    monkeypatch.setattr(embedding_module, "write_gathered_checkpoint", _write)
+    monkeypatch.setattr(embedding_module, "normalize_gathered_state_dict", recording)
 
     EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
 
-    assert written["model"] is backbone
-    assert written["max_shard_size"] == ctx.max_shard_size
-    assert sorted(written["state_dict"]) == ["linear.weight"]  # adapters folded, base_layer spelling gone
-    assert torch.equal(written["state_dict"]["linear.weight"], expected.detach())
+    layers = "layers" if bare else "encoder.layers"
+    assert chunks == [{""}, {f"{layers}.0"}, {f"{layers}.1"}]
+    written = load_full_state_dict(str(tmp_path))
+    assert written.keys() == expected.keys()  # adapters folded, base_layer spelling gone
+    for key, tensor in expected.items():
+        assert torch.equal(written[key], tensor), key
     assert host.processing_class.saved_to == str(tmp_path)
 
 
+def test_the_injected_lora_save_folds_one_target_at_a_time(monkeypatch, tmp_path):
+    """Each fold is a device copy of its target; folded up front, all would be alive at once."""
+    host, _, _ = _host(has_lora=True)
+    ctx = _context(host, monkeypatch)
+    real_fold = peft_adapters.lora_folded
+    alive = made = peak = 0
+
+    def released():
+        nonlocal alive
+        alive -= 1
+
+    def counting_fold(param, layers):
+        nonlocal alive, made, peak
+        folded = real_fold(param, layers)
+        weakref.finalize(folded, released)
+        alive, made = alive + 1, made + 1
+        peak = max(peak, alive)
+        return folded
+
+    monkeypatch.setattr(peft_adapters, "lora_folded", counting_fold)
+
+    EmbeddingTrainer._save_distributed_embedding_model(host, ctx, str(tmp_path))
+
+    assert made == 3, "premise: one fold per adapted linear"
+    assert peak == 1
+
+
+def _enospc(*args, **kwargs):
+    raise OSError(28, "No space left on device")
+
+
+def _failing_write_worker(rank: int, tmp_dir: str) -> None:
+    host, _, _ = _host(has_lora=True, is_save_rank=rank == 0)
+    outcome = "NO RAISE"
+    with pytest.MonkeyPatch.context() as patcher:
+        ctx = _context(host, patcher)
+        patcher.setattr(writing_mod, "save_safetensors_file", _enospc)
+        try:
+            EmbeddingTrainer._save_distributed_embedding_model(host, ctx, tmp_dir)
+        except RuntimeError as error:
+            outcome = str(error)
+    with open(os.path.join(tmp_dir, f"result_{rank}.txt"), "w") as fh:
+        fh.write(outcome)
+
+
+def test_a_failed_injected_lora_write_raises_on_every_rank(tmp_path):
+    """A ``pytorch_model.bin`` fallback would leave a format no other gathered save writes, or strand the peers."""
+    run_gloo_ranks(_failing_write_worker, WORLD_SIZE, str(tmp_path))
+
+    for rank in range(WORLD_SIZE):
+        outcome = (tmp_path / f"result_{rank}.txt").read_text()
+        assert "No space left on device" in outcome, f"rank {rank}: {outcome}"
+    assert not (tmp_path / "pytorch_model.bin").exists()
+
+
 def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
-    """An EP layer adopts the block's shared experts as children, so a target list that reaches only
-    those puts every adapter inside it. The run still trains injected LoRA: it must be folded on save
-    and refused under EP, which an EP-excluding scan would miss."""
+    """An EP layer adopts the block's shared experts as children, and the run still trains injected LoRA there.
+    It must be folded on save and refused under EP, which an EP-excluding scan would miss."""
     layer = _SharedExpertEPLayer()
     backbone = _Backbone()
     backbone.add_module("moe", layer)
     inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_experts"]), backbone)
-    assert find_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
+    assert named_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
 
-    assert EmbeddingTrainer._has_injected_lora(None, backbone)
+    assert has_injected_lora(backbone)
 
 
 def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatch, tmp_path):
-    # The run's sequence budget is pinned on the tokenizer as a truncation default; save_pretrained
-    # would otherwise persist it as the exported model's served context.
+    # The run's sequence budget is pinned on the tokenizer, and save_pretrained would persist it as the served context.
     host, _, _ = _host()
     host._pristine_special_token_ids = []
-    host._persist_router_balancing_biases = lambda _dir: None
+    monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: None)
     order = []
 
     @contextlib.contextmanager
@@ -207,8 +266,8 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
         order.append("exit")
 
     monkeypatch.setattr(checkpointing_mod, "pristine_model_max_length", _pristine)
-    monkeypatch.setattr(embedding_module, "fs_aware_save_rank", lambda: True)
-    monkeypatch.setattr("src.trainers.mixins.checkpointing.fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",
@@ -221,13 +280,13 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
 
 
 def _record_save_steps(host, monkeypatch) -> list[str]:
-    """Record the save steps that must run once per save: the reshard, the balancing sidecar, each writer."""
     calls = []
     host._pristine_special_token_ids = []
-    host._persist_router_balancing_biases = lambda _dir: calls.append("sidecar")
+    monkeypatch.setattr(checkpointing_mod, "save_balancing_biases", lambda *args, **kwargs: calls.append("sidecar"))
     for module in (embedding_module, checkpointing_mod):
         monkeypatch.setattr(module, "reshard_fsdp2_modules", lambda _model: calls.append("reshard"))
-        monkeypatch.setattr(module, "fs_aware_save_rank", lambda: True)
+    monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",
@@ -240,9 +299,7 @@ def _record_save_steps(host, monkeypatch) -> list[str]:
 
 
 def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
-    """Single GPU, DDP and accelerate FSDP: the mixin's save owns the reshard, the sidecar and the fence
-    mark, with ST's writer as its base fallback. Wrapping it in a second copy of those steps runs each
-    twice — a second sidecar write, a second reshard."""
+    """Single GPU, DDP, accelerate FSDP: a second copy of the mixin's steps would run the sidecar and reshard twice."""
     host, _, _ = _host()
     host._fsdp_wrapped = False
     host.args.should_save = False
@@ -254,9 +311,22 @@ def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
     assert host._model_save_collectives_done
 
 
+def test_a_one_process_save_of_ep_layers_writes_the_pipeline_config_beside_the_ladder(monkeypatch, tmp_path):
+    """Only the ladder's EP saver writes hub-layout experts, but the mixin's payload adds no pipeline config beside it.
+    The export would load as a bare backbone, mean-pooled and unnormalized."""
+    host, backbone, _ = _host()
+    backbone.add_module("moe", _SharedExpertEPLayer())
+    host._fsdp_wrapped = False
+    host.args.should_save = False
+    calls = _record_save_steps(host, monkeypatch)
+    monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, output_dir: calls.append("ladder") or True)
+
+    EmbeddingTrainer.save_model(host, str(tmp_path))
+
+    assert calls == ["reshard", "sidecar", "distributed"]
+
+
 def test_a_distributed_save_writes_through_the_mixins_payload_hook(monkeypatch, tmp_path):
-    """EP/TP/FSDP2 and injected LoRA replace only the payload: the mixin's save keeps the reshard, the
-    sidecar and the fence mark, each once, and ST's writer never runs."""
     host, _, _ = _host()
     calls = _record_save_steps(host, monkeypatch)
 

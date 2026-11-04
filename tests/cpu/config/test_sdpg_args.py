@@ -1,36 +1,25 @@
 #!/usr/bin/env python
-"""Parse-time validation of the SDPG argument block (``SDPGArguments``) on both OPD arms.
-
-The hint template is a ``str.format`` string whose placeholders each arm's formatter fills from a
-fixed set: the on-policy trainer the gold answer alone, the self-distillation collator a reference
-solution too. A placeholder outside that set would raise ``KeyError`` at the first teacher prompt,
-after the model load, and an unbounded numeric knob would NaN or invert the OPD term; both are
-refused at parse time. A null template is refused naming the field — except beside RLVR's closed
-``use_sdpg`` gate, where the script's gate refusal names it as a value set beside the gate.
-
-Run: pytest tests/cpu/config/test_sdpg_args.py
-"""
+"""Parse-time validation of ``SDPGArguments`` on both OPD arms. A placeholder outside an arm's fixed set raises
+``KeyError`` at the first teacher prompt, after the model load, and an unbounded numeric knob NaNs or inverts the
+OPD term."""
 
 import math
 import re
 import sys
+import types
 from unittest import mock
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.args.mixins import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, format_field_names
-from src.args.rlvr_online_grpo_args import RLVROnlineGRPOScriptArguments
-from src.args.self_distill_args import SelfDistillationArguments
-from src.data.collators.self_distill import inject_privileged_hint, privileged_hint
-from src.trainers.distillation.sdpg import DistributedSDPGTrainer
-from tests.common.utils import load_script_module
+from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
+from halo.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from tests.common.repo import load_script_module
 
-PartialState()  # the RLVR script logs through accelerate, which refuses to log without it
-
-ONLINE_ARMS = (SDPGArguments, RLVROnlineGRPOScriptArguments)
-ALL_ARMS = (*ONLINE_ARMS, SelfDistillationArguments)
+ONLINE_ARMS = (SDPGArguments, OnlineGRPOScriptArguments)
+ALL_ARMS = (*ONLINE_ARMS, SelfDistillScriptArguments)
 
 
 def _placeholders(names) -> str:
@@ -51,7 +40,8 @@ def _online_teacher_hint(template: str, answer: str) -> str:
     """The hint text the on-policy trainer's own formatter appends to a one-token prompt."""
     trainer = object.__new__(DistributedSDPGTrainer)
     trainer.processing_class = _CharTokenizer()
-    trainer.sdpg_hint_template = template
+    # A stand-in block: the formatter must be probed with templates the real block refuses.
+    trainer.sdpg = types.SimpleNamespace(sdpg_hint_template=template)
     trainer.sdpg_answer_field = "answer"
     trainer._warned_missing_answer = set()
     prompt_ids = torch.tensor([[ord("Q")]])
@@ -66,12 +56,12 @@ def test_the_pinned_default_template_is_valid_on_every_arm(arm):
 
 
 def test_each_formatter_fills_every_placeholder_its_arm_admits():
-    """The declared sets are the contract the parse-time check enforces; a name added to one that its
-    formatter does not supply would pass the check and raise ``KeyError`` mid-run."""
+    """A name added to a declared set that its formatter does not supply would pass the check and raise ``KeyError``
+    mid-run."""
     online = _placeholders(SDPGArguments.HINT_PLACEHOLDERS)
     assert _online_teacher_hint(online, "42") == online.replace("{answer}", "42")
 
-    offline = _placeholders(SelfDistillationArguments.HINT_PLACEHOLDERS)
+    offline = _placeholders(SelfDistillScriptArguments.HINT_PLACEHOLDERS)
     hint = privileged_hint(offline, answer="42", solution="6 * 7")
     history = inject_privileged_hint([{"role": "user", "content": "Q"}], hint)
     assert history[-1]["content"] == "Q" + offline.replace("{answer}", "42").replace("{solution}", "6 * 7")
@@ -87,7 +77,7 @@ def test_the_online_arm_refuses_the_solution_placeholder(arm):
 
 
 def test_self_distillation_admits_the_solution_placeholder():
-    assert SelfDistillationArguments(sdpg_hint_template="{answer} {solution}").sdpg_hint_template
+    assert SelfDistillScriptArguments(sdpg_hint_template="{answer} {solution}").sdpg_hint_template
 
 
 def test_the_online_trainer_refuses_it_at_construction_too():
@@ -96,7 +86,9 @@ def test_the_online_trainer_refuses_it_at_construction_too():
         "sdpg_hint_template names ['{solution}'], which SDPGArguments's hint does not fill; it fills ['{answer}']."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
-        DistributedSDPGTrainer(sdpg_hint_template="{solution}")
+        DistributedSDPGTrainer(
+            sdpg_hint_template="{solution}", sdpg_answer_field="answer", opd_positive_advantage_only=True
+        )
 
 
 @pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)
@@ -124,12 +116,11 @@ def test_a_malformed_template_is_refused(arm, template):
 
 @pytest.mark.parametrize(
     "build",
-    [SDPGArguments, SelfDistillationArguments, lambda **kw: RLVROnlineGRPOScriptArguments(use_sdpg=True, **kw)],
-    ids=["SDPGArguments", "SelfDistillationArguments", "RLVROnlineGRPOScriptArguments-use_sdpg"],
+    [SDPGArguments, SelfDistillScriptArguments, lambda **kw: OnlineGRPOScriptArguments(use_sdpg=True, **kw)],
+    ids=["SDPGArguments", "SelfDistillScriptArguments", "OnlineGRPOScriptArguments-use_sdpg"],
 )
 def test_a_null_template_is_refused_naming_the_field(build):
-    """A YAML ``sdpg_hint_template: null`` parses to None, which ``string.Formatter`` meets with a bare
-    ``TypeError`` naming no field."""
+    """A YAML null parses to None, which ``string.Formatter`` meets with a bare ``TypeError`` naming no field."""
     with pytest.raises(ValueError, match=r"^sdpg_hint_template must be a str.format template string, got None$"):
         build(sdpg_hint_template=None)
 
@@ -139,9 +130,9 @@ def _run_rlvr_main(tmp_path, yaml_tail: str):
     config.write_text(
         f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n{yaml_tail}"
     )
-    script = load_script_module("scripts/training/online_grpo/rlvr.py", "halo_test_rlvr_sdpg_gate")
+    script = load_script_module("scripts/training/grpo/online.py", "halo_test_rlvr_sdpg_gate")
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(script, "init_training_script", side_effect=AssertionError("reached the load")),
     ):
@@ -149,8 +140,8 @@ def _run_rlvr_main(tmp_path, yaml_tail: str):
 
 
 def test_a_null_template_beside_the_closed_rlvr_gate_is_refused_by_the_gate(tmp_path):
-    """With ``use_sdpg`` off the template is inert, so the refusal that speaks is the one naming it as set
-    beside the closed gate — not a parse error asking for a template the run would never read."""
+    """With ``use_sdpg`` off the template is inert, so the refusal that speaks names it as set beside the closed
+    gate."""
     with pytest.raises(ValueError, match=r"use_sdpg off does not support .*\['sdpg_hint_template'\]"):
         _run_rlvr_main(tmp_path, "sdpg_hint_template: null\n")
 
@@ -200,20 +191,21 @@ def test_the_boundary_values_still_parse(arm):
     [("{answer}", "sdpg_answer_field"), ("{solution}", "privileged_solution_field")],
 )
 def test_self_distillation_needs_a_column_for_each_slot_its_hint_names(template, unset):
-    """With no column to fill a named slot no row could render the hint; a slot the template does not
-    name needs none — a solution-only template takes no answer column."""
+    """A slot the template does not name needs no column: a solution-only template takes no answer column."""
     with pytest.raises(ValueError, match=rf"column is unset \(\['{unset}'\]\)"):
-        SelfDistillationArguments(sdpg_hint_template=template, **{unset: None})
-    assert SelfDistillationArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})
+        SelfDistillScriptArguments(sdpg_hint_template=template, **{unset: None})
+    assert SelfDistillScriptArguments(sdpg_hint_template=template, sdpg_beta_base=0.0, **{unset: None})
     other = {"sdpg_answer_field": "privileged_solution_field", "privileged_solution_field": "sdpg_answer_field"}[unset]
-    assert SelfDistillationArguments(sdpg_hint_template=template, **{other: None})
+    assert SelfDistillScriptArguments(sdpg_hint_template=template, **{other: None})
 
 
 def test_self_distillation_may_supervise_the_prompt_only_with_the_opd_term_off():
     """With the prompt in the labels the hint shifts every OPD pair; SFT alone has no pairs."""
     with pytest.raises(ValueError, match="train_on_completions_only: false while sdpg_beta_base > 0"):
-        SelfDistillationArguments(train_on_completions_only=False)
-    assert not SelfDistillationArguments(train_on_completions_only=False, sdpg_beta_base=0.0).train_on_completions_only
+        SelfDistillScriptArguments(train_on_completions_only=False)
+    assert not SelfDistillScriptArguments(
+        train_on_completions_only=False, sdpg_beta_base=0.0
+    ).train_on_completions_only
 
 
 if __name__ == "__main__":

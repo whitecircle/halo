@@ -1,13 +1,13 @@
 # Offline GRPO — gpt-oss-20b on GSM8K (pre-computed completions + rewards), EP=8.
 # Dataset rows need prompt/completions/rewards — generate via
-# scripts/inference/reward_model/rm_rejection_sampling.py --output_format offline_grpo (the default is preference).
+# scripts/inference/reward_model/rejection_sample.py --output_format offline_grpo (the default is preference).
 # See agent-docs/training-methods/grpo/offline.md.
-# Launch: torchrun --nproc_per_node=8 scripts/training/offline_grpo.py <this config>
+# Blackwell only: attention is pinned to FA4, which the Hopper image does not carry.
+# Launch: torchrun --nproc_per_node=8 scripts/training/grpo/offline.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2  # FA2 carries no sink argument; live sinks are rejected
-                                        #   under it, so reset_sinks must stay on (its default)
+attn_implementation: flash_attention_4   # these scripts' unset pick on Blackwell (SDPA elsewhere); sinks stay reset (the default)
 model_init_kwargs:
   output_router_logits: true
 moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics
@@ -17,16 +17,14 @@ expert_parallel_size: 8
 fp32_router: true
 
 # --- Dataset ---
-# The file the rejection-sampling step above wrote: <output_folder>/<prompts stem>_<model>_offline_grpo.jsonl
-# (keep --output_folder off the small root FS).
+# The file the rejection-sampling step above wrote: <output_dir>/<prompts stem>_<model>_offline_grpo.jsonl
+# (keep --output_dir off the small root FS).
 dataset:
 - path/to/gsm8k_<model>_offline_grpo.jsonl
 test_size: 0.05
 
 # --- Offline GRPO Hyperparameters ---
 loss_type: bnpo                    # global token average
-advantage_method: quantile_norm    # rank-based → normal; handles discrete reward sets
-kl_beta: 0.0                       # no reference model
 initial_min_log_prob: -0.5         # schedules to -3.0
 
 # --- Training ---
@@ -34,16 +32,10 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
-gradient_checkpointing_kwargs:
-  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 weight_decay: 0.01
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 10
-seed: 42
 
 # --- Sequence Lengths ---
 max_prompt_length: 512
@@ -51,7 +43,6 @@ max_completion_length: 6144
 
 # --- Output ---
 output_dir: checkpoints/offline-grpo-gptoss-20b-gsm8k
-save_strategy: steps
 save_steps: 100
 eval_strategy: steps
 eval_steps: 50
@@ -64,7 +55,6 @@ logging_first_step: true
 report_to: wandb
 
 # --- Generation Callback ---
-generate_eval_examples: true
 num_eval_examples: 10
 
 # --- Data ---

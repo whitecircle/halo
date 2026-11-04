@@ -1,0 +1,187 @@
+#!/usr/bin/env python
+"""Cross-rank agreement and rejection are one fixed-size all-reduce on a real 3-rank gloo world.
+A canonical blake2b digest with one int64 MAX of ``[d, -d]``, so only a disagreement gathers objects."""
+
+import datetime
+import json
+from contextlib import contextmanager
+
+import pytest
+import torch.distributed as dist
+
+from halo.runtime.consensus import (
+    DeferredRankFailure,
+    agree_across_ranks,
+    rank_max,
+    rank_min,
+    reject_across_ranks,
+    reject_divergent_settings,
+)
+from tests.common.gloo import run_gloo_ranks
+
+WORLD = 3
+
+
+@contextmanager
+def _counted_collectives(counts: dict[str, int]):
+    """Delegates to the real collectives."""
+    names = ("all_reduce", "all_gather_object", "broadcast_object_list")
+    originals = {name: getattr(dist, name) for name in names}
+
+    def counting(name):
+        def call(*args, **kwargs):
+            counts[name] = counts.get(name, 0) + 1
+            return originals[name](*args, **kwargs)
+
+        return call
+
+    for name in names:
+        setattr(dist, name, counting(name))
+    try:
+        yield
+    finally:
+        for name, original in originals.items():
+            setattr(dist, name, original)
+
+
+def _worker(rank: int, out: str) -> None:
+    results = {}
+
+    counts: dict[str, int] = {}
+    with _counted_collectives(counts):
+        # Different insertion order on every rank: the digest must not see it.
+        items = [("b", 2), ("a", 1), ("c", (3, None))]
+        agreement = agree_across_ranks(dict(items[rank:] + items[:rank]))
+    results["agree"] = [agreement, counts]
+
+    counts = {}
+    with _counted_collectives(counts):
+        reject_divergent_settings({"HALO_GRAD_BUCKET_MB": 256}, "Toolkit environment", "Align it.")
+    results["settings_fast_path"] = counts
+
+    try:
+        reject_divergent_settings(
+            {"HALO_GRAD_BUCKET_MB": 64 if rank == 2 else 256}, "Toolkit environment", "Align it."
+        )
+        results["settings_mismatch"] = "agreed"
+    except ValueError as exc:
+        results["settings_mismatch"] = str(exc)
+
+    # Equal under == but spelled differently per rank: the digest misses, the gathered comparison agrees.
+    for name, values in {
+        "set": {"names": {f"layer_{i}.mlp" for i in range(16)}},
+        "nested_dict": {"cfg": dict([("a", 1), ("b", 2)][:: 1 if rank == 0 else -1])},
+        "int_and_float": {"timeout": 30 if rank == 0 else 30.0},
+        "none_and_absent": {"x": None} if rank == 0 else {},
+    }.items():
+        try:
+            reject_divergent_settings(values, f"Equal {name}", "Align it.")
+            results[f"equal_{name}"] = "agreed"
+        except ValueError as exc:
+            results[f"equal_{name}"] = str(exc)
+
+    # A mixed str/int mapping, which the canonical digest cannot sort.
+    try:
+        reject_divergent_settings({"x": 1, 2: 3} if rank == 2 else {"x": 1}, "Mixed-key settings", "Align it.")
+        results["undigestible"] = "agreed"
+    except ValueError as exc:
+        results["undigestible"] = str(exc)
+    # No shared fallback digest may agree differing undigestible values.
+    try:
+        reject_divergent_settings({"x": 1, 2: rank}, "All mixed-key settings", "Align it.")
+        results["all_undigestible"] = "agreed"
+    except ValueError as exc:
+        results["all_undigestible"] = str(exc)
+
+    counts = {}
+    with _counted_collectives(counts):
+        reject_across_ranks(None, "checkpoint write")
+        guard = DeferredRankFailure("checkpoint finalize")
+        guard.run(lambda: None)
+        guard.reject()
+    results["reject_fast_path"] = counts
+
+    try:
+        reject_across_ranks("disk full" if rank == 1 else None, "checkpoint write")
+        results["reject_one_rank"] = "passed"
+    except RuntimeError as exc:
+        results["reject_one_rank"] = str(exc)
+
+    counts = {}
+    with _counted_collectives(counts):
+        results["extremes"] = [rank_max([rank, -rank]), rank_min([10 + rank]), counts]
+
+    with open(f"{out}.{rank}", "w") as fh:
+        json.dump(results, fh)
+
+
+@pytest.fixture(scope="module")
+def per_rank(tmp_path_factory):
+    out = str(tmp_path_factory.mktemp("agreement") / "results")
+    run_gloo_ranks(_worker, WORLD, out, pg_timeout=datetime.timedelta(seconds=60))
+    results = []
+    for rank in range(WORLD):
+        with open(f"{out}.{rank}") as fh:
+            results.append(json.load(fh))
+    return results
+
+
+def test_agreement_is_one_all_reduce_whatever_the_insertion_order(per_rank):
+    for rank, results in enumerate(per_rank):
+        assert results["agree"] == [True, {"all_reduce": 1}], f"rank {rank}: {results['agree']}"
+
+
+def test_the_settings_check_agrees_without_an_object_collective(per_rank):
+    for rank, results in enumerate(per_rank):
+        assert results["settings_fast_path"] == {"all_reduce": 1}, f"rank {rank}"
+
+
+def test_a_settings_mismatch_raises_on_every_rank_with_the_callers_message(per_rank):
+    for rank, results in enumerate(per_rank):
+        message = results["settings_mismatch"]
+        assert "Toolkit environment differs across ranks" in message, f"rank {rank}: {message}"
+        assert "Align it." in message and "rank 0 has {'HALO_GRAD_BUCKET_MB': 256}" in message, message
+
+
+@pytest.mark.parametrize("name", ["set", "nested_dict", "int_and_float", "none_and_absent"])
+def test_values_equal_under_eq_but_spelled_differently_agree(per_rank, name):
+    """The digest only fast-paths agreement; a salted set order or ``30`` beside ``30.0`` are one setting."""
+    for rank, results in enumerate(per_rank):
+        assert results[f"equal_{name}"] == "agreed", f"rank {rank}: {results[f'equal_{name}']}"
+
+
+def test_an_object_one_rank_cannot_digest_reaches_the_gather_and_is_named(per_rank):
+    """A raise inside the digest on rank 2 alone would leave its peers in the agreement reduce."""
+    for rank, results in enumerate(per_rank):
+        assert "Mixed-key settings differs across ranks: {2: ['3', 'None']}" in results["undigestible"], (
+            f"rank {rank}: {results['undigestible']}"
+        )
+        assert "All mixed-key settings differs across ranks: {2: ['0', '1', '2']}" in results["all_undigestible"], (
+            f"rank {rank}: {results['all_undigestible']}"
+        )
+
+
+def test_a_rejection_nobody_needs_is_one_all_reduce(per_rank):
+    """A bare rejection and a deferred guard's."""
+    for rank, results in enumerate(per_rank):
+        assert results["reject_fast_path"] == {"all_reduce": 2}, f"rank {rank}: {results['reject_fast_path']}"
+
+
+def test_one_ranks_failure_raises_on_every_rank_with_the_gathered_message(per_rank):
+    for rank, results in enumerate(per_rank):
+        assert results["reject_one_rank"] == (
+            f"checkpoint write failed on 1 of {WORLD} rank(s) [1]. First (rank 1): disk full"
+        ), f"rank {rank}: {results['reject_one_rank']}"
+
+
+def test_world_extremes_are_one_all_reduce_each(per_rank):
+    for rank, results in enumerate(per_rank):
+        assert results["extremes"] == [[WORLD - 1, 0], [10], {"all_reduce": 2}], f"rank {rank}: {results['extremes']}"
+
+
+def test_a_single_process_keeps_its_own_values():
+    assert rank_max([5, -3]) == [5, -3] and rank_min([4]) == [4]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

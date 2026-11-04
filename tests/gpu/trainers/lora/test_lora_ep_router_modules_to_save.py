@@ -1,31 +1,9 @@
 #!/usr/bin/env python
-"""
-Test: PEFT ``modules_to_save`` on the MoE ROUTER under Expert Parallelism (EP=2, GptOss-20B).
+"""PEFT ``modules_to_save`` on the MoE router under EP=2, on GptOss-20B.
 
-The router/gate is absorbed into the EP module (FSDP-ignored), so its grad is DP-averaged by a hook
-the EP layer registers on the ORIGINAL router param at construction. ``modules_to_save`` trains a COPY
-that hook never saw; ``EPMoELayerBase.reattach_router_grad_sync`` (driven by the trainer mixin) must
-re-attach the DP-average hook to the copy or its grad silently drifts across DP ranks. Checks, each of
-which FAILS when a piece of the wiring breaks:
-
-  1. Setup: the trainer builds without the loud safety net firing
-     (``_reject_unsynced_trainable_params``), the router copy is trainable, and it is the
-     ``modules_to_save`` copy (``.modules_to_save.`` in the name), not the frozen original.
-  2. POSITIVE — DP sync: a backward with RANK-DISTINCT inputs leaves the router copy's grad IDENTICAL
-     on every rank (the re-attached hook all-reduced it). This is the whole point: without the reattach
-     the copy would carry each rank's local, unaveraged grad.
-  3. NEGATIVE control: remove the EP grad-sync hooks, redo the same rank-distinct backward, and confirm
-     the router copy's grad now DIFFERS across ranks — proving the sync in check 2 came from the hook,
-     not from some incidental averaging.
-  4. Expert adapters coexist: native grouped expert-LoRA is still present (has_ep_lora), so the router
-     path does not disturb expert-LoRA.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_ep_router_modules_to_save.py
-
-Requirements:
-    - 2x GPUs (>=80GB), DeepEP installed. Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded).
+The EP layer's DP-average hook sits on the original router param, so ``reattach_dp_average_grad_hooks`` must re-attach
+it to the trained copy, or its grad silently drifts across DP ranks. Removing the hooks must make the same backward
+differ across ranks, proving the sync came from them.
 """
 
 from types import SimpleNamespace
@@ -33,21 +11,23 @@ from types import SimpleNamespace
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
-from trl import ModelConfig, SFTConfig
+from trl import SFTConfig
 
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lora_targets
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
-from src.env import env_int, env_str
-from src.trainers.sft import DistributedSFTTrainer
+from halo.configs.script_arguments import ModelArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
+from halo.runtime.collectives import barrier
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "flex_attention")
@@ -61,7 +41,6 @@ _PEFT_ARGS = SimpleNamespace(unfreeze_layers_patterns=None, freeze_layers_patter
 
 
 def _router_copy_params(model):
-    """Trainable modules_to_save router copies: ``(name, param)`` with ``.modules_to_save.`` in the name."""
     return [
         (n, p)
         for n, p in model.named_parameters()
@@ -70,7 +49,7 @@ def _router_copy_params(model):
 
 
 def _grads_identical_across_ranks(param, world_size) -> bool:
-    """True iff ``param.grad`` is bit-identical on every rank (all_gather + compare to rank 0)."""
+    """All_gather + compare to rank 0."""
     grad = param.grad
     assert grad is not None, "grad is None — backward did not populate it"
     gathered = [torch.zeros_like(grad) for _ in range(world_size)]
@@ -79,7 +58,7 @@ def _grads_identical_across_ranks(param, world_size) -> bool:
 
 
 def _rank_distinct_backward(model, tokenizer, rank, local_rank):
-    """Forward+backward on text unique to this rank, so an un-synced grad differs across ranks."""
+    """On text unique to this rank, so an un-synced grad differs across ranks."""
     for _, p in model.named_parameters():
         if p.grad is not None:
             p.grad = None
@@ -107,9 +86,8 @@ def run(ctx) -> dict:
         tokenizer.pad_token = tokenizer.eos_token
     train_dataset = create_sft_dataset(16, tokenizer, seed=SEED)
 
-    # Production path: q_proj attention LoRA + expert LoRA (gate/up/down peeled to native grouped-LoRA)
-    # + router full-trained via modules_to_save. get_peft_model wraps the router in a ModulesToSaveWrapper.
-    model_config = ModelConfig(
+    # q_proj attention LoRA + expert LoRA (peeled to native grouped LoRA) + the router via modules_to_save.
+    model_config = ModelArguments(
         model_name_or_path=MODEL_NAME,
         use_peft=True,
         lora_r=LORA_R,
@@ -131,7 +109,7 @@ def run(ctx) -> dict:
         attn_implementation=ATTN_IMPL,
         use_liger_kernel=True,
     )
-    peft_config = setup_peft_model(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
+    peft_config = configure_adapter_training(_PEFT_ARGS, model, model_config, "CAUSAL_LM")
     log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
     log("\n[3/5] Building trainer (runs reattach + loud safety-net validation)...")
@@ -152,8 +130,7 @@ def run(ctx) -> dict:
         remove_unused_columns=False,
         dataloader_num_workers=0,
     )
-    # If _reject_unsynced_trainable_params were to fire wrongly, or reattach were missing so a
-    # trainable router copy went unsynced, construction raises here — the test fails loudly.
+    # reject_unsynced_trainable_params firing wrongly, or a missing reattach, raises here.
     trainer = DistributedSFTTrainer(
         model=model,
         args=config,
@@ -168,19 +145,17 @@ def run(ctx) -> dict:
     tmodel = trainer.model
     router_copies = _router_copy_params(tmodel)
     checks["router_copy_trainable"] = len(router_copies) > 0
-    checks["expert_lora_present"] = has_ep_lora(tmodel)
+    checks["expert_lora_present"] = model_has_expert_lora(tmodel)
     log(f"  router modules_to_save copies: {len(router_copies)}, expert-LoRA present: {checks['expert_lora_present']}")
     if not router_copies:
         raise RuntimeError("no trainable modules_to_save router copy found — modules_to_save did not wrap it")
 
-    # --- Check 2 (POSITIVE): rank-distinct backward → router copy grad identical across ranks ---
     log("\n[4/5] POSITIVE: rank-distinct backward, router copy grad must be DP-synced...")
     _rank_distinct_backward(tmodel, tokenizer, ctx.rank, ctx.local_rank)
     pos = all(_grads_identical_across_ranks(p, ctx.world_size) for _, p in _router_copy_params(tmodel))
     checks["router_grad_synced"] = pos
     log(f"  router copy grad identical across ranks: {pos}")
 
-    # --- Check 3 (NEGATIVE control): remove EP hooks → same backward → grads must now DIFFER ---
     log("\n[5/5] NEGATIVE control: drop EP hooks, grads must differ across ranks...")
     for layer in ep_layers(tmodel):
         for hook in layer._grad_sync_hooks:

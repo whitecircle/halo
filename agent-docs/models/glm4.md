@@ -2,17 +2,13 @@
 
 `Glm4MoeLiteForCausalLM` — MoE with sigmoid routing (group-limited top-k), shared experts, and LoRA-style attention compression (`q_a_proj` / `q_b_proj` + `kv_a_proj_with_mqa` / `kv_b_proj`).
 
-| | EP | CP | TP | ETP | PP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| GLM-4 MoE Lite | Yes | Yes (MLA path) | Yes (selective) | Yes | — ¹ | Yes | Yes |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism splits it at any layer offset ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
-¹ Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+Its MLA-style attention (192 + 64 = 256-wide query/key, 256-wide value) runs FA2 on Blackwell in every run, Context Parallelism and `full_determinism` included: the resolver keeps latent attention at that width on FA2 as a precaution ([Flash Attention → Model-specific handling](../optimization/flash-attention.md#model-specific-handling)). FA3 on Hopper.
 
-Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`model_fa4_backward_nan_prone`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+## EP layer
 
-## EP wrapper
-
-`EPGlm4MoELayer` (`src/distributed/expert_parallel/layers/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
+`EPGlm4MoELayer` (`halo/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this EP layer — see [Laguna](laguna.md).
 
 - Routing: sigmoid + group mask + top-k. `topk_group` selects eligible expert *groups*, then `top_k` (=4) experts are chosen across them. `route_tokens_to_experts()` runs this before DeepEP dispatch.
 - Routed experts: `Glm4MoeLiteExperts`, fused `gate_up_proj` and `down_proj` 3D tensors.
@@ -21,7 +17,7 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 ## Fused SwiGLU
 
-The `_fused_glu_mul` latch replaces the activation and the multiply with one Triton kernel on every base compute path, the ETP-sharded one included: the packed `[gate | up]` path runs it through `packed_glu_mul`, split halves through `_glu_combine`. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`src/kernels/fused_glu.py`) returns for the resolved activation — `fused_silu_mul` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `fused_gelu_tanh_mul` for a tanh-GELU one (Gemma 4), `None` otherwise.
+The `_fused_glu_mul` latch replaces the activation and the multiply with one Triton kernel on every base compute path, the ETP-sharded one included: the packed `[gate | up]` path runs it through `GluCombine.packed`, split halves through `_glu_combine`. It is a **roster-wide** seam, not a GLM-4 one: `_resolve_activation` latches whatever `resolve_fused_glu_mul` (`halo/kernels/fused_glu.py`) returns for the resolved activation — `GluCombine.silu()` for a SiLU gate (GLM-4 Lite, Laguna, Qwen3, Qwen3.5/3.6, Bailing, LFM-2, Mistral4, Cohere2 MoE, Inkling, Zaya, and Step-3.7's unclamped layers), `GluCombine.gelu_tanh()` for a tanh-GELU one (Gemma 4), `None` otherwise.
 
 A family opts in by *having* a gate the kernels implement, not by setting a flag. A family whose combine is a variant rebinds the same seam: DeepSeek-V4 (clamp before the activation) and Step-3.7 (its two clamped layers clamp after it) arm their kernels off the same SiLU probe.
 
@@ -35,7 +31,7 @@ The probe fails closed: an activation it cannot vouch for runs eager rather than
 
 ## CP wrapper
 
-`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`src/distributed/context_parallel/layers/glm4.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttentionBase`, which runs the DeepSeek-V3 MLA geometry on the `[B, H, S, D]` path (`_optimize_attention = False`: flash-attn's optimized GQA path assumes plain per-head QKV of one head dim, which MLA's compressed projections and nope/rope split are not). Two MLA-specific bits:
+`Glm4MoeLiteAttention` → `Glm4MoeLiteUlyssesAttention` (`halo/distributed/context_parallel/families.py`), which declares only its HF class name. Everything below lives on the shared `MLAUlyssesAttention`, which runs the DeepSeek-V3 MLA geometry on the one Ulysses path. Two MLA-specific bits:
 
 - **Head dims** — `kv_b_proj` expands the compressed KV into `qk_nope_head_dim + v_head_dim`. Where `v_head_dim` is narrower than `qk_head_dim` the base pads V for the flash kernel and crops the output back.
 
@@ -49,8 +45,8 @@ GLM-4 has no llama-4 position scaling, so the base forward is unchanged. RoPE fo
 
 Selective TP via `apply_tp_to_attention_only()` needs a tailored plan for the LoRA-style attention:
 
-- **Sharded** (ColwiseParallel): `q_b_proj`, `kv_b_proj` — the expansion linears.
-- **Sharded** (RowwiseParallel): `o_proj` — reduces back over the head dim the expansions split.
+- **Sharded** (colwise): `q_b_proj`, `kv_b_proj` — the expansion linears.
+- **Sharded** (rowwise): `o_proj` — reduces back over the head dim the expansions split.
 - **Replicated**: `q_a_proj`, `kv_a_proj_with_mqa` and their layer norms — low-rank compressions (often dim ≤ `tp_size × num_heads`) where sharding produces degenerate per-rank shapes.
 
 ## ETP
@@ -59,15 +55,15 @@ The routed experts use fused-GLU contiguous-halves storage, so at `expert_tp_siz
 
 ## Router balancing and precision
 
-GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_score_correction_bias`) and the forward has no aux-loss term, so `aux_loss` adds no balancing. `Glm4MoeLiteForCausalLM.forward` declares no `output_router_logits` parameter, so `auto` resolves to `bias_update` wherever the EP wrappers are present (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun); the shipped EP configs set it explicitly.
+GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_score_correction_bias`) and the forward has no aux-loss term, so `aux_loss` adds no balancing. `Glm4MoeLiteForCausalLM.forward` declares no `output_router_logits` parameter, so `auto` resolves to `bias_update` wherever the EP layers are present (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun); the shipped EP configs set it explicitly.
 
-[RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes as training did. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
+[BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes on it. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
 
 Router precision comes from `fp32_router`, and `fp32_non_ep_params` (dense attention/embeddings/lm_head) turns it on regardless, since that upcast skips the EP-owned router. The example config sets both.
 
 ## Chat templates
 
-Three templates under `jinja-templates/glm/`. The first two render the native non-thinking assistant format (`<|assistant|></think>…`):
+Three templates under `jinja-templates/glm/` serve this family (`glm5-chat.jinja` beside them is [GLM-5 Next's](glm5-next.md#tree-packing)). The first two render the native non-thinking assistant format (`<|assistant|></think>…`):
 
 - `glm-instruct.jinja` — single-turn (raises on more than one assistant message).
 - `glm-chat.jinja` — multi-turn system/user/assistant.
@@ -76,21 +72,23 @@ Three templates under `jinja-templates/glm/`. The first two render the native no
   when the training render must match native serving byte-for-byte (tool data, RL); tool-call
   `arguments` must be a parsed mapping, not the OpenAI JSON-string form.
 
-Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`src/data/spans.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
+Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`halo/data/turn_markers.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
 
 Pair them with `assistant_message_template: "<|assistant|>"` — the role token alone marks every assistant turn and matches both the thinking and non-thinking renders, where `<|assistant|></think>` would silently miss a thinking turn. See [Collators](../data/collators.md).
 
 ## Configs and serving
 
+The release's MTP tail (`model.layers.47.*`) drops at load and exports carry none, so `method=mtp` refuses them, unless the run [trains the head](../optimization/mtp-heads.md).
+
 GLM-4.7-Flash (47 layers, 64 routed experts, top-k=4) trains under EP=8 at ~30K max length: `examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml`.
 
-Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-expert hub layout both pinned engines read directly — GLM-4 declares `_PER_EXPERT_UNFUSED_KEYS`, so the merge is the structural inverse of the gather. A checkpoint that bypassed the EP save path entirely (`merge_peft_adapters.py` over a plain `from_pretrained` load of the stock hub checkpoint, say) stays in the transformers-native fused layout and needs `scripts/after_training/unfuse_moe_experts.py` first.
+Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-expert hub layout both pinned engines read directly — GLM-4's spec declares a `FUSED_SPLIT_PER_EXPERT` `ExpertLayout`, which the gather and the merge both apply. A checkpoint fused before Halo loaded it stays fused through the writers without an EP layer, which keep the loaded layout ([Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang)), and needs `scripts/after_training/unfuse_moe_experts.py` first.
 
 MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--attention-backend triton`. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
 
 RL weight sync runs on either engine. Two SGLang facts shape it.
 
-The gate caches an fp32 copy of its weight on the first forward and never re-reads the parameter, so a synced router weight would land in the parameter while routing keeps the launch values. `Dockerfile.sglang` patches it (`docker/sglang/patches/`), and weight sync needs that image.
+SGLang 0.5.22's gate holds its weight in fp32 and reads it live, so a synced router weight reaches routing; the image build asserts it (`docker/sglang/patches/patch_sglang.py`), so a release that caches the weight again fails the build ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 SGLang's MLA loader fuses `q_a_proj` with `kv_a_proj_with_mqa` from a cache local to one request, dropping a half that arrives alone. The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps both halves in one chunk ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 

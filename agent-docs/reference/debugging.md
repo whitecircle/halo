@@ -10,16 +10,20 @@ Every helper here is opt-in and costs nothing when disabled.
 | CPU-side stalls (dataloader, tokenization) | py-spy flame graph | `scripts/profiling/py_spy_diag.py record` |
 | Step time, tokens/s, peak memory, MFU/S-MFU | `EfficiencyCallback` | `enable_efficiency_metrics` YAML flag; MFU/S-MFU also need `report_mfu_diagnostics` |
 | Rank skew on a collective | TraceLens collective report | `profiler_ranks: "all"`, then `scripts/profiling/trace_report.py` |
-| Cross-rank value divergence | `assert_consistent` | add the call, then `HALO_TP_CONSISTENCY_CHECK=1` |
+| Cross-rank value divergence | `assert_rank_uniform` | add the call; `strict=True` raises instead of warning |
 | Hang stack dump (every rank on the node) | `scripts/profiling/py_spy_diag.py dump` | run standalone; needs ptrace access ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)) |
-| NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, while a failed `nvidia-smi` or an unrecognized counter layout raises |
+| NVLink lane health (hard errors: Rx, symbol, link recovery, link integrity) | `scripts/profiling/nvlink_health.py` | run standalone; exit 1 = hard lane errors, a down link or a GPU short of links, while a failed `nvidia-smi` or an unrecognized counter layout raises |
 | NCCL watchdog timeout | `init_distributed` | `DIST_NCCL_TIMEOUT_MINUTES` (default 30) |
 | Weight-sync hang or slow sync: the transport the trainer↔rollout-server group formed on (EFA, InfiniBand, sockets, CUDA IPC, shared memory), plugin build, GB/s | `scripts/profiling/weight_sync_transport.py` | run standalone against a live server; `--expect efa` exits 1 off the fabric ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)) |
 
-The consistency helpers live in `src/diagnostics/debugging.py`. They are **manual
-instrumentation** — the toolkit ships no call sites for them, so the env flag does nothing until you
-add the call to the code you are investigating. The profiler session and CUDA-memory helpers live in
-`src/diagnostics/profiling.py`; the in-loop callbacks in `src/callbacks/`.
+Each `scripts/profiling/` tool also runs by name: `halo run trace-report`, `halo run py-spy-diag dump`,
+`halo run nvlink-health`, `halo run weight-sync-transport`.
+
+The consistency check is `assert_rank_uniform` in `halo/runtime/consensus.py`. It is **manual
+instrumentation** — the toolkit ships no call sites for it, so add the call to the code you are
+investigating. The profiler session and CUDA-memory helpers live in
+`halo/diagnostics/profiling.py`, the py-spy captures behind `py_spy_diag.py` in
+`halo/diagnostics/py_spy.py`, and the in-loop callbacks in `halo/callbacks/`.
 
 ## 1. Flame graphs
 
@@ -30,7 +34,7 @@ Use the **torch profiler** for the GPU/operator picture (which kernels dominate,
 
 ```yaml
 enable_torch_profiler: true
-profiler_output_dir: /mnt/profiling/torch   # default: $HALO_DATA_ROOT/profiling/torch
+profiler_output_dir: <large-volume>/profiling/torch   # default: $HALO_DATA_ROOT/profiling/torch
 profiler_wait: 5        # skip the first 5 steps (warm caches, allocator settles)
 profiler_warmup: 1      # 1 warmup step (profiler on, not yet recording)
 profiler_active: 3      # record 3 steps into the trace
@@ -52,8 +56,8 @@ Each selected rank writes into `profiler_output_dir`; artifacts carry a `-cycleN
 
 Traces label the toolkit's own phases as named ranges: `ep.dispatch` / `ep.expert_compute` /
 `ep.combine` around the DeepEP spans of every EP layer, and `grad_sync.reduce_bucketed` around the
-post-backward grad-sync sweep — so the all-to-all and grad-sync fractions read off the timeline
-directly.
+post-backward grad-sync sweep — so the EP and grad-sync fractions read off the timeline directly. A rank's
+`ep.combine` includes its wait for the slowest rank, so it is not wire time.
 
 `with_stack=True` puts the Python frames in the trace itself (`python_function` events, readable in
 Perfetto and the TraceLens workbook of §1b); torch's collapsed-stacks export writes nothing on the
@@ -61,12 +65,14 @@ image's torch, so `export_profiler_artifacts` drops the empty file rather than l
 For a collapsed-stack flame graph use py-spy (§1c).
 
 Keep the window small — stacks and shapes add real overhead, and the capture is one-shot so the
-rest of training runs at full speed. Profile an arbitrary region the same way:
+rest of training runs at full speed. On a large multi-GPU MoE, CPU per-op tracing starves the GPUs
+(the first step crawls): build `TorchProfilerCallback(cpu_activity=False)` for a CUDA-kernel-only trace,
+at the cost of host-side op attribution and the TraceLens report (§1b). Profile an arbitrary region the same way:
 
 ```python
-from src.diagnostics.profiling import torch_profiler_session
+from halo.diagnostics.profiling import torch_profiler_session
 
-with torch_profiler_session("/mnt/profiling/gen", label="generate", ranks="0"):
+with torch_profiler_session("<large-volume>/profiling/gen", label="generate", ranks="0"):
     out = model.generate(**inputs)
 ```
 
@@ -79,13 +85,13 @@ per-collective latency, bus bandwidth, and cross-rank skew.
 
 ```bash
 python scripts/profiling/trace_report.py                    # $HALO_DATA_ROOT/profiling/torch
-python scripts/profiling/trace_report.py /mnt/profiling/torch --label trace-cycle1
+python scripts/profiling/trace_report.py <large-volume>/profiling/torch --label trace-cycle1
 ```
 
 Writes `<label>-rankNN.tracelens.xlsx` per rank and, for multi-rank captures dense from 0,
-`<label>.collective.xlsx`, next to the traces (`--no-collective` skips the second). A CUDA-only
+`<label>.collective.xlsx`, next to the traces (`--no_collective` skips the second). A CUDA-only
 capture (`cpu_activity=False`) is refused — the report hangs every kernel off the `cpu_op` that
-launched it — and any trace set left without a report exits 1 unless `--keep-going`. For short-kernel
+launched it — and any trace set left without a report exits 1 unless `--keep_going`. For short-kernel
 studies, CSV output, or report diffs, call the TraceLens CLIs directly
 (`TraceLens_generate_perf_report_pytorch`, `TraceLens_compare_perf_reports_pytorch`).
 
@@ -95,13 +101,13 @@ When GPUs are idle between steps, the bottleneck is CPU-side. Attach to the runn
 shell in the same container — no launch-time flags:
 
 ```bash
-# One SVG per rank → $TMPDIR/halo_diag_flamegraphs/<ts>-rank00/pid<pid>.svg (--output-dir moves it)
+# One SVG per rank → $HALO_DATA_ROOT/profiling/py_spy/flamegraphs/<ts>-rank00/pid<pid>.svg (--output_dir moves it)
 python scripts/profiling/py_spy_diag.py record --duration 30
 ```
 
 One SVG per torchrun rank, every rank sampled over the same window, spots a single straggler; `--pid`
 narrows the target, `--rate` sets the sampling rate (default 100/s), `--native` adds C/CUDA-runtime
-frames. In-script, `record_distributed_flamegraph` defaults to `this_rank_only=True` — one SVG for the
+frames. In-script, `record_flamegraphs` defaults to `this_rank_only=True` — one SVG for the
 calling process; pass `this_rank_only=False` for the per-rank sweep. Without py-spy on `PATH` the CLI
 exits 2. A pid either subcommand cannot attach to is named with its reason (also in
 `pid<pid>.error`) and the CLI exits 1.
@@ -129,7 +135,8 @@ Open the Chrome trace in Perfetto and read the gaps on the CUDA stream:
 
 - Large gaps with NCCL kernels (`ncclDevKernel…`, all-to-all, reduce-scatter) →
   communication-bound. On multi-node, check whether the slow collective is cross-node (RDMA) that
-  could be kept NVLink-local ([Multi-Node](../parallelism/multi-node.md)).
+  could be kept NVLink-local ([Multi-Node](../parallelism/multi-node.md)). At single-node ep8, DeepEP combine gaps are
+  mostly the wait for the busiest rank ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
 - CPU thread busy, GPU idle → dataloader / host overhead; confirm with a py-spy flame graph (§1c)
   and raise `dataloader_num_workers`.
 - Back-to-back GEMM/attention, GPU ~100% busy → compute-bound (the good case); read `top_ops.txt`
@@ -150,16 +157,11 @@ model class and EP degree, not the dense ceiling.
 collective report (`scripts/profiling/trace_report.py`), which attributes wait time per collective
 per rank without a code change.
 
-**Fine-grained op timing** — `get_performance_monitor().time_operation(name)`
-(`src/diagnostics/performance_monitor.py`) times a span on CUDA events where available, else the
-wall clock, and accumulates it into the monitor's `.stats` map: one `TimingStats` (`count`,
-`total_time`, `.avg_time`) per operation name.
-
-`HALO_EP_PERF_PROFILE=1` is a benchmark switch: the EP layers then wrap their
-dispatch/expert-compute/combine phases with it, and only `tests/gpu/profiling/benchmark_sft_ep.py
---comm_profile` (which sets the variable itself) reads those stats, printing the split. A training run
-with it set pays two syncs per phase and reports nothing; `enable_torch_profiler` shows the same `ep.*`
-spans at no cost.
+**EP phase split** — `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` swaps the EP layers'
+dispatch/expert-compute/combine labels for the benchmark's span timer (`tests/common/ep_span_timer.py`),
+which times each phase on CUDA events, and prints each rank's per-layer split past the warm-up steps. It
+syncs twice per phase, so it measures shares, not throughput, and a rank's combine includes its wait for the
+slowest rank. `enable_torch_profiler` shows the same `ep.*` spans at no cost.
 
 ## 3. GPU memory profiling
 
@@ -175,7 +177,7 @@ one after.
 Or wrap any region manually:
 
 ```python
-from src.diagnostics.profiling import cuda_memory_history
+from halo.diagnostics.profiling import cuda_memory_history
 
 with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/snapshot-rankNN.pickle
     trainer.train()      # or the step that OOMs
@@ -183,9 +185,10 @@ with cuda_memory_history(ranks="all"):  # → $HALO_DATA_ROOT/profiling/memory/s
 
 Drag the `.pickle` onto <https://pytorch.org/memory_viz> for the allocation timeline and
 per-allocation flame graph, each block traced to its Python call site — the fastest way to find an
-OOM source or a leak. For quick textual checks, `log_cuda_memory("after forward")` and
-`reset_peak_memory_stats()` live in `src.diagnostics.profiling`; `EfficiencyCallback`
-already reports peak memory per step.
+OOM source or a leak. For a quick textual check, `log_cuda_memory("after forward")` in
+`halo.diagnostics.profiling` logs this rank's allocated, reserved and peak memory
+(`read_cuda_memory()` returns them as GiB); `torch.cuda.reset_peak_memory_stats()` scopes the peaks to
+a region. `EfficiencyCallback` already reports peak memory per step.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` brackets every collective weight sync with per-rank
 `[mem rankNN] weight-sync pre/post` lines (allocated / reserved / peaks, GiB) — Online GRPO and
@@ -224,25 +227,24 @@ timing that decides which step the mismatch lands on.
 ### Dump every rank's stack
 
 ```bash
-python scripts/profiling/py_spy_diag.py dump   # → $TMPDIR/halo_diag_stacks/<ts>-rank00/pid<pid>.txt (--output-dir moves it)
+python scripts/profiling/py_spy_diag.py dump   # → $HALO_DATA_ROOT/profiling/py_spy/stacks/<ts>-rank00/pid<pid>.txt (--output_dir moves it)
 ```
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 The rank *not* in a collective (still in the dataloader, or a different `if` branch) is the culprit.
+In-script, `dump_node_stacks` (`halo/diagnostics/py_spy.py`) takes the same snapshot.
 
 ### Catch divergence before it deadlocks
 
-`assert_consistent` / `assert_tensor_shape_consistent` compare a value across a process group and
-raise a clear error instead of a downstream NCCL hang. Add the call at the suspect point — nothing
-in the toolkit calls them for you:
-
-```bash
-export HALO_TP_CONSISTENCY_CHECK=1   # make assert_consistent raise instead of warn
-```
+`assert_rank_uniform` compares a value's digest across a process group, so a divergence surfaces as
+a warning, or a clear error, instead of a downstream NCCL hang. Pass `tuple(t.shape)` to compare only
+a shape, the usual first sign of a TP/EP collective deadlock. Add the call at the suspect point —
+nothing in the toolkit calls it for you. It warns by default, `strict=True` raises on every rank of
+the group, and `group=None` or a one-rank group is a no-op.
 
 ```python
-from src.diagnostics.debugging import assert_tensor_shape_consistent
-assert_tensor_shape_consistent(hidden_states, group=tp_group, label="attn_in")
+from halo.runtime.consensus import assert_rank_uniform
+assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in", strict=True)
 ```
 
 ### NCCL flight recorder + watchdog timeout

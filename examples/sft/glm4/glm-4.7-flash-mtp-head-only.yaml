@@ -1,0 +1,65 @@
+# GLM-4.7-Flash — EP=8 fit of the released MTP head over a frozen trunk. See agent-docs/optimization/mtp-heads.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+#
+# Measured at this learning rate on first-turn rows, not on this recipe's: acceptance 0.7685 to 0.7649, which the gate
+# stops, and that export served at 0.7317 on vLLM against the release head's 0.7450, so this run may exit non-zero. The
+# learning rate and warmup are the ones the acceptance gate does not warn about on Qwen3.6. mtp_loss_type: hard is the
+# other objective.
+
+# --- Model ---
+model_name_or_path: zai-org/GLM-4.7-Flash
+
+# --- MTP head ---
+mtp_loss_weight: 1.0
+mtp_loss_type: soft
+mtp_train_scope: head_only
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.001                      # the gate scores held-out rows at step 0 and every eval_steps
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 64 routed experts → 8/rank
+gradient_checkpointing: false         # the frozen trunk holds no graph
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+max_length: 4096
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+max_steps: 150
+
+# --- Optimizer & LR schedule ---
+learning_rate: 1.0e-05
+lr_scheduler_type: constant_with_warmup
+warmup_steps: 20
+
+# --- Checkpointing & evaluation ---
+save_steps: 150
+eval_strategy: steps
+eval_steps: 30
+save_only_model: true
+output_dir: checkpoints/glm-4.7-flash-mtp-head-only
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# Role token alone matches both thinking and non-thinking renders.
+assistant_message_template: "<|assistant|>"
+pad_token: <|endoftext|>
+eos_token: <|endoftext|>
+# Multi-turn data needs glm-chat.jinja — glm-instruct.jinja raises on >1 assistant turn.
+chat_template: jinja-templates/glm/glm-chat.jinja
+force_chat_template: true

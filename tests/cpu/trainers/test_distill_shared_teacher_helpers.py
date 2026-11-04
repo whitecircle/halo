@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""Self-distillation's construction gates, and the two primitives the distillation trainers share.
-
-1. ``DistributedSelfDistillationTrainer`` sets a weighted reference up, and only a weighted one.
-   Either term with nothing to compute it from (a weighted anchor without a reference, OPD on with a
-   collator that builds no teacher branch) raises at construction rather than dropping out of the
-   loss. The EP/TP report on the reference lives in tests/cpu/parallelism/test_reference_model_gate.py.
-2. ``privileged_teacher_pass`` and ``shifted_token_cross_entropy`` each serve two trainers; the
-   cross-entropy is pinned to an independent ``-log_softmax`` gather.
-
-Run: python tests/cpu/trainers/test_distill_shared_teacher_helpers.py
-"""
+"""Self-distillation's construction gates and the two primitives the distillation trainers share.
+The EP/TP report on the reference lives in tests/cpu/parallelism/test_reference_model_gate.py."""
 
 import types
 from unittest import mock
@@ -17,17 +8,16 @@ from unittest import mock
 import pytest
 import torch
 import torch.nn as nn
-from accelerate import PartialState
 from torch.nn.functional import log_softmax
 from trl import SFTTrainer
 
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.distillation.losses import privileged_teacher_pass, shifted_token_cross_entropy
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from src.trainers.sft import DistributedSFTTrainer
-
-PartialState()  # the trainers' accelerate logger requires an initialized state
+import halo.trainers.distillation.self_distillation as self_distillation
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.distillation.divergences import place_frozen_scorer, shifted_token_cross_entropy
+from halo.trainers.distillation.opd_term import privileged_teacher_pass
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.sft import DistributedSFTTrainer
 
 _TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 
@@ -35,25 +25,23 @@ _TEACHER_BRANCH_COLLATOR = types.SimpleNamespace(builds_teacher_branch=True)
 def _build(
     setup_calls, ep_size=1, tp_size=1, reference_model=None, reference_kl_coef=1.0, sdpg_beta_base=0.0, collator=None
 ):
-    """Construct the trainer with only the HF/TRL machinery stubbed out, recording every reference setup."""
-
     def _init_cfg(self, kwargs, **_):
         self.parallelism_config = ParallelismConfig(world_size=8, gpus_per_node=8, ep_size=ep_size, tp_size=tp_size)
         return kwargs
 
     def _sft_init(self, *args, **kwargs):
-        self.data_collator = collator
+        self.data_collator, self.model, self.processing_class = collator, None, None
+
+    def _place(scorer, *args):
+        setup_calls.append(scorer)
+        return None, torch.device("cpu")
 
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
         mock.patch.object(SFTTrainer, "__init__", _sft_init),
-        mock.patch.object(DistributedSelfDistillationTrainer, "_setup_distributed_modes", return_value=None),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes", return_value=None),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", return_value=None),
-        mock.patch.object(
-            DistributedSelfDistillationTrainer,
-            "_setup_reference_model",
-            lambda self: setup_calls.append(self._reference_model),
-        ),
+        mock.patch.object(self_distillation, "place_frozen_scorer", _place),
     ):
         return DistributedSelfDistillationTrainer(
             reference_model=reference_model,
@@ -75,7 +63,7 @@ def test_a_weighted_reference_is_set_up_on_every_axis(ep_size, tp_size):
 
 @pytest.mark.parametrize("reference_model", [None, nn.Linear(2, 2)], ids=["no-reference", "unused-reference"])
 def test_an_unweighted_anchor_is_never_gated(reference_model):
-    """``reference_kl_coef == 0`` never reads the reference, so the gate stays on the branch that does."""
+    """``reference_kl_coef == 0`` never reads the reference."""
     setup_calls = []
     _build(setup_calls, ep_size=8, reference_model=reference_model, reference_kl_coef=0.0)
     assert setup_calls == []
@@ -89,7 +77,7 @@ def test_a_weighted_anchor_without_a_reference_raises():
 
 @pytest.mark.parametrize("collator", [None, types.SimpleNamespace(builds_teacher_branch=False)], ids=["plain", "off"])
 def test_opd_on_needs_a_collator_that_builds_the_teacher_branch(collator):
-    """Refused at construction, on every rank alike: a batch without ``teacher_*`` keys would skip OPD."""
+    """A batch without ``teacher_*`` keys would skip OPD, so it is refused at construction on every rank."""
     with pytest.raises(ValueError, match="needs the privileged teacher branch"):
         _build([], reference_kl_coef=0.0, sdpg_beta_base=1.0, collator=collator)
 
@@ -115,25 +103,20 @@ class _Tokenizer:
         return self.size
 
 
-def _reference_setup(policy_rows, reference_rows, tokenizer_len=10):
-    trainer = object.__new__(DistributedSelfDistillationTrainer)
-    trainer.model, trainer._reference_model = _Rows(policy_rows), _Rows(reference_rows)
-    trainer.processing_class = _Tokenizer(tokenizer_len)
-    trainer.reference_kl_coef = 0.1
-    trainer._setup_reference_model()
-    return trainer
+def _reference_width(policy_rows, reference_rows, tokenizer_len=10):
+    tokenizer = _Tokenizer(tokenizer_len)
+    return place_frozen_scorer(_Rows(reference_rows), _Rows(policy_rows), tokenizer, tokenizer)[0]
 
 
 def test_the_reference_shares_the_policy_vocab_check():
     """Same tokenizer: equal rows compare whole, padding past it is sliced away, too few rows raise."""
-    assert _reference_setup(16, 16)._reference_vocab_width is None
-    assert _reference_setup(16, 12)._reference_vocab_width == 10
+    assert _reference_width(16, 16) is None
+    assert _reference_width(16, 12) == 10
     with pytest.raises(ValueError, match="fewer logit rows than the tokenizer"):
-        _reference_setup(16, 8)
+        _reference_width(16, 8)
 
 
 def test_shifted_ce_is_the_negative_gold_log_prob_and_zero_where_ignored():
-    """Pinned to an independent ``-log_softmax`` gather, in fp32 from bf16 logits."""
     torch.manual_seed(0)
     logits = torch.randn(2, 4, 7).bfloat16()
     labels = torch.randint(0, 7, (2, 4))

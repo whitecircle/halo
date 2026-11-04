@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A pipeline stage must honor the trainer's gradient-checkpointing call exactly as ``PreTrainedModel`` does.
-
-transformers' trainer enables checkpointing through ``gradient_checkpointing_enable(
-gradient_checkpointing_kwargs=..., every_n_layers=...)``; a stage that rejects the second keyword
-crashes every PP run with checkpointing on, and one that ignores it checkpoints every layer at the
-memory profile of a run that asked for fewer. ``every_n_layers`` counts each stage's own decoder
-layers from its first, and reentrant checkpointing stays refused (FSDP2 registers no pre-backward
-hooks for a forward run under ``no_grad``).
-
-Run: ``pytest -m cpu tests/cpu/parallelism/test_pp_stage_gradient_checkpointing.py``
-"""
+"""A pipeline stage honors the trainer's gradient-checkpointing call as ``PreTrainedModel`` does.
+Reentrant stays refused, since FSDP2 registers no pre-backward hooks under ``no_grad``."""
 
 from __future__ import annotations
 
@@ -17,7 +8,7 @@ import pytest
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from src.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2

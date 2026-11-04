@@ -1,46 +1,35 @@
 #!/usr/bin/env python
-"""CPU test: SMPO / Classification dataloaders equalize pre-sharded lengths.
+"""SMPO and Classification dataloaders equalize pre-sharded lengths: ranks running different step counts hang the
+next gradient all-reduce. Both train and eval truncate to the global minimum via ``_equalize_presharded_length``,
+and a zero-row eval rank raises."""
 
-When a dataset is pre-sharded per DP rank, the shards can differ in length, so ranks would run a
-different number of optimizer steps and the next gradient all-reduce hangs forever.
-``DataParallelDataLoaderMixin.get_train_dataloader`` AND ``get_eval_dataloader`` (inherited by SMPO
-and Classification) truncate every rank to the global minimum via ``_equalize_presharded_length``.
-These tests fail if either call is dropped (the hang would return silently), if the eval zero-row
-case stops raising, or if the GRPO trainers stop inheriting the eval path from the mixin.
-
-    python tests/cpu/data/test_presharded_dataloader_equalization.py
-"""
-
+import logging
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-import torch
-from accelerate import PartialState
 from datasets import Dataset
 
-# _equalize_presharded_length logs via the accelerate logger, which requires an initialized state.
-PartialState()
-
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
-from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
-from src.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.on_policy import GenerationRoundMixin
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
+from halo.trainers.reward.classification import ClassificationTrainer
 
 
 class _StopAfterEqualize(Exception):
-    """Sentinel raised by the stubbed sampler to stop before real DataLoader construction."""
+    """Raised by the stubbed sampler to stop before real DataLoader construction."""
 
 
 def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
-    """Build a bare trainer instance (no __init__) with just enough state to run the
-    get_train_dataloader/get_eval_dataloader prefix, recording each _equalize_presharded_length
-    call's split."""
+    """A bare trainer (no __init__) with enough state to run the dataloader prefix, recording each equalize call's
+    split."""
     t = object.__new__(trainer_cls)
     # A TP group of 2 replicates each batch on two ranks.
-    t.parallelism_config = SimpleNamespace(is_tp_mode=tp, is_pp_mode=False, non_dp_replication_factor=2 if tp else 1)
+    t.parallelism_config = SimpleNamespace(
+        is_tp_mode=tp, is_cp_mode=False, is_pp_mode=False, non_dp_replication_factor=2 if tp else 1
+    )
     t._dataset_presharded = presharded
     t.train_dataset = [{"x": 1}, {"x": 2}, {"x": 3}]
     t.eval_dataset = [{"x": 1}, {"x": 2}]
@@ -52,6 +41,7 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
         dataloader_pin_memory=False,
         dataloader_persistent_workers=False,
         dataloader_drop_last=False,
+        train_sampling_strategy="random",
         dataloader_prefetch_factor=None,
         dataloader_multiprocessing_context=None,
         dataloader_in_order=True,
@@ -61,7 +51,6 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
     calls = []
     t._equalize_presharded_length = lambda ds, split="train": calls.append(split) or ds
 
-    # Stop right after the equalization decision, before building a real DataLoader.
     def _stop_sampler(*args, **kwargs):
         raise _StopAfterEqualize()
 
@@ -70,7 +59,7 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
     return t, calls
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_equalizes_when_presharded(trainer_cls):
     t, calls = _make_stub(trainer_cls, presharded=True, tp=False)
     with pytest.raises(_StopAfterEqualize):
@@ -78,25 +67,24 @@ def test_equalizes_when_presharded(trainer_cls):
     assert len(calls) == 1, f"{trainer_cls.__name__}: _equalize_presharded_length not called for presharded dataset"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_no_equalize_when_not_presharded(trainer_cls):
-    # Custom path entered via TP, but dataset not pre-sharded → must NOT truncate.
+    # Custom path entered via TP, but the dataset is not pre-sharded, so no truncation.
     t, calls = _make_stub(trainer_cls, presharded=False, tp=True)
     with pytest.raises(_StopAfterEqualize):
         trainer_cls.get_train_dataloader(t)
     assert len(calls) == 0, f"{trainer_cls.__name__}: equalized a non-presharded dataset"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_eval_equalizes_when_presharded(trainer_cls):
-    """Pre-sharded EVAL must be equalized too: unequal eval step counts hang on NCCL."""
     t, calls = _make_stub(trainer_cls, presharded=True, tp=False)
     with pytest.raises(_StopAfterEqualize):
         trainer_cls.get_eval_dataloader(t)
     assert calls == ["eval"], f"{trainer_cls.__name__}: _equalize_presharded_length not called for presharded eval"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_eval_no_equalize_when_not_presharded(trainer_cls):
     t, calls = _make_stub(trainer_cls, presharded=False, tp=True)
     with pytest.raises(_StopAfterEqualize):
@@ -104,41 +92,25 @@ def test_eval_no_equalize_when_not_presharded(trainer_cls):
     assert len(calls) == 0, f"{trainer_cls.__name__}: equalized a non-presharded eval dataset"
 
 
-class _FakeAllReduce:
-    """Stand-in for torch.distributed that forces the global-min all_reduce result."""
-
-    def __init__(self, forced_min: int):
-        self.forced_min = forced_min
-        self.ReduceOp = torch.distributed.ReduceOp
-
-    def is_available(self):
-        return True
-
-    def is_initialized(self):
-        return True
-
-    def get_world_size(self):
-        return 2
-
-    def all_reduce(self, tensor, op=None):
-        tensor.fill_(min(self.forced_min, int(tensor.item())))
-
-
-def _equalize_with_forced_min(dataset, forced_min: int, split: str):
-    """Run the real _equalize_presharded_length with a faked distributed MIN reduction."""
+def _equalize_with_forced_min(dataset, forced_min: int, split: str, forced_max: int = 0):
+    """Run the real _equalize_presharded_length as global rank 0 of a world whose other ranks hold
+    ``forced_min`` and ``forced_max`` rows."""
     with (
-        patch("src.trainers.mixins.dataloader.dist", _FakeAllReduce(forced_min)),
+        patch(
+            "halo.trainers.dataloaders.rank_max",
+            lambda values: [max(forced_max, values[0]), max(-forced_min, values[1])],
+        ),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
-        patch("src.trainers.mixins.dataloader.is_multi_rank_run", return_value=True),
-        patch("src.trainers.mixins.dataloader.current_device", return_value=torch.device("cpu")),
+        patch("halo.trainers.dataloaders.is_multi_rank_run", return_value=True),
+        patch("halo.trainers.dataloaders.is_global_main_process", return_value=True),
     ):
-        return DataParallelDataLoaderMixin._equalize_presharded_length(None, dataset, split=split)
+        return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 
 
 @pytest.mark.parametrize("split", ["eval", "test"])
 def test_eval_zero_row_rank_raises(split):
-    """A rank with zero eval or test rows (fewer non-empty shards than DP ranks) must raise, not
-    silently truncate to an empty eval or hang at the metrics gather, and name the split it read."""
+    """Fewer non-empty shards than DP ranks must raise and name the split, not truncate to an empty eval or hang at
+    the metrics gather."""
     ds = Dataset.from_dict({"x": [1, 2, 3]})
     with pytest.raises(ValueError, match=rf"Pre-sharded {split} dataset: .* zero {split} examples") as raised:
         _equalize_with_forced_min(ds, forced_min=0, split=split)
@@ -158,13 +130,37 @@ def test_eval_truncates_to_global_min():
     assert len(out) == 3, f"expected truncation to global min 3, got {len(out)}"
 
 
+def _data_loss_warnings(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING and "DATA LOSS" in r.getMessage()]
+
+
+def test_rank_zero_warns_of_another_ranks_drop_when_it_holds_the_minimum(caplog):
+    """Rank 0 truncating nothing still reports the drop the fullest rank takes; shard sizes differ by one row even
+    when num_shards is a multiple of data_parallel_size."""
+    ds = Dataset.from_dict({"x": list(range(5))})
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+        out = _equalize_with_forced_min(ds, forced_min=5, forced_max=7, split="train")
+
+    assert len(out) == 5
+    (warning,) = _data_loss_warnings(caplog)
+    assert "5 to 7 examples" in warning and "DROPS 2" in warning, warning
+    assert "not a multiple of data_parallel_size" in warning and "one row per shard" in warning, warning
+
+
+def test_equal_ranks_warn_of_nothing(caplog):
+    ds = Dataset.from_dict({"x": list(range(4))})
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+        out = _equalize_with_forced_min(ds, forced_min=4, forced_max=4, split="train")
+    assert len(out) == 4
+    assert _data_loss_warnings(caplog) == []
+
+
 def test_grpo_trainers_inherit_mixin_eval_dataloader():
-    """The GRPO dataloader mixin overrides only the TRAIN path; eval must resolve to
-    DataParallelDataLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
-    so the pre-sharded eval equalization applies to online + environmental GRPO too."""
-    assert "get_eval_dataloader" not in vars(GRPOTrainDataLoaderMixin)
-    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
-        assert cls.get_eval_dataloader is DataParallelDataLoaderMixin.get_eval_dataloader, (
+    """The GRPO mixin overrides only the train path; eval must resolve to DataParallelLoaderMixin through the MRO,
+    ahead of TRL's GRPOTrainer."""
+    assert "get_eval_dataloader" not in vars(GenerationRoundMixin)
+    for cls in (DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+        assert cls.get_eval_dataloader is DataParallelLoaderMixin.get_eval_dataloader, (
             f"{cls.__name__}.get_eval_dataloader does not resolve to the DP mixin's eval path"
         )
 

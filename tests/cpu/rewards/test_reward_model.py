@@ -1,8 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests: the served reward-model scorer against fake vLLM and SGLang classify routes.
-
-Run: python tests/cpu/rewards/test_reward_model.py  (or pytest)
-"""
+"""The served reward-model scorer against fake vLLM and SGLang classify routes."""
 
 import asyncio
 import json
@@ -11,14 +8,13 @@ import math
 import httpx
 import pytest
 
-from src.rewards.samples import ScoringSample
-from src.rewards.scorers.reward_model import ServedRewardModel
-from src.rewards.terms import RewardModelTerm
+from halo.rewards.samples import ScoringSample
+from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.terms import RewardModelTerm
 
 
 class _Template:
-    """A tokenizer stand-in: renders every message as ``role: content`` on its own line and tokenizes a
-    text to its character codes, refusing to add special tokens."""
+    """Tokenizer stand-in: a ``role: content`` line per message, character codes as tokens, no special tokens added."""
 
     def __init__(self):
         self.rendered: list[list[dict]] = []
@@ -57,7 +53,7 @@ def _scorer(term: RewardModelTerm, handler) -> tuple[ServedRewardModel, list[htt
 def _vllm_handler(logits_by_text):
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
-        # Out of order on purpose: the client must sort by index, not trust arrival order.
+        # Out of order: the client must sort by index.
         rows = [
             {"index": i, "probs": [logits_by_text[text], 0.0], "label": None, "num_classes": 2}
             for i, text in enumerate(body["input"])
@@ -97,7 +93,7 @@ def test_sglang_request_and_parsing():
     scorer, requests = _scorer(term, handler)
     results = asyncio.run(scorer.score([_sample("a"), _sample("b"), _sample("c")]))
     assert str(requests[0].url) == "http://rm:30000/classify"
-    # Token ids of the rendered text, without added special tokens: TRL's in-process reward-model input.
+    # TRL's in-process reward-model input: the rendered text's ids, no added special tokens.
     assert json.loads(requests[0].content) == {
         "input_ids": [[ord(c) for c in f"user: Hi\nassistant: {t}"] for t in ("a", "b", "c")]
     }
@@ -106,7 +102,7 @@ def test_sglang_request_and_parsing():
 
 
 def test_label_index_picks_the_head_output():
-    """A 2-class RM whose positive label is index 1: reading index 0 would reward the negative logit."""
+    """Positive label at index 1: reading index 0 would reward the negative logit."""
     term = RewardModelTerm(name="pref", url="http://rm", model="m", label_index=1)
     scorer, _ = _scorer(term, lambda request: httpx.Response(200, json={"data": [{"index": 0, "probs": [9.0, -9.0]}]}))
     (result,) = asyncio.run(scorer.score([_sample("x")]))
@@ -172,8 +168,7 @@ def test_verify_scores_a_probe_and_raises_on_failure():
 
 
 def test_verify_releases_the_client_it_probed_through():
-    """The launch probe runs on a different loop than the Ray actor, and a cached AsyncClient carries a
-    pool bound to the loop it was built on — so the probe's client is closed and dropped."""
+    """A cached AsyncClient's pool is bound to the loop it was built on, and the probe runs on a different one."""
     scorer, _ = _scorer(
         RewardModelTerm(name="pref", url="http://rm", model="m"),
         lambda r: httpx.Response(200, json={"data": [{"index": 0, "probs": [0.1]}]}),
@@ -202,7 +197,6 @@ def test_the_view_selects_what_is_rendered():
     asyncio.run(final.score([sample]))
     full, _ = _scorer(RewardModelTerm(name="p", url="http://rm", model="m", view="full"), handler)
     asyncio.run(full.score([sample]))
-    # The final view scores what the episode delivered, not the last turn, when the sample says which.
     delivered = ScoringSample(prompt=sample.prompt, completion=sample.completion, final_answer="FINAL")
     asyncio.run(final.score([delivered]))
     assert rendered == [
@@ -213,8 +207,7 @@ def test_the_view_selects_what_is_rendered():
 
 
 def test_the_full_view_hands_the_template_wire_messages_only():
-    """A judge's sample carries reasoning and turn flags; a chat template given those keys raises or
-    renders them, so the reward model reads the wire spelling."""
+    """A chat template given a judge sample's reasoning and turn-flag keys raises or renders them."""
     sample = ScoringSample(
         prompt=[{"role": "user", "content": "Hi"}],
         completion=[

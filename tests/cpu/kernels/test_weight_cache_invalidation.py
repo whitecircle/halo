@@ -1,20 +1,12 @@
-"""The low-precision weight cache must invalidate after a real optimizer step.
-
-``cached_fake_quant`` keys its cache on ``weight._version``. An optimizer that writes through
-``p.data`` gets an alias carrying its own version counter, so the parameter's ``_version`` never
-advances and the cache serves the step-0 quantized weight for the entire run — the forward freezes
-while the master weights keep moving, silently invalidating every fp8/fp4 QAT result.
-
-The existing weight-cache test bumps ``_version`` by hand, which cannot catch that; these tests drive
-a real optimizer step instead.
-"""
+"""The low-precision weight cache invalidates after a real optimizer step. Writing through ``p.data`` keeps the
+parameter's ``_version``, freezing the forward at step 0 while the masters move."""
 
 import pytest
 import torch
 from torch import nn
 
-from src.kernels.lowp.quantization import cached_fake_quant
-from src.optimizers.adamw_bf16 import AdamWBF16
+from halo.kernels.lowp.quantization import cached_fake_quant
+from halo.optimizers.adamw_bf16 import AdamWBF16
 
 BLOCK_AXIS = 1
 
@@ -26,7 +18,6 @@ def _step(optimizer, param, scale: float = 1.0):
 
 @pytest.mark.parametrize("optimizer_name", ["adamw_bf16", "torch_adamw"])
 def test_optimizer_step_advances_the_parameter_version(optimizer_name):
-    """Every optimizer the toolkit ships must bump ``_version`` on the parameter it updates."""
     param = nn.Parameter(torch.randn(32, 64, dtype=torch.bfloat16))
     if optimizer_name == "adamw_bf16":
         optimizer = AdamWBF16([("weight", param)], lr=1e-2, weight_decay=0.0, use_triton=False)
@@ -45,7 +36,6 @@ def test_optimizer_step_advances_the_parameter_version(optimizer_name):
 
 
 def test_cached_fake_quant_tracks_the_weight_across_steps():
-    """The cached quantized weight must follow the master weight, not freeze at step 0."""
     torch.manual_seed(0)
     param = nn.Parameter(torch.randn(32, 64, dtype=torch.bfloat16))
     optimizer = AdamWBF16([("weight", param)], lr=1e-1, weight_decay=0.0, use_triton=False)

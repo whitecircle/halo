@@ -1,412 +1,344 @@
 #!/usr/bin/env python
-"""Tests for GenerateExamplesCallback. Run: python tests/cpu/callbacks/test_generate_examples.py"""
 
 import itertools
 import logging
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
 import pytest
 import torch
+from datasets import Dataset
 
-import src.callbacks.generate_examples as cb_module
-from src.callbacks.generate_examples import (
+import halo.callbacks.generate_examples as cb_module
+from halo.callbacks.generate_examples import (
     _MAX_PRINTED_PROMPT_CHARS,
     GenerateExamplesCallback,
-    _is_distributed_parallel_model,
     _pretty_print_dataframe,
 )
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
+from tests.common.ep_stubs import StubEPLayerBase
 
-# Mock helpers
-
-
-class MockModule:
-    """A mock nn.Module-like object."""
-
-    def parameters(self):
-        return iter([torch.randn(10)])
-
-
-class _StandInEPLayer(EPMoELayerBase):
-    """A real ``EPMoELayerBase`` instance, which is what ``find_ep_layers`` keys on; the heavy base
-    ``__init__`` (process groups, DeepEP buffers) is skipped."""
-
-    def __init__(self):
-        torch.nn.Module.__init__(self)
-
-    def forward(self, hidden_states, **kwargs):
-        raise NotImplementedError("stand-in: never invoked")
+_SKIP_PP = (
+    "[GenerateExamplesCallback] Skipping: a pipeline-parallel stage holds only part of the model "
+    "and cannot generate. Generate from a saved checkpoint instead."
+)
+_SKIP_CP = "[GenerateExamplesCallback] Skipping: Context Parallelism is incompatible with autoregressive generation."
+_SKIP_TP = (
+    "[GenerateExamplesCallback] Skipping: Tensor Parallelism (DTensor) is incompatible with autoregressive generation."
+)
 
 
-class MockTokenizer:
-    """Mock tokenizer with encode/decode."""
-
-    def __init__(self):
-        self._vocab = {}
-
+class _Tokenizer:
     def decode(self, token_ids, skip_special_tokens=False):
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.tolist()
-        return "decoded:" + ",".join(str(t) for t in token_ids)
+        return "decoded:" + ",".join(str(t) for t in token_ids.tolist())
 
-    def encode(self, text, return_tensors=None):
-        return [1, 2, 3]
 
+class _FakeDTensor:
+    def __init__(self, mesh_dim_names):
+        self.device_mesh = SimpleNamespace(mesh_dim_names=mesh_dim_names)
 
-class MockGenerateModel:
-    """Mock model with generate() method."""
 
-    def __init__(self):
-        self.device = torch.device("cpu")
-        self._generate_output = None
+class _FakeCPWrapper(torch.nn.Module):
+    pass
 
-    def generate(self, input_ids, attention_mask=None, max_new_tokens=256):
-        # Return input_ids + some generated tokens
-        new_tokens = torch.tensor([[100, 101, 102]])
-        return torch.cat([input_ids, new_tokens], dim=1)
 
-    def eval(self):
-        pass
+class _FakePipelineStage(torch.nn.Module):
+    pass
 
-    def modules(self):
-        return iter([self])
 
-    def parameters(self):
-        return iter([torch.randn(10)])
+class _GCLayer(torch.nn.Module):
+    def __init__(self, gradient_checkpointing: bool):
+        super().__init__()
+        self.gradient_checkpointing = gradient_checkpointing
 
 
-class MockDataset:
-    """Mock HuggingFace Dataset for testing."""
+class _Generator(torch.nn.Module):
+    """Records, per call, the prompt, greedy flag and GC flags it saw."""
 
-    def __init__(self, data):
-        self._data = data
+    def __init__(self, *children: torch.nn.Module, fail: bool = False):
+        super().__init__()
+        self.proj = torch.nn.Linear(2, 2)
+        self.blocks = torch.nn.ModuleList(children)
+        self.fail = fail
+        self.calls: list[tuple[list[int], bool, list[bool]]] = []
 
-    def __len__(self):
-        return len(self._data)
+    @property
+    def device(self):
+        return torch.device("cpu")
 
-    def __getitem__(self, idx):
-        if isinstance(idx, int):
-            return self._data[idx]
-        return self._data[idx]
-
-    def select(self, indices):
-        selected_data = [self._data[i] for i in indices]
-        return MockDataset(selected_data)
-
-    def __iter__(self):
-        return iter(self._data)
-
-
-# Tests
-
-
-def test_is_distributed_parallel_model():
-    """An EP layer anywhere in the tree makes generation collective; a plain model generates per rank."""
-    assert _is_distributed_parallel_model(torch.nn.Sequential(torch.nn.Linear(4, 4))) is False
-
-    nested_ep = torch.nn.Sequential(torch.nn.Linear(4, 4), torch.nn.Sequential(_StandInEPLayer()))
-    assert _is_distributed_parallel_model(nested_ep) is True
-
-
-def test_callback_init():
-    """Test GenerateExamplesCallback deterministic sample selection with seed=42."""
-    # Create a dataset with 20 examples
-    data = []
-    for i in range(20):
-        data.append(
-            {
-                "input_ids": [1, 2, 3, i],
-                "attention_mask": [1, 1, 1, 1],
-            }
-        )
-    dataset = MockDataset(data)
-    tokenizer = MockTokenizer()
-
-    cb1 = GenerateExamplesCallback(
-        preprocessed_dataset=dataset,
-        tokenizer=tokenizer,
-        num_examples=5,
-        max_new_tokens=128,
-    )
-
-    cb2 = GenerateExamplesCallback(
-        preprocessed_dataset=dataset,
-        tokenizer=tokenizer,
-        num_examples=5,
-        max_new_tokens=128,
-    )
-
-    # Both callbacks should select the same samples (same seed=42)
-    assert len(cb1.samples) == 5, f"Expected 5 samples, got {len(cb1.samples)}"
-    assert len(cb2.samples) == 5, f"Expected 5 samples, got {len(cb2.samples)}"
-
-    for i in range(5):
-        s1 = cb1.samples[i]
-        s2 = cb2.samples[i]
-        assert s1["input_ids"] == s2["input_ids"], f"Sample {i} differs: {s1['input_ids']} vs {s2['input_ids']}"
-
-    # num_examples should be clamped to dataset length
-    cb_small = GenerateExamplesCallback(
-        preprocessed_dataset=MockDataset(data[:3]),
-        tokenizer=tokenizer,
-        num_examples=10,  # more than dataset size (3)
-    )
-    assert cb_small.num_examples == 3, f"Expected clamped to 3, got {cb_small.num_examples}"
-
-
-def test_has_tp_dtensor_params():
-    """Test _has_tp_dtensor_params distinguishes TP DTensors from FSDP2 DTensors."""
-    # Plain model (no DTensors) — both should return False
-    plain_model = MockModule()
-    assert cb_module._has_tp_dtensor_params(plain_model) is False
-    assert cb_module._has_any_dtensor_params(plain_model) is False
-
-    # Use a base class that our mocks can be instances of
-    class FakeDTensorBase:
-        pass
-
-    class MockMesh:
-        def __init__(self, dim_names):
-            self.mesh_dim_names = dim_names
-
-    class FakeDTensor(FakeDTensorBase):
-        def __init__(self, mesh):
-            self.device_mesh = mesh
-
-    class MockModelWithDTensors:
-        def __init__(self, mesh_names):
-            mesh = MockMesh(mesh_names)
-            self._params = [type("P", (), {"data": FakeDTensor(mesh)})()]
-
-        def parameters(self):
-            return iter(self._params)
-
-        def modules(self):
-            return iter([self])
-
-    # Patch the DTensor reference in the callback module so isinstance checks work
-    with patch.object(cb_module, "DTensor", FakeDTensorBase):
-        # TP DTensor (mesh with 'tp' dimension)
-        tp_model = MockModelWithDTensors(("dp", "tp"))
-        assert cb_module._has_tp_dtensor_params(tp_model) is True
-        assert cb_module._has_any_dtensor_params(tp_model) is True
-
-        # FSDP2 DTensor (mesh without 'tp' dimension)
-        fsdp2_model = MockModelWithDTensors(("dp",))
-        assert cb_module._has_tp_dtensor_params(fsdp2_model) is False
-        assert cb_module._has_any_dtensor_params(fsdp2_model) is True
-
-        # FSDP2 with no named dimensions
-        fsdp2_unnamed = MockModelWithDTensors(())
-        assert cb_module._has_tp_dtensor_params(fsdp2_unnamed) is False
-        assert cb_module._has_any_dtensor_params(fsdp2_unnamed) is True
-
-        # FSDP2 with None dim names
-        fsdp2_none = MockModelWithDTensors(None)
-        assert cb_module._has_tp_dtensor_params(fsdp2_none) is False
-        assert cb_module._has_any_dtensor_params(fsdp2_none) is True
-
-
-def test_fsdp2_routes_to_all_ranks():
-    """Test that FSDP2 DTensor models route to all-ranks generation (not split)."""
-
-    class FakeDTensorBase:
-        pass
-
-    class MockMesh:
-        def __init__(self, dim_names):
-            self.mesh_dim_names = dim_names
-
-    class FakeDTensor(FakeDTensorBase):
-        def __init__(self, mesh):
-            self.device_mesh = mesh
-
-    class MockFSDP2Model:
-        def __init__(self):
-            mesh = MockMesh(("dp",))
-            self._params = [type("P", (), {"data": FakeDTensor(mesh)})()]
-
-        def parameters(self):
-            return iter(self._params)
-
-        def named_modules(self):
-            return iter([("", self)])
-
-    # Patch DTensor so isinstance checks work with our mocks
-    with patch.object(cb_module, "DTensor", FakeDTensorBase):
-        fsdp2_model = MockFSDP2Model()
-        assert cb_module._is_distributed_parallel_model(fsdp2_model) is True, (
-            "FSDP2 DTensor model should be detected as distributed parallel (requires all ranks in forward)"
-        )
-
-
-def test_generate_single_with_chosen_rejected():
-    """Test _generate_single includes chosen/rejected when present."""
-    data = [
-        {
-            "input_ids": [1, 2, 3],
-            "attention_mask": [1, 1, 1],
-            "chosen": [{"content": "good answer"}],
-            "rejected": [{"content": "bad answer"}],
-        }
-    ]
-    dataset = MockDataset(data)
-    tokenizer = MockTokenizer()
-
-    cb = GenerateExamplesCallback(
-        preprocessed_dataset=dataset,
-        tokenizer=tokenizer,
-        num_examples=1,
-    )
-
-    model = MockGenerateModel()
-
-    # MockDataset items need a .keys() method for the "chosen"/"rejected" check
-    class DictLikeExample(dict):
-        pass
-
-    example = DictLikeExample(data[0])
-    record = cb._generate_single(model, example)
-
-    assert "Chosen" in record, "Record should have 'Chosen' key"
-    assert record["Chosen"] == "good answer", f"Expected 'good answer', got {record['Chosen']!r}"
-    assert "Rejected" in record, "Record should have 'Rejected' key"
-    assert record["Rejected"] == "bad answer", f"Expected 'bad answer', got {record['Rejected']!r}"
-
-
-def test_is_cp_wrapped_sees_a_wrapper_nested_under_peft():
-    """PEFT keeps the CP wrapper at ``base_model.model`` and delegates ``generate`` down to it, so a
-    root-only isinstance misses it and the callback would generate on sequence-sharded ranks."""
-
-    class FakeCPWrapper(torch.nn.Module):
-        pass
-
-    class FakePeftModel(torch.nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.base_model = torch.nn.Module()
-            self.base_model.model = FakeCPWrapper()
-
-    with patch.object(cb_module, "UlyssesCPModelWrapper", FakeCPWrapper):
-        assert cb_module._is_cp_wrapped(FakePeftModel()) is True
-        assert cb_module._is_cp_wrapped(FakeCPWrapper()) is True
-        assert cb_module._is_cp_wrapped(torch.nn.Linear(2, 2)) is False
-
-
-def test_is_fsdp2_model():
-    """FSDP2 is detected by the ``_is_fsdp_managed_module`` flag ``fully_shard`` stamps on every
-    module it manages — not by the ``FSDP<Name>`` class rename, which covers only the roots and
-    would misread any unrelated class whose name happens to start with FSDP."""
-
-    class Plain:
-        pass
-
-    assert cb_module._is_fsdp2_model(Plain()) is False
-
-    class Flagged:
-        _is_fsdp_managed_module = True
-
-    assert cb_module._is_fsdp2_model(Flagged()) is True
-
-    assert cb_module._is_fsdp2_model(type("FSDPLookalike", (), {})()) is False
-
-
-def test_gradient_checkpointing_disable_restore_is_an_exact_inverse():
-    """Disable-then-restore must leave every module's GC flag exactly as it was found.
-
-    Generation is a side trip inside training: a restore that switches GC on for layers that had it
-    off silently changes memory and step time for the remainder of the run. Checked over every
-    on/off pattern rather than the uniform all-on case, which cannot distinguish the two.
-    """
-
-    class Layer:
-        def __init__(self, gc):
-            self.gradient_checkpointing = gc
-
-    class Model:
-        def __init__(self, flags):
-            self._mods = [Layer(flag) for flag in flags]
-
-        def modules(self):
-            return iter(self._mods)
-
-    for flags in itertools.product([True, False], repeat=3):
-        m = Model(flags)
-        touched = cb_module._disable_gradient_checkpointing(m)
-        assert [mod.gradient_checkpointing for mod in m._mods] == [False] * 3, flags
-        assert len(touched) == sum(flags), f"{flags}: reported {len(touched)} enabled modules"
-
-        cb_module._restore_gradient_checkpointing(touched)
-        assert [mod.gradient_checkpointing for mod in m._mods] == list(flags), (
-            f"restore is not the inverse of disable for pattern {flags}"
-        )
-
-
-def test_gradient_checkpointing_restored_when_generation_raises():
-    """The finally-block contract: a failed generation must not leave GC off for the rest of training."""
-
-    class RaisingModel(MockGenerateModel):
-        def __init__(self):
-            super().__init__()
-            self.gradient_checkpointing = True
-
-        def generate(self, input_ids, **kwargs):
+    def generate(self, input_ids, attention_mask=None, **kwargs):
+        gc_flags = [m.gradient_checkpointing for m in self.modules() if isinstance(m, _GCLayer)]
+        self.calls.append((input_ids[0].tolist(), kwargs.get("do_sample") is False, gc_flags))
+        if self.fail:
             raise RuntimeError("boom")
-
-    dataset = MockDataset([{"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}])
-    cb = GenerateExamplesCallback(preprocessed_dataset=dataset, tokenizer=MockTokenizer(), num_examples=1)
-    model = RaisingModel()
-
-    with pytest.raises(RuntimeError, match="boom"):
-        cb._generate_standard(model, type("S", (), {"global_step": 1})(), is_parallel=False)
-    assert model.gradient_checkpointing is True, "generation failure left gradient checkpointing off"
+        return torch.cat([input_ids, torch.tensor([[100]])], dim=1)
 
 
-def test_build_record_plain_and_preference():
-    """_build_record carries chosen/rejected content only when those keys exist."""
-    plain = GenerateExamplesCallback._build_record("P", "C", {"input_ids": [1]})
-    assert plain == {"Prompt": "P", "Completion": "C"}
+class _DTensorGenerator(_Generator):
+    def __init__(self, *children: torch.nn.Module, mesh_dim_names, fail: bool = False):
+        super().__init__(*children, fail=fail)
+        self.mesh_dim_names = mesh_dim_names
 
-    pref = GenerateExamplesCallback._build_record(
-        "P",
-        "C",
-        {"chosen": [{"content": "good"}], "rejected": [{"content": "bad"}]},
-    )
-    assert pref["Chosen"] == "good"
-    assert pref["Rejected"] == "bad"
+    def parameters(self, recurse: bool = True):
+        return iter([SimpleNamespace(data=_FakeDTensor(self.mesh_dim_names))])
 
 
-def test_generate_single_strips_prompt_prefix():
-    """The completion is the generated suffix with the prompt prefix removed.
+def _fsdp_stamped(model: torch.nn.Module) -> torch.nn.Module:
+    model._is_fsdp_managed_module = True
+    return model
 
-    The mock tokenizer decodes ``decoded:<ids>``; the prompt decode is a strict
-    prefix of the full-output decode, so the completion is exactly the new ids.
-    """
-    dataset = MockDataset([{"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1]}])
-    cb = GenerateExamplesCallback(preprocessed_dataset=dataset, tokenizer=MockTokenizer(), num_examples=1)
-    record = cb._generate_single(MockGenerateModel(), dataset[0])
 
-    # MockGenerateModel appends tokens [100, 101, 102]; the prompt prefix is
-    # "decoded:1,2,3" and the full output is "decoded:1,2,3,100,101,102",
-    # so the completion is the trailing ",100,101,102".
-    assert record["Prompt"] == "decoded:1,2,3"
-    assert record["Completion"] == ",100,101,102"
+def _peft_over(inner: torch.nn.Module) -> torch.nn.Module:
+    peft = torch.nn.Module()
+    peft.base_model = torch.nn.Module()
+    peft.base_model.model = inner
+    return peft
+
+
+def _generation_dataset(num_rows: int = 4) -> Dataset:
+    return Dataset.from_list([{"input_ids": [1, 10 + i], "attention_mask": [1, 1]} for i in range(num_rows)])
+
+
+def _callback(dataset: Dataset, num_examples: int) -> GenerateExamplesCallback:
+    return GenerateExamplesCallback(dataset, _Tokenizer(), num_examples=num_examples, logger_backend="none")
+
+
+def _evaluate(model, *, world_size: int, rank: int = 0, num_examples: int = 2, num_rows: int = 4):
+    callback = _callback(_generation_dataset(num_rows), num_examples)
+    collectives: list[str] = []
+
+    def _all_gather_object(out, obj, group=None):
+        collectives.append("all_gather_object")
+        out[:] = [obj] * len(out)
+
+    warnings: list[str] = []
+    info_lines: list[str] = []
+    with (
+        patch.object(cb_module, "DTensor", _FakeDTensor),
+        patch.object(cb_module, "UlyssesModel", _FakeCPWrapper),
+        patch.object(cb_module, "PipelineStageModule", _FakePipelineStage),
+        patch.object(cb_module, "get_global_world_size", return_value=world_size),
+        patch.object(cb_module, "get_global_rank", return_value=rank),
+        patch.object(cb_module, "is_global_main_process", return_value=rank == 0),
+        patch.object(cb_module, "barrier", side_effect=lambda *a, **k: collectives.append("barrier")),
+        patch.object(torch.distributed, "all_gather_object", side_effect=_all_gather_object),
+        patch.object(cb_module.logger, "warning", side_effect=lambda msg, *a, **k: warnings.append(str(msg))),
+        patch.object(cb_module.logger, "info", side_effect=lambda msg, *a, **k: info_lines.append(str(msg))),
+    ):
+        callback.on_evaluate(None, SimpleNamespace(global_step=7), None, model=model)
+    return collectives, warnings, info_lines
+
+
+def _dispatch(build, world_size: int):
+    """``("skip", message)`` or ``(path, greedy, failure)``, the last read from a run whose generate raises."""
+    model, generator = build(fail=False)
+    collectives, warnings, _ = _evaluate(model, world_size=world_size)
+    skips = [w for w in warnings if w.startswith("[GenerateExamplesCallback] Skipping:")]
+    if skips:
+        assert generator is None or generator.calls == [], "a skipped layout still generated"
+        assert collectives == [], "a skipped layout still issued a collective"
+        return ("skip", *skips)
+    path = "all_ranks" if "barrier" in collectives else "split" if "all_gather_object" in collectives else "none"
+    assert generator.calls, "a generating layout produced no sample"
+    greedy = all(greedy for _, greedy, _ in generator.calls)
+
+    model, generator = build(fail=True)
+    try:
+        _, warnings, info_lines = _evaluate(model, world_size=world_size)
+    except RuntimeError:
+        failure = "raises"
+    else:
+        if any("Generation failed at step 7: boom. Training will continue." in w for w in warnings):
+            failure = "warns"
+        elif any("<generation failed: boom>" in line for line in info_lines):
+            failure = "recorded"
+        else:
+            failure = "silent"
+    return (path, greedy, failure)
+
+
+def _plain(fail):
+    g = _Generator(fail=fail)
+    return g, g
+
+
+def _ddp(fail):
+    g = _Generator(fail=fail)
+    return torch.nn.DataParallel(g), g
+
+
+def _fsdp1(fail):
+    g = _fsdp_stamped(_Generator(fail=fail))
+    return g, g
+
+
+def _fsdp_named_without_stamp(fail):
+    g = type("FSDPGenerator", (_Generator,), {})(fail=fail)
+    return g, g
+
+
+def _fsdp2(mesh_dim_names):
+    def build(fail):
+        g = _DTensorGenerator(mesh_dim_names=mesh_dim_names, fail=fail)
+        return g, g
+
+    return build
+
+
+def _ep(fail):
+    g = _Generator(torch.nn.Sequential(StubEPLayerBase()), fail=fail)
+    return g, g
+
+
+def _ep_compiled(fail):
+    g = _Generator(torch.nn.Sequential(StubEPLayerBase()), fail=fail)
+    return torch.compile(g), g
+
+
+def _tp(fail):
+    g = _DTensorGenerator(mesh_dim_names=("dp", "tp"), fail=fail)
+    return g, g
+
+
+def _tp_with_ep(fail):
+    g = _DTensorGenerator(StubEPLayerBase(), mesh_dim_names=("tp",), fail=fail)
+    return g, g
+
+
+def _cp_under_peft(fail):
+    return _peft_over(_FakeCPWrapper()), None
+
+
+def _cp_compiled(fail):
+    return torch.compile(_FakeCPWrapper()), None
+
+
+def _cp_with_tp(fail):
+    return _DTensorGenerator(_FakeCPWrapper(), mesh_dim_names=("tp",), fail=fail), None
+
+
+def _pp(fail):
+    return _FakePipelineStage(), None
+
+
+def _pp_compiled(fail):
+    return torch.compile(_FakePipelineStage()), None
+
+
+def _pp_holding_cp(fail):
+    stage = _FakePipelineStage()
+    stage.inner = _FakeCPWrapper()
+    return stage, None
+
+
+# (id, layout builder, world size, expected dispatch)
+_DISPATCH_GOLDEN = [
+    ("single_process", _plain, 1, ("all_ranks", True, "warns")),
+    ("ddp", _ddp, 2, ("split", False, "recorded")),
+    ("fsdp1_stamped", _fsdp1, 2, ("all_ranks", True, "raises")),
+    ("fsdp1_stamped_single_process", _fsdp1, 1, ("all_ranks", True, "raises")),
+    ("fsdp_named_without_stamp", _fsdp_named_without_stamp, 2, ("split", False, "recorded")),
+    ("fsdp2_dp_mesh", _fsdp2(("dp",)), 2, ("all_ranks", True, "raises")),
+    ("fsdp2_unnamed_mesh", _fsdp2(()), 2, ("all_ranks", True, "raises")),
+    ("fsdp2_none_mesh", _fsdp2(None), 2, ("all_ranks", True, "raises")),
+    ("ep", _ep, 2, ("all_ranks", True, "raises")),
+    ("ep_compiled", _ep_compiled, 2, ("all_ranks", True, "raises")),
+    ("tp", _tp, 2, ("skip", _SKIP_TP)),
+    ("tp_with_ep", _tp_with_ep, 2, ("skip", _SKIP_TP)),
+    ("cp_under_peft", _cp_under_peft, 2, ("skip", _SKIP_CP)),
+    ("cp_compiled", _cp_compiled, 2, ("skip", _SKIP_CP)),
+    ("cp_with_tp", _cp_with_tp, 2, ("skip", _SKIP_CP)),
+    ("pp", _pp, 2, ("skip", _SKIP_PP)),
+    ("pp_compiled", _pp_compiled, 2, ("skip", _SKIP_PP)),
+    ("pp_holding_cp", _pp_holding_cp, 2, ("skip", _SKIP_PP)),
+]
+
+
+@pytest.mark.parametrize(
+    ("build", "world_size", "expected"),
+    [case[1:] for case in _DISPATCH_GOLDEN],
+    ids=[case[0] for case in _DISPATCH_GOLDEN],
+)
+def test_dispatch_matches_golden(build, world_size, expected):
+    assert _dispatch(build, world_size) == expected
+
+
+def test_skip_warns_on_the_main_rank_only():
+    model, _ = _pp(fail=False)
+    collectives, warnings, _ = _evaluate(model, world_size=2, rank=1)
+    assert (collectives, warnings) == ([], [])
+
+
+def test_split_ranks_generate_every_world_size_th_sample():
+    """Rank 1 of 3 generates sample positions 1 and 4 of the seeded draw (rows 5, 0, 6, 2, 4 of seven)."""
+    generator = _Generator()
+    collectives, _, _ = _evaluate(generator, world_size=3, rank=1, num_examples=5, num_rows=7)
+    assert collectives == ["all_gather_object"]
+    assert [prompt for prompt, _, _ in generator.calls] == [[1, 10], [1, 14]]
+
+
+@pytest.mark.parametrize("flags", list(itertools.product([True, False], repeat=3)))
+@pytest.mark.parametrize("fail", [False, True])
+def test_gradient_checkpointing_is_off_during_generation_and_restored_exactly(flags, fail):
+    """Over every on/off pattern: switching GC back on everywhere would change memory and step time on layers a
+    partially checkpointed model left off. A collective failure must restore too."""
+    generator = _fsdp_stamped(_Generator(*(_GCLayer(flag) for flag in flags), fail=fail))
+    if fail:
+        with pytest.raises(RuntimeError, match="boom"):
+            _evaluate(generator, world_size=1, num_examples=1)
+    else:
+        _evaluate(generator, world_size=1, num_examples=1)
+    assert [gc_flags for _, _, gc_flags in generator.calls] == [[False] * 3]
+    assert [m.gradient_checkpointing for m in generator.blocks] == list(flags)
+
+
+def test_the_sample_shows_each_row_once():
+    """``num_examples`` is capped at the dataset length, which only means something for distinct rows."""
+    prompts = _callback(_generation_dataset(50), 50).samples["input_ids"]
+    assert len({tuple(prompt) for prompt in prompts}) == 50
+
+
+def test_sample_draw_is_seeded_and_clamped_to_the_dataset():
+    """Every rank draws the same samples, so collective generation and the gather line up."""
+    dataset = _generation_dataset(20)
+    first, second = _callback(dataset, 5), _callback(dataset, 5)
+    assert first.samples["input_ids"] == second.samples["input_ids"]
+    assert len(first.samples) == 5
+    assert _callback(_generation_dataset(3), 10).num_examples == 3
+
+
+def test_generate_single_strips_the_prompt_and_keeps_preference_replies():
+    example = {
+        "input_ids": [1, 2, 3],
+        "attention_mask": [1, 1, 1],
+        "chosen": [{"content": "good answer"}],
+        "rejected": [{"content": "bad answer"}],
+    }
+    record = _callback(_generation_dataset(1), 1)._generate_single(_Generator(), example)
+    assert record == {
+        "Prompt": "decoded:1,2,3",
+        "Completion": ",100",
+        "Chosen": "good answer",
+        "Rejected": "bad answer",
+    }
+
+
+def test_build_record_carries_preference_replies_only_when_present():
+    assert GenerateExamplesCallback._build_record("P", "C", {"input_ids": [1]}) == {"Prompt": "P", "Completion": "C"}
 
 
 def test_pretty_print_dataframe_truncates_long_prompt(caplog):
-    """Long prompts are tail-truncated to the module's character budget with a leading ellipsis, so
-    the completion stays readable in the log table; the caller's frame is left untouched."""
+    """Tail-truncated with a leading ellipsis, so the completion stays readable in the log table."""
     long_prompt = "y" * (_MAX_PRINTED_PROMPT_CHARS + 1) + "x" * _MAX_PRINTED_PROMPT_CHARS
     df = pd.DataFrame([{"Prompt": long_prompt, "Completion": "c"}])
 
-    with caplog.at_level(logging.INFO, logger="src.callbacks.generate_examples"):
+    with caplog.at_level(logging.INFO, logger="halo.callbacks.generate_examples"):
         _pretty_print_dataframe(df)
 
     table = caplog.records[-1].getMessage()
     assert "..." + "x" * _MAX_PRINTED_PROMPT_CHARS in table, table
     assert "y" not in table, "the truncated head must not reach the table"
-    assert df.loc[0, "Prompt"] == long_prompt  # original untouched (works on a copy)
+    assert df.loc[0, "Prompt"] == long_prompt  # works on a copy
 
 
 if __name__ == "__main__":

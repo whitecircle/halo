@@ -1,0 +1,67 @@
+# Qwen3.6 35B-A3B — EP=8 SFT whose objective also trains the released MTP head. See agent-docs/optimization/mtp-heads.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+#
+# Measured without this recipe's fp32 masters, on packed random tokens at 33,000 per rank on FA2: the term adds 6% to 7%
+# to a step and about 1 GiB. What it does to the trunk or the head's served acceptance over a fine-tune is not measured.
+# A weight of 0.3 is what DeepSeek-V3 published for pretraining; mtp_train_scope: detached keeps the trunk on the
+# next-token objective, and mtp_loss_type: soft routes the head's gradient to the trunk's own distribution.
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.6-35B-A3B
+
+# --- MTP head ---
+mtp_loss_weight: 0.3
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 256 routed experts → 32/rank
+moe_balancing: bias_update_transient  # the architecture has no exportable bias slot, so exports serve without it
+fp32_router: true
+fp32_experts: true
+fp32_non_ep_params: true
+
+# --- Attention & kernels ---
+attn_implementation: flash_attention_2
+packing: true                         # fixed-length only — never padding_free (M-RoPE varlen crash)
+max_length: 33000
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/qwen3.6-35b-a3b-mtp-joint
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+assistant_message_template: "<|im_start|>assistant\n"
+pad_token: <|endoftext|>
+eos_token: <|im_end|>
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # an empty think block before every reply; without one the trunk reads far worse
+force_chat_template: true

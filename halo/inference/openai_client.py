@@ -1,0 +1,105 @@
+"""The OpenAI-compatible chat client: construction, one chat request with the upstream retry, and the single-request
+helper that normalizes a reply."""
+
+import asyncio
+from collections.abc import Mapping
+from typing import Any
+
+from openai import AsyncOpenAI
+
+from halo.env import env_str
+from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
+from halo.inference.response import OpenAIResponse, get_finish_reason, get_reasoning_text
+
+# Client-error statuses that report a transient server condition, not a bad request.
+TRANSIENT_CLIENT_ERROR_CODES = frozenset({408, 429})
+# An aggregator can answer 200 with no choices and an error body the SDK does not retry (OpenRouter
+# spells an upstream rate limit this way); these codes are retried here with this backoff.
+_RETRYABLE_UPSTREAM_CODES = TRANSIENT_CLIENT_ERROR_CODES | {500, 502, 503, 504}
+UPSTREAM_RETRIES = 4
+_UPSTREAM_BACKOFF_S = 2.0
+_SDK_MAX_RETRIES = 4
+# Generous: a run floods one endpoint, and a long reasoning turn queued behind the requests takes minutes.
+REQUEST_TIMEOUT_SECONDS = 180.0
+
+
+class EmptyChoicesError(RuntimeError):
+    """The error body it carried instead, if any."""
+
+    def __init__(self, model: str, error: Any):
+        super().__init__(f"chat completion for {model!r} carried no choices: {error!r}")
+        self.error = error
+
+
+def _usage_field(completion, field: str) -> int:
+    usage = getattr(completion, "usage", None)
+    if usage is None:
+        return 0
+    return getattr(usage, field, 0) or 0
+
+
+def build_openai_client(base_url: str | None = None, api_key_override: str | None = None) -> AsyncOpenAI:
+    """An omitted ``base_url`` targets :data:`DEFAULT_LOCAL_BASE_URL`, never the public OpenAI API. No key raises: the
+    SDK re-reads a blank variable itself, and the empty key it builds with fails only later, as an opaque 401
+    (``.env.example`` ships the variable blank)."""
+    api_key = api_key_override or env_str("OPENAI_API_KEY")
+    if not api_key:
+        raise ValueError("no API key for the OpenAI-compatible client: pass one, or set OPENAI_API_KEY")
+    return AsyncOpenAI(base_url=base_url or DEFAULT_LOCAL_BASE_URL, api_key=api_key, max_retries=_SDK_MAX_RETRIES)
+
+
+async def chat_completion(client: AsyncOpenAI, **request: Any):
+    """A reply with no choices retries on a retryable upstream code and raises :class:`EmptyChoicesError` otherwise, so
+    no caller indexes an empty ``choices``."""
+    for attempt in range(UPSTREAM_RETRIES + 1):
+        completion = await client.chat.completions.create(**request)
+        if completion.choices:
+            return completion
+        error = getattr(completion, "error", None)
+        code = error.get("code") if isinstance(error, Mapping) else None
+        # An aggregator may spell the code as a string.
+        code = int(code) if isinstance(code, int | str) and str(code).isdigit() else None
+        if code not in _RETRYABLE_UPSTREAM_CODES or attempt == UPSTREAM_RETRIES:
+            raise EmptyChoicesError(request.get("model", "?"), error)
+        await asyncio.sleep(_UPSTREAM_BACKOFF_S * 2**attempt)
+    raise AssertionError("unreachable")
+
+
+async def generate_openai_response(
+    model: str,
+    messages: str | list[dict],
+    *,
+    client: AsyncOpenAI,
+    temperature: float | None = 0.0,
+    max_tokens: int = 512,
+    tools: list[dict] | None = None,
+    request_timeout: float = REQUEST_TIMEOUT_SECONDS,
+) -> OpenAIResponse:
+    """``temperature`` ``None`` keeps the served default, which reasoning models require."""
+    if isinstance(messages, str):
+        messages = [{"role": "user", "content": messages}]
+
+    request: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "max_tokens": max_tokens,
+        "timeout": request_timeout,
+    }
+    if temperature is not None:
+        request["temperature"] = temperature
+    if tools is not None:
+        request["tools"] = tools
+
+    completion = await chat_completion(client, **request)
+    choice = completion.choices[0]
+    message = choice.message
+    completion_tokens = _usage_field(completion, "completion_tokens")
+    return OpenAIResponse(
+        answer=message.content,
+        reasoning=get_reasoning_text(message),
+        finish_reason=get_finish_reason(choice, completion_tokens=completion_tokens, max_tokens=max_tokens) or "",
+        tool_calls=message.tool_calls,
+        prompt_tokens=_usage_field(completion, "prompt_tokens"),
+        completion_tokens=completion_tokens,
+        total_tokens=_usage_field(completion, "total_tokens"),
+    )

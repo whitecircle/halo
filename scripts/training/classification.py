@@ -1,64 +1,64 @@
 #!/usr/bin/env python
-"""Distributed sequence-classification training.
+"""Distributed sequence-classification training. Text-only: few families have a multimodal classification head
+upstream, and halo/models/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6.
 
-Modality: text-only. VLM sequence classification needs a multimodal classification head, which
-transformers ships for only a few families (Gemma3, dense Qwen3.5, T5Gemma2, ModernVBert); the
-toolkit registers two more itself in src/models/seq_cls_heads.py — Gemma 4 and MoE Qwen3.5/3.6,
-each in both spellings a checkpoint can carry (composite and text tower). Other VLM families have
-no such head, so general VLM classification is not supported upstream.
+Modes: EP, TP, ETP, PP. CP is not supported, as the trainer pools over the complete sequence, which no CP shard holds.
+Under PP a multimodal checkpoint trains its text tower and score head; untouched vision tensors ride every checkpoint
+under the wrapper layout."""
 
-Supported Parallelism Modes: EP, TP, ETP (PP is declared but not yet available in this release).
-CP is not supported — the trainer pools over the complete sequence, which no CP shard holds.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/classification.py \\
-        examples/classification/gptoss/clf-gptoss-20b-mage-ep.yaml
-"""
+import logging
 
 import torch.distributed as dist
-from accelerate.logging import get_logger
 from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
-from trl import ModelConfig
 
-from src.args.classification_args import CLFScriptArguments
-from src.args.distributed_args import DistributedArguments
-from src.configs.classification_config import ClassificationConfig
-from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
-from src.data.pipeline.processing import coordinated_map, resolve_map_num_proc
-from src.data.pipeline.rendered import tokenize_rendered
-from src.data.sources.loading import reject_image_columns
-from src.data.sources.paths import EVAL_SPLIT_NAMES
-from src.distributed.loading.peft_setup import setup_peft_model
-from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
-from src.distributed.runtime import barrier, get_global_world_size, is_global_main_process, reject_across_ranks
-from src.models.loading.model_preparation import log_model_info
-from src.trainers.mixins.validation import evaluation_runs
-from src.trainers.reward.classification import ClassificationTrainer
-from src.training.environment import run_training
-from src.training.parser import H4ArgumentParser
-from src.training.script_runner import (
-    apply_distributed_trainer_config,
+from halo.config_validation import reject_non_default_args, reject_unsupported_args
+from halo.configs.classification import ClassificationConfig, ClassificationScriptArguments
+from halo.configs.parallelism_arguments import ParallelismArguments
+from halo.configs.script_arguments import ModelArguments
+from halo.data.chat_render import tokenize_rendered
+from halo.data.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
+from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
+from halo.data.sources.paths import EVAL_SPLIT_NAMES
+from halo.data.vlm_detection import reject_image_columns
+from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.model_setup import (
     apply_max_length,
-    build_training_callbacks,
+    default_padded_attn_implementation,
+    load_model_and_tokenizer,
+    log_model_info,
+    reject_multimodal_model_without_seq_cls_head,
+)
+from halo.entrypoints.script import (
+    configure_balancing_and_build_callbacks,
     distributed_trainer_kwargs,
     init_training_script,
-    load_script_datasets,
-    load_script_model,
-    log_script_dataset_examples,
-    padded_workload_attn_implementation,
-    reject_unsupported_args,
+    parse_script_args,
     run_trainer,
+    with_distributed_teardown,
 )
+from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.runtime.collectives import barrier
+from halo.runtime.consensus import reject_across_ranks
+from halo.runtime.ranks import get_global_world_size, is_global_main_process
+from halo.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.reward.classification_loss import reject_mismatched_class_weights
+from halo.trainers.training_args_overrides import uses_evaluation
 
-logger = get_logger(__name__, log_level="INFO")
+logger = logging.getLogger(__name__)
 
-# A "no label" row, in the stringified form get_label_list gives every label.
+# A "no label" row, in the stringified form labels_in_split gives every label.
 NO_LABEL_SENTINEL = "-1"
 
-# Every split whose labels join the class list: an eval split may hold a class train lacks, and a
-# split the run never reads still counts, so the head does not change shape with the eval setting.
+# An eval split may hold a class train lacks, and a split the run never reads still counts, so the head does not change
+# shape with the eval setting.
 LABEL_SPLITS = ("train", *EVAL_SPLIT_NAMES)
+
+_EVAL_ON_LABELED_ROWS_REMEDY = (
+    "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "
+    "dataset: <hub id>@train) and cut the eval split from it with test_size, or set "
+    "eval_strategy: no."
+)
 
 
 def tokenize_classification_row(
@@ -71,18 +71,10 @@ def tokenize_classification_row(
     text_field: str | None = None,
     tools_field: str | None = None,
 ) -> dict:
-    """Chat-template and tokenize one classification row, mapping its label to an id.
-
-    Accepts either a pre-built ``prompt`` conversation or a raw ``text_field`` column, so text/label
-    datasets (e.g. imdb) train without pre-wrapping each row as a conversation. Kept module-level
-    with every tunable in the signature so the map's state rides in ``fn_kwargs``, which the cache
-    key fingerprints, rather than in closure cells it cannot.
-
-    Rows over ``max_length`` are truncated rather than dropped as on the SFT path: a classification
-    label describes the whole document, so a shortened document keeps a valid label, while dropping
-    the row would shrink the training set and skew the class balance.
-    """
-    prompt = maybe_parse_json(example.get("prompt"))
+    """Reads a pre-built ``prompt`` or a raw ``text_field``. Module-level with every tunable in the signature, so the
+    map's state rides in ``fn_kwargs``, which the cache key fingerprints. Rows over ``max_length`` are truncated,
+    unlike SFT: a label describes the whole document, and dropping rows would skew the class balance."""
+    prompt = resolve_json_value(example.get("prompt"))
     if prompt is None and text_field:
         prompt = [{"role": "user", "content": example[text_field]}]
 
@@ -114,12 +106,7 @@ def tokenize_classification_row(
 
 
 def require_prompt_or_text_column(train_columns: list[str], text_field: str | None) -> None:
-    """Config-time check that tokenization has an input column, before the model is loaded.
-
-    ``tokenize_classification_row`` reads a pre-built ``prompt`` conversation, falling back to
-    ``text_field`` — with neither present the failure would otherwise surface as a per-row
-    ``KeyError`` deep in the dataset map, after the full (possibly multi-node) model load.
-    """
+    """Config-time check: the failure would otherwise be a per-row ``KeyError`` in the dataset map, post-load."""
     if "prompt" in train_columns or (text_field and text_field in train_columns):
         return
     text_field_state = f"text_field='{text_field}' names no existing column" if text_field else "text_field is not set"
@@ -131,82 +118,34 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
 
 
 def run_splits(training_config) -> tuple[str, ...]:
-    """The splits the run reads: train, and the ``test`` eval split when the run evaluates."""
-    return ("train", "test") if evaluation_runs(training_config) else ("train",)
+    return ("train", "test") if uses_evaluation(training_config) else ("train",)
 
 
-def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
-    """Each label-bearing split's stringified label set, unioned across the world on a pre-sharded load.
-
-    A pre-sharded dataset leaves each rank part of a split's labels, giving a rank-divergent
-    num_labels and so a different [num_labels, hidden] score head per rank, which breaks the
-    FSDP2/DDP all-reduce over it. Every rank needs a train row, which the label type is read from.
-    """
-    if dataset_presharded:
-        reject_across_ranks(
-            None if len(ds["train"]) else "its train shard holds no rows; shard so every rank gets one",
-            "Loading the pre-sharded dataset",
-            ValueError,
-        )
-    labels = {split: set(get_label_list(ds, split)) for split in LABEL_SPLITS if split in ds}
-    if dataset_presharded and get_global_world_size() > 1:
-        gathered = [None] * get_global_world_size()
-        dist.all_gather_object(gathered, labels)
-        labels = {split: set().union(*(part[split] for part in gathered)) for split in labels}
-    return labels
-
-
-def refuse_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
-    """Refuse the ``-1`` "no label" sentinel in a single-label split the run reads.
-
-    A multi-hot row reads the sentinel as absence. A single-label row has no class to put it in:
-    ``-1`` would reach the cross-entropy as an out-of-range class index. A split the run never reads
-    is dropped before tokenization, so an unlabeled GLUE-style test split does not block a run that
-    does not evaluate. Runs on the world-agreed label sets, before the model load, so every rank
-    raises together.
-    """
-    if is_multi_label:
-        return
+def _label_column_problem(ds, used_splits) -> str | None:
+    """The first split the run reads that holds rows but no ``label`` column, said with its remedy."""
     for split in used_splits:
-        if NO_LABEL_SENTINEL not in split_labels.get(split, ()):
-            continue
-        if split == "train":
+        if split in ds and len(ds[split]) and "label" not in ds[split].column_names:
             remedy = (
-                f"Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != {NO_LABEL_SENTINEL!r})."
+                "Add a 'label' column holding each row's class, or a list of classes per row for a multi-label run."
+                if split == "train"
+                else _EVAL_ON_LABELED_ROWS_REMEDY
             )
-        else:
-            remedy = (
-                "Evaluate on labeled rows instead: point dataset at the train split alone (e.g. "
-                "dataset: <hub id>@train) and cut the eval split from it with test_size, or set "
-                "eval_strategy: no."
+            return (
+                f"The '{split}' split of this classification dataset has no 'label' column (columns: "
+                f"{sorted(ds[split].column_names)}), and the run reads that split. {remedy}"
             )
-        raise ValueError(
-            f"The '{split}' split of this single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no "
-            f"label' sentinel (unlabeled rows, as in GLUE-style test splits), and the run reads that "
-            f"split. A single-label row has no class to put it in, and the loss would read it as an "
-            f"out-of-range class index. {remedy}"
-        )
+    return None
 
 
-def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
-    """The sorted class list: every split's labels, less the ``-1`` "no label" sentinel."""
-    for split, labels in split_labels.items():
-        eval_only = sorted(labels - split_labels["train"] - {NO_LABEL_SENTINEL})
-        if eval_only and is_global_main_process():
-            logger.warning(f"Labels {eval_only} in {split} set but not in training set, adding them")
-    union = set().union(*split_labels.values())
-    if NO_LABEL_SENTINEL in union and is_global_main_process():
-        logger.warning(f"Label {NO_LABEL_SENTINEL} found in label list, removing it.")
-    return sorted(union - {NO_LABEL_SENTINEL})
+def reject_read_splits_without_labels(ds, used_splits) -> None:
+    """COLLECTIVE: a split the run never reads may hold no labels; one it reads is refused by name, on every rank."""
+    reject_across_ranks(_label_column_problem(ds, used_splits), "Checking the label column", ValueError)
 
 
-def get_label_list(raw_dataset, split="train") -> list[str]:
-    """The stringified labels of ``split``, flattened for a multi-label one.
-
-    Empty for an empty split: a pre-sharded eval split can leave a rank without rows, and that rank
-    must still reach the label-set gather its peers enter.
-    """
-    if len(raw_dataset[split]) == 0:
+def labels_in_split(raw_dataset, split="train") -> list[str]:
+    """Empty for an empty split, since a rowless rank on a pre-sharded eval split must still join the label gather, and
+    for a split with no label column, which only one the run does not read gets this far with."""
+    if len(raw_dataset[split]) == 0 or "label" not in raw_dataset[split].column_names:
         return []
     if isinstance(raw_dataset[split]["label"][0], list):
         label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
@@ -217,15 +156,74 @@ def get_label_list(raw_dataset, split="train") -> list[str]:
     return label_list
 
 
+def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
+    """Unioned across the world on a pre-sharded load: partial labels would give a rank-divergent ``num_labels`` and
+    score head, breaking the all-reduce over it. Every rank needs a train row, which gives the label type."""
+    if dataset_presharded:
+        reject_across_ranks(
+            None if len(ds["train"]) else "its train shard holds no rows; shard so every rank gets one",
+            "Loading the pre-sharded dataset",
+            ValueError,
+        )
+    labels = {split: set(labels_in_split(ds, split)) for split in LABEL_SPLITS if split in ds}
+    if dataset_presharded and get_global_world_size() > 1:
+        gathered = [None] * get_global_world_size()
+        dist.all_gather_object(gathered, labels)
+        labels = {split: set().union(*(part[split] for part in gathered)) for split in labels}
+    return labels
+
+
+def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
+    """Refuse the ``-1`` sentinel in a single-label split the run reads: it would reach the cross-entropy as an
+    out-of-range class. Runs on the world-agreed label sets before the model load, so every rank raises together."""
+    if is_multi_label:
+        return
+    for split in used_splits:
+        if NO_LABEL_SENTINEL not in split_labels.get(split, ()):
+            continue
+        if split == "train":
+            remedy = (
+                f"Filter those rows out, e.g. dataset.filter(lambda row: str(row['label']) != {NO_LABEL_SENTINEL!r})."
+            )
+        else:
+            remedy = _EVAL_ON_LABELED_ROWS_REMEDY
+        raise ValueError(
+            f"The '{split}' split of this single-label dataset carries the {NO_LABEL_SENTINEL!r} 'no "
+            f"label' sentinel (unlabeled rows, as in GLUE-style test splits), and the run reads that "
+            f"split. A single-label row has no class to put it in, and the loss would read it as an "
+            f"out-of-range class index. {remedy}"
+        )
+
+
+def reject_unread_metric_knobs(config: ClassificationConfig, is_multi_label: bool) -> None:
+    """Each is read on one kind of head only, and the dataset decides the kind."""
+    if is_multi_label:
+        reject_non_default_args("Classification on a multi-label dataset", config, "compute_per_class_metrics")
+    else:
+        reject_non_default_args("Classification on a single-label dataset", config, "multi_label_threshold")
+
+
+def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
+    """Every split's labels, sorted, less the ``-1`` no-label sentinel."""
+    for split, labels in split_labels.items():
+        eval_only = sorted(labels - split_labels["train"] - {NO_LABEL_SENTINEL})
+        if eval_only and is_global_main_process():
+            logger.warning(f"Labels {eval_only} in {split} set but not in training set, adding them")
+    union = set().union(*split_labels.values())
+    if NO_LABEL_SENTINEL in union and is_global_main_process():
+        logger.warning(f"Label {NO_LABEL_SENTINEL} found in label list, removing it.")
+    return sorted(union - {NO_LABEL_SENTINEL})
+
+
 def main():
-    parser = H4ArgumentParser((CLFScriptArguments, ClassificationConfig, ModelConfig, DistributedArguments))
-    args, classification_config, model_config, dist_args = parser.parse()
+    args, classification_config, model_config, dist_args = parse_script_args(
+        ClassificationScriptArguments, ClassificationConfig, ModelArguments, ParallelismArguments
+    )
 
-    # The score head is pinned to AutoModelForSequenceClassification, so the loader would only warn
-    # and build the wrapper anyway; reject the flag rather than accept one that cannot take effect.
-    reject_unsupported_args("Classification", text_only_model=dist_args.text_only_model)
+    # The score head is pinned to AutoModelForSequenceClassification, so the flag could not take effect.
+    reject_unsupported_args("Classification", text_only_model=args.text_only_model)
 
-    runtime = init_training_script(
+    context = init_training_script(
         args,
         classification_config,
         model_config,
@@ -233,13 +231,15 @@ def main():
         script_prefix="classification",
         trainer_cls=ClassificationTrainer,
     )
-    parallelism_config = runtime.parallelism_config
+    parallelism_config = context.parallelism_config
 
     # Dataset first: num_labels comes from it.
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
     reject_image_columns(ds, "Classification")
 
     require_prompt_or_text_column(ds["train"].column_names, args.text_field)
+    used_splits = run_splits(classification_config)
+    reject_read_splits_without_labels(ds, used_splits)
     split_labels = split_label_sets(ds, dataset_presharded)
 
     is_multi_label = False
@@ -248,30 +248,29 @@ def main():
         if is_global_main_process():
             logger.info("Label type is list, doing multi-label classification")
 
-    used_splits = run_splits(classification_config)
-    refuse_unlabeled_rows(split_labels, used_splits, is_multi_label)
+    reject_unread_metric_knobs(classification_config, is_multi_label)
+    reject_unlabeled_rows(split_labels, used_splits, is_multi_label)
     label_list = build_label_list(split_labels)
     num_labels = len(label_list)
     if num_labels <= 1:
         raise ValueError("You need more than one label to do classification.")
+    reject_mismatched_class_weights(classification_config.class_weights, num_labels)
 
     label_to_id = {v: i for i, v in enumerate(label_list)}
 
-    # Before the model load: a multimodal family with no score head otherwise fails inside Auto*
-    # resolution on every rank, naming no alternative. After the distributed init, so the hub read it
-    # makes is ordered main-rank-first.
-    require_multimodal_sequence_classification_head(model_config)
+    # Before the load: a family with no score head fails inside Auto* resolution on every rank, naming no alternative.
+    # After the distributed init, so the hub read is ordered main-rank-first.
+    reject_multimodal_model_without_seq_cls_head(model_config)
 
-    # ClassificationTrainer's DataCollatorWithPadding right-pads every batch — keep those shapes off
-    # the auto-selected FA4's slow varlen path.
-    model, tokenizer = load_script_model(
-        runtime,
+    # ClassificationTrainer's DataCollatorWithPadding right-pads every batch.
+    model, tokenizer = load_model_and_tokenizer(
+        context,
         classification_config,
         model_config,
-        dist_args,
+        args,
         model_class=AutoModelForSequenceClassification,
         model_config_overrides={"num_labels": num_labels},
-        attn_implementation=padded_workload_attn_implementation(model_config, sinks_reset=dist_args.reset_sinks),
+        attn_default=default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks),
     )
 
     tokenizer = apply_max_length(classification_config, args, model, tokenizer)
@@ -284,7 +283,7 @@ def main():
     model.config.label2id = label_to_id
     model.config.id2label = {id: label for label, id in label_to_id.items()}
 
-    peft_config = setup_peft_model(args, model, model_config, "SEQ_CLS")
+    peft_config = configure_adapter_training(args, model, model_config, "SEQ_CLS")
 
     log_model_info(model, tokenizer)
 
@@ -303,8 +302,7 @@ def main():
             "text_field": args.text_field,
             "tools_field": args.tools_field,
         },
-        # The baked label_to_id keys the map cache: with presharded data the ids change with world size,
-        # and a stale cache would keep the old ones.
+        # With presharded data the ids change with world size, and a stale cache would keep the old ones.
         cache_key_extras={"label_list": label_list},
     )
 
@@ -313,11 +311,9 @@ def main():
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, classification_config)
 
-    apply_distributed_trainer_config(classification_config, parallelism_config)
-
     barrier()
 
-    callbacks = build_training_callbacks(args, classification_config, model, parallelism_config)
+    callbacks = configure_balancing_and_build_callbacks(args, classification_config, model, context)
 
     trainer = ClassificationTrainer(
         model=model,
@@ -330,10 +326,10 @@ def main():
         is_binary=len(label_to_id) == 2 and not is_multi_label,
         is_multi_label=is_multi_label,
         label_names_list=label_list,
-        **distributed_trainer_kwargs(args, dist_args, parallelism_config, dataset_presharded=dataset_presharded),
+        **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
-    run_trainer(trainer, runtime, method_name="Classification")
+    run_trainer(trainer, context, method_name="Classification")
 
 
 if __name__ == "__main__":
-    run_training(main)()
+    with_distributed_teardown(main)()

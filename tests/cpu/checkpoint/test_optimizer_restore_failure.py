@@ -1,44 +1,21 @@
-"""A per-rank optimizer restore that fails on ONE rank must fail the resume on EVERY rank.
-
-The shards passed every topology gate, so they are this run's state: a rank that cannot read its
-shard (truncated, an I/O error) or apply it (a CUDA OOM inside ``set_optimizer_state_dict``) must not
-turn into a fresh optimizer while the weights, step and LR schedule resume. Two ranks on a real gloo
-group, with only rank 1 failing, pin:
-
-1. **Uniform raise.** Rank 0, whose own restore succeeded, raises too, and both messages name the
-   failing rank and its error. Rank 0 cannot learn the failure from a single-process stub. A rank
-   whose apply failed has dropped what the attempt left behind (moments, zero gradients, ``lr=0``)
-   by then, which is what lets a rank that ran out of memory enter the verdict's gather.
-2. **The opt-in.** ``allow_optimizer_warm_restart`` keeps the warm restart instead: no rank raises,
-   every rank drops its optimizer state (rank 0's restored moments included), the LR schedule still
-   resumes, and rank 0 warns with the failing rank and error.
-3. **No optimizer state saved** (``save_only_model``) is not a failure: the resume proceeds with a
-   fresh optimizer and a warning, without the opt-in.
-4. **An interrupted save is.** Shards whose meta never landed, and the base save's rank-0
-   ``optimizer.pt`` with no shards beside it, are the two halves a kill mid-save leaves: every rank
-   refuses them, naming the opt-in, rather than warm-restarting over them as if they were complete.
-
-A single process takes both outcomes too, and the trainer hands the opt-in to the store it builds.
-
-    python tests/cpu/checkpoint/test_optimizer_restore_failure.py
-"""
+"""A per-rank optimizer restore failing on one rank fails the resume on every rank, or the weights resume on fresh
+moments. Two ranks on a real gloo group, since rank 0 cannot learn the failure from a single-process stub."""
 
 import datetime
 import json
 import logging
 import os
 import re
-from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-import src.distributed.checkpoint.optimizer as optimizer_mod
-from src.distributed.checkpoint.optimizer import OptimizerShardStore
-from src.distributed.runtime import fs_aware_makedirs
-from src.trainers.mixins.checkpointing import CheckpointingMixin
+import halo.checkpoint.parallel.optimizer as optimizer_mod
+from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.runtime.filesystem import fs_aware_makedirs
+from halo.trainers.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import (
     OPTIMIZER_SHARD_FILE,
     SHARD_ROUND_TRIP_LR,
@@ -58,7 +35,7 @@ BASE_OPTIMIZER_FILE = "optimizer.pt"
 SEED = 20261003
 TRAIN_STEPS = 3
 OOM_MESSAGE = "CUDA out of memory. Tried to allocate 20.00 MiB"
-# A rank left in a collective its peer never entered fails at this bound instead of stalling the suite.
+# Fails at this bound instead of stalling the suite.
 PG_TIMEOUT = datetime.timedelta(seconds=60)
 
 
@@ -80,7 +57,7 @@ def _store(model, optimizer, scheduler, rank: int, world_size: int, allow: bool 
 
 
 def _save(checkpoint: str, rank: int, world_size: int) -> torch.optim.lr_scheduler.LRScheduler:
-    """Save this rank's own moments; returns the schedule, ``TRAIN_STEPS`` in, for the caller to keep."""
+    """Returns the schedule, ``TRAIN_STEPS`` in, for the caller to keep."""
     model, optimizer, scheduler = _fresh()
     step_on_seeded_data(model, optimizer, SEED + 1 + rank, TRAIN_STEPS)
     for _ in range(TRAIN_STEPS):
@@ -113,7 +90,6 @@ class _WarningRecorder(logging.Handler):
 
 
 def _worker(rank: int, root: str, scenario: str) -> None:
-    """Save a checkpoint (unless the scenario saved none), then resume it into a fresh optimizer."""
     outcome = {"raised": None, "applied_locally": False}
     warnings = _WarningRecorder()
     logging.getLogger(optimizer_mod.__name__).addHandler(warnings)
@@ -155,7 +131,7 @@ def _worker(rank: int, root: str, scenario: str) -> None:
         outcome["grads_left"] = sum(param.grad is not None for param in model.parameters())
         outcome["lr"] = optimizer.param_groups[0]["lr"]
         outcome["scheduler_epoch"] = scheduler.last_epoch
-    except Exception as e:  # the setup failing must still leave a verdict file for the assertions
+    except Exception as e:  # The setup failing must still leave a verdict file.
         outcome["raised"] = f"setup {type(e).__name__}: {e}"
     outcome["warnings"] = warnings.messages
     with open(os.path.join(root, f"result_{rank}.json"), "w") as fh:
@@ -243,8 +219,7 @@ def test_shards_whose_meta_never_landed_are_refused_on_every_rank(tmp_path):
 
 
 def test_the_base_optimizer_without_its_shards_is_refused_on_every_rank(tmp_path):
-    """Killed after the base save's ``trainer_state.json`` but before the per-rank shards: what is
-    left is rank 0's replicated view, which the mixin deletes only once its shards are on disk."""
+    """State that provably exists in a layout this run's shards cannot take."""
     _assert_every_rank_refused_the_torn_save(_run(tmp_path, "base_optimizer_only"), BASE_OPTIMIZER_FILE)
 
 
@@ -261,11 +236,8 @@ def test_the_opt_in_warm_restarts_over_a_torn_shard_set(tmp_path):
 @pytest.mark.parametrize("failure", ["unreadable_shard", "apply_failure"])
 @pytest.mark.parametrize("allow", [False, True], ids=["default", "opted-in"])
 def test_a_single_process_restore_failure(tmp_path, monkeypatch, failure, allow):
-    """The verdict's non-distributed branch, for both failures and both outcomes.
-
-    No ``scheduler.pt`` here, so nothing re-applies a learning rate after the warm restart: the run's
-    own must survive the failed apply, which torch's init step left at 0.
-    """
+    """No ``scheduler.pt``, so nothing re-applies a learning rate; the run's own must survive the failed apply,
+    which torch's init step left at 0."""
     _save(str(tmp_path), rank=0, world_size=1)
     if failure == "unreadable_shard":
         _truncate_shard(str(tmp_path), rank=0)
@@ -289,13 +261,12 @@ def test_a_single_process_restore_failure(tmp_path, monkeypatch, failure, allow)
 
 
 def _rebuild_one_group_too_many(optimizer: torch.optim.Optimizer) -> None:
-    """What a shard saved under another param-group layout leaves after ``set_optimizer_state_dict``."""
     optimizer.param_groups.append({**optimizer.param_groups[0], "params": []})
 
 
 def test_a_drifted_group_count_never_masks_the_restore_error(tmp_path, monkeypatch):
-    """The group-settings cleanup runs while the apply's own error unwinds: a group count it cannot
-    pair up must not replace that error, which is the only diagnosis every rank receives."""
+    """The cleanup runs while the apply's error unwinds; replacing that error would lose the only diagnosis every
+    rank receives."""
     _save(str(tmp_path), rank=0, world_size=1)
 
     def drift_then_fail(model, optimizer, **kwargs):
@@ -312,8 +283,7 @@ def test_a_drifted_group_count_never_masks_the_restore_error(tmp_path, monkeypat
 
 
 def test_a_restore_that_rebuilt_another_group_count_fails_loud(tmp_path, monkeypatch):
-    """An unmatched group would step on the checkpoint's hyperparameters, so a clean apply that
-    drifted the group count still fails the resume."""
+    """An unmatched group would step on the checkpoint's hyperparameters."""
     _save(str(tmp_path), rank=0, world_size=1)
     real_apply = optimizer_mod.set_optimizer_state_dict
 
@@ -330,8 +300,6 @@ def test_a_restore_that_rebuilt_another_group_count_fails_loud(tmp_path, monkeyp
 
 
 class _TrainerBase:
-    """The two base-Trainer methods the load context binds through ``super()``."""
-
     def _load_from_checkpoint(self, resume_from_checkpoint, model=None) -> None:
         raise AssertionError("not reached")
 
@@ -340,13 +308,13 @@ class _TrainerBase:
 
 
 class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
-    def __init__(self, args):
-        self.args = args
+    def __init__(self, allow_optimizer_warm_restart):
+        self.allow_optimizer_warm_restart = allow_optimizer_warm_restart
         self.model = nn.Linear(2, 2)
         self.optimizer = None
         self.lr_scheduler = None
         self.parallelism_config = make_parallelism_config(world_size=1, gpus_per_node=1)
-        self._has_ep_layers = False
+        self._ep_layers = list
         self._fsdp_wrapped = True
         self._accelerate_manages_fsdp = False
 
@@ -354,19 +322,10 @@ class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
         return 0
 
 
-@pytest.mark.parametrize(
-    ("args", "expected"),
-    [
-        (SimpleNamespace(allow_optimizer_warm_restart=True), True),
-        (SimpleNamespace(allow_optimizer_warm_restart=False), False),
-        (SimpleNamespace(), False),
-    ],
-    ids=["opted-in", "default", "config-built-outside-the-entry-scripts"],
-)
-def test_the_trainer_hands_the_opt_in_to_the_optimizer_store(args, expected):
-    """The entry scripts forward the knob onto the training config; the store reads it only off the
-    context the trainer builds, so a context that drops it makes the opt-in a silent no-op."""
-    assert _CheckpointingHost(args)._optimizer_store().ctx.allow_optimizer_warm_restart is expected
+@pytest.mark.parametrize("opted_in", [True, False], ids=["opted-in", "default"])
+def test_the_trainer_hands_the_opt_in_to_the_optimizer_store(opted_in):
+    """The store reads it only off the context, so dropping it makes the opt-in a silent no-op."""
+    assert _CheckpointingHost(opted_in)._optimizer_store().ctx.allow_optimizer_warm_restart is opted_in
 
 
 if __name__ == "__main__":

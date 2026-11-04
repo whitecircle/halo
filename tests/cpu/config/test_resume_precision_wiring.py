@@ -2,6 +2,7 @@
 """Resume provenance makes checkpoint master coverage strict across every supported Path-B loader."""
 
 import ast
+import inspect
 import re
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,12 +11,15 @@ import pytest
 import torch
 from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
-from trl import ModelConfig
 
-import src.distributed.loading.model_loading as loading
-import src.distributed.loading.vlm_setup as vlm_setup
-from src.training.environment import prepare_distributed_resume
-from src.training.script_runner import ScriptRuntime, load_script_model
+import halo.entrypoints.model_setup as model_setup
+import halo.model_loading.parallel.loader as loading
+from halo.configs.script_arguments import ModelArguments
+from halo.entrypoints.model_setup import load_model_and_tokenizer
+from halo.entrypoints.run_setup import prepare_distributed_resume
+from halo.entrypoints.script import ScriptContext
+from halo.model_loading.parallel.model_source import ModelSource
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.source_sweep import call_name, functions_in
 
@@ -25,10 +29,11 @@ PartialState()
 class _Dispatched(Exception):
     """Stop the public loader at the leaf the dispatcher picked, before weights or groups are built."""
 
-    def __init__(self, loader: str, common_kwargs: dict):
+    def __init__(self, loader: str, from_pretrained_kwargs: dict, preserve_checkpoint_precision: bool):
         super().__init__(loader)
         self.loader = loader
-        self.common_kwargs = common_kwargs
+        self.from_pretrained_kwargs = from_pretrained_kwargs
+        self.preserve_checkpoint_precision = preserve_checkpoint_precision
 
 
 # Each axis set the public loader serves: its parallel sizes, the checkpoint family it is asked to
@@ -36,29 +41,29 @@ class _Dispatched(Exception):
 # PP rows sit on two NVLink domains, so each stage owns a whole one.
 DISPATCH_CASES = {
     "dp": ({}, Qwen3MoeConfig, "_load_undistributed_model"),
-    "cp_only": ({"cp_size": 2}, Qwen3MoeConfig, "_load_cp_model"),
-    "ep": ({"ep_size": 8}, Qwen3MoeConfig, "_load_ep_model"),
-    "ep_cp": ({"ep_size": 8, "cp_size": 2}, Qwen3MoeConfig, "_load_ep_cp_model"),
-    "dense_tp": ({"tp_size": 2}, Qwen3Config, "_load_tp_model"),
-    "moe_tp": ({"tp_size": 2}, Qwen3MoeConfig, "_load_tp_moe_model"),
-    "ep_tp": ({"ep_size": 8, "tp_size": 2}, Qwen3MoeConfig, "_load_ep_tp_model"),
-    "pure_etp": ({"expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
-    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, Qwen3MoeConfig, "_load_ep_model"),
-    "pp": ({"pp_size": 2}, Qwen3MoeConfig, "_load_pp_stage_model"),
-    "pp_ep": ({"pp_size": 2, "ep_size": 8}, Qwen3MoeConfig, "_load_pp_stage_model"),
+    "cp_only": ({"cp_size": 2}, Qwen3MoeConfig, "load_cp_model"),
+    "ep": ({"ep_size": 8}, Qwen3MoeConfig, "load_ep_model"),
+    "ep_cp": ({"ep_size": 8, "cp_size": 2}, Qwen3MoeConfig, "load_ep_cp_model"),
+    "dense_tp": ({"tp_size": 2}, Qwen3Config, "load_tp_model"),
+    "moe_tp": ({"tp_size": 2}, Qwen3MoeConfig, "load_tp_moe_model"),
+    "ep_tp": ({"ep_size": 8, "tp_size": 2}, Qwen3MoeConfig, "load_ep_tp_model"),
+    "pure_etp": ({"expert_tp_size": 2}, Qwen3MoeConfig, "load_ep_model"),
+    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, Qwen3MoeConfig, "load_ep_model"),
+    "pp": ({"pp_size": 2}, Qwen3MoeConfig, "load_pp_stage_model"),
+    "pp_ep": ({"pp_size": 2, "ep_size": 8}, Qwen3MoeConfig, "load_pp_stage_model"),
 }
 
 
-def _leaf_loaders() -> list[str]:
-    """The per-mode loaders ``_dispatch_model_loading`` chooses among, by the module's naming."""
-    return sorted(
-        name for name, value in vars(loading).items() if re.fullmatch(r"_load_\w+_model", name) and callable(value)
-    )
+def _leaf_loaders() -> set[str]:
+    """The per-mode loaders ``_dispatch_model_loading`` calls, read off its source."""
+    tree = ast.parse(inspect.getsource(loading._dispatch_model_loading))
+    names = {call_name(node) for node in ast.walk(tree) if isinstance(node, ast.Call)}
+    return {name for name in names if name and re.fullmatch(r"_?load_\w+_model", name)}
 
 
 def _stopping_loader(name: str):
-    def load(source, parallelism, model_class, common_kwargs, *args, **kwargs):
-        raise _Dispatched(name, dict(common_kwargs))
+    def load(source, parallelism, model_class, from_pretrained_kwargs, *, preserve_checkpoint_precision, **kwargs):
+        raise _Dispatched(name, dict(from_pretrained_kwargs), preserve_checkpoint_precision)
 
     return load
 
@@ -69,18 +74,27 @@ def test_the_real_dispatch_hands_each_axis_set_its_loader_and_the_strict_master_
     axes, config_class, expected_loader = DISPATCH_CASES[case]
     pc = make_parallelism_config(world_size=16 if "pp_size" in axes else 8, gpus_per_node=8, **axes)
     config = config_class()
-    monkeypatch.setattr(loading, "resolve_model_source", lambda path, revision, **kwargs: revision)
+    monkeypatch.setattr(
+        loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+    )
     monkeypatch.setattr(loading.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
     monkeypatch.setattr(loading.AutoTokenizer, "from_pretrained", lambda *args, **kwargs: SimpleNamespace())
+    # The module-tree gate has its own test; it would refuse the eager label standing in for attention under CP.
+    monkeypatch.setattr(loading, "reject_unsupported_structure", lambda *args, **kwargs: None)
     for name in _leaf_loaders():
         monkeypatch.setattr(loading, name, _stopping_loader(name))
     with pytest.raises(_Dispatched) as dispatched:
         loading.load_distributed_model(
-            "org/base", pc, dtype=torch.bfloat16, attn_implementation="eager", preserve_checkpoint_precision=preserve
+            "org/base",
+            pc,
+            dtype=torch.bfloat16,
+            attn_implementation="eager",
+            preserve_checkpoint_precision=preserve,
+            trust_remote_code=True,
         )
     assert dispatched.value.loader == expected_loader
-    assert dispatched.value.common_kwargs.get("preserve_checkpoint_precision", False) is preserve
-    assert dispatched.value.common_kwargs["dtype"] is torch.bfloat16
+    assert dispatched.value.preserve_checkpoint_precision is preserve
+    assert dispatched.value.from_pretrained_kwargs["dtype"] is torch.bfloat16
 
 
 @pytest.mark.parametrize("resume", (False, "explicit", True, "adapter"), ids=("fresh", "explicit", "auto", "adapter"))
@@ -100,22 +114,22 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
         use_liger_kernel=False,
         liger_kernel_config=None,
     )
-    model_config = ModelConfig(model_name_or_path="org/base")
+    model_config = ModelArguments(model_name_or_path="org/base")
     pc = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8)
-    checkpoint, source = prepare_distributed_resume(training, model_config, pc)
-    runtime = ScriptRuntime(pc, "ep", 0, checkpoint, source)
+    checkpoint, source = prepare_distributed_resume(training, model_config, pc, overwrite_output_dir=False)
+    runtime = ScriptContext(pc, 0, checkpoint, source, DistributedSFTTrainer)
 
     def load(**kwargs):
         # The name from_pretrained gives the config of the directory it read.
         return SimpleNamespace(config=SimpleNamespace(_name_or_path=kwargs["model_name_or_path"])), SimpleNamespace()
 
     loader = Mock(side_effect=load)
-    monkeypatch.setattr(vlm_setup, "load_distributed_model", loader)
-    model, _ = load_script_model(
+    monkeypatch.setattr(model_setup, "load_distributed_model", loader)
+    model, _ = load_model_and_tokenizer(
         runtime,
         training,
         model_config,
-        SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False),
+        SimpleNamespace(reset_sinks=True, train_sinks=False, text_only_model=False, init_from_scratch=False),
     )
     expected = resume in ("explicit", True)
     assert loader.call_args.kwargs["preserve_checkpoint_precision"] is expected
@@ -127,21 +141,21 @@ def test_script_model_uses_resolved_checkpoint_identity_not_resume_flag(tmp_path
 
 
 def test_modality_aware_training_calls_forward_the_runtime_checkpoint_identity():
+    """The checkpoint identity reaches the loader only through the script's own context, which the
+    preference load hands on as it got it."""
     calls = [
         (path, node)
-        for path, function in functions_in(("scripts/training",))
+        for path, function in functions_in(("scripts/training", "halo/entrypoints/model_setup.py"))
         for node in ast.walk(function)
-        if isinstance(node, ast.Call) and call_name(node) == "load_model_for_training"
+        if isinstance(node, ast.Call) and call_name(node) in ("load_policy_model", "load_preference_models")
     ]
     assert len(calls) >= 6, "the modality-aware policy-construction sweep must remain non-vacuous"
     for path, call in calls:
-        value = {keyword.arg: keyword.value for keyword in call.keywords}.get("preserve_checkpoint_precision")
-        assert isinstance(value, ast.Attribute) and value.attr == "policy_from_checkpoint", path
-        assert isinstance(value.value, ast.Name) and value.value.id == "runtime", path
+        assert isinstance(call.args[0], ast.Name) and call.args[0].id == "context", path
 
 
 def test_the_dispatch_matrix_reaches_every_leaf_loader():
-    assert {loader for _, _, loader in DISPATCH_CASES.values()} == set(_leaf_loaders())
+    assert {loader for _, _, loader in DISPATCH_CASES.values()} == _leaf_loaders()
 
 
 if __name__ == "__main__":

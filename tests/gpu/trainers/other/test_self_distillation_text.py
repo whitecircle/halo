@@ -1,19 +1,8 @@
 #!/usr/bin/env python
-"""Test: DistributedSelfDistillationTrainer (offline SDPG approximation) on a text LLM — single-GPU smoke.
+"""DistributedSelfDistillationTrainer on a text LLM, single-GPU smoke: finite losses and a recorded opd_loss.
 
-Runs the text self-distillation path end-to-end under TRL 1.6: SelfDistillTextCollator builds the
-student batch plus the privileged-hint teacher_* branch, and the trainer runs the student and
-teacher forwards for L = L_sft + beta(k) * L_OPD. It checks only that every configured step ran,
-that every logged step loss is finite and that the opd_loss metric was recorded (the
-privileged-teacher forward ran); it does not compare either loss term against a reference. The
-student/teacher response-token alignment is pinned on CPU by
-tests/cpu/data/test_self_distill_collator.py, and the objective by
+No loss term is compared here; alignment and objective are pinned by tests/cpu/data/test_self_distill_collator.py and
 tests/cpu/trainers/test_self_distillation_trainer.py.
-
-Model defaults to Qwen3-0.6B (CI); set HALO_TEST_MODEL to override (e.g. Qwen/Qwen3.5-4B).
-
-Run:
-    torchrun --nproc_per_node=1 tests/gpu/trainers/other/test_self_distillation_text.py
 """
 
 import torch
@@ -21,13 +10,14 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig
 
-from src.data.collators.self_distill import SelfDistillTextCollator
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_str
-from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_str
+from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", QWEN3_0_6B)
 NUM_TRAIN_SAMPLES = 16
@@ -35,7 +25,6 @@ NUM_TRAIN_STEPS = 4
 
 
 def create_text_self_distill_dataset(n: int) -> Dataset:
-    """Synthetic raw conversations with a privileged ``answer`` field (arithmetic task)."""
     rows = []
     for i in range(n):
         a, b = i % 7, (i * 3) % 5
@@ -70,6 +59,7 @@ def run(ctx) -> dict:
         hint_template="\n[Hint] The correct answer is: {answer}.\n",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
         response_prompt_template="<|im_start|>assistant\n",
         train_on_completions_only=True,
     )
@@ -93,7 +83,6 @@ def run(ctx) -> dict:
         dataloader_num_workers=0,
         remove_unused_columns=False,
         dataset_kwargs={"skip_prepare_dataset": True},
-        fsdp="",
     )
 
     trainer = DistributedSelfDistillationTrainer(
@@ -122,7 +111,7 @@ def run(ctx) -> dict:
         "checks": {
             "steps_completed": trainer.state.global_step == NUM_TRAIN_STEPS,
             "losses_finite": bool(losses) and all(torch.isfinite(torch.tensor(v)) for v in losses),
-            # No opd_loss metric ⇒ the privileged-teacher forward never ran.
+            # No opd_loss metric means the privileged-teacher forward never ran.
             "opd_loss_recorded": bool(opd),
         }
     }

@@ -1,16 +1,6 @@
 #!/usr/bin/env python
-"""
-End-to-end step-throughput A/B of the two DeepEP transport backends: legacy Buffer (V1) vs
-ElasticBuffer (V2). The backends differ only in the MoE all-to-all (a minority of step FLOPs), so
-this confirms picking ``legacy`` for the no-token-ceiling property does not cost training throughput.
-
-Loads the SAME MoE model at EP=2 once per backend and times forward+backward (median over N iters,
-CUDA-synced) on a fixed input, reporting median ms/step, tokens/s, and the legacy/elastic ratio.
-
-Run with 2 GPUs (single node — legacy is intranode-only):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/profiling/bench_ep_buffer_backends.py
-"""
+"""Step throughput of DeepEP's legacy Buffer vs ElasticBuffer at EP=2: they differ only in the MoE all-to-all, so
+``legacy`` should cost no throughput. Single node, since legacy is intranode-only."""
 
 import statistics
 import sys
@@ -18,17 +8,18 @@ import sys
 import torch
 from accelerate import PartialState
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import barrier
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.collectives import barrier
 from tests.common.distributed import (
     ensure_model_downloaded,
     init_distributed,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -39,7 +30,7 @@ ITERS = 10
 
 def time_backend(backend, local_rank):
     device = f"cuda:{local_rank}"
-    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=has_grouped_mm(), ep_buffer_backend=backend)
+    cfg = ParallelismConfig(ep_size=EP_SIZE, use_grouped_gemm=supports_grouped_mm(), ep_buffer_backend=backend)
     model = load_distributed_model(
         model_name_or_path=MODEL_NAME,
         parallelism_config=cfg,

@@ -8,8 +8,8 @@ Fit a student to a teacher's token-level output distribution. The three methods 
 | Policy | Off-policy, fixed dataset | Off-policy, fixed responses | On-policy, student rollouts |
 | Generation | None | None | vLLM rollouts |
 | Objective | `distill_alpha·L_distill + (1−distill_alpha)·L_clm` | `L_sft + beta(k)·L_OPD + alpha·L_ref` | `L_GRPO + beta(k)·L_OPD` |
-| Trainer | `DistributedDistillationTrainer` | `DistributedSelfDistillationTrainer` | `DistributedSDPGTrainer` |
-| Script | `distillation/teacher_distill.py` | `distillation/self_distill.py` | `online_grpo/rlvr.py --use_sdpg` |
+| Trainer | `DistributedTeacherDistillationTrainer` | `DistributedSelfDistillationTrainer` | `DistributedSDPGTrainer` |
+| Script | `distillation/teacher_distill.py` | `distillation/self_distill.py` | `grpo/online.py --use_sdpg` |
 | Modality | Text + VLM | Text + VLM | Text only |
 
 Which to pick:
@@ -19,6 +19,8 @@ Which to pick:
 - One model, a verifier, and a vLLM rollout budget → [online SDPG](online-sdpg.md).
 
 All three take EP, TP, ETP, EP+TP and EP+ETP on the student. None takes CP or PP: each needs a second whole-model forward that neither the sequence split nor the stage split can reproduce.
+
+Every divergence, the gold-token gate and the hard-label cross-entropy score the logits one token chunk at a time under a checkpoint (`token_divergence` in `halo/trainers/distillation/divergences.py`), so backward holds each forward's logits and no fp32 `[tokens, vocab]` plane; the peak beyond the models is those logits planes.
 
 ## Dataset
 

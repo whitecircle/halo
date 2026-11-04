@@ -1,23 +1,6 @@
 #!/usr/bin/env python
 """SMPO under context parallelism trains the unsplit objective: same loss, same gradient.
-
-Each CP rank holds one sequence chunk and all-reduces its partial per-sequence log-prob and NLL sums,
-so every rank computes the same loss. Those sum reduces must be autograd-aware: their backward sums
-the gradient over the CP group, which FSDP2's world-wide gradient average then divides back by
-``cp_size``. An in-place ``dist.all_reduce`` on a grad-carrying tensor instead reaches autograd
-through PyTorch's deprecated c10d fallback — identity backward plus an "autograd kernel was not
-registered" warning — and trains on ``1/cp_size`` of the gradient unless the loss is rescaled. The
-percentile clip's all-gather must likewise see only detached values.
-
-This drives the real ``get_batch_loss_metrics`` over a 2-rank gloo CP group in float64 and compares
-the per-sequence log-probs, the loss, the FSDP-averaged gradient and every logged metric with a
-``cp_size=1`` run of the same batch. The ``logits/*`` means are logging-only reduces: each rank's
-chunk mean would differ from the sequence's. A batch whose prompts the collator left-padded must
-reach the CP forward with trailing padding only — the stand-in model refuses a left-padded batch as
-the CP wrapper does — and still match the unsplit run.
-
-    python tests/cpu/trainers/test_smpo_cp_gradient.py
-"""
+An in-place ``dist.all_reduce`` has an identity backward in c10d's fallback, training ``1/cp_size`` of the grad."""
 
 import copy
 import warnings
@@ -28,12 +11,12 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from src.distributed.context_parallel.config import split_sequence_for_cp
-from src.distributed.context_parallel.wrapper import _reject_left_padding
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.distributed.context_parallel.sequence_chunks import reject_left_padding, split_sequence_for_cp
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
 from tests.common.gloo import run_gloo_ranks
+from tests.common.smpo_trainer import smpo_trainer
 
 CP_WORLD_SIZE = 2
 VOCAB = 16
@@ -45,8 +28,7 @@ PER_SEQUENCE_KEYS = ("chosen_logps", "rejected_logps", "chosen_sft_loss", "rejec
 
 
 class _TokenTableLM(nn.Module):
-    """Logits looked up per token; under CP it refuses a left-padded batch and forwards only this
-    rank's chunk, like the CP wrapper."""
+    """Logits looked up per token; under CP it refuses a left-padded batch and forwards only this rank's chunk."""
 
     def __init__(self):
         super().__init__()
@@ -56,36 +38,26 @@ class _TokenTableLM(nn.Module):
 
     def forward(self, input_ids, attention_mask=None, position_ids=None, use_cache=None):
         if self.cp_config is not None:
-            _reject_left_padding(attention_mask)
+            reject_left_padding(attention_mask)
             input_ids = split_sequence_for_cp(input_ids, self.cp_config)
         return SimpleNamespace(logits=self.table[input_ids])
 
 
-def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SmoothMarginPOTrainer:
-    """A construction-free SMPO carrying what ``get_batch_loss_metrics`` reads."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
-    trainer.parallelism_config = parallelism_config
-    trainer.cp_config = cp_config
-    trainer.pad_token_id = PAD_TOKEN_ID
-    trainer.padding_free = False
+def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SMPOTrainer:
     # Clipping on, so the CP quantile's all-gather runs inside the backward-carrying forward.
-    trainer.lower_clip_percentile = 0.25
-    trainer.upper_clip_percentile = 0.9
-    trainer.min_log_prob = -3.0
-    trainer.beta = 2.0
-    trainer.loss_type = "sigmoid"
-    trainer.target_margin = 0.3
-    trainer.use_margin_schedule = False
-    trainer.chosen_sft_ratio = 0.7
-    return trainer
+    return smpo_trainer(
+        parallelism_config=parallelism_config,
+        cp_config=cp_config,
+        pad_token_id=PAD_TOKEN_ID,
+        lower_clip_percentile=0.25,
+        upper_clip_percentile=0.9,
+        min_log_prob=-3.0,
+    )
 
 
 def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:
-    """Two pairs with ragged completions, so the loss tokens split unevenly across the two chunks.
-
-    ``ragged_prompts`` left-pads the second prompt the way ``DataCollatorForSMPO`` does, which the CP
-    forward must turn into trailing padding.
-    """
+    """Two pairs with ragged completions, so the loss tokens split unevenly across the chunks.
+    ``ragged_prompts`` left-pads the second prompt like ``DataCollatorForSMPO``, which the CP forward must undo."""
     generator = torch.Generator().manual_seed(1)
 
     def ids(rows, length):
@@ -102,9 +74,8 @@ def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:
     }
 
 
-def _loss_and_grad(trainer: SmoothMarginPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
-    """Per-sequence outputs, the loss, the table gradient, the logged metrics and the warnings the
-    backward raised."""
+def _loss_and_grad(trainer: SMPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
+    """Per-sequence outputs, the loss, the table gradient, the logged metrics and the backward's warnings."""
     outputs = trainer.concatenated_forward(model, batch)
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -124,7 +95,7 @@ def _worker(rank: int, ragged_prompts: bool) -> None:
     parallelism_config = ParallelismConfig(
         cp_size=CP_WORLD_SIZE, world_size=CP_WORLD_SIZE, gpus_per_node=CP_WORLD_SIZE
     )
-    cp_config = parallelism_config.create_cp_config()
+    cp_config = parallelism_config.cp_config()
     cp_model.cp_config = cp_config
     cp_outputs, cp_loss, cp_grad, cp_metrics, cp_warnings = _loss_and_grad(
         _trainer(parallelism_config, cp_config), cp_model, batch

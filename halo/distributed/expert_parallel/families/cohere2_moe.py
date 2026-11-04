@@ -1,0 +1,71 @@
+"""EP layer for Cohere2 MoE / Command A+ (fused experts, top-k-then-activate router)."""
+
+from __future__ import annotations
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from halo.models.moe.family_specs import COHERE2_MOE
+
+
+class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
+    """EP layer for ``Cohere2MoeSparseMoeBlock``. ``Cohere2MoeTopKRouter`` selects top-k on the raw logits and
+    activates only the selected scores. The shared expert combines with the routed output by ``sum`` or ``average``.
+    Layers whose ``mlp_layer_types`` entry is ``dense`` build ``Cohere2MoeMLP`` instead, so they are never wrapped."""
+
+    HF_MODULE_NAMES = ("Cohere2MoeSparseMoeBlock",)
+    FAMILY = COHERE2_MOE
+
+    # Upstream builds the shared expert only under a config flag, so an absent one is a configuration.
+    _SHARED_EXPERT_REQUIRED = False
+
+    # The sigmoid top-k renorm adds no floor.
+    _TOPK_WEIGHT_NORM_EPS = 0.0
+
+    def _adopt_routing(self, original_layer: nn.Module) -> None:
+        """Top-k plus the router's activation choice and renorm flag, which determine every gate weight."""
+        super()._adopt_routing(original_layer)
+        self.expert_selection_fn = self.gate.expert_selection_fn
+        if self.expert_selection_fn not in ("softmax", "sigmoid"):
+            raise ValueError(
+                f"{type(self).__name__}: expert_selection_fn must be 'softmax' or 'sigmoid', "
+                f"got {self.expert_selection_fn!r} — transformers changed the router contract."
+            )
+        self.norm_topk_prob = bool(self.gate.norm_topk_prob)
+
+    def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
+        """The shared expert plus the block's combination strategy, which scales the whole output:
+        defaulting ``average`` to ``sum`` would emit 2x every token."""
+        super()._adopt_shared_experts(original_layer)
+        strategy = original_layer.shared_expert_combination_strategy
+        if strategy not in ("sum", "average"):
+            raise ValueError(
+                f"{type(self).__name__}: shared_expert_combination_strategy must be 'sum' or "
+                f"'average', got {strategy!r} — transformers changed the block contract."
+            )
+        self._output_scale = 0.5 if (self.shared_experts is not None and strategy == "average") else 1.0
+
+    def _init_summary_extras(self, original_layer: nn.Module) -> tuple[str, ...]:
+        return (
+            *super()._init_summary_extras(original_layer),
+            f"selection={self.expert_selection_fn}",
+            f"output_scale={self._output_scale}",
+        )
+
+    def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Top-k on the raw logits (bias-perturbable), gate weights from the unbiased selected scores."""
+        return self._biased_route(router_logits)
+
+    def _gate_weights_at(self, router_logits: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+        """Router weights at ``indices``: softmax over the k scores, or sigmoid with optional renorm."""
+        scores = router_logits.gather(-1, indices)
+        if self.expert_selection_fn == "softmax":
+            return F.softmax(scores, dim=-1, dtype=torch.float)
+        weights = torch.sigmoid(scores)
+        return self._renormalize_topk_weights(weights) if self.norm_topk_prob else weights
+
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+        output = super().forward(hidden_states, **kwargs)
+        return output if self._output_scale == 1.0 else output * self._output_scale

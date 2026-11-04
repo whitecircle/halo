@@ -6,9 +6,8 @@ queries and keys through low-rank projections (MLA).
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM, SGLang |
+Modes: the GLM-4 MoE Lite row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `zai-org/GLM-4.7-Flash`.
 - **GPUs:** eight at EP8, eight experts per GPU, at 30,720 tokens.
@@ -43,6 +42,20 @@ halo launch sft examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/glm-4.7-flash-lora
 ```
 
+### MTP head
+
+Fit the tail the release ships over a frozen trunk, so a server can draft with it. Its export carries the head's trunk
+copies, which vLLM's loader requires ([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
+
+This recipe's own fit is not measured. A separate fit at its learning rate, on first-turn rows rather than the recipe's,
+fell from 0.7685 to 0.7649 acceptance, which the gate stops, and that export served at 0.7317 on vLLM against the release
+head's 0.7450. No served gain is measured.
+
+```bash
+halo launch sft examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml -n 8 \
+  --output_dir=/data/checkpoints/glm-4.7-flash-mtp-head
+```
+
 ### GRPO
 
 Read [Before a GRPO run](README.md#before-a-grpo-run) first. This setup serves the SFT checkpoint from
@@ -52,8 +65,7 @@ RL uses `jinja-templates/glm/glm-native.jinja`, the upstream template with tool 
 template renders no tools. The server must serve the same file. On the host:
 
 ```bash
-cp jinja-templates/glm/glm-native.jinja "$HALO_SCRATCH/"
-VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft VLLM_CHAT_TEMPLATE=/data/glm-native.jinja \
+VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft VLLM_CHAT_TEMPLATE=/jinja-templates/glm/glm-native.jinja \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
@@ -66,7 +78,7 @@ non-thinking render. To keep rollouts non-thinking, also add
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml glm47-grpo.yaml
-CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch environmental-grpo glm47-grpo.yaml -n 4 \
+CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental glm47-grpo.yaml -n 4 \
   --model_name_or_path=/data/checkpoints/glm-4.7-flash-sft \
   --chat_template=jinja-templates/glm/glm-native.jinja --force_chat_template=true \
   --routing_replay=rollout --beta=0.0 \
@@ -80,31 +92,31 @@ the trainer.
 
 ## Settings that matter
 
-- **Attention.** The recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on GLM's
-  attention shape, so Halo replaces an FA4 pick with SDPA. CP refuses an SDPA label, so keep FA2 under
-  CP.
+- **Attention.** The recipe pins `flash_attention_2`, which Blackwell also picks unpinned: Halo keeps
+  GLM's 256-wide latent attention on FA2 as a precaution, under CP and `full_determinism` too
+  ([why](../../agent-docs/optimization/flash-attention.md#model-specific-handling) ↗). CP refuses an
+  explicit `sdpa` label.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks. It updates
   the router's own `e_score_correction_bias`, so the trained bias ships in every checkpoint and the
-  served model routes as it trained. The router has no auxiliary loss to use instead.
+  served model routes on it. The router has no auxiliary loss to use instead.
 - **Chat templates.** SFT uses `glm-chat.jinja` for multi-turn data. `glm-instruct.jinja` raises on more
   than one assistant turn. Keep `assistant_message_template: "<|assistant|>"`: the role token alone
   matches both thinking and non-thinking turns.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=glm47`. The default `hermes` can't read GLM tool calls,
-  so every episode scores zero.
+  and the run stops by its second round.
 
 ## Limits
 
 - On Blackwell, both engines need an MLA attention backend that accepts GLM's head size:
   `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` or `SGLANG_ATTENTION_BACKEND=triton`. With SGLang's default the
   server exits at startup.
-- SGLang weight sync needs this repo's SGLang image. It patches the GLM-4 router, which upstream caches
-  on first use.
+- Pipeline parallelism passes tiny-model GPU tests only.
 
 ## Export and serve
 
-Gathered saves write the hub's per-expert layout, which both engines read. A checkpoint that skipped the
-EP save, such as a `merge-peft-adapters` merge over a plain load, stays fused and needs
-`halo run unfuse-moe-experts` before serving.
+Gathered saves write the hub's per-expert layout, which both engines read, and the other writers keep
+the layout the checkpoint was loaded in. A checkpoint fused before Halo loaded it holds the fused pair
+and needs `halo run unfuse-moe-experts` before serving.
 
 Smoke-test with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Serve from the
 [host](README.md#serve-from-the-host) with SGLang on port 30000:

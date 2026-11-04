@@ -1,21 +1,11 @@
 #!/usr/bin/env python
-"""Test: a ``merge_expert_lora_on_save`` checkpoint serves AND resumes exactly (tiny MoE, 2 ranks).
-
-The representative rows of the merged-resume body (``tests/common/merged_resume_e2e.py``, whose
-docstring lists the four phases): the per-expert unfused (Qwen3-MoE) and interleaved fused
-(GptOss, with attention sinks) expert layouts, expert-only and mixed adapters, at ``--ep-size 2``,
-at ``--ep-size 1`` (DTensor experts) and under EP+CP (``--cp-size 2``). Every other family runs the
-same body in ``test_lora_merged_save_resume_families.py``.
-
-Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family qwen3_moe --adapters mixed --ep-size 2
-"""
+"""A ``merge_expert_lora_on_save`` checkpoint serves and resumes exactly, on each tiny MoE family; body and phases in
+``tests/common/merged_resume_e2e.py``."""
 
 from tests.common.harness import gpu_test_main
 from tests.common.merged_resume_e2e import WORLD_SIZE, merged_resume_parser, run_merged_resume
 
-ARGS = merged_resume_parser(("gpt_oss", "qwen3_moe")).parse_args()
+ARGS = merged_resume_parser().parse_args()
 
 
 @gpu_test_main(
@@ -30,6 +20,8 @@ def run(ctx):
         ep_size=ARGS.ep_size,
         cp_size=ARGS.cp_size,
         fp32_masters=ARGS.fp32_masters,
+        liger=ARGS.liger,
+        attention_targets=ARGS.attention_targets,
     )
 
 

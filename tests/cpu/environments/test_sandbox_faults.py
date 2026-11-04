@@ -1,19 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests: a sandbox fault is booked by its class, never priced as the other one.
-
-- An infrastructure fault (:class:`SandboxInfraError`) says nothing about the policy: the tool call is
-  unpriced, the episode ends and is marked invalid, so the trainer's ``rollout_valid_mask`` drops it
-  from the GRPO group baseline.
-- A sandbox the program broke itself (:class:`SandboxAgentFault` — its working directory replaced by
-  a link or file) is the policy's: the call is a failed one and the episode ends uncompleted, inside the
-  baseline, where it is scored against its group like any other episode.
-- Nothing the program controls may read as infra: a remote ``Failed`` run, a build past the compile
-  limit, an output flood, a removed working directory (recreated) and a FIFO where the host stages or
-  reads are verdicts or ordinary results, never an ``error`` that voids the episode or a host open that
-  blocks.
-
-    python tests/cpu/environments/test_sandbox_faults.py
-"""
+"""A sandbox fault is booked by its class. An infrastructure fault (:class:`SandboxInfraError`) is unpriced and
+voids the episode; a sandbox the program broke (:class:`SandboxAgentFault`) is the policy's and stays in the
+baseline; nothing the program controls may read as infra."""
 
 import asyncio
 import errno
@@ -33,39 +21,39 @@ import time
 import pytest
 import torch
 
-from src.environments.base import (
+from halo.environments.episode import RolloutResult
+from halo.environments.episode_keys import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
-    REWARD_PENDING_KEY,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from src.environments.envs.protocols.native import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
-from src.environments.envs.tasks.coding.swe import SweEnvironment
-from src.environments.episode import RolloutResult
-from src.environments.sandbox.base import SandboxAgentFault, SandboxInfraError, SandboxResult
-from src.environments.sandbox.bubblewrap import BubblewrapSandbox
-from src.environments.sandbox.local import (
+from halo.environments.episode_scoring import REWARD_PENDING_KEY
+from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
+from halo.environments.sandbox.local import (
     LOCAL_FSIZE_LIMIT,
     TAMPERED_WORKDIR_RETURNCODE,
     LocalSubprocessSandbox,
     _grant_owner,
     _restore_owner_access,
 )
-from src.environments.sandbox.remote import RemoteSandbox
-from src.environments.sandbox.repl import format_sandbox_repl_output
-from src.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
-from src.environments.tools.factories import create_session_code_tools
-from src.rewards.scorers import catalog as scorers_module
-from src.rewards.scorers.base import Scorer, ScoreResult
-from src.rewards.terms import JudgeTerm
-from src.trainers.grpo.environmental import rollout_valid_mask
-from src.trainers.grpo.objective.advantages import group_relative_advantages
+from halo.environments.sandbox.remote import RemoteSandbox
+from halo.environments.sandbox.repl import format_sandbox_repl_output
+from halo.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
+from halo.environments.tasks.coding.swe import SweEnvironment
+from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
+from halo.environments.tools.toolsets import build_session_code_tools
+from halo.rewards import composer as scorers_module
+from halo.rewards.scorers.base import Scorer, ScoreResult
+from halo.rewards.terms import JudgeTerm
+from halo.trainers.grpo.environmental.step_batch import rollout_valid_mask
+from halo.trainers.grpo.objective.advantages import group_relative_advantages
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
 _TOOL_ERROR_PENALTY = 0.1
 _REMOVE_OWN_WORKDIR = "import os, shutil\nprint('hello')\nshutil.rmtree(os.getcwd())\n"
@@ -123,9 +111,6 @@ def _react_episode(mode: str):
     env = ReActEnvironment(tool_registry=_registry(), thought_reward=0.0, no_thought_penalty=0.0, **_knobs())
     ids, _ = env.reset(["task"], [{"answer": "4"}])
     return env.step(ids, [f'Thought: go\nAction: run(mode="{mode}")'], [{}])[0], env
-
-
-# The protocols book each class by type
 
 
 @pytest.mark.parametrize("cls", [NativeToolUseEnvironment, AsyncNativeToolUseEnvironment])
@@ -271,9 +256,6 @@ def test_the_trainer_trains_on_the_repercussion_and_drops_the_outage():
     assert advantages[0].item() == pytest.approx((rewards[0] - baseline).item()), "the outage is out of the mean"
 
 
-# The sandbox layer: nothing the program controls reads as infra
-
-
 def test_the_repl_raises_each_fault_class_by_the_result():
     with pytest.raises(SandboxInfraError):
         format_sandbox_repl_output(SandboxResult(error="remote sandbox error: 503"), timeout=5)
@@ -287,9 +269,8 @@ def test_the_repl_raises_each_fault_class_by_the_result():
 
 
 def test_remote_failed_run_is_the_programs_verdict():
-    """SandboxFusion answers ``Failed`` for any run that exited non-zero: that is a runtime error of
-    the program, not the service's failure. A ``Failed`` body that names no failing step, and a
-    ``SandboxError``, stay the service's."""
+    """SandboxFusion answers ``Failed`` for any non-zero exit: a runtime error of the program. A ``Failed`` body
+    naming no step, and a ``SandboxError``, stay the service's."""
     payload = {
         "status": "Failed",
         "message": "",
@@ -332,9 +313,8 @@ def test_the_run_step_file_size_limit_is_the_documented_one():
 
 
 def test_an_output_flood_is_the_programs_failure_at_the_file_size_limit():
-    """Output is captured in files under the child's ``RLIMIT_FSIZE``, so a flood ends as the program's
-    own failure at the limit, never as gigabytes of host memory the grader runs out of (an infra error
-    that would void the episode)."""
+    """Output is captured in files under the child's ``RLIMIT_FSIZE``, so a flood ends as the program's failure and
+    not as gigabytes of host memory."""
     chunks = LOCAL_FSIZE_LIMIT // (1 << 20) + 16
     flood = f"import sys\nchunk = 'x' * (1 << 20)\nfor _ in range({chunks}):\n    sys.stdout.write(chunk)\n"
     result = LocalSubprocessSandbox().run(flood, timeout=60)
@@ -354,7 +334,7 @@ def _executor(backend: str):
 
 @pytest.mark.parametrize("backend", ["local", "bubblewrap"])
 def test_a_lone_surrogate_in_submitted_code_is_graded_not_voided(backend):
-    """What UTF-8 cannot carry in the program's source is replaced, as in its stdin, so staging it can
+    """What UTF-8 cannot carry in the program's source is replaced, as in its stdin, so writing it can
     never fail into an infra error the policy controls."""
     tests = [{"input": "", "output": "ok"}]
     grade = run_solution_against_tests("print('ok')  # \ud83d\n", tests, sandbox=_executor(backend))
@@ -418,7 +398,7 @@ def test_a_removed_working_directory_is_recreated_not_a_fault():
         session.write_file("notes.txt", "x")
         removed = session.run(_REMOVE_OWN_WORKDIR)
         assert removed.ok and removed.agent_fault is None and removed.stdout.strip() == "hello"
-        session.reset_to_staged()
+        session.reset_to_prepared()
         again = session.run("print(1)")
         assert again.ok and again.stdout.strip() == "1"
         assert session.read_file("notes.txt") is None, "the program's own removal takes its files with it"
@@ -433,8 +413,8 @@ def test_a_replaced_working_directory_is_an_agent_fault_and_never_followed(tmp_p
     assert result.agent_fault and "replaced" in result.agent_fault and result.error is None
     assert result.returncode == TAMPERED_WORKDIR_RETURNCODE and not result.ok
     assert session.run("print(1)").agent_fault
-    assert sorted(os.listdir(host)) == ["keep.txt"], "a broken session never stages into the replaced path"
-    session.reset_to_staged()
+    assert sorted(os.listdir(host)) == ["keep.txt"], "a broken session never writes into the replaced path"
+    session.reset_to_prepared()
     assert (host / "keep.txt").read_text() == "host data", "reset must not delete through the link"
     for operation in (lambda: session.read_file("keep.txt"), session.list_files, lambda: session.write_file("a", "")):
         with pytest.raises(SandboxAgentFault):
@@ -452,7 +432,7 @@ def _completes_promptly(fn) -> bool:
     return not worker.is_alive()
 
 
-# Takes back the owner's access to everything it wrote and to what the host staged.
+# Takes back the owner's access to everything it wrote and to what the host prepared.
 _LOCK_THE_WORKDIR = (
     "import os\n"
     "os.makedirs('sub/deeper', exist_ok=True)\n"
@@ -466,19 +446,19 @@ _LOCK_THE_WORKDIR = (
     "print('wrong')\n"
 )
 # Grades the locking program, then drives one session through the two host steps that must give the
-# owner its access back first: a reset (else the lock keeps the program's files) and the staging of the
+# owner its access back first: a reset (else the lock keeps the program's files) and the source write of the
 # next run (else it cannot write its source).
 _GRADE_AND_REPORT = f"""
 import json, os, tempfile
-from src.environments.envs.tasks.coding.grading import run_solution_against_tests
-from src.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.tasks.coding.grading import run_solution_against_tests
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 tempfile.tempdir = tempfile.mkdtemp()
 tests = [{{"input": "", "output": "right"}}] * 3
 sandbox = LocalSubprocessSandbox()
 grade = run_solution_against_tests({_LOCK_THE_WORKDIR!r}, tests, sandbox=sandbox)
 with sandbox.open_session() as session:
     session.run({_LOCK_THE_WORKDIR!r})
-    session.reset_to_staged()
+    session.reset_to_prepared()
     after_reset = sorted(os.listdir(session.workdir))
     session.run({_LOCK_THE_WORKDIR!r})
     rerun = session.run("print(1)")
@@ -505,6 +485,7 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     """Graded by a user that is not root, which the program shares: every test is judged, its
     working directory is removed at the end, and nothing it locked reads as a grading outage."""
     command = [sys.executable, "-c", _GRADE_AND_REPORT]
+    env = {**os.environ, "HOME": "/tmp"}
     if os.geteuid() == 0:
         if shutil.which("setpriv") is None:
             pytest.skip("running as root without setpriv to drop to an unprivileged uid")
@@ -517,9 +498,10 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
             "--clear-groups",
             *command,
         ]
-    proc = subprocess.run(
-        command, capture_output=True, text=True, cwd=REPO_ROOT, check=False, env={**os.environ, "HOME": "/tmp"}
-    )
+        # Importing torch latches its compile cache dir, under the suite's temp dir, into the environment; that dir
+        # may be private to root, so the dropped uid derives its own.
+        env.pop("TORCHINDUCTOR_CACHE_DIR", None)
+    proc = subprocess.run(command, capture_output=True, text=True, cwd=REPO_ROOT, check=False, env=env)
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout.splitlines()[-1])
     assert report["uid"] != 0
@@ -528,7 +510,7 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     assert "Tests 1, 2, 3: FAIL" in grade["details"], "each test judges the program's own output"
     assert "tampered" not in grade["details"] and "ERROR --" not in grade["details"], grade["details"]
     assert report["after_reset"] == ["main.py"], "the reset removes what the program locked"
-    assert report["rerun"] == [0, "1"], "the next run stages over the lock"
+    assert report["rerun"] == [0, "1"], "the next run writes over the lock"
     assert report["left"] == [], "the session removes the working directory the program locked"
 
 
@@ -603,8 +585,8 @@ def test_a_link_raced_in_after_the_type_check_is_left_alone(tmp_path, monkeypatc
     assert host.stat().st_mode & 0o777 == 0o500
 
 
-def test_a_staging_write_refused_after_the_restore_is_the_programs_runtime_error(monkeypatch):
-    """A child that escaped the process group can lock a staged file again between the host's restore
+def test_a_source_write_refused_after_the_restore_is_the_programs_runtime_error(monkeypatch):
+    """A child that escaped the process group can lock a written file again between the host's restore
     and its write: the refusal is the program's runtime error, never an infra error."""
 
     def locked(self, workdir, name, content):
@@ -625,7 +607,7 @@ def test_a_reset_refused_after_the_restore_leaves_the_entry(monkeypatch):
         assert session.run("open('left.txt', 'w').close()").ok
         with monkeypatch.context() as patched:
             patched.setattr(os, "remove", locked)
-            session.reset_to_staged()
+            session.reset_to_prepared()
         assert "left.txt" in session.list_files()
 
 
@@ -690,14 +672,14 @@ def test_restoring_owner_access_reaches_nested_entries_and_never_follows_a_link(
         host.chmod(0o700)
 
 
-def test_a_fifo_where_the_host_stages_or_reads_never_blocks_it():
+def test_a_fifo_where_the_host_writes_or_reads_never_blocks_it():
     with LocalSubprocessSandbox().open_session() as session:
         assert session.run("import os\nos.remove('main.py')\nos.mkfifo('main.py')\nos.mkfifo('pipe')\n").ok
         results = {}
-        assert _completes_promptly(lambda: results.update(staged=session.run("print(1)")))
+        assert _completes_promptly(lambda: results.update(written=session.run("print(1)")))
         assert _completes_promptly(lambda: results.update(read=session.read_file("pipe")))
-    staged = results["staged"]
-    assert staged.error is None and staged.returncode == TAMPERED_WORKDIR_RETURNCODE, staged
+    written = results["written"]
+    assert written.error is None and written.returncode == TAMPERED_WORKDIR_RETURNCODE, written
     assert results["read"] is None
 
 
@@ -838,7 +820,7 @@ def test_a_swe_command_that_removes_its_workspace_just_loses_its_files():
 
 
 def test_a_missing_session_is_an_infra_fault():
-    handler = create_session_code_tools(lambda: None).get("run_python").handler
+    handler = build_session_code_tools(lambda: None).get("run_python").handler
     with pytest.raises(SandboxInfraError):
         handler(code="print(1)")
 

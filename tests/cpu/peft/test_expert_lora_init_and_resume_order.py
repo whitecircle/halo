@@ -1,20 +1,7 @@
 #!/usr/bin/env python
-"""Native expert-LoRA init scale and the rank-consistency of the adapter resume loop.
-
-Two invariants that fail silently:
-
-* ``load_expert_lora_state_dict`` re-shards DTensor adapters with ``distribute_tensor`` — a
-  collective. Its loop therefore has to visit the adapters in an order that is a deterministic
-  function of the NAMES, not of the container holding them: ``_expert_lora_attrs`` is a frozenset,
-  and frozenset iteration order over strings varies per process (``PYTHONHASHSEED`` is unpinned under
-  torchrun), so ranks would scatter in different orders.
-* ``lora_A`` must be drawn on PEFT's scale. PEFT initializes a 2-D ``[r, K]`` weight, whose
-  ``kaiming_uniform_(a=sqrt(5))`` bound reduces to ``1/sqrt(K)``; handing torch the 3-D ``[E, K, r]``
-  tensor folds ``r`` into ``fan_in`` and shrinks the bound by ``sqrt(r)``, so expert and attention
-  adapters in one run would warm up on different scales.
-
-Run: pytest tests/cpu/peft/test_expert_lora_init_and_resume_order.py
-"""
+"""Native expert-LoRA init scale and the rank consistency of the adapter resume loop.
+``distribute_tensor`` is a collective and frozenset order varies by process (``PYTHONHASHSEED``), so the loop sorts.
+A 3-D ``[E, K, r]`` init folds ``r`` into ``fan_in``; expert and attention adapters would warm up differently."""
 
 import math
 
@@ -22,7 +9,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.config import ExpertLoraSpec
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_stubs import StubEPLayerBase
 
 NUM_LOCAL_EXPERTS = 2
@@ -45,8 +32,6 @@ class _StubEPLayer(StubEPLayerBase):
 
 
 class _OrderRecordingState(dict):
-    """A layer_state that records the order the load loop reads its keys in."""
-
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.access_order: list[str] = []
@@ -66,10 +51,9 @@ def _saved_state(attrs) -> _OrderRecordingState:
 
 
 def test_resume_visits_adapters_in_name_sorted_order():
-    """Independent of how the attr container itself iterates — that is the whole point."""
     attrs = ("down_proj", "gate_up_proj")
     layer = _StubEPLayer(attrs)
-    # Adversarial container order: a loop over the attribute directly would visit gate_up_proj first.
+    # A loop over the attribute directly would visit gate_up_proj first.
     layer._expert_lora_attrs = ["gate_up_proj", "down_proj"]
     state = _saved_state(attrs)
 
@@ -84,11 +68,7 @@ def test_resume_visits_adapters_in_name_sorted_order():
 
 
 def test_resume_order_matches_the_save_order():
-    """``gather_expert_lora_state_dict`` writes sorted; the load must walk that same order.
-
-    The container is skewed the other way for the same reason as above — left as a real frozenset,
-    an implementation that iterates the container instead of sorting would agree with the save order
-    or not depending on PYTHONHASHSEED."""
+    """``gather_expert_lora_state_dict`` writes sorted. A real frozenset here would pass or fail by PYTHONHASHSEED."""
     attrs = ("down_proj", "gate_up_proj")
     layer = _StubEPLayer(attrs)
     layer._expert_lora_attrs = sorted(attrs, reverse=True)
@@ -101,7 +81,6 @@ def test_resume_order_matches_the_save_order():
 
 
 def test_resume_copies_the_saved_values():
-    """Ordering aside, the load must still land the right tensor on the right adapter."""
     attrs = ("down_proj", "gate_up_proj")
     layer = _StubEPLayer(attrs)
     state = _saved_state(attrs)
@@ -115,7 +94,7 @@ def test_resume_copies_the_saved_values():
 
 
 def test_expert_lora_a_init_matches_peft_scale():
-    """The grouped ``lora_A`` bound must be PEFT's ``1/sqrt(K)``, not the 3-D ``1/sqrt(K*r)``."""
+    """The bound must be PEFT's ``1/sqrt(K)``, not the 3-D ``1/sqrt(K*r)``."""
     layer = _StubEPLayer(("gate_up_proj",))
     layer.ep_config = type("_Cfg", (), {"expert_lora": ExpertLoraSpec(r=RANK, alpha=2 * RANK)})()
     layer.gate_up_proj = nn.Parameter(torch.zeros(NUM_LOCAL_EXPERTS, HIDDEN, INTERMEDIATE))

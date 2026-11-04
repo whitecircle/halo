@@ -1,13 +1,6 @@
-"""``py_spy_diag.py`` against a stand-in ``py-spy`` on ``PATH``: a pid it cannot attach to fails the
-run by name, and ``record`` samples every rank over the same window.
-
-An attach that fails (no ptrace permission, another pid namespace, an exited rank) must not leave a
-partial artifact directory behind a success line and exit 0. The ranks are sampled together: one
-after another, the last of eight would be sampled seven windows after the first. And a sweep that
-stops early, on its timeout or an interrupt, must leave no py-spy attached to a training rank.
-
-Run: python tests/cpu/diagnostics/test_py_spy_diag.py
-"""
+"""``py_spy_diag.py`` against a stand-in ``py-spy`` on ``PATH``: a pid it cannot attach to fails the run by name,
+``record`` samples every rank over the same window, and a sweep that stops early leaves no py-spy attached to a
+training rank."""
 
 import json
 import os
@@ -16,8 +9,8 @@ import sys
 
 import pytest
 
-from src.diagnostics import debugging
-from tests.common.utils import REPO_ROOT
+from halo.diagnostics import py_spy
+from tests.common.repo import REPO_ROOT
 
 _PIDS = (101, 102, 103)
 
@@ -41,7 +34,11 @@ with open(os.path.join(os.environ["FAKE_PY_SPY_LOG"], pid + ".json"), "w") as wi
 """
 
 
-def _run(tmp_path, command: str, *, failing: tuple[int, ...] = ()) -> tuple[subprocess.CompletedProcess, str]:
+def _run(
+    tmp_path, command: str, *, failing: tuple[int, ...] = (), default_output: bool = False
+) -> tuple[subprocess.CompletedProcess, str]:
+    """Run ``command`` against the stand-in; ``default_output`` drops ``--output_dir`` and points
+    ``HALO_DATA_ROOT`` at ``tmp_path/data``, ``TMPDIR`` at ``tmp_path/tmp``."""
     bin_dir, log_dir, out_dir = (tmp_path / name for name in ("bin", "log", "out"))
     bin_dir.mkdir()
     log_dir.mkdir()
@@ -54,13 +51,29 @@ def _run(tmp_path, command: str, *, failing: tuple[int, ...] = ()) -> tuple[subp
         "FAKE_PY_SPY_LOG": str(log_dir),
         "FAKE_PY_SPY_FAIL": ",".join(map(str, failing)),
     }
-    argv = [sys.executable, "scripts/profiling/py_spy_diag.py", command, "--output-dir", str(out_dir)]
+    argv = [sys.executable, "scripts/profiling/py_spy_diag.py", command]
+    if default_output:
+        (tmp_path / "tmp").mkdir()
+        env.update(HALO_DATA_ROOT=str(tmp_path / "data"), TMPDIR=str(tmp_path / "tmp"))
+        out_dir = tmp_path / "data" / "profiling" / "py_spy" / ("stacks" if command == "dump" else "flamegraphs")
+    else:
+        argv += ["--output_dir", str(out_dir)]
     argv += [arg for pid in _PIDS for arg in ("--pid", str(pid))]
     if command == "record":
         argv += ["--duration", "1"]
     proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT, timeout=120)
     (artifacts,) = out_dir.iterdir()
     return proc, str(artifacts)
+
+
+@pytest.mark.parametrize("command", ["dump", "record"])
+def test_captures_default_under_halo_data_root_not_the_temp_dir(tmp_path, command):
+    """A capture written to TMPDIR is gone with a container whose temp dir is not mounted."""
+    proc, artifacts = _run(tmp_path, command, default_output=True)
+
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert os.listdir(artifacts), "the capture directory is empty"
+    assert os.listdir(tmp_path / "tmp") == [], "a capture landed in the temp dir"
 
 
 @pytest.mark.parametrize("command", ["dump", "record"])
@@ -102,12 +115,12 @@ def started(monkeypatch) -> list[subprocess.Popen]:
         processes.append(real_popen(*args, **kwargs))
         return processes[-1]
 
-    monkeypatch.setattr(debugging.subprocess, "Popen", recording_popen)
+    monkeypatch.setattr(py_spy.subprocess, "Popen", recording_popen)
     return processes
 
 
 def test_an_attach_past_its_timeout_is_killed_and_reported(tmp_path, started):
-    capture = debugging._run_py_spy_per_pid(
+    capture = py_spy._run_py_spy_per_pid(
         tmp_path, [7], lambda _pid, _target: _SLEEPER, timeout=1, output_suffix=".log"
     )
 
@@ -122,7 +135,7 @@ def test_a_sweep_interrupted_mid_launch_leaves_no_process_running(tmp_path, star
         return _SLEEPER
 
     with pytest.raises(KeyboardInterrupt):
-        debugging._run_py_spy_per_pid(tmp_path, [1, 2], command, timeout=60, output_suffix=".log")
+        py_spy._run_py_spy_per_pid(tmp_path, [1, 2], command, timeout=60, output_suffix=".log")
 
     assert started and all(process.poll() is not None for process in started), (
         "an interrupted sweep left py-spy running"

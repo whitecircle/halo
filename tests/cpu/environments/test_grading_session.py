@@ -1,18 +1,16 @@
 #!/usr/bin/env python
-"""Grading runs a submission's tests through one sandbox session, so a compiled program is built
-once, and a compile failure grades the whole pool once.
-
-Run: python tests/cpu/environments/test_grading_session.py  (or pytest)
-"""
+"""Grading runs a submission's tests through one sandbox session, so a compiled program is built once, and a compile
+failure grades the whole pool once."""
 
 import errno
 import logging
 
 import pytest
 
-from src.environments.envs.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
-from src.environments.sandbox.base import SandboxExecutor, SandboxResult, SandboxSession
-from src.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.base import SandboxExecutor, SandboxSession
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 
 _TESTS = [{"input": f"{i}\n", "output": "ok\n"} for i in range(3)]
 _OK = SandboxResult(stdout="ok\n", returncode=0)
@@ -26,7 +24,7 @@ class _Session(SandboxSession):
         self.runs.append((language, stdin))
         return self.result
 
-    def reset_to_staged(self):
+    def reset_to_prepared(self):
         self.resets += 1
 
     def write_file(self, path, content):  # pragma: no cover
@@ -75,7 +73,7 @@ class _DeniedSession(_Session):
         self._deny("run")
         return super().run(code, **kwargs)
 
-    def reset_to_staged(self):
+    def reset_to_prepared(self):
         self._deny("reset")
 
 
@@ -95,7 +93,7 @@ def test_a_grade_runs_every_test_through_one_session_and_closes_it():
     assert len(sandbox.opened) == 1
     (session,) = sandbox.opened
     assert session.runs == [("cpp", "0\n"), ("cpp", "1\n"), ("cpp", "2\n")]
-    assert session.resets == 3, "the session is reset to its staged state after every test"
+    assert session.resets == 3, "the session is reset to its prepared state after every test"
     assert session.closed
 
 
@@ -113,9 +111,8 @@ def test_a_host_fault_shows_its_class_alone_under_outcome(stage, caplog):
 
 @pytest.mark.parametrize("stage", ["run", "reset"])
 def test_a_backend_down_for_every_test_logs_one_line_per_grade(stage, caplog):
-    """A pool of hundreds of tests against a dead backend must not log a traceback per test: the grade
-    logs one line counting its infra errors, the per-test detail stays at debug."""
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.tasks.coding.grading"):
+    """The grade logs one line counting its infra errors; the per-test detail stays at debug."""
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tasks.coding.grading"):
         grade = run_solution_against_tests("code", _TESTS, sandbox=_DeniedSandbox(stage))
     assert grade.infra_errors == len(_TESTS)
     logged = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
@@ -141,7 +138,7 @@ def test_tests_of_one_grade_cannot_see_each_others_files():
 
 def test_an_executor_without_sessions_grades_one_shot_without_a_warning(caplog):
     sandbox = _SessionSandbox(sessions=False)
-    with caplog.at_level(logging.WARNING, logger="src.environments.envs.tasks.coding.grading"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tasks.coding.grading"):
         grade = run_solution_against_tests("code", _TESTS, sandbox=sandbox)
     assert grade.passed == 3 and sandbox.one_shot == 3
     assert caplog.records == []

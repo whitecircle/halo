@@ -34,13 +34,13 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 from trl import SFTConfig
 
-from src.checkpoint.format import load_full_state_dict
-from src.distributed.expert_parallel.base_layer import find_ep_layers
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
-from src.training.environment import resolve_resume_weights_source
+from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
+from halo.checkpoint.reading import load_full_state_dict
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model_from_config, peft_model_config, unwrap
 from tests.common.checkpoint_io import (
     RestorePointSnapshot,
     ResumeCapture,
@@ -52,10 +52,12 @@ from tests.common.checkpoint_io import (
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config, unwrap
+from tests.common.memory import finish_phase
 from tests.common.pinned_params import RUN_DTYPE, SEED, load_row_model, tiny_family_checkpoint
+from tests.common.rank_log import log
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
-from tests.common.utils import finish_phase, log, resumed_loss_deltas, step_losses, training_run_checks
+from tests.common.training_checks import resumed_loss_deltas, step_losses, training_run_checks
 
 FAMILIES = ("qwen3_moe", "gpt_oss", "zaya", "lfm2_moe")
 TOTAL_STEPS = 4
@@ -63,20 +65,19 @@ SAVE_AT_STEP = 2
 BATCH_SIZE = 2
 MAX_LENGTH = 128
 LEARNING_RATE = 2e-3
-# Configured router masters and adapter copies retain their stored FP32 values across construction.
+# Configured router masters and adapter copies retain their stored fp32 values across construction.
 RESUMED_LOSS_TOL = TOL.replayed_resume_loss_abs
 PROBE_TEXT = "User: Which dtype does the router train in?\nAssistant: fp32, as its own shard group."
 
 
 def _parallelism_config() -> ParallelismConfig:
-    """A fresh config per phase (``create_ep_config`` caches its ``EPConfig`` on the config); the defaults
-    keep ``fsdp_shard_ep1_experts`` on, which is the point."""
+    """Fresh per phase, since ``ep_config`` caches its ``EPConfig``; the defaults keep ``fsdp_shard_ep1_experts``
+    on."""
     return ParallelismConfig(ep_size=1, ep_fp32_router=True)
 
 
 def _load(source: str, family: str, lora: bool, pc: ParallelismConfig):
-    """``(model, tokenizer, peft_config)`` from ``source``: a full fine-tune, or attention LoRA with the
-    family's router (the EP layer's own ``_ROUTER_ATTR``) in ``modules_to_save``."""
+    """A full fine-tune, or attention LoRA with the family's router in ``modules_to_save``."""
     if not lora:
         return load_row_model(source, "full", pc)
     model_config = peft_model_config("lora", pc, model_name=source)
@@ -85,11 +86,10 @@ def _load(source: str, family: str, lora: bool, pc: ParallelismConfig):
 
 
 def _router_params(model) -> dict[str, torch.nn.Parameter]:
-    """Every trainable router parameter by name, off each EP layer's live router (the ``modules_to_save``
-    copy under LoRA)."""
+    """Off each EP layer's live router (the ``modules_to_save`` copy under LoRA)."""
     ids = {
         id(param)
-        for _, layer in find_ep_layers(unwrap(model))
+        for _, layer in named_ep_layers(unwrap(model))
         for param in layer._live_router_module().parameters()
         if param.requires_grad
     }
@@ -97,12 +97,12 @@ def _router_params(model) -> dict[str, torch.nn.Parameter]:
 
 
 def _whole(tensor: torch.Tensor) -> torch.Tensor:
-    """``tensor`` whole on every rank; collective for a DTensor."""
+    """COLLECTIVE for a DTensor."""
     return (tensor.full_tensor() if isinstance(tensor, DTensor) else tensor).detach().float().clone()
 
 
 def _router_snapshot(model) -> dict[str, torch.Tensor]:
-    """Every router parameter whole on every rank, read off the sharded masters. Collective."""
+    """COLLECTIVE. Every router parameter whole on every rank, read off the sharded masters."""
     reshard_fsdp2_modules(unwrap(model))
     return {name: _whole(param) for name, param in _router_params(model).items()}
 
@@ -112,9 +112,8 @@ def _fp32_dtensor_masters(params: dict[str, torch.nn.Parameter]) -> bool:
 
 
 class _RouterGrads(TrainerCallback):
-    """Before every optimizer step: each router parameter's gradient is a DTensor on every rank, finite
-    and nonzero. One all-reduce of the per-parameter magnitudes, NaN where a rank holds no DTensor
-    gradient, so the verdict is the same on every rank."""
+    """Each router gradient is a finite nonzero DTensor on every rank before each step. One all-reduce, NaN where a
+    rank holds no DTensor gradient, so every rank reaches one verdict."""
 
     def __init__(self, trainer, device: torch.device):
         self.trainer = trainer
@@ -146,8 +145,6 @@ class _AtSave(RestorePointSnapshot):
 
 
 class _AtResume(ResumeCapture):
-    """Read router masters after restore and before the first resumed optimizer step."""
-
     def on_train_begin(self, args, state, control, **kwargs):
         control = super().on_train_begin(args, state, control, **kwargs)
         self.capture["routers"] = _router_snapshot(self.trainer.model)
@@ -178,7 +175,7 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
 
 
 def _checkpoint_checks(ctx, checkpoint: str, router_names: list[str]) -> dict[str, bool]:
-    """Rank 0 reads the checkpoint: every file a resume reads, and each router at fp32."""
+    """Rank 0: every file a resume reads, and each router at fp32."""
     checks: dict[str, bool] = {}
     if ctx.rank == 0:
         checks = resume_checkpoint_checks(checkpoint, ctx.world_size)

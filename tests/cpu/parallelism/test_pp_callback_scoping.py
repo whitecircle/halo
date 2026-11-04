@@ -1,17 +1,6 @@
 #!/usr/bin/env python
-"""Callback scoping under pipeline parallelism (CPU).
-
-Under PP each stage holds different layers, so world-wide callback collectives and world-based
-throughput math are wrong:
-
-* ``RouterBiasBalancingCallback`` must all-reduce its stacked per-layer expert counters over the
-  trainer-injected ``reduce_group`` (the stage group) — a world all-reduce is a shape mismatch or a
-  silent cross-stage blend.
-* ``build_perf_callbacks`` must not install ``MoEMetricsCallback`` at ``pp_size > 1`` (a stage
-  forward returns a bare tensor, so its router-logits hook would silently record nothing).
-
-Run: python tests/cpu/parallelism/test_pp_callback_scoping.py
-"""
+"""Callback scoping under pipeline parallelism, where each stage holds different layers. A world all-reduce is a shape
+mismatch or a cross-stage blend; a stage forward returns a bare tensor, so MoE metrics would record nothing."""
 
 from __future__ import annotations
 
@@ -22,13 +11,10 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.callbacks.wiring import build_perf_callbacks
+from halo.callbacks.balancing import BalancingBiasCallback
+from halo.callbacks.factory import build_run_callbacks
 
-_RBB_MOD = "src.callbacks.router_bias_balancing"
-
-
-# RouterBiasBalancingCallback.reduce_group
+_BALANCING_MOD = "halo.callbacks.balancing"
 
 
 class _Router(torch.nn.Module):
@@ -45,7 +31,7 @@ class _RouterModel(torch.nn.Module):
 
 
 def _run_step(callback) -> dict:
-    """Drive ``on_step_end`` with ``dist`` stubbed as a 2-rank job; capture the all-reduce kwargs."""
+    """``dist`` stubbed as a 2-rank job; captures the all-reduce kwargs."""
     captured: dict = {}
 
     def _fake_all_reduce(tensor, op=None, group=None):
@@ -54,17 +40,17 @@ def _run_step(callback) -> dict:
 
     fake_dist = types.SimpleNamespace(all_reduce=_fake_all_reduce, ReduceOp=torch.distributed.ReduceOp)
     with (
-        patch(f"{_RBB_MOD}.dist", fake_dist),
-        patch(f"{_RBB_MOD}.get_global_world_size", return_value=2),
+        patch(f"{_BALANCING_MOD}.dist", fake_dist),
+        patch(f"{_BALANCING_MOD}.get_global_world_size", return_value=2),
     ):
-        callback.on_step_end(args=None, state=None, control=None, model=_RouterModel())
+        callback.on_step_end(args=None, state=SimpleNamespace(global_step=1), control=None, model=_RouterModel())
     assert "group" in captured, "counter all-reduce was never issued"
     return captured
 
 
 def test_bias_balancing_all_reduce_honors_injected_reduce_group():
     sentinel = object()
-    callback = RouterBiasBalancingCallback()
+    callback = BalancingBiasCallback()
     callback.reduce_group = sentinel
     captured = _run_step(callback)
     assert captured["group"] is sentinel, captured
@@ -72,13 +58,10 @@ def test_bias_balancing_all_reduce_honors_injected_reduce_group():
 
 
 def test_bias_balancing_defaults_to_world_group():
-    callback = RouterBiasBalancingCallback()
-    assert callback.reduce_group is None  # trainer injects; default = world group
+    callback = BalancingBiasCallback()
+    assert callback.reduce_group is None  # The trainer injects it; default = world group.
     captured = _run_step(callback)
     assert captured["group"] is None, captured
-
-
-# build_perf_callbacks: MoEMetricsCallback skipped under PP
 
 
 class _MoEConfig:
@@ -115,7 +98,9 @@ def _parallelism(pp_size: int):
 
 
 def _moe_metric_callbacks(pp_size: int) -> list:
-    callbacks = build_perf_callbacks(_perf_args(), SimpleNamespace(), _MoEModel(), _parallelism(pp_size))
+    callbacks = build_run_callbacks(
+        _perf_args(), SimpleNamespace(), _MoEModel(), _parallelism(pp_size), balancing_mode="none"
+    )
     return [cb for cb in callbacks if type(cb).__name__ == "MoEMetricsCallback"]
 
 

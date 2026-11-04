@@ -2,52 +2,53 @@
 
 `DeepseekV4ForCausalLM` (transformers-native `deepseek_v4`) — MoE with a hash-routing bootstrap: `mlp_layer_types` schedules each MoE layer as `hash_moe` or `moe` (default: the first three `hash_moe`, the rest `moe`). A `hash_moe` layer selects experts via a frozen `tid2eid[input_ids]` table; a `moe` layer uses `sqrtsoftplus` top-k routing with a `noaux_tc` correction bias. Each layer carries a shared expert and clamped SwiGLU experts (`swiglu_limit`).
 
-Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel residual streams) and three attention layer types (sliding window / CSA + Lightning Indexer / HCA) over shared-KV MQA with `head_dim=512` and learnable sinks. V4-Flash: 43 layers, 256 routed experts, top-k=6.
+Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel residual streams) and three attention layer types (sliding window / CSA + Lightning Indexer / HCA) over shared-KV MQA with `head_dim=512` and learnable sinks. V4-Flash: 43 layers, 256 routed experts, top-k=6. On CUDA the hyper-connections, their mixes and the final `hc_head` collapse run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md). Those kernels have run on tiny models only, so the V4-Flash release has no rate.
 
-| | EP | CP | TP | ETP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| DeepSeek-V4 | Yes | No | No | Yes | No | No |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Why each axis runs or not:
 
-- **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/validation.py`.
+- **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `halo/distributed/context_parallel/model_rules.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.
 - **ETP** — the experts use the shared fused-GLU storage, split through `_init_fused_glu_params`. Pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites, `--mode etp2` / `ep2etp2`); the full V4-Flash checkpoint is not run under ETP.
-- **PP** — [not yet available in this release](../parallelism/pipeline-parallelism.md).
-- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`validate_weight_sync_support`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+- **PP** — registered (`DEEPSEEK_V4_PP`): the stages carry the `hc_mult`-widened stream, any split offset is exact, and every `hash_moe` layer must sit on stage 0, whose `input_ids` its `tid2eid` router reads ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+- **RL weight sync** — online and async GRPO reject DeepSeek-V4 at trainer construction (`reject_unsyncable_model`, off each client's `UNSERVABLE_MODEL_TYPES`). The sync feeds the engine's `model.load_weights` directly, and neither pinned engine has a loader that takes it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-    vLLM 0.26.0 serves V4 from an out-of-tree package whose loader targets DeepSeek's original fp8/fp4-packed release: its o-projection reads a `weight_scale_inv` unconditionally, so a BF16 checkpoint is not servable there, whatever its names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair.
+    vLLM 0.32.0 serves V4 in tree, with a bf16 o-projection path, but its routed-expert loader maps only the release's per-expert `experts.{i}.w1/w2/w3` names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair, which that loader does not take. Serving a BF16 checkpoint there is unverified.
 
-    SGLang 0.5.17 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
+    SGLang 0.5.22 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
+- **Offline GRPO** — always scores through the per-row chunked path, since the compressors cut KV windows at fixed row indices a left pad would move, and refuses a pipeline batch above one row ([Row positions](../training-methods/grpo/offline.md#row-positions)).
 
 ## Attention: eager-only
 
-Every non-eager backend is off (`_supports_flash_attn/_supports_sdpa/_supports_flex_attn = False` upstream): FA2/3/4 cap head_dim at 256 (V4 is 512), SDPA drops the learnable sink column, and the compressors concatenate KV entries after the mask is built (no BlockMask resize). `load_distributed_model` forces `attn_implementation="eager"` with a warning (`_model_is_deepseek_v4` in `src/models/patches/attention.py`).
+Every non-eager backend is off (`_supports_flash_attn/_supports_sdpa/_supports_flex_attn = False` upstream): FA2/3/4 cap head_dim at 256 (V4 is 512), SDPA drops the learnable sink column, and the compressors concatenate KV entries after the mask is built (no BlockMask resize). `load_distributed_model` forces `attn_implementation="eager"` with a warning, off the family spec's `eager_only_attention` (`halo/models/moe/family_specs.py`).
 
 Consequences:
 
-- **One document per row.** `packing` and `padding_free` are refused on every backend (`reject_compressed_kv_rows` in `src/models/segment_markers.py`, keyed on the compressed `layer_types`, so the legacy `compress_ratios` spelling the config folds into them is covered). The SFT script refuses them off its first config read, before the model load, `prepare_dataset.py` refuses `--pack-sequences` before fetching the input, and the collator factory refuses them again. A packing or padding-free collator handed straight to the SFT trainer, and SMPO's own `padding_free` forward, are refused at trainer construction. The CSA and HCA compressors cut their KV windows at fixed indices of the row and judge each window's causality by position. A multi-document row restarts its positions at every document while the windows stay put, so every document after the first attends the compressed KV of the row's first tokens instead of its own: wrong context, not a soft boundary leak. The masked-attention layers alone would isolate (the mask is synthesized from the per-document `position_ids` whenever no cache is live, and training runs `use_cache=False`), but no position or segment marker reaches the compressor windows ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+- **One document per row.** `packing` and `padding_free` are refused on every backend (`reject_compressed_kv_rows` in `halo/models/segment_markers.py`, keyed on the compressed `layer_types`, so the legacy `compress_ratios` spelling the config folds into them is covered). The SFT script refuses them off its first config read, before the model load, `prepare_dataset.py` refuses `--pack_sequences` before fetching the input, and the collator factory refuses them again. A packing or padding-free collator handed straight to the SFT trainer, and SMPO's own `padding_free` forward, are refused at trainer construction. The CSA and HCA compressors cut their KV windows at fixed indices of the row and judge each window's causality by position. A multi-document row restarts its positions at every document while the windows stay put, so every document after the first attends the compressed KV of the row's first tokens instead of its own: wrong context, not a soft boundary leak. The masked-attention layers alone would isolate (the mask is synthesized from the per-document `position_ids` whenever no cache is live, and training runs `use_cache=False`), but no position or segment marker reaches the compressor windows ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 - The per-rope-type rotary buffers (`{main,compress}_inv_freq`, on the model-level rotary and inside every compressor/indexer) are recomputed in fp32 by the rotary fixer chain `finalize_loaded_model` walks on every load path.
 
-## EP wrapper
+## EP layer
 
-`EPDeepseekV4MoELayer` (`src/distributed/expert_parallel/layers/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It subclasses `EPMoELayerBase` directly (not the shared-experts forward base): the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
+`EPDeepseekV4MoELayer` (`halo/distributed/expert_parallel/families/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It takes the routed forward of `EPSharedExpertsMoELayerBase` and overrides `_route_hidden_states`: the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
-- **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
-- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `fused_clamped_silu_mul`, with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
+- **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the EP layer validates at init and raises). It holds one row per token id, so a vocabulary grow (`added_special_tokens` past the embedding's rows, `patch_vocab.py`) is refused: a new token has no expert assignment.
+- **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `GluCombine.clamped_silu(limit)` (`glu_combine=clamped_silu`), with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
 
     The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
 
 - **Shared expert**: `DeepseekV4MLP` (same clamp), replicated per rank, DP-averaged via the router grad hook, output added after DeepEP combine.
-- Expert storage is the standard fused contiguous-halves layout (`gate_up_proj [E, 2M, H]`), so the base gather/save, the lazy fused-expert loader, native grouped expert-LoRA, and the shard-merge transform (the base `merge_shards_to_hf`, reached by resolving `model_type` through `resolve_ep_merge_layer_class`) all apply unchanged.
+- Expert storage is the standard fused contiguous-halves layout (`gate_up_proj [E, 2M, H]`), so the base gather/save, the lazy fused-expert loader, native grouped expert-LoRA, and the shard merge (the spec's `FUSED` `ExpertLayout`, reached by resolving `model_type` through `find_moe_family_spec`) all apply unchanged.
 
 ## Router balancing
 
-Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback)); an explicit `aux_loss` warns and stays off.
+The EP layer re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`SEVERS_AUX_LOSS`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
 
 The update lands in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
 
 ## Checkpoint conversion
+
+The release's MTP tail drops at load and the BF16 converter drops it too, so exports carry none and `method=mtp` refuses them; `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
 
 The hub checkpoints (`deepseek-ai/DeepSeek-V4-Flash[-Base]`) ship fine-grained FP8 dense weights (e4m3, 128×128 blocks, ue8m0 scales) with FP4-packed experts (`config.expert_dtype="fp4"`, two e2m1 nibbles per int8 byte, [1, 32] scale grid). EP requires plain BF16 experts, so convert once:
 
@@ -57,9 +58,9 @@ HF_HOME=$D/hf python scripts/before_training/convert_deepseek_v4_bf16.py \
     --model_id deepseek-ai/DeepSeek-V4-Flash --output_dir $D/models/DeepSeek-V4-Flash-BF16
 ```
 
-Budget ~910 GB disk (~330 GB download cache + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint: transformers' `_keep_in_fp32_modules_strict` would keep the HC/norm modules fp32, whose fp32 outputs crash the eager bf16 forward on a dtype mismatch. Those modules upcast internally, so flattening is safe.
+Budget ~740 GB disk (~160 GB download + ~580 GB BF16 output) and ~580 GB of host RAM: the model is materialized on CPU. The script routes through transformers' dequantizing loader (`FineGrainedFP8Config(dequantize=True)`) and writes a **uniform BF16** checkpoint. The HC and norm modules transformers pins to fp32 (`_keep_in_fp32_modules_strict`) upcast internally, so flattening them is safe.
 
-A `from_pretrained` load resurrects the pins even from this checkpoint; every training loader casts them back to the run dtype ([Load precision](README.md#load-precision)), so V4 trains uniform bf16 under EP, ep1, plain FSDP2 and on one GPU alike. `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32; where the FSDP2 mixed-precision policy then computes pinned modules in bf16, a wrap-time warning lists them (`_warn_fp32_pins_cast_by_policy`). The fp32-sensitive paths upcast internally, so the cast affects weight-value rounding only.
+A `from_pretrained` load resurrects the pins even from this checkpoint, and on transformers 5.20.2 an eager bf16 forward and backward run with them live (tiny model, CPU); every training loader casts them back to the run dtype ([Load precision](README.md#load-precision)), so V4 trains uniform bf16 under EP, ep1, plain FSDP2 and on one GPU alike. `fp32_experts` / `fp32_non_ep_params` are the supported way to hold masters in fp32; where the FSDP2 mixed-precision policy then computes pinned modules in bf16, a wrap-time warning lists them (`_warn_fp32_pins_cast_by_policy`). The fp32-sensitive paths upcast internally, so the cast affects weight-value rounding only.
 
 ## Liger
 
@@ -69,12 +70,16 @@ A `from_pretrained` load resurrects the pins even from this checkpoint; every tr
 
 Example configs under `examples/sft/deepseek_v4/`:
 
-- `v4-flash-ultrachat-lora-ep.yaml` — EP=8 LoRA on the converted checkpoint: PEFT on `q_a_proj`/`q_b_proj`/`o_b_proj`, native grouped expert-LoRA on `gate_up_proj`/`down_proj`. `merge_expert_lora_on_save: true` folds both halves into a servable checkpoint; `false` writes the mixed adapter, which this toolkit resumes but no merge tool folds.
+- `v4-flash-ultrachat-lora-ep.yaml` — EP=8 LoRA on the converted checkpoint, a shape that has not run on the full-size model and whose fit is computed, not measured: PEFT on `q_a_proj`/`q_b_proj`/`o_b_proj`, native grouped expert-LoRA on `gate_up_proj`/`down_proj`. `merge_expert_lora_on_save: true` folds both halves into a servable checkpoint; `false` writes the mixed adapter, which this toolkit resumes but no merge tool folds. It trains one unpacked row per micro-batch, so it sets `train_sampling_strategy: batch_rebalance`: each optimizer step's rows go to its accumulation slots by length, and the ranks of a micro-step wait on no single long row (the sampler's fixed-seed shuffle also sets which rows a step holds) ([Data Loading](../parallelism/data-loading.md)).
 
     `o_a_proj` is excluded from adapter injection, by name and under `all-linear` alike: it is a
     `DeepseekV4GroupedLinear`, whose block-diagonal forward returns one group's width, so a stock LoRA
     delta added to it is the wrong shape ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)).
     Its sibling mix-down `o_b_proj` carries the output projection's adapter.
+
+    `q_b_proj` also names each CSA layer's indexer query projection (`compressor.indexer.q_b_proj`, 20 on
+    V4-Flash). The indexer hands attention only its top-k indices, so no gradient reaches those adapters:
+    their delta stays zero and adds nothing to the trained or merged weights.
 - `v4-tiny-random-smoke-ep.yaml` — EP=2 pipeline smoke on a tiny random-init checkpoint (materialization recipe in the file).
 
 The hub checkpoint ships **no chat template** (DeepSeek uses an external message encoder) — one is required for conversational SFT. `jinja-templates/deepseek-v4/deepseek-v4-chat.jinja` renders the tokenizer's native `<｜User｜>`/`<｜Assistant｜>` special tokens; pair it with `assistant_message_template: "<｜Assistant｜>"` and `train_on_completions_only: true` (pad == eos).

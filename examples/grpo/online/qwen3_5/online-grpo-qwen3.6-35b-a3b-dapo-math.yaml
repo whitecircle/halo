@@ -2,7 +2,7 @@
 # See agent-docs/training-methods/grpo/online.md.
 # Launch: vllm-server with --weight-transfer-config '{"backend":"nccl"}' --moe-backend triton (GPU 0;
 #   the auto-picked Blackwell MoE backends repack the expert weights this sync writes), then
-#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/online_grpo/rlvr.py <this config>
+#   CUDA_VISIBLE_DEVICES=1,2 torchrun --nproc_per_node=2 scripts/training/grpo/online.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
@@ -36,18 +36,13 @@ loss_type: grpo
 
 # --- Training ---
 per_device_train_batch_size: 1
-per_device_eval_batch_size: 8   # global eval batch must divide by num_generations at any world size
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
 gradient_checkpointing_kwargs:
   use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
-optim: adamw_torch_fused
 learning_rate: 1.0e-06
-max_grad_norm: 1.0
 lr_scheduler_type: cosine
 warmup_steps: 20
-seed: 42
 
 # --- Sequence Lengths ---
 max_prompt_length: 1024
@@ -56,14 +51,9 @@ max_completion_length: 4096
 # --- vLLM Generation ---
 use_vllm: true
 vllm_mode: server
-vllm_server_host: 0.0.0.0   # the address the TRAINER DIALS, not a bind address (Linux connects
-                            # 0.0.0.0 to loopback); a server on another host needs its real
-                            # address here, or vllm_server_base_url instead
-vllm_server_port: 8000
 
 # --- Output ---
 output_dir: checkpoints/online-grpo-qwen3.6-35b-a3b-dapo-math
-save_strategy: steps
 save_steps: 200
 eval_strategy: steps
 eval_steps: 200
@@ -75,10 +65,6 @@ logging_steps: 1
 logging_first_step: true
 report_to: wandb
 log_completions: true
-
-# --- Data ---
-dataloader_num_workers: 0
-remove_unused_columns: false
 
 # --- PEFT (optional) ---
 use_peft: false

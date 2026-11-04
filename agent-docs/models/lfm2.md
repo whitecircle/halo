@@ -2,24 +2,20 @@
 
 Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution and full-attention layers) with sigmoid routing and an optional non-trainable `expert_bias` buffer for top-k selection correction. EP, ETP, and selective TP are supported; CP is blocked by the sequence-axis short-conv layers.
 
-| | EP | CP | TP | ETP | PP | EP+TP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| LFM-2 MoE | Yes | **No** | Yes | Yes | — | Yes |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism refuses the checkpoints at the tie gate, before the registry check: they tie their head (`tie_word_embeddings` is the config-class default) and ship no `lm_head` tensor.
 
-Pipeline parallelism is [not yet available in this release](../parallelism/pipeline-parallelism.md).
+## EP layer
 
-## EP wrapper
-
-`EPLfm2MoELayer` (`src/distributed/expert_parallel/layers/lfm2.py`) replaces `Lfm2MoeSparseMoeBlock`.
+`EPLfm2MoELayer` (`halo/distributed/expert_parallel/families/lfm2.py`) replaces `Lfm2MoeSparseMoeBlock`.
 
 - Routing: sigmoid scores, plus optional `expert_bias` for top-k selection only; the selected weights come from the unbiased scores, normalized to sum 1 when `norm_topk_prob` (default), then scaled by `routed_scaling_factor`. `expert_bias` is a buffer (not trainable), so it affects selection but doesn't appear in gradients and needs no grad-sync hook.
 - Storage: fused `gate_up_proj` and `down_proj` as 3D tensors. Compute via Grouped GEMM (fused-GLU path).
-- No shared experts (the wrapper extends `EPSharedExpertsMoELayerBase` with `shared_experts=None`, so the shared leg is skipped).
-- Gathered saves write the per-expert hub layout (`experts.{i}.w{1,3,2}.weight`) via `_PER_EXPERT_UNFUSED_KEYS` — the names both pinned engines' per-expert loaders read, so either serves the export and takes the RL weight sync. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
+- No shared experts (the EP layer extends `EPSharedExpertsMoELayerBase` with `shared_experts=None`, so the shared leg is skipped).
+- Gathered saves write the per-expert hub layout (`experts.{i}.w{1,3,2}.weight`) via the spec's `FUSED_SPLIT_PER_EXPERT` `ExpertLayout` — the names both pinned engines' per-expert loaders read, so either serves the export and takes the RL weight sync. SGLang 0.5.22's LFM-2 loader also reads the fused pair (`experts.gate_up_proj` / `experts.down_proj`, out-features-major as trained). See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
 
 ## TP and ETP
 
-Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/module_types.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
+Selective attention-only TP — `Lfm2MoeAttention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`); `Lfm2MoeSparseMoeBlock` is skipped (handled by EP). Only the full-attention layers shard — the short-conv layers stay replicated, so the per-rank footprint falls by far less than `1/tp_size`.
 
 LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor-parallelism.md#weight-sharding): `_init_fused_glu_params` splits the `[gate(M) | up(M)]` halves and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The non-trainable `expert_bias` buffer is replicated across ETP ranks.
 
@@ -27,7 +23,7 @@ LFM-2 uses the [fused contiguous-halves ETP layout](../parallelism/expert-tensor
 
 Documents stay isolated in both halves of the hybrid stack. The attention layers key on the packed
 `position_ids`; for the `Lfm2MoeShortConv` layers the collators and SMPO's padding-free forward
-additionally emit `seq_idx` for this family (`segment_markers_for` in `src/models/segment_markers.py`
+additionally emit `seq_idx` for this family (`segment_markers_for` in `halo/models/segment_markers.py`
 turns it on by model type) and both conv paths honor it, which zeroes the cross-document term exactly
 rather than approximately.
 
@@ -41,7 +37,12 @@ The short-conv layers mix tokens along the sequence axis, so a Ulysses sequence 
 
 The production SFT example is `examples/sft/lfm2/lfm2.5-8b-a1b-ultrachat-ep2.yaml`.
 It trains `LiquidAI/LFM2.5-8B-A1B` on UltraChat with EP2 and gathered Hugging Face
-checkpoints. The path is also exercised by `tests/gpu/trainers/sft/test_sft_lfm2_moe.py`
+checkpoints, on packed 16,384-token rows without gradient checkpointing. A row holds about 43 GB of
+activations (LFM2-24B-A2B: about 70 GB). By computation, not measurement (this shape has not run on the full-size model), that fits beside the EP state
+on B200/B300 but not on an 80 GB GPU, where `--gradient_checkpointing=true` brings it back. Each rank still sees 65,536 tokens
+per optimizer step; the longer row spreads the per-micro-batch fixed cost over twice the tokens
+([Throughput Benchmarks](../optimization/throughput-benchmarks.md) lists 35,517 tok/s/GPU at 16,384
+against 31,262 at 8,192). The path is also exercised by `tests/gpu/trainers/sft/test_sft_families.py --suite lfm2_moe`
 (`LiquidAI/LFM2-24B-A2B`, `--mode fsdp` and `--mode ep`). The LFM2.5 VL
 self-distillation example, `examples/distillation/lfm2/self-distill-lfm2.5-vl-1.6b.yaml`,
 uses a **dense** `LiquidAI/LFM2.5-VL-1.6B` checkpoint (`text_config.model_type: lfm2`,
@@ -51,6 +52,6 @@ no experts), so none of the MoE columns above apply to it.
 
 On a `use_expert_bias: false` checkpoint the slot is **materialized** at enable time (a zero buffer in the same sigmoid-score space, a semantic no-op at creation) and `use_expert_bias` flips in the exported config, so serving engines load and apply the trained bias there too.
 
-`moe_balancing: auto` picks `bias_update` here. `Lfm2MoeForCausalLM` has no aux-loss path — no `output_router_logits` / `router_aux_loss_coef` config field, no router-logit output, no aux term in the loss — and a `forward` that declares no `output_router_logits` parameter is the signal `auto` keys on, so it takes the EP-wrapper bias wherever the wrappers apply (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun).
+`moe_balancing: auto` picks `bias_update` here. `Lfm2MoeForCausalLM` has no aux-loss path — no `output_router_logits` / `router_aux_loss_coef` config field, no router-logit output, no aux term in the loss — and a `forward` that declares no `output_router_logits` parameter is the signal `auto` keys on, so it takes the EP-layer bias wherever the EP layers apply (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun).
 
-Without the wrappers nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning; freeze the router there. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags) and [RouterBiasBalancingCallback](../training-methods/callbacks.md#routerbiasbalancingcallback).
+Without the EP layers nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning; freeze the router there. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags) and [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).

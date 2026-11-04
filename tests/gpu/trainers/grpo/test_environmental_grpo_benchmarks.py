@@ -1,36 +1,9 @@
 #!/usr/bin/env python
-"""
-End-to-end Environmental GRPO training with real benchmark datasets.
+"""Environmental GRPO on real benchmark datasets against a live vLLM server, in sequence on one group port.
 
-Tests 4 environment types against actual evaluation datasets:
-1. ReAct Math        → GSM8K (grade school math)
-2. SearchQA          → SimpleQA (factual QA)
-3. ExamQA            → MMLU-Pro (hard multiple choice)
-4. CodeContests      → Codeforces (competitive programming)
-
-Each test runs a short training loop (``MAX_STEPS``, default 3) with a live vLLM server, sequentially
-in one process: every benchmark forms its own weight-transfer group on the same group port, so it
-also covers the client releasing that listener on close.
-
-Prerequisites:
-    # vLLM server on its OWN GPU (weight sync is NCCL — a server sharing the trainer's GPU cannot
-    # broadcast to itself). ``VLLM_MODEL`` must be the model trained here: the trainer broadcasts its
-    # own parameters into the served model. Neither server setting below is optional — code_contests
-    # binds a per-effort CoT budget that reaches the server as ``thinking_token_budget``, which draws a
-    # 400 on EVERY rollout without a reasoning parser and again under Model Runner V2, which does not
-    # implement the field; the benchmark then "runs" with zero generated tokens and loss=0 / reward=0.
-    VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 VLLM_USE_V2_MODEL_RUNNER=0 \
-        docker compose -f docker-compose.vllm.yml up -d vllm-server
-
-Usage:
-    # Trainer on a different GPU than the server. On a host WITHOUT InfiniBand the image's OFI/Gin
-    # NCCL defaults wedge the cross-container group — override them:
-    CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test react_math
-
-    # All four environments:
-    CUDA_VISIBLE_DEVICES=0 NCCL_IB_DISABLE=1 NCCL_NET=Socket torchrun --nproc_per_node=1 \
-        tests/gpu/trainers/grpo/test_environmental_grpo_benchmarks.py --test all
+The server needs its own GPU, the trained model (``VLLM_MODEL``) and ``VLLM_REASONING_PARSER=qwen3``: code_contests'
+per-effort CoT budget draws a 400 on every rollout without one, giving zero tokens and loss=0. Without InfiniBand, set
+``NCCL_IB_DISABLE=1 NCCL_NET=Socket`` or the image's OFI/Gin defaults wedge the cross-container group.
 """
 
 import argparse
@@ -50,39 +23,36 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.configs.environment_config import EnvironmentConfig
-from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import env_int, env_str
-from src.environments.envs.protocols.react import ReActEnvironment
-from src.environments.envs.tasks.coding.code_contests import CodeContestsEnvironment
-from src.environments.envs.tasks.qa import ExamQAEnvironment
-from src.environments.tools.factories import create_native_math_tools, create_native_python_tools
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import env_int, env_str
+from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.environments.tasks.qa import ExamQAEnvironment
+from halo.environments.tools.toolsets import build_math_tools, build_python_tools
+from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, step_losses
-from tests.common.utils import log as rank0_log
+from tests.common.rank_log import log as rank0_log
+from tests.common.training_checks import step_losses
 from tests.common.weight_sync import weight_transfer_port
 
-# Same knob as docker-compose.vllm.yml: the trainer broadcasts its own weights into the served
-# model, so the two must be the same checkpoint.
+# The trainer broadcasts its own weights into the served model, so the two must be the same checkpoint.
 MODEL_NAME = env_str("VLLM_MODEL", QWEN3_0_6B)
-# ``or`` (not an env_str default): an exported-but-empty VLLM_SERVER_URL passes the conftest gate,
-# which reads it the same way, so the client must fall back to the same URL rather than to "".
+# ``or``: an exported-but-empty VLLM_SERVER_URL passes the conftest gate, which reads it the same way.
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
 # Drawn once for the process (one rank): every benchmark rebinds it.
 GROUP_PORT = weight_transfer_port("HALO_TEST_VLLM_GROUP_PORT")
-# The search benchmark keeps the offline fabricated-results backend instead of rate-limited live
-# search; naming it is refused at env construction without this opt-in. Module scope, because Ray
-# actors snapshot the driver environment at the FIRST ray.init — an earlier benchmark in the same
-# process starts Ray before test_search_qa runs.
+# The offline fabricated-results backend needs this opt-in at env construction. Module scope: Ray actors snapshot the
+# driver environment at the first ray.init, which an earlier benchmark in this process reaches first.
 os.environ["HALO_ALLOW_MOCK_SEARCH"] = "1"
 MAX_STEPS = env_int("HALO_TEST_MAX_STEPS", 3)
+# The harness gives every run an empty HF_DATASETS_CACHE, so an offline host names a prepared cache here.
+DATASETS_CACHE = env_str("HALO_TEST_BENCHMARK_DATASETS_CACHE")
 
-# Sized for ONE vLLM server: batch × grad_accum × num_generations = 16 multi-turn rollouts per step,
-# which is about what a single engine serves concurrently. Scale the workers with the engine count.
+# Sized for one vLLM server: batch x grad_accum x num_generations = 16 multi-turn rollouts per step.
 DEFAULT_BATCH_SIZE = env_int("HALO_TEST_BATCH_SIZE", 2)
 DEFAULT_GRAD_ACCUM = env_int("HALO_TEST_GRAD_ACCUM", 2)
 DEFAULT_NUM_GENERATIONS = env_int("HALO_TEST_NUM_GENERATIONS", 4)
@@ -93,12 +63,10 @@ DEFAULT_MAX_COMPLETION = env_int("HALO_TEST_MAX_COMPLETION", 2048)
 
 
 def log(msg: str) -> None:
-    """A benchmark line, from the main process only."""
     rank0_log(f"[benchmark] {msg}")
 
 
 def check_vllm_server() -> bool:
-    """Check if vLLM server is healthy."""
     try:
         req = urllib.request.Request(f"{VLLM_SERVER_URL}/health/")
         with urllib.request.urlopen(req, timeout=10) as resp:
@@ -114,9 +82,8 @@ def format_duration(seconds: float) -> str:
 
 
 def prepare_gsm8k_dataset(num_samples: int = 200) -> Dataset:
-    """Load GSM8K and format for Environmental GRPO (ReAct math)."""
     log(f"Loading GSM8K dataset ({num_samples} samples)...")
-    ds = load_dataset("openai/gsm8k", "main", split=f"train[:{num_samples}]")
+    ds = load_dataset("openai/gsm8k", "main", split=f"train[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:
@@ -137,9 +104,8 @@ def prepare_gsm8k_dataset(num_samples: int = 200) -> Dataset:
 
 
 def prepare_simpleqa_dataset(num_samples: int = 200) -> Dataset:
-    """Load SimpleQA and format for SearchQA environment."""
     log(f"Loading SimpleQA dataset ({num_samples} samples)...")
-    ds = load_dataset("basicv8vc/SimpleQA", split=f"test[:{num_samples}]")
+    ds = load_dataset("basicv8vc/SimpleQA", split=f"test[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:
@@ -156,9 +122,8 @@ def prepare_simpleqa_dataset(num_samples: int = 200) -> Dataset:
 
 
 def prepare_mmlu_pro_dataset(num_samples: int = 200) -> Dataset:
-    """Load MMLU-Pro and format for ExamQA environment (multiple choice)."""
     log(f"Loading MMLU-Pro dataset ({num_samples} samples)...")
-    ds = load_dataset("TIGER-Lab/MMLU-Pro", split=f"test[:{num_samples}]")
+    ds = load_dataset("TIGER-Lab/MMLU-Pro", split=f"test[:{num_samples}]", cache_dir=DATASETS_CACHE)
 
     data = []
     choice_letters = "ABCDEFGHIJ"
@@ -184,9 +149,8 @@ def prepare_mmlu_pro_dataset(num_samples: int = 200) -> Dataset:
 
 
 def prepare_code_contests_dataset(num_samples: int = 100) -> Dataset:
-    """Load Codeforces problems from deepmind/code_contests for CodeContests env."""
     log(f"Loading Codeforces dataset ({num_samples} samples)...")
-    ds = load_dataset("deepmind/code_contests", split="test")
+    ds = load_dataset("deepmind/code_contests", split="test", cache_dir=DATASETS_CACHE)
 
     data = []
     for row in ds:
@@ -230,12 +194,7 @@ def run_env_grpo_training(
     max_completion_length: int = DEFAULT_MAX_COMPLETION,
     extra_grpo_kwargs: dict | None = None,
 ) -> dict[str, Any]:
-    """Run a single Environmental GRPO training session.
-
-    Returns ``{"success": bool, "error": str | None}``: whether the run was healthy, and why not.
-    """
-    # Resolved here, not as a def-time default: ``--max-steps`` rebinds the module global in run(),
-    # which a default bound at import time would never see.
+    # Resolved here: ``--max-steps`` rebinds the module global in run(), which a def-time default would never see.
     max_steps = MAX_STEPS if max_steps is None else max_steps
 
     output_dir = tempfile.mkdtemp(prefix=f"test_env_grpo_{env_name}_")
@@ -269,12 +228,10 @@ def run_env_grpo_training(
             "num_generations": num_generations,
             "max_completion_length": max_completion_length,
             "beta": 0.01,
-            "fsdp": "",
             "reward_weights": [1.0],
             "gradient_checkpointing": True,
             "gradient_checkpointing_kwargs": {"use_reentrant": False},
             "optim": "adamw_torch_fused",
-            "vllm_group_port": GROUP_PORT,
             "remove_unused_columns": False,
         }
         if extra_grpo_kwargs:
@@ -282,8 +239,9 @@ def run_env_grpo_training(
 
         grpo_config = GRPOConfig(**grpo_kwargs)
 
-        async_config = AsyncTrainingConfig(
+        async_config = AsyncRolloutConfig(
             rollout_server_url=VLLM_SERVER_URL,
+            rollout_group_port=GROUP_PORT,
             rollout_connection_timeout=120.0,
             num_rollout_workers=num_workers,
             max_concurrent_rollouts=max_concurrent,
@@ -305,9 +263,8 @@ def run_env_grpo_training(
             f"× {num_generations} gen = {batch_size * grad_accum * num_generations} sequences/step"
         )
 
-        # environment_cls takes real BaseEnvironment subclasses only; factory-built envs (qa_search)
-        # arrive as registry names and must go through EnvironmentConfig instead, whose turn cap is its
-        # own field.
+        # environment_cls takes real EnvironmentBase subclasses only; factory-built envs (qa_search) arrive as registry
+        # names through EnvironmentConfig, whose turn cap is its own field.
         log("  Creating DistributedAsyncEnvironmentalGRPOTrainer...")
         if isinstance(environment_cls, str):
             env_kwargs = dict(environment_kwargs)
@@ -329,7 +286,11 @@ def run_env_grpo_training(
             parallelism_config=ParallelismConfig(),
             # beta != 0 on a full fine-tune holds a frozen reference, loaded as the policy is.
             ref_model=load_frozen_auxiliary_model(
-                MODEL_NAME, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="flash_attention_2"
+                MODEL_NAME,
+                dtype=torch.bfloat16,
+                trust_remote_code=True,
+                attn_implementation="flash_attention_2",
+                download_tag=None,
             ),
             **env_selector,
         )
@@ -342,11 +303,9 @@ def run_env_grpo_training(
         losses = step_losses(trainer)
         rewards = [float(entry["reward"]) for entry in trainer.state.log_history if "reward" in entry]
 
-        # Graded against what the SERVED model can deliver: react_math is solvable by the default
-        # 0.6B so a stuck verifier (all-equal reward → zero advantage) must show as reward == 0,
-        # while the other three score 0 at that size no matter how healthy the stack is and are
-        # instead pinned on episodes having run at all — a dead server or rejected request shows
-        # zero generated tokens.
+        # Graded against what the served model can deliver: react_math is solvable at the default 0.6B, so a stuck
+        # verifier must show as reward == 0. The other three score 0 at that size and are pinned on episodes having run
+        # at all.
         gen_tokens = [
             float(entry["async/total_generation_tokens"])
             for entry in trainer.state.log_history
@@ -398,15 +357,14 @@ def run_env_grpo_training(
 
 
 def test_react_math():
-    """ReAct Math environment with GSM8K dataset."""
     log("=" * 70)
     log("TEST: ReAct Math Environment + GSM8K")
     log("=" * 70)
 
     dataset = prepare_gsm8k_dataset(num_samples=200)
 
-    registry = create_native_math_tools()
-    for tool in create_native_python_tools().list_tools():
+    registry = build_math_tools()
+    for tool in build_python_tools().list_tools():
         registry.register(tool)
 
     return run_env_grpo_training(
@@ -420,8 +378,6 @@ def test_react_math():
 
 
 def test_search_qa():
-    """SearchQA environment with SimpleQA dataset."""
-
     log("=" * 70)
     log("TEST: SearchQA Environment + SimpleQA")
     log("=" * 70)
@@ -431,7 +387,7 @@ def test_search_qa():
     return run_env_grpo_training(
         env_name="search_qa",
         dataset=dataset,
-        environment_cls="qa_search",  # factory-built env → registry name, not a class
+        environment_cls="qa_search",  # Factory-built env: a registry name, not a class.
         environment_kwargs={"max_turns": 5, "search_backend": "mock", "include_python_tools": False},
         rollout_max_tokens=1024,
         max_completion_length=1024,
@@ -439,7 +395,6 @@ def test_search_qa():
 
 
 def test_exam_qa():
-    """ExamQA environment with MMLU-Pro dataset."""
     log("=" * 70)
     log("TEST: ExamQA Environment + MMLU-Pro")
     log("=" * 70)
@@ -458,7 +413,6 @@ def test_exam_qa():
 
 
 def test_code_contests():
-    """CodeContests environment with Codeforces dataset."""
     log("=" * 70)
     log("TEST: CodeContests Environment + Codeforces")
     log("=" * 70)
@@ -476,7 +430,7 @@ def test_code_contests():
             "reasoning_effort_profiles": {"medium": {"thinking_tokens": 1024}},
         },
         num_generations=4,
-        batch_size=4,  # must be divisible by num_generations
+        batch_size=4,  # Must be divisible by num_generations.
         grad_accum=1,
         rollout_max_tokens=2048,
         max_completion_length=2048,
@@ -488,12 +442,8 @@ BENCHMARKS = ("react_math", "search_qa", "exam_qa", "code_contests")
 
 
 def _run_benchmark(name: str, benchmark) -> None:
-    """Run one benchmark and raise with its own diagnosis unless it ran healthy.
-
-    Health is re-checked first so a server that died mid-suite reports as such rather than as the
-    downstream failures of every later benchmark (no restart between them: each forms a fresh
-    weight-transfer group on the same port).
-    """
+    """Health is re-checked first, so a server that died mid-suite reports as such over every later benchmark's
+    failures."""
     if not check_vllm_server():
         raise RuntimeError(f"vLLM server at {VLLM_SERVER_URL} stopped answering /health before {name}")
     result = benchmark()

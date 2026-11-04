@@ -1,30 +1,15 @@
 #!/usr/bin/env python3
-"""tokenize_rendered: probe-based special-token ownership for rendered chat-template text.
-
-The seam probes each tokenizer once (``tokenizer("", add_special_tokens=True)``) to learn what the
-post-processor really adds, then keeps every special exactly once. Pins all tokenizer contracts:
-- no-BOS tokenizer (Qwen-style): token IDs identical to a plain ``tokenizer(text)`` call.
-- BOS-post-processing tokenizer + BOS-emitting template (gemma-3/llama-style): exactly one BOS,
-  counted inside the truncation budget.
-- ``bos_token`` defined but NOT post-processed, template does NOT emit it (gpt-oss/Bailing-style):
-  no BOS is invented — the served policy never sees one.
-- ``bos_token`` defined but NOT post-processed, template DOES emit it (gemma-4-style): the
-  template's BOS survives verbatim (stripping + add_special_tokens=True would silently drop it).
-- trailing-special post-processor (Zaya-style ``<|im_end|>``): preserved on training rows, stripped
-  from generation prompts (``for_generation=True``) so they never end with a turn terminator.
-
-Usage:
-    python tests/cpu/data/test_tokenize_rendered.py
-"""
+"""``tokenize_rendered`` probes each tokenizer once to learn what the post-processor adds, then keeps every special
+exactly once, across the no-BOS, post-processed BOS, nominal BOS, template BOS and trailing-special contracts."""
 
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 from datasets import Dataset, DatasetDict
 
-from src.data.pipeline.rendered import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
-from tests.common.utils import load_script_module
+from halo.data.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
+from halo.entrypoints.data_setup import prepare_chat_text_split
+from tests.common.repo import load_script_module
 
 BOS_ID = 1
 TRAILING_EOS_ID = 555
@@ -47,11 +32,8 @@ class NoBosTokenizer:
 
 
 class BosTokenizer:
-    """Gemma-3/Llama-style: BOS in the template AND prepended by the post-processor.
-
-    A leading ``<bos>`` in the text tokenizes to the BOS id (special tokens parse from text),
-    exactly like real tokenizers handle rendered templates.
-    """
+    """Gemma-3/Llama-style: BOS in the template and prepended by the post-processor; a leading ``<bos>`` in the text
+    tokenizes to the BOS id."""
 
     bos_token = "<bos>"
     bos_token_id = BOS_ID
@@ -81,8 +63,7 @@ class NominalBosTokenizer(NoBosTokenizer):
 
 
 class Gemma4StyleTokenizer(NoBosTokenizer):
-    """gemma-4-style: the template emits BOS but the post-processor does NOT re-add it —
-    the rendered BOS must survive verbatim."""
+    """gemma-4-style: the template emits BOS and the post-processor does not re-add it."""
 
     bos_token = "<bos>"
     bos_token_id = BOS_ID
@@ -96,7 +77,6 @@ class Gemma4StyleTokenizer(NoBosTokenizer):
             ids.append(BOS_ID)
             text = text[len(self.bos_token) :]
         ids += [100 + i for i, _ in enumerate(text.split())]
-        # No post-processing: add_special_tokens adds nothing.
         if truncation and max_length is not None:
             ids = ids[:max_length]
         return {"input_ids": ids, "attention_mask": [1] * len(ids)}
@@ -123,7 +103,7 @@ class TrailingEosTokenizer(NoBosTokenizer):
 
 
 class BosAndTrailingEosTokenizer(BosTokenizer):
-    """Zaya's real contract: post-processor prepends BOS AND appends a trailing ``<|im_end|>``."""
+    """Zaya's real contract: post-processor prepends BOS and appends a trailing ``<|im_end|>``."""
 
     eos_token_id = TRAILING_EOS_ID
     eos_token = TRAILING_EOS_TOKEN
@@ -150,10 +130,8 @@ class TerminatedRenderTokenizer(TrailingEosTokenizer):
 
 
 class BudgetedTerminatedRenderTokenizer(TerminatedRenderTokenizer):
-    """HF-faithful truncation on top of the terminated-render shape: the appended trailing special
-    fits INSIDE the ``max_length`` budget (fast tokenizers truncate the text to make room for
-    post-processor specials), so a truncated row ends with the appended terminator at exactly
-    ``max_length`` tokens."""
+    """The appended trailing special fits inside the ``max_length`` budget, as fast tokenizers make room for it, so
+    a truncated row ends with it at exactly ``max_length`` tokens."""
 
     def __call__(self, text, add_special_tokens=True, truncation=False, padding=False, max_length=None):
         text_budget = max_length - 1 if (add_special_tokens and truncation and max_length is not None) else max_length
@@ -169,7 +147,6 @@ def _unpack(specials):
 
 
 def test_probe_contracts():
-    """The probe classifies each stub's real add_special_tokens contract."""
     assert _unpack(probe_tokenizer_specials(NoBosTokenizer())) == (False, ())
     assert _unpack(probe_tokenizer_specials(BosTokenizer())) == (True, ())
     assert _unpack(probe_tokenizer_specials(NominalBosTokenizer())) == (False, ())
@@ -179,7 +156,6 @@ def test_probe_contracts():
 
 
 def test_probe_cached_per_instance():
-    """The probe runs once per tokenizer instance (cached), and per-instance — not per-class."""
     calls = []
 
     class CountingTokenizer(NoBosTokenizer):
@@ -195,8 +171,7 @@ def test_probe_cached_per_instance():
 
 
 def test_nominal_bos_tokenizer_gets_no_bos():
-    """A tokenizer that defines bos_token without post-processing it must NOT gain a BOS —
-    prepending one would train on a token the served policy never produces."""
+    """Prepending one would train on a token the served policy never produces."""
     tok = NominalBosTokenizer()
     text = "hello world"
     ids = tokenize_rendered(tok, text)["input_ids"]
@@ -205,8 +180,7 @@ def test_nominal_bos_tokenizer_gets_no_bos():
 
 
 def test_gemma4_style_template_bos_survives():
-    """gemma-4-style: the template's rendered BOS must survive — a strip +
-    add_special_tokens=True drops it (the post-processor never re-adds)."""
+    """A strip + add_special_tokens=True drops it, since the post-processor never re-adds."""
     tok = Gemma4StyleTokenizer()
     text = tok.apply_chat_template([{"role": "user", "content": "hi there"}])
     assert text.startswith(tok.bos_token), "precondition: the template emits BOS"
@@ -217,7 +191,6 @@ def test_gemma4_style_template_bos_survives():
 
 
 def test_no_bos_tokenizer_equivalence():
-    """No-BOS path is token-ID identical to a plain tokenizer(text) call."""
     tok = NoBosTokenizer()
     text = "hello world how are you"
     assert tokenize_rendered(tok, text)["input_ids"] == tok(text)["input_ids"]
@@ -228,8 +201,7 @@ def test_no_bos_tokenizer_equivalence():
 
 
 def test_bos_template_no_double_bos():
-    """Rendered text that already carries BOS yields exactly ONE leading BOS (a plain
-    add_special_tokens=True call produces two)."""
+    """A plain add_special_tokens=True call produces two."""
     tok = BosTokenizer()
     text = tok.bos_token + "hello world"
 
@@ -241,8 +213,7 @@ def test_bos_template_no_double_bos():
 
 
 def test_stripped_render_gains_single_bos():
-    """A BOS-stripped render regains exactly one BOS when the post-processor owns BOS
-    (a plain add_special_tokens=False call yields zero)."""
+    """A plain add_special_tokens=False call yields zero."""
     tok = BosTokenizer()
     text = "hello world"
 
@@ -260,16 +231,14 @@ def test_bos_counts_toward_truncation_budget():
 
 
 def test_trailing_eos_post_processing_preserved_on_training_rows():
-    """Zaya-style trailing EOS from add_special_tokens=True must survive on training rows
-    (add_special_tokens=False would silently drop the row terminator)."""
+    """add_special_tokens=False would silently drop the row terminator."""
     tok = TrailingEosTokenizer()
     ids = tokenize_rendered(tok, "hello world")["input_ids"]
     assert ids[-1] == tok.eos_token_id
 
 
 def test_for_generation_strips_trailing_special():
-    """Generation prompts must not end with the tokenizer-appended turn terminator — the model
-    would see its own end-of-turn at the generation point."""
+    """The model would see its own end-of-turn at the generation point."""
     tok = TrailingEosTokenizer()
     out = tokenize_rendered(tok, "hello world", for_generation=True)
     assert out["input_ids"] == tok("hello world", add_special_tokens=False)["input_ids"]
@@ -278,7 +247,6 @@ def test_for_generation_strips_trailing_special():
 
 
 def test_for_generation_keeps_bos_strips_trailing():
-    """Zaya's full contract under for_generation: single BOS kept, trailing terminator stripped."""
     tok = BosAndTrailingEosTokenizer()
     text = tok.bos_token + "hello world"
     ids = tokenize_rendered(tok, text, for_generation=True)["input_ids"]
@@ -290,9 +258,8 @@ def test_for_generation_keeps_bos_strips_trailing():
 
 
 def test_trailing_special_not_doubled_when_render_already_terminated():
-    """Zaya regression: the chat template already ends the final assistant turn with the terminator
-    (``…<eos>\\n``), and add_special_tokens=True appends ANOTHER — doubling the terminator on
-    training rows and violating the once-only contract. The appended duplicate must be stripped."""
+    """The chat template already ends the final assistant turn with the terminator and add_special_tokens=True
+    appends another; the duplicate is stripped."""
     tok = TerminatedRenderTokenizer()
     text = f"hello world {TRAILING_EOS_TOKEN}\n"  # render terminates the turn itself (+ trailing newline)
 
@@ -308,8 +275,8 @@ def test_trailing_special_not_doubled_when_render_already_terminated():
 
 
 def test_truncated_row_keeps_appended_terminator():
-    """Truncation regression: when truncation cut the render's own terminator, the post-processor's
-    appended copy is the row's ONLY terminator — the untruncated-text dedup must NOT strip it."""
+    """When truncation cut the render's own terminator, the appended copy is the row's only one, so the dedup must
+    not strip it."""
     tok = BudgetedTerminatedRenderTokenizer()
     text = f"w0 w1 w2 w3 w4 w5 {TRAILING_EOS_TOKEN}\n"  # full render terminates the turn itself
 
@@ -321,8 +288,6 @@ def test_truncated_row_keeps_appended_terminator():
 
 
 def test_untruncated_row_with_truncation_kwarg_still_deduped():
-    """truncation=True that never engages (row under max_length) keeps the dedup: the render's own
-    terminator survives, the appended duplicate is stripped."""
     tok = BudgetedTerminatedRenderTokenizer()
     text = f"hello world {TRAILING_EOS_TOKEN}\n"
 
@@ -332,16 +297,12 @@ def test_untruncated_row_with_truncation_kwarg_still_deduped():
 
 
 def test_row_that_exactly_fills_the_budget_is_still_deduped():
-    """Boundary regression: a render that EXACTLY fills ``max_length`` is never cut, so its own
-    terminator survives and the appended copy is still a duplicate.
-
-    Skipping the dedup whenever ``len >= max_length`` cannot distinguish "was cut" from "exactly
-    fits" — every row landing on the budget then carries a doubled terminator.
-    """
+    """A render exactly filling ``max_length`` is never cut, so its own terminator survives and the appended copy is
+    a duplicate; ``len >= max_length`` cannot tell that from a cut."""
     tok = BudgetedTerminatedRenderTokenizer()
     text = f"w0 w1 w2 {TRAILING_EOS_TOKEN}\n"
     untruncated = tokenize_rendered(tok, text)["input_ids"]
-    budget = len(untruncated) + 1  # the appended duplicate exactly fills it — nothing is cut
+    budget = len(untruncated) + 1  # the appended duplicate exactly fills it, so nothing is cut
 
     ids = tokenize_rendered(tok, text, truncation=True, max_length=budget)["input_ids"]
     assert ids == untruncated, f"row at the max_length boundary diverged from the untruncated row: {ids}"
@@ -349,7 +310,6 @@ def test_row_that_exactly_fills_the_budget_is_still_deduped():
 
 
 def test_for_generation_noop_without_trailing_specials():
-    """for_generation must not change output for tokenizers that append nothing."""
     for tok in (NoBosTokenizer(), BosTokenizer(), NominalBosTokenizer(), Gemma4StyleTokenizer()):
         text = "hello world"
         assert (
@@ -358,12 +318,8 @@ def test_for_generation_noop_without_trailing_specials():
 
 
 def test_render_generation_prompt_keeps_bos_when_nothing_re_adds_it():
-    """gemma-4-style: the template's BOS must stay in the returned prompt TEXT.
-
-    Nothing downstream puts it back — TRL's GRPO tokenizes the prompt with
-    ``add_special_tokens=False`` and this tokenizer's post-processor adds nothing — so an
-    unconditional strip silently trains and rolls out on a BOS-less prompt.
-    """
+    """Nothing downstream puts it back: TRL's GRPO tokenizes with ``add_special_tokens=False`` and this
+    post-processor adds nothing."""
     tok = Gemma4StyleTokenizer()
     messages = [{"role": "user", "content": "hi there"}]
     text = render_generation_prompt(tok, messages)
@@ -373,8 +329,8 @@ def test_render_generation_prompt_keeps_bos_when_nothing_re_adds_it():
 
 
 def test_render_generation_prompt_strips_bos_when_post_processor_re_adds_it():
-    """gemma-3-style: the post-processor prepends BOS, so the render's own copy must go — keeping
-    both would double it the moment anything tokenizes with add_special_tokens=True."""
+    """The post-processor prepends BOS, so keeping the render's copy doubles it once anything tokenizes with
+    add_special_tokens=True."""
     tok = BosTokenizer()
     text = render_generation_prompt(tok, [{"role": "user", "content": "hi there"}])
     assert not text.startswith(tok.bos_token), f"BOS-post-processing render kept its BOS: {text[:40]!r}"
@@ -383,12 +339,8 @@ def test_render_generation_prompt_strips_bos_when_post_processor_re_adds_it():
 
 
 def test_render_generation_prompt_budget_counts_generation_tokenization():
-    """The max_prompt_length filter must measure the ids the row will really carry.
-
-    A Zaya-style post-processor appends a turn terminator that a generation prompt never keeps, so
-    measuring with a bare ``tokenizer(text)`` counts a token that is not there and rejects prompts
-    that fit.
-    """
+    """A Zaya-style post-processor appends a terminator a generation prompt never keeps, so a bare
+    ``tokenizer(text)`` counts a token that is not there and rejects prompts that fit."""
     tok = BosAndTrailingEosTokenizer()
     messages = [{"role": "user", "content": "one two three"}]
     text = render_generation_prompt(tok, messages)
@@ -406,12 +358,8 @@ def _classification_script():
 
 
 def test_classification_row_tokenization_never_doubles_bos():
-    """The classification script's row processor routes through tokenize_rendered.
-
-    A bare ``tokenizer(text=rendered)`` re-adds the post-processor's BOS on top of the template's,
-    which is what gemma-3 / Zaya / LFM2 actually do — every classification row would open with two
-    BOS tokens.
-    """
+    """A bare ``tokenizer(text=rendered)`` re-adds the post-processor's BOS on top of the template's (gemma-3, Zaya,
+    LFM2)."""
     module = _classification_script()
 
     tok = BosTokenizer()
@@ -432,17 +380,13 @@ def test_classification_row_tokenization_never_doubles_bos():
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
-        ([0, 2], [1.0, 0.0, 1.0]),  # int-valued column: get_label_list stringified the keys
-        (["0", "1"], [1.0, 1.0, 0.0]),  # already strings
+        ([0, 2], [1.0, 0.0, 1.0]),  # int-valued column: labels_in_split stringified the keys
+        (["0", "1"], [1.0, 1.0, 0.0]),
     ],
 )
 def test_classification_row_maps_multi_labels_of_either_type(labels, expected):
-    """``get_label_list`` stringifies every key, so both label paths must look up ``str(label)``.
-
-    An int-valued multi-label column is what a HF dataset with a ``Sequence(ClassLabel)`` column
-    yields, and a raw-value lookup ``KeyError``s on it while the single-label path accepts the very
-    same column type.
-    """
+    """``labels_in_split`` stringifies every key, so both label paths look up ``str(label)``; a raw-value lookup
+    ``KeyError``s on a ``Sequence(ClassLabel)`` column."""
     module = _classification_script()
 
     out = module.tokenize_classification_row(
@@ -457,10 +401,8 @@ def test_classification_row_maps_multi_labels_of_either_type(labels, expected):
 
 @pytest.mark.parametrize("sentinel", [-1, "-1"])
 def test_classification_row_skips_the_unlabeled_sentinel_in_a_multi_label_row(sentinel):
-    """``build_label_list`` REMOVES ``-1`` from the class list, so it has no id to look up: a multi-hot
-    row reads it as absence, leaving its slot at 0. Without the skip the row ``KeyError``s on a key the
-    pipeline deliberately dropped.
-    """
+    """``build_label_list`` removes ``-1`` from the class list, so a multi-hot row reads it as absence and leaves
+    its slot at 0."""
     module = _classification_script()
 
     out = module.tokenize_classification_row(
@@ -473,14 +415,9 @@ def test_classification_row_skips_the_unlabeled_sentinel_in_a_multi_label_row(se
     assert out["label"] == [0.0, 0.0, 1.0]
 
 
-def test_teacher_distill_text_rows_are_length_filtered_on_the_ids_they_train_on():
-    """The distillation text path drops an over-length conversation by the tokenization it trains on.
-
-    Measuring the rendered text with a bare ``tokenizer(text)`` counts the post-processor's BOS on
-    top of the template's (gemma-3; Zaya also its doubled terminator), so a conversation that exactly
-    fills ``max_length`` was dropped as over-length.
-    """
-    module = load_script_module("scripts/training/distillation/teacher_distill.py", "halo_teacher_distill_text_path")
+def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
+    """A bare ``tokenizer(text)`` counts the post-processor's BOS on top of the template's (gemma-3; Zaya also its
+    doubled terminator), dropping a conversation that exactly fills ``max_length``."""
     tok = BosTokenizer()
     fits = [{"role": "user", "content": "one two"}, {"role": "assistant", "content": "three"}]
     too_long = [{"role": "user", "content": "one two three four"}, {"role": "assistant", "content": "five six"}]
@@ -498,10 +435,13 @@ def test_teacher_distill_text_rows_are_length_filtered_on_the_ids_they_train_on(
     )
     training_config = SimpleNamespace(dataset_num_proc=1, max_length=len(trained_ids))
 
-    with mock.patch.object(module, "_text_distill_collator"):
-        train, test, _ = module._prepare_text_distill_data(
-            DatasetDict({"train": split, "test": split}), args, training_config, tok, None
-        )
+    train, test = prepare_chat_text_split(
+        DatasetDict({"train": split, "test": split}),
+        tok,
+        args,
+        training_config,
+        desc="Processing dataset",
+    )
 
     for rows in (train, test):
         assert rows["input_ids"] == [trained_ids], f"expected only the fitting row, as trained: {rows['input_ids']}"

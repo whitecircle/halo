@@ -1,17 +1,17 @@
 # AWS Credentials (optional S3 datasets)
 
-AWS is entirely optional. Halo defaults to the HuggingFace Hub and local paths for datasets, and to a Docker image you build locally or pull anonymously from ECR Public; you only need AWS if you keep datasets (or checkpoints) in your own S3 bucket, or pull the image from your own ECR registry. In all cases you bring your own account, bucket, and credentials — nothing here is provisioned for you.
+AWS is optional. Datasets default to the HuggingFace Hub and local paths, and the images build locally or pull anonymously from ECR Public; you need AWS only for datasets or checkpoints in your own S3 bucket, or images in your own ECR registry. You bring the account, bucket and credentials.
 
 ## Credential resolution
 
-The S3 utilities in `src/data/sources/s3_client.py` build a `boto3.Session` with no explicit keys unless `aws_access_key_id` / `aws_secret_access_key` are passed, so credentials resolve through the standard boto3 chain: environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) → `~/.aws/credentials` → `~/.aws/config` (an SSO session) → an instance/role profile. No region is hardcoded in Python.
+The S3 utilities in `halo/data/sources/s3_client.py` build a `boto3.Session` with no explicit keys unless `aws_access_key_id` / `aws_secret_access_key` are passed, so credentials resolve through the standard boto3 chain: environment variables (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY`) → `~/.aws/credentials` → `~/.aws/config` (an SSO session) → an instance/role profile. No region is hardcoded in Python.
 
 Any standard AWS setup works. The two common ones:
 
 - **Access keys** — set `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` (env vars or `~/.aws/credentials`). Simplest for CI, remote pods, and automation.
 - **AWS SSO** — `aws configure sso` writes an `~/.aws/config` SSO session; refresh it with `aws sso login`. On headless machines use the legacy (non-`[sso-session]`) config format: it forces the device-code flow (`aws sso login --no-browser` prints a URL + user code to authorize from any device), while the `[sso-session]` format redirects to a localhost URI no headless machine can open.
 
-Point the default S3 bucket at your own with `HALO_S3_DEFAULT_BUCKET=<your-bucket>`, or give fully-qualified `s3://<your-bucket>/...` dataset URIs.
+Give dataset URIs as `s3://<your-bucket>/...`, or set `HALO_S3_DEFAULT_BUCKET=<your-bucket>` for key-only paths; a key-only path with no default bucket raises. Retries and the cache layout: [S3 utilities](../data/s3-utilities.md).
 
 ## Credentials inside the training container
 
@@ -24,7 +24,7 @@ docker run --rm --gpus all --env-file .env \
   halo:blackwell bash -lc "..."
 ```
 
-AWS credentials are never baked into the image. S3 datasets pre-cached under `$HALO_DATA_ROOT/s3_datasets` (keyed by `md5("<bucket>/<key>")`) load without any live AWS call — see [S3 utilities](../data/s3-utilities.md).
+AWS credentials are never baked into the image. S3 datasets pre-cached under `$HALO_DATA_ROOT/s3_datasets` (keyed by `md5("<bucket>/<key>")`) load without a live AWS call.
 
 ## ECR (optional private image registry)
 
@@ -67,5 +67,3 @@ Remote pods (RunPod, SkyPilot, multi-node workers) have no access to a local SSO
 | Headless SSO redirects to `http://127.0.0.1:...` | You are on the `[sso-session]` config format; switch to the legacy format so `aws sso login --no-browser` uses the device-code flow |
 
 Never commit keys; keep `~/.aws/credentials` out of version control, rotate keys, and prefer SSO with least-privilege permissions.
-
-Image tagging and publishing live in [Docker → Registry](docker.md#registry).

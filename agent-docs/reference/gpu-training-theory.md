@@ -125,6 +125,8 @@ A step is thousands of kernels, and at any moment one of four resources limits i
 | **Latency / launch-bound** | many tiny kernels, gaps between them | **batch** the work: grouped GEMM, CUDA graphs |
 | **Communication-bound** | GPUs idle on NCCL, util drops in bursts | bigger M, smaller parallel degree, compute–comm overlap |
 
+Under EP a rank's combine reads as communication but is mostly its wait for the busiest rank at ep8 ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)), so balance and a lower EP degree act on it, not a faster wire.
+
 The launch floor is a few microseconds of host time per kernel — the sustained issue cost with framework dispatch included, not the bare driver call. [§11](#11-measuring-it-yourself)'s script measures it on your GPU.
 
 Run a MoE layer as a per-expert loop and that cost dominates. Qwen3-30B-A3B's `128 experts × 2 fused projections = 256` tiny matmuls take 1.12 ms in the forward against 0.11 ms for one grouped kernel (B300, 4k tokens) ([Grouped GEMM](../optimization/grouped-gemm.md)). Batching into one kernel matters at high expert count independent of the roofline.
@@ -146,7 +148,9 @@ Forward plus backward dominate FLOPs (`6P`). The collective and optimizer are fi
 
 Tensor-core kernels break the output into **tiles**, commonly 128 rows along M on SM90/SM100. Each tile's warp group loads matching input strips into SRAM and multiplies there, and the hardware wants the problem to divide into whole tiles:
 
-- **Alignment** — the MMA consumes fixed-size fragments, so the contraction dim `K` (and ideally `M`, `N`) should be multiples of 16 in bf16; a dim that isn't a multiple of 8 forces padding or a slower path. Round hidden sizes and padded vocabularies exist for this reason.
+- **Alignment** — the MMA consumes fixed-size fragments, which is why hidden sizes and padded vocabularies are round. On one B300, a plain bf16 GEMM `[M, K] @ [K, N]` runs 3–10× slower when `K` or `N` is off a multiple of 8: 3–5× when even, 5–9× when odd. `M` has no such effect, and fp32 inputs stay flat. Past 8, a `K` multiple of 32 gains a bf16 output a further 1.3× and an fp32 output nothing.
+
+    The rule reaches a plain GEMM whose `K` or `N` follows the row, not a fixed width. [Masked matmul attention](../optimization/flash-attention.md#masked-matmul-attention) rounds its crop and tile widths to 8 for it, and tree sparse attention pads its key rows to 8 (1.39× on that kernel). Grouped GEMM has no such cliff: expert row counts off a multiple of 8 cost at most 1.23×, on its widest products. Row lengths stay unpadded: `pad_to_multiple_of: 8` on a real full fine-tune (gpt-oss-20b, `ep2 × dp3`, rows of about 7,950 tokens) ran 4% slower, at 0.043% more tokens.
 - **Tail effect** — M not a tile multiple leaves the last tile partly empty. At M=130 against a 128-tile, the second tile fills only 2 of 128 rows. This is pure geometry, and its throughput cost folds into the small-M penalty below.
 - **Wave quantization** — tiles schedule in waves across 148 SMs, so a tile count just past a multiple of 148 runs a near-empty final wave. At its worst (149 tiles on 148 SMs) that would nearly double the time for the same work; measured, it is a mild ripple.
 
@@ -189,15 +193,15 @@ A stream is an **ordering constraint, not a hardware lane**. Kernels in one stre
 
 The block scheduler fills SMs from any resident grid, so real overlap happens only when one kernel leaves SMs idle. Two large GEMMs mostly serialize, while an NCCL collective (a few SMs' worth of copy work) does run beside compute.
 
-Every overlap trick in §9 rests on that. Data-parallel training hides each layer's gradient collective behind the next layer's backward, and the EP wrapper can run the always-active shared experts beside the token exchange (`HALO_EP_SHARED_OVERLAP`). Cross-stream ordering is expressed with **events**: record on one stream, wait on it from another.
+Every overlap trick in §9 rests on that. Data-parallel training hides each layer's gradient collective behind the next layer's backward, and the EP layer can run the always-active shared experts beside the token exchange (`HALO_EP_SHARED_OVERLAP`). Cross-stream ordering is expressed with **events**: record on one stream, wait on it from another.
 
 Streams also shape **memory**. The caching allocator pools freed blocks *per stream*, since reuse within a stream is safe by ordering alone while cross-stream reuse would need per-block event tracking.
 
-So allocations made on a short-lived stream are stranded when it dies. That is why the RL weight broadcast (§10) keeps one persistent stream pair (vLLM) or send stream (SGLang) per server client ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)).
+So a block freed on a stream that then stops being used is stranded: nothing allocates from that pool again. That is why the RL weight broadcast (§10) allocates its staging buffers on the caller's stream rather than the streams each server client sends from, and records them for those streams ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)).
 
 `reserved` far above `peak_alloc` in a memory reading means stranded pools, not live tensors ([Debugging](debugging.md#3-gpu-memory-profiling)).
 
-**CUDA graphs** record a kernel sequence once and replay it with a single launch, collapsing that host cost — a win for many-small-kernel steps. The catch is rigidity: fixed shapes and addresses fight dynamic control flow, so graphs are awkward for MoE, where per-expert token counts change every step. The toolkit does not capture the EP path.
+**CUDA graphs** record a kernel sequence once and replay it with a single launch, collapsing that host cost — a win for many-small-kernel steps. The cost is rigidity: fixed shapes and addresses fight dynamic control flow, so graphs are awkward for MoE, where per-expert token counts change every step. The toolkit does not capture the EP path.
 
 ---
 
@@ -215,7 +219,7 @@ A naive activation is several such kernels, each a separate HBM round trip. Fusi
 
 The toolkit gets this fusion from two places:
 
-- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP computes its own loss. [Liger Kernels](../optimization/liger-kernels.md).
+- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP layer replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP or PP computes the loss outside the forward. [Liger Kernels](../optimization/liger-kernels.md).
 - **torch.compile** (Inductor) auto-fuses pointwise chains. [torch.compile](../optimization/torch-compile.md).
 
 ### Fused-linear-cross-entropy (FLCE)
@@ -224,12 +228,12 @@ An LM's final step multiplies each position's hidden state by `lm_head` to produ
 
 FLCE never materializes it. It fuses the `lm_head` projection and cross-entropy into one kernel that processes the sequence in chunks, computing each block's logits, loss, and gradient and freeing them before the next — often the difference between a long sequence and OOM.
 
-The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP and CP. It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
+The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP and PP (under CP the Ulysses wrapper runs it over each chunk). It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`, `nemotron_h`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
 
 ### What fusion does not buy
 
 - **Chains, not isolated ops.** `torch.compile(mode="max-autotune")` on a single `silu(a)*b` is slower than eager on a B300, since autotune and guard overhead exceed the one-op saving.
-- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile fuses only the spans between breaks; on EP MoE it gains at most 1% ([torch.compile](../optimization/torch-compile.md)).
+- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), the reentrant checkpointing that EP and CP force, and each FA4 call break the graph, so compile fuses only the spans between breaks; on EP MoE it gains at most 1% ([torch.compile](../optimization/torch-compile.md)).
 - **Nothing for compute-bound matmuls**, which have no HBM pass to remove.
 
 ---
@@ -242,7 +246,7 @@ FlashAttention never materializes `S`. It tiles the sequence, computes scores fo
 
 The compute stays `O(seq²)`: this is an IO optimization, not a cheaper algorithm. In roofline terms (§2) it moves attention across the ridge. Naive AI ≈ `head_dim` (64–128 for most models, well below the ~275 ridge, so memory-bound), while Flash's effective AI ≈ `seq/2` lands attention on the compute-bound side.
 
-The versions are arch-tuning of one algorithm, each pairing the same math with its generation's tensor cores: FA2 on Ampere `mma` (the portable baseline, which under-feeds Hopper/Blackwell — the §4 narrow straw), FA3 on Hopper `wgmma` + TMA, FA4 on Blackwell `tcgen05` + tensor memory + 2-CTA clusters. Auto-selected per architecture; selection logic, GptOss sink handling, and the per-family NaN→SDPA fallbacks are in [Flash Attention & Backends](../optimization/flash-attention.md).
+The versions are arch-tuning of one algorithm, each pairing the same math with its generation's tensor cores: FA2 on Ampere `mma` (the portable baseline, which under-feeds Hopper/Blackwell — the §4 narrow straw), FA3 on Hopper `wgmma` + TMA, FA4 on Blackwell `tcgen05` + tensor memory + 2-CTA clusters. Auto-selected per architecture; selection logic, GptOss sink handling, and the per-family fallbacks are in [Flash Attention & Backends](../optimization/flash-attention.md).
 
 ---
 
@@ -255,17 +259,17 @@ FP8/FP4 doubles or quadruples tensor-core throughput and raises the compute ceil
 - **Compute-bound (AI above ridge):** the ceiling is what you are hitting, so raising it makes the step faster. This is the large-M / wide-matmul regime (dense MLPs at long seq, very wide experts).
 - **Memory-bound (AI below ridge):** you're on the diagonal, nowhere near the ceiling, so raising it does nothing. Most schemes also add a per-step quantization pass (read operand, compute scales, write quantized copy), so on a bandwidth-bound kernel the net result is slower.
 
-Fine-grained MoE experts live in the second regime: small per-expert M, weight-bandwidth-bound (§2 table). That is the measured reason bf16 is the toolkit default for MoE expert compute. Low precision earns its keep as a *memory* lever (smaller weights, activations, optimizer states, EP-dispatch payloads) and for inference, not as a compute lever at fine-grained MoE shapes.
+An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, so the kernel has headroom, but Halo's low-precision paths spend more on casts and copies than the kernel saves, and the backward stays bf16. Their whole steps run at 0.10–0.54× bf16, so bf16 is the default ([Why bf16 is the default](../optimization/low-precision-moe-kernels.md#why-bf16-is-the-default)).
 
-A frontier-scale result therefore doesn't transfer down. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
+A frontier-scale result does not transfer on its own. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
 
-At the toolkit's model sizes and per-expert M the same GEMMs fall below the ridge, where FP8 buys nothing. Check which regime *your* shape lands in.
+Compute rows per expert for your shape ([Grouped GEMM](../optimization/grouped-gemm.md)) and compare it with the ridge.
 
 ### Why a faster kernel doesn't change the verdict
 
 An isolated block-scaled nvfp4 grouped kernel does beat bf16 — but only with the group layout known ahead of time. MoE routing is dynamic, so each group's size and offset change every step and the fixed-layout CuTe grouped API has to rebuild its per-expert pointer arrays and swizzle metadata on the CPU every call, leaving the GPU idle behind a host wall.
 
-DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel) and still loses: the per-token activation-quant pass it exposes never amortizes at these per-expert M. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1` plus a shape gate) and net-slower than bf16 in a real step. Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it runs whole steps at 0.37–0.54× bf16 at ep8; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
 
 ### bf16 numerics (what stays fp32)
 
@@ -353,14 +357,14 @@ Split a model across GPUs and a third speed enters the picture: inter-GPU bandwi
 The one recorded collective, an NCCL all-reduce at **767 GB/s** bus bandwidth, ran on 16 GPUs across two
 nodes, so it measures a job that crosses the node boundary, not NVLink alone.
 
-![The bandwidth ladder on a log scale: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink/NVSwitch inside the node at 1.8 TB/s spec (~4× below HBM), with the repo's one recorded all-reduce bus bandwidth, 767 GB/s across 16 GPUs on 2 nodes, drawn as the measured bar, PCIe Gen5 ×16 at 64 GB/s per direction (~100× below HBM), and InfiniBand NDR across nodes at ~48 GB/s (~130× below HBM, the node boundary). Filled bars are measured, dashed outlines are spec; a collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
+![The bandwidth ladder on a log axis, filled dots measured and hollow dots spec. Inside a node: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink 5 / NVSwitch at 1.8 TB/s spec, about 4× below HBM, and PCIe Gen5 ×16 at 64 GB/s per direction by spec, about 100× below HBM. Across nodes: an NCCL all-reduce on 16 GPUs over 2 nodes at 767 GB/s bus bandwidth measured, EFA on B300 at 93 GB/s NCCL broadcast measured (spec about 100), and InfiniBand NDR at about 50 GB/s by spec, about 130× below HBM. A collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
 
 One ratio drives distributed design. Crossing a node boundary costs ~18–36× more per byte than staying on NVLink (1.8 TB/s vs 50–100 GB/s per GPU). A collective inside the NVLink domain is cheap. Stretch it across nodes and it hits the InfiniBand wall.
 
 - **NVLink** is direct GPU-to-GPU (Blackwell NVLink 5 ≈ 1.8 TB/s/GPU, Hopper NVLink 4 ≈ 0.9) and bypasses the CPU.
 - **NVSwitch** is an on-board crossbar: all 8 GPUs reach each other at full NVLink bandwidth, any-to-any.
 
-    NCCL's effective all-reduce bus bandwidth sits below the link spec because of algorithm and protocol overhead, the same measured-vs-spec gap HBM shows. The repo's one measured all-reduce figure, 767 GB/s, is from 16 GPUs across two 8-GPU B300 nodes — NVLink inside each node plus a cross-node RDMA hop — so a single node's all-reduce lands above it ([DeepEP](../infrastructure/deepep.md)).
+    NCCL's effective all-reduce bus bandwidth sits below the link spec because of algorithm and protocol overhead, the same measured-vs-spec gap HBM shows. The repo's one measured all-reduce figure, 767 GB/s, is from 16 GPUs across two 8-GPU B300 nodes — NVLink inside each node plus a cross-node RDMA hop — so a single node's all-reduce lands above it.
 
 - **NVLink SHARP (NVLS)** does the all-reduce sum inside the NVSwitch ASIC. NCCL enables it where the fabric supports it.
 
@@ -396,19 +400,19 @@ Gradient accumulation runs several micro-batches per optimizer step, so it buys 
 
 Each mode buys memory headroom by spending a specific collective.
 
-- **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (a decoder layer). Both halves overlap well (prefetch the next layer), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
+- **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (two decoder layers under ZeRO-2, one under ZeRO-3). Both halves overlap well (prefetch the next unit), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
 - **EP (expert parallel)** shards experts and adds a token all-to-all before and after each MoE layer (DeepEP). It is orthogonal to DP and tolerates cross-node links. [Expert Parallelism](../parallelism/expert-parallelism.md).
 
-    The catch is load balance: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
+    Load balance limits it: real routing is lumpy, so each layer waits for the rank with the most rows and the dispatch itself is a small share ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
 
 - **TP (tensor parallel)** splits each matmul and needs an all-reduce on the forward's critical path that the toolkit does not overlap, so TP must stay NVLink-local. [Tensor Parallelism](../parallelism/tensor-parallelism.md).
-- **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one for Q, one for the fused K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
+- **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one carrying Q, K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
 
 **Where ZeRO fits.** Most readers arrive with DeepSpeed's stage vocabulary. DDP replicates everything; ZeRO-1 shards optimizer state, ZeRO-2 adds the gradients, ZeRO-3 shards the parameters too.
 
 FSDP2's `fully_shard` shards all three, and the toolkit's default `reshard_after_forward=False` keeps each unit's gathered parameters resident from its forward to its backward — the ZeRO-2 analog.
 
-`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is rejected wherever an expert-distribution group exists and under TP with `data_parallel_size > 1`. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
+`fsdp_reshard_after_forward: true` is the ZeRO-3 analog: it drops the gathered copy after the forward and re-gathers it for the backward, ~1.5× the wire bytes for a lower peak. It is rejected wherever an expert-distribution group exists, under TP with `data_parallel_size > 1` and under PP. No DeepSpeed runs here; ZeRO is the naming only ([Data Parallelism](../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
 
 ### Why N× GPUs is not N× throughput
 
@@ -418,17 +422,17 @@ Adding a GPU adds compute but also adds communication that does no FLOPs. **Stro
 
 ### Pipeline parallelism: the bubble and the boundary
 
-The schedule engine behind PP is **not yet available in this release** — `pipeline_parallel_size > 1` is rejected at config time, so what follows is the design argument rather than a runbook ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
+The runbook is [Pipeline Parallelism](../parallelism/pipeline-parallelism.md); this section is the design argument.
 
 PP cuts the layer stack into `p` contiguous **stages**, one rank block each, and streams `m` **microbatches** through them. It carves the world first. Every other mode then runs unchanged inside one stage, on `stage_world_size = world_size / p` ranks.
 
-That is what "outermost" means, and it is why each stage must be a whole number of NVLink domains. Even once it lands PP would stay off by default — its idle time buys nothing inside a domain where FSDP2 and EP already fit.
+That is what "outermost" means, and it is why each stage must be a whole number of NVLink domains. PP stays off by default: its idle time buys nothing inside a domain where FSDP2 and EP already fit.
 
 **The bandwidth argument.** A stage boundary carries one tensor: the hidden state forward, its gradient back. Per step per edge that is `4 · T · H` bytes (bf16, both directions), for `T` tokens per step and hidden size `H` — `× hc_mult` for the hyper-connection families, whose boundary is the widened stream.
 
 At `T = 8192, H = 4096` that is 134 MB, against the ~32 GB FSDP2 moves per rank per step on an 8B model. That is ~250× apart, and point-to-point rather than every-link (the third identity above).
 
-Every other model-splitting axis prices its traffic per *parameter*; PP prices it per *token × hidden*. So PP is the axis worth spending a 50–100 GB/s per-GPU cross-node link on. The same pricing is why the toolkit forces stage boundaries onto NVLink-domain boundaries: every intra-stage collective then stays inside a domain, and only the P2P activation crosses.
+Every other model-splitting axis prices its traffic per *parameter*; PP prices it per *token × hidden*. So PP holds its rate on a link too slow for the others, and a fast link carries the others too: on 2 × 8 B300 over EFA, `dp16` still runs 4% ahead of `pp2 × dp8`, and forced onto plain TCP sockets `pp2 × dp8` leads by 13.8× ([rows](../parallelism/pipeline-parallelism.md#measured-throughput)). The same pricing is why the toolkit forces stage boundaries onto NVLink-domain boundaries: every intra-stage collective then stays inside a domain, and only the P2P activation crosses.
 
 **The bubble.** Fill and drain leave each rank idle for `p−1` of a step's `m + p − 1` microbatch slots (the figure below splits each slot into its forward and backward halves, 6 idle of 22):
 
@@ -436,19 +440,19 @@ Every other model-splitting axis prices its traffic per *parameter*; PP prices i
 bubble fraction = (p − 1) / (m + p − 1)
 ```
 
-![A 1F1B pipeline schedule drawn as a grid: 4 stages down, 22 time slots across, one slot per microbatch forward or backward. Every stage runs the same 16 busy slots — 8 forwards and their 8 backwards, alternating one for one once the pipe is full — and sits idle for the other 6. Later stages wait at both ends, while the pipe fills and while the last backwards drain; stage 0 waits in the middle instead, after its warmup forwards, until the first backward comes back down. Those 6 of 22 slots are the bubble, (p−1)/(m+p−1) = 3/11 ≈ 27% of the step](../assets/diagrams/pp_bubble.png)
+![A 1F1B pipeline schedule drawn as a grid: 4 stages down, 22 time slots across, one slot per microbatch forward or backward. Every stage runs the same 16 busy slots — 8 forwards and their 8 backwards, alternating one for one once the pipe is full — and sits idle for the other 6. Later stages wait at both ends, while the pipe fills and while the last backwards drain; stage 0 waits in the middle instead, after its warmup forwards, until the first backward comes back down. Those 6 of 22 slots are the bubble, (p−1)/(m+p−1) = 3/11 ≈ 27% of the step. A second grid runs GPipe, all forwards then all backwards: the same 22 slots and 6 idle, but every stage holds all 8 microbatches live, where 1F1B holds at most 4 on stage 0 and 1 on stage 3](../assets/diagrams/pp_bubble.png)
 
 The formula assumes equal per-stage cost and no cross-step overlap. What sets it is the ratio `m/p`, not either term alone. At `m = 2p` the idle share runs from a fifth (`p = 2`) toward a third (large `p`); planning `m = 9·(p−1)` puts it at 10%.
 
 **The tension with M.** Under PP the microbatches *are* the gradient accumulation. Raising `m` to shrink the bubble therefore splits the per-device batch into thinner slices and slides every GEMM's `M` down §4's ramp.
 
-Fixed shapes push the same way: the P2P buffers freeze on the first step, so every batch pads to a constant width. That is why packing (fixed-width rows) would be the shape to run under PP, and why the padding-free collator, whose width is the summed document length, is refused.
+Fixed shapes push the same way: the P2P buffers freeze on the first step, so every batch pads to a constant width. That is why packing (fixed-width rows) is the shape to run under PP, and why the padding-free collator, whose width is the summed document length, is refused.
 
 Deep pipelines want many microbatches; the roofline wants few and fat.
 
 **Memory.** A stage holds `1/p` of the parameters, and torch's schedule pins them unsharded across the backward and defers FSDP's reduce-scatter to the optimizer step. Per rank that is `2P/p` bytes of resident weights and `2P/p` of accumulating gradient, while optimizer state stays sharded at `4P/world_size` (§8); `fp32_grad_reduce` doubles the gradient term to `4P/p` ([BF16 Optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)). PP divides the one term FSDP2 leaves whole.
 
-Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a dense stage the headroom GC exists to buy, so a dense PP run would want GC off, and nothing would disable it automatically.
+Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a stage the headroom GC exists to buy, so a PP run wants GC off where memory allows, dense or with EP ([measured](../parallelism/pipeline-parallelism.md#measured-throughput)), and nothing disables it automatically.
 
 **Composition.** The expert axes are the only other sharding PP admits: EP, whose dispatch stays inside a stage, or pure ETP (`ep_size=1`), never both.
 
@@ -468,18 +472,18 @@ The most common wrong choice starts "fp8 made inference 2× faster, so it'll spe
 
 Inference compute splits into prefill (all prompt tokens, large M, compute-bound, like a training forward) and decode (one token at a time, M=1 per sequence). Decode is the §2 small-M regime at its extreme — weight-bandwidth-bound, its speed set by how fast weights stream rather than by FLOPs.
 
-That is why low precision pays there: quantizing weights halves (fp8) or quarters (fp4/int4) the bytes per token and shrinks the KV cache. None of it transfers to training, where weights stay in training precision, the streamed bytes don't shrink, and §7's quant-pass overhead is all that remains.
+That is why low precision pays there: quantizing weights halves (fp8) or quarters (fp4/int4) the bytes per token and shrinks the KV cache. In training, weights are quantized once per step from a higher-precision master and the backward adds two more GEMMs, so published training gains are smaller (1.1–1.2× on MoE) and MXFP8 often raises memory.
 
 | | Training | Inference (decode) |
 |---|---|---|
 | Passes/layer | `fprop`+`dgrad`+`wgrad` (3 GEMMs) | `fprop` only |
 | Dominant memory | activations (∝ seq×batch) + optimizer state | weights + KV cache |
 | Per-matmul M | batch×seq (large, packed) | 1 per sequence (tiny) |
-| Typical regime | compute-bound at good M; comm-bound when sharded | weight-bandwidth-bound |
-| Low precision | mostly a *memory* lever; bf16 compute at these MoE shapes | a real *speed* lever |
+| Typical regime | compute-bound at good M; sharded runs add collectives and rank wait | weight-bandwidth-bound |
+| Low precision | bf16 here | a real *speed* lever |
 | Optimize | bigger M, fusion, GC trade-off, comm overlap | weight quant, KV compression, batching |
 
-Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/mxfp4/nvfp4: fp8/fp4 is an inference and memory capability here, and training stays bf16.
+Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/mxfp4/nvfp4: fp8/fp4 here is a QAT path plus a weight export, and training stays bf16.
 
 ### RL is both at once
 
@@ -497,7 +501,7 @@ The levers are the same three ideas at step granularity instead of kernel granul
 
 The weight sync itself is a bandwidth question with the same shape as §9's ladder. A full-model broadcast is ~42 GB at 20B and 234 GB for gpt-oss-120b; on one host NCCL moves it GPU to GPU over CUDA IPC (`P2P/CUMEM`).
 
-Across nodes it rides the fabric: 53 GB/s (vLLM client) to 80 GB/s (SGLang) over EFA against 9.7 GB/s on sockets: 4.4 s, 2.9 s and 24 s for gpt-oss-120b (234 GB), and 0.5–0.8 s at 20B by the same EFA rates ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
+Across nodes it rides the fabric, so the broadcast takes the model size over the sync rate; the measured EFA and socket rates, and what bounds each client, are on [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
 
 ---
 
@@ -550,9 +554,9 @@ For a full training step, enable the profiler and efficiency callback to get the
 - **Watch power, not util %.** 100% utilization at 50–70% of the board limit is memory- or launch-bound (§11).
 - **Pad tokens cost full GEMM FLOPs.** Pack the batch before reaching for a faster kernel (§2).
 - **Gradient checkpointing is a memory lever with a compute price.** Leave it off whenever the batch fits without it (§8).
-- **Low precision is a memory lever at these MoE shapes, not a speed one.** Train in bf16; export to fp8/fp4 (§7, §10).
+- **Train in bf16.** Halo's low-precision paths are for QAT, not speed (§7).
 - **N× GPUs is not N× throughput.** Grow the batch with the world, or per-GPU `M` slides down the ramp (§9).
-- **Keep TP inside an NVLink domain and let EP cross nodes; PP is the axis a cross-node link would be spent on** (§9).
+- **Keep TP inside an NVLink domain and keep experts local where they fit; PP is for a slow link or a model that does not fit on one machine** (§9).
 - **Compare runs in tokens/s per GPU.** It survives a change of config and chip; MFU compares only within one chip (§11).
 
 ---

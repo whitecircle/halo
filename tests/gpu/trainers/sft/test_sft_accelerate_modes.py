@@ -1,35 +1,6 @@
 #!/usr/bin/env python
-"""
-SFT Trainer test for accelerate launch configurations and torchrun standard DP.
-
-Smoke test of DistributedSFTTrainer under different launch methods and data parallel strategies:
-
-1. torchrun (FSDP2 SHARD_GRAD_OP): standard DP via mixin, safe checkpoints
-2. accelerate MULTI_GPU (DDP): accelerate manages DDP wrapping
-3. accelerate FSDP2 SHARD_GRAD_OP: accelerate manages FSDP v2 (fully_shard)
-4. accelerate FSDP2 FULL_SHARD: accelerate manages FSDP v2 with resharding
-
-The test auto-detects its launch method. It checks that training runs every step with finite train
-and eval losses and a lower last-step loss than first, and that ``save_model`` writes ``config.json``
-and weight files (rank 0). No loss is compared against a reference and the saved checkpoint is not
-reloaded.
-
-Run with torchrun (tests the mixin's FSDP2 SHARD_GRAD_OP path):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/sft/test_sft_accelerate_modes.py
-
-Run with accelerate DDP (tests MULTI_GPU path):
-    accelerate launch --config_file launcher-configs/accelerate/multigpu_dp_config.yaml \
-        --num_processes=2 tests/gpu/trainers/sft/test_sft_accelerate_modes.py
-
-Run with accelerate FSDP2 SHARD_GRAD_OP:
-    accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml \
-        --num_processes=2 tests/gpu/trainers/sft/test_sft_accelerate_modes.py
-
-Run with accelerate FSDP2 FULL_SHARD:
-    accelerate launch --config_file launcher-configs/accelerate/fsdp2_full_config.yaml \
-        --num_processes=2 tests/gpu/trainers/sft/test_sft_accelerate_modes.py
-"""
+"""DistributedSFTTrainer smoke under torchrun FSDP2 and accelerate DDP / FSDP2, auto-detecting its launch. Compares no
+loss against a reference."""
 
 import math
 import os
@@ -37,15 +8,16 @@ import os
 import torch
 from trl import SFTConfig
 
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.env import is_accelerate_fsdp_launch, is_accelerate_launch
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.env import is_accelerate_fsdp_launch, is_accelerate_launch
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 5
@@ -58,9 +30,8 @@ SEED = 42
 
 
 def detect_launch_mode() -> str:
-    """Detect how this script was launched."""
     if is_accelerate_fsdp_launch():
-        # accelerate's own var, parsed the way accelerate writes it — not a toolkit knob.
+        # accelerate's own var, parsed the way accelerate writes it.
         reshard = os.environ.get("FSDP_RESHARD_AFTER_FORWARD", "false").lower()
         if reshard in ("true", "1"):
             return "accelerate_fsdp2_full_shard"
@@ -73,7 +44,6 @@ def detect_launch_mode() -> str:
 
 @gpu_test_main(min_world_size=1, prefix="test_sft_accel")
 def run(ctx):
-    """Run SFT test under current launch configuration."""
     launch_mode = detect_launch_mode()
     save_dir = os.path.join(ctx.output_dir, "saved_model")
 
@@ -113,13 +83,13 @@ def run(ctx):
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
-        # With drop_last, a per-device eval batch past NUM_EVAL_SAMPLES / world size yields no batch,
-        # and the eval leg then logs no loss at all.
+        # With drop_last, a per-device eval batch past NUM_EVAL_SAMPLES / world size yields no batch and no logged
+        # loss.
         per_device_eval_batch_size=BATCH_SIZE,
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # already applied at load
+        use_liger_kernel=False,  # Already applied at load.
         logging_steps=1,
         save_strategy="no",
         eval_strategy="steps",
@@ -129,7 +99,6 @@ def run(ctx):
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        fsdp="",  # Mixin handles wrapping
     )
 
     trainer = DistributedSFTTrainer(

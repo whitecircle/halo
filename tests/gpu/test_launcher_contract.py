@@ -1,25 +1,12 @@
-"""Contract tests for the GPU-suite launcher in ``tests/gpu/conftest.py``.
+"""Contract tests for the GPU-suite launcher: a misclassified verdict voids the whole tier silently.
 
-A launcher that misclassifies a verdict voids the whole tier silently, so its classification is
-tested directly rather than trusted. These are pytest-native (collected like ``test_suite.py``, not
-launched through the manifest) and need no GPU — but they carry the ``gpu``/``core`` markers because
-they gate the GPU tier and must run wherever it runs.
-
-Each case pins one verdict the suite depends on:
-
-* a failed check is a FAIL, not a pass;
-* a crash before any harness code is an ERROR;
-* a non-zero exit whose result line says ``pass`` is a FAIL (only rank 0 emits the line, so that
-  combination means a non-zero rank failed) — never an infra ERROR, which would read as something
-  to retry rather than as a real regression;
-* the timeout path reaches workers torchrun placed in their own sessions, and reports any it could
-  not kill (they keep holding GPUs and poison later nodes);
-* zero visible GPUs is a usage error, never a green tier of skips.
+Pytest-native and GPU-free, but marked ``gpu``/``core`` because they gate the GPU tier and must run wherever it runs.
 """
 
 import contextlib
 import json
 import subprocess
+import sys
 import time
 from unittest import mock
 
@@ -27,7 +14,7 @@ import pytest
 
 from tests.common.reporting import RESULT_SENTINEL
 from tests.gpu import conftest as launcher
-from tests.gpu.manifest import TestSpec
+from tests.gpu.manifest import TestSpec, script_path
 
 pytestmark = [pytest.mark.gpu, pytest.mark.core]
 
@@ -44,7 +31,6 @@ def _result_line(status: str, checks: dict) -> str:
 
 
 def _verdict(case, tmp_path) -> tuple[str, str]:
-    """Run the case; return ``("pass", "")`` or ``("fail", <report text>)``."""
     try:
         case.run(tmp_path)
     except BaseException as e:
@@ -81,21 +67,51 @@ def test_passing_run_passes(monkeypatch, tmp_path):
 
 
 def test_declined_run_is_skipped_through_the_rank_prefix(monkeypatch, tmp_path):
-    """A script that declines to run must be SKIPPED, not reported as a green PASS.
-
-    The scripts announce it through ``log()``, which stamps a ``[Rank N] `` prefix, and torchrun
-    interleaves ranks mid-line — so the launcher has to scan for the marker rather than anchor at
-    the start of the line. Anchoring is what makes an unrun test look like a passing one.
-    """
+    """``log()`` stamps ``[Rank N] `` and torchrun interleaves mid-line, so the launcher scans for the marker.
+    Anchoring at line start makes an unrun test look like a passing one."""
     case = _case(monkeypatch, 0, "[Rank 0] SKIP: local model path missing: org/model\n")
     with pytest.raises(pytest.skip.Exception, match="local model path missing"):
         case.run(tmp_path)
 
 
 def test_a_silent_exit_zero_is_still_a_pass(monkeypatch, tmp_path):
-    """Anti-vacuity for the skip above: exit-code-only scripts have no other way to report success,
-    so a clean exit with neither a result line nor a SKIP must stay a PASS."""
+    """Exit-code-only scripts have no other channel, so a clean exit with neither a result line nor a SKIP stays a
+    PASS."""
     assert _verdict(_case(monkeypatch, 0, "done\n"), tmp_path)[0] == "pass"
+
+
+def _launched(monkeypatch, tmp_path, spec: TestSpec) -> tuple[list[str], dict]:
+    seen = {}
+
+    class _Done:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return "", None
+
+    def popen(cmd, env, **kwargs):
+        seen.update(cmd=cmd, env=env)
+        return _Done()
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", popen)
+    launcher.GPUCase("fake/test_x.py", spec, "--method sft")._launch_once(tmp_path)
+    return seen["cmd"], seen["env"]
+
+
+def test_a_python_row_runs_its_script_as_one_process_told_how_many_ranks_to_start(monkeypatch, tmp_path):
+    """Under torchrun a ``halo launch`` driver would itself be ``nproc`` ranks, each launching ``nproc`` more onto the
+    same GPUs."""
+    cmd, env = _launched(monkeypatch, tmp_path, TestSpec(nproc=2, markers=("gpu",), launcher="python"))
+    assert cmd == [sys.executable, str(script_path("fake/test_x.py")), "--method", "sft"]
+    assert env[launcher._NPROC_VAR] == "2"
+    assert env[launcher._LAUNCH_ID_VAR], "the driver's own launches inherit the id the timeout sweep keys on"
+
+
+def test_a_torchrun_row_still_launches_its_ranks_under_torchrun(monkeypatch, tmp_path):
+    cmd, env = _launched(monkeypatch, tmp_path, TestSpec(nproc=2, markers=("gpu",)))
+    assert cmd[:4] == [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2"]
+    assert cmd[-3:] == [str(script_path("fake/test_x.py")), "--method", "sft"]
+    assert launcher._NPROC_VAR not in env
 
 
 def test_timeout_reports_workers_it_could_not_kill(monkeypatch, tmp_path):
@@ -106,29 +122,23 @@ def test_timeout_reports_workers_it_could_not_kill(monkeypatch, tmp_path):
 
 
 def test_oom_on_a_small_tier_is_not_skipped(monkeypatch, tmp_path):
-    """An OOM at nproc=2 is a real error: that config is required to fit."""
+    """An OOM at nproc=2 is a real error: that config must fit."""
     case = _case(monkeypatch, 1, "torch.OutOfMemoryError: CUDA out of memory\n", nproc=2)
     outcome, msg = _verdict(case, tmp_path)
     assert outcome == "fail" and "OOM" in msg, msg
 
 
 def test_kill_launch_sweeps_workers_outside_the_agent_process_group():
-    """The timeout path must reach workers torchrun put in their own sessions.
-
-    A ``killpg`` on the agent alone leaves them running — they keep holding GPUs and the launch's
-    stdout pipe, which stalls the drain and poisons every later node. Stand up a real grandchild in
-    its own session and check the sweep finds and kills it.
-    """
+    """A ``killpg`` on the agent alone leaves workers in their own sessions holding GPUs and the stdout pipe, which
+    stalls the drain and poisons later nodes."""
     launch_id = "halo-launcher-contract-probe"
     env = {launcher._LAUNCH_ID_VAR: launch_id}
     agent = subprocess.Popen(["/bin/sh", "-c", "sleep 300"], env=env, start_new_session=True)
-    # Its own session, exactly like a torchrun worker: outside the agent's process group.
+    # Its own session, like a torchrun worker: outside the agent's process group.
     worker = subprocess.Popen(["/bin/sh", "-c", "sleep 300"], env=env, start_new_session=True)
     try:
-        # Popen returns once the child is FORKED, not once it has exec'd, and the sweep reads
-        # /proc/<pid>/environ — which carries the marker only after the exec. Poll for it rather
-        # than sampling once, or the assertion below races the child's startup. Assert on what the
-        # poll saw: re-surveying here would race the process-table churn all over again.
+        # Popen returns once the child is forked, and /proc/<pid>/environ carries the marker only after the exec, so
+        # poll and assert on what the poll saw: re-surveying would race the process-table churn.
         deadline = time.monotonic() + 30
         survivors: list[int] = []
         while time.monotonic() < deadline:
@@ -150,7 +160,6 @@ def test_kill_launch_sweeps_workers_outside_the_agent_process_group():
 
 
 def _socket_limit(monkeypatch, root, spare: int) -> None:
-    """Set the AF_UNIX cap so a directory directly under ``root`` has ``spare`` bytes past the budget."""
     monkeypatch.setattr(launcher, "_AF_UNIX_MAX", len(str(root)) + spare + launcher._SOCKET_SUFFIX_BUDGET)
 
 
@@ -162,15 +171,15 @@ def test_a_tmp_path_with_room_for_a_socket_is_used_as_is(monkeypatch, tmp_path):
 def test_a_deep_tmp_path_moves_to_a_short_sibling(monkeypatch, tmp_path):
     deep = tmp_path / ("d" * 40)
     deep.mkdir()
-    _socket_limit(monkeypatch, tmp_path, spare=12)  # "/h" + mkdtemp's 8 random characters fit
+    _socket_limit(monkeypatch, tmp_path, spare=12)  # "/h" + mkdtemp's 8 random characters fit.
     short = launcher._socket_safe_tmpdir(deep)
     assert short.parent == tmp_path
     assert len(str(short)) + launcher._SOCKET_SUFFIX_BUDGET <= launcher._AF_UNIX_MAX
 
 
 def test_a_basetemp_too_deep_for_any_socket_is_a_usage_error(monkeypatch, tmp_path):
-    """Even the short sibling overflows: every ``datasets`` map would die on a bare EOFError, so the
-    launcher refuses the run, names TMPDIR, and leaves no sibling behind."""
+    """Every ``datasets`` map would die on a bare EOFError, so the launcher refuses, names TMPDIR, and leaves no
+    sibling."""
     node = tmp_path / "node"
     node.mkdir()
     _socket_limit(monkeypatch, tmp_path, spare=4)
@@ -180,8 +189,6 @@ def test_a_basetemp_too_deep_for_any_socket_is_a_usage_error(monkeypatch, tmp_pa
 
 
 def test_zero_visible_gpus_is_an_error_not_a_green_tier(monkeypatch):
-    """0 GPUs must abort collection; skipping every node exits 0 and looks like a passing tier."""
-
     class FakeItem:
         def __init__(self, case):
             self.callspec = type("CallSpec", (), {"params": {"gpu_case": case}})()
@@ -200,9 +207,8 @@ def test_zero_visible_gpus_is_an_error_not_a_green_tier(monkeypatch):
 
 
 def test_server_tier_skips_when_its_engine_is_absent_and_names_how_to_start_it():
-    """A node driving vLLM/SGLang cannot run on a host where that engine is down. Failing it there
-    buries the tier's real signal under nine red herrings, so it skips — and the reason has to carry
-    the command that fixes it, or the skip is just a quieter dead end."""
+    """Failing would bury the tier's signal under nine red herrings; the skip reason carries the command that fixes
+    it."""
     launcher._server_is_up.cache_clear()
     with mock.patch.object(launcher, "_server_is_up", return_value=False):
         vllm = launcher._absent_server(("gpu", "full", "vllm_server"))
@@ -212,8 +218,7 @@ def test_server_tier_skips_when_its_engine_is_absent_and_names_how_to_start_it()
 
 
 def test_only_server_tier_nodes_are_skipped_and_only_while_the_engine_is_down():
-    """The skip must not leak: an ordinary GPU node has no engine to wait for, and a server node
-    whose engine IS up must run — otherwise a live tier reports green without testing anything."""
+    """An ordinary GPU node has no engine to wait for, and a server node whose engine is up must run."""
     with mock.patch.object(launcher, "_server_is_up", return_value=False):
         assert launcher._absent_server(("gpu", "core", "2gpu", "ep")) is None
     with mock.patch.object(launcher, "_server_is_up", return_value=True):
@@ -221,9 +226,8 @@ def test_only_server_tier_nodes_are_skipped_and_only_while_the_engine_is_down():
 
 
 def test_scheme_less_server_url_is_probed_not_condemned():
-    """``VLLM_SERVER_URL=localhost:8000`` passes the Makefile's ``curl`` gate, and urllib raises
-    ``ValueError`` on it — read as "down", the whole tier would silently skip seconds after curl
-    said healthy. The probe must normalize the scheme so both gates ask the same question."""
+    """``VLLM_SERVER_URL=localhost:8000`` passes the Makefile's ``curl`` gate and urllib raises ``ValueError`` on it;
+    read as down, the whole tier would silently skip. The probe normalizes the scheme."""
     seen = []
     with mock.patch.object(
         launcher.urllib.request,

@@ -1,43 +1,28 @@
 #!/usr/bin/env python
-"""Offline GRPO's KL term under pipeline parallelism must be the SAME objective as off it.
-
-Under PP the reference is scored once by a sweep through the pipeline and shipped per completion
-token as a dataset column; the last-stage loss then re-applies every step of ``compute_loss`` — the
-negative-advantage ``min_log_prob`` clamp on both policy and reference, the capped k3 KL, the pg
-formulation, group weighting and the per-loss-type denominator. Each seam yields a silently wrong
-number, not a crash, so the PP loss is pinned against the real non-PP ``_compute_loss_inner`` on
-identical logits, with both clamps genuinely binding.
-
-Run: python tests/cpu/grpo/test_offline_grpo_pp_kl.py
-"""
+"""Offline GRPO's KL term under PP must equal the non-PP objective. A wrong seam gives a wrong number with no crash, so
+the PP loss is pinned against the real ``_compute_loss_inner`` on identical logits with both clamps binding."""
 
 import types
-from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
-from src.data.spans import LABEL_IGNORE_INDEX
-from src.distributed.pipeline_parallel.losses import token_logprobs
-from src.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
-from src.trainers.grpo.offline import OfflineGRPOTrainer
-
-PartialState()  # the collator's accelerate logger requires an initialized state
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN, OfflineGRPODataCollatorWithPadding
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, token_logprobs
+from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
+from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options, resolve_pp_max_length
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.world_metrics import WorldMetrics
 
 BATCH, PROMPT, COMPLETION, VOCAB, MAX_LENGTH = 4, 3, 4, 16, 10
 PAD = 0
 MIN_LOG_PROB = -3.0
-# Per-row completion lengths (row 2 and 3 are short) and advantages of both signs.
 COMPLETION_LENGTHS = [4, 4, 2, 3]
 ADVANTAGES = [1.0, -0.5, 0.7, -1.2]
 GROUP_SIZES = [2, 2, 3, 3]
 
 
 class _FixedLogits:
-    """A model whose forward returns stored logits, honoring ``logits_to_keep`` like HF does."""
-
     def __init__(self, logits: torch.Tensor):
         self.logits = logits
 
@@ -47,7 +32,6 @@ class _FixedLogits:
 
 
 def _collated_batch() -> dict[str, torch.Tensor]:
-    """What the offline collator emits: left-padded prompts, right-padded completions, metadata."""
     torch.manual_seed(0)
     prompt_ids = torch.randint(1, VOCAB, (BATCH, PROMPT))
     prompt_mask = torch.ones(BATCH, PROMPT, dtype=torch.long)
@@ -68,8 +52,7 @@ def _collated_batch() -> dict[str, torch.Tensor]:
 
 
 def _logits_pair() -> tuple[torch.Tensor, torch.Tensor]:
-    """Policy and reference logits over the fixed shape; the spread makes the -3 floor bind, and row
-    0 is built so the reference exceeds the policy by far more than the k3 cap at its labels."""
+    """The spread makes the -3 floor bind."""
     torch.manual_seed(1)
     policy = torch.randn(BATCH, MAX_LENGTH, VOCAB) * 3
     reference = torch.randn(BATCH, MAX_LENGTH, VOCAB) * 3
@@ -83,8 +66,7 @@ def _bind_row0_extremes(policy, reference, completion_ids):
 
 
 def _reference_column(reference: torch.Tensor, batch: dict) -> torch.Tensor:
-    """The collated ``REF_PER_TOKEN_LOGPS_COLUMN``: one log-prob per completion token, from first
-    principles (completion token ``j`` is scored by the logits at input position ``P + j - 1``)."""
+    """The collated ``REF_PER_TOKEN_LOGPS_COLUMN``, from first principles."""
     column = torch.zeros(BATCH, COMPLETION)
     logps = torch.log_softmax(reference.float(), dim=-1)
     for row, length in enumerate(COMPLETION_LENGTHS):
@@ -97,26 +79,29 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
     me = types.SimpleNamespace(
         beta=beta,
         loss_type=loss_type,
-        policy_gradient_formulation=pg,
         min_log_prob=min_log_prob,
         max_completion_length=COMPLETION,
         padding_value=PAD,
         parallelism_config=types.SimpleNamespace(is_cp_mode=False),
-        args=types.SimpleNamespace(max_length=MAX_LENGTH),
+        args=types.SimpleNamespace(max_length=MAX_LENGTH, policy_gradient_formulation=pg),
         model=types.SimpleNamespace(training=True),
         ref_model=_FixedLogits(reference),
         _precompute_reference=False,
         # The non-PP side scores through TRL's full-logits path, the one PP's last stage replaces.
         _scores_full_logits=True,
-        _sign_metric_buffer={"train": defaultdict(list), "eval": defaultdict(list)},
+        _sign_metrics={"train": WorldMetrics(), "eval": WorldMetrics()},
+        _SIGN_METRIC_KEYS=OfflineGRPOTrainer._SIGN_METRIC_KEYS,
         _pp_ref_sweep=None,
-        _pp_min_log_prob=min_log_prob,
+        _live_min_log_prob=min_log_prob,
+        _joined_rows=OfflineGRPOTrainer._joined_rows,
     )
     for name in (
         "_get_per_token_logps",
         "_compute_loss_inner",
+        "_token_objective",
+        "_reference_policy",
         "_pp_batch_transform",
-        "_buffer_sign_metrics",
+        "_record_sign_metrics",
         "_pp_normalizer",
         "_pp_token_loss",
     ):
@@ -154,19 +139,16 @@ def test_pp_kl_loss_matches_compute_loss(loss_type, pg, min_log_prob):
     beta = 0.3
     me = _stub(beta=beta, loss_type=loss_type, pg=pg, min_log_prob=min_log_prob, policy=policy, reference=reference)
     non_pp = me._compute_loss_inner(me.policy, {k: v for k, v in batch.items() if k != REF_PER_TOKEN_LOGPS_COLUMN})
-    buffered_off_pp = {key: torch.cat(chunks).clone() for key, chunks in me._sign_metric_buffer["train"].items()}
-    me._sign_metric_buffer["train"].clear()
+    buffered_off_pp = me._sign_metrics["train"].flush()
     pp = _pp_loss(me, policy, batch)
     assert torch.allclose(pp, non_pp, atol=1e-5, rtol=1e-5), f"PP {pp.item()} vs non-PP {non_pp.item()}"
 
-    # The same per-sample diagnostics the non-PP loss buffers must reach the buffer under PP too —
-    # they are the only thing offline GRPO logs per step, and the last stage is where they exist.
-    buffered_under_pp = {key: torch.cat(chunks) for key, chunks in me._sign_metric_buffer["train"].items()}
+    # These diagnostics are all offline GRPO logs per step, and the last stage is where they exist.
+    buffered_under_pp = me._sign_metrics["train"].flush()
     assert buffered_under_pp.keys() == buffered_off_pp.keys()
-    for key, values in buffered_off_pp.items():
-        assert torch.allclose(buffered_under_pp[key], values, atol=1e-5, rtol=1e-5), key
+    assert buffered_under_pp == pytest.approx(buffered_off_pp, abs=1e-5, rel=1e-5)
 
-    # The KL term genuinely enters: the kl_beta=0 objective must NOT match.
+    # The kl_beta=0 objective must differ, or the KL term never entered.
     me_zero = _stub(
         beta=0.0, loss_type=loss_type, pg=pg, min_log_prob=min_log_prob, policy=policy, reference=reference
     )
@@ -174,7 +156,6 @@ def test_pp_kl_loss_matches_compute_loss(loss_type, pg, min_log_prob):
 
 
 def test_batch_transform_places_reference_on_the_shifted_grid():
-    """Completion token ``j`` lands at ``P + j - 1``; every other position is 0."""
     batch = _collated_batch()
     column = torch.arange(1, BATCH * COMPLETION + 1, dtype=torch.float32).view(BATCH, COMPLETION)
     batch[REF_PER_TOKEN_LOGPS_COLUMN] = column
@@ -184,7 +165,7 @@ def test_batch_transform_places_reference_on_the_shifted_grid():
     assert shifted.shape == (BATCH, MAX_LENGTH - 1) and shifted.dtype == torch.float32
     assert torch.equal(shifted[:, PROMPT - 1 : PROMPT - 1 + COMPLETION], column)
     assert shifted[:, : PROMPT - 1].eq(0).all() and shifted[:, PROMPT - 1 + COMPLETION :].eq(0).all()
-    # And the placement agrees with the grid token_logprobs scores: the mask is exactly the placed span.
+    # The placement agrees with the grid token_logprobs scores.
     _, mask = token_logprobs(policy, me._pp_batch_transform(batch)["labels"])
     for row, length in enumerate(COMPLETION_LENGTHS):
         assert mask[row].nonzero().flatten().tolist() == list(range(PROMPT - 1, PROMPT - 1 + length))
@@ -199,13 +180,11 @@ def test_batch_transform_requires_the_column_outside_the_sweep():
     # The sweep is the one caller that feeds batches through before the column exists.
     me._pp_ref_sweep = []
     assert REF_PER_TOKEN_LOGPS_COLUMN not in me._pp_batch_transform(batch)
-    # kl_beta == 0 never asks for it.
     me_zero = _stub(beta=0.0, loss_type="grpo", pg="reinforce", min_log_prob=None, policy=policy, reference=reference)
     assert REF_PER_TOKEN_LOGPS_COLUMN not in me_zero._pp_batch_transform(batch)
 
 
 def test_token_loss_stashes_raw_logps_during_the_sweep():
-    """The sweep branch scores, does not train: raw (unclamped) per-token log-probs, zero loss."""
     batch = _collated_batch()
     policy, reference = _logits_pair()
     me = _stub(
@@ -267,7 +246,7 @@ def test_reference_batch_uses_the_shared_pp_pass_and_keeps_only_real_completion_
         passes.append(1)
         return OfflineGRPOTrainer._pp_reference_sweep_pass(me, inputs)
 
-    me._pp_runtime = types.SimpleNamespace(eval_loss=eval_loss)
+    me._pp_runner = types.SimpleNamespace(eval_loss=eval_loss)
     me._pp_broadcast_output_from_last_stage = broadcast
     me._pp_reference_sweep_pass = observed_pass
     actual = me._pp_score_reference_batch(batch)
@@ -316,7 +295,7 @@ def test_collator_carries_reference_logps_aligned_with_completions():
     )
     assert out[REF_PER_TOKEN_LOGPS_COLUMN].shape == out["completion_input_ids"].shape
 
-    # A column produced under other caps or another tokenizer is refused, not silently misaligned.
+    # A column produced under other caps or another tokenizer would misalign.
     rows[0][REF_PER_TOKEN_LOGPS_COLUMN] = [-0.1, -0.2]
     with pytest.raises(ValueError, match="one per completion token"):
         collator(rows)
@@ -342,21 +321,53 @@ def test_all_empty_completions_keep_reference_and_completion_shapes_aligned():
 
 
 def test_the_pp_ctor_gate_accepts_a_kl_term():
-    """The construction gate accepts ``kl_beta != 0`` under PP."""
-    trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
-    args = types.SimpleNamespace(kl_beta=0.1, use_chunked_grpo_logprobs=False, max_length=None)
-    OfflineGRPOTrainer._reject_pp_explicit_options(trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None)
-    assert args.max_length == PROMPT + COMPLETION
+    args = types.SimpleNamespace(
+        kl_beta=0.1,
+        use_chunked_grpo_logprobs=False,
+        max_prompt_length=PROMPT,
+        max_completion_length=COMPLETION,
+    )
+    pipeline = types.SimpleNamespace(is_pp_mode=True)
+    reject_offline_pp_options(args, pipeline, None, None)
+    assert resolve_pp_max_length(args, pipeline) == PROMPT + COMPLETION
 
 
 def test_the_pp_ctor_gate_refuses_chunked_logprobs():
     """The pipeline's last stage materializes its own logits plane; the switch would parse and do nothing."""
-    trainer = types.SimpleNamespace(max_prompt_length=PROMPT, max_completion_length=COMPLETION)
-    args = types.SimpleNamespace(kl_beta=0.0, use_chunked_grpo_logprobs=True, max_length=None)
+    args = types.SimpleNamespace(
+        kl_beta=0.0,
+        use_chunked_grpo_logprobs=True,
+        max_prompt_length=PROMPT,
+        max_completion_length=COMPLETION,
+    )
     with pytest.raises(ValueError, match="use_chunked_grpo_logprobs does nothing under pipeline parallelism"):
-        OfflineGRPOTrainer._reject_pp_explicit_options(
-            trainer, args, types.SimpleNamespace(is_pp_mode=True), None, None
-        )
+        reject_offline_pp_options(args, types.SimpleNamespace(is_pp_mode=True), None, None)
+
+
+@pytest.mark.parametrize(
+    ("lengths", "match"),
+    [
+        ({"max_prompt_length": None}, r"requires bounded sequences .* max_prompt_length \(got None\)"),
+        ({"max_completion_length": None}, r"requires bounded sequences .* max_completion_length \(got None\)"),
+        ({"max_completion_length": 0}, r"requires bounded sequences .* max_completion_length \(got 0\)"),
+    ],
+    ids=["unbounded-prompt", "unbounded-completion", "zero-completion"],
+)
+def test_the_pp_ctor_gate_refuses_a_shape_the_fixed_buffers_cannot_hold(lengths, match):
+    """The P2P buffers freeze on the first step at the caps' sum, so both caps must be bounded."""
+    args = types.SimpleNamespace(
+        **{
+            "kl_beta": 0.0,
+            "use_chunked_grpo_logprobs": False,
+            "max_prompt_length": PROMPT,
+            "max_completion_length": COMPLETION,
+            **lengths,
+        }
+    )
+    pipeline = types.SimpleNamespace(is_pp_mode=True)
+    with pytest.raises(ValueError, match=match):
+        reject_offline_pp_options(args, pipeline, None, None)
+    reject_offline_pp_options(args, types.SimpleNamespace(is_pp_mode=False), None, None)
 
 
 if __name__ == "__main__":

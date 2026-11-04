@@ -19,7 +19,7 @@ The model is built with the resolved auto class's `from_config(config)`, so weig
 
 Three refusals:
 
-- **EP, TP, CP or ETP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
+- **EP, TP, CP, ETP or PP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented, and a pipeline stage has no checkpoint to stream. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
 - **Quantization** raises — QLoRA loads pretrained weights.
 - **A multimodal checkpoint** raises at the VLM load; `text_only_model: true` routes it to the text-only sibling, which does random-init.
 
@@ -57,18 +57,18 @@ Raw text is tokenized with document packing and no chat template:
 python scripts/before_training/prepare_dataset.py \
     --input  "s3://my-bucket/raw/my_corpus" \
     --output "s3://my-bucket/preprocessed/my_corpus_packed" \
-    --model-name "Qwen/Qwen3-4B" \
-    --mode text --text-field text \
-    --max-length 8192 --test-size 0.005 \
-    --pack-sequences --packing-strategy bfd_split \
-    --num-shards 256
+    --model_name_or_path "Qwen/Qwen3-4B" \
+    --mode text --text_field text \
+    --max_length 8192 --test_size 0.005 \
+    --pack_sequences --packing_strategy bfd_split \
+    --num_shards 256
 ```
 
-`--mode text` tokenizes `--text-field` and appends an EOS per document (`--no-append-eos` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, `bfd` discards every token past `--max-length`, and `wrapped` concatenates across boundaries, emitting none at all. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
+`--mode text` tokenizes `--text_field` and appends an EOS per document (`--append_eos false` when the corpus already delimits them). Whole documents reach the packer, so the strategy decides the overflow: **`bfd_split`** carries it into later packs, where each fragment restarts at position 0, sees none of its earlier half and loses its first token as a target; `bfd` discards every token past `--max_length`; and `wrapped` chunks the token stream across document boundaries, and a completion span the wrap cuts is not trained on either side. Flags: [Pre-Processing](../data/dataset-preparation.md#parameters).
 
-`--num-shards` must be at least the data-parallel size, or the train split raises; a non-multiple truncates every rank to the smallest shard. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
+`--num_shards` must be at least the data-parallel size, or the train split raises. Every rank is truncated to the smallest rank's row count (a warning names the drop), so a shard count that is not a multiple of the data-parallel size drops about a shard from each fuller rank per pass. `ShardedDatasetLoader` assigns them by **DP rank**, not global rank ([Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets)).
 
-The SFT trainer auto-detects the artifact and holds the run to it. Text mode bakes `train_on_completions_only: false` while the training-side default is `true`, so the YAML must state it or startup raises. `max_length` must equal the prep `--max-length` exactly; both directions raise.
+The SFT trainer auto-detects the artifact and holds the run to it. Text mode bakes `train_on_completions_only: false` while the training-side default is `true`, so the YAML must state it or startup raises. `max_length` must equal the prep `--max_length` exactly; both directions raise.
 
 ## Step-based training
 
@@ -82,17 +82,17 @@ max_grad_norm: 1.0
 train_on_completions_only: false   # matches the text-mode artifact
 ```
 
-`warmup_steps` of 1 or more is an exact step count, below 1 a fraction of the total; there is no `warmup_ratio`. `max_grad_norm` clips on the global gradient norm reduced across all DP/EP/TP shards ([clipping](../reference/trainer-architecture.md#ep-aware-gradient-clipping)).
+`warmup_steps` reads as on [SFT](sft.md#learning-rate-and-global-batch-size). `max_grad_norm` clips on the global gradient norm reduced across all DP/EP/TP shards ([clipping](../reference/trainer-architecture.md#ep-aware-gradient-clipping)).
 
 Under `bf16` (the toolkit default) with a stock AdamW, AdamWBF16 with stochastic rounding is the optimizer unless accelerate manages DDP ([BF16 Optimizer](../optimization/bf16-optimizer.md)). Checkpoints write as HF-standard safetensors sharded at `save_max_shard_size` (default `5GB`); exact optimizer resume needs the same world size ([Checkpoints](../reference/checkpoints.md)).
 
-For MoE pre-training, router balancing matters from step 0: [`RouterBiasBalancingCallback`](callbacks.md#routerbiasbalancingcallback) implements DeepSeek-V3's aux-loss-free bias update.
+For MoE pre-training, router balancing matters from step 0: [`BalancingBiasCallback`](callbacks.md#balancingbiascallback) implements DeepSeek-V3's aux-loss-free bias update.
 
 ## Large corpora
 
 There is no streaming path: `datasets` loads at `keep_in_memory=False`, so a corpus is memory-mapped from Arrow — disk bounds it, not RAM, but the whole dataset must land on disk. Split a multi-terabyte corpus at the source, tokenize each batch to its own prefix with the command above, and train the phases in sequence, each resuming the previous checkpoint.
 
-Keep `--max-length` and `--model-name` identical across batches so shards stay interchangeable, and point `TMPDIR` / `HF_DATASETS_CACHE` at the large volume. A `dataset:` **list** is not the way to mix prepared prefixes: only a single string path is probed for the pre-processed stamp, and list entries load whole, with no per-rank sharding. `dataset_ratio` (a keep fraction, broadcast or one per entry) applies to raw sources, single or mixed.
+Keep `--max_length` and `--model_name_or_path` identical across batches so shards stay interchangeable, and point `TMPDIR` / `HF_DATASETS_CACHE` at the large volume. A `dataset:` **list** is not the way to mix prepared prefixes: only a single string path is probed for the pre-processed stamp, and list entries load whole, with no per-rank sharding. `dataset_ratio` (a keep fraction, broadcast or one per entry) applies to raw sources, single or mixed.
 
 Set `DIST_SHARED_FILESYSTEM=0` for per-node local storage (default `1` = shared NFS/Lustre) ([Filesystem](../data/filesystem-handling.md)).
 

@@ -1,78 +1,39 @@
 #!/usr/bin/env python
-"""
-Grad-equivalence + memory test for ``fsdp_shard_ep1_experts`` (ep_size==1).
-
-At ep_size==1 the MoE experts are replicated (the DeepEP dispatch is a no-op), so
-there are two ways to keep them in sync across DP ranks:
-
-  * ``fsdp_shard_ep1_experts=False``: the experts are handed to FSDP as
-    ``ignored_params`` (replicated on every rank), and the EP layer's own
-    post-backward hook DP-averages their gradient.
-  * ``fsdp_shard_ep1_experts=True``: FSDP shards the experts like any other param
-    and its reduce-scatter is their *sole* gradient sync (the EP layer skips its
-    hook). Frees the replicated-expert memory that otherwise grows with DP size.
-
-Both paths must produce the SAME (DP-averaged) expert gradient. This test builds
-the real ``DistributedSFTTrainer`` for each mode (so the trainer-side and
-layer-side gates both fire), runs one forward+backward on identical input, and
-checks:
-
-  1. Structural — the flag flips FSDP ownership: with the flag ON the expert
-     weight is a sharded ``DTensor``; with it OFF it is a plain replicated param.
-  2. Loss parity — identical input → identical forward loss (the sync only
-     changes the backward).
-  3. Gradient equivalence — the full (gathered) expert gradient matches between
-     the two modes (cosine ~1, small relative L2). A doubled / dropped / per-rank
-     sync would blow past the tolerance.
-  4. Memory — peak allocated memory with the flag ON is strictly below OFF (the
-     point of the feature); the win grows with DP size.
-
-Run with 2 GPUs (correctness) or 8 GPUs (the largest-all-gather scale gate):
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep1_fsdp_shard_experts.py
-
-Requirements:
-    - 2x (or 8x) GPUs with >=80GB memory each
-    - DeepEP installed
-    - Model: unsloth/gpt-oss-20b-BF16 (auto-downloaded)
-"""
+"""``fsdp_shard_ep1_experts``: FSDP's reduce-scatter as the sole expert sync gives the EP hook's gradient at less
+memory."""
 
 import torch
 from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.base_layer import has_grouped_mm
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.sft import DistributedSFTTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import supports_grouped_mm
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, cos_sim, log, log_all
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 SEQ_LEN = 128
 SEED = 42
 
-# Identical input → the forward loss must be bit-for-bit equal across modes.
+# Identical input, so the forward loss must be bit-for-bit equal across modes.
 LOSS_ABS_TOL = 1e-4
-# The two sync mechanisms (FSDP reduce-scatter vs EP-hook all-reduce) reduce in a
-# different floating-point order, so the gathered expert gradient matches only to
-# bf16/fp32-reduce noise — tight enough to catch a doubled/dropped/per-rank sync.
+# The two mechanisms reduce in a different float order, so gradients match only to bf16/fp32-reduce noise, tight enough
+# to catch a doubled, dropped or per-rank sync.
 GRAD_COSINE_MIN = 0.999
 GRAD_REL_L2_MAX = 5e-3
 
 
 def first_expert_weight(model):
-    """Return (name, param, num_ep_layers) for the first EP layer's expert weight.
-
-    Uses the EP layer's canonical ``expert_named_params()`` accessor (the same set the
-    gradient-sync path operates on), so detection is independent of the per-model expert
-    attribute layout (fused ``gate_up_proj`` vs split ``gate_proj``/``up_proj``).
-    """
+    """Through ``expert_named_params()``, independent of the per-model expert attribute layout."""
     ep_layers = [m for _, m in model.named_modules() if hasattr(m, "expert_named_params")]
     for name, module in model.named_modules():
         if hasattr(module, "expert_named_params"):
@@ -84,7 +45,6 @@ def first_expert_weight(model):
 
 
 def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
-    """Build the trainer at ep1 with the flag set, run one backward, return a result dict."""
     device = f"cuda:{local_rank}"
     mode = "ON" if fsdp_shard_ep1_experts else "OFF"
     log(f"\n{'=' * 70}\nMODE fsdp_shard_ep1_experts={mode} (ep_size=1)\n{'=' * 70}")
@@ -93,7 +53,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
 
     parallelism_config = ParallelismConfig(
         ep_size=1,
-        use_grouped_gemm=has_grouped_mm(),
+        use_grouped_gemm=supports_grouped_mm(),
         fsdp_shard_ep1_experts=fsdp_shard_ep1_experts,
     )
     model, _ = load_distributed_model(
@@ -112,7 +72,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
         bf16=True,
-        gradient_checkpointing=False,  # keep the backward graph simple for a clean grad readout
+        gradient_checkpointing=False,  # Keeps the backward graph simple for a clean grad readout.
         use_liger_kernel=False,
         logging_steps=1,
         save_strategy="no",
@@ -122,10 +82,9 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
         dataloader_drop_last=True,
         dataloader_num_workers=0,
         ddp_find_unused_parameters=True,
-        fsdp="",  # the mixin handles FSDP wrapping
     )
-    # A tiny dataset is required to construct the trainer; the backward below uses a
-    # fixed broadcast batch instead so both modes see identical input.
+    # Required to construct the trainer; the backward below uses a fixed broadcast batch so both modes see identical
+    # input.
     train_dataset = create_sft_dataset(num_samples=8, tokenizer=tokenizer, seed=SEED)
     trainer = DistributedSFTTrainer(
         model=model,
@@ -139,7 +98,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
     name, expert_w, n_ep_layers = first_expert_weight(wrapped)
     assert expert_w is not None, (
         f"no EP expert weight found ({n_ep_layers} EP layers detected) — model was not EP-wrapped at ep1. "
-        "Confirm use_grouped_gemm enables EP wrappers for this MoE."
+        "Confirm use_grouped_gemm enables EP layers for this MoE."
     )
     is_dtensor = isinstance(expert_w, DTensor)
     log(f"  expert weight: {name}  DTensor={is_dtensor}  (FSDP-sharded={is_dtensor})")
@@ -185,7 +144,6 @@ def run(ctx) -> dict:
     on = run_mode(True, tokenizer, ctx.local_rank, ctx.output_dir)
     ctx.barrier()
 
-    # ---- compare on rank 0 ----
     cos = cos_sim(off["grad"], on["grad"], label=off["name"])
     rel_l2 = ((on["grad"] - off["grad"]).norm() / (off["grad"].norm() + 1e-12)).item()
     loss_diff = abs(on["loss"] - off["loss"])

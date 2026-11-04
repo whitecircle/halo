@@ -1,51 +1,6 @@
-"""Shared body of the LoRA weight-sync exactness suites: the syncs leave the frozen base bit-identical.
-
-Every rollout-engine sync (online GRPO, async GRPO with environments, SDPG; vLLM or SGLang) pushes the
-policy with the PEFT adapters folded into their bf16 base weights, one tensor at a time and out of
-place. Folding in place and unfolding with PEFT's unmerge would not give the base back: ``(w + d) - d``
-misses ``w`` by a rounding step wherever the two roundings do not cancel, and the sync repeats every
-few steps for the whole run. ``test_lora_weight_sync_exact.py`` runs a representative dense and MoE
-family per mode; ``test_lora_weight_sync_exact_families.py`` sweeps every other family the sync serves.
-
-A row is one tiny random-init family of :mod:`tests.common.tiny_models` (``--family``: a dense one,
-or a MoE one under its ``model_type``) under one sharding (``--mode``: ``fsdp`` for a dense model;
-``ep1`` with FSDP-sharded DTensor experts, ``ep2`` with plain experts, or pure ETP ``etp2`` for a
-MoE) with stock PEFT on the token mixers' projections (every linear layer on a dense model), alone or
-mixed with native expert LoRA (``--adapters``). No server: the pushes run through the trainers' own
-entry (``sync_trainer_weights``) into a recording sender, the step syncs through its gather
-(``gather_and_send_weights``) with no rank forwarding, and the row must:
-
-  1. Cover the roster and the layout it names: the tiny MoE roster has a model for every EP family
-     some engine takes an online update for (the syncable roster, derived from the layer registry and
-     the clients' refusals, which ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the
-     manifest rows to); the production gate (``validate_weight_sync_support``) admits the model for
-     at least one engine; the LoRA'd base weights are FSDP2 DTensor shards (pure ETP included, whose
-     FSDP2 spans the world at data parallel 1); experts are DTensor at ep1 and plain otherwise; a
-     mixed row carries native expert adapters.
-  2. Across a sync after each of ``STEP_SYNCS`` optimizer steps, leave every frozen parameter
-     bit-identical while the adapters train.
-  3. With the adapters of the next step fixed, ``PUSHES`` syncs (a recording sender on the forwarding
-     rank), each after a forward that leaves FSDP2's unsharded params registered, leave the base and
-     adapters bit-identical and forward the same bytes every push: each PEFT-LoRA'd weight as
-     ``w + delta`` exactly as PEFT's merge adds it, the fold moving the trained ones off ``w``; a mixed
-     row's experts as the layers' own ``gather_expert_state_dict(merge_lora=True)`` folds them, off the
-     base experts, and a PEFT-only row's as their base. The expert expectation is production's fold, so
-     this pins that the push forwards it, not its values; ``tests/cpu/grpo/test_weight_sync_expert_tp_guard.py``
-     holds those to an independent ``base + scaling·(A@B)``. Expected tensors are spelled by the sync's
-     own forwarder, so export renames and hub-namespace reverts name them as a push does.
-  4. Negative control: ``CONTROL_STEPS`` further step syncs inside an in-place PEFT merge/unmerge
-     (``folded_in_place``) move the base (the elements moved since the pushes, counted after each sync,
-     and the largest drift are reported as metrics), so checks 2 and 3 cannot pass vacuously on this row.
-  5. Memory: the peak a step sync requests over what was requested before it stays within
-     ``FOLD_PEAK_BOUND`` largest-folded-tensor sizes of the in-place syncs' peak, which fold nothing
-     themselves (the first step sync is left out: it pays one-time allocations). Per fold, recorded on
-     the last step sync: every folded tensor is recorded, each fold's own peak stays within the same
-     allowance, and the bytes held as each fold starts do not grow along the walk by more than one
-     tensor, so nothing a fold makes outlives its tensor. The row must be one where a copy of the whole LoRA'd shard
-     would exceed the bound.
-
-TP is no mode: every LoRA shape is refused at trainer construction under TP.
-"""
+"""Shared body of the LoRA weight-sync exactness suite: syncs leave the frozen base bit-identical. Folds are out of
+place, since in-place fold and unfold misses ``w`` by a rounding step. No server: a recording sender takes the pushes,
+with ``folded_in_place`` as the negative control. TP is no mode, since it refuses every LoRA shape."""
 
 import argparse
 import os
@@ -59,34 +14,34 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
-import src.models.structure as structure
-from src.distributed.checkpoint.peft import find_peft_model
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
-from src.distributed.fsdp import reshard_fsdp2_modules
-from src.distributed.nccl.registry import resolve_weight_sync_client, rollout_backends
-from src.distributed.parallelism_config import ParallelismConfig
-from src.distributed.runtime import broadcast_from_rank0
-from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
-from src.trainers.grpo.rollout.weight_sync import (
+import halo.models.peft_adapters as peft_adapters
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.peft_adapters import lora_fold_targets
+from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
+from halo.runtime.collectives import broadcast_from_rank0
+from halo.trainers.grpo.rollout.weight_push import (
     gather_and_send_weights,
+    reject_unsyncable_model,
     sync_trainer_weights,
-    validate_weight_sync_support,
 )
-from src.trainers.mixins.ep_introspection import named_ep_layers
-from src.trainers.sft import DistributedSFTTrainer
+from halo.trainers.sft import DistributedSFTTrainer
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+from tests.common.adapters import load_peft_model, mixed_targets, mixer_linear_leaves
 from tests.common.checkpoint_io import fixed_text_batch
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import load_peft_model, mixed_targets, mixer_linear_leaves
+from tests.common.rank_log import log, log_all
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
     shared_tiny_family_checkpoint,
     tiny_family_model,
 )
-from tests.common.utils import log, log_all
 from tests.common.weight_sync import (
     RecordingSender,
     as_pushed,
@@ -98,20 +53,17 @@ from tests.common.weight_sync import (
 
 SEED = 42
 WORLD_SIZE = 2
-# Optimizer steps followed by one sync each, as shipped; then, at the next step, PUSHES syncs of the
-# adapters that step left; then CONTROL_STEPS step syncs inside an in-place merge/unmerge.
+# One sync per optimizer step; then, at the next step, PUSHES syncs of its adapters; then CONTROL_STEPS in-place syncs.
 STEP_SYNCS = 3
 PUSHES = 4
 CONTROL_STEPS = 3
 # Large enough that each step moves lora_B by far more than a bf16 rounding step of the base.
 LEARNING_RATE = 5e-3
-# The out-of-place fold's allowance, in full sizes of the largest folded tensor: its shard copy and a
-# full delta. Measured on every row: a sync peaks exactly as an in-place one does, each fold at 1.5
-# sizes, and the bytes held as each fold starts never move; a fold keeping every folded tensor adds the
-# whole LoRA'd shard, 1.1-1.5 MiB here, and grows the fold starts by as much.
+# The out-of-place fold's allowance, in sizes of the largest folded tensor: its shard copy and a full delta. Measured:
+# each fold at 1.5 sizes, and held bytes never move; keeping every folded tensor adds the whole LoRA'd shard (1.1-1.5
+# MiB).
 FOLD_PEAK_BOUND = 2
-# The pushes' forward input: the same sequence on every rank, so an EP forward's dispatch collectives
-# stay aligned.
+# The same sequence on every rank, so an EP forward's dispatch collectives stay aligned.
 PROBE_TEXT = "The capital of France is Paris. " * 8
 MODES = {
     "fsdp": {},
@@ -120,39 +72,32 @@ MODES = {
     "etp2": {"ep_size": 1, "expert_tp_size": 2},
 }
 DENSE_MODES = ("fsdp",)
-# The core-tier rows: one dense and one MoE family; the full tier sweeps the rest.
-REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe")
 
 
 def syncable_ep_classes() -> set[type]:
-    """Every EP family class some rollout engine takes an online update for: declared syncable, and
-    its own ``model_type`` spelling (``HF_MODEL_TYPES[0]``) left unrefused by at least one client; the
-    composite wrappers and sibling spellings behind it are refused under their own entries."""
+    """Every EP family class some engine takes an online update for: declared syncable and its own ``model_type``
+    unrefused by a client."""
     clients = [resolve_weight_sync_client(backend) for backend in rollout_backends()]
     return {
         cls
-        for cls in ep_layer_classes()
-        if cls.HF_MODEL_TYPES
-        and cls._supports_weight_sync
-        and any(cls.HF_MODEL_TYPES[0] not in client.UNSERVABLE_MODEL_TYPES for client in clients)
+        for cls in set(ep_layer_class_by_model_type().values())
+        if cls.FAMILY.weight_sync_refusal is None
+        and any(cls.FAMILY.model_types[0] not in client.UNSERVABLE_MODEL_TYPES for client in clients)
     }
 
 
 def syncable_moe_families() -> tuple[str, ...]:
-    """The ``TINY_MOE_FAMILIES`` whose EP layer class is in :func:`syncable_ep_classes`."""
     registry, syncable = ep_layer_class_by_model_type(), syncable_ep_classes()
     return tuple(sorted(name for name in TINY_MOE_FAMILIES if registry[name] in syncable))
 
 
 def row_families() -> tuple[str, ...]:
-    """Every ``--family`` a row may name: the ``TINY_DENSE_FAMILIES``, which run under ``DENSE_MODES``
-    alone, and the syncable MoE roster."""
+    """Every ``--family`` a row may name: dense families (``DENSE_MODES`` only) and the syncable MoE roster."""
     return (*TINY_DENSE_FAMILIES, *syncable_moe_families())
 
 
 def parse_row(families: Iterable[str], argv: list[str] | None = None) -> argparse.Namespace:
-    """``--family`` (one of ``families``), ``--mode`` and ``--adapters`` from ``argv`` (the command line
-    by default), refusing a shape no run takes."""
+    """Parse ``--family``, ``--mode`` and ``--adapters``, refusing a shape no run takes."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=sorted(families), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
@@ -172,12 +117,12 @@ def _is_adapter(name: str) -> bool:
 
 
 def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Every EP layer's experts gathered as the push gathers them, without and with the native delta,
-    under their live names. Collective within the EP group; empty on a dense model."""
+    """Every EP layer's experts as the push gathers them, without and with the native delta. Collective within the EP
+    group."""
     bases, merges = {}, {}
-    for layer_name, layer in named_ep_layers(peft_model).items():
+    for layer_name, layer in named_ep_layers(peft_model):
         for merge, out in ((False, bases), (True, merges)):
-            for key, tensor in layer.gather_expert_state_dict("cuda", merge_lora=merge).items():
+            for key, tensor in layer.gather_expert_state_dict(device="cuda", merge_lora=merge).items():
                 out[f"{layer_name}.{key}"] = tensor.detach().clone()
     return bases, merges
 
@@ -187,19 +132,15 @@ def _requested_bytes(stat: str) -> int:
 
 
 def _gather_without_forwarding(trainer) -> None:
-    """The step sync's gathers and adapter folds with no rank forwarding: what the peak and fold rows
-    measure, with nothing staged for an engine. A sync proper refuses a forwarding rank with no client."""
+    """The step sync's gathers and folds with no rank forwarding; a sync proper refuses a forwarding rank with no
+    client."""
     gather_and_send_weights(unwrap_framework_wrappers(trainer.model), None)
 
 
 def _sync_peak(model, sync: Callable[[], None]) -> int:
-    """Bytes ``sync`` requests at its peak over what was requested before it, on this rank.
-
-    Requested rather than allocated bytes: the caching allocator may serve a large request from a
-    cached block up to 1 MiB bigger and count the whole block, which would swamp a tiny row's fold.
-    Resharded first, so every measurement starts from the same registration rather than from whatever
-    unsharded params the step left behind, which the sync's own reshard would free inside the window.
-    """
+    """Bytes ``sync`` requests at its peak over what was requested before it, on this rank. Requested, not allocated:
+    the caching allocator may count a block up to 1 MiB bigger, swamping a tiny row. Resharded first, so the sync's own
+    reshard cannot free the step's unsharded params inside the window."""
     reshard_fsdp2_modules(model)
     torch.cuda.synchronize()
     before = _requested_bytes("current")
@@ -211,10 +152,9 @@ def _sync_peak(model, sync: Callable[[], None]) -> int:
 
 @contextmanager
 def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
-    """Record every tensor the sync folds: the bytes requested as its fold starts and the fold's own
-    peak over that. A fold that kept anything past its tensor would show as a start that grows along
-    the walk."""
-    fold = structure.lora_folded
+    """Record each fold's starting bytes and own peak; a fold keeping anything past its tensor shows as a start that
+    grows along the walk."""
+    fold = peft_adapters.lora_folded
 
     def recorded(param, layers):
         torch.cuda.synchronize()
@@ -225,17 +165,14 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
         record.append((start, _requested_bytes("peak") - start))
         return folded
 
-    with patch.object(structure, "lora_folded", recorded):
+    with patch.object(peft_adapters, "lora_folded", recorded):
         yield
 
 
 class _SyncEachStep(TrainerCallback):
-    """The online trainers' cadence, a sync after every optimizer step while the adapters train, in
-    the three phases of checks 2-4, each step sync's allocation peak measured for check 5. The
-    fixed-adapter pushes replace a step's sync rather than follow it: a bf16 fold/unfold of unchanged
-    adapters mostly lands back where the previous one left the base, so after an in-place sync of the
-    same adapters the next could barely move it. Every rank runs callbacks, so the sync's gathers stay
-    collective."""
+    """A sync after every optimizer step, measuring each step sync's peak; every rank runs callbacks, so gathers stay
+    collective. Fixed-adapter pushes replace a step's sync: a bf16 fold/unfold of unchanged adapters mostly lands back
+    where the last one left the base."""
 
     def __init__(self, state: dict):
         self.state = state
@@ -270,9 +207,8 @@ class _SyncEachStep(TrainerCallback):
             _gather_without_forwarding(trainer)
 
     def _fixed_adapter_pushes(self, trainer) -> None:
-        """``PUSHES`` syncs, each after a no-grad forward; what the forwarding rank handed its client,
-        and the expected values. Those are spelled on every rank, so a refusal raises everywhere
-        rather than stranding the peers in the next gather."""
+        """``PUSHES`` syncs, each after a no-grad forward; expected values are spelled on every rank, so a refusal
+        raises everywhere."""
         peft_model, rank = self.state["peft_model"], self.state["rank"]
         self.state["before_pushes"] = self._parameters()
         lora_base, lora_merged = lora_bases_and_merges(peft_model)
@@ -307,7 +243,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     """The roster, the gate and the sharding the row names, read off the live tree (rank-local)."""
     params = dict(unwrapped.named_parameters())
     lora_bases = [name for name in params if ".base_layer." in name]
-    layers = named_ep_layers(unwrapped)
+    layers = dict(named_ep_layers(unwrapped))
     experts = [
         param for layer in layers.values() for attr, param in layer.expert_named_params() if not _is_adapter(attr)
     ]
@@ -315,7 +251,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
     admitted = []
     for backend in rollout_backends():
         try:
-            validate_weight_sync_support(unwrapped, backend)
+            reject_unsyncable_model(unwrapped, backend)
             admitted.append(backend)
         except ValueError as refusal:
             log(f"  {backend} refuses the sync: {str(refusal).splitlines()[0][:160]}")
@@ -331,7 +267,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
         or (bool(layers) and all(type(m) is ep_layer_class_by_model_type()[model_type] for m in layers.values())),
         "experts_dtensor_iff_ep1": model_type is None
         or (bool(experts) and all(isinstance(p.data, DTensor) == (mode == "ep1") for p in experts)),
-        "native_expert_lora_iff_mixed": has_ep_lora(unwrapped) == (adapters == "mixed"),
+        "native_expert_lora_iff_mixed": model_has_expert_lora(unwrapped) == (adapters == "mixed"),
     }
     log(
         f"  layout: {layout} ({len(lora_bases)} PEFT-LoRA'd weights, {len(experts)} expert tensors, "
@@ -348,8 +284,7 @@ def _push_checks(state: dict, adapters: str) -> dict[str, bool]:
     checks["pushed_lora_weights_equal_base_plus_delta"] = checks["every_push_forwarded_the_lora_weights"] and all(
         torch.equal(push[key], value) for push in pushes for key, value in merged.items()
     )
-    # Any, not every: an adapter the batches never reach (a vision tower on text-only rows) stays at
-    # lora_B = 0 and folds nothing.
+    # Any suffices: an adapter the batches never reach (a vision tower on text-only rows) stays at lora_B = 0.
     moved = [key for key in base if not torch.equal(merged[key], base[key])]
     checks["fold_moved_lora_weights"] = bool(moved)
     log(f"  the fold moved {len(moved)}/{len(base)} pushed LoRA'd weights")
@@ -365,7 +300,6 @@ def _push_checks(state: dict, adapters: str) -> dict[str, bool]:
             and any(not torch.equal(experts[key], expert_base[key]) for key in expert_base)
         )
     elif expert_base:
-        # Without expert adapters the push folds nothing into the experts.
         checks["pushed_experts_equal_their_base"] = all(
             key in pushes[0] and torch.equal(pushes[0][key], value) for key, value in expert_base.items()
         )
@@ -381,9 +315,8 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     dense = family in TINY_DENSE_FAMILIES
     tiny = TINY_DENSE_FAMILIES[family] if dense else TINY_MOE_FAMILIES[family]
     base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"lora_sync_exactness_{family}", tokenizer, SEED)
-    # The PEFT targets, off the module tree: MLA, fused QKV, gated and linear attention spell them
-    # differently. The mixed targets' logical expert projections become native expert LoRA on a MoE;
-    # on a dense model the same names are its MLP, which stock PEFT adapts.
+    # Off the module tree, since MLA, fused QKV, gated and linear attention spell them differently. The logical expert
+    # names become native expert LoRA on a MoE; on a dense model they are its MLP, which stock PEFT adapts.
     leaves = broadcast_from_rank0(mixer_linear_leaves(tiny_family_model(tiny, tokenizer)) if ctx.rank == 0 else None)
     targets = mixed_targets(leaves) if dense or adapters == "mixed" else leaves
 

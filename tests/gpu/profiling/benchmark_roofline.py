@@ -47,7 +47,7 @@ def measure_gemm(M: int, N: int, K: int, w: torch.Tensor, dev) -> tuple[float, f
     a = torch.randn(M, K, dtype=torch.bfloat16, device=dev)
     t = sync_time(lambda: a @ w, iters=30, warmup=10)
     flops = 2 * M * N * K
-    bytes_moved = 2 * (M * K + K * N + M * N)  # bf16 read A,W + write C
+    bytes_moved = 2 * (M * K + K * N + M * N)  # bf16 read A,W + write C.
     return t, flops / t / 1e12, flops / bytes_moved
 
 
@@ -84,16 +84,14 @@ def _run_roofline(args) -> None:
         f"mem={props.total_memory / 1e9:.0f}GB  cc={props.major}.{props.minor}"
     )
 
-    # ---- 1. HBM bandwidth ----
     print("\n## HBM bandwidth (device-to-device copy)")
     nbytes = 2 << 30  # 2 GiB
     a = torch.empty(nbytes // 2, dtype=torch.bfloat16, device=dev)
     b = torch.empty_like(a)
     t = sync_time(lambda: b.copy_(a), iters=50, warmup=10)
-    bw = 2 * nbytes / t / 1e12  # read a + write b
+    bw = 2 * nbytes / t / 1e12  # Read a + write b.
     print(f"  copy {nbytes / 2**30:.0f}GiB: {t * 1e3:.3f} ms  -> {bw:.1f} TB/s")
 
-    # ---- 2. bf16 GEMM compute peak ----
     print(f"\n## bf16 GEMM peak  ({args.peak_kn}^3, compute-bound)")
     P = args.peak_kn
     wp = torch.randn(P, P, dtype=torch.bfloat16, device=dev)
@@ -104,7 +102,6 @@ def _run_roofline(args) -> None:
         print(f"  M={M:>6} N={P} K={P}: {t * 1e3:7.3f} ms  {tf:7.0f} TFLOP/s  AI={ai:.0f}")
     print(f"  -> peak ~= {peak:.0f} TFLOP/s ;  ridge AI ~= {peak / bw:.0f} FLOP/byte")
 
-    # ---- 3. small-M roofline sweep at a fixed expert shape ----
     KN = args.expert_kn
     print(f"\n## MoE expert GEMM  K=N={KN}  small-M -> large-M crossover  (ridge ~{peak / bw:.0f})")
     print(f"  {'M(tok/exp)':>10} {'ms':>9} {'TFLOP/s':>9} {'AI':>6} {'regime':>16}")
@@ -115,17 +112,16 @@ def _run_roofline(args) -> None:
         regime = "weight-bw-bound" if ai < ridge else "compute-bound"
         print(f"  {M:>10} {t * 1e3:>9.4f} {tf:>9.0f} {ai:>6.0f} {regime:>16}")
 
-    # ---- 4. kernel-launch floor ----
     x = torch.randn(8, device=dev)
     t = sync_time(lambda: x.add_(1.0), iters=2000, warmup=200)
     print(f"\n## kernel-launch floor (tiny add): {t * 1e6:.1f} us/op")
 
-    # ---- 5. elementwise SwiGLU (memory-bound; fusion target) ----
+    # Elementwise SwiGLU: memory-bound, the fusion target.
     N = H = 8192
     ea = torch.randn(N, H, dtype=torch.bfloat16, device=dev)
     eb = torch.randn(N, H, dtype=torch.bfloat16, device=dev)
     te = sync_time(lambda: torch.nn.functional.silu(ea) * eb, iters=100, warmup=20)
-    traffic = 3 * N * H * 2  # read a, read b, write out (bf16), minimum
+    traffic = 3 * N * H * 2  # Read a, read b, write out (bf16), minimum.
     print(
         f"\n## SwiGLU elementwise {N}x{H} bf16: {te * 1e3:.3f} ms  "
         f"-> {traffic / te / 1e12:.1f} TB/s effective (pure HBM, ~0 useful FLOPs)"

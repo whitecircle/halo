@@ -1,44 +1,28 @@
 #!/usr/bin/env python
 """A ``text_only_model`` full fine-tune saved through the base Trainer writes its text-only layout.
-
-``text_only_model: true`` loads a multimodal Qwen3.5/3.6 checkpoint as its ``*ForCausalLM`` sibling,
-and transformers records the ``PrefixChange(prefix_to_remove="language_model")`` that load consumed.
-Where no parallel saver claims the write (single GPU, DDP, accelerate FSDP), the trainer falls back to
-HF's ``Trainer.save_model``, whose stock ``save_pretrained`` replays that record: a ``*_text`` config
-over ``model.language_model.*`` keys. transformers re-strips the prefix on reload, so a reload alone
-proves nothing; engine loaders keyed on the architectures and ``reattach_vision_tower.py`` do not.
-These tests pin the on-disk keys to what a fresh model of the saved config writes.
-
-    python tests/cpu/trainers/test_text_only_base_save_layout.py
-"""
+transformers re-strips ``language_model`` on reload; engine loaders and ``reattach_vision_tower.py`` do not."""
 
 from __future__ import annotations
-
-# Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import.
-import src.models.patches.kernel_dispatch  # noqa: F401  # isort: skip
 
 from pathlib import Path
 
 import pytest
 import torch
-from accelerate import PartialState
 from datasets import Dataset
 from transformers import AutoConfig
 from trl import SFTConfig
 
-PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
-
-from src.distributed.checkpoint.save import select_checkpoint_saver
-from src.models.loading.model_preparation import auto_load_model
-from src.trainers.sft import DistributedSFTTrainer
+from halo.checkpoint.parallel.save import select_checkpoint_saver
+from halo.model_loading.model_preparation import auto_load_model
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
+from tests.common.tiny_models import word_level_tokenizer
 from tests.cpu.checkpoint.test_merge_text_only_adapter_e2e import (
     _FAMILIES,
     _WRAPPER_TEXT_PREFIX,
     _build_multimodal_base,
     _declared_layout,
     _on_disk_keys,
-    _tiny_tokenizer,
 )
 
 _INPUT_IDS = [2, 3, 2, 3]
@@ -65,7 +49,7 @@ def _trainer(model, output_dir: Path) -> DistributedSFTTrainer:
         model=model,
         args=args,
         train_dataset=Dataset.from_dict({"input_ids": [_INPUT_IDS] * 2, "labels": [_INPUT_IDS] * 2}),
-        processing_class=_tiny_tokenizer(),
+        processing_class=word_level_tokenizer(("hello", "world")),
         parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
         moe_balancing="none",
     )

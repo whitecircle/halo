@@ -11,14 +11,15 @@ Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
 
 | Option | Default | Effect |
 |---|---|---|
-| `requirements`, `scale` | —, `10` | `{name, description, weight}` items (`weight > 0`, default 1), each scored `0..scale` |
-| `checks` | — | `{name, description, veto, weight}` items; `veto` default `false`; `weight >= 0`, default 1, non-veto checks only |
-| `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included |
-| `api_key_env` | `OPENROUTER_API_KEY` | Key variable; falls back to `OPENROUTER_API_KEY`, then `OPENAI_API_KEY` |
+| `requirements`, `scale` | —, `10` | `{name, description, weight}` items (`weight > 0`, default 1), each scored `0..scale`; a veto judge refuses `scale` |
+| `checks` | — | `{name, description, veto, weight, unless}` items; `veto` default `false`; `weight >= 0`, default 1 (0 for a veto check); `unless` an episode fact the environment establishes, under which the check never fires. `environment` takes the checks the environment declares ([Environment checks](#environment-checks)) |
+| `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included; one neither loopback nor a vendor's own host needs `api_key_env` |
+| `api_key_env` | `OPENROUTER_API_KEY` | Key variable. Another name is that key alone: unset, the launch probe fails, with no fallback. At the default, a loopback `base_url` reads `VLLM_API_KEY`, then `OPENAI_API_KEY`, and needs neither; OpenRouter's host reads only `OPENROUTER_API_KEY` and `api.openai.com` only `OPENAI_API_KEY`; any other host is refused, so name its key here |
 | `reasoning_effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; `null` sends no such field |
 | `temperature` | unset | Reasoning models refuse an explicit one |
 | `view` | `final` | `final`, `full` or `digest` ([Views](#views)) |
 | `context` | unset | What the episode does not show (how the environment and its limits work) |
+| `context_file` | unset | A UTF-8 text file read into `context` when the config is parsed, so the environments receive the text; absolute or relative to the launch directory, and exclusive with `context` |
 | `include_reference`, `include_reasoning` | `true`, `true` | Show the reference answer (when the sample has one); show the policy's reasoning in the `full` and `digest` views |
 | `on_error` | `invalid`; `neutral` for a veto judge | [Outages](README.md#outages) |
 | `max_tokens`, `request_timeout`, `max_concurrency` | `8192`, `120`, `16` | Per request (`max_tokens` includes reasoning); concurrency per scorer (per rank or actor) |
@@ -41,7 +42,7 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 A turn header (`full` and `digest`) notes a reasoning cap hit, an engine cut, an empty turn, or calls all unknown or refused.
 
-A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the training rollout decodes it (vLLM under a thinking budget; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it.
+A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a thinking budget, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an identical resubmission, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
 
 ### The length cut
 
@@ -50,7 +51,7 @@ A view over `max_view_chars` is cut in two stages:
 1. In the `full` view, reasoning goes first: each turn's is cut to head and tail within an even share of the room the rest leaves, so no call, result or text is cut for a thought.
 2. The view keeps two thirds of the budget from its head and one third from its tail, with a marker between, so the final answer survives.
 
-The reference is cut the same way. Renderers: `src/rewards/samples.py`.
+The reference is cut the same way. Renderers: `halo/rewards/samples.py`.
 
 ## Veto judge
 
@@ -69,18 +70,24 @@ rewards:
       - {name: blind_resubmission, description: "A resubmission changed nothing material."}
 ```
 
+### Environment checks
+
+`checks: environment` takes the rubric the environment declares (`JUDGE_CHECKS`): code contests declares its audit, its scratchpad's name filled in, so a recipe carries only the judge's model, view, price and `context`. An environment that declares none refuses the term at construction, and the RLVR arm refuses it as any veto judge.
+
 ### Evidence
 
-A fired check must quote one to three lines; one found quote suffices (a judge misquotes a long program's line about one time in four). A flag without a counting quote does not fire and counts in `judge/<name>/unsupported_flags`.
+A fired check must quote one to three lines; one found quote suffices. A flag without a counting quote does not fire and counts in `judge/<name>/unsupported_flags`.
 
-- **Sources:** the policy's actions as the term's `view` shows them (`render_actions`): visible text, tool-call arguments (a cut call's included) and their results; under `final`, the answer, or the last assistant text when there is none. Never reasoning, since a veto on a thought teaches the policy to hide it, and never environment notes (headers, flags, nudges).
+A check with `unless` does not fire where the environment establishes that episode fact, whatever the judge answered; the dropped flag counts in `judge/<name>/exempted_flags`. An exemption the environment can decide exactly is not left to the judge. An environment declares the facts it establishes, and a check naming another is refused at construction.
+
+- **Sources:** the policy's actions as the term's `view` shows them (`render_actions`): visible text, tool-call arguments (a cut or refused call's included) and their results; under `final`, the answer, or the last assistant text when there is none. Never reasoning, since a veto on a thought teaches the policy to hide it, and never environment notes (headers, flags, nudges).
 - **Match:** a whitespace-folded span of that text, both read as the prompt shows them, so a quoted tag matches with or without its escape. A quote of four or more words also counts when, case aside, it matches in order at one place missing at most a fifth of its words (one at least), first and last words included.
 - **Length:** over 400 characters never counts.
 
 ### What a fired check costs
 
 - A fired `veto: true` check zeroes `reward/objective` and every other positive component. The penalties stand.
-- The term's score is the weighted fired fraction of its non-veto checks. A check at weight `0` is logged, never priced; a veto check takes no weight.
+- The term's score is the weighted fired fraction of its checks. A non-veto check at weight `0` is logged, never priced. A veto check counts only when given a weight: a penalty on top of the gate, since a vetoed failure has no credit to lose beyond its bonuses.
 - The term's `weight` must be `<= 0`. The default `0` logs flags unpriced; a negative weight charges them.
 - `on_error` defaults to `neutral`, so a judge outage leaves the environment's grade standing.
 
@@ -99,6 +106,7 @@ Per completion, averaged per step on both arms (the online arm logs 0 on a rank 
 | `judge/<name>/<check>` | Veto judge: the check fired (1/0) |
 | `judge/<name>/veto` | Veto judge: a `veto: true` check fired (1/0) |
 | `judge/<name>/unsupported_flags` | Veto judge: flags dropped for lack of a counting quote |
+| `judge/<name>/exempted_flags` | Veto judge: flags dropped because the episode fact a check stands exempt under holds |
 | `judge/<name>/completion_tokens` | The judge's completion tokens |
 | `judge/<name>/cost_usd` | Environment arm: request cost, where the endpoint reports one (OpenRouter does) |
 

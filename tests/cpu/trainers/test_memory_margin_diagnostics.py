@@ -1,28 +1,16 @@
 #!/usr/bin/env python
-"""Test the mixin's OOM-diagnosability helpers in single-process isolation.
-
-The thin-margin warning and the rank-local OOM banner exist so a one-rank OOM inside a distributed
-step does not read as a DeepEP/cuBLAS kernel fault: the hot rank OOMs by a fraction of a GiB and its
-peers die on Xid 43 launch failures inside combine. No GPU or distributed init.
-
-Both are PER-RANK verdicts emitted through accelerate's ``MultiProcessAdapter``, which drops records
-on every non-main rank unless ``main_process_only=False`` — so the kwarg is pinned here alongside the
-message text. Without it each one prints only when rank 0 is the affected rank, which is precisely
-the case it was not written for.
-
-Run: python tests/cpu/trainers/test_memory_margin_diagnostics.py
-"""
+"""The mixin's OOM-diagnosability helpers, so a one-rank OOM does not read as a DeepEP/cuBLAS kernel fault.
+Both are per-rank verdicts, so each must log on a rank that is not the main process."""
 
 import types
+from unittest import mock
 
 import pytest
 import torch
 
-from src.trainers.mixins.base import (
-    _MEMORY_MARGIN_WARN_RATIO,
+from halo.trainers.distributed_trainer import (
+    MEMORY_MARGIN_WARN_RATIO,
     DistributedTrainerMixin,
-    emit_primary_failure,
-    oom_banner,
     thin_memory_margin_message,
 )
 
@@ -40,12 +28,12 @@ def test_message_fires_above_the_ratio():
 
 def test_message_silent_below_the_ratio():
     total = 268 * _GIB
-    assert thin_memory_margin_message(int(total * (_MEMORY_MARGIN_WARN_RATIO - 0.01)), total, rank=0) is None
+    assert thin_memory_margin_message(int(total * (MEMORY_MARGIN_WARN_RATIO - 0.01)), total, rank=0) is None
 
 
 def test_message_boundary_is_the_ratio():
     total = 100 * _GIB
-    at = int(total * _MEMORY_MARGIN_WARN_RATIO)
+    at = int(total * MEMORY_MARGIN_WARN_RATIO)
     assert thin_memory_margin_message(at, total, rank=0) is not None
     assert thin_memory_margin_message(at - _GIB, total, rank=0) is None
 
@@ -54,58 +42,53 @@ def test_message_survives_zero_total():
     assert thin_memory_margin_message(0, 0, rank=0) is None
 
 
-def test_oom_banner_names_the_primary_failure_and_the_collateral():
-    banner = oom_banner(5, RuntimeError("CUDA out of memory. Tried to allocate 7.84 GiB"))
-    assert "RANK 5" in banner
-    assert "PRIMARY FAILURE" in banner
-    assert "Xid 43" in banner
-    assert "7.84 GiB" in banner
+class _OOMingTrainer:
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 53.56 GiB")
 
 
-class _RecordingLogger:
-    """Stands in for the module's accelerate adapter, capturing the kwargs each call passes."""
+class _StepHost(DistributedTrainerMixin, _OOMingTrainer):
+    def _accumulate_unmasked_output_tokens(self, local_count):
+        pass
 
-    def __init__(self):
-        self.calls: list[tuple[str, str, dict]] = []
-
-    def error(self, msg, **kwargs):
-        self.calls.append(("error", msg, kwargs))
-
-    def warning(self, msg, **kwargs):
-        self.calls.append(("warning", msg, kwargs))
+    def _accumulate_attention_flops(self, inputs):
+        pass
 
 
-def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatch):
-    """The banner names the rank that OOMed, and this module logs through accelerate's
-    ``MultiProcessAdapter``, which drops records on every non-main rank unless
-    ``main_process_only=False``. On the default the banner prints only when rank 0 is the one that
-    died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
-    primary cause."""
-    recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.mixins.base.logger", recorder)
+def _oom_step():
+    host = object.__new__(_StepHost)
+    host._memory_margin_checked = True
+    host._window_modules = []
+    host.accelerator = types.SimpleNamespace(sync_gradients=True)
+    DistributedTrainerMixin.training_step(host, None, {})
 
-    emit_primary_failure(3, RuntimeError("CUDA out of memory. Tried to allocate 53.56 GiB"))
 
-    assert len(recorder.calls) == 1
-    level, msg, kwargs = recorder.calls[0]
-    assert level == "error"
-    assert kwargs.get("main_process_only") is False, (
-        "the banner must be emitted on every rank; the adapter's default silently drops it on the "
-        "non-zero rank that actually OOMed"
-    )
+def _recorder(monkeypatch, main: bool) -> mock.MagicMock:
+    recorder = mock.MagicMock()
+    monkeypatch.setattr("halo.trainers.distributed_trainer.logger", recorder)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.is_global_main_process", lambda: main)
+    return recorder
+
+
+def test_primary_failure_banner_logs_off_the_main_process(monkeypatch):
+    """Guarded to the main process it would print only when rank 0 died, leaving peer timeouts and no primary cause."""
+    recorder = _recorder(monkeypatch, main=False)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.get_global_rank", lambda: 3)
+
+    with pytest.raises(torch.OutOfMemoryError):
+        _oom_step()
+
+    recorder.error.assert_called_once()
+    (msg,), _ = recorder.error.call_args
     assert "RANK 3" in msg and "53.56 GiB" in msg
+    assert "PRIMARY FAILURE" in msg and "Xid 43" in msg, "the banner must name the primary failure and the collateral"
 
 
-def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
-    """Same adapter, same trap: the thin-margin verdict is per-rank by construction (MoE routing
-    skew concentrates dispatch buffers and expert activations on hot ranks), so a main-process-only
-    emit reports it for the one rank whose margin is least likely to be the problem.
-
-    CUDA is faked rather than skipped: on the CPU tier a skip would leave the kwarg unpinned, which
-    is the whole behaviour under test."""
-    recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.mixins.base.logger", recorder)
-    monkeypatch.setattr("src.trainers.mixins.base.thin_memory_margin_message", lambda *a, **k: "thin margin")
+def test_thin_margin_warning_logs_off_the_main_process(monkeypatch):
+    """MoE routing skew concentrates buffers on hot ranks, so a main-process-only emit reports the rank least at risk.
+    CUDA is faked because a skip on the CPU tier would leave the emit unpinned."""
+    recorder = _recorder(monkeypatch, main=False)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 99 * 1024**3)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
@@ -116,12 +99,19 @@ def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
 
     DistributedTrainerMixin._warn_once_on_thin_memory_margin(me)
 
-    assert recorder.calls, "the thin-margin warning never reached the logger"
-    level, msg, kwargs = recorder.calls[0]
-    assert level == "warning" and msg == "thin margin"
-    assert kwargs.get("main_process_only") is False, (
-        "a per-rank margin verdict emitted main-process-only is invisible on the hot rank it describes"
-    )
+    recorder.warning.assert_called_once_with("thin margin")
+
+
+@pytest.mark.parametrize("main", [True, False])
+def test_the_released_buffers_line_logs_on_the_main_process_only(monkeypatch, main):
+    """The control for the two above."""
+    recorder = _recorder(monkeypatch, main)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.free_unclaimed_ep_buffers", lambda: 2)
+    monkeypatch.setattr("halo.trainers.distributed_trainer.barrier", lambda: None)
+
+    DistributedTrainerMixin.cleanup_ep(types.SimpleNamespace(_ep_layers=lambda: []))
+
+    assert recorder.info.called is main
 
 
 def test_margin_check_runs_once_and_only_after_the_first_step():

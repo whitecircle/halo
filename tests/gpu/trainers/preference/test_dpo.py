@@ -1,23 +1,6 @@
 #!/usr/bin/env python
-"""
-Test: DistributedDPOTrainer with Qwen3-0.6B (smoke test).
-
-Runs DPO training end-to-end with:
-1. Synthetic math preference data (chosen vs rejected)
-2. 30% multi-turn conversations
-3. Liger kernels, gradient checkpointing, bf16
-4. ParallelismConfig() (standard mode, no EP/CP/TP)
-
-Assertions:
-- Every configured step runs, logging at least two step losses
-- Final training loss and every logged step loss are finite (not NaN/Inf)
-
-It does not compare the DPO loss against a reference, so a wrong-but-finite objective passes.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_dpo.py
-"""
+"""DistributedDPOTrainer smoke test on Qwen3-0.6B. It compares no loss against a reference, so a wrong finite objective
+passes."""
 
 import random
 
@@ -26,13 +9,12 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import DPOConfig
 
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.dpo import DistributedDPOTrainer
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses, training_run_checks
-
-# Configuration
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 NUM_GPUS = 2
@@ -45,27 +27,13 @@ LEARNING_RATE = 5e-6
 SEED = 42
 
 
-# Dataset Creation (DPO-specific format -- kept inline)
-
-
 def create_word_problem_preference_dataset(
     num_samples: int,
     tokenizer,
     seed: int = SEED,
 ) -> Dataset:
-    """Create synthetic math preference data for DPO.
-
-    Each sample has:
-    - prompt: chat-templated user question
-    - chosen: correct answer (higher quality)
-    - rejected: incorrect or lower-quality answer
-
-    30% of samples are multi-turn (follow-up question).
-
-    Not ``tests.common.datasets.create_preference_dataset``: the word-problem templates and the
-    per-operation chosen/rejected wording here are wider, and the pairs a DPO margin trains on are
-    what this test measures — swapping the generator moves the trajectory it asserts on.
-    """
+    """Not ``tests.common.datasets.create_preference_dataset``: the wider templates and wording here are what this
+    test's trajectory rests on."""
     random.seed(seed)
 
     question_templates = [
@@ -105,7 +73,6 @@ def create_word_problem_preference_dataset(
         messages_chosen = [{"role": "assistant", "content": chosen_answer}]
         messages_rejected = [{"role": "assistant", "content": rejected_answer}]
 
-        # 30% multi-turn: add a follow-up exchange
         if random.random() < 0.3:
             a2 = random.randint(1, 50)
             b2 = random.randint(1, 50)
@@ -122,8 +89,7 @@ def create_word_problem_preference_dataset(
             messages_chosen = [{"role": "assistant", "content": followup_correct}]
             messages_rejected = [{"role": "assistant", "content": followup_wrong}]
 
-        # Use message list format for DPO — TRL handles tokenization internally.
-        # prompt = list of user/assistant messages, chosen/rejected = completion messages only.
+        # TRL handles tokenization: prompt is user/assistant messages, chosen/rejected the completion messages only.
         data.append(
             {
                 "prompt": messages_prompt,
@@ -135,11 +101,7 @@ def create_word_problem_preference_dataset(
     return Dataset.from_list(data)
 
 
-# Main Test
-
-
 def run(ctx) -> dict:
-    """Run the DPO training test."""
     log(f"{'=' * 70}")
     log("DPO Trainer Test")
     log(f"{'=' * 70}")
@@ -150,19 +112,16 @@ def run(ctx) -> dict:
     if ctx.world_size != NUM_GPUS:
         log(f"WARNING: Expected {NUM_GPUS} GPUs, got {ctx.world_size}. Proceeding anyway.")
 
-    # ── Load tokenizer ──────────────────────────────────────────
     log("Loading tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    # ── Create datasets ─────────────────────────────────────────
     log("Creating synthetic preference datasets...")
     train_dataset = create_word_problem_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_word_problem_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1)
     log(f"Train samples: {len(train_dataset)}, Eval samples: {len(eval_dataset)}")
 
-    # ── Load model ──────────────────────────────────────────────
     log("Loading model...")
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
@@ -174,7 +133,6 @@ def run(ctx) -> dict:
     total_params = sum(p.numel() for p in model.parameters())
     log(f"Model parameters: {total_params / 1e6:.1f}M")
 
-    # ── Configure DPO training ──────────────────────────────────
     log("Configuring DPO training...")
     config = DPOConfig(
         output_dir=ctx.output_dir,
@@ -191,14 +149,12 @@ def run(ctx) -> dict:
         report_to="none",
         logging_nan_inf_filter=False,
         max_length=MAX_SEQ_LENGTH,
-        # TRL 1.6 DPOConfig has no max_prompt_length (prompt is truncated within max_length).
+        # TRL 1.14's DPOConfig has no max_prompt_length: prompt and completion truncate together to max_length.
         dataloader_drop_last=True,
         dataset_num_proc=1,
         dataloader_num_workers=0,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
-    # ── Create trainer ──────────────────────────────────────────
     log("Creating DistributedDPOTrainer...")
     parallelism_config = ParallelismConfig()
     trainer = DistributedDPOTrainer(
@@ -211,12 +167,10 @@ def run(ctx) -> dict:
     )
     ctx.on_teardown(lambda: trainer.cleanup_ep() if hasattr(trainer, "cleanup_ep") else None)
 
-    # ── Train ───────────────────────────────────────────────────
     log("Starting DPO training...")
     ctx.barrier()
     train_result = trainer.train()
 
-    # ── Checks ──────────────────────────────────────────────────
     checks = training_run_checks(train_result, trainer, NUM_TRAIN_STEPS)
     checks["enough_steps_logged"] = len(step_losses(trainer)) >= 2
 

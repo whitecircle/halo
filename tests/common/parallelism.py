@@ -1,41 +1,83 @@
-"""Build a :class:`ParallelismConfig` (or a single-process :class:`EPConfig`) for an arbitrary
-simulated topology on a CPU-only box.
-
-``world_size`` / ``gpus_per_node`` / ``nvlink_domain_size`` are constructor fields the config
-resolves from the dist primitives only when left at ``0``, so a test states its topology by passing
-them rather than by patching. The one primitive that cannot be passed is ``get_global_rank``, since
-``ParallelismConfig.global_rank`` is ``init=False``.
-"""
+"""Simulated job topologies on a CPU-only box; a config takes its topology as fields, and only the ``init=False``
+global rank is patched."""
 
 from __future__ import annotations
 
 import contextlib
+from collections.abc import Iterable, Iterator
 from unittest.mock import patch
 
-from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.parallelism_config import ParallelismConfig
+import torch.distributed as dist
 
-_MOD = "src.distributed.parallelism_config"
+from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime import collectives
+from halo.runtime.ranks import get_global_rank
+
+_MOD = "halo.distributed.parallelism_config"
+_RULES_MOD = "halo.distributed.parallelism_rules"
 
 
 @contextlib.contextmanager
 def _mocked_rank(rank: int):
-    """Present ``rank`` as this process's global rank (and main-process status) while inside."""
     with (
         patch(f"{_MOD}.get_global_rank", return_value=rank),
         patch(f"{_MOD}.is_global_main_process", return_value=rank == 0),
+        patch(f"{_RULES_MOD}.is_global_main_process", return_value=rank == 0),
     ):
         yield
 
 
 @contextlib.contextmanager
 def simulated_world(world_size: int, gpus_per_node: int, rank: int = 0):
-    """Present a ``world_size``-rank job on ``gpus_per_node``-GPU nodes, as ``rank``, to a config that
-    resolves its topology from the dist primitives (``parallelism_config_from_args`` passes none)."""
+    """Present a ``world_size``-rank job as ``rank`` to a config resolving its topology from dist primitives."""
     with (
         patch(f"{_MOD}.get_global_world_size", return_value=world_size),
         patch(f"{_MOD}.get_local_world_size", return_value=gpus_per_node),
         _mocked_rank(rank),
+    ):
+        yield
+
+
+class StubGroup(tuple):
+    """A process group stand-in: hashes and compares as its member tuple; ``is`` tells two groups of the same members
+    apart."""
+
+    kwargs: dict
+
+    def __new__(cls, ranks: Iterable[int], kwargs: dict) -> StubGroup:
+        group = super().__new__(cls, ranks)
+        group.kwargs = kwargs
+        return group
+
+
+@contextlib.contextmanager
+def stubbed_process_groups(
+    world_size: int, rank: int, calls: list[StubGroup] | None = None, *, splits: list[tuple] | None = None
+) -> Iterator[None]:
+    """``torch.distributed`` as ``rank`` of a live job, where ``new_group`` returns a :class:`StubGroup` and appends it
+    to ``calls``. With ``splits``, the default group counts as device-bound NCCL and ``split_group`` returns the split
+    holding ``rank``, or None."""
+
+    def new_group(ranks=None, **kwargs):
+        group = StubGroup(ranks, kwargs)
+        if calls is not None:
+            calls.append(group)
+        return group
+
+    def split_group(parent_pg=None, split_ranks=None, **kwargs):
+        splits.append((kwargs.get("group_desc"), [list(ranks) for ranks in split_ranks]))
+        return next((StubGroup(sorted(ranks), kwargs) for ranks in split_ranks if rank in ranks), None)
+
+    with (
+        patch.object(dist, "is_initialized", new=lambda: True),
+        patch.object(dist, "get_rank", new=lambda group=None: rank),
+        patch.object(dist, "get_world_size", new=lambda group=None: world_size),
+        # The split verdict alone: a real default group keeps answering its collectives.
+        patch.object(collectives, "_splits_default_group", new=lambda: splits is not None),
+        patch.object(dist, "new_group", new=new_group),
+        patch.object(dist, "split_group", new=split_group),
+        patch.object(dist, "get_process_group_ranks", new=list),
     ):
         yield
 
@@ -48,12 +90,8 @@ def make_parallelism_config(
     rank: int = 0,
     **kwargs,
 ) -> ParallelismConfig:
-    """A config for the given simulated topology, as rank ``rank``.
-
-    ``nvlink_domain_size`` defaults to ``gpus_per_node`` rather than to the field default, so a test
-    never inherits the host's ``NVLINK_DOMAIN_SIZE`` (an NVL72 box would resolve 72 and change every
-    domain-locality verdict). Pass ``nvlink_domain_size=0`` to exercise that resolution.
-    """
+    """A config for the simulated topology, as ``rank``. ``nvlink_domain_size`` defaults to ``gpus_per_node`` so a test
+    never inherits the host's."""
     with _mocked_rank(rank):
         return ParallelismConfig(
             world_size=world_size,
@@ -63,25 +101,46 @@ def make_parallelism_config(
         )
 
 
-def create_config(**kwargs):
-    """A ParallelismConfig on the simulated topology ``world_size``/``gpus_per_node``, as ``rank``.
+def built_ep_config(config: ParallelismConfig) -> EPConfig:
+    with stubbed_process_groups(config.world_size, config.global_rank):
+        return config.ep_config()
 
-    Takes no ``local_rank``: production is never handed one (every group derives from the global rank
-    and the NVLink-domain coordinate), so accepting one here would let a test assert a locality claim
-    the config could not have read.
-    """
+
+def create_config(**kwargs):
+    """A ParallelismConfig on the simulated topology. Takes no ``local_rank``: production is never handed one."""
     return make_parallelism_config(**kwargs)
 
 
-def single_process_ep_config(num_experts: int, **overrides) -> EPConfig:
-    """An :class:`EPConfig` owning all ``num_experts`` experts on one rank, no process group.
+def stubbed_rank_ep_config(world_size: int, ep_size: int, rank: int, num_experts: int, **overrides) -> EPConfig:
+    """Rank ``rank``'s :class:`EPConfig` at ``ep_size``-way dispatch and the quotient expert TP, over stubbed groups,
+    experts FSDP-ignored."""
+    with stubbed_process_groups(world_size, rank):
+        config = EPConfig(
+            ep_size=ep_size,
+            expert_tp_size=world_size // ep_size,
+            stage_world_size=world_size,
+            nvlink_domain_size=world_size,
+            experts_fsdp_managed=False,
+            **overrides,
+        )
+        config.finalize_expert_assignment(num_experts)
+    return config
 
-    The shape every CPU wrapper test needs: ``ep_size=1`` on a world of 1 distributes nothing, so an
-    EP layer built on it runs the same routing and expert compute a real rank runs while the
-    comparison stays in-process. ``use_grouped_gemm=False`` keeps the eager expert loop (the
-    grouped-GEMM kernel needs SM90+; a GPU caller overrides it), and the expert assignment is finalized
-    here because the layers read ``expert_start_idx``/``expert_end_idx`` at construction.
-    """
-    config = EPConfig(**{"ep_size": 1, "world_size": 1, "gpus_per_node": 1, "use_grouped_gemm": False, **overrides})
-    config.finalize_expert_assignment(num_experts)
+
+def single_process_ep_config(num_experts: int | None = None, **overrides) -> EPConfig:
+    """An :class:`EPConfig` owning every expert on one rank, no process group. ``use_grouped_gemm=False`` keeps the
+    eager loop, since the kernel needs SM90+. ``num_experts`` finalizes the assignment for a layer built directly."""
+    config = EPConfig(
+        **{
+            "ep_size": 1,
+            "stage_world_size": 1,
+            "stage_base_rank": get_global_rank(),
+            "nvlink_domain_size": 1,
+            "use_grouped_gemm": False,
+            "experts_fsdp_managed": True,
+            **overrides,
+        }
+    )
+    if num_experts is not None:
+        config.finalize_expert_assignment(num_experts)
     return config

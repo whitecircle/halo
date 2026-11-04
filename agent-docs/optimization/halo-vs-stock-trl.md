@@ -4,7 +4,9 @@ Halo against upstream `trl.SFTTrainer` on transformers v5 with native FSDP — s
 kernels, only the framework changes. Measured with the same `EfficiencyCallback` and synthetic dataset as
 [Throughput Benchmarks](throughput-benchmarks.md). The 4k–16k, grouped-GEMM and GC-off tables share their
 main run set with that page; the FLCE, long-context and Qwen3-30B tables come from a separate run set.
-Compare within one run set.
+Compare within one run set. Every number here was measured on Halo 1.1.0 code or earlier (the long-context tables on
+1.0.0), so the stock side ran that release's pinned TRL and transformers, before 1.2.0's kernel and clock changes
+([1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)).
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP
@@ -17,7 +19,7 @@ distribute experts.
 |---|---|---|
 | Trainer | `trl.SFTTrainer` | `DistributedSFTTrainer` |
 | Precision | bf16 + FA4 bf16 compute | *identical* |
-| Optimizer | `adamw_torch_fused` — fp32 moments, 12 B/param | AdamWBF16 + stochastic rounding — 6 B/param |
+| Optimizer | `adamw_torch_fused` over the bf16 weights — bf16 moments, nearest rounding, 6 B/param | AdamWBF16 + stochastic rounding — 6 B/param |
 | Sharding | FSDP2 `full_shard` (ZeRO-3) | FSDP2 ZeRO-2 default (`reshard_after_forward=False`) + Expert Parallelism |
 | Expert kernel | `grouped_mm` (transformers v5 default) | `grouped_mm` + EP token distribution |
 | Liger / loss | Liger on → fused-linear-CE (the MoE applier's default) | Liger on, Liger CE default (logits materialized); `--fused_linear_ce` matches at long context |
@@ -29,9 +31,9 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
 
 *8× B300 · Blackwell image · stock TRL (mean of 2 runs) and Halo EP8 (median of 2) each from a separate run set. GC-on · grouped GEMM · TRL ZeRO-3 · Halo ZeRO-2 (EP1 also at ZeRO-3) · elastic.* **tok/s/GPU · peak GiB:**
 
-![Throughput: Halo vs stock TRL, 4k/16k](../assets/benchmarks/throughput_4k16k.png)
+![Tokens/s per GPU of stock TRL and four Halo layouts on gpt-oss-20b at 4k and 16k tokens: the fastest Halo layout runs 3.1–3.5× stock TRL in each group](../assets/benchmarks/throughput_4k16k.png)
 
-![Peak memory: Halo vs stock TRL, 4k/16k](../assets/benchmarks/memory_4k16k.png)
+![Peak GiB of stock TRL and four Halo layouts on gpt-oss-20b at 4k and 16k tokens: the lowest-memory Halo layout holds 0.54–0.75× stock TRL's peak in four groups and 1.05× at 16k batch 2](../assets/benchmarks/memory_4k16k.png)
 
 | seq·b | stock TRL (z3) | Halo EP1 (z2) | Halo EP1 (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|---|---|
@@ -45,7 +47,7 @@ The baseline gets the strongest stock options — ZeRO-3 and Liger's FLCE, which
   scaling. EP8 gains least from batch (4k: 10,905 → 13,239 tok/s/GPU from b1 to b4; 16k: +4.5% from b1
   to b2): its dispatch cost grows with tokens/rank.
 - **EP8 trades throughput for memory** — 1.7–2.8× TRL at ~½ its memory (25.5 vs 47.6 GiB at 4k·b1).
-- **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP wrapper: both sides shard every
+- **EP1 z3 isolates the framework gap** to AdamWBF16 + Halo's FSDP2+EP layer: both sides shard every
   param 8-way with the same kernel, and EP1 still leads 2.5× (4k·b1) to 3.2× (4k·b4) on throughput, and
   on memory everywhere but 16k·b2 (58.6 vs 55.6 GiB). **Prefer z2 at short sequence, z3 when memory-tight.**
 
@@ -94,9 +96,9 @@ The memory cut grows with sequence while the throughput cost shrinks (EP1: −20
 −7% for −30 GiB at 32k), so **turn FLCE on past ~16k.**
 
 On the dense path it is decisive: EP1 z3 at 128k·b1 is 183 → **67 GiB**, and 256k·b1 goes
-**OOM → 5,728 · 112 GiB**. FLCE is what enables 256k dense at all. Under EP+CP the per-rank sequence is
-already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per-model applier defaults:
-[Liger Kernels](liger-kernels.md).
+**OOM → 5,728 · 112 GiB**. FLCE is what enables 256k dense at all. Under CP the wrapper runs it on each
+rank's chunk ([fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). Per-model applier
+defaults: [Liger Kernels](liger-kernels.md).
 
 ## Gradient checkpointing on vs off
 
@@ -112,7 +114,7 @@ baseline is the 4k–16k table above):*
 | 16k | 7,010 | 25,395 | 22,729 | 16,335 |
 
 Measured 4k–16k here; EP8 32k·b1 GC-off also trains on the default elastic transport, at a 159.4 GiB
-peak ([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)), and past ~64k
+peak ([Throughput Benchmarks](throughput-benchmarks.md#where-the-ep-steps-time-goes)), and past ~64k
 tokens/rank nothing fits GC-off.
 
 ## Long context: 64k → 256k
@@ -121,7 +123,7 @@ tokens/rank nothing fits GC-off.
 (EP1) is the **throughput** corner — 2.1× TRL at 64k, 1.6× at 128k, 1.28× at 256k, at less memory than
 TRL from 128k (the lead narrows as quadratic attention comes to dominate). `EP8+CP8` and dense `CP-only` are the **memory** corner at ≈½ TRL's memory.
 
-![Long context throughput and memory at 64k/128k/256k](../assets/benchmarks/long_context.png)
+![Throughput and peak memory of Halo layouts against stock TRL at 64k, 128k and 256k tokens: dense EP1 leads at 2.1×, 1.6× and 1.3× stock TRL, its memory passing below stock TRL's from 128k, and at 128k and 256k dense CP-only holds 0.34× and 0.38× stock TRL's memory](../assets/benchmarks/long_context.png)
 
 *32k–64k, every rank holds a full sequence (DP=8) — tok/s/GPU · peak GiB:*
 
@@ -162,21 +164,10 @@ fails on both transports. Past that, split further with CP (EP8+CP8 = 16k/rank a
 (EP1 / dense CP-only — neither uses DeepEP). Transport limits: [DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend) and
 [Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
 
-## Why Halo's EP wins: all-to-all vs masked all-reduce
-
-transformers v5 ships an EP path (`EpRouterParallel` + `MoeExpertsParallel`, the styles a family's
-`base_model_ep_plan` names `ep_router` / `moe_tp_experts`) that never moves tokens:
-every rank holds the whole batch, zeroes the routing scores of the experts it does not own, then
-**all-reduces the full `[tokens, hidden]` output** of every MoE layer (and the hidden states again in
-backward).
-
-Halo routes by **all-to-all** (DeepEP V2): each token is sent once to the rank owning its expert, so the wire
-carries only `top_k/num_experts` of the batch per layer instead of a full-tensor reduction on every rank.
-
 ## Second model: Qwen3-30B-A3B
 
 *Separate run set. b1 · GC-on · TRL ZeRO-3 · Halo ZeRO-2 · elastic.* The win holds but is smaller: the heavier router
-(top_k=8 vs gpt-oss's 4) makes a fatter all-to-all, and ZeRO-3 shards the 30B leanly.
+(top_k=8 vs gpt-oss's 4) sends each token to twice the experts, and ZeRO-3 shards the 30B leanly.
 
 | Qwen3-30B b1 | Stock TRL (z3) | Halo EP2 (z2) | Halo EP8 (z2) |
 |---|---|---|---|
@@ -218,12 +209,13 @@ torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_convergence.py \
 
 **Held constant:** bf16, FA4, Liger, `learning_rate=2e-5`, seed 42, 10 steps / 3 warmup (throughput) or 200
 steps (convergence), `gradient_accumulation_steps=1`, `drop_last`, global batch = `8 ×
-per_device_batch_size`. Baseline `trl.SFTTrainer` with `fsdp="full_shard auto_wrap"` and
+per_device_train_batch_size`. Baseline `trl.SFTTrainer` with `fsdp="full_shard auto_wrap"` and
 `fsdp_config={"version": 2, "reshard_after_forward": …}` (True = ZeRO-3, False = ZeRO-2), `adamw_torch_fused`;
 Halo `DistributedSFTTrainer`, FSDP2, `use_grouped_gemm=True`, AdamWBF16. Hardware 8× B300 SXM6 (288 GB), `halo:blackwell`.
 
-**Dataset.** `create_benchmark_dataset` builds 64 filler examples tokenized to *exactly* `seq` tokens with
-`labels = input_ids`, so every microbatch is a `[batch, seq]` tensor. It is a shape fixture, not real data:
-the content is irrelevant to tokens/s and peak memory, and the fixed length isolates the framework
-comparison. No packing / padding-free — with every example already exactly `seq` long there is nothing to
+**Dataset.** `create_benchmark_dataset` builds 64 rows of *exactly* `seq` token ids, drawn uniformly from
+the regular vocabulary with a fixed seed, with `labels = input_ids`, so every microbatch is a `[batch, seq]`
+tensor. It is a shape fixture, not real data: a dense model's tokens/s and peak memory do not depend on the
+ids, an MoE model cannot fit them so its routing stays put across steps and runs, and the fixed length
+isolates the framework comparison. No packing / padding-free — with every example already exactly `seq` long there is nothing to
 pack.

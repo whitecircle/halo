@@ -1,0 +1,26 @@
+# Tiny environmental GRPO recipe for the entry-script runs (tests/common/entry_scripts.py), which add
+# the served model, dataset and output_dir, the rollout server and weight-transfer port, and the step counts.
+attn_implementation: sdpa
+environment_type: native_math
+max_turns: 2
+# Thinking off, so a turn finishes within its budget. The served model then answers about two in three
+# samples of a three-digit sum outright and calls the calculator on the rest; the penalty on the former
+# splits a group whose answers all grade correct, which would otherwise tie and carry no gradient.
+rollout_chat_template_kwargs:
+  enable_thinking: false
+environment_kwargs:
+  no_tool_use_penalty: 0.5
+num_rollout_workers: 2
+rollout_max_tokens: 128
+rollout_connection_timeout: 180.0
+enable_prefetch: false
+num_generations: 4
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 1
+beta: 0.0
+scale_rewards: batch
+learning_rate: 1.0e-5
+lr_scheduler_type: constant
+logging_steps: 1
+report_to: none
+seed: 42

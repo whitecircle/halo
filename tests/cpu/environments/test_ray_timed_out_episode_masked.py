@@ -1,12 +1,6 @@
 #!/usr/bin/env python
-"""A timed-out episode must be an INVALID row, not a valid zero-reward group member.
-
-A timeout can surface as a bare ``TimeoutError``, and ``str(TimeoutError())`` is ``""``. An error
-field built from it reads as no error to ``rollout_valid_mask``, so a timed-out episode would enter
-the GRPO baseline at reward 0 and an all-timed-out step would never trip the empty-step halt.
-
-    python tests/cpu/environments/test_ray_timed_out_episode_masked.py
-"""
+"""A timed-out episode is an invalid row: ``str(TimeoutError())`` is empty, and an error field built from it reads
+as no error to ``rollout_valid_mask``, entering the baseline at reward 0."""
 
 import asyncio
 from types import SimpleNamespace
@@ -14,10 +8,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import src.environments.ray_actors as ray_actors
-from src.configs.rollout_config import RolloutConfig
-from src.environments.ray_actors import EnvironmentActor, RolloutManager
-from src.trainers.grpo.environmental import rollout_valid_mask
+import halo.environments.ray_actors as ray_actors
+from halo.environments.ray_actors import EnvironmentActor, RolloutManager
+from halo.environments.rollout_config import RolloutConfig
+from halo.trainers.grpo.environmental.step_batch import rollout_valid_mask
 
 _CPU = torch.device("cpu")
 
@@ -45,15 +39,12 @@ class _NeverReturningActor:
 async def test_a_request_timeout_inside_the_episode_is_a_masked_error():
     actor = _actor()
 
-    async def _client():
-        return None
-
     async def _timed_out_generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
     ):
         raise TimeoutError()  # the builtin, with an empty message
 
-    actor._get_http_client = _client
+    actor._http_client = None
     actor._generate = _timed_out_generate
 
     result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", RolloutConfig(max_retries=0))

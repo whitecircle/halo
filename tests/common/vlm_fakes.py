@@ -1,10 +1,4 @@
-"""Whitespace stand-ins for a VLM tokenizer/processor, for the preprocessing and collation tests.
-
-Real processors need a hub checkpoint and an image backend; these honour the parts of the HF
-processor call contract the toolkit's VLM path depends on: chat rendering, padded
-``input_ids``/``attention_mask``, and the vision keys a family may add. What a processor emits for an
-image row is the subject of individual tests, so ``__call__`` is the seam subclasses override.
-"""
+"""Whitespace stand-ins for a VLM tokenizer and processor; ``__call__`` is the seam subclasses override per test."""
 
 from __future__ import annotations
 
@@ -21,11 +15,14 @@ class FakeVLMTokenizer:
         return {"<|image_pad|>": 99}
 
     def __len__(self) -> int:
-        return 100  # the metadata stamp records the vocab size
+        return 100  # The metadata stamp records the vocab size.
 
 
 class FakeVLMProcessorBase:
-    """A whitespace 'processor' honouring the HF processor call contract."""
+    """A whitespace processor honouring the HF processor call contract."""
+
+    # Recorded by the bake like a real processor's template.
+    chat_template = "{% for m in messages %}{{ m.role }} : {{ m.content }} {% endfor %}"
 
     def __init__(self, tokenizer=None):
         self.tokenizer = FakeVLMTokenizer() if tokenizer is None else tokenizer
@@ -41,7 +38,7 @@ class FakeVLMProcessorBase:
         return " ".join(parts)
 
     def encode_batch(self, text, max_length: int | None = None) -> dict[str, torch.Tensor]:
-        """Whitespace ids + mask, right-padded to the batch's widest row (truncated when asked)."""
+        """Whitespace ids + mask, right-padded to the batch's widest row, truncated when asked."""
         rows = [[2 + (j % 97) for j, _ in enumerate(t.split())] for t in text]
         if max_length is not None:
             rows = [row[:max_length] for row in rows]

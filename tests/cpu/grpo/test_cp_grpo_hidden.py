@@ -7,8 +7,8 @@ import pytest
 import torch
 from torch import nn
 
-import src.distributed.context_parallel.wrapper as cp_wrapper
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+import halo.distributed.context_parallel.ulysses_model as cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 
 SEQ = 12
 HIDDEN = 5
@@ -45,14 +45,12 @@ class _Model(nn.Module):
 
 
 def _wrapper(model, cp_size, cp_rank):
-    return unpatched_cp_wrapper(
-        model, cp_size=cp_size, cp_rank=cp_rank, attention_layers=[SimpleNamespace(global_position_ids=None)]
-    )
+    return unpatched_cp_wrapper(model, cp_size=cp_size, cp_rank=cp_rank)
 
 
 @pytest.mark.parametrize("cp_size", [1, 2, 4])
 def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
-    """CP2/4 cover rank-ordering; each rank sees its shard but hooks see all positions."""
+    """Each rank's backbone sees no mask, which only a router aux loss reads outside the attention CP replaces."""
     torch.manual_seed(18)
     model = _Model()
     ids = torch.randint(1, 32, (2, SEQ))
@@ -69,10 +67,9 @@ def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
         torch.testing.assert_close(got, expected[:, start:end])
         seen_ids, seen_mask, seen_positions, use_cache = model.base_model.calls[-1]
         torch.testing.assert_close(seen_ids, ids[:, start:end])
-        torch.testing.assert_close(seen_mask, mask[:, start:end])
+        assert seen_mask is None
         torch.testing.assert_close(seen_positions, positions[:, start:end])
         assert use_cache is False
-        torch.testing.assert_close(wrapper._attention_layers[0].global_position_ids, positions)
 
     stitched = torch.cat(
         [
@@ -88,10 +85,6 @@ def test_hidden_only_reuses_cp_guards_and_does_not_accept_labels():
     model = _Model()
     wrapper = _wrapper(model, cp_size=2, cp_rank=0)
     ids = torch.ones(1, SEQ, dtype=torch.long)
-    mask = torch.ones_like(ids)
-    mask[:, :2] = 0
-    with pytest.raises(ValueError, match="LEFT-padded"):
-        wrapper.forward_hidden_states(ids, attention_mask=mask)
     with pytest.raises(ValueError, match="does not accept labels"):
         wrapper.forward_hidden_states(ids, labels=ids)
     with pytest.raises(ValueError, match="use_cache=False"):

@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NCCL hangs, OOM) are on the toolkit's [Troubleshooting](../../reference/troubleshooting.md) page.
+Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NCCL hangs, OOM) and the weight-sync errors both GRPO arms share (group address, port bind, transport mismatch, SGLang cuMem) are on the toolkit's [Troubleshooting](../../reference/troubleshooting.md) page.
 
 ## Training dynamics
 
@@ -12,11 +12,13 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 
 | Symptom | Cause | Fix |
 |---|---|---|
+| `Rollout server … cannot serve this run: …` | The server is off the toolkit's image or lacks a launch flag the run reads; the message names each | Serve as it says ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)) |
 | `server unreachable at …`, or a stall in `init_communicator()` | The server is down, or never joins the NCCL group (an unroutable advertised master, or trainer and server on one GPU) | Verify `/health`; set `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` to a routable NIC; give them different `CUDA_VISIBLE_DEVICES` ([Rollout Servers](../../infrastructure/rollout-servers.md#troubleshooting)) |
-| `Could not bind the weight-transfer group port` | A live client, or an outbound connection using it as an ephemeral source port, holds the port (not `TIME_WAIT`). The server keeps serving | Give each server and trainer its own `group_port` / `vllm_group_port`, outside `net.ipv4.ip_local_port_range` or reserved; remove the stale container |
-| `GENERATION is wedged (no response … to a 1-token probe)` | The scheduler is stuck after a trainer was killed while attached to the weight-transfer group | Restart the server container after every hard trainer crash |
-| `vLLM server … is PAUSED for a weight update` | A trainer died without lifting its `/pause` | `POST /resume`, or restart the server if that sync had streamed part of the model |
-| `Prefetch auto-disabled: 1 rollout server configured.` | Expected: a sync pauses the only server | Configure more servers ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
+| `GENERATION is paused or wedged (no response … to a 1-token probe)` | A trainer was killed while attached to the weight-sync routes; SGLang, which has no pause route, shows a pause this way | `POST /resume` (vLLM) or `/continue_generation` (SGLang), or restart the server if that sync had streamed part of the model |
+| `vLLM server … is PAUSED for a weight update` | A trainer died without lifting its `/pause` | `POST /resume`, or restart the server if that sync had opened its update session, which unloads the model: `/resume` then takes the engine down |
+| `Prefetch off: 1 rollout server …` (info) | The single-server default: each round rolls out, then trains | `enable_prefetch: true` overlaps the next round with the update, one round stale ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
+| `prefetch_depth=N sets how many rounds prefetch holds, but …` | A depth above 1 on a run that does not prefetch: `enable_prefetch: false`, or unset on one server | `enable_prefetch: true` (one server included), or drop `prefetch_depth` ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
+| `Every SGLang weight sync aborts the turns in flight, and at prefetch_depth=N …` | A prefetched round spans more syncs than `max_retries`, so a long turn aborted at each fails its episode | Sync less often, lower `prefetch_depth`, `steps_per_generation` or `num_iterations`, or raise `max_retries` to the span with `(1 + max_retries) × request_timeout` within `episode_timeout` ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
 | `404 … "The model <path> does not exist"` on every rollout | `model_name` is unset, so the checkpoint path (`model_name_or_path`) is sent as the id | Set `model_name` to the id at `/v1/models`, or serve with `--served-model-name` |
 
 ## Rollouts
@@ -27,6 +29,8 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 | Episodes booked into `episode/error_rate` near `episode_timeout` | The episode (generation, tools, grading) passed its deadline (default 1200 s) | Raise `DIST_NCCL_TIMEOUT_MINUTES` first, then `episode_timeout` ([bounds](performance.md#sizing-a-run)) |
 | `500 "Already borrowed"` | A vLLM fast-tokenizer race that scales with concurrency | Harmless unless `gave up after N tries` appears; then raise `max_retries` or `retry_base_wait` |
 | `consecutive steps produced no valid episode anywhere in the world` | Two steps in a row had nothing to train on; the message ends with the cause. `reward term '<name>' scored nothing` is a judge or reward-model outage under `on_error: invalid`; a rollout error points at the server or the sandbox | Fix the scorer's key or endpoint, or the server, and resume ([Batch construction](objective.md#batch-construction)) |
+| `… rounds hold …, how this model writes a tool call, in their text, and the server parsed no call` | The server's tool parser does not read this model's format, so calls stay text and every episode ties | Serve the family's parser ([Tool calls](episodes.md#tool-calls)). If the parser is right and the calls are malformed or prose, raise `tool_parser_watch_rounds` or set it to `null` |
+| `No token carried a policy gradient in … train round(s) in a row` | Every group tied or dropped; the message gives the shares and this rank's tool-call count. Tied with no tool calls usually means a parser problem, tied with calls an environment that scores every attempt alike | Fix that. It stops a launch that has not trained yet at `zero_gradient_round_limit` rounds in a row: raise that for a very sparse reward, or set it to `null` ([`zero_gradient_round`](monitoring.md#group-and-entropy-diagnostics)) |
 | `ray.exceptions.RayActorError` | The episode returns as an errored, masked-out row and the actor restarts (`max_restarts=-1`) | Check `ray logs` and per-node memory ([Ray Cluster](../../infrastructure/ray.md#monitoring)) |
 
 ## Sandboxes and environments

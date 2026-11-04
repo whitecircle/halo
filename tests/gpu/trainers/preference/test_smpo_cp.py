@@ -1,41 +1,18 @@
 #!/usr/bin/env python
-"""
-SMPO with Context Parallelism (CP=2): the first step is the unsplit sequence's step.
+"""SMPO under CP=2: step 1 equals the unsplit sequence's step, scored by a CP=1 trainer on the initial weights.
 
-Each CP rank holds one chunk of every sequence and all-reduces its partial log-prob and NLL sums, so
-every rank computes the whole-sequence loss. Those reduces have to be autograd-aware: their backward
-sums the gradient over the CP group, which FSDP2's world-wide average divides back. An in-place
-``dist.all_reduce`` reaches autograd only through PyTorch's c10d fallback (identity backward, a
-warning), and a loss multiplied by ``cp_size`` to make up the gradient logs ``cp_size`` times the true
-loss. Both train to finite losses, so the run is pinned by value: step 1's microbatches, as
-``compute_loss`` saw them, are scored again by a CP=1 SmoothMarginPOTrainer on the initial weights, and
-
-  1. each microbatch loss and the logged step-1 loss equal the reference's;
-  2. the step-1 gradient the optimizer is handed matches the reference's in direction and norm
-     (clipping off, so it is the backward's own gradient);
-  3. no backward reached the c10d autograd fallback;
-
-besides the smoke checks: the Ulysses layers span the CP group, every step runs, and the losses and
-logged gradient norms are finite.
-tests/cpu/trainers/test_smpo_cp_gradient.py pins the same objective exactly, in float64 on gloo.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/preference/test_smpo_cp.py
-
-Requirements:
-    - 2x GPUs
-    - Model: Qwen/Qwen3-0.6B (auto-downloaded)
+An in-place ``dist.all_reduce`` reaches autograd only through PyTorch's c10d fallback (identity backward, a warning),
+and a loss multiplied by ``cp_size`` logs that many times the true loss. Both train finite.
 """
 
 import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer
 
-from src.configs.smpo_config import SmoothMarginPOConfig
-from src.distributed.loading.model_loading import load_distributed_model
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.parallel.loader import load_distributed_model
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.first_step import (
     FirstStep,
@@ -45,17 +22,16 @@ from tests.common.first_step import (
     train_recording_first_step,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import QWEN3_0_6B
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
-
-# Configuration
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 CP_SIZE = 2
 NUM_TRAIN_STEPS = 10
-# Two pairs per microbatch: the collator left-pads a ragged pair of prompts, which the concat must
-# flush behind the completions.
+# The collator left-pads a ragged pair of prompts, which the concat must flush behind the completions.
 BATCH_SIZE = 2
 GRADIENT_ACCUMULATION_STEPS = 2
 LEARNING_RATE = 5e-6
@@ -64,14 +40,13 @@ MAX_PROMPT_LENGTH = 2048
 NUM_TRAIN_SAMPLES = 128
 NUM_EVAL_SAMPLES = 16
 SEED = 42
-# Step 1 against the CP=1 trainer, relative. The squared-hinge margin term amplifies bf16 log-prob noise:
-# measured over four seeds at 2 to 16 microbatches, a microbatch loss is at most 3.1% off and the logged
-# step loss 2.0%. A loss counted once per CP rank is 100% off.
+# The squared-hinge margin amplifies bf16 log-prob noise: measured over four seeds at 2 to 16 microbatches, a
+# microbatch loss is at most 3.1% off and the logged step 2.0%. A loss counted once per CP rank is 100% off.
 LOSS_RTOL = 0.1
 
 
-def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
-    return SmoothMarginPOConfig(
+def _smpo_config(output_dir: str) -> SMPOConfig:
+    return SMPOConfig(
         output_dir=output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -81,7 +56,7 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         max_grad_norm=0.0,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=False,  # Already applied in load_distributed_model
+        use_liger_kernel=False,  # Already applied in load_distributed_model.
         logging_steps=1,
         save_strategy="no",
         report_to="none",
@@ -89,7 +64,6 @@ def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
         max_length=MAX_LENGTH,
         max_prompt_length=MAX_PROMPT_LENGTH,
         dataloader_drop_last=True,
-        fsdp="",  # Mixin handles FSDP wrapping
     )
 
 
@@ -106,7 +80,6 @@ def _load_model(parallelism_config: ParallelismConfig, attn_implementation: str 
 
 
 def _train_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, str]:
-    """Train under CP; return the smoke checks, the recorded first step and the attention kernel."""
     train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_preference_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1000)
     log(f"Train samples: {len(train_dataset)}, Eval samples: {len(eval_dataset)}")
@@ -118,7 +91,7 @@ def _train_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, s
     attn_implementation = model.config._attn_implementation
     log(f"Model loaded. Type: {type(model).__name__}, attention: {attn_implementation}")
 
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=_smpo_config(output_dir),
         train_dataset=train_dataset,
@@ -139,9 +112,8 @@ def _train_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep, s
 
 
 def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_implementation: str) -> FirstStep:
-    """Score the recorded first step with a CP=1 trainer on the initial weights."""
     parallelism_config = ParallelismConfig()
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=_load_model(parallelism_config, attn_implementation),
         args=_smpo_config(output_dir),
         processing_class=tokenizer,
@@ -150,11 +122,7 @@ def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_imp
     return score_first_step(trainer, first_step)
 
 
-# Main Test
-
-
 def run(ctx) -> dict:
-    """Run SMPO + CP=2 training test."""
     log(f"\n{'#' * 70}")
     log(f"  SMPO + CP={CP_SIZE} Training Test")
     log(f"  World size: {ctx.world_size}, CP size: {CP_SIZE}")
@@ -162,7 +130,6 @@ def run(ctx) -> dict:
     log(f"  GPU: {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"{'#' * 70}")
 
-    # ---- Output Directory (broadcast from rank 0) ----
     output_dir = ctx.output_dir
     if ctx.world_size > 1:
         output_list = [output_dir]
@@ -178,8 +145,7 @@ def run(ctx) -> dict:
     log(f"\nScoring step 1 with a CP=1 trainer (GPU memory after freeing the CP run: {gpu_mem_gb():.1f}GB)")
     reference = _score_reference(output_dir, tokenizer, first_step, attn_implementation)
     loss_checks, metrics = first_step_checks(first_step, reference, miscount_factor=CP_SIZE, loss_rtol=LOSS_RTOL)
-    # TOL's CP gradient bounds: measured over four seeds at 2 to 16 microbatches, the gradient's cosine to
-    # the reference is at least 0.9985 and its norm within 2.8%.
+    # Measured over four seeds at 2 to 16 microbatches: cosine at least 0.9985, norm within 2.8%.
     grad_checks, grad_metrics = first_step_gradient_checks(first_step, reference)
     return {"checks": checks | loss_checks | grad_checks, "metrics": metrics | grad_metrics}
 

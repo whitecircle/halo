@@ -1,21 +1,25 @@
 #!/usr/bin/env python
-"""CPU tests: the environment registry must not override per-class defaults it didn't configure.
+"""The environment registry does not override per-class defaults it did not configure: class defaults win unless the
+config sets ``max_turns``. Since the shipped templates rely on ``max_turns: null``, the overview's registry table
+is held to the classes."""
 
-The registry must not inject ``max_turns=10`` into every factory call: that silently clobbers
-the per-class defaults. Class defaults win unless the user set ``max_turns`` in the env config —
-and because ``max_turns: null`` is what the shipped templates rely on, the ``EnvironmentConfig``
-help that tells users which default they are getting is held to the classes themselves here.
-
-Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
-"""
+import math
+from operator import attrgetter
+from typing import get_type_hints
 
 import pytest
 
-from src.configs.environment_config import EnvironmentConfig
-from src.environments.base import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, BaseEnvironment
-from src.environments.envs.protocols.react import create_react_math_environment
-from src.environments.registry import get_registered_environments, resolve_environment
-from src.rewards.terms import EnvironmentTerm
+from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from halo.environments.protocols.react import build_react_math_environment
+from halo.environments.registry import build_environment, get_registered_environments
+from halo.rewards.terms import EnvironmentTerm
+from scripts.docs.markdown import parse_tables
+from tests.common.repo import REPO_ROOT
+
+_ENVIRONMENTS_OVERVIEW = REPO_ROOT / "agent-docs/training-methods/async-grpo/environments/README.md"
+_MAX_TURNS_COLUMN = "Default `max_turns`"
 
 # Minimal valid construction kwargs per registered env. ``sandbox_backend`` is declared only by the
 # sandboxed coding envs; passing it to the others raises instead of being absorbed and ignored,
@@ -34,42 +38,63 @@ _ENV_KWARGS = {
     "mcp": {},
 }
 
-# The turn budget each env class declares for itself; anything absent here defaults to the base 10.
-# Written out, not derived: this is the table the user-facing help below is held to, and deriving it
-# from the same classes the help must describe would make that check agree with itself.
+# The turn budget each env class declares; absent means the base 10. Written out, since deriving it from the classes
+# the overview must describe would make the check agree with itself.
 _CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "exam_qa": 8}
 
-# The environments whose reward grades ONLY against ``context["answer"]``; everything absent grades
-# without one (the native protocol and its presets grade against an answer where a row carries one).
-# Written out for the same reason as the table above: it is the roster the docs and the trainer's
-# dataset gate are held to, and deriving it from the classes would make the check agree with itself.
+# The environments whose reward grades only against ``context["answer"]``. Written out for the same reason.
 _REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search", "swe"}
 
 # The environments that register ``web_search``, with the options that make them register it.
 _SEARCH_ENV_KWARGS = {"exam_qa": {"open_book": True}, "native_combined": {}, "qa_search": {}, "react_search": {}}
 
+# A boolean a registry factory reads before any constructor, so no class signature declares it.
+_FACTORY_BOOL_KNOBS = {"qa_search": {"include_python_tools"}}
+
 
 def _base_default_max_turns() -> int:
-    """``BaseEnvironment``'s own default — the value every env inherits unless it declares one."""
-    return BaseEnvironment.DEFAULT_MAX_TURNS
+    return EnvironmentBase.DEFAULT_MAX_TURNS
 
 
 def _declared_max_turns(env_type: str) -> int:
-    """The ``DEFAULT_MAX_TURNS`` the class registered under ``env_type`` declares."""
-    return type(resolve_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
+    return type(build_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
+
+
+def _bool_knobs(env_type: str) -> set[str]:
+    """The boolean ``environment_kwargs`` of an environment: every constructor parameter annotated so along its class's
+    MRO, so a new knob is swept by existing."""
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
+    constructors = [vars(klass)["__init__"] for klass in type(env).__mro__ if "__init__" in vars(klass)]
+    declared = {
+        name
+        for constructor in constructors
+        for name, hint in get_type_hints(constructor).items()
+        if hint in (bool, bool | None)
+    }
+    return declared | _FACTORY_BOOL_KNOBS.get(env_type, set())
+
+
+def _documented_max_turns() -> dict[str, int]:
+    """``environment_type`` → the default ``max_turns`` the environments overview's registry table states."""
+    table = next(
+        table
+        for table in parse_tables(_ENVIRONMENTS_OVERVIEW.read_text(encoding="utf-8"))
+        if table.headers[0] == "`environment_type`"
+    )
+    column = table.headers.index(_MAX_TURNS_COLUMN)
+    return {row[0].strip("`"): int(row[column]) for row in table.rows}
 
 
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
 def test_class_default_max_turns_wins_when_unconfigured(env_type):
     expected = _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns())
-    env = resolve_environment(env_type, _ENV_KWARGS[env_type])
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
     assert env.max_turns == expected
 
 
 def test_class_default_table_names_every_environment_that_declares_one():
-    """Anti-rot: a class that declares its own ``DEFAULT_MAX_TURNS`` must appear in the table above,
-    which is what holds the user-facing help to account. Without this, a new override would ship
-    with no help entry and the help test would pass by not knowing about it."""
+    """A class declaring its own ``DEFAULT_MAX_TURNS`` must appear in the table above, or the docs test passes by
+    not knowing about it."""
     declared = {
         env_type: _declared_max_turns(env_type)
         for env_type in _ENV_KWARGS
@@ -79,44 +104,37 @@ def test_class_default_table_names_every_environment_that_declares_one():
 
 
 def test_every_registered_environment_is_covered():
-    """A new env_type must arrive with its own turn-budget assertion, else the tables above (and the
-    user-facing help they hold to account) silently stop covering the registry."""
+    """A new env_type must arrive with its own turn-budget assertion."""
     assert sorted(_ENV_KWARGS) == get_registered_environments()
 
 
-def test_max_turns_help_names_every_environment_that_overrides_the_base_default():
-    """An env that declares its own budget while the help enumerates only the others leaves the
-    shipped template's ``max_turns: null`` documenting no budget at all. The table read here is
-    tied to the classes above, so a new env with its own budget fails until the help says so."""
-    help_text = EnvironmentConfig.__dataclass_fields__["max_turns"].metadata["help"]
-    for env_type, default in _CLASS_DEFAULT_MAX_TURNS.items():
-        assert f"{env_type} {default}" in help_text, (
-            f"EnvironmentConfig.max_turns help does not state that '{env_type}' defaults to "
-            f"{default} turns; a null max_turns then silently picks a budget the user cannot read."
-        )
-    # The catch-all the help states for everything it does not name.
-    assert f"every other environment {_base_default_max_turns()}" in help_text
+def test_the_environments_overview_states_every_environments_turn_budget():
+    """A missing or wrong row leaves the templates' ``max_turns: null`` documenting the wrong budget."""
+    expected = {
+        env_type: _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns()) for env_type in _ENV_KWARGS
+    }
+    assert _documented_max_turns() == expected, (
+        f"{_ENVIRONMENTS_OVERVIEW.relative_to(REPO_ROOT)}'s registry table must state each environment's "
+        f"default max_turns in its '{_MAX_TURNS_COLUMN}' column"
+    )
 
 
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
 def test_each_environment_declares_whether_its_reward_needs_an_answer(env_type):
-    """``requires_answer`` is what the trainer refuses an answer-less dataset by, so a class that
-    grades on ``context["answer"]`` and forgets to declare it trains on a constant reward, while one
-    that declares it spuriously refuses a dataset it could have trained on."""
-    env = resolve_environment(env_type, _ENV_KWARGS[env_type])
+    """The trainer refuses an answer-less dataset by this flag: a class forgetting it trains on a constant reward,
+    one declaring it spuriously refuses a dataset."""
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
     assert env.requires_answer is (env_type in _REQUIRES_ANSWER)
 
 
 def test_the_answer_requirement_table_names_only_registered_environments():
-    """Anti-rot: a renamed or dropped env_type must not leave a verdict here that covers nothing."""
     assert set(get_registered_environments()) >= _REQUIRES_ANSWER
 
 
 def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
-    """The validator IS the grader once passed — consulted before the expected answer is read — so it
-    clears the requirement; without one an answer-less episode collects the full objective for
-    reaching any Final Answer at all."""
-    assert create_react_math_environment().requires_answer
+    """The validator is the grader once passed, so it clears the requirement; without one an answer-less episode
+    collects the objective for any Final Answer."""
+    assert build_react_math_environment().requires_answer
 
     seen = []
 
@@ -124,7 +142,7 @@ def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
         seen.append((answer, expected))
         return answer == "7"
 
-    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    env = build_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
     assert not env.requires_answer
 
     ids, _ = env.reset(["2 + 5?"])
@@ -134,14 +152,12 @@ def test_a_react_answer_validator_grades_in_place_of_the_answer_column():
 
 
 def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
-    """A validator clears the answer requirement, so its rows carry no expected answer and the default
-    check would pay any Final Answer the whole objective: a grader that raises voids the episode, as a
-    failed scorer does, rather than handing it a solve."""
+    """With no expected answer the default check would pay any Final Answer, so a raising grader voids the episode."""
 
     def validator(answer, expected):
         raise RuntimeError("grader down")
 
-    env = create_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
+    env = build_react_math_environment(answer_validator=validator, thought_reward=0.0, no_thought_penalty=0.0)
     ids, _ = env.reset(["2 + 5?"])
     trajectory = env.step(ids, ["Thought: add\nFinal Answer: 7"], [{}])[0].trajectory
     assert trajectory.total_reward == 0.0
@@ -149,84 +165,183 @@ def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
     assert trajectory.info[EPISODE_INVALID_REASON_KEY] == "answer_validator raised RuntimeError: grader down"
 
 
+@pytest.mark.parametrize("env_type", ["react_math", "react_search"])
+def test_a_react_answer_validator_from_yaml_is_refused(env_type):
+    """A string would leave the default grader paying while the config names another."""
+    with pytest.raises(ValueError, match="answer_validator must be a callable"):
+        build_environment(env_type, {"answer_validator": "my.module:fn"})
+
+
 def test_an_explicit_requires_answer_overrides_the_class_declaration():
     """The escape hatch for a run that grades some other way: an environment_kwargs entry, like every
     other constructor knob."""
-    assert not resolve_environment("exam_qa", {"requires_answer": False}).requires_answer
-    assert resolve_environment("native_math", {"requires_answer": True}).requires_answer
+    assert not build_environment("exam_qa", {"requires_answer": False}).requires_answer
+    assert build_environment("native_math", {"requires_answer": True}).requires_answer
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "codeforces"])
+def test_a_contest_cannot_drop_its_answer_gate(env_type):
+    """It grades only against the answer column's hidden tests, so an answerless dataset would pass the trainer's gate
+    and fail at the first submission."""
+    with pytest.raises(ValueError, match="requires_answer cannot be false"):
+        build_environment(env_type, {**_ENV_KWARGS[env_type], "requires_answer": False})
+    assert build_environment(env_type, {**_ENV_KWARGS[env_type], "requires_answer": True}).requires_answer
+
+
+@pytest.mark.parametrize("knob", ["tool_success_reward", "tool_error_penalty", "tool_reward_cap"])
+def test_a_closed_book_exam_refuses_tool_pricing(knob, monkeypatch):
+    with pytest.raises(ValueError, match=rf"\['{knob}'\] price tool calls.*registers no tool"):
+        build_environment("exam_qa", {knob: 0.5})
+    monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
+    assert build_environment("exam_qa", {"open_book": True, "search_backend": "mock", knob: 0.5})
+
+
+_BAD_BOUNDS = [
+    ("native_math", "max_tool_calls_per_turn", [0, -1, 2.5, True, None]),
+    ("swe", "max_tool_calls_per_turn", [0, -1, 2.5, True, None]),
+    ("native_math", "max_observation_chars", [-1, 2.5, True, None]),
+    ("react_math", "max_observation_chars", [-1, 2.5, True, None]),
+    ("code_contests", "max_output_size", [0, -1, 2.5, True]),
+    ("swe", "code_timeout", [0, -1, math.nan, math.inf, True]),
+    ("native_math", "max_length_cutoff_recoveries", [-1, 2.5, True]),
+    ("react_math", "max_length_cutoff_recoveries", [-1, 2.5, True]),
+]
+
+
+@pytest.mark.parametrize(
+    ("env_type", "knob", "bad"),
+    [(env_type, knob, bad) for env_type, knob, values in _BAD_BOUNDS for bad in values],
+    ids=str,
+)
+def test_an_environment_refuses_an_out_of_bounds_knob(env_type, knob, bad):
+    with pytest.raises(ValueError, match=rf"{knob} must be"):
+        build_environment(env_type, {**_ENV_KWARGS[env_type], knob: bad})
+
+
+@pytest.mark.parametrize(
+    ("env_type", "knob", "good", "read"),
+    [
+        ("native_math", "max_tool_calls_per_turn", 1, "max_tool_calls_per_turn"),
+        ("native_math", "max_observation_chars", 0, "max_observation_chars"),
+        ("code_contests", "max_output_size", 1, "grading_spec.max_output_size"),
+        ("native_math", "max_length_cutoff_recoveries", 0, "max_length_cutoff_recoveries"),
+        ("native_math", "max_length_cutoff_recoveries", None, "max_length_cutoff_recoveries"),
+    ],
+    ids=str,
+)
+def test_an_environment_takes_a_knob_at_its_bound(env_type, knob, good, read):
+    assert attrgetter(read)(build_environment(env_type, {**_ENV_KWARGS[env_type], knob: good})) == good
 
 
 def test_explicit_max_turns_still_overrides():
-    env = resolve_environment("swe", {"sandbox_backend": "local", "max_turns": 7})
+    env = build_environment("swe", {"sandbox_backend": "local", "max_turns": 7})
     assert env.max_turns == 7
 
 
 @pytest.mark.parametrize("env_type", ["code_contests", "react_math"])
 def test_unknown_environment_kwarg_is_rejected(env_type):
-    """An ``environment_kwargs`` key no constructor binds must raise, not be silently absorbed.
-
-    Parking leftover ``**kwargs`` in ``BaseEnvironment.__init__``'s ``self.config``, which nothing
-    ever reads, lets a misspelled key (``timout_per_test``) or one meant for a different ``env_type``
-    (``sandbox_backend`` on a non-sandboxed env) parse cleanly and change nothing about the run.
-    """
+    """A misspelled key or one meant for another ``env_type`` would otherwise parse cleanly and change nothing."""
     with pytest.raises(TypeError, match="timout_per_test"):
-        resolve_environment(env_type, {"timout_per_test": 10})
+        build_environment(env_type, {"timout_per_test": 10})
 
 
 def test_valid_environment_kwarg_still_reaches_the_environment():
-    """Guards the rejection above from being satisfied by rejecting everything."""
-    env = resolve_environment("code_contests", {"timeout_per_test": 3, "sandbox_backend": "local"})
+    env = build_environment("code_contests", {"timeout_per_test": 3, "sandbox_backend": "local"})
     assert env.grading_spec.default_timeout == 3
 
 
 @pytest.mark.parametrize("env_type", sorted(_SEARCH_ENV_KWARGS))
 def test_every_search_environment_takes_its_backend_from_the_config(env_type, monkeypatch):
-    """``search_backend`` picks the backend of every environment that registers ``web_search``, and a
-    name no backend answers to is refused when the env is built. Refused as an unknown option instead,
-    a preset can only auto-select, so a run searches on whichever API key its actor nodes hold."""
+    """A name no backend answers to is refused at build; refused as an unknown option instead, a preset can only
+    auto-select, searching on whichever API key its actor nodes hold."""
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
     config = {**_ENV_KWARGS[env_type], **_SEARCH_ENV_KWARGS[env_type]}
-    env = resolve_environment(env_type, {**config, "search_backend": "mock"})
+    env = build_environment(env_type, {**config, "search_backend": "mock"})
     assert "Wikipedia: pytest" in env.registry.get("web_search").execute(query="pytest")
     with pytest.raises(ValueError, match="Unknown search backend: nonexistent"):
-        resolve_environment(env_type, {**config, "search_backend": "nonexistent"})
+        build_environment(env_type, {**config, "search_backend": "nonexistent"})
 
 
 def test_the_search_table_names_every_environment_that_registers_web_search():
-    """Anti-rot: a preset that gains a ``web_search`` tool must arrive in the table above, so the backend
-    knob is held to it too."""
+    """A preset gaining ``web_search`` must arrive in the table above."""
     registering = set()
     for env_type, kwargs in _ENV_KWARGS.items():
-        env = resolve_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
+        env = build_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
         if "web_search" in env.registry.names():
             registering.add(env_type)
     assert registering == set(_SEARCH_ENV_KWARGS)
 
 
+@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+def test_every_boolean_knob_refuses_what_a_truthiness_check_would_take_as_true(env_type):
+    """The parser's own guard stops at the top-level fields: ``open_book: no`` would register web_search and
+    ``carry_reasoning: off`` send the reasoning back. A preset's own ``scratch_allowlist`` collides as a TypeError."""
+    for knob in _bool_knobs(env_type):
+        for spelling in ("no", "off", "false", 0, 1):
+            with pytest.raises((ValueError, TypeError), match=knob):
+                build_environment(env_type, {**_ENV_KWARGS[env_type], knob: spelling})
+
+
+def test_the_boolean_knob_sweep_reaches_the_knobs_that_exist():
+    """Anti-vacuity: an annotation no longer matching would leave the sweep above empty and passing."""
+    swept = set().union(*map(_bool_knobs, _ENV_KWARGS))
+    assert swept >= {
+        "carry_reasoning",
+        "requires_answer",
+        "open_book",
+        "include_python_tools",
+        "stop_on_first_failure",
+        "scratch_allowlist",
+        "episode_scratch",
+    }
+
+
+@pytest.mark.parametrize(
+    ("env_type", "kwargs", "applied"),
+    [
+        ("react_math", {"carry_reasoning": True}, lambda env: env.carry_reasoning),
+        ("exam_qa", {"requires_answer": False}, lambda env: not env.requires_answer),
+        ("exam_qa", {"open_book": False}, lambda env: "web_search" not in env.registry.names()),
+        ("qa_search", {"include_python_tools": True}, lambda env: "python" in env.registry.names()),
+        (
+            "code_contests",
+            {"sandbox_backend": "local", "stop_on_first_failure": True},
+            lambda env: env.grading_spec.stop_on_first_failure,
+        ),
+        ("mcp", {"episode_scratch": False}, lambda env: not env.episode_scratch),
+    ],
+    ids=["carry_reasoning", "requires_answer", "open_book", "include_python_tools", "stop_on_first_failure", "mcp"],
+)
+def test_a_real_boolean_still_reaches_the_environment(env_type, kwargs, applied):
+    assert applied(build_environment(env_type, kwargs))
+
+
+def test_a_null_requires_answer_stays_unset():
+    assert build_environment("exam_qa", {"requires_answer": None}).requires_answer
+
+
 @pytest.mark.parametrize("max_turns", [0, -1])
 def test_non_positive_max_turns_is_rejected(max_turns):
-    """``max_turns: 0`` makes the rollout loop a no-op, so every episode returns reward 0 with no
-    error — a silently all-zero batch that reads as a legitimately failing policy."""
+    """``max_turns: 0`` makes the rollout loop a no-op: a silently all-zero batch that reads as a failing policy."""
     with pytest.raises(ValueError, match="max_turns"):
-        resolve_environment("react_math", {"max_turns": max_turns})
+        build_environment("react_math", {"max_turns": max_turns})
 
 
 def test_the_reward_defaults_to_the_environment_term_alone():
-    """An env config naming no ``reward_terms`` prices the environment's own all-or-nothing grade at
-    weight 1, exponent 1 — and a per-env reward knob is refused as an unknown option, not absorbed."""
-    env = resolve_environment("exam_qa", {})
+    """An env config naming no ``reward_terms`` prices the environment's grade at weight 1, exponent 1, and a
+    per-env reward knob is refused as an unknown option."""
+    env = build_environment("exam_qa", {})
     assert env.reward_terms == (EnvironmentTerm(),)
     for knob in ("success_reward", "failure_reward", "partial_reward"):
         with pytest.raises(TypeError, match=knob):
-            resolve_environment("exam_qa", {knob: 0.5})
+            build_environment("exam_qa", {knob: 0.5})
 
 
 def test_environment_config_yaml_path_defers_to_class_default():
-    """The trainer YAML path (EnvironmentConfig.to_env_config) must not inject its own dataclass
-    default — an unset max_turns lets the class default (code_contests 15) win."""
+    """An unset max_turns lets the class default (code_contests 15) win."""
     cfg = EnvironmentConfig(environment_type="code_contests", environment_kwargs={"sandbox_backend": "local"})
     assert "max_turns" not in cfg.to_env_config()
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     assert env.max_turns == 15
 
 
@@ -234,7 +349,7 @@ def test_environment_config_explicit_max_turns_overrides():
     cfg = EnvironmentConfig(
         environment_type="code_contests", max_turns=12, environment_kwargs={"sandbox_backend": "local"}
     )
-    env = resolve_environment(cfg.environment_type, cfg.to_env_config())
+    env = build_environment(cfg.environment_type, cfg.to_env_config())
     assert env.max_turns == 12
 
 

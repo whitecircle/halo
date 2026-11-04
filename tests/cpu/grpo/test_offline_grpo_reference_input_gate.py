@@ -8,13 +8,14 @@ from datasets import Dataset, IterableDataset
 from peft import LoraConfig
 from transformers import LlamaConfig, LlamaForCausalLM
 
-import src.trainers.grpo.offline as offline_mod
-from src.configs.offline_grpo_config import OfflineGRPOConfig
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.expert_parallel.config import ExpertLoraSpec
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
-from src.trainers.grpo.offline import OfflineGRPOTrainer, tokenize_offline_grpo_rows
+import halo.trainers.grpo.offline.trainer as offline_mod
+from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
+from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import make_offline_tokenizer, offline_grpo_dataset
 
@@ -28,7 +29,7 @@ def test_string_policy_with_kl_reaches_the_model_loader_without_a_peft_probe_cra
         calls.append(source)
         raise RuntimeError("model loader reached")
 
-    monkeypatch.setattr(offline_mod, "load_model_from_pretrained", stop_at_loader)
+    monkeypatch.setattr(offline_mod, "resolve_trainer_model", stop_at_loader)
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=0.2, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
@@ -48,7 +49,7 @@ def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tm
     def stop_at_loader(*args, **kwargs):
         raise RuntimeError("model loader reached")
 
-    monkeypatch.setattr(offline_mod, "load_model_from_pretrained", stop_at_loader)
+    monkeypatch.setattr(offline_mod, "resolve_trainer_model", stop_at_loader)
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=0.2, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
@@ -96,7 +97,7 @@ def test_unused_supplied_reference_column_is_discarded_instead_of_refused(tmp_pa
     parallelism = (
         ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)) if mode == "expert" else ParallelismConfig()
     )
-    monkeypatch.setattr(OfflineGRPOTrainer, "_setup_distributed_modes", lambda self: None)
+    monkeypatch.setattr(OfflineGRPOTrainer, "_configure_distributed_modes", lambda self: None)
     trainer = OfflineGRPOTrainer(
         model=_policy(),
         args=args,

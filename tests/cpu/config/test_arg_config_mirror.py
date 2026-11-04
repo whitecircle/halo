@@ -1,30 +1,7 @@
 #!/usr/bin/env python
-"""Parity between ``DistributedArguments`` (the YAML/CLI surface) and ``ParallelismConfig``.
-
-Several knobs are declared TWICE: once as a script argument the parser gates, once as a
-``ParallelismConfig`` field the runtime reads. The enum-like ones share their ``Literal`` type, but
-nothing links the two defaults, so a default changed on one side alone fails silently rather than
-loudly:
-
-  * a default that drifts breaks ``parallelism_config_from_args``' non-SFT gate, which compares the
-    parsed ``DistributedArguments`` values against ``ParallelismConfig``'s DEFAULTS
-    (``_LOWP_SHAPE_DEFAULTS``) — a one-sided change makes EVERY non-SFT script reject a config
-    nobody touched;
-  * ``ep_scope`` in particular must default to ``"auto"`` on both sides: a hand-built config (the
-    documented pattern for tests and notebooks) otherwise silently gets a different scope than the
-    identical YAML run, and e.g. ``ep_size=16`` on 16 GPUs is rejected instead of resolving global;
-  * ``parallelism_config_from_args`` forwards the same-named fields as themselves — by a derived loop
-    or line by line, this file asserts the RESULT either way — but spells the renames and derivations
-    by hand, so a knob whose two declarations disagree on the name and has no explicit entry is one
-    that parses and does nothing.
-
-The last section carries that reachability question one step further: a knob the configuration
-reference never names cannot be set either, since the reference is the only place its spelling is
-written down. (``tests/cpu/conventions/test_env_var_catalogue.py`` holds the same contract for the
-env-var half of that page.)
-
-Run: pytest tests/cpu/config/test_arg_config_mirror.py
-"""
+"""Parity between ``ParallelismArguments`` (the YAML/CLI surface) and ``ParallelismConfig``: a knob whose two
+declarations disagree on the name and has no explicit entry in ``parallelism_config_from_args`` parses and does
+nothing, and one the configuration reference never names cannot be set."""
 
 import ast
 import inspect
@@ -35,50 +12,30 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-from src.args.distributed_args import DistributedArguments
-from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.training.parallelism_args import _LOWP_SHAPE_DEFAULTS, parallelism_config_from_args
-from src.training.parser import _literal_choices
+from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.configs.parser import _literal_choices
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.parallelism_rules import AXES
+from halo.kernels.lowp.spec import LowpSpec
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import REPO_ROOT
+from tests.common.repo import REPO_ROOT
 
-# Knobs the two dataclasses spell identically. The builder forwards them as themselves; whether it
-# does so in a derived loop or a line each is its own business, so this is read off the declarations
-# rather than off the builder — the source it would otherwise be checked against.
-_SAME_NAME_FIELDS = {f.name for f in fields(DistributedArguments)} & {
+# Knobs the two dataclasses spell identically, read off the declarations since the builder is what is being checked.
+_SAME_NAME_FIELDS = {f.name for f in fields(ParallelismArguments)} & {
     f.name for f in fields(ParallelismConfig) if f.init
 }
 
-# DistributedArguments field -> the ParallelismConfig field it is forwarded to, for the knobs whose
-# DEFAULT is mirrored (not merely the value). Kept explicit: only these have a runtime that reads
-# one side's default while the user sets the other.
-_MIRRORED_DEFAULTS = {
-    "ep_scope": "ep_scope",
-    "ep_buffer_backend": "ep_buffer_backend",
-    "pipeline_schedule": "pp_schedule",
-    "lowp_precision": "lowp_precision",
-    "lowp_apply_dense_mlp": "lowp_apply_dense_mlp",
-    "lowp_apply_moe_experts": "lowp_apply_moe_experts",
-    "lowp_keep_first_blocks": "lowp_keep_first_blocks",
-    "lowp_keep_last_blocks": "lowp_keep_last_blocks",
-}
+_LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 
-# DistributedArguments fields the builder deliberately never touches, each named with the consumer
-# that reads it instead. Adding an entry must be a decision, not an omission.
-_NOT_FORWARDED = {
-    "save_sharded_ep": "trainer save kwargs",
-    "save_max_shard_size": "init_training_script -> training_config",
-    "overwrite_output_dir": "init_training_script -> training_config",
-    "allow_optimizer_warm_restart": "init_training_script -> training_config",
-    "reset_sinks": "model loading / attn selection",
-    "train_sinks": "model loading (SinksPolicy.from_flags)",
-    "text_only_model": "model loading (load_model_for_training -> resolve_auto_model_class text_only)",
-}
-
-# ParallelismConfig fields the builder cannot supply: both are resolved from the live process group
-# in ``__post_init__``, not from a YAML/CLI knob.
+# Resolved from the live process group in ``__post_init__``, not from a YAML/CLI knob.
 _CONFIG_FIELDS_NOT_FROM_ARGS = {"world_size", "gpus_per_node"}
+
+
+class _LowpTrainer(DistributedTrainerMixin):
+    """The mixin's gates with the ``lowp_*`` knobs admitted, as on the SFT path."""
+
+    SUPPORTS_LOWP_PRECISION = True
 
 
 def _defaults(cls) -> dict:
@@ -107,14 +64,14 @@ def _dist_args_names_read_by_builder() -> set[str]:
         and node.args[0].id == "dist_args"
         and isinstance(node.args[1], ast.Constant)
     }
-    # Plus the two dynamic reads the AST cannot see: the ``_LOWP_SHAPE_DEFAULTS`` loop, and the
-    # by-name forwarding, which reads every field the two dataclasses spell identically.
-    return names | set(_LOWP_SHAPE_DEFAULTS) | _SAME_NAME_FIELDS
+    # Plus the dynamic reads the AST cannot see: the ``LowpSpec`` field loop, the ``AXES`` size loop, and
+    # the by-name forwarding, which reads every field the two dataclasses spell identically.
+    return names | set(_LOWP_ARG_FIELDS) | {axis.flag for axis in AXES} | _SAME_NAME_FIELDS
 
 
 def _config_kwargs_built_by_builder() -> set[str]:
-    """Every ``ParallelismConfig`` keyword the builder assembles — dict literal keys plus the
-    ``kwargs.update(...)`` keywords the low-precision branch adds."""
+    """Every ``ParallelismConfig`` keyword the builder assembles: dict literal keys, the
+    ``kwargs.update(...)`` keywords and the ``AXES`` size fields."""
     tree = _builder_ast()
     keys: set[str] = set()
     for node in ast.walk(tree):
@@ -122,31 +79,24 @@ def _config_kwargs_built_by_builder() -> set[str]:
             keys |= {k.value for k in node.keys if isinstance(k, ast.Constant)}
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "update":
             keys |= {kw.arg for kw in node.keywords if kw.arg}
-    return keys | _SAME_NAME_FIELDS
+    return keys | {axis.size_field for axis in AXES} | _SAME_NAME_FIELDS
 
 
-@pytest.mark.parametrize(("arg_field", "config_field"), sorted(_MIRRORED_DEFAULTS.items()))
-def test_mirrored_default_matches_the_config_field(arg_field, config_field):
-    arg_default = _defaults(DistributedArguments)[arg_field]
-    config_default = _defaults(ParallelismConfig)[config_field]
-    assert arg_default == config_default, (
-        f"DistributedArguments.{arg_field}={arg_default!r} but ParallelismConfig.{config_field}={config_default!r}"
-    )
+@pytest.mark.parametrize(("arg_field", "spec_field"), sorted(_LOWP_ARG_FIELDS.items()))
+def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
+    """A ``lowp_*`` knob set away from its default reaches ``ParallelismConfig.lowp`` on the SFT path."""
+    requested = _non_default_value(arg_field)
+    # Under an enabled mode, so a shape knob is not the bf16 no-op.
+    dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
 
+    config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
 
-def test_lowp_shape_gate_compares_against_the_argument_defaults():
-    """``parallelism_config_from_args`` rejects a non-default lowp shape knob outside SFT by
-    comparing the parsed ``DistributedArguments`` value against this table, which is derived from
-    ``ParallelismConfig``. If the two defaults ever diverge the gate fires on an untouched config
-    and every non-SFT script stops running."""
-    arg_defaults = _defaults(DistributedArguments)
-    assert {name: arg_defaults[name] for name in _LOWP_SHAPE_DEFAULTS} == _LOWP_SHAPE_DEFAULTS
+    assert getattr(config.lowp, spec_field) == requested
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():
-    """The behavior the shared ``"auto"`` default buys: a hand-built config for 16 GPUs of EP over
-    two 8-GPU NVLink domains resolves to global scope. With a ``"node"`` default it is rejected while
-    the identical YAML run (which passes ep_scope='auto') is accepted."""
+    """A hand-built config for 16 GPUs of EP over two 8-GPU NVLink domains resolves to global scope. A ``"node"``
+    default would reject it while the identical YAML run, which passes ep_scope='auto', is accepted."""
     config = make_parallelism_config(ep_size=16, world_size=16, gpus_per_node=8)
     assert config.ep_scope == "global"
 
@@ -157,27 +107,21 @@ def test_ep_scope_auto_default_stays_node_local_within_one_domain():
 
 
 def test_every_declared_argument_reaches_the_builder():
-    """A knob whose two declarations disagree on the NAME needs an explicit line in
-    ``parallelism_config_from_args``; without one it parses, shows in ``--help``, and silently keeps
-    the runtime default — the failure mode the ``lowp_*`` branch already guards for its four knobs.
-    (Same-named fields are forwarded by construction — see ``same_name_arg_forwards``.)"""
-    declared = {f.name for f in fields(DistributedArguments)}
-    unforwarded = declared - _dist_args_names_read_by_builder() - set(_NOT_FORWARDED)
+    """A knob whose two declarations disagree on the name needs an explicit line in
+    ``parallelism_config_from_args``, or it parses, shows in ``--help`` and silently keeps the runtime default."""
+    declared = {f.name for f in fields(ParallelismArguments)}
+    unforwarded = declared - _dist_args_names_read_by_builder()
     assert unforwarded == set(), (
-        f"{sorted(unforwarded)} are declared on DistributedArguments but never read by "
-        "parallelism_config_from_args: the knob parses and does nothing. Forward it, or add it to "
-        "_NOT_FORWARDED naming the consumer that reads it instead."
+        f"{sorted(unforwarded)} are declared on ParallelismArguments but never read by "
+        "parallelism_config_from_args: the knob parses and does nothing. Forward it, or move it off "
+        "ParallelismArguments to the arguments its consumer reads."
     )
 
 
 def _non_default_value(arg_field: str):
-    """A valid value for ``DistributedArguments.<arg_field>`` that is not its default.
-
-    Derived from the declared type, so the sweep below covers every same-name knob without a table of
-    values to keep in step with the dataclass.
-    """
-    annotation = get_type_hints(DistributedArguments)[arg_field]
-    default = _defaults(DistributedArguments)[arg_field]
+    """A valid non-default value, derived from the declared type so the sweep needs no table of values."""
+    annotation = get_type_hints(ParallelismArguments)[arg_field]
+    default = _defaults(ParallelismArguments)[arg_field]
     choices = _literal_choices(annotation)
     if choices is not None:
         return next(choice for choice in choices if choice != default)
@@ -186,51 +130,29 @@ def _non_default_value(arg_field: str):
         return not default
     if int in declared:
         return (default or 0) + 1
-    raise AssertionError(f"no non-default value rule for DistributedArguments.{arg_field}: {annotation}")
+    raise AssertionError(f"no non-default value rule for ParallelismArguments.{arg_field}: {annotation}")
 
 
 @pytest.mark.parametrize("arg_field", sorted(_SAME_NAME_FIELDS))
 def test_every_same_name_knob_lands_on_the_built_config(arg_field):
-    """The by-name half of the wiring, asserted on the RESULT instead of on how it is spelled: set one
-    knob away from its default, build through the real entry point, and read it back off the config
-    the trainers are handed. A forward that goes missing — a dropped line, or a derivation that stops
-    covering this field — leaves the runtime default standing, which is the value the user overrode.
-    """
+    """A forward that goes missing leaves the runtime default standing, which is the value the user overrode."""
     requested = _non_default_value(arg_field)
 
     config = parallelism_config_from_args(
-        DistributedArguments(**{arg_field: requested}),
-        trainer_cls=DistributedTrainerMixin,
-        allow_low_precision=True,
+        ParallelismArguments(**{arg_field: requested}),
+        trainer_cls=_LowpTrainer,
     )
 
     assert getattr(config, arg_field) == requested, (
-        f"DistributedArguments.{arg_field}={requested!r} never reached ParallelismConfig.{arg_field} "
+        f"ParallelismArguments.{arg_field}={requested!r} never reached ParallelismConfig.{arg_field} "
         f"(got {getattr(config, arg_field)!r}): the knob parses and the runtime keeps its own default."
     )
 
 
-@pytest.mark.parametrize(("arg_field", "consumer"), sorted(_NOT_FORWARDED.items()))
-def test_not_forwarded_allow_list_stays_honest(arg_field, consumer):
-    """The allow-list must shrink when a field starts being forwarded, and must not name a field
-    that no longer exists — otherwise it rots into an excuse for the next omission."""
-    assert arg_field in {f.name for f in fields(DistributedArguments)}, (
-        f"_NOT_FORWARDED names {arg_field}, which DistributedArguments no longer declares"
-    )
-    assert arg_field not in _dist_args_names_read_by_builder(), (
-        f"parallelism_config_from_args now reads {arg_field}; drop it from _NOT_FORWARDED "
-        f"(it was allow-listed as consumed by: {consumer})"
-    )
-
-
 class _WithFieldRemoved:
-    """A ``DistributedArguments`` proxy with one attribute made absent.
-
-    No production caller looks like this — that is the point. A ``getattr(..., <default>)`` read of
-    the five declared fields hands back the default instead of failing when one is absent, and for
-    ``context_parallel_size`` the silent ``1`` lets the CP-rejection guard ACCEPT a config that
-    requested CP.
-    """
+    """A ``ParallelismArguments`` proxy with one attribute absent: a ``getattr(..., <default>)`` read hands back the
+    default, and for ``context_parallel_size`` the silent ``1`` lets the CP-rejection guard accept a config that
+    requested CP."""
 
     def __init__(self, real, missing: str):
         self._real = real
@@ -246,23 +168,19 @@ class _WithFieldRemoved:
     "missing", ["lowp_precision", "init_from_scratch", "context_parallel_size", "pipeline_parallel_size"]
 )
 def test_a_missing_declared_field_is_loud(missing):
-    dist_args = _WithFieldRemoved(DistributedArguments(), missing)
+    dist_args = _WithFieldRemoved(ParallelismArguments(), missing)
     with pytest.raises(AttributeError, match=missing):
         parallelism_config_from_args(dist_args, trainer_cls=DistributedTrainerMixin)
 
 
 def test_every_settable_config_field_has_an_argument_surface():
-    """Reverse direction: a ``ParallelismConfig`` field the builder never sets is a runtime knob with
-    no YAML/CLI reach — only settable from a hand-built config."""
+    """A field the builder never sets has no YAML/CLI reach."""
     settable = {f.name for f in fields(ParallelismConfig) if f.init}
     unreachable = settable - _config_kwargs_built_by_builder() - _CONFIG_FIELDS_NOT_FROM_ARGS
     assert unreachable == set(), (
         f"{sorted(unreachable)} are settable ParallelismConfig fields that parallelism_config_from_args "
         "never passes: no YAML or CLI can reach them."
     )
-
-
-# Documentation reach: a knob nobody documents is unreachable in practice
 
 
 def _documented_names() -> set[str]:
@@ -278,15 +196,14 @@ _SETTABLE_CONFIG_FIELDS = sorted(f.name for f in fields(ParallelismConfig) if f.
 
 
 def test_the_documentation_sweep_sees_the_reference():
-    """Guards the parser: a moved or renamed page would otherwise make every check below vacuous."""
     assert len(_DOCUMENTED) > 100, f"the configuration reference parsed to {len(_DOCUMENTED)} identifiers"
 
 
-@pytest.mark.parametrize("arg_field", sorted(f.name for f in fields(DistributedArguments)))
+@pytest.mark.parametrize("arg_field", sorted(f.name for f in fields(ParallelismArguments)))
 def test_every_argument_is_documented(arg_field):
-    """The YAML/CLI surface is only reachable through the reference — nothing else lists these names."""
+    """The YAML/CLI surface is only reachable through the reference; nothing else lists these names."""
     assert arg_field in _DOCUMENTED, (
-        f"DistributedArguments.{arg_field} appears nowhere in agent-docs/reference/configuration-reference.md: "
+        f"ParallelismArguments.{arg_field} appears nowhere in agent-docs/reference/configuration-reference.md: "
         "a user cannot set a knob whose name is not written down. Add its row, or delete the field."
     )
 

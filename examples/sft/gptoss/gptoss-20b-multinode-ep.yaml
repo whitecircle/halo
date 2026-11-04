@@ -35,7 +35,8 @@ dataset_num_proc: 32
 expert_parallel_size: 16
 ep_scope: global
 
-# (B) Node-local EP + DP across nodes (lower comms): uncomment instead of (A).
+# (B) Node-local EP + DP across nodes (lower comms): uncomment instead of (A), and set
+#     use_grouped_gemm: true below (the loop path is 28% slower at ep8).
 # expert_parallel_size: 8
 # ep_scope: node
 
@@ -50,7 +51,6 @@ ep_scope: global
 # ep_scope: node
 # nvlink_domain_size: 72         # or `export NVLINK_DOMAIN_SIZE=72`
 
-save_sharded_ep: false
 use_grouped_gemm: false               # 2 experts/rank at ep16, square non-128-aligned FFN: see agent-docs/models/gpt-oss.md
 max_concurrent_loading: 2             # ranks loading at once per node
 
@@ -61,20 +61,18 @@ max_length: 8192
 
 # --- Training schedule ---
 per_device_train_batch_size: 1     # layout (A) ceiling: pdbs x max_length <= 8192 tokens/rank
+per_device_eval_batch_size: 1      # the same ceiling binds eval batches
 gradient_accumulation_steps: 4
+gradient_checkpointing: false   # ~33 GB of activations per 8,192-token row
 num_train_epochs: 1.0
-gradient_checkpointing: true
 
 # --- Optimizer & LR schedule ---
-optim: adamw_torch_fused
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 32
-max_grad_norm: 1.0
 
 # --- Checkpointing & evaluation ---
 output_dir: checkpoints/oss-20b-multinode-ep
-save_strategy: steps
 save_steps: 1000
 eval_strategy: steps
 eval_steps: 300

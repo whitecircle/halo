@@ -2,29 +2,39 @@
 
 Reading and writing HuggingFace `Dataset`/`DatasetDict` objects and arbitrary folders in S3, with a
 local cache for distributed training and a CLI. The default bucket comes from
-`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Three modules plus a CLI, split so a consumer takes on only the
-dependency it needs:
+`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Four modules plus the CLI and its commands, split so a consumer
+takes on only the dependency it needs:
 
 | File | Holds |
 |---|---|
-| `src/data/sources/paths.py` | source/destination classification — pure string rules, no boto3 |
-| `src/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
-| `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads, the default-bucket helpers |
-| `scripts/before_training/s3_datasets.py` | the CLI |
+| `halo/data/sources/paths.py` | source/destination classification — string rules, no boto3 |
+| `halo/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
+| `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
+| `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
+| `halo/data/sources/s3_commands.py` | the CLI's commands — push, download, list, exists, delete — over one `S3Client` |
+| `scripts/before_training/s3.py` | the CLI's flags |
 
 ## Dataset path formats
 
-`parse_dataset_source` (`src/data/sources/paths.py` — pure string rules, no boto3, so the
+`parse_dataset_source` (`halo/data/sources/paths.py` — string rules, no boto3, so the
 loader and the scripts classify a path without an S3 stack) sorts a path into
 `('s3' | 'hf_hub' | 'local', bucket, key)`:
 
 - **S3 URI** (recommended): `"s3://my-bucket/datasets/my_dataset/train"`.
-- **HuggingFace Hub**: `"HuggingFaceH4/ultrachat_200k"` — exactly one slash, no prefix. Optional
+- **HuggingFace Hub**: `"HuggingFaceH4/ultrachat_200k"` — exactly one slash, no part starting with a dot. Optional
   suffixes: `:config` picks a dataset config (`"openai/gsm8k:main"`), `@split` picks one split when
   the repo has no plain `train` (`"HuggingFaceH4/ultrachat_200k@train_sft"`). The key is returned
   **verbatim including the suffixes**; they are stripped later, at load.
-- **Local**: everything else — an absolute or relative path, a `file://` URI (prefix stripped), or
-  any path ending in `.jsonl` / `.json` / `.parquet` / `.arrow` / `.csv`.
+- **Local**: everything else — an absolute, `./` or `../` path, a `file://` URI (prefix stripped), any
+  path ending in `.jsonl` / `.json` / `.parquet` / `.arrow` / `.csv`, and a relative path with no slash or
+  more than one.
+
+A Hub-shaped path that also names a local directory (`preprocessed/my_dataset` beside a directory of
+that name) is refused by every reader, training, `prepare_dataset.py --input`, the eval runner and the
+deduplication tool alike, rather than guessed: write `./preprocessed/my_dataset` or an absolute path for the directory, without a
+`:config` / `@split` suffix (a saved split is its own subdirectory).
+`reject_ambiguous_hub_source` is the check; on training it runs inside the rank-joined load and probe, so
+a directory present on some nodes only fails every rank with the same cause.
 
 `parse_dataset_destination` is its write-side twin and classifies a bare `org/name` as **local**:
 guessing the Hub is acceptable for a read, but a write only targets the Hub on an explicit
@@ -49,6 +59,8 @@ How it works:
 
 - **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
 
+- **One copy on disk**: the tree downloads straight into that temp dir through the client's parallel transfer (`download_dataset_tree`), so no second copy waits under `TMPDIR` for the process to exit. A tree missing its load gates (a torn promote) raises there and its partial download is removed, so it is never published.
+
 - **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
 
 - **Offline-resilient hit**: a complete cache skips the existence probe and the download, and the staleness probe fails soft.
@@ -59,7 +71,9 @@ How it works:
 
     Preprocessed/sharded classification therefore survives an outage too, not just the dataset bytes. Live wins; a live 404 drops the mirror, so a re-pushed raw dataset cannot keep its old classification offline.
 
-The per-shard cache used by sharded pre-processed datasets (`src/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
+    A training script reads them once per launch: global rank 0 reads the stamp and both shard indexes (`share_s3_control_files`), every rank's later probes and loads use that read, and each node's local rank 0 writes the mirror. A file rank 0 cannot read is left to every rank's own read.
+
+The per-shard cache used by sharded pre-processed datasets (`halo/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
 
 An empty prefix listing is a real absence, not a transport fault, and does not disarm the probes.
 
@@ -76,17 +90,23 @@ own account and bucket; setup and credential failures are in [AWS Auth](../infra
 service or non-default bucket, pass `aws_access_key_id` / `aws_secret_access_key` / `endpoint_url` /
 `region_name` directly to `S3Client(...)`.
 
+Retries follow the AWS configuration: `AWS_MAX_ATTEMPTS` / `AWS_RETRY_MODE`, or the profile's
+`max_attempts` / `retry_mode`. A key neither sets takes the toolkit default, 4 total attempts in `standard`
+mode; raise both for a many-node fetch that meets S3 throttling (`SlowDown`).
+
 ## Python API
 
-Import from `src.data.sources.s3_client`. The module surface (see the package for full signatures and defaults):
+Dataset trees go through `halo.data.sources.s3_dataset_store`; everything else is `halo.data.sources.s3_client`
+(see the modules for full signatures and defaults):
 
 | Function | Purpose |
 |----------|---------|
 | `load_dataset_from_s3_uri(s3_uri, keep_in_memory=None, use_cache=True)` | Load HF dataset by URI; cached with file locking |
-| `push_dataset_to_s3_uri(dataset, s3_uri, overwrite=True)` | Push HF dataset by URI through the staged protocol: the tree uploads whole to a `.staging-*` sibling prefix, is sealed, then promoted by server-side copy with the load gates (`state.json`/`dataset_dict.json`) deleted first and copied last. A crash leaves either a complete copy at the destination or the sealed staging tree, which `load_dataset_from_s3_uri` falls back to; the next successful push heals and sweeps. One writer per destination at a time |
-| `build_s3_uri(key, subfolder=None)` | Full S3 URI from key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET` (`default_bucket()`, which raises while it is unset), without constructing a client |
+| `push_dataset_to_s3_uri(dataset, s3_uri, overwrite=True)` | Push HF dataset by URI: the tree uploads whole to a `.staging-*` sibling prefix, is sealed, then promoted by server-side copy with the load gates (`state.json`/`dataset_dict.json`) deleted first and copied last. A crash leaves either a complete copy at the destination or the sealed push, which `load_dataset_from_s3_uri` falls back to; the next successful push heals and sweeps. One writer per destination at a time |
+| `push_dataset(client, dataset, key, ...)` / `load_s3_dataset(client, key, ...)` | The same on an explicit `S3Client` (the URI functions above wrap these) |
+| `build_s3_uri(path, subfolder=None, *, given_as)` (`s3_client`) | The S3 URI a CLI path names, without constructing a client: a full `s3://` URI as given, a bare key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET`. A bare key with the variable unset raises naming `given_as`, the flag the path came from |
 
-`subfolder` is prepended to `key`; key paths may be nested. Everything else — folder transfers, listings,
+`subfolder` is prepended to a bare key; key paths may be nested. Everything else — folder transfers, listings,
 deletes — is an `S3Client` method, called on a client built for the bucket in question.
 
 ### S3Client
@@ -94,10 +114,11 @@ deletes — is an `S3Client` method, called on a client built for the bucket in 
 For a non-default bucket or an S3-compatible service:
 
 ```python
-from src.data.sources.s3_client import S3Client
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.s3_dataset_store import push_dataset
 
 client = S3Client(bucket="<bucket>")
-client.push_dataset(dataset, "data")
+push_dataset(client, dataset, "data")
 
 # MinIO / S3-compatible
 client = S3Client(
@@ -108,8 +129,8 @@ client = S3Client(
 )
 ```
 
-`S3Client` carries the full surface: `push_dataset` / `load_dataset` (the URI functions above wrap
-these), `exists` / `object_exists`, `list_objects`, `delete`, and the folder transfers:
+`S3Client` carries the transport surface: `exists` / `object_exists`, `list_objects`, `delete`, and the
+folder transfers:
 
 | Method | Purpose |
 |--------|---------|
@@ -126,23 +147,26 @@ duplicate downloads, memory-map the Arrow files.
 ## CLI
 
 ```bash
-python scripts/before_training/s3_datasets.py push ./data project/experiment/data
-python scripts/before_training/s3_datasets.py download project/experiment/data ./data
-python scripts/before_training/s3_datasets.py list my_project/ --recursive
-python scripts/before_training/s3_datasets.py delete my_folder/data.json --yes
-python scripts/before_training/s3_datasets.py delete my_folder --recursive --yes
+python scripts/before_training/s3.py push ./data project/experiment/data
+python scripts/before_training/s3.py download project/experiment/data ./data
+python scripts/before_training/s3.py list my_project/ --recursive
+python scripts/before_training/s3.py delete my_folder/data.json --yes
+python scripts/before_training/s3.py delete my_folder --recursive --yes
+python scripts/before_training/s3.py download s3://my-bucket/project/experiment/data ./data
 ```
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,
-`--bucket/-b` and `--verbose/-v`. The other flags are per command:
+`--bucket/-b` (default `HALO_S3_DEFAULT_BUCKET`; a bare key needs one of the two) and `--verbose/-v`. A
+key (or `list`'s prefix) given as a full `s3://bucket/key` URI names its own bucket, so it refuses
+`--subfolder` and a different `--bucket`. The other flags are per command:
 
 | Flag | Commands | Notes |
 |---|---|---|
-| `--no-overwrite` | push, download | |
+| `--no_overwrite` | push, download | |
 | `--quiet/-q` | push, download | Suppresses the transfer progress bar |
 | `--recursive/-r` | list, delete | Opt-in on `delete`: removes every object under the prefix. The Python `delete()` above defaults the other way (`recursive=True`) |
 | `--yes/-y` | delete | Skips the confirmation |
-| `--max-keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
+| `--max_keys/-n` | list | Default 100 here, unlike `list_objects`'s 1000 |
 
 CLI `delete` removes ONE object; a non-recursive delete aimed at a prefix is refused rather than
 reported as a no-op success. That refusal, a `--recursive` delete aimed at a single object, and a

@@ -1,0 +1,60 @@
+# SMPO (reference-free preference optimization) — NVIDIA Nemotron 3.5 Super VL's text tower on the Tulu-3 preference
+# mixture, EP=8, one 8x B300 node. Measured: 178-184 GB reserved by rank for a full 2 x 4,096 pair on the plain head,
+# 165-170 GB on these rows. See agent-docs/models/nemotron-h.md and
+# agent-docs/training-methods/preference/smpo.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/preference/smpo.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16
+text_only_model: true                 # NemotronHForCausalLM: no vision tower or MTP head
+moe_balancing: bias_update            # the router's own e_score_correction_bias; auto resolves here too
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 512 routed experts -> 64/rank; one dispatch group on 8 GPUs
+
+# --- Dataset ---
+dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
+test_size: 0.005
+
+# --- SMPO Hyperparameters ---
+beta: 1.0
+target_margin: 0.4
+initial_margin: 0.2
+chosen_sft_ratio: 0.75
+loss_type: smooth_lower_bound
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 20
+
+# --- Sequence Lengths ---
+max_length: 4096
+max_prompt_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/smpo-nemotron-3.5-super-vl-tulu3-prefmix-ep8
+save_steps: 1000                      # each save ~241 GB
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 1
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+
+# --- PEFT (optional) ---
+use_peft: false
+
+# --- Tokens ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>

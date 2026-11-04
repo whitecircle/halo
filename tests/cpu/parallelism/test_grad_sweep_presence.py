@@ -1,29 +1,10 @@
 #!/usr/bin/env python
-"""The three post-backward grad sweeps agree grad presence over their reduce group, on 2 gloo ranks.
-
-Grad presence is rank-local, so each sweep (QLoRA's world DP average, the TP replicated sweep, the
-deferred-EP cross-replica sweep) agrees which params enter its collective first
-(``agree_grad_presence``). Two properties, per sweep:
-
-* a param one rank produced a grad for enters on every rank, zero-filled where absent, so the
-  reduced value is the true average and no rank skips a collective its peer enters;
-* a param NO rank touched keeps ``grad is None`` everywhere: a materialized zero would hand AdamW a
-  weight-decay and momentum step on a parameter the step should have left alone;
-* presence is agreed over the sweep's own reduce group, never a wider one: on 4 ranks with
-  2-rank groups, a param only rank 0 touched is zero-filled on its group peer and stays ``None``
-  on the other group's ranks — for the expert, router and TP sweeps, and for an FSDP-sharded
-  DTensor on the deferred sweep's replica leg;
-* a rank holding no grad at all still enters the mask's all-reduce its group peer is in.
-
-Every run carries a 60 s collective timeout on the default group and on every subgroup it builds,
-so a rank skipping the mask's all-reduce fails fast instead of waiting out the spawn bound.
-
-    python tests/cpu/parallelism/test_grad_sweep_presence.py
-"""
+"""The three post-backward grad sweeps agree grad presence over their own reduce group (``agree_grad_presence``). A
+materialized zero on an untouched param would hand AdamW a weight-decay step."""
 
 import datetime
 import json
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -32,7 +13,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD = 2
@@ -70,7 +51,7 @@ def _tp(model: _Model, tp_group=None) -> None:
     host = SimpleNamespace(
         state=SimpleNamespace(global_step=0),
         parallelism_config=SimpleNamespace(fp32_grad_reduce=False),
-        parallel_dims=SimpleNamespace(tp_group=lambda: dist.group.WORLD if tp_group is None else tp_group),
+        _device_mesh=SimpleNamespace(get_group=lambda: dist.group.WORLD if tp_group is None else tp_group),
         _tp_sharded_plain_param_ids=lambda: set(),
         _tp_per_head_norm_param_ids=lambda: set(),
     )
@@ -78,14 +59,15 @@ def _tp(model: _Model, tp_group=None) -> None:
 
 
 def _deferred_ep(model: _Model, *, experts: bool, replica_group, dp_scope_group=None, world_size=WORLD) -> None:
-    """The sweep over ``model``'s params as expert shards (SUM / replicas) or as routers (AVG)."""
+    """As expert shards (SUM / replicas) or as routers (AVG)."""
     ids = {id(p) for p in model.parameters()}
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
-            defer_grad_sync=True,
+            sweep_reduces_across_replicas=True,
+            runs_post_backward_sweep=True,
             expert_replica_group=replica_group,
             is_deferred_dp=False,
-            world_size=world_size,
+            stage_world_size=world_size,
             expert_tp_size=1,
             fp32_grad_reduce=False,
             dp_scope_group=dp_scope_group,
@@ -95,7 +77,8 @@ def _deferred_ep(model: _Model, *, experts: bool, replica_group, dp_scope_group=
         _get_ep_param_ids=lambda: ids,
         _top_level_model=lambda: model,
     )
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
 
 
 SWEEPS = {
@@ -154,15 +137,14 @@ def test_a_param_no_rank_touched_keeps_no_grad(per_rank, sweep):
 
 
 def test_one_replica_divides_locally_and_fills_nothing(per_rank):
-    """With no replica group the combine already summed the replicas; nothing is zero-filled."""
+    """The combine already summed the replicas."""
     rank1 = per_rank[1]["deferred_ep_one_replica"]
     assert rank1["rank0"] is None, "a grad this rank never produced must not be materialized locally"
     assert per_rank[0]["deferred_ep_one_replica"]["rank0"] == [2.0, 2.0]
 
 
 def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
-    """A non-expert FSDP shard over the EP group under multi-node deferred DP: the sweep averages its
-    local shard over the expert replicas. Only rank 0 produced a grad for it."""
+    """Under multi-node deferred DP the sweep averages the local shard over expert replicas."""
     mesh = DeviceMesh.from_group(ep_group, "cpu")
     model = nn.Module()
     model.shard = nn.Parameter(DTensor.from_local(torch.zeros(2), mesh, [Shard(0)], run_check=False))
@@ -170,11 +152,12 @@ def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
         model.shard.grad = DTensor.from_local(torch.full((2,), 4.0), mesh, [Shard(0)], run_check=False)
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
-            defer_grad_sync=True,
+            sweep_reduces_across_replicas=True,
+            runs_post_backward_sweep=True,
             expert_replica_group=replica_group,
             is_deferred_dp=True,
             ep_group_size=2,
-            world_size=GROUPED_WORLD,
+            stage_world_size=GROUPED_WORLD,
             expert_tp_size=1,
             fp32_grad_reduce=False,
             dp_scope_group=None,
@@ -184,12 +167,12 @@ def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
         _get_ep_param_ids=lambda: set(),
         _top_level_model=lambda: model,
     )
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
     return None if model.shard.grad is None else model.shard.grad.to_local().tolist()
 
 
 def _grad_less_rank(rank: int, tp_group) -> list[float] | None:
-    """The TP sweep over a pair in which rank 1 and rank 3 produced no grad for any param."""
     model = _Model()
     if rank in (0, 2):
         model.both.grad = torch.full((2,), float(rank + 1))
@@ -198,8 +181,7 @@ def _grad_less_rank(rank: int, tp_group) -> list[float] | None:
 
 
 def _grouped_worker(rank: int, out: str) -> None:
-    """Two EP groups [0, 1], [2, 3] whose expert replicas are [0, 2], [1, 3]; the TP groups and the
-    pipeline-stage DP scopes are [0, 1], [2, 3]. Only rank 0 touches ``rank0``."""
+    """EP groups [0, 1], [2, 3], expert replicas [0, 2], [1, 3], TP groups and stage DP scopes [0, 1], [2, 3]."""
     pairs = new_groups(rank, [[0, 1], [2, 3]], PG_TIMEOUT)
     replicas = new_groups(rank, [[0, 2], [1, 3]], PG_TIMEOUT)
     results = {}
@@ -221,8 +203,7 @@ def _grouped_worker(rank: int, out: str) -> None:
 
 
 def test_presence_is_agreed_over_the_reduce_group_not_the_world(tmp_path):
-    """A mask agreed world-wide (or over another sweep's group) would zero-fill ``rank0`` on ranks
-    whose group never touched it, stepping weight decay onto a param their replicas left alone."""
+    """A wider mask would step weight decay onto a param a rank's replicas left alone."""
     out = str(tmp_path / "grouped")
     run_gloo_ranks(_grouped_worker, GROUPED_WORLD, out, pg_timeout=PG_TIMEOUT)
     results = []
@@ -230,14 +211,13 @@ def test_presence_is_agreed_over_the_reduce_group_not_the_world(tmp_path):
         with open(f"{out}.{rank}") as fh:
             results.append(json.load(fh))
     expected = {
-        # rank 0's 4.0 summed with rank 2's zero over the replica pair, divided by the 4-rank world
+        # Rank 0's 4.0 summed with rank 2's zero over the replica pair, divided by the 4-rank world.
         "expert_over_replicas": [[1.0, 1.0], None, [1.0, 1.0], None],
-        # averaged over the stage pair [0, 1]; the other stage never saw it
+        # Averaged over the stage pair [0, 1]; the other stage never saw it.
         "router_over_stage": [[2.0, 2.0], [2.0, 2.0], None, None],
         "tp_over_pair": [[2.0, 2.0], [2.0, 2.0], None, None],
-        # rank 0's local 4.0 averaged with rank 2's zero over the replica pair; ranks 1 and 3 untouched
+        # Rank 0's local 4.0 averaged with rank 2's zero; ranks 1 and 3 untouched.
         "replica_leg_over_replicas": [[2.0, 2.0], None, [2.0, 2.0], None],
-        # each pair averages its one grad with its grad-less peer's zero
         "grad_less_rank_joins": [[0.5, 0.5], [0.5, 0.5], [1.5, 1.5], [1.5, 1.5]],
     }
     for name, per_rank_grad in expected.items():

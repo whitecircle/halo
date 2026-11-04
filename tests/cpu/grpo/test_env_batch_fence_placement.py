@@ -1,30 +1,15 @@
 #!/usr/bin/env python
-"""Each batch-construction failure is raised at its own phase's fence, ahead of the next phase's work.
-
-Outside routing replay the round entry joins the ``BatchBuildFence`` three times:
-* after reading the prompts, for an unusable prompt;
-* after the rollouts are acquired and before any synchronous fallback, for a wedged prefetch;
-* after tokenization, for a row over the context window.
-
-A wedged rank fenced only later would first pay a whole synchronous round while its peers wait in the
-fence. A row failure fenced later would run the recompute forward, whose dispatch is a collective, on a
-batch the step then refuses. The round entry and the batch build run for real over a recording fence;
-rollout collection, tokenization and the forward are stubs that log their turn.
-
-    python tests/cpu/grpo/test_env_batch_fence_placement.py
-"""
+"""Each batch-construction failure is raised at its own phase's fence. A wedged rank fenced later pays a whole
+synchronous round while its peers wait; a row failure fenced later runs a collective forward on a refused batch."""
 
 from collections import deque
 from types import SimpleNamespace
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.trainers.grpo.environmental import BatchBuildFence
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from tests.common.env_grpo_batch import batch_host, episode, row
-
-PartialState()  # the world-metrics flush gathers through accelerate, which reads the process state
 
 
 class _RecordingFence(BatchBuildFence):
@@ -84,23 +69,37 @@ def _round(events: list[str], *, row_error: bool = False, wedged_prefetch: bool 
 _TASKS = [{"prompt": "task"}, {"prompt": "task"}]
 
 
+def test_the_tool_call_watch_reads_each_round_while_armed_before_it_is_built():
+    """Past the leader's broadcast, so every group rank reads one round, and before the forward a wrong parser wastes."""
+    events = []
+    host = _round(events)
+    host._tool_call_watch = SimpleNamespace(armed=True, observe=lambda results: events.append("watch"))
+    host._collect_and_score_rollouts(_TASKS)
+    assert events.index("rollout") < events.index("watch") < events.index("tokenize")
+
+    events.clear()
+    host._tool_call_watch.armed = False
+    host._collect_and_score_rollouts(_TASKS)
+    assert "watch" not in events
+
+
 def test_a_round_joins_the_fence_at_each_phase_boundary():
     events = []
-    _round(events)._generate_and_score_completions_base(_TASKS)
+    _round(events)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence", "rollout", "tokenize", "fence", "recompute forward"]
 
 
 def test_a_wedged_prefetch_is_raised_before_the_synchronous_fallback():
     events = []
     with pytest.raises(ValueError, match="wedged"):
-        _round(events, wedged_prefetch=True)._generate_and_score_completions_base(_TASKS)
+        _round(events, wedged_prefetch=True)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence"], "the wedged rank rolled out a synchronous round first"
 
 
 def test_a_row_failure_is_raised_before_the_recompute_forward():
     events = []
     with pytest.raises(ValueError, match="context window"):
-        _round(events, row_error=True)._generate_and_score_completions_base(_TASKS)
+        _round(events, row_error=True)._collect_and_score_rollouts(_TASKS)
     assert events == ["fence", "fence", "rollout", "tokenize", "fence"]
 
 

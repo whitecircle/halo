@@ -1,15 +1,6 @@
 #!/usr/bin/env python
-"""A reasoning-consuming knob with no captured reasoning warns once per run.
-
-Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
-the reasoning floor scores every episode as maximal under-use, the reasoning price charges nothing,
-and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point the
-reasoning terms are applied, when a step's assistant turns carry no reasoning while any of the three
-is on, naming the ones that are; a step with reasoning, a step with no assistant turn, or a run with
-all three off warns nothing.
-
-    python tests/cpu/grpo/test_env_trainer_reasoning_warning.py
-"""
+"""A reasoning-consuming knob with no captured reasoning warns once per run. Without the rollout server's reasoning
+parser the floor scores maximal under-use, the price charges nothing and ``carry_reasoning`` sends nothing."""
 
 import logging
 from collections import defaultdict
@@ -17,15 +8,14 @@ from collections import defaultdict
 import pytest
 import torch
 
-from src.configs.async_training_config import AsyncTrainingConfig
-from src.environments.base import Message, Trajectory
-from src.environments.episode import RolloutResult
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.grpo.reasoning_terms import reasoning_token_counts
-from tests.common.grpo_metrics import attach_world_metrics, flushed_metrics
+from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Message, Trajectory
+from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
-# The warning goes through the tokenize mixin's stdlib logger (the repo's warn_once convention).
-LOGGER = "src.trainers.grpo.rollout.trajectory_tokenize"
+LOGGER = "halo.trainers.grpo.environmental.trajectory_tokenize"
 
 
 class _StubTokenizer:
@@ -35,7 +25,8 @@ class _StubTokenizer:
 
 def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float] | None = None):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight, reasoning_price=price)
+    trainer.async_config = AsyncRolloutConfig(reasoning_floor=floor_weight, reasoning_price=price)
+    trainer.num_generations = 1
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
     trainer._metrics = {"train": defaultdict(list)}
@@ -51,9 +42,9 @@ def _rollouts(thinkings: list[str | None]) -> list[RolloutResult]:
 
 
 def _with_counts(rollouts: list[RolloutResult]) -> tuple:
-    """``_build_rollout_rewards``' arguments: the rollouts, their per-turn reasoning counts, the device."""
+    """``_build_rollout_rewards``' arguments."""
     counts = [reasoning_token_counts(_StubTokenizer(), r.trajectory) for r in rollouts]
-    return rollouts, counts, torch.device("cpu")
+    return rollouts, counts, torch.device("cpu"), "train"
 
 
 def _warnings(caplog) -> list[str]:

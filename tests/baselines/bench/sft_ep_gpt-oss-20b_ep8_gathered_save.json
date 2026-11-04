@@ -1,0 +1,32 @@
+{
+  "key": "sft_ep_gpt-oss-20b_ep8_gathered_save",
+  "provenance": {
+    "commit": "5e8dc4990a62261d327890af83020be5b0098aa6",
+    "image": "halo:blackwell@sha256:4a390344ca000c5785fcc2938e78557975cd5af9d85a589a6b1029c3582cb41b",
+    "measured": "2026-11-02",
+    "world_size": 8,
+    "command": "tests/gpu/profiling/benchmark_sft_ep.py --model gpt-oss-20b --ep 8 --measure_save --seq 4096 --steps 20 --warmup 3"
+  },
+  "repeats": [
+    {
+      "save_seconds": 28.15,
+      "save_peak_rss_gib": 9.2
+    },
+    {
+      "save_seconds": 29.9,
+      "save_peak_rss_gib": 9.39
+    },
+    {
+      "save_seconds": 30.29,
+      "save_peak_rss_gib": 9.39
+    },
+    {
+      "save_seconds": 29.73,
+      "save_peak_rss_gib": 9.38
+    },
+    {
+      "save_seconds": 29.31,
+      "save_peak_rss_gib": 9.39
+    }
+  ]
+}

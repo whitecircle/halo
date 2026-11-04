@@ -1,0 +1,295 @@
+"""EP topology: process groups for token routing, expert-replica gradient sync and expert TP; expert assignment."""
+
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
+import torch.distributed as dist
+
+from halo.distributed.group_layout import CrossNodeLayout, NodeLocalLayout, ep_layout, etp_rank_lists, job_group_lists
+from halo.hardware import supports_grouped_mm
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.runtime.collectives import build_groups
+from halo.runtime.ranks import get_global_rank, get_global_world_size, has_process_group, is_global_main_process
+
+logger = logging.getLogger(__name__)
+
+# The DeepEP buffer backend: "elastic" (V2 ElasticBuffer, what "auto" resolves to) or "legacy" (V1, intranode).
+EPBufferBackend = Literal["auto", "elastic", "legacy"]
+
+
+def _build_member_group(rank_lists: list[list[int]], rank: int, what: str) -> dist.ProcessGroup:
+    """COLLECTIVE: build every group in ``rank_lists`` and return the one holding ``rank``."""
+    mine = next((index for index, ranks in enumerate(rank_lists) if rank in ranks), -1)
+    return build_groups(rank_lists, mine=mine, what=what)
+
+
+class EPConfig:
+    """The EP topology, process groups and expert assignment. EP is orthogonal to DP: experts receive tokens from any
+    batch. ``node_local`` keeps each EP group within one NVLink domain; otherwise groups span domains over RDMA."""
+
+    def __init__(
+        self,
+        ep_size: int,
+        *,
+        stage_world_size: int,
+        stage_base_rank: int = 0,
+        node_local: bool = True,
+        nvlink_domain_size: int,
+        fp32_router: bool = False,
+        fp32_experts: bool = False,
+        expert_tp_size: int = 1,
+        use_grouped_gemm: bool = True,
+        fp32_grad_reduce: bool = False,
+        expert_lora: ExpertLoraSpec | None = None,
+        experts_fsdp_managed: bool,
+        ep_buffer_backend: EPBufferBackend = "auto",
+    ):
+        """``ep_size`` distributes the experts; ``ep_size * expert_tp_size`` ranks form the full EP process group. Layout
+        math runs in stage-local ranks: ``stage_world_size`` is a pipeline stage's width (the
+        world without PP), ``stage_base_rank`` its first global rank. ``experts_fsdp_managed``: FSDP2's reduce-scatter
+        is the replicated experts' only sync."""
+        self.ep_size = ep_size
+        self.expert_tp_size = expert_tp_size
+        self.ep_group_size = ep_size * expert_tp_size
+        self.node_local = node_local
+        self.fp32_router = fp32_router
+        self.fp32_experts = fp32_experts
+        self.fp32_grad_reduce = fp32_grad_reduce
+        self.use_grouped_gemm = use_grouped_gemm
+        self.expert_lora = expert_lora
+        self.experts_fsdp_managed = experts_fsdp_managed
+        self.ep_buffer_backend = ep_buffer_backend
+        if stage_base_rank % stage_world_size != 0:
+            raise ValueError(
+                f"stage_base_rank ({stage_base_rank}) must be a multiple of stage_world_size "
+                f"({stage_world_size}): each rank block starts at its first global rank."
+            )
+        self.stage_world_size = stage_world_size
+        self.stage_base_rank = stage_base_rank
+        self.nvlink_domain_size = nvlink_domain_size
+        self.num_domains = stage_world_size // nvlink_domain_size
+        # Set by finalize_expert_assignment once the model's expert count is known.
+        self.num_experts = None
+        self.experts_per_rank = None
+        self.expert_start_idx = None
+        self.expert_end_idx = None
+        # Single-process values (rank 0 of each group, which CPU tests plan with); _build_process_groups replaces them.
+        # dispatch_ep_group stays None at ep_size == 1; dp_scope_group None is the world, a per-stage group under PP.
+        self.process_group = None
+        self.dispatch_ep_group = None
+        self.expert_tp_group = None
+        self.expert_replica_group = None
+        self.dp_scope_group = None
+        self.ep_rank = 0
+        self.ep_group_idx = 0
+        self.num_ep_groups = 1
+        self.expert_tp_rank = 0
+        self.dispatch_ep_rank = 0
+        self.expert_replica_ranks = [0]
+        self.needs_expert_grad_sync = False
+        self.is_deferred_dp = False
+        self.num_rank_blocks = 1
+        self._my_ep_group_ranks = None
+
+        self._build_process_groups()
+
+        # Every cross-replica topology defers: a post-accumulate hook fires only where the expert weight accumulated a
+        # grad, and a rank whose dispatch delivered no tokens for a layer never enters the collective its replicas wait
+        # in. ``is_deferred_dp`` is a subset of ``needs_expert_grad_sync``, so it adds no term. PP defers too, since
+        # per-backward hooks would fire on every microbatch and re-scale already-synced grads (not idempotent).
+        self.sweep_reduces_across_replicas = (
+            self.needs_expert_grad_sync or self.num_rank_blocks > 1
+        ) and not self.experts_fsdp_managed
+        # One EP group per rank block keeps the router's in-backward average, which a reentrant recompute may
+        # fire once per nested backward harmlessly; the expert divide may not, so the sweep runs it once per step.
+        self.runs_post_backward_sweep = self.sweep_reduces_across_replicas or (
+            not self.experts_fsdp_managed and self.has_grad_sync_peers
+        )
+
+        scope_str = "node-local" if node_local else "cross-node"
+        if is_global_main_process():
+            logger.info(
+                f"EP Config ({scope_str}): ep_size={ep_size}, ep_group_size={self.ep_group_size}, "
+                f"world_size={self.stage_world_size}"
+            )
+            logger.info(f"  NVLink domains={self.num_domains}, GPUs/domain={self.nvlink_domain_size}")
+            if expert_tp_size > 1:
+                logger.info(f"  Expert TP: size={expert_tp_size}, ep_size (distribution)={ep_size}")
+            logger.info(f"  Gradient sync: {self.stage_world_size} ranks")
+            logger.info("EP and DP work orthogonally - experts can receive tokens from any batch")
+
+    @property
+    def has_grad_sync_peers(self) -> bool:
+        """Read live, since the default process group is initialized independently of the config."""
+        return has_process_group() and self.stage_world_size > 1
+
+    @property
+    def uses_backward_grad_hooks(self) -> bool:
+        """Whether the EP layer syncs its router and replicated grads with in-backward hooks, neither FSDP2 nor the
+        deferred sweep doing it. The expert grads are the sweep's either way (``runs_post_backward_sweep``)."""
+        return not self.experts_fsdp_managed and not self.sweep_reduces_across_replicas
+
+    @property
+    def keeps_fp32_experts(self) -> bool:
+        """Whether the expert weights are kept as fp32 masters; under FSDP2 its bf16 policy casts them."""
+        return self.fp32_experts and not self.experts_fsdp_managed
+
+    @property
+    def spans_domains(self) -> bool:
+        """Whether an EP group spans NVLink domains, dispatching over Gin (RDMA) rather than NVLink."""
+        return self.num_domains > 1 and not self.node_local
+
+    @property
+    def grouped_gemm_enabled(self) -> bool:
+        """Whether the experts compute with grouped GEMM: requested, and supported by this GPU."""
+        return self.use_grouped_gemm and supports_grouped_mm()
+
+    def finalize_expert_assignment(self, num_experts: int):
+        """Assign this rank's expert range; ranks of one expert-TP group share it through ``dispatch_ep_rank``."""
+        if num_experts % self.ep_size != 0:
+            raise ValueError(
+                f"num_experts ({num_experts}) must be divisible by expert_parallel_size ({self.ep_size}): "
+                f"DeepEP dispatch assumes a uniform expert→rank division, so an uneven assignment would route "
+                f"tokens to the wrong experts or silently drop them. Choose an expert_parallel_size that "
+                f"divides {num_experts}."
+            )
+
+        self.num_experts = num_experts
+        self.experts_per_rank = num_experts // self.ep_size
+        self.expert_start_idx = self.dispatch_ep_rank * self.experts_per_rank
+        self.expert_end_idx = self.expert_start_idx + self.experts_per_rank
+
+        if is_global_main_process():
+            global_rank = get_global_rank()
+            logger.info(
+                f"EP Config finalized: ep_size={self.ep_size} distribution, ep_group_size={self.ep_group_size}, {num_experts} experts"
+            )
+            if self.expert_tp_size > 1:
+                logger.info(f"  - Expert TP: size={self.expert_tp_size}, ep_size (distribution)={self.ep_size}")
+                logger.info(
+                    f"  - Global rank {global_rank}, dispatch_ep_rank {self.dispatch_ep_rank}, "
+                    f"expert_tp_rank {self.expert_tp_rank}: {self.experts_per_rank} experts "
+                    f"(indices {self.expert_start_idx}-{self.expert_end_idx - 1})"
+                )
+            else:
+                logger.info(
+                    f"  - Global rank {global_rank}, EP rank {self.ep_rank}: {self.experts_per_rank} experts (indices {self.expert_start_idx}-{self.expert_end_idx - 1})"
+                )
+
+            logger.info("Expert and Data Parallelism work orthogonally:")
+            logger.info(f"  - {self.stage_world_size} ranks total, {self.num_ep_groups} EP groups")
+            logger.info(f"  - Each EP group has {self.ep_group_size} ranks, {self.ep_size}-way expert distribution")
+            logger.info(f"  - All {self.stage_world_size} ranks participate in gradient sync (DP)")
+
+    def _build_process_groups(self):
+        """COLLECTIVE over the default group: build the EP, expert-replica, expert-TP and DP-scope groups of every rank
+        block, in one order on every rank, keeping this rank's own."""
+        if not has_process_group():
+            logger.warning("Distributed not initialized - using single process mode")
+            return
+
+        global_rank = get_global_rank()
+        # More than one rank block means pipeline stages.
+        self.num_rank_blocks = get_global_world_size() // self.stage_world_size
+        block = self.stage_base_rank // self.stage_world_size
+        layout = ep_layout(
+            world_size=self.stage_world_size,
+            group_size=self.ep_group_size,
+            domain_size=self.nvlink_domain_size,
+            node_local=self.node_local,
+        )
+        self._build_ep_groups(global_rank, layout, block)
+
+        # Narrower than ``sweep_reduces_across_replicas``: multi-domain multi-group, where non-expert DP also shards
+        # over the EP group. Attention TP cannot reach it (parallelism_rules._reject_tp).
+        self.is_deferred_dp = (
+            self.num_ep_groups > 1 and self.num_domains > 1 and self.expert_tp_size == 1 and self.ep_group_size > 1
+        )
+
+        if self.expert_tp_size > 1:
+            self._build_expert_tp_groups(global_rank, layout)
+        else:
+            self.dispatch_ep_group = self.process_group
+            self.dispatch_ep_rank = self.ep_rank
+
+        # Under PP the world group would blend stages holding different layers, so each rank block gets
+        # its own DP-average domain.
+        if self.num_rank_blocks > 1:
+            self.dp_scope_group = build_groups(
+                [list(range(base, base + self.stage_world_size)) for base in self._rank_block_bases()],
+                mine=block,
+                what="DP-scope group",
+            )
+
+        self._log_process_groups(global_rank)
+
+    def _build_ep_groups(self, global_rank: int, layout: NodeLocalLayout | CrossNodeLayout, block: int):
+        """COLLECTIVE: build the EP token-routing groups and, with several per stage, the expert-replica groups."""
+        self.num_ep_groups = layout.num_groups
+        self.ep_rank, self.ep_group_idx = layout.rank_and_group(global_rank - self.stage_base_rank)
+
+        if self.ep_group_size == 1:
+            # One EP group per rank: singletons carry no collective and the dispatcher is a no-op (``ep_size <= 1``).
+            # Creating them costs world_size rendezvous nothing can use, on the default grouped-GEMM MoE path.
+            self._my_ep_group_ranks = [global_rank]
+        else:
+            ep_groups = job_group_lists(layout, get_global_world_size(), self.stage_world_size)
+            mine = block * self.num_ep_groups + self.ep_group_idx
+            self.process_group = build_groups(ep_groups, mine=mine, what="EP group")
+            self._my_ep_group_ranks = ep_groups[mine]
+
+        self.needs_expert_grad_sync = self.num_ep_groups > 1
+        if not self.needs_expert_grad_sync:
+            self.expert_replica_ranks = [global_rank]
+            return
+        # Per rank block: the same ep_rank in another PP stage holds different layers.
+        replica_lists = [
+            [base + rank for rank in layout.replica_ranks(target_ep_rank)]
+            for base in self._rank_block_bases()
+            for target_ep_rank in range(self.ep_group_size)
+        ]
+        mine = block * self.ep_group_size + self.ep_rank
+        self.expert_replica_group = build_groups(replica_lists, mine=mine, what="expert-replica group")
+        self.expert_replica_ranks = replica_lists[mine]
+
+    def _rank_block_bases(self) -> range:
+        """First global rank of each rank block (one per pipeline stage)."""
+        return range(0, get_global_world_size(), self.stage_world_size)
+
+    def _build_expert_tp_groups(self, global_rank: int, layout: NodeLocalLayout | CrossNodeLayout):
+        """COLLECTIVE: build the expert-TP groups and, at ``ep_size > 1``, the dispatch groups. Dispatch groups back
+        DeepEP's NVLink buffer, whose P2P kernel needs contiguous ranks; expert-TP groups (plain NCCL) reduce in token
+        space outside dispatch->combine. Node-local ep4+etp2: dispatch ``[0,1,2,3] [4,5,6,7]``, expert TP
+        ``[0,4] [1,5] [2,6] [3,7]``."""
+        ep_size = self.ep_size
+        self.dispatch_ep_rank, self.expert_tp_rank = layout.etp_partition(self.ep_rank, ep_size, self.expert_tp_size)
+
+        ep_groups = job_group_lists(layout, get_global_world_size(), self.stage_world_size)
+        tp_lists, dispatch_lists = etp_rank_lists(layout, ep_groups, ep_size, self.expert_tp_size)
+        self.expert_tp_group = _build_member_group(tp_lists, global_rank, "expert-TP group")
+        if ep_size > 1:
+            self.dispatch_ep_group = _build_member_group(dispatch_lists, global_rank, "dispatch group")
+
+        if is_global_main_process():
+            logger.info(
+                f"  Expert TP groups created: expert_tp_rank={self.expert_tp_rank}, "
+                f"dispatch_ep_rank={self.dispatch_ep_rank}, "
+                f"sub-EP size (ep_size)={self.ep_size}"
+            )
+
+    def _log_process_groups(self, global_rank: int):
+        scope_str = "node-local" if self.node_local else "cross-node"
+        if is_global_main_process():
+            logger.info(f"EP Process Groups created ({scope_str}):")
+            logger.info(f"  - Number of EP groups: {self.num_ep_groups}")
+            logger.info(f"  - EP group ranks (rank 0): {self._my_ep_group_ranks}")
+            logger.info(f"  - Expert replica ranks (rank 0): {self.expert_replica_ranks}")
+            logger.info(f"  - Needs expert grad sync: {self.needs_expert_grad_sync}")
+        domain_id = global_rank // self.nvlink_domain_size
+        logger.debug(
+            f"EP rank {global_rank}: EP group idx={self.ep_group_idx}, "
+            f"EP rank={self.ep_rank}, NVLink domain={domain_id}, "
+            f"group ranks={self._my_ep_group_ranks}"
+        )

@@ -1,24 +1,20 @@
-# Training + vLLM 0.26.0 rollout server: two containers on one host, HTTP for rollouts and a shared
-# NCCL group for weight sync. `docker compose -f docker-compose.vllm.yml up [vllm-server]` builds
-# `vllm-server:0.26.0` from Dockerfile.vllm when the tag is absent; the trainer image comes from
+# Training + vLLM 0.32.0 rollout server: two containers on one host, HTTP for rollouts and a shared
+# NCCL group for weight sync. The server image is `make build-vllm`'s halo:vllm-0.32.0, or VLLM_IMAGE
+# set to the prebuilt public.ecr.aws/whitecircle/halo:vllm-0.32.0; the trainer image comes from
 # `make build-blackwell` (TRAIN_IMAGE=halo:hopper on Hopper). The sync needs network_mode + ipc host
 # and all GPUs visible, VLLM_ and TRAINER_CUDA_DEVICES disjoint; EFA layers docker-compose.vllm.efa.yml.
 
 services:
   vllm-server:
-    build:
-      context: .
-      dockerfile: Dockerfile.vllm
-      args:
-        VLLM_VERSION: "0.26.0"
-    image: vllm-server:0.26.0
+    image: ${VLLM_IMAGE:-halo:vllm-0.32.0}
     ipc: host
     network_mode: host
     environment:
       - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_DEVICES:-7}
       - VLLM_SERVER_DEV_MODE=1
-      # Unset by default. Thinking budgets need VLLM_USE_V2_MODEL_RUNNER=0 (V2 answers them with
-      # 400). 0 or 1 only — vLLM parses it with int(), so an empty value kills the server at startup.
+      # Model Runner V2, which the image pins (VLLM_USE_V2_MODEL_RUNNER=1): it enforces thinking budgets
+      # and is the only runner R3 capture runs on. Passed through bare, so unset keeps the image's value;
+      # 0 or 1 only, since vLLM parses it with int() and an empty value kills the server at startup.
       - VLLM_USE_V2_MODEL_RUNNER
       # Off for RL: strict mode constrains every tool-bearing request with a structural-tag grammar,
       # so the served distribution is no longer the policy's, and it costs the engine core CPU per
@@ -48,10 +44,12 @@ services:
               capabilities: [gpu]
     # `vllm serve` args. Three are load-bearing: --moe-backend triton (the auto Blackwell backends
     # repack expert weights, so a synced write silently corrupts the experts),
-    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids; without them each
-    # trajectory falls back to re-tokenization, with one warning) and --logprobs-mode processed_logprobs
+    # --return-tokens-as-token-ids (train_on_sampled_tokens recovers the sampled ids; the trainer's startup
+    # probe refuses a server without them) and --logprobs-mode processed_logprobs
     # (the IS ratio divides by them; raw_logprobs are pre-temperature, which the trainer's startup probe
-    # refuses at a sampling temperature other than 1). Parsers, prefix caching, chat template:
+    # refuses at a sampling temperature other than 1). --enable-prefix-caching stays explicit: R3
+    # (--enable-return-routed-experts) refuses to start without it, and a multi-turn episode
+    # re-prefills its whole context every turn when it is off. Parsers, chat template:
     # agent-docs/infrastructure/rollout-servers.md
     # VLLM_TOOL_CALLING_FLAGS set to empty drops tool calling (the ReAct recipes); unset keeps it on.
     command: >
@@ -73,6 +71,8 @@ services:
       ${VLLM_CHAT_TEMPLATE:+--chat-template ${VLLM_CHAT_TEMPLATE}}
       ${VLLM_REASONING_PARSER_PLUGIN:+--reasoning-parser-plugin ${VLLM_REASONING_PARSER_PLUGIN}}
       ${VLLM_REASONING_PARSER:+--reasoning-parser ${VLLM_REASONING_PARSER}}
+      ${VLLM_TRUST_REMOTE_CODE:+--trust-remote-code}
+      ${VLLM_EXTRA_ARGS:-}
     healthcheck:
       # python3 because the base image does not provide a bare `python`.
       test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:${VLLM_PORT:-8000}/health')\""]
@@ -83,6 +83,8 @@ services:
     restart: unless-stopped
     volumes:
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
+      # The chat templates the recipes pin, at the path their headers name for VLLM_CHAT_TEMPLATE.
+      - ./jinja-templates:/jinja-templates:ro
 
   training:
     image: ${TRAIN_IMAGE:-halo:blackwell}
@@ -111,9 +113,10 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - HF_DATASETS_CACHE=/root/.cache/huggingface/datasets
       # Toolkit scratch on the volume the Makefile targets use, so the S3 dataset cache and profiler
-      # traces are shared with `make test-gpu-*`.
-      - HALO_DATA_ROOT=${HALO_SCRATCH:-/mnt}
-      - TMPDIR=${HALO_SCRATCH:-/mnt}/tmp
+      # traces are shared with `make test-gpu-*`. No fallback: compose interpolates the whole file, so
+      # even `up vllm-server` refuses to start until it is set (in the shell or the repo-root .env).
+      - HALO_DATA_ROOT=${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}
+      - TMPDIR=${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}/tmp
     deploy:
       resources:
         reservations:
@@ -128,7 +131,7 @@ services:
       - .:/workspace
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
       # Same path inside and out, so HALO_DATA_ROOT resolves either side of the boundary.
-      - ${HALO_SCRATCH:-/mnt}:${HALO_SCRATCH:-/mnt}
+      - ${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}:${HALO_SCRATCH}
       # Optional S3 dataset sources — bring your own credentials (read-write so refreshes persist).
       - ~/.aws:/root/.aws
     working_dir: /workspace

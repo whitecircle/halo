@@ -1,35 +1,12 @@
 #!/usr/bin/env python
-"""Every toolkit-registered sequence-classification head must be reachable through ``AutoModel``.
-
-transformers 5.16 ships no classification head for Gemma 4 or for MoE Qwen3.5/3.6, and each family
-has TWO config classes a checkpoint can carry — the composite (``gemma4``, ``qwen3_5_moe``) and the
-text tower (``gemma4_text``, ``qwen3_5_moe_text``), the latter being what a CausalLM SFT on a
-text-only artifact writes. Reward modeling and classification both resolve the model through
-``AutoModelForSequenceClassification``, so a missing spelling is a hard failure
-("Unrecognized configuration class") at load, on a checkpoint that trained fine.
-
-All four go through ``src.models.seq_cls_heads``, which writes the auto mapping's ``_extra_content``
-directly rather than calling ``register()``: transformers >= 5.12 silently no-ops ``register()`` for
-a config class living under ``transformers.*``, so the shim would appear to apply and then fail far
-away.
-
-The registration is an import side effect, which is exactly the kind of thing a refactor drops
-without any test noticing. So this pins, per family and per spelling: the import alone is enough,
-each config class resolves to its own head, each head declares the config class it claims, the head
-actually forwards — and, as anti-vacuity, that removing one entry really does make resolution fail
-(otherwise the assertions could be passing on an upstream mapping that never needed the shim).
-
-Run: ``python tests/cpu/models/test_seq_cls_head_registration.py`` (or ``pytest -m cpu``).
-"""
+"""Each toolkit-registered classification head resolves through ``AutoModel``: transformers ships none for Gemma 4 or
+MoE Qwen3.5/3.6 (composite and text configs), so a missing spelling fails at load on a checkpoint that trained fine."""
 
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
-
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import pytest
 import torch
@@ -41,13 +18,14 @@ from transformers.models.auto.modeling_auto import (
 from transformers.models.gemma4.configuration_gemma4 import Gemma4Config, Gemma4TextConfig
 from transformers.models.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
-# Importing IS the registration under test.
-from src.models.seq_cls_heads import (
+# Importing is the registration under test.
+from halo.models.seq_cls_heads import (
     Gemma4ForSequenceClassification,
     Gemma4TextForSequenceClassification,
     Qwen3_5MoeForSequenceClassification,
     Qwen3_5MoeTextForSequenceClassification,
 )
+from tests.common.repo import REPO_ROOT
 
 _GEMMA4_TEXT_KWARGS = {
     "vocab_size": 128,
@@ -86,7 +64,7 @@ _QWEN3_5_MOE_TEXT_KWARGS = {
     "pad_token_id": 0,
 }
 
-# (model_type, config factory, expected head class) — the id IS the ``model_type`` a checkpoint carries.
+# (model_type, config factory, expected head class); the id is the ``model_type`` a checkpoint carries.
 _REGISTRATIONS = [
     (
         "gemma4",
@@ -111,16 +89,14 @@ _PARAMETRIZE = pytest.mark.parametrize(("model_type", "build_config", "expected"
 
 
 def test_the_production_import_path_pulls_in_every_registration():
-    """Every trainer's load goes through the ``model_loading`` dispatcher, which reaches these heads
-    only by a side-effecting import in ``model_preparation``. Asserted in a FRESH interpreter,
-    because this file imports the heads itself — in-process the chain could be severed and every
-    other test here would still pass."""
+    """Asserted in a fresh interpreter because this file imports the heads itself: in-process the chain could be
+    severed and every other test here would still pass."""
     probe = (
-        "import src.distributed.loading.model_loading\n"
+        "import halo.model_loading.parallel.loader\n"
         "from transformers import AutoModelForSequenceClassification as A\n"
         "print(sorted(c.model_type for c in A._model_mapping._extra_content))\n"
     )
-    result = subprocess.run([sys.executable, "-c", probe], cwd=_REPO_ROOT, capture_output=True, text=True, check=True)
+    result = subprocess.run([sys.executable, "-c", probe], cwd=REPO_ROOT, capture_output=True, text=True, check=True)
     registered = set(ast.literal_eval(result.stdout.strip().splitlines()[-1]))
 
     assert set(_IDS) <= registered, f"only {sorted(registered)} reachable from the production import"
@@ -128,9 +104,7 @@ def test_the_production_import_path_pulls_in_every_registration():
 
 @pytest.mark.parametrize("model_type", _IDS)
 def test_transformers_still_ships_no_native_head(model_type):
-    """Premise of the whole shim: the moment upstream registers its own head for one of these, the
-    registration helper no-ops (it is guarded on exactly this) and the module must be retired rather
-    than left as dead code the tests below would keep passing on."""
+    """Once upstream registers its own head, the registration helper no-ops and the module must be retired."""
     assert model_type not in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
 
 
@@ -148,15 +122,13 @@ def test_auto_resolves_each_config_class_to_its_own_head(model_type, build_confi
 
 @_PARAMETRIZE
 def test_each_head_claims_the_config_class_it_is_registered_under(model_type, build_config, expected):
-    """The mapping key and the class's own ``config_class`` must agree, or ``from_pretrained`` builds
-    the head and then rejects the very config that selected it."""
+    """The two must agree, or ``from_pretrained`` builds the head and then rejects the config that selected it."""
     assert expected.config_class is type(build_config())
 
 
 @_PARAMETRIZE
 def test_each_head_runs(model_type, build_config, expected):
-    """Resolving to a head that cannot forward would still satisfy every mapping assertion above —
-    and for the text towers there is no other coverage at all."""
+    """A head that cannot forward would satisfy every mapping assertion, and the text towers have no other coverage."""
     config = build_config()
     config.num_labels = 1
     model = AutoModelForSequenceClassification.from_config(config).eval()
@@ -171,9 +143,8 @@ def test_each_head_runs(model_type, build_config, expected):
 
 @_PARAMETRIZE
 def test_resolution_fails_without_the_registration(model_type, build_config, expected, monkeypatch):
-    """Anti-vacuity: pop the entry these modules plant and the resolution the tests above assert must
-    stop working. Without this, they would pass just as well on a transformers release that had
-    started shipping the head itself — and the shim could be deleted unnoticed."""
+    """Without this, the tests above would pass on a transformers release that ships the head itself, and the shim
+    could be deleted unnoticed."""
     config_class = expected.config_class
     assert MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING._extra_content[config_class] is expected
     monkeypatch.delitem(MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING._extra_content, config_class)

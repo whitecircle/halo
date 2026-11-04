@@ -1,0 +1,23 @@
+# Tiny online GRPO (RLVR) recipe for the entry-script runs (tests/common/entry_scripts.py), which add
+# the served model, dataset and output_dir, the vLLM server and weight-transfer port, and the step counts.
+attn_implementation: sdpa
+use_vllm: true
+vllm_mode: server
+num_generations: 4
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 1
+max_prompt_length: 128
+max_completion_length: 32
+# A tied group has zero advantage, and boxed accuracy ties every group the short completions cannot finish:
+# the format term pays an even character count, a coin flip on the sampled text, so groups of four split.
+rewards:
+  - source: accuracy
+  - source: format
+    name: even_length
+    pattern: '\A(?:..)*\Z'
+beta: 0.0
+learning_rate: 1.0e-5
+lr_scheduler_type: constant
+logging_steps: 1
+report_to: none
+seed: 42

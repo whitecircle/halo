@@ -1,31 +1,29 @@
 #!/usr/bin/env python
-"""The IS trust-region breaker's verdict holds for the WHOLE generation round.
-
-A round spans ``steps_per_generation * num_iterations`` micro-batches — ``num_iterations`` optimizer
-steps at the default ``steps_per_generation`` — and ``_build_training_tensors`` zeroes the advantages
-of every one of them. The optimizer skip must therefore fire on every one of those steps too: a skip
-that consumed the flag on first use would leave the later steps running Adam on momentum alone, exactly the
-weight movement the skip exists to prevent. ``_update_breaker_tripped`` owns the flag: it sets this
-round's verdict and, on the next round, replaces it.
-
-    python tests/cpu/grpo/test_env_trainer_breaker_round.py
-"""
+"""The IS trust-region breaker's verdict holds for the whole generation round. A skip that consumed the flag on first
+use would leave the round's later steps running Adam on momentum alone, the movement the skip exists to prevent."""
 
 import types
 from collections import defaultdict
 
 import pytest
 import torch
-from accelerate import PartialState
 
-from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
-PartialState()  # the breaker warns through accelerate's logger, which refuses to log without it
+
+class _TrainerStandIn(types.SimpleNamespace):
+    """Weak-referenceable, as the trainer the breaker's hook holds is."""
+
+
+def _skip_hook(host):
+    callback = _BreakerOptimizerSkipCallback(host)
+    return lambda: callback.on_pre_optimizer_step(None, None, None)
 
 
 def _breaker_host(threshold: float, tripped: bool = False):
     host = types.SimpleNamespace(
-        _skip_update_masked_frac=threshold,
+        async_config=types.SimpleNamespace(skip_update_masked_frac=threshold),
         _breaker_tripped_this_step=tripped,
         accelerator=types.SimpleNamespace(gather=lambda x: x),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
@@ -44,11 +42,11 @@ def _batch(masked_trajs: list[bool]):
 
 def test_the_skip_fires_on_every_optimizer_step_while_the_round_is_tripped():
     calls = []
-    host = types.SimpleNamespace(
+    host = _TrainerStandIn(
         _breaker_tripped_this_step=True,
         optimizer=types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none)),
     )
-    skip = DistributedAsyncEnvironmentalGRPOTrainer._skip_optimizer_step_if_breaker_tripped.__get__(host)
+    skip = _skip_hook(host)
     for _ in range(3):
         skip()
     assert calls == [True, True, True], "a round of three optimizer steps must skip all three"
@@ -56,8 +54,6 @@ def test_the_skip_fires_on_every_optimizer_step_while_the_round_is_tripped():
 
 
 def test_the_next_round_verdict_replaces_a_tripped_one():
-    """The flag comes down only where it went up: a healthy round after a tripped one re-enables the
-    optimizer step, and a tripped round after a healthy one arms it."""
     tripped, host = _breaker_host(0.5, tripped=True)
     assert tripped(*_batch([True, False, False, False]), 4, "train") is False
     assert host._breaker_tripped_this_step is False
@@ -66,8 +62,7 @@ def test_the_next_round_verdict_replaces_a_tripped_one():
 
 
 def test_an_eval_round_leaves_the_training_verdict_standing():
-    """Evaluation can run between two optimizer steps of one generation round; its batch build must
-    not clear the verdict those steps still act on."""
+    """Evaluation can run between two optimizer steps of one generation round."""
     tripped, host = _breaker_host(0.5, tripped=True)
     assert tripped(*_batch([False, False, False, False]), 4, "eval") is False
     assert host._breaker_tripped_this_step is True

@@ -1,22 +1,16 @@
 #!/usr/bin/env python
-"""Tests for VariableSchedulerCallback. Run: python tests/cpu/callbacks/test_variable_scheduler.py"""
 
 import pytest
+import torch
 
-from src.callbacks.variable_scheduler import VariableSchedulerCallback
-
-# Mock helpers
+from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 
 
 class MockModel:
-    """Simple mock model to receive scheduled attributes."""
-
     pass
 
 
 class MockModuleWrappedModel:
-    """Simulates DDP/FSDP wrapped model with .module attribute."""
-
     def __init__(self, inner_model):
         self.module = inner_model
 
@@ -35,36 +29,27 @@ class MockControl:
     pass
 
 
-# Tests
-
-
 def test_linear_schedule():
+    """Holds at final past max_steps rather than extrapolating."""
+    model = MockModel()
     cb = VariableSchedulerCallback(
         attribute_name="test_attr",
         initial_value=2.0,
         final_value=10.0,
     )
-    cb.total_steps = 100
+    state = MockTrainerState(global_step=0, max_steps=100)
+    cb.on_train_begin(MockArgs(), state, MockControl(), model=model)
 
-    # step=0 -> initial
-    val = cb._calculate_value(0)
-    assert abs(val - 2.0) < 1e-6, f"step=0: expected 2.0, got {val}"
-
-    # step=max -> final
-    val = cb._calculate_value(100)
-    assert abs(val - 10.0) < 1e-6, f"step=100: expected 10.0, got {val}"
-
-    # midpoint: linear at 0.5 progress -> 2.0 + (10.0-2.0)*0.5 = 6.0
-    val = cb._calculate_value(50)
-    assert abs(val - 6.0) < 1e-6, f"step=50: expected 6.0, got {val}"
-
-    # past max_steps the value holds at final rather than extrapolating
-    val = cb._calculate_value(150)
-    assert abs(val - 10.0) < 1e-6, f"step=150: expected 10.0, got {val}"
+    scheduled = []
+    for step in (0, 50, 100, 150):
+        state.global_step = step
+        cb.on_step_begin(MockArgs(), state, MockControl(), model=model)
+        scheduled.append(model.test_attr)
+    assert scheduled == pytest.approx([2.0, 6.0, 10.0, 10.0])
 
 
 def test_error_no_training_steps():
-    """A run with no steps has nothing to schedule over; it fails at train begin, not on a division."""
+    """A run with no steps fails at train begin, not on a division."""
     cb = VariableSchedulerCallback(
         attribute_name="test_attr",
         initial_value=1.0,
@@ -79,7 +64,6 @@ def test_error_no_training_steps():
 
 
 def test_missing_model_in_kwargs_raises():
-    """No model in the callback kwargs is a hard error — the attribute has nowhere to land."""
     cb = VariableSchedulerCallback(
         attribute_name="x",
         initial_value=1.0,
@@ -87,11 +71,10 @@ def test_missing_model_in_kwargs_raises():
     )
     state = MockTrainerState(global_step=0, max_steps=100)
     with pytest.raises(ValueError, match="(?i)model"):
-        cb.on_train_begin(MockArgs(), state, MockControl())  # no model=...
+        cb.on_train_begin(MockArgs(), state, MockControl())
 
 
 def test_module_wrapped_model_unwrapped():
-    """A DDP/FSDP-style wrapper (.module) has the attribute set on the inner model."""
     inner = MockModel()
     wrapped = MockModuleWrappedModel(inner)
     cb = VariableSchedulerCallback(
@@ -102,7 +85,6 @@ def test_module_wrapped_model_unwrapped():
     state = MockTrainerState(global_step=0, max_steps=100)
     cb.on_train_begin(MockArgs(), state, MockControl(), model=wrapped)
 
-    # The attribute lands on the inner module, not the wrapper.
     assert hasattr(inner, "my_attr")
     assert not hasattr(wrapped, "my_attr")
 
@@ -112,9 +94,8 @@ def test_module_wrapped_model_unwrapped():
 
 
 def test_existing_attribute_not_overwritten_on_train_begin():
-    """If the model already defines the attribute, on_train_begin leaves it intact."""
     model = MockModel()
-    model.my_attr = 0.123  # pre-existing value
+    model.my_attr = 0.123
     cb = VariableSchedulerCallback(
         attribute_name="my_attr",
         initial_value=1.0,
@@ -122,7 +103,6 @@ def test_existing_attribute_not_overwritten_on_train_begin():
     )
     state = MockTrainerState(global_step=0, max_steps=100)
     cb.on_train_begin(MockArgs(), state, MockControl(), model=model)
-    # on_train_begin only sets the attr when absent — pre-existing stays.
     assert abs(model.my_attr - 0.123) < 1e-6
 
 
@@ -141,29 +121,36 @@ def test_model_attribute_is_initialized():
     assert abs(model.my_attr - 1.0) < 1e-6, f"Expected initial value 1.0, got {model.my_attr}"
 
 
-def test_on_step_begin():
-    model = MockModel()
-    cb = VariableSchedulerCallback(
-        attribute_name="my_attr",
-        initial_value=1.0,
-        final_value=0.0,
-    )
+def test_step_leaves_the_module_tree_unchanged():
+    """A nested child exposing ``.module`` (an FSDP1 unit) stays in place; a recursive unwrap rewrites the model."""
 
-    state = MockTrainerState(global_step=0, max_steps=100)
-    cb.on_train_begin(MockArgs(), state, MockControl(), model=model)
+    class Unit(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.module = torch.nn.Linear(2, 2)
 
-    # Step to halfway
-    state.global_step = 50
-    cb.on_step_begin(MockArgs(), state, MockControl(), model=model)
+    class Inner(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.block = Unit()
 
-    expected = 0.5  # linear: 1.0 + (0.0 - 1.0) * 0.5 = 0.5
-    assert abs(model.my_attr - expected) < 1e-6, f"Expected {expected}, got {model.my_attr}"
+    class Wrapper(torch.nn.Module):
+        def __init__(self, inner):
+            super().__init__()
+            self.module = inner
 
-    # Step to end
-    state.global_step = 100
-    cb.on_step_begin(MockArgs(), state, MockControl(), model=model)
+    inner = Inner()
+    wrapped = Wrapper(inner)
+    tree = [(name, id(module)) for name, module in wrapped.named_modules()]
+    cb = VariableSchedulerCallback(attribute_name="my_attr", initial_value=1.0, final_value=0.0)
+    state = MockTrainerState(global_step=0, max_steps=10)
 
-    assert abs(model.my_attr - 0.0) < 1e-6, f"Expected 0.0, got {model.my_attr}"
+    cb.on_train_begin(MockArgs(), state, MockControl(), model=wrapped)
+    state.global_step = 5
+    cb.on_step_begin(MockArgs(), state, MockControl(), model=wrapped)
+
+    assert [(name, id(module)) for name, module in wrapped.named_modules()] == tree
+    assert inner.my_attr == pytest.approx(0.5)
 
 
 if __name__ == "__main__":

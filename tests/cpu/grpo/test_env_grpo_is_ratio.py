@@ -1,14 +1,10 @@
-"""Per-row importance-sampling ratio for env-GRPO (``compute_is_ratio``).
-
-A rollout error drops a trajectory's vLLM logprobs. That row must fall back to ratio 1 *on its own*
-without perturbing the other rows: an all-or-nothing gate costs the whole batch its trust region,
-silently removing the correction on any step containing one bad episode.
-"""
+"""Per-row importance-sampling ratio for env-GRPO (``compute_is_ratio``). A row whose rollout error dropped its
+logprobs falls back to ratio 1 alone; an all-or-nothing gate would silently drop the correction for the whole batch."""
 
 import pytest
 import torch
 
-from src.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
+from halo.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
 
 CLIP_MAX = 3.0
 
@@ -31,8 +27,7 @@ def test_corrected_row_matches_exp_of_logratio():
 
 
 def test_row_without_sampling_logps_is_exactly_one():
-    """The regression this guards: a logprob-less row must be ratio 1, not exp(garbage)."""
-    # sampling_logps for the bad row are zeros (the placeholder the trainer fills in).
+    # The bad row's sampling_logps are the trainer's placeholder zeros.
     ratio, diff, corrected = _run([[-4.0, -5.0]], [[0.0, 0.0]], [[1, 1]], [False])
     assert torch.equal(ratio, torch.ones(1, 2)), ratio
     assert torch.equal(diff, torch.zeros(1, 2))
@@ -40,21 +35,18 @@ def test_row_without_sampling_logps_is_exactly_one():
 
 
 def test_bad_row_does_not_perturb_good_rows():
-    """One errored episode must not disable (or alter) the correction for the rest of the batch."""
     recompute = [[-1.0, -2.0], [-4.0, -5.0]]
     sampling = [[-1.5, -2.25], [0.0, 0.0]]  # row 1 = placeholder zeros
     ratio_mixed, _, corrected = _run(recompute, sampling, [[1, 1], [1, 1]], [True, False])
 
-    # The good row is bit-identical to computing it alone.
     ratio_alone, _, _ = _run([recompute[0]], [sampling[0]], [[1, 1]], [True])
     torch.testing.assert_close(ratio_mixed[0], ratio_alone[0])
-    # The bad row is neutral.
     assert torch.equal(ratio_mixed[1], torch.ones(2))
     assert corrected[0].all() and not corrected[1].any()
 
 
 def test_non_policy_tokens_are_neutral():
-    """Masked (padding / dummy-row) positions carry ratio 1 regardless of the logps there."""
+    """Masked (padding or dummy-row) positions carry ratio 1."""
     ratio, diff, corrected = _run([[-1.0, -9.0]], [[-1.5, 0.0]], [[1, 0]], [True])
     assert ratio[0, 1].item() == pytest.approx(1.0)
     assert diff[0, 1].item() == 0.0
@@ -62,9 +54,7 @@ def test_non_policy_tokens_are_neutral():
 
 
 def test_sampler_certain_token_is_uncorrected():
-    """A token the engine emitted at probability 1 (sampling logprob exactly 0 — a budget-forced
-    ``</think>``, a collapsed nucleus) was no sampling choice: ratio exactly 1, outside the corrected
-    set, while its neighbours stay corrected."""
+    """A token emitted at probability 1 (a budget-forced ``</think>``, a collapsed nucleus) was no sampling choice."""
     ratio, diff, corrected = _run([[-1.0, -9.0, -2.0]], [[-1.5, 0.0, -2.25]], [[1, 1, 1]], [True])
     assert ratio[0, 1].item() == 1.0 and diff[0, 1].item() == 0.0
     assert not corrected[0, 1]
@@ -82,9 +72,8 @@ _END = 7
 
 
 def test_only_forced_reasoning_closes_lose_their_policy_gradient():
-    """A reasoning close the engine forced at the thinking budget (the end token at probability 1) gets ratio 0:
-    trained with the episode's advantage it moves the model's own close probability. A naturally certain token
-    of any other id, an unforced close, and a row without sampling logprobs all keep their ratio."""
+    """Trained with the episode's advantage, a close the engine forced at the thinking budget moves the model's own
+    close probability. Other certain tokens, an unforced close and a row without sampling logprobs keep their ratio."""
     sampling = torch.tensor([[-0.3, 0.0, 0.0, -0.4], [0.0, 0.0, 0.0, 0.0]])
     ids = torch.tensor([[5, _END, 9, _END], [_END, 5, 5, 5]])
     mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 0]])
@@ -99,9 +88,8 @@ _OPENER = (70, 71, 72, 73, 74)
 
 
 def test_a_forced_multi_token_close_loses_its_policy_gradient_as_one_run():
-    """gpt-oss's budget appends a five-token opener, every token at probability 1. The whole run gets ratio 0;
-    the same ids with one token the model chose (a natural close), a run cut short, and a lone certain id of
-    the run keep their ratio."""
+    """gpt-oss's budget appends a five-token opener, every token at probability 1. The same ids with one token the
+    model chose, a run cut short and a lone certain id keep their ratio."""
     certain, chosen = 0.0, -0.2
     sampling = torch.tensor(
         [
@@ -124,8 +112,7 @@ def test_a_forced_multi_token_close_loses_its_policy_gradient_as_one_run():
 
 
 def test_a_completion_narrower_than_the_close_has_none_to_zero():
-    """A batch whose completions are all shorter than the five-token opener cannot hold a forced close: it
-    keeps every ratio, where sliding the opener's window over it would raise."""
+    """Sliding the five-token opener's window over shorter completions would raise."""
     ids = torch.tensor([list(_OPENER[:3]), [9, 8, 7]])
     ratio, forced = zero_engine_forced_closes(
         torch.full((2, 3), 0.7), torch.zeros(2, 3), torch.ones(2, 3), torch.ones(2, dtype=torch.bool), ids, _OPENER

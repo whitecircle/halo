@@ -1,28 +1,22 @@
 #!/usr/bin/env python
-"""The staged-push protocol — ``push_dataset`` must never hold the only copy hostage.
+"""The staged-push protocol, crash point by crash point on an in-memory fake S3: a complete copy exists at the
+destination or in a sealed staging tree at every instant, an interrupted promote leaves the destination loudly
+unreadable, and ``load_s3_dataset`` recovers from the newest sealed tree."""
 
-The generation CLIs (``scripts/inference/_common.py``) push their accumulated results through
-``push_dataset`` every checkpoint interval. Deleting the destination prefix before uploading is what
-the staging exists to avoid: a crash in that window either tears the prefix (loud) or — after the
-delete, before the first byte — leaves ``exists()`` False, and the next resume silently regenerates
-everything the checkpointing existed to protect.
-
-The staged protocol is pinned here on an in-memory fake S3, crash point by crash point: a complete
-copy exists either at the destination or in a sealed staging tree at every instant; an interrupted
-promote leaves the destination loudly unreadable (a load gate missing), never a readable old/new
-mixture and never an empty prefix; ``load_dataset`` recovers from the newest sealed staging tree;
-and a completed push sweeps stale objects and every staging tree.
-
-    python tests/cpu/data/test_s3_staged_push.py
-"""
-
+import uuid
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 
-from src.data.sources.s3_client import _PUSH_COMPLETE_MARKER, _STAGING_INFIX, S3Client
+from halo.data.preprocessed.shard_index import ShardInfo
+from halo.data.sources import s3_dataset_store
+from halo.data.sources.dataset_cache import DOWNLOAD_COMPLETE_MARKER
+from halo.data.sources.s3_client import S3Client
+from halo.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
+from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 BUCKET = "test-bucket"
 KEY = "datasets/results"
@@ -103,6 +97,10 @@ class FakeBoto:
 
         return _Paginator()
 
+    def download_file(self, Bucket, Key, Filename, Config=None):
+        self.ops.append(("download", Key))
+        Path(Filename).write_bytes(self.objects[Key])
+
     def head_object(self, Bucket, Key):
         if Key not in self.objects:
             raise ClientError({"Error": {"Code": "404", "Message": "NotFound"}}, "HeadObject")
@@ -112,12 +110,16 @@ class FakeBoto:
         return {"KeyCount": len(matching)}
 
 
+def _new_push_key(full_key: str) -> str:
+    return f"{s3_dataset_store._push_scan_prefix(full_key)}{uuid.uuid4().hex[:8]}"
+
+
 def _client() -> tuple[S3Client, FakeBoto]:
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket=BUCKET)
     fake = FakeBoto()
-    client._client = fake
-    client._transfer_config = None
+    client.boto_client = fake
+    client.transfer_config = None
     return client, fake
 
 
@@ -143,7 +145,7 @@ def _fake_dataset_dict_save(fake: FakeBoto, rows_tag: bytes = b"new"):
 def _seed_old_copy(fake: FakeBoto):
     for rel in (
         "train/data-00000-of-00002.arrow",
-        "train/data-00001-of-00002.arrow",  # stale under the new 1-shard tree — must be swept
+        "train/data-00001-of-00002.arrow",  # stale under the new 1-shard tree, so it must be swept
         "train/state.json",
         "train/dataset_info.json",
         "test/data-00000-of-00001.arrow",
@@ -161,18 +163,37 @@ def _mock_dataset(save_side_effect) -> MagicMock:
     return ds
 
 
+def _upload_tree(fake: FakeBoto, local_dir: Path, key: str, *, skip=lambda rel: False) -> None:
+    """Write a real ``save_to_disk`` tree into the fake store under ``key``, leaving out what ``skip`` names."""
+    for path in sorted(local_dir.rglob("*")):
+        rel = path.relative_to(local_dir).as_posix()
+        if path.is_file() and not skip(rel):
+            fake._write(f"{key}/{rel}", path.read_bytes())
+
+
+def _saved_dataset_dict(directory: Path, train: list[int]) -> Path:
+    DatasetDict({"train": Dataset.from_dict({"x": train}), "test": Dataset.from_dict({"x": [0]})}).save_to_disk(
+        directory
+    )
+    return directory
+
+
+def _published_markers(cache_root: Path) -> list[Path]:
+    return list(cache_root.rglob(DOWNLOAD_COMPLETE_MARKER))
+
+
 def _dest_keys(fake: FakeBoto) -> set[str]:
     return {k[len(KEY) + 1 :] for k in fake.objects if k.startswith(f"{KEY}/")}
 
 
 def _staging_keys(fake: FakeBoto) -> set[str]:
-    return {k for k in fake.objects if _STAGING_INFIX in k}
+    return {k for k in fake.objects if _PUSH_INFIX in k}
 
 
 def test_successful_push_replaces_the_tree_and_sweeps_stale_and_staging():
     client, fake = _client()
     _seed_old_copy(fake)
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     assert _dest_keys(fake) == {
         "train/data-00000-of-00001.arrow",
@@ -192,7 +213,7 @@ def test_successful_push_replaces_the_tree_and_sweeps_stale_and_staging():
 def test_promote_ordering_gates_last_and_sweep_after_gates():
     client, fake = _client()
     _seed_old_copy(fake)
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     dest_ops = [(op, key[len(KEY) + 1 :]) for op, key in fake.ops if key.startswith(f"{KEY}/")]
     gate_deletes = [
@@ -226,7 +247,7 @@ def test_crash_during_staging_upload_leaves_the_destination_untouched():
         raise OSError("connection reset mid-upload")
 
     with pytest.raises(OSError, match="mid-upload"):
-        client.push_dataset(_mock_dataset(_boom), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_boom), KEY)
 
     assert {k: v for k, v in fake.objects.items() if k.startswith(f"{KEY}/")} == before, (
         "the old copy must survive a staging-upload crash byte-for-byte"
@@ -251,7 +272,7 @@ def test_crash_mid_promote_keeps_a_sealed_staging_tree_and_a_loud_destination():
 
     fake.copy = _failing_copy
     with pytest.raises(OSError, match="mid-promote"):
-        client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
 
     assert "dataset_dict.json" not in _dest_keys(fake), (
         "an interrupted promote must leave the destination UNREADABLE (gate missing), not old-mixed-new"
@@ -278,10 +299,10 @@ def test_next_push_after_a_crash_heals_and_clears_orphans():
 
     fake.copy = _failing_copy
     with pytest.raises(OSError):
-        client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+        s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
     fake.copy = original_copy
 
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake, b"new2")), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake, b"new2")), KEY)
     assert not _staging_keys(fake), "the healing push must clear the crashed push's staging orphan too"
     assert all(body.startswith(b"new2:") for k, body in fake.objects.items() if k.startswith(f"{KEY}/"))
 
@@ -291,25 +312,25 @@ def test_no_overwrite_raises_before_any_write():
     _seed_old_copy(fake)
     ds = _mock_dataset(_fake_dataset_dict_save(fake))
     with pytest.raises(FileExistsError, match="(?i)already exists"):
-        client.push_dataset(ds, KEY, overwrite=False)
+        s3_dataset_store.push_dataset(client, ds, KEY, overwrite=False)
     ds.save_to_disk.assert_not_called()
     assert not _staging_keys(fake)
 
 
 def test_staging_sibling_never_pollutes_the_destination_namespace():
-    """The staging tree must live OUTSIDE the destination's anchored prefix: listings, exists(), the
-    content fingerprint, and recursive delete on the dataset key must all be blind to it."""
+    """The staging tree lives outside the destination's anchored prefix: listings, exists(), the fingerprint and
+    recursive delete are blind to it."""
     client, fake = _client()
     _seed_old_copy(fake)
     fingerprint_before = client.content_fingerprint(KEY)
 
-    staging_key = client._new_staging_key(KEY)
+    staging_key = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{staging_key}")
     fake.put_object(Bucket=BUCKET, Key=f"{staging_key}/{_PUSH_COMPLETE_MARKER}", Body=KEY.encode())
 
     assert client.content_fingerprint(KEY) == fingerprint_before
     listed = {obj["FullKey"] for obj in client.list_objects(KEY)}
-    assert listed and not any(_STAGING_INFIX in key for key in listed), (
+    assert listed and not any(_PUSH_INFIX in key for key in listed), (
         f"an anchored listing of {KEY} surfaced staging objects: {sorted(listed)}"
     )
     client.delete(KEY, recursive=True)
@@ -318,44 +339,42 @@ def test_staging_sibling_never_pollutes_the_destination_namespace():
 
 
 def test_sibling_dataset_staging_is_never_swept_or_recovered_across():
-    """The staging scan prefix for ``…/results`` is a plain string prefix of sibling ``…/results-2``'s
-    staging trees. Unanchored, a successful push of ``results`` sweeps the sibling's SEALED staging
-    tree — its only complete copy while torn — and ``results``'s recovery can then serve the
-    sibling's rows."""
+    """The scan prefix for ``.../results`` is a string prefix of sibling ``.../results-2``'s staging trees.
+    Unanchored, a push sweeps the sibling's sealed tree and recovery can serve its rows."""
     client, fake = _client()
     _seed_old_copy(fake)
     sibling_key = f"{KEY}-2"
-    sibling_staging = client._new_staging_key(sibling_key)
+    sibling_staging = _new_push_key(sibling_key)
     _fake_dataset_dict_save(fake, b"sib")(f"s3://{BUCKET}/{sibling_staging}")
     fake.put_object(Bucket=BUCKET, Key=f"{sibling_staging}/{_PUSH_COMPLETE_MARKER}", Body=sibling_key.encode())
 
-    # The sibling's sealed tree is the ONLY sealed staging around — recovery for KEY must not take it.
-    assert client._latest_complete_staging(KEY) is None
-    assert client._latest_complete_staging(sibling_key) == sibling_staging
+    # The sibling's sealed tree is the only sealed staging around, and recovery for KEY must not take it.
+    assert s3_dataset_store._latest_complete_push(client, KEY) is None
+    assert s3_dataset_store._latest_complete_push(client, sibling_key) == sibling_staging
 
-    client.push_dataset(_mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
     assert f"{sibling_staging}/{_PUSH_COMPLETE_MARKER}" in fake.objects, (
         "a push of one dataset must never sweep a hyphen-sibling dataset's staging trees"
     )
 
 
-def test_latest_complete_staging_picks_the_newest_sealed_tree():
+def test_latest_complete_push_picks_the_newest_sealed_tree():
     client, fake = _client()
-    older = client._new_staging_key(KEY)
+    older = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{older}")
     fake.put_object(Bucket=BUCKET, Key=f"{older}/{_PUSH_COMPLETE_MARKER}", Body=b"")
-    unsealed = client._new_staging_key(KEY)
+    unsealed = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{unsealed}")
-    newer = client._new_staging_key(KEY)
+    newer = _new_push_key(KEY)
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{newer}")
     fake.put_object(Bucket=BUCKET, Key=f"{newer}/{_PUSH_COMPLETE_MARKER}", Body=b"")
 
-    assert client._latest_complete_staging(KEY) == newer
+    assert s3_dataset_store._latest_complete_push(client, KEY) == newer
 
 
-def test_recover_from_staging_loads_the_sealed_tree_and_guards_recursion():
+def test_recover_from_pending_push_loads_the_sealed_tree_and_guards_recursion(monkeypatch):
     client, fake = _client()
-    sealed = client._new_staging_key(KEY)
+    sealed = _new_push_key(KEY)
     fake._write(f"{KEY}/train/data-00000-of-00001.arrow", b"torn")  # destination torn: data, no gates
     _fake_dataset_dict_save(fake)(f"s3://{BUCKET}/{sealed}")
     fake.put_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}", Body=b"")
@@ -363,41 +382,106 @@ def test_recover_from_staging_loads_the_sealed_tree_and_guards_recursion():
     recovered = MagicMock(spec=Dataset)
     loaded_keys: list[str] = []
 
-    def _spy_load(key, subfolder=None, keep_in_memory=None, use_cache=True):
+    def _spy_load(client, key, subfolder=None, keep_in_memory=None, use_cache=True):
         loaded_keys.append(key)
         return recovered
 
-    client.load_dataset = _spy_load
+    monkeypatch.setattr(s3_dataset_store, "load_s3_dataset", _spy_load)
     cause = FileNotFoundError("no state.json")
-    assert client._recover_from_staging(KEY, None, True, cause=cause) is recovered
+    assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is recovered
     assert loaded_keys == [sealed], "recovery must load exactly the sealed staging tree"
 
-    # A load already targeting a staging tree must not recover into another — one level only.
-    assert client._recover_from_staging(sealed, None, True, cause=cause) is None
-    # No sealed tree → nothing to recover.
+    # A load already targeting a staging tree must not recover into another: one level only.
+    assert s3_dataset_store._recover_from_pending_push(client, sealed, None, True, cause=cause) is None
     fake.delete_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}")
-    assert client._recover_from_staging(KEY, None, True, cause=cause) is None
+    assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is None
 
 
-def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
+def test_load_s3_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
     client, fake = _client()
     fake._write(f"{KEY}/train/data-00000-of-00001.arrow", b"torn")
     recovered = MagicMock(spec=Dataset)
-    client._recover_from_staging = MagicMock(return_value=recovered)
+    torn = FileNotFoundError("no state.json")
+    with (
+        patch("halo.data.sources.s3_dataset_store._recover_from_pending_push", return_value=recovered),
+        patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+    ):
+        assert s3_dataset_store.load_s3_dataset(client, KEY) is recovered
 
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch(
-            "src.data.sources.s3_client.publish_cached_download", side_effect=FileNotFoundError("no state.json")
-        ):
-            assert client.load_dataset(KEY) is recovered
+    with (
+        patch("halo.data.sources.s3_dataset_store._recover_from_pending_push", return_value=None),
+        patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
+        patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
+    ):
+        with pytest.raises(FileNotFoundError, match="state.json"):
+            s3_dataset_store.load_s3_dataset(client, KEY)
 
-    client._recover_from_staging = MagicMock(return_value=None)
-    with patch("src.data.sources.s3_client.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
-        with patch(
-            "src.data.sources.s3_client.publish_cached_download", side_effect=FileNotFoundError("no state.json")
-        ):
-            with pytest.raises(FileNotFoundError, match="state.json"):
-                client.load_dataset(KEY)
+
+def test_load_s3_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
+    """The fetch is the client's own download into the cache's publish temp, every object once, with no
+    datasets-side copy."""
+    client, fake = _client()
+    _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[1, 2, 3]), KEY)
+    cache_root = tmp_path / "cache"
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        loaded = s3_dataset_store.load_s3_dataset(client, KEY)
+
+    assert loaded["train"]["x"] == [1, 2, 3]
+    assert sorted(key for op, key in fake.ops if op == "download") == sorted(fake.objects)
+    (marker,) = _published_markers(cache_root)
+    assert Path(loaded["train"].cache_files[0]["filename"]).is_relative_to(marker.parent)
+
+
+def test_folder_marker_objects_are_not_downloaded_as_files(tmp_path):
+    """The S3 console's Create folder leaves zero-byte keys ending in /, which written as files would fail the
+    download."""
+    client, fake = _client()
+    _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[4]), KEY)
+    for marker in (f"{KEY}/", f"{KEY}/train/"):
+        fake._write(marker, b"")
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")):
+        assert s3_dataset_store.load_s3_dataset(client, KEY)["train"]["x"] == [4]
+
+
+def test_a_torn_destination_is_never_published_and_recovers_from_the_sealed_push(tmp_path):
+    """A destination missing its load gates must raise inside the fetch, before the cache marks it complete,
+    leave no partial download behind, and hand the load to the newest sealed push."""
+    client, fake = _client()
+    source = _saved_dataset_dict(tmp_path / "source", train=[7, 8])
+    gate_names = {"dataset_dict.json", "state.json"}
+    _upload_tree(fake, source, KEY, skip=lambda rel: rel.rsplit("/", 1)[-1] in gate_names)
+    cache_root = tmp_path / "cache"
+
+    with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        with pytest.raises(FileNotFoundError):
+            s3_dataset_store.load_s3_dataset(client, KEY)
+        assert _published_markers(cache_root) == []
+        assert [p for p in cache_root.rglob("*") if ".tmp-" in p.name] == [], "a failed fetch left its partial tree"
+
+        sealed = _new_push_key(KEY)
+        _upload_tree(fake, source, sealed)
+        fake.put_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}", Body=KEY.encode())
+        recovered = s3_dataset_store.load_s3_dataset(client, KEY)
+
+    assert recovered["train"]["x"] == [7, 8]
+
+
+def test_a_shard_downloads_straight_into_its_own_cache(tmp_path):
+    client, fake = _client()
+    shard = ShardInfo(id=0, path="train/shard_0000", num_examples=2)
+    Dataset.from_dict({"x": [5, 6]}).save_to_disk(tmp_path / "shard")
+    _upload_tree(fake, tmp_path / "shard", f"{KEY}/{shard.path}")
+    loader = ShardedDatasetLoader(f"s3://{BUCKET}/{KEY}", dp_rank=0, dp_size=1)
+    loader._s3_client = client
+    cache_root = tmp_path / "cache"
+    with patch("halo.data.sources.sharded_dataset.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
+        loaded = loader._load_shard_from_s3(shard)
+
+    assert loaded["x"] == [5, 6]
+    assert sorted(key for op, key in fake.ops if op == "download") == sorted(fake.objects)
+    (marker,) = _published_markers(cache_root)
+    assert Path(loaded.cache_files[0]["filename"]).is_relative_to(marker.parent)
 
 
 if __name__ == "__main__":

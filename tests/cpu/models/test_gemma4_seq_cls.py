@@ -1,21 +1,13 @@
 #!/usr/bin/env python
-"""Gemma4ForSequenceClassification registration tests.
-
-Verifies (registration itself, both ``gemma4`` spellings, is pinned by
-``test_seq_cls_head_registration.py``):
-  1. A miniaturised model builds from a multimodal ``Gemma4Config`` (null towers), runs a CPU
-     forward, and pools pad-aware when given ``input_ids``.
-  2. The head exposes the ``.model``/``.score`` Generic surface the reward-model trainers dispatch on.
-
-Run: python tests/cpu/models/test_gemma4_seq_cls.py
-"""
+"""Gemma4ForSequenceClassification: a tiny model from a multimodal config forwards on CPU and pools pad-aware.
+Registration is pinned by ``tests/cpu/models/test_seq_cls_head_registration.py``."""
 
 import pytest
 import torch
 from transformers import AutoModelForSequenceClassification
 from transformers.models.gemma4 import Gemma4Config
 
-import src.models.seq_cls_heads  # noqa: F401  (registers the head as an import side effect)
+import halo.models.seq_cls_heads  # noqa: F401  (registers the head as an import side effect)
 
 
 def _tiny_config(num_labels: int = 1) -> Gemma4Config:
@@ -44,8 +36,6 @@ def test_forward_pools_pad_aware():
     torch.manual_seed(0)
     model = AutoModelForSequenceClassification.from_config(_tiny_config()).eval()
     # The Generic surface the RM trainers dispatch on.
-    # (Auto-registration itself, both gemma4 spellings included, is pinned by
-    # tests/cpu/models/test_seq_cls_head_registration.py.)
     assert hasattr(model, "model") and hasattr(model, "score")
     ids = torch.randint(1, 250, (1, 7))
     mask = torch.ones_like(ids)
@@ -57,7 +47,7 @@ def test_forward_pools_pad_aware():
             attention_mask=torch.cat([mask, torch.zeros_like(pad)], dim=1),
         ).logits
     assert alone.shape == (1, 1) and torch.isfinite(alone).all()
-    # input_ids path detects padding: the pooled position must not move with right padding.
+    # The pooled position must not move with right padding.
     assert torch.allclose(alone, padded, atol=1e-5)
 
 

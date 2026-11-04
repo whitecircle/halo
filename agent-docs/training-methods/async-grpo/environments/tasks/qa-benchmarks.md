@@ -1,6 +1,6 @@
 # QA Benchmark Environments
 
-Two registry names cover question answering with rule-based rewards (`src/environments/envs/tasks/qa.py`). Both speak native tool calls, so a tool-carrying variant needs a tool-call parser on the server ([Tool calls](../../episodes.md#tool-calls)).
+Two registry names cover question answering with rule-based rewards (`halo/environments/tasks/qa.py`). Both speak native tool calls, so a tool-carrying variant needs a tool-call parser on the server ([Tool calls](../../episodes.md#tool-calls)).
 
 | Name | Task | Shape |
 |---|---|---|
@@ -23,7 +23,7 @@ environment_kwargs:
 |---|---|---|
 | `search_backend` | auto | `serper`, `brave`, `tavily`, `duckduckgo`; auto picks by which API key is set, keyless DuckDuckGo last. Validated at construction |
 | `include_python_tools` | `false` | `qa_search` only: adds the in-process restricted `python` REPL |
-| `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` closed-book raises |
+| `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` or a tool price (`tool_success_reward`, `tool_error_penalty`, `tool_reward_cap`) closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |
 
 A fifth backend, `mock`, returns fabricated snippets and is refused unless `HALO_ALLOW_MOCK_SEARCH=1`. Its results pay `tool_success_reward`, so training on it teaches the policy that invented evidence works.
@@ -35,7 +35,7 @@ A fifth backend, `mock`, returns fabricated snippets and is refused unless `HALO
 
 ## Reward
 
-Grading is all-or-nothing, 1 or 0 (`src/rewards/graders/matching.py`), priced by the reward's `environment` term ([Reward Terms](../../../grpo/rewards/README.md#environment-arm)).
+Grading is all-or-nothing, 1 or 0 (`halo/rewards/graders/matching.py`), priced by the reward's `environment` term ([Reward Terms](../../../grpo/rewards/README.md#environment-arm)).
 
 1. `exact_match` — case-insensitive, after normalization.
 2. `numeric_match` — every number in the response against the one value the expected answer states (`$18` and `18 dollars` expect 18). Tolerance `rtol=0.01` / `atol=1e-6`; percentages are divided by 100, and `3,500` or `10\,000` read as one number.
@@ -85,7 +85,7 @@ A row with `choices` switches `exam_qa` to letter grading and appends the choice
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py --env_type exam_qa \
+python scripts/environments/inference/eval_env.py --env_type exam_qa \
     --dataset <hub-id-or-dir> --split test --prompt_field question --answer_field answer \
     --context_fields choices --group_by subject \
     --base_url http://localhost:8000/v1 --model <served-name> --num_examples 100

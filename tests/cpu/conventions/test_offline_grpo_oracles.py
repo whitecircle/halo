@@ -1,11 +1,7 @@
 #!/usr/bin/env python
-"""The offline-GRPO GPU suites' shared oracles grade the real trainer, on CPU.
-
-The suites compare the trainer's run-start reference sweep and its pure-KL loss with independent
-full-logits scores (:mod:`tests.common.offline_grpo`). Here the same helpers run against a real
-single-process trainer: they must agree with it, reject a wrong objective, leave the policy as they
-found it, and read a resumed export's move at the export's dtype.
-"""
+"""The offline-GRPO GPU suites' shared oracles (:mod:`tests.common.offline_grpo`) grade the real trainer, on CPU:
+they agree with it, reject a wrong objective, leave the policy as found, and read a resumed export's move at the
+export's dtype."""
 
 from types import SimpleNamespace
 
@@ -15,8 +11,8 @@ from accelerate import PartialState
 from safetensors.torch import save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.distributed.parallelism_config import ParallelismConfig
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.offline_grpo import (
     OFFLINE_VOCAB,
     doubled_head_kl_verdict,

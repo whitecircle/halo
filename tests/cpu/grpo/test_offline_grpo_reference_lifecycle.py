@@ -8,8 +8,8 @@ import numpy as np
 import pytest
 from datasets import Dataset, Features, Sequence, Value
 
-from src.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
-from src.trainers.grpo.mixins.offline_reference import _token_row_keys
+from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
+from halo.trainers.grpo.offline.reference import _token_row_keys
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo_reference import (
     ReferenceStorageTrainer,

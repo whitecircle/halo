@@ -1,57 +1,27 @@
 #!/usr/bin/env python
-"""Gradient checkpointing must not silence the bias-update balancer, on a REAL DeepEP EP layer.
+"""Gradient checkpointing must not silence the bias-update balancer, on a real DeepEP EP layer.
 
-``moe_balancing: bias_update`` steers routing from ``expert_load_counter``, which every EP layer
-fills in its forward. Under activation checkpointing that forward runs TWICE per microbatch, so the
-gate has to pick exactly ONE of the two passes — and grad mode cannot make that call. The REENTRANT
-checkpoint (forced on every non-PP EP/CP run) executes its original pass inside an
-``autograd.Function``, i.e. with grad DISABLED, and its recompute inside backward with grad ENABLED;
-the NON-reentrant one (the mode pipeline parallelism accepts) runs both passes with grad enabled. A
-gate written as ``torch.is_grad_enabled()`` therefore silently relocates the recording to the
-recompute in the first case — leaving the counter incomplete until backward has run, so any step
-whose backward is skipped or pruned drops the microbatch — and DOUBLE-counts in the second. Every
-shipped balancing config sets ``gradient_checkpointing: true``, and nothing about either failure
-surfaces as an error.
-
-:func:`~src.distributed.expert_parallel.gc_scope.counts_toward_expert_load` is unit-pinned on stubs
-in ``tests/cpu/parallelism/test_expert_load_recording.py``. What only a GPU can show is the same
-matrix through the real thing: a patched ``EPGptOssMoELayer`` with a live DeepEP ``ElasticBuffer``,
-HF's own checkpoint function, and the native adopted ``router.bias`` the export path serves. So this
-runs one model through four modes —
-
-  1. no checkpointing (plus a frozen ``no_grad`` reference/teacher pass on that same path),
-  2. reentrant checkpointing (the EP/CP default),
-  3. non-reentrant checkpointing (the mode pipeline parallelism accepts),
-  4. eval.
-
-Modes 1-3 must record EXACTLY ``tokens * top_k`` per layer and agree tensor-for-tensor; the frozen
-pass and eval must record nothing. A forward-entry counter proves the recompute actually ran —
-without it "counts did not double" is vacuous — and the finale drives ``RouterBiasBalancingCallback``
-after a checkpointed step and asserts the bias MOVED by the exact DeepSeek-V3 sign step, in
-``router.bias``: the tensor ``state_dict`` exports and vLLM/SGLang route on.
-
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep_gc_bias_balancing.py
+Grad mode can't pick which pass counts. Reentrant runs its original with grad off and recompute with grad on;
+non-reentrant has it on for both. A ``torch.is_grad_enabled()`` gate moves the recording to the recompute, so a skipped
+backward drops the microbatch, and double-counts in the second case.
 """
 
 import sys
 
 import torch
 import torch.distributed as dist
-from transformers import GptOssConfig, GptOssForCausalLM
+from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
-from src.callbacks.router_bias_balancing import RouterBiasBalancingCallback
-from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import (
-    create_ep_buffers,
-    enable_ep_gradient_checkpointing,
-    patch_moe_model_for_ep,
+from halo.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
 )
-from src.distributed.parallelism_config import ParallelismConfig
-from tests.common.harness import gpu_test_main, log
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.rank_log import log
 
 EP_SIZE = 2
 BATCH = 2
@@ -60,21 +30,20 @@ TOP_K = TINY_GPTOSS_CONFIG["num_experts_per_tok"]
 NUM_EXPERTS = TINY_GPTOSS_CONFIG["num_local_experts"]
 NUM_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]
 TOKENS = BATCH * SEQ_LEN
-# Large enough that a bf16-rounded write would still be visible; the update is a pure sign step, so
-# the magnitude only has to be exactly reproducible.
+# Large enough that a bf16-rounded write would show; the update is a pure sign step.
 GAMMA = 0.125
 SEED = 1234
 
 
 def build_model(device):
-    """The seeded tiny GptOss MoE. bf16 — the DeepEP dispatch dtype every EP run trains in."""
+    """bf16, the DeepEP dispatch dtype every EP run trains in."""
     torch.manual_seed(SEED)
     model = GptOssForCausalLM(GptOssConfig(**TINY_GPTOSS_CONFIG)).to(torch.bfloat16).to(device)
     return model
 
 
 def build_batch(device, rank: int) -> dict:
-    """One rank-local microbatch. EP is orthogonal to DP, so each rank routes its own tokens."""
+    """EP is orthogonal to DP, so each rank routes its own tokens."""
     generator = torch.Generator(device="cpu").manual_seed(SEED + rank)
     input_ids = torch.randint(
         0, TINY_GPTOSS_CONFIG["vocab_size"], (BATCH, SEQ_LEN), generator=generator, device="cpu"
@@ -87,11 +56,8 @@ def read_counters(ep_layers) -> list[torch.Tensor | None]:
 
 
 def train_step(model, ep_layers, batch, *, after_forward=None) -> tuple[list[torch.Tensor | None], float]:
-    """One training forward+backward; returns each EP layer's freshly recorded counter.
-
-    ``after_forward`` observes the counters between forward and backward — the only way to tell
-    WHICH pass recorded them, since both passes have finished by the time the step is over.
-    """
+    """``after_forward`` sees the counters between forward and backward, the only way to tell which pass recorded
+    them."""
     for layer in ep_layers:
         layer.expert_load_counter = None
     model.train()
@@ -104,7 +70,6 @@ def train_step(model, ep_layers, batch, *, after_forward=None) -> tuple[list[tor
 
 
 def frozen_forward(model, ep_layers, batch) -> list[torch.Tensor | None]:
-    """A reference/teacher-shaped pass: train mode, no grad, no optimizer step behind it."""
     for layer in ep_layers:
         layer.expert_load_counter = None
     model.train()
@@ -114,7 +79,6 @@ def frozen_forward(model, ep_layers, batch) -> list[torch.Tensor | None]:
 
 
 def all_checkpoint_funcs_scoped(model) -> bool:
-    """Every installed checkpoint function carries the EP scope, and at least one is installed."""
     funcs = [
         module._gradient_checkpointing_func
         for module in model.modules()
@@ -124,7 +88,7 @@ def all_checkpoint_funcs_scoped(model) -> bool:
 
 
 def counts_match_expected(counters: list[torch.Tensor | None]) -> bool:
-    """Every layer recorded exactly one count per (token, selected expert) of this microbatch."""
+    """Exactly one count per (token, selected expert) of this microbatch."""
     return len(counters) == NUM_LAYERS and all(
         c is not None and int(c.sum().item()) == TOKENS * TOP_K for c in counters
     )
@@ -142,8 +106,7 @@ def run(ctx):
 
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model(ctx.device)
-    patch_moe_model_for_ep(model, parallelism_config.create_ep_config())
-    create_ep_buffers(model)
+    apply_ep_layers(model, parallelism_config.ep_config())
 
     ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]
     checks["ep_layers_patched"] = len(ep_layers) == NUM_LAYERS
@@ -151,27 +114,23 @@ def run(ctx):
         layer.experts_per_rank == NUM_EXPERTS // EP_SIZE for layer in ep_layers
     )
 
-    # bias_update through the real strategy seam: GptOss adopts the hub router's own `router.bias`,
-    # so everything below is measured on the tensor an export actually carries.
-    apply_balancing_strategy(model, "bias_update", is_moe=True)
+    # GptOss adopts the hub router's `router.bias`, so this measures the tensor an export carries.
+    apply_balancing_mode(model, "bias_update", is_moe=True)
     checks["balancing_bias_is_the_native_router_bias"] = all(
         layer.balancing_biases is layer.router.bias for layer in ep_layers
     )
 
-    # A forward-call counter on one EP layer: without it, "the checkpointed step counted the same as
-    # the unchecked one" would also pass if the recompute never ran at all.
+    # Without it, "counted the same" would also pass if the recompute never ran.
     forward_calls = {"n": 0}
 
     def count_forward(_module, _args):
         forward_calls["n"] += 1
 
-    # A PRE-hook: the non-reentrant recompute stops as soon as it has reproduced the last saved
-    # tensor, so it can leave the layer without ever returning from it.
+    # A pre-hook: the non-reentrant recompute stops at the last saved tensor and can leave without returning.
     ep_layers[0].register_forward_pre_hook(count_forward)
 
     batch = build_batch(ctx.device, ctx.rank)
 
-    # ── 1. no gradient checkpointing ────────────────────────────────────────────────────────────
     forward_calls["n"] = 0
     plain_counts, plain_loss = train_step(model, ep_layers, batch)
     plain_calls = forward_calls["n"]
@@ -180,25 +139,19 @@ def run(ctx):
     checks["no_gc_loss_finite"] = bool(torch.isfinite(torch.tensor(plain_loss)))
     metrics["tokens_times_topk"] = float(TOKENS * TOP_K)
 
-    # A frozen reference/teacher pass drives no optimizer step, so its load must not skew the
-    # balance. Outside a checkpoint scope that is exactly the grad-mode gate.
+    # A frozen reference/teacher pass drives no optimizer step, so its load must not skew the balance.
     checks["frozen_no_grad_pass_records_nothing"] = all(c is None for c in frozen_forward(model, ep_layers, batch))
 
-    # ── 2. REENTRANT checkpointing — what every non-PP EP/CP run is forced onto ──────────────────
-    enable_ep_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    # Reentrant, what every non-PP EP/CP run is forced onto.
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     checks["gc_scopes_installed"] = all_checkpoint_funcs_scoped(model)
     forward_calls["n"] = 0
     mid_step: list[list[torch.Tensor | None]] = []
     reentrant_counts, reentrant_loss = train_step(model, ep_layers, batch, after_forward=mid_step.append)
     reentrant_calls = forward_calls["n"]
-    # WHICH pass recorded. The reentrant checkpoint runs its original forward inside an
-    # ``autograd.Function``, i.e. with grad disabled, and its recompute inside backward with grad
-    # ENABLED — so a grad-mode gate silently moves the recording to the recompute. The totals still
-    # look right, but the counter is then only complete once backward has run, and any step whose
-    # backward is skipped or pruned loses the microbatch entirely. The contract is the original pass.
+    # The contract is the original pass: a counter filled by the recompute is only complete once backward has run.
     checks["reentrant_gc_counts_before_backward"] = counts_match_expected(mid_step[0])
-    # The premise for the whole file: the body really did run twice, so a gate that counted both
-    # passes would have doubled and one that counted neither would be at zero.
+    # The body really ran twice, so a gate counting both passes would double and one counting neither would be at zero.
     checks["reentrant_gc_recomputed_the_body"] = reentrant_calls == 2
     checks["reentrant_gc_counts_every_routed_token"] = counts_match_expected(reentrant_counts)
     checks["reentrant_gc_counts_identically_to_no_gc"] = counters_equal(plain_counts, reentrant_counts)
@@ -207,9 +160,9 @@ def run(ctx):
         float(reentrant_counts[0].sum().item()) if reentrant_counts[0] is not None else -1
     )
 
-    # ── 3. NON-reentrant checkpointing — the mode pipeline parallelism accepts. Re-enabling through
-    # the model's own method also exercises `_rescope_on_reenable`: HF installs a BARE checkpoint
-    # function here, and losing the scope would make the EP layer raise rather than replay.
+    # Non-reentrant, the mode PP accepts. Re-enabling through the model's own method also exercises
+    # `_rescope_on_reenable`: HF installs a bare checkpoint function here, and losing the scope would make the EP layer
+    # raise.
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
     checks["gc_scopes_survive_reenable"] = all_checkpoint_funcs_scoped(model)
     forward_calls["n"] = 0
@@ -219,9 +172,8 @@ def run(ctx):
     checks["non_reentrant_gc_counts_identically_to_no_gc"] = counters_equal(plain_counts, non_reentrant_counts)
     checks["non_reentrant_gc_loss_finite"] = bool(torch.isfinite(torch.tensor(non_reentrant_loss)))
 
-    # ── 4. eval — an evaluation loop routes real tokens through the same layers, and counting them
-    # would fold the eval set's balance into the training bias. HF also gates checkpointing on
-    # ``training``, so this is the no-scope path even with checkpointing enabled.
+    # Eval tokens would fold the eval set's balance into the training bias. HF gates checkpointing on ``training``, so
+    # this is the no-scope path even with checkpointing enabled.
     for layer in ep_layers:
         layer.expert_load_counter = None
     model.eval()
@@ -229,14 +181,12 @@ def run(ctx):
         model(**batch)
     checks["eval_pass_records_nothing"] = all(layer.expert_load_counter is None for layer in ep_layers)
 
-    # ── the shipped shape end to end: GC on + bias_update ⇒ the exported bias MOVES ──────────────
-    # Back to the reentrant mode the EP/CP default forces, then one real step and one callback tick.
+    # GC on + bias_update: the exported bias moves, back on the reentrant mode.
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
     step_counts, _ = train_step(model, ep_layers, batch)
     checks["final_step_recorded_load_under_gc"] = counts_match_expected(step_counts)
 
-    # The callback all-reduces the counters over the world before deriving the sign step, so the
-    # reference must be reduced the same way.
+    # The callback all-reduces the counters over the world before the sign step, so the reference does too.
     global_counts = torch.stack([c.clone() for c in step_counts])
     dist.all_reduce(global_counts, op=dist.ReduceOp.SUM)
     expected_delta = GAMMA * torch.sign(global_counts.mean(dim=-1, keepdim=True) - global_counts)
@@ -244,7 +194,7 @@ def run(ctx):
     checks["load_is_imbalanced_enough_to_move_the_bias"] = bool((expected_delta[0] != 0).any())
 
     before = [layer.balancing_biases.clone() for layer in ep_layers]
-    RouterBiasBalancingCallback(update_rate=GAMMA).on_step_end(None, None, None, model=model)
+    BalancingBiasCallback(update_rate=GAMMA).on_step_end(None, TrainerState(global_step=1), None, model=model)
     after = [layer.balancing_biases for layer in ep_layers]
 
     moved = [(a - b) for a, b in zip(after, before, strict=True)]
@@ -258,8 +208,7 @@ def run(ctx):
     )
     metrics["max_bias_movement"] = float(torch.stack(moved).abs().max().item())
 
-    # The moved tensor is the one an export carries: `state_dict` is what the gathered save, the
-    # vLLM/SGLang weight sync and `save_pretrained` all read.
+    # `state_dict` is what the gathered save, the weight sync and `save_pretrained` all read.
     exported = model.state_dict()
     bias_keys = [key for key in exported if key.endswith("mlp.router.bias")]
     checks["bias_is_in_the_exported_state_dict"] = len(bias_keys) == NUM_LAYERS

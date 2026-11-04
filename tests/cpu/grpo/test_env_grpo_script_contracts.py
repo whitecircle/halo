@@ -1,12 +1,12 @@
 #!/usr/bin/env python
-"""environmental_grpo.py script contracts: honest prompt conditioning + context accounting.
+"""grpo/environmental.py script contracts: honest prompt conditioning + context accounting.
 
 - ``system_prompt`` must be REJECTED at startup: the environment builds the rollout conversation
   (its own system prompt + tool schema) from only the dataset's user prompt, so a YAML
   ``system_prompt`` is a silent no-op for conditioning (it only distorts the prompt-length filter).
 - ``measure_env_prompt_overhead`` measures the environment's real preamble (system prompt + tool
-  schema) so the startup context-window check validates the prompt the model actually sees, with a
-  conservative fallback when the template cannot render it.
+  schema) so the startup context-window check validates the prompt the model actually sees, and raises
+  when the template cannot render it rather than assuming a margin.
 - ``process_dataset`` carries the ``answer`` column where the dataset has one and continues where it
   does not: whether an answer is required is the environment's ``requires_answer`` declaration, which
   the trainer gates on. An ``answer_field`` renamed away from the default still has to name a real
@@ -19,42 +19,30 @@ import logging
 import re
 import sys
 import types
-from pathlib import Path
 from unittest import mock
 
 import pytest
 import yaml
-from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
-from src.args.environmental_grpo_args import EnvironmentalGRPOScriptArguments
-from src.configs.async_training_config import AsyncTrainingConfig
-from tests.common.utils import load_script_module
-
-PartialState()  # the script logs through accelerate, which refuses to log without it
-
-_REPO_ROOT = Path(__file__).resolve().parents[3]
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRPOScriptArguments
+from tests.common.repo import REPO_ROOT, load_script_module
 
 
 @pytest.fixture(scope="module")
 def env_grpo_module():
-    return load_script_module("scripts/training/environmental_grpo.py", "halo_test_environmental_grpo")
-
-
-# system_prompt is rejected loudly (it cannot condition env rollouts)
+    return load_script_module("scripts/training/grpo/environmental.py", "halo_test_environmental_grpo")
 
 
 def test_system_prompt_rejected_at_startup(env_grpo_module, tmp_path):
-    """No env-GRPO config declares ``system_prompt`` — the environment owns the rollout's system
-    turn — so it must reach the parser's strict unknown-key check rather than being absorbed and
-    silently skewing only the prompt-length filter."""
+    """The environment owns the system turn; absorbed, ``system_prompt`` would only skew the prompt-length filter."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
         "bf16: false\nuse_cpu: true\nenvironment_type: code_contests\nsystem_prompt: 'be helpful'\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         pytest.raises(ValueError, match="system_prompt"),
     ):
@@ -62,15 +50,14 @@ def test_system_prompt_rejected_at_startup(env_grpo_module, tmp_path):
 
 
 def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_path):
-    """The registry refuses an unregistered name, naming the available ones; the probe env that hits
-    it is built ahead of the distributed init and the model load."""
+    """The probe env that hits the registry's refusal is built ahead of the distributed init and the model load."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
         "bf16: false\nuse_cpu: true\nenvironment_type: no_such_env\n"
     )
     with (
-        mock.patch("src.training.parser.install_log_tee"),
+        mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
         pytest.raises(ValueError, match=r"Unknown environment type: 'no_such_env'.*code_contests"),
@@ -78,12 +65,8 @@ def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_pat
         env_grpo_module.main()
 
 
-# Environment prompt overhead measurement
-
-
 class _Tokenizer:
-    """Chat template whose render length is exactly the char count of what it was given, template
-    variables included."""
+    """Render length is the char count of what the template was given, template variables included."""
 
     def apply_chat_template(
         self, messages, tools=None, tokenize=False, add_generation_prompt=False, **template_kwargs
@@ -106,13 +89,11 @@ def test_overhead_counts_system_prompt_and_tool_schema(env_grpo_module):
     bare = env_grpo_module.measure_env_prompt_overhead(_env(), tok, {})
     assert bare >= len("SYSTEM PROMPT")
     with_tools = env_grpo_module.measure_env_prompt_overhead(_env(tools=[{"name": "python_repl"}]), tok, {})
-    assert with_tools > bare  # the rendered tool schema is part of the real rollout prompt
+    assert with_tools > bare
 
 
 def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
-    """The rollout request carries the run's template variables and the effort steer, and a template's
-    preamble depends on them (gpt-oss renders the effort line, Qwen3.x its thinking scaffold), so the
-    probe must render under the same kwargs or it budgets a prompt the model never sees."""
+    """The preamble depends on these kwargs (gpt-oss renders the effort line, Qwen3.x its thinking scaffold)."""
     tok = _Tokenizer()
     bare = env_grpo_module.measure_env_prompt_overhead(_env(), tok, {})
     steered = env_grpo_module.measure_env_prompt_overhead(
@@ -122,16 +103,15 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
 
 
 def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
-    """The probe renders the budget variable the rollout requests carry, which is the episode's bound
-    per-turn cap: the level's 36000 clamped to the run's 18000, the level's own 12000 where the run
-    sets no cap, and nothing but the level and that cap, flagged where the budget is soft."""
+    """The budget variable the rollout requests carry is the episode's bound per-turn cap: the level's 36000 clamped
+    to the run's 18000, the level's own 12000 where the run sets no cap."""
     env = types.SimpleNamespace(
         reasoning_effort="high",
         thinking_budget_for_effort=lambda level: 36000,
         thinking_budget_enforced=lambda level: True,
     )
     clamped = env_grpo_module.probe_template_kwargs(
-        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=18000), env
+        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=18000), env
     )
     assert clamped == {"reasoning_effort": "high", "reasoning_budget": 18000}
     level = types.SimpleNamespace(
@@ -139,48 +119,45 @@ def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
         thinking_budget_for_effort=lambda level: 12000,
         thinking_budget_enforced=lambda level: True,
     )
-    assert env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), level) == {
+    assert env_grpo_module.probe_template_kwargs(AsyncRolloutConfig(rollout_max_tokens=30000), level) == {
         "reasoning_effort": "high",
         "reasoning_budget": 12000,
     }
-    # A soft budget renders flagged, as its requests carry it, under the run's ceiling.
+    # A soft budget renders flagged, as its requests carry it.
     soft = types.SimpleNamespace(
         reasoning_effort="high",
         thinking_budget_for_effort=lambda level: 12000,
         thinking_budget_enforced=lambda level: False,
     )
     assert env_grpo_module.probe_template_kwargs(
-        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=21800), soft
+        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=21800), soft
     ) == {"reasoning_effort": "high", "reasoning_budget": 12000, "reasoning_budget_soft": True}
     # The probe binds under the run's own bounds, so a soft budget past the ceiling an answer bound leaves is refused
     # before the servers are up, as every episode would be.
     assert env_grpo_module.probe_template_kwargs(
-        AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=8192), soft
+        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=8192), soft
     )["reasoning_budget_soft"]
     with pytest.raises(ValueError, match="must sit below its ceiling"):
         env_grpo_module.probe_template_kwargs(
-            AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=20000), soft
+            AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=20000), soft
         )
     # A level whose budget fills the turn binds no episode, and the probe says so before the servers are up.
     with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        env_grpo_module.probe_template_kwargs(AsyncTrainingConfig(rollout_max_tokens=30000), env)
+        env_grpo_module.probe_template_kwargs(AsyncRolloutConfig(rollout_max_tokens=30000), env)
 
 
 def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
-    overhead = env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {})
-    assert overhead >= 0
-    assert overhead != env_grpo_module.FALLBACK_ENV_PROMPT_OVERHEAD
+    assert env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {}) == 0
 
 
 def test_tools_discovered_on_reset_are_warned_as_missing(env_grpo_module, caplog):
-    """An MCP environment learns its tools when its first reset connects, and the probe env is never reset,
-    so the overhead omits their schema and the run must say so. An environment whose tools are declared up
-    front has nothing missing, with no tools (closed-book ``exam_qa``) or no tool protocol at all."""
+    """An MCP environment learns its tools at its first reset and the probe env is never reset, so the overhead omits
+    their schema."""
 
     def warned():
         return [r for r in caplog.records if "tools arrive when its first reset" in r.getMessage()]
 
-    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.logger.name):
+    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.name):
         for declared in (None, []):
             env_grpo_module.measure_env_prompt_overhead(_env(tools=declared), _Tokenizer(), {})
         assert not warned()
@@ -188,39 +165,31 @@ def test_tools_discovered_on_reset_are_warned_as_missing(env_grpo_module, caplog
     assert warned()
 
 
-def test_overhead_falls_back_conservatively_when_render_fails(env_grpo_module):
+def test_overhead_raises_when_the_template_cannot_render_the_preamble(env_grpo_module):
+    """The rollouts render the same preamble, so the run fails at startup and never checks an assumed margin."""
     broken = types.SimpleNamespace(
         apply_chat_template=mock.Mock(side_effect=TypeError("no tools support")),
     )
-    overhead = env_grpo_module.measure_env_prompt_overhead(_env(), broken, {})
-    assert overhead == env_grpo_module.FALLBACK_ENV_PROMPT_OVERHEAD
-
-
-# the docstring's launch examples must be runnable
+    with pytest.raises(TypeError, match="no tools support"):
+        env_grpo_module.measure_env_prompt_overhead(_env(), broken, {})
 
 
 def _docstring_launches(docstring: str) -> list[tuple[int, str]]:
-    """``(nproc_per_node, example config path)`` for every launch block in the module docstring."""
     blocks = re.findall(r"--nproc_per_node=(\d+)(.*?)(examples/\S+\.yaml)", docstring, flags=re.S)
     return [(int(nproc), path) for nproc, _, path in blocks]
 
 
 def test_docstring_launch_examples_are_runnable(env_grpo_module):
-    """A launch line whose world size cannot host the config's own ``expert_parallel_size`` is
-    rejected by ``ParallelismConfig`` before the first step, so a docstring carrying one teaches a
-    command that cannot run. Every cited config must also still exist."""
+    """``ParallelismConfig`` rejects a launch whose world size cannot host the config's ``expert_parallel_size``."""
     launches = _docstring_launches(env_grpo_module.__doc__)
     assert launches, "premise: the docstring shows at least one launch command"
     for nproc, relative in launches:
-        config = _REPO_ROOT / relative
+        config = REPO_ROOT / relative
         assert config.is_file(), f"the docstring cites {relative}, which does not exist"
         ep_size = int(yaml.safe_load(config.read_text()).get("expert_parallel_size", 1))
         assert ep_size <= nproc and nproc % ep_size == 0, (
             f"{relative} declares expert_parallel_size={ep_size}, which --nproc_per_node={nproc} cannot host"
         )
-
-
-# Dataset columns: the answer column is carried, not demanded
 
 
 @pytest.fixture
@@ -230,8 +199,6 @@ def _isolated_datasets_cache(tmp_path, monkeypatch):
 
 
 class _ChatTokenizer:
-    """Enough tokenizer for the prompt render: a template, the specials probe, a decode."""
-
     bos_token_id = None
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=True, **kwargs):
@@ -254,24 +221,21 @@ def _raw(**columns) -> DatasetDict:
 
 
 def test_the_default_answer_field_does_not_demand_the_column(env_grpo_module, _isolated_datasets_cache):
-    """Demanding it of every dataset makes each environment that grades without an answer —
-    the native protocol, swe, mcp — unlaunchable as configured."""
+    """Demanding it would leave every environment that grades without an answer (native, swe, mcp) unlaunchable."""
     processed = env_grpo_module.process_dataset(_script_args(), _ChatTokenizer(), _raw())
 
     assert processed["train"].column_names == ["prompt"]
     assert processed["train"][0]["prompt"] == [{"role": "user", "content": "solve it"}]
 
 
-def test_a_renamed_answer_field_must_still_name_a_real_column(env_grpo_module, _isolated_datasets_cache):
-    """An explicit rename is a claim about the dataset: resolving to no column is a typo, and the run
-    would train with no ground truth at all."""
+def test_a_renamed_answer_field_must_still_name_a_real_column(env_grpo_module):
+    """Resolving to no column is a typo, and the run would train with no ground truth."""
     with pytest.raises(ValueError, match="answer_field='solution'"):
-        env_grpo_module.process_dataset(_script_args(answer_field="solution"), _ChatTokenizer(), _raw())
+        env_grpo_module.reject_missing_carried_columns(_script_args(answer_field="solution"), _raw())
 
 
 def test_a_renamed_answer_field_is_carried_into_the_answer_column(env_grpo_module, _isolated_datasets_cache):
-    """Guards the raise above: the rename that DOES resolve still lands under the pinned name the
-    environments read their context from."""
+    """Environments read their context from the pinned ``answer`` name."""
     processed = env_grpo_module.process_dataset(
         _script_args(answer_field="solution"), _ChatTokenizer(), _raw(solution=["42"])
     )
@@ -281,12 +245,11 @@ def test_a_renamed_answer_field_is_carried_into_the_answer_column(env_grpo_modul
 
 
 def test_the_context_check_takes_the_episode_budget_where_it_binds_first(env_grpo_module):
-    """The worst case the servers' context is checked against: ``max_turns`` turns of the turn cap, or the
-    episode output budget when it is smaller — a budget above the product changes nothing."""
-    cfg = AsyncTrainingConfig(rollout_max_tokens=30000, rollout_max_episode_tokens=131072)
+    """The servers' context is checked against ``max_turns`` turns of the turn cap, or a smaller episode budget."""
+    cfg = AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_episode_tokens=131072)
     assert env_grpo_module.worst_case_generation(cfg, 16) == 131072
     assert env_grpo_module.worst_case_generation(cfg, 4) == 120000
-    assert env_grpo_module.worst_case_generation(AsyncTrainingConfig(rollout_max_tokens=30000), 16) == 480000
+    assert env_grpo_module.worst_case_generation(AsyncRolloutConfig(rollout_max_tokens=30000), 16) == 480000
 
 
 if __name__ == "__main__":

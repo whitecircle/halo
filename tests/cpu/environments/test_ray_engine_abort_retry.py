@@ -1,21 +1,14 @@
 #!/usr/bin/env python
-"""An engine abort is re-issued, never stepped: the fragment is the engine's doing, not the policy's.
-
-SGLang's sync pause aborts every in-flight request, and ``finish_reason: abort`` is an engine-cut
-reason — stepping the env with it spends the episode's length-cutoff recovery cap and, past the cap,
-truncates the episode, all for a cut the model did not make. The actor re-issues the turn for the
-same observation, bounded by ``max_retries`` aborts per turn; past that the episode errors into a
-masked row.
-
-    python tests/cpu/environments/test_ray_engine_abort_retry.py
-"""
+"""An engine abort is re-issued, never stepped: stepping it spends the recovery cap on a cut the model did not make.
+The actor re-issues the turn for the same observation, bounded by ``max_retries`` aborts per turn, and past that
+the episode errors into a masked row."""
 
 import pytest
 
-from src.configs.rollout_config import RolloutConfig
-from src.environments.episode import TurnGeneration
-from src.environments.ray_actors import EnvironmentActor
-from src.inference.response import FINISH_REASON_ABORT
+from halo.environments.episode import TurnGeneration
+from halo.environments.ray_actors import EnvironmentActor
+from halo.environments.rollout_config import RolloutConfig
+from halo.inference.response import FINISH_REASON_ABORT
 
 _OBSERVATION = [{"role": "user", "content": "2+2?"}]
 
@@ -31,9 +24,6 @@ def _scripted(actor, finish_reasons: list[str | None]):
     """Make the actor's engine call answer ``finish_reasons`` in order; ``None`` is a completed turn."""
     served: list[list[dict]] = []
 
-    async def _client():
-        return None
-
     async def _generate(
         client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
     ):
@@ -43,7 +33,7 @@ def _scripted(actor, finish_reasons: list[str | None]):
             return TurnGeneration("partial reas", [], "", 3, finish_reason=reason)
         return TurnGeneration("final answer: 4", [], "", 5, finish_reason=reason)
 
-    actor._get_http_client = _client
+    actor._http_client = None
     actor._generate = _generate
     return served
 
@@ -69,7 +59,7 @@ async def test_aborts_past_max_retries_error_the_episode():
 
     assert len(served) == 2, "max_retries bounds the re-issues"
     assert result.error and "aborted the same turn 2 times" in result.error
-    assert result.total_reward == 0.0 and not result.success
+    assert result.total_reward == 0.0 and not result.terminated_naturally
 
 
 async def test_max_retries_zero_tolerates_no_abort():

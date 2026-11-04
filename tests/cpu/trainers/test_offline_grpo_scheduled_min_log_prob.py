@@ -1,14 +1,6 @@
 #!/usr/bin/env python
-"""Test that offline GRPO's loss reads the SCHEDULED ``min_log_prob`` the callback actually set.
-
-``VariableSchedulerCallback`` unwraps DDP/accelerate (``target_obj.module``) before setting the
-attribute, so the scheduled value lands on the trainer's unwrapped ``self.model``. Reading it off
-the wrapped ``model`` handed to ``compute_loss`` finds nothing and silently falls back to the
-config's start value for the whole run, while ``log()`` (which reads ``self.model``) reports the
-ramp — the loss and the logged metric disagree.
-
-Run: python tests/cpu/trainers/test_offline_grpo_scheduled_min_log_prob.py
-"""
+"""Offline GRPO's loss reads the scheduled ``min_log_prob`` the callback set on the unwrapped model.
+Read off the wrapped ``model``, it would silently stay at the config's start value while ``log()`` reports the ramp."""
 
 import contextlib
 import types
@@ -16,15 +8,15 @@ import types
 import pytest
 import torch
 
-from src.callbacks.variable_scheduler import VariableSchedulerCallback
-from src.trainers.grpo.offline import OfflineGRPOTrainer
+from halo.callbacks.variable_scheduler import VariableSchedulerCallback
+from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 _CONFIG_START = -2.3
 _SCHEDULED = -0.5
 
 
 class _Sentinel(Exception):
-    """Raised from the stubbed log-prob call to end compute_loss at the point of interest."""
+    """Raised from the stubbed objective to end compute_loss at the point of interest."""
 
 
 def _inputs(batch=2, prompt_len=3, completion_len=4):
@@ -38,21 +30,17 @@ def _inputs(batch=2, prompt_len=3, completion_len=4):
 
 
 def _trainer_and_wrapped(*, scheduled_on_module):
-    """A stub trainer plus the DDP-style wrapper compute_loss receives.
-
-    ``self.model`` is the unwrapped module (what the callback writes to); ``wrapped.module`` is it,
-    mirroring DDP, and the wrapper itself carries no ``min_log_prob``.
-    """
+    """``self.model`` is the unwrapped module the callback writes to; the DDP-style wrapper has no ``min_log_prob``."""
     unwrapped = types.SimpleNamespace()
     wrapped = types.SimpleNamespace(module=unwrapped)
-    me = types.SimpleNamespace(
-        model=unwrapped,
-        min_log_prob=_CONFIG_START,
-        # compute_loss opens the (inert here) QLoRA bf16 autocast region around the forwards.
-        _peft_has_been_casted_to_bf16=False,
-        accelerator=types.SimpleNamespace(device=torch.device("cpu")),
-        parallelism_config=types.SimpleNamespace(is_cp_mode=False),
-    )
+    me = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
+    me.model = unwrapped
+    me.min_log_prob = _CONFIG_START
+    me.beta = 0.0
+    # compute_loss opens the (inert here) QLoRA bf16 autocast region around the forwards.
+    me._peft_has_been_casted_to_bf16 = False
+    me.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
+    me.parallelism_config = types.SimpleNamespace(is_cp_mode=False)
 
     if scheduled_on_module:
         callback = VariableSchedulerCallback(
@@ -65,13 +53,14 @@ def _trainer_and_wrapped(*, scheduled_on_module):
 
     seen = {}
 
-    def _fake_logps(_model, *_args, min_log_prob=None, **_kwargs):
+    def _fake_objective(_logps, _advantages, _ref_logps, min_log_prob):
         seen["min_log_prob"] = min_log_prob
         raise _Sentinel
 
-    me._get_per_token_logps = _fake_logps
-    # compute_loss is the autocast wrapper; the body under test is the inner half.
-    me._compute_loss_inner = types.MethodType(OfflineGRPOTrainer._compute_loss_inner, me)
+    me._get_per_token_logps = lambda _model, input_ids, _mask, logits_to_keep: torch.zeros(
+        input_ids.size(0), logits_to_keep
+    )
+    me._token_objective = _fake_objective
     return me, wrapped, seen
 
 
@@ -83,7 +72,6 @@ def _min_log_prob_used(*, scheduled_on_module):
 
 
 def test_callback_writes_to_the_unwrapped_module():
-    # Guards the premise: the scheduler unwraps, so the attribute is NOT on the wrapper.
     _, wrapped, _ = _trainer_and_wrapped(scheduled_on_module=True)
     assert wrapped.module.min_log_prob == _SCHEDULED
     assert not hasattr(wrapped, "min_log_prob")
