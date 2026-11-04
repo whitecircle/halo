@@ -141,11 +141,11 @@ def _relative_errors(measured: tuple[torch.Tensor, ...], reference: tuple[torch.
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--seq", type=int, default=None, help="tokens; required without --mask")
-    parser.add_argument("--heads", type=int, default=64)
-    parser.add_argument("--head_dim", type=int, default=256)
+    parser.add_argument("--heads", type=int, default=64, help="attention heads of the synthetic inputs")
+    parser.add_argument("--head_dim", type=int, default=256, help="query, key and value width per head")
     parser.add_argument("--mask", default=None, help="a saved boolean [1, 1, T, T] mask")
     parser.add_argument("--iters", type=int, default=5, help="timed iterations after the dropped first one")
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=0, help="seed of the random inputs")
     parser.add_argument("--out", default=None, help="append each JSON record to this file")
     args = parser.parse_args()
     if args.mask is None and args.seq is None:

@@ -1,6 +1,6 @@
 # NVIDIA Nemotron 3.5 Super VL (nemotron_h, 120B total, 113B of it routed experts) — EP=8 full fine-tuning SFT of the
 # text tower on UltraChat 200K, one 8x B300 node. The hub release is plain bf16, no conversion step.
-# Measured on 8x B300: 3,057 tok/s per rank and 186-202 GB reserved by rank at this max_length; --max_length=32000
+# Measured on 8x B300: 3,054 tok/s per rank and 185-202 GB reserved by rank at this max_length; --max_length=32000
 # reached 268-283 GB, 99.4% of the top rank's device. Gradient checkpointing (on by default) is what makes it fit.
 # See agent-docs/models/nemotron-h.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>

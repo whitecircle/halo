@@ -20,7 +20,7 @@ DEVICE_GB = 288
 # (group, recipe, tokens per rank, allocated low, allocated high, reserved low, reserved high, label)
 MEMORY_ROWS = (
     ("Super VL", "LoRA", "16,384", 92, 94, 118, 165, None),
-    ("Super VL", "Full fine-tune", "8,192", 169, 171, 186, 202, None),
+    ("Super VL", "Full fine-tune", "8,192", 168, 169, 185, 202, None),
     ("Super VL", "Full fine-tune", "about 31,700", 227, 235, 268, 283, "top rank 99.4%"),
     ("Super VL", "Frozen experts", "about 48,800", 188, 194, 241, 283, "top rank 99%"),
     ("Super VL", "Full fine-tune on images", "about 6,790", 168, 168, 184, 188, None),
@@ -28,7 +28,7 @@ MEMORY_ROWS = (
     ("Super VL", "SMPO, full pairs", "2 × 4,096", 170, 170, 178, 184, None),
     ("Super VL", "SMPO, its Tulu rows", "up to 2 × 4,096", 157, 161, 165, 170, None),
     ("Super VL", "Offline GRPO", "the recipe's rows", 164, 165, 169, 179, None),
-    ("Lightning", "Full fine-tune", "8,192", 51.2, 51.6, 55, 60, None),
+    ("Lightning", "Full fine-tune", "8,192", 50.9, 51.4, 55, 60, None),
 )
 
 

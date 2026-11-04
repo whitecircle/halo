@@ -2,7 +2,7 @@
 
 `DeepseekV4ForCausalLM` (transformers-native `deepseek_v4`) — MoE with a hash-routing bootstrap: `mlp_layer_types` schedules each MoE layer as `hash_moe` or `moe` (default: the first three `hash_moe`, the rest `moe`). A `hash_moe` layer selects experts via a frozen `tid2eid[input_ids]` table; a `moe` layer uses `sqrtsoftplus` top-k routing with a `noaux_tc` correction bias. Each layer carries a shared expert and clamped SwiGLU experts (`swiglu_limit`).
 
-Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel residual streams) and three attention layer types (sliding window / CSA + Lightning Indexer / HCA) over shared-KV MQA with `head_dim=512` and learnable sinks. V4-Flash: 43 layers, 256 routed experts, top-k=6. On CUDA the hyper-connections, their mixes and the final `hc_head` collapse run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md).
+Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel residual streams) and three attention layer types (sliding window / CSA + Lightning Indexer / HCA) over shared-KV MQA with `head_dim=512` and learnable sinks. V4-Flash: 43 layers, 256 routed experts, top-k=6. On CUDA the hyper-connections, their mixes and the final `hc_head` collapse run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md). Those kernels have run on tiny models only, so the V4-Flash release has no rate.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Why each axis runs or not:
 

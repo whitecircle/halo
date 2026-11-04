@@ -10,7 +10,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
     No text layer applies a position encoding: the config refuses a non-zero `qk_rope_head_dim`, and the top-2048 `Glm5NextTextIndexer` applies no rotary either, so position reaches a DSA layer only through the indexer's pool boundaries. `layer_types` spells `"linear_attention"`, which is what the CP gate reads.
 
-- **Hyper-connections** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`, `hc_eps: 1e-6`) — per-layer `hc_attn_*` / `hc_ffn_*` tensors route a 4×-widened residual state across layers; the mHC mapping (Sinkhorn-projected combine matrix) computes in fp32 by upcasting its inputs and `fn` inside the forward, and the model declares `_is_stateful = True`. On CUDA the mapping and the mix run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md).
+- **Hyper-connections** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`, `hc_eps: 1e-6`) — per-layer `hc_attn_*` / `hc_ffn_*` tensors route a 4×-widened residual state across layers; the mHC mapping (Sinkhorn-projected combine matrix) computes in fp32 by upcasting its inputs and `fn` inside the forward, and the model declares `_is_stateful = True`. On CUDA the mapping and the mix run on the [hyper-connection kernels](../optimization/hyper-connection-kernels.md), and together they take about a sixth of their time on upstream's forwards ([Throughput](#throughput)).
 - **MoE** — 288 routed experts, sigmoid top-8 `noaux_tc` (`n_group` 1 → plain top-k), `norm_topk_prob: true`, `routed_scaling_factor: 2.5`, 1 shared expert, `moe_intermediate_size` 2048; the first 3 layers are dense.
 
     `swiglu_limit: 10.0` clamps the GLU; the EP layer runs its own fused Triton clamped SwiGLU (`GluCombine.clamped_silu`, bound as a runtime kernel argument), latched into the generic fused-GLU seam the same way DeepSeek-V4 does ([GLM-4 → Fused SwiGLU](glm4.md#fused-swiglu)).
@@ -51,7 +51,7 @@ ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves
 
 EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (hc tensors, the KDA `forget_gate` family, a three-source `q/k/v_conv1d → conv1d` merge, per-expert projections), and the lazy loaders plan their keys on transformers' `glm5_next` conversion, as `from_pretrained` does, while fusing only this rank's experts, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py`).
 
-There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), up to ~95 GB of file-backed RSS per rank while its shard handles are open. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
+There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), a 73–75 GiB host RSS peak per rank while its shard handles are open, and 2.3 GiB after. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 
 RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next`, but their expert loaders take only per-expert keys where the gather emits the fused pair, and no online update into either has been validated.
 
@@ -63,9 +63,32 @@ The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's ex
 
 Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
 
-The 11 DSA layers keep `config._attn_implementation == "sdpa"` and its boolean `[B, 1, S, S]` mask, but on CUDA the `sdpa` slot of `modeling_glm5_next` holds `masked_matmul_attention` (`halo/models/attention/masked_matmul.py`, [how it works](../optimization/flash-attention.md#masked-matmul-attention)). Any call it does not serve goes to the library's SDPA, and `HALO_DSA_MATMUL=0` keeps stock SDPA throughout. A [tree](#tree-packing) forward carrying a plan attends in its own forward and never reaches this slot.
+The 11 DSA layers keep `config._attn_implementation == "sdpa"` and its boolean `[B, 1, S, S]` mask, but on Blackwell the `sdpa` slot of `modeling_glm5_next` holds `masked_matmul_attention` (`halo/models/attention/masked_matmul.py`, [how it works](../optimization/flash-attention.md#masked-matmul-attention)). Any call it does not serve goes to the library's SDPA. `HALO_DSA_MATMUL` defaults off on other GPUs, and `0` keeps stock SDPA throughout. A [tree](#tree-packing) forward carrying a plan attends in its own forward and never reaches this slot.
 
-Measured against stock mem-efficient SDPA: MEASUREMENT PENDING (`scripts/profiling/benchmark_dsa_attention.py`).
+A DSA query reads about 1,800 to 1,900 keys, at most 2,051, under a mask as wide as the row. Torch's mem-efficient kernel is a general one: it scores every key of the row, and its backward costs about 7.5× its forward. The matmul kernel runs a forward, its recompute and a backward 4.95× faster at 8k and 5.13× at 16k ([numbers](../optimization/flash-attention.md#masked-matmul-attention)).
+
+On a 7-layer cut at `ep1` and 32,752 tokens, the per-token gap to an fp32 reference reads 0.0195 with both kernels on and 0.0232 with neither, and top-k disagreement 1.00% against 1.34%. With hyper-connection kernels off, the DSA kernel's forward is bit-identical to SDPA's.
+
+## Throughput
+
+Both kernels on, with torch's general kernel and upstream's hyper-connections in parentheses: B300, reentrant checkpointing (non-reentrant on `pp2 × ep8`, which refuses reentrant), padded rows of real text, one run per arm.
+
+| Run | Layout, `max_length` | tok/s/GPU | s/step | Peak allocated, GiB |
+|---|---|---:|---:|---:|
+| LoRA, one 8-GPU machine | `ep8`, 8,192 | 2,840 (1,282) | 21.89 (48.52) | 133.0–133.5 (132.3–134.4) |
+| | `ep8`, 16,384 | 2,390 (893) | 51.93 (138.89) | 175.6–176.8 (176.6–177.8) |
+| Full fine-tune, two 8-GPU machines | `ep16` global, 8,192 | 1,504 (913) | 20.63 (33.99) | 212.7–214.1 |
+| | `pp2 × ep8`, 8,192 | 2,423 (about 1,060) | 12.82 (29.29) | 218.0–218.7 / 197.5–197.9 |
+
+- The PP rate counts attended tokens ([logged rates count padding](../parallelism/pipeline-parallelism.md#measured-throughput)). PP leads `ep16` by 1.61×, 1.16× on the general kernels.
+- `ep8` with DP runs out of memory in the first optimizer step, about 3 minutes in, since no gate refuses it first. At 40.2B trainable per rank, AdamWBF16's state takes the allocation to 243–250 GiB of 267.7.
+- The LoRA rows are long real-text rows averaging about 7,760 and 15,520 tokens, rendered with `glm-chat.jinja`. The shipped recipe reads `ultrachat_200k` at about 1,140 tokens a row under `glm5-chat.jinja`; it ran 5 steps on a cold cache with no steady rate to read, and its loss and rate do not compare with these rows.
+- Raising `max_length` still costs tok/s, 16% from 8k to 16k against 30% on the general kernels: a query's keys are capped at 2,051, while each tile's forward still scores its crop up to its last selected key.
+- MFU charges a DSA layer `index_topk`, 2,048 keys, plus the pooled indexer.
+
+![One LoRA step at EP8 and 8,192 tokens by part, sorted by what each takes now: DSA attention 21.91 s to 4.63 s, MoE compute 4.50 s on both, MoE router, dispatch and combine 3.99 s to 3.67 s, KDA conv, projections, gate and output 3.28 s to 3.27 s, KDA scan 3.06 s on both, DSA projections, indexer and mask 1.84 s to 1.83 s, everything else 1.97 s to 1.78 s, hyper-connection weights 7.17 s to 1.31 s, hyper-connection mix 3.39 s to 0.44 s](../assets/benchmarks/glm_step_split.png)
+
+On a per-part clock, which adds about 2.6 s, that step takes 24.5 s against 51.1. DSA attention (18.9%) and MoE compute (18.4%) are its largest parts, then MoE router, dispatch and combine (15.0%), KDA conv, projections, gate and output (13.4%) and the KDA scan (12.5%). Every expert call runs grouped GEMM, with no per-expert loop.
 
 ## Limitations
 
@@ -93,9 +116,9 @@ assistant_message_template: "<|assistant|>"
 ## Configs
 
 `examples/sft/glm5_next/glm-5.3-flash-ultrachat-ep-lora.yaml` trains LoRA + expert-LoRA at EP=8 on one
-8-GPU node, the only shape expected to fit one 8×Blackwell node (~110 GB static of a 288 GB card,
-unmeasured). Full fine-tuning puts ~38B of experts on each rank, ~304 GB at 8 B/param. It renders with
+8-GPU machine: 105.6 GiB allocated and 109.4 GiB on the device after a load of about 45 s. A save with
+`merge_expert_lora_on_save` takes about 8 minutes and 612 GiB on disk. It renders with
 `glm5-chat.jinja`, GLM-5's own non-thinking turn ([Tree packing](#tree-packing)); GLM-4's `glm-chat.jinja`
 writes a lone `</think>` GLM-5 never does.
 
-The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).
+The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes two 8-GPU machines ([rates](#throughput)), through `pp2 × ep8` on padded rows or cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

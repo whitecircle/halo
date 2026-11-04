@@ -69,7 +69,7 @@ sequence length to fit.
 
 ## Pipeline parallelism
 
-![Pipeline-parallel throughput on one host and on two nodes, with gradient checkpointing on and off](../agent-docs/assets/benchmarks/pp_throughput.png)
+![Tokens/s/GPU with and without pipeline parallelism: on two 8-GPU machines over a fast link PP runs 4.0% below dp16 and 15.9% below ep8 with DP; forced onto plain TCP sockets it leads dp16 by 13.8×; on one machine it runs 8.5% below dp8 and 9.2% above ep8; on GLM-5.3-Flash it leads ep16 by 1.61×](../agent-docs/assets/benchmarks/pp_throughput.png)
 
 `pipeline_parallel_size` splits the decoder layers into stages, each a whole
 number of NVLink domains, so only boundary activations cross nodes. A run needs
@@ -81,12 +81,19 @@ and Qwen3.8-Flash-Next included, are in the
 [Supported matrix](supported-matrix.md#model-families); any other model is
 refused by name before a weight loads.
 
+- **When it pays.** Between machines on a fast link, PP is not a speedup for a model
+  that fits on one machine: it runs 4.0% below `dp16` and 15.9% below `ep8`
+  with DP. It leads on a slow link (13.8× over `dp16` forced onto plain TCP
+  sockets), over layouts that cross the link with experts (3.82× over `ep16`), and
+  where experts and optimizer state do not fit one machine: GLM-5.3-Flash runs
+  1.61× over `ep16`, and `ep8` with DP runs out of memory
+  ([rows](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗).
 - **Batches.** `pipeline_microbatches` replaces gradient accumulation and must
   divide `per_device_train_batch_size`. Every batch pads to `max_length`, so use
   `packing` with one packed row per microbatch. Inkling, GLM-5 Next and
   DeepSeek-V4 refuse packing under PP and train on padded rows.
 - **Gradient checkpointing.** Turn it off where memory allows. The shipped
-  recipes do, and run 18–22% faster than with it, at about 1.9× the allocated
+  recipes do, and run 19–23% faster than with it, at about twice the allocated
   peak. Reentrant checkpointing is refused; `use_reentrant: false` works.
 - **Refused:** LoRA and any PEFT model, QLoRA, tied embeddings, `accelerate
   launch`, `padding_free`, `torch_compile`, Muon and FlashAdamW, `save_sharded_ep`,

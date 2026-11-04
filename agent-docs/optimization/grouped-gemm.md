@@ -6,9 +6,11 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 ## Performance
 
-Every figure on this page is from Halo 1.1.0 or earlier, except the two 1.2.0 rows that open this section and Nemotron-H's backward below.
+Every figure on this page is from Halo 1.1.0 or earlier, except the 1.2.0 rows that open this section and Nemotron-H's backward below.
 
 **Routing sort (1.2.0).** The counting sort against the torch construction, which runs about 31 small aten ops per MoE layer pass. On 8× B300 at the [1.2.0 comparison's shapes](throughput-benchmarks.md#120-against-110), three rounds, peaks equal, step-1 loss bitwise: gpt-oss-20b ep8 × cp2 **+10.6%**, Qwen3.5-35B-A3B ep8 +9.0%, gpt-oss-20b ep2 +6.8%, ep8 × tp2 +5.7%, ep8 +2.2%.
+
+**No multiple-of-8 cliff (1.2.0).** A plain bf16 GEMM off a multiple of 8 runs [3–10× slower](../reference/gpu-training-theory.md#4-how-a-matmul-runs-tiles-kernels-launches); expert row counts off one cost grouped GEMM at most 1.23×, on GLM-5.3-Flash's 4096-wide `gate_up` product.
 
 **Receive counts (1.2.0).** Expert compute sized from DeepEP's host-side receive counts, with no device read-back, on the same shapes: gpt-oss-20b ep4 × etp2 +6.6%, Qwen3.5-35B-A3B ep8 +2.4%, every other row within 0.5%.
 

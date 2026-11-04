@@ -25,11 +25,20 @@ No shape of the twelve benchmarked against 1.1.0 ran slower. Peak memory matched
 hold two decoder layers per shard group. A bigger batch goes
 much higher: on 1.1.0 or earlier, GPT-OSS 20B reached about 28,700 at `ep1` (batch 4, no
 checkpointing) and Qwen3.5-35B-A3B about 16,400 at `ep2` (batch 4, checkpointing
-on). Pipeline parallelism across two nodes reaches 17,740 on Qwen3-8B
-(`pp2`) and 15,500 on GPT-OSS 20B (`pp2 × ep8`), without checkpointing. More
-shapes:
+on). On real conversations at `ep8`, the packed Qwen3.5-35B-A3B recipe reaches
+17,225 at 33,000 tokens per row. Pipeline parallelism across two machines reaches
+17,608 on Qwen3-8B (`pp2`) and 15,715 on GPT-OSS 20B (`pp2 × ep8`), without
+checkpointing, which on a fast link is 4.0% and 15.9% below `dp16` and `ep8` with DP.
+More shapes:
 [Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗ ·
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
+
+GLM-5.3-Flash runs two kernels of its own: DeepSeek sparse attention as a tiled
+matmul over the keys a query can reach, and hyper-connections as one launch per
+direction, which DeepSeek-V4 shares. LoRA at `ep8` reaches 2,840 at 8,192 tokens
+and 2,390 at 16,384, against 1,282 and 893 without them; a full fine-tune on two
+8-GPU machines reaches 1,504 at `ep16` and 2,423 at `pp2 × ep8`
+([GLM-5 Next](../agent-docs/models/glm5-next.md#throughput) ↗).
 
 Pick the lowest expert-parallel size that fits, since EP costs throughput. CP
 and the other sharding modes add sequence length and capacity at a cost in tokens
@@ -37,8 +46,10 @@ per second.
 
 Before you judge a number, check `M = per_device_train_batch_size × max_length`.
 On a B300 MoE run it should be at least ~8k; below that throughput is still
-climbing fast. Set `enable_efficiency_metrics: true` to log tokens/s/GPU in your
-own run; it counts a batch that TP, ETP, CP or PP ranks share once.
+climbing fast. Read it on a warm Triton cache too: on a fresh one, a recipe's first
+~20 steps run about 40% of the steady rate while kernels compile. Set
+`enable_efficiency_metrics: true` to log tokens/s/GPU in your own run; it counts a
+batch that TP, ETP, CP or PP ranks share once, and a PP rate also counts padding.
 
 ## Levers that help
 

@@ -24,7 +24,7 @@ of them are MoE.
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; SDPA; the tokenizer ships no pad token |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |
-| [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only |
+| [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only; LoRA fits one 8-GPU machine, a full fine-tune takes two |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
 | [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
 | [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: text tower under EP, ETP and PP; 95 GiB n-gram table in host memory; no online RL; offline GRPO CPU-checked only |

@@ -194,10 +194,12 @@ gpt-oss-20b ep2). Legacy runs 9,826 tok/s/GPU against elastic's 11,896 at ep8 (g
 GC on, 8× B300, [1.2.0](../optimization/throughput-benchmarks.md#120-against-110));
 `tests/gpu/profiling/bench_ep_buffer_backends.py` A/Bs the two.
 
-Pick **`legacy`** for long-context ep8 within a node: elastic ep8 at extreme tokens/rank (≥~64k·b1)
-fails at step 1, its combine barrier racing FSDP2's reduce-scatter into a deadlock, while legacy's
-CUDA-IPC buffer has no such barrier and trains gpt-oss-20b ep8 at 64k. EP+CP is the other long-context
-ep8 path.
+Pick **`legacy`** for long-context ep8 within a node: on gpt-oss-20b, elastic ep8 at extreme tokens/rank
+(≥~64k·b1) fails at step 1, its combine barrier racing FSDP2's reduce-scatter into a deadlock, while legacy's
+CUDA-IPC buffer has no such barrier and trains ep8 at 64k. EP+CP is the other long-context ep8 path. Elastic ep8
+ran Qwen3.6-35B at `max_length` 65,536, about 63,200 tokens per rank, with no fault over its 8 steps, at
+[8,113 tok/s/GPU](../optimization/throughput-benchmarks.md#recipes-and-real-text). That row sits just under the
+threshold, so it says nothing about elastic past ~64k tokens per rank.
 
 `legacy` is intranode-only: `ParallelismConfig` rejects it for an EP group spanning NVLink domains, for
 a dispatch group wider than 8 or than `gpus_per_node`, and for a width outside DeepEP V1's tuned rank
@@ -333,8 +335,9 @@ dispatch sits ~100× over what that bandwidth predicts). Three consequences:
   global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of EP=16 (8 partners), at a
   batch shape the run did not record. `gptoss-20b-multinode-ep.yaml` at EP=16 (one 8,192-token row
   per rank, `gradient_accumulation_steps: 4`, loop path, `aux_loss`, no gradient checkpointing) runs
-  3,636 tok/s/GPU at 8.97 s/step and a 55.4 GiB rank-0 allocated peak. The PP recipe's 15,500 is not
-  comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`. Combine EP=2 with
+  3,636 tok/s/GPU at 8.97 s/step and a 55.4 GiB rank-0 allocated peak. The PP recipe's 15,715 is not
+  comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`, and the same arm at EP=16 with
+  those two settings runs [4,115](../parallelism/pipeline-parallelism.md#measured-throughput). Combine EP=2 with
   `expert_tp_size` to shard those experts back down
   ([Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo));
   the ETP partners share one batch, so tok/s/GPU falls as the ETP width grows.

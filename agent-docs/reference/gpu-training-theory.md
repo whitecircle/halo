@@ -148,7 +148,9 @@ Forward plus backward dominate FLOPs (`6P`). The collective and optimizer are fi
 
 Tensor-core kernels break the output into **tiles**, commonly 128 rows along M on SM90/SM100. Each tile's warp group loads matching input strips into SRAM and multiplies there, and the hardware wants the problem to divide into whole tiles:
 
-- **Alignment** — the MMA consumes fixed-size fragments, so the contraction dim `K` (and ideally `M`, `N`) should be multiples of 16 in bf16; a dim that isn't a multiple of 8 forces padding or a slower path. Round hidden sizes and padded vocabularies exist for this reason.
+- **Alignment** — the MMA consumes fixed-size fragments, which is why hidden sizes and padded vocabularies are round. On one B300, a plain bf16 GEMM `[M, K] @ [K, N]` runs 3–10× slower when `K` or `N` is off a multiple of 8: 3–5× when even, 5–9× when odd. `M` has no such effect, and fp32 inputs stay flat. Past 8, a `K` multiple of 32 gains a bf16 output a further 1.3× and an fp32 output nothing.
+
+    The rule reaches a plain GEMM whose `K` or `N` follows the row, not a fixed width. [Masked matmul attention](../optimization/flash-attention.md#masked-matmul-attention) rounds its crop and tile widths to 8 for it, and tree sparse attention pads its key rows to 8 (1.39× on that kernel). Grouped GEMM has no such cliff: expert row counts off a multiple of 8 cost at most 1.23×, on its widest products. Row lengths stay unpadded: `pad_to_multiple_of: 8` on a real full fine-tune (gpt-oss-20b, `ep2 × dp3`, rows of about 7,950 tokens) ran 4% slower, at 0.043% more tokens.
 - **Tail effect** — M not a tile multiple leaves the last tile partly empty. At M=130 against a 128-tile, the second tile fills only 2 of 128 rows. This is pure geometry, and its throughput cost folds into the small-M penalty below.
 - **Wave quantization** — tiles schedule in waves across 148 SMs, so a tile count just past a multiple of 148 runs a near-empty final wave. At its worst (149 tiles on 148 SMs) that would nearly double the time for the same work; measured, it is a mild ripple.
 
@@ -430,7 +432,7 @@ That is what "outermost" means, and it is why each stage must be a whole number 
 
 At `T = 8192, H = 4096` that is 134 MB, against the ~32 GB FSDP2 moves per rank per step on an 8B model. That is ~250× apart, and point-to-point rather than every-link (the third identity above).
 
-Every other model-splitting axis prices its traffic per *parameter*; PP prices it per *token × hidden*. So PP is the axis worth spending a 50–100 GB/s per-GPU cross-node link on. The same pricing is why the toolkit forces stage boundaries onto NVLink-domain boundaries: every intra-stage collective then stays inside a domain, and only the P2P activation crosses.
+Every other model-splitting axis prices its traffic per *parameter*; PP prices it per *token × hidden*. So PP holds its rate on a link too slow for the others, and a fast link carries the others too: on 2 × 8 B300 over EFA, `dp16` still runs 4% ahead of `pp2 × dp8`, and forced onto plain TCP sockets `pp2 × dp8` leads by 13.8× ([rows](../parallelism/pipeline-parallelism.md#measured-throughput)). The same pricing is why the toolkit forces stage boundaries onto NVLink-domain boundaries: every intra-stage collective then stays inside a domain, and only the P2P activation crosses.
 
 **The bubble.** Fill and drain leave each rank idle for `p−1` of a step's `m + p − 1` microbatch slots (the figure below splits each slot into its forward and backward halves, 6 idle of 22):
 
@@ -554,7 +556,7 @@ For a full training step, enable the profiler and efficiency callback to get the
 - **Gradient checkpointing is a memory lever with a compute price.** Leave it off whenever the batch fits without it (§8).
 - **Train in bf16.** Halo's low-precision paths are for QAT, not speed (§7).
 - **N× GPUs is not N× throughput.** Grow the batch with the world, or per-GPU `M` slides down the ramp (§9).
-- **Keep TP inside an NVLink domain and let EP cross nodes; PP is the axis a cross-node link would be spent on** (§9).
+- **Keep TP inside an NVLink domain and keep experts local where they fit; PP is for a slow link or a model that does not fit on one machine** (§9).
 - **Compare runs in tokens/s per GPU.** It survives a change of config and chip; MFU compares only within one chip (§11).
 
 ---

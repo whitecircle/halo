@@ -26,7 +26,7 @@ one import line in the family roster.
   an existing one subclasses that instead: Laguna reuses GLM-4's in 21 lines,
   Qwen3-Next reuses Qwen3.5-MoE's in 25, and Qwen3.8-Flash-Next reuses
   Qwen3-Next's in 11.
-- Every other EP layer file is 83 lines or fewer.
+- Every other EP layer file is under 90 lines.
 - GPT-OSS is the outlier at 168, because of its interleaved, biased gate/up
   weights and its own clamped SwiGLU compute.
 

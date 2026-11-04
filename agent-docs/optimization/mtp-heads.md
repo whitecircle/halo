@@ -21,7 +21,7 @@ A Nemotron-H head is the chain both engines draft with: the norms and the projec
 Index `t` reads the embedding of token `t+1` and the trunk's hidden `t`, and predicts token `t+2`. The term is the cross-entropy at those targets, divided by the same count as the next-token loss, added inside the model's forward, so HF's later scale multiplies both alike. No draft scores across a document start under packing or padding-free rows.
 
 - `mtp_loss_type: hard` fits the gold token.
-- `mtp_loss_type: soft` keeps the loss value and the output embedding's gradient, and routes the head's gradient to the trunk's next-token distribution: a KL at the same step, with the routed term exactly `mtp_loss_weight` at any batch.
+- `mtp_loss_type: soft` is [Soft-MTP](https://arxiv.org/abs/2610.38331). It keeps the loss value and the output embedding's gradient, and routes the head's gradient to the trunk's next-token distribution: a KL at the same step, with the routed term exactly `mtp_loss_weight` at any batch.
 - `mtp_train_scope: joint` lets the term reach head, trunk, embedding and output embedding.
 - `mtp_train_scope: detached` trains the head alone while the trunk takes the next-token gradient. The global clip norm still covers both.
 - `mtp_train_scope: head_only` is `detached` over a frozen trunk, which runs with no graph. `moe_balancing: auto` resolves to `none` there.
@@ -53,7 +53,7 @@ What `hard` does depends on the rate: from a stale start it climbs then falls at
 
 On first-turn rows through `--release`, Nemotron-H's own head reads 0.8124 on Lightning and 0.8876 on Super VL before any fit. A `soft` fit at 1e-5 falls and the gate stops it (0.8076 and 0.8854). At 1e-6 Lightning holds at 0.8126 and the gate passes. Super VL did not run at that rate.
 
-The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
+The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4, and at EP2 at 0.8185 on FA2 and 0.8189 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
 
 ## Parallel axes
 
@@ -63,7 +63,7 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4. 
 | EP, ETP, EP+ETP | The head's MoE block takes the family's EP layer, and each rank streams its slice of the tail. It dispatches the tokens the first MoE layer sized for, so it adds no capacity all-reduce, and a row with no target still walks its ops on every rank. |
 | Long rows | The term runs Liger's fused kernel where the family's fused loss is on, else fp32 logits in checkpointed chunks, so no `[T, V]` plane stays held through backward. |
 | Gradient checkpointing | Follows the run. `detached` passes the head grad-requiring leaves, so a reentrant checkpoint around a list head keeps its gradient. |
-| Several nodes | EP groups replicate each other, with the head's experts in the deferred sweep as the trunk's are, and plain FSDP2 spans the nodes. A save writes the head on every node's disk under per-node output storage. Node-local `ep_size: 4` and plain FSDP2 ran on two machines at 4 GPUs each, each on its own disk. |
+| Several nodes | EP groups replicate each other, with the head's experts in the deferred sweep as the trunk's are, and plain FSDP2 spans the nodes. A save writes the head on every node's disk under per-node output storage. Node-local EP and plain FSDP2 ran on two machines at 2 and at 4 GPUs each, each on its own disk. |
 
 ## Step cost
 
@@ -112,6 +112,10 @@ A head can follow a policy another trainer produced: a `head_only` fit with `mtp
 |---|---|---|
 | vLLM, Qwen3.6 stale `soft` fit | 0.8215 | 0.8284 |
 | SGLang, the same fit | 0.8295 | 0.8415 |
+| vLLM, the same fit from an EP8 export | 0.8223 | 0.8371 |
+| SGLang, the same fit from an EP8 export | 0.8285 | 0.8374 |
+| vLLM, the same fit at EP2, reattached to the composite | 0.8252 | 0.8438 |
+| SGLang, the same fit at EP2, reattached to the composite | 0.8217 | 0.8357 |
 | vLLM, GLM-4.7 Flash `own_soft` fit the gate stopped | 0.7317 | 0.7450 |
 | vLLM, Lightning `own_soft` fit the gate stopped | 0.8282 | 0.8372 |
 | SGLang, the same fit | 0.8366 | 0.8407 |
@@ -154,6 +158,8 @@ Both Qwen3.6 recipes render `qwen3.6-reasoning-effort.jinja`, an empty think blo
 |---|---|---|---|---|---|
 | `qwen3.6-reasoning-effort.jinja` | 0.8376 to 0.8494 | 0.899 | 0.704 to 0.712 | 0.8339 | 0.8311 |
 | `qwen3-multiturn.jinja` | 0.3076 to 0.8656 | 3.286 | 0.662 to 0.193 | 0.8372 | 0.8394 |
+
+The Qwen3.5-35B-A3B, Qwen3.5-122B-A10B, Qwen3-Next and two Qwen3.8-Flash-Next recipes also render `qwen3-multiturn.jinja`, and the loss it starts at differs by model: Qwen3.5-35B-A3B's recipe starts at 1.12, on rows packed to 33,000 tokens. Train and serve under one render.
 
 Neither render shows a served gain. Each recipe's rows are ultrachat replies, not a server's own samples after an open think block, so the gate's reading here does not predict the served one; the template only keeps that reading meaningful. The `joint` recipe's cost is under [Step cost](#step-cost), and what it does to a trunk or a served head over a fine-tune is not measured. The GLM-4.7 Flash recipe's numbers are from first-turn rows at its learning rate: acceptance 0.7685 to 0.7649, which the gate stops, with its served reading under [Serving](#serving).
 

@@ -216,6 +216,8 @@ mode): [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## When pipeline parallelism is worth it
 
-Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
+On one 8-GPU machine, run as two 4-GPU agents, PP runs 8.5% below `dp8` on Qwen3-8B and 9.2% above `ep8` on gpt-oss-20b, where halving the dispatch group pays for the bubble. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
+
+Measured on two 8-GPU B300 machines, DP, with any experts on one machine, beats PP on a fast link: PP runs 4.0% below `dp16` and 15.9% below `ep8` with DP. PP leads layouts that cross the link with attention or experts (1.63× over `dp8 × tp2`, 3.82× over `ep16`), a slow link (13.8× over `dp16` forced onto plain TCP sockets), and a model too large for one machine's expert group (GLM-5.3-Flash, 1.61× over `ep16`, where `ep8` with DP runs out of memory). The rows: [Measured throughput](pipeline-parallelism.md#measured-throughput).
 
 PP is not a drop-in: [what it refuses](pipeline-parallelism.md#rejected-combinations). Layouts without it: [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).

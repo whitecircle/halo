@@ -25,10 +25,10 @@ more GPUs or a shorter `max_length` there.
 ## What ran on 1.2.0
 
 Short runs on the full checkpoints covered these SFT recipes: Gemma 4, GLM-4.7-Flash, Ling 2.0, both ZAYA1
-recipes, Qwen3.5-35B-A3B at 16,384 tokens, and on two 8-GPU machines gpt-oss-20b and the two pipeline
+recipes, Qwen3.5-35B-A3B at 33,000 tokens, and on two 8-GPU machines gpt-oss-20b and the two pipeline
 recipes. They also covered gpt-oss-20b's classification, self-distillation, embedding, offline GRPO, DPO, SMPO
 and reward recipes and Gemma 4's DPO, SMPO and reward recipes. All four Nemotron 3.5 Super VL recipes ran on the
-text tower, and its image recipe on the composite. The Nemotron 3.5 Lightning recipe ran for 5 steps. Both
+text tower, and its image recipe on the composite. The Nemotron 3.5 Lightning recipe ran for 20 steps. Both
 Qwen3.6-35B-A3B MTP recipes ran, the joint one for 5 steps.
 
 The Laguna S, LFM2.5-8B, Mistral Small 4, DeepSeek-V4 LoRA and Command A+ recipes have not run at their current

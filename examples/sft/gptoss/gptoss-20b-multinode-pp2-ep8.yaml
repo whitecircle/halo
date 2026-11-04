@@ -1,6 +1,6 @@
 # GPT-OSS 20B — two-node pipeline-parallel SFT with expert parallelism inside each stage (2 nodes x 8 GPUs:
 # one stage per node, its experts across the node's 8 GPUs over NVLink).
-# See agent-docs/parallelism/pipeline-parallelism.md.
+# See agent-docs/parallelism/pipeline-parallelism.md. On a fast link, ep8 with DP runs ahead of this recipe (18,685 tok/s/GPU).
 # Launch on EACH node (MASTER_ADDR = node0 IP; SLURM: exactly ONE srun task per node):
 #   torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
 #     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
@@ -41,7 +41,7 @@ packing: true
 # --- Training schedule ---
 per_device_train_batch_size: 8        # split into the 8 microbatches above: one 8192-token row each
 num_train_epochs: 1.0
-gradient_checkpointing: false         # on is TRL's default; off: +21.5% tok/s at ~70 GiB peak per GPU (B300)
+gradient_checkpointing: false         # on is TRL's default; off: 15,715 tok/s/GPU against 12,796, at ~70 GiB peak per GPU (B300)
 
 # --- Optimizer & LR schedule ---
 learning_rate: 5.0e-06

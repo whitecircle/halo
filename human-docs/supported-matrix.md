@@ -211,7 +211,7 @@ advanced parallelism. What each family is for:
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower, with `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | tiny models only |
-| Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental, text rows: EP8 trains the release cut to four layers, the rest runs on tiny models; full fine-tuning or LoRA; PP takes the text tower, full fine-tuning with `moe_balancing: none`; the 95 GiB n-gram table stays in host memory; `ep_size: 1` loads about 246 GiB on every GPU ([details](../agent-docs/models/qwen4_exp.md) ↗) |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental, text rows: EP8 trains the release cut to four layers, PP ran the whole text tower for 13 steps with checkpointing on, the rest runs on tiny models; full fine-tuning or LoRA; PP takes the text tower, full fine-tuning with `moe_balancing: none`; the 95 GiB n-gram table stays in host memory; `ep_size: 1` loads about 246 GiB on every GPU ([details](../agent-docs/models/qwen4_exp.md) ↗) |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP on tiny models only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP on tiny models only; on SDPA, so use `packing`, not `padding_free` |
@@ -221,7 +221,7 @@ advanced parallelism. What each family is for:
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
-| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, the other modes and image SMPO on tiny models only; Lightning ran 5 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
+| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 5 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP8 ran on the 200B+ checkpoint, on Halo 1.0.0 or earlier; the other modes and LoRA on tiny models |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; the fp8 release needs `halo run convert-glm5-bf16` first |

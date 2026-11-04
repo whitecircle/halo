@@ -22,7 +22,7 @@ What these rows leave:
 - **Length of run:** 5 to 20 steps each. No run has trained the release to a quality metric, so a step's loss is all they say about training.
 - **Serving:** both engines have served an export, an untrained reattached one, on one image prompt and one text prompt ([Checkpoints and serving](#checkpoints-and-serving)). Engine sync stays refused ([RL weight sync](#rl-weight-sync)).
 - **Mixed rows:** image and text rows ran at `ep8` on the release with no hang. That the tower trains on them rests on tiny rows.
-- **Other axes:** pipeline parallelism, pure ETP and EP+ETP have run on tiny models only.
+- **Other axes:** pure ETP and EP+ETP have run on tiny models only. Pipeline parallelism ran Super VL's text tower for 13 steps with GC on.
 
 ## Lightning
 
@@ -44,7 +44,7 @@ On the real weights:
 - **Exports:** the full 52-layer export holds 6,243 keys, the release's 6,513 minus `mtp.*`, each byte-identical to the release, with an identical `config.json`. NLL gap 0.0042, 59 GiB on disk.
 - **Resume:** exact at a 9-layer cut: loss difference 0.0, final weights rel L2 0.0.
 - **Throughput per block kind:** forward and backward at 8,192 tokens run 10,694 tok/s per rank at `ep8`: Mamba 58.0%, MoE 36.2%, attention 3.2%, head 2.6%.
-- **Recipe, memory and tok/s:** 5 steps at `ep8` and `max_length` 8,192 run 9,986 tok/s per rank with the optimizer and reduce, at 47.7–48.1 GiB peak allocated and 55–60 GB reserved.
+- **Recipe, memory and tok/s:** 20 steps at `ep8` and `max_length` 8,192 run 9,986 tok/s per rank with the optimizer and reduce, at 6.53 s a step, 47.4–47.9 GiB peak allocated and 55–60 GB reserved.
 - **Serving:** vLLM and SGLang each start an untrained export with the cookbook's flags and answered one text prompt. SGLang refuses transformers' native `config.json` at start. Online weight sync stays refused, as for the family.
 
 ## Methods
@@ -61,7 +61,7 @@ On the real weights:
 
 `apply_nemotron_h_patches` (`halo/models/nemotron_h.py`) replaces upstream's module-level scan and leaves the mixer's forward in place:
 
-- **Per-group scan.** A group's heads share B and C, which upstream copies per head. The output matches upstream's to 1e-7, at 1.05× the step and 37% less scan memory. Autocast is off inside it, as it would run this fp32 body in bf16.
+- **Per-group scan.** A group's heads share B and C, which upstream copies per head. The output matches upstream's to 1e-7. On one layer and one GPU at 8,192 tokens it takes 31.8 ms against 34.7 ms and 5.23 GiB of scan memory against 8.29 GiB, by arithmetic about 1.05× faster over a step. Autocast is off inside it, as it would run this fp32 body in bf16.
 - **Documents.** A row holding several documents scans each from a zero state, with its chunks counted from its first token. Documents share a padded batch while it costs at most 1.25× their tokens.
 - **No fused kernel.** The patch pins `mamba2_split_conv1d_scan_combined` off, so a later `mamba-ssm` install cannot read `in_proj` and `out_proj` past their adapters or refuse `seq_idx`.
 - **Time-step limit.** The mixer takes the config's `time_step_limit` (0, inf), which the release declares and both engines apply. Upstream clamps at `time_step_min` 0.001 instead. On the release, 11–20% of the time steps sit below that floor, and the two clamps move one layer's output by 0.6–5.7% rel L2. On real text the config's limit scores 0.05–0.09 nats better than upstream's floor at every length that ran.
@@ -99,7 +99,7 @@ Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at t
 | Recipe | Tokens per rank | tok/s per rank | Peak allocated | Reserved |
 |---|---:|---:|---:|---:|
 | LoRA | 16,384 | 3,000 | 92–94 GB | 118–165 GB |
-| Full fine-tune | 8,192 | 3,057 | 169–171 GB | 186–202 GB |
+| Full fine-tune | 8,192 | 3,054 | 168–169 GB | 185–202 GB |
 | Full fine-tune, `--max_length=32000` | about 31,700 | 3,221 | 227–235 GB | 268–283 GB |
 | Frozen experts, `--max_length=50000` | about 48,800 | 3,246 | 188–194 GB | 241–283 GB |
 | Full fine-tune on images (the cookbook's recipe) | about 6,790 | 3,198 | 168 GB | 184–188 GB |
@@ -108,9 +108,9 @@ Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at t
 | SMPO, its Tulu rows | up to 2 × 4,096 | | 157–161 GB | 165–170 GB |
 | Offline GRPO | the recipe's rows | | 164–165 GB | 169–179 GB |
 
-![Peak allocated and reserved memory per GPU for each recipe against the device's 288 GB: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 186–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
+![Peak allocated and reserved memory per GPU for each recipe against the device's 288 GB: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 185–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
 
-The 32,000 and frozen 50,000 rows are at the limit: their top ranks reached 99.4% and 99% of the device over 5 steps, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
+The full fine-tune at 8,192 takes 21.28 s a step over 20 steps. The 32,000 and frozen 50,000 rows are at the limit: their top ranks reached 99.4% and 99% of the device over 5 steps, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
 
 The tower's forward and backward alone, with frozen experts and no optimizer state, at exact lengths:
 
@@ -188,7 +188,7 @@ The transport preflight's default parameter does not exist on this family: pass 
 
 ## Pipeline parallelism
 
-`NemotronHModel` is registered on any split offset ([Model support](../parallelism/pipeline-parallelism.md#model-support)), with `text_only_model: true`. The GPU rows run pp2 × ep2 and pp2 × etp2 on tiny models. No release run has used it.
+`NemotronHModel` is registered on any split offset ([Model support](../parallelism/pipeline-parallelism.md#model-support)), with `text_only_model: true`. The GPU rows run pp2 × ep2 and pp2 × etp2 on tiny models. On Super VL, `pp2 × ep8` across two 8-GPU machines ran 13 steps with GC on at 13.69 s a step, 2,394 tok/s/GPU as logged (padding counted), at 100.9 / 96.8 GiB; with GC off the first step runs out of memory at about 260 GiB.
 
 ## Refused modes
 

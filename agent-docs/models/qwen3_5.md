@@ -105,7 +105,7 @@ Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeG
 
 Examples under `examples/sft/qwen3_5/`:
 
-- `qwen3.5-35b-a3b-ultrachat-ep.yaml`.
+- `qwen3.5-35b-a3b-ultrachat-ep.yaml`: [17,225 tok/s/GPU on real conversations](../optimization/throughput-benchmarks.md#recipes-and-real-text).
 - `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 on one node. Across two nodes it takes `--expert_parallel_size=16 --ep_scope=global --max_length=8192`: the cross-node dispatch gate refuses its 16,384 tokens per rank. It keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
 - VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 

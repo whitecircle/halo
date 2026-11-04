@@ -441,12 +441,14 @@ Pre-shard the corpus with `scripts/before_training/prepare_dataset.py --num_shar
 The same arithmetic (8 B/param on the trained experts, `X = ep_size × expert_tp_size`, the
 non-expert weights gathered whole under ZeRO-2) for the three other checkpoints in the 200–320B
 class, on 8 × B300 ([Budget](#per-rank-memory-model)). Every figure is a plan, not
-a measurement.
+a measurement, except the three GLM-5.3-Flash rows marked measured ([rates](../models/glm5-next.md#throughput)).
 
 | Checkpoint | Routed experts | Cell | Expert leg / rank | Static / rank | What binds |
 |---|---:|---|---:|---:|---|
-| **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | ~200 GB (+33 GB gathered non-expert bf16, +13 GB fp32 non-EP masters/state) | the 8192 tokens/rank cross-node dispatch ceiling; `ep8` on one node is 304 GB of experts alone. Needs the bf16 conversion (~650 GB) |
-| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | same | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
+| **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | Measured, GC on: 68.8 GiB after load, 212.7–214.1 GiB peak, 1,504 tok/s/GPU | the 8192 tokens/rank cross-node dispatch ceiling. Needs the bf16 conversion (~650 GB) |
+| GLM-5.3-Flash | 304 B | 2 × 8, `pp2 × ep8` | 19.0 B → 152 GB | Measured, GC on: 57.1 / 54.0 GiB after load, 218.0–218.7 / 197.5–197.9 GiB peak, 2,423 tok/s/GPU | padded rows only, as packing is refused; 1.61× `ep16` |
+| GLM-5.3-Flash | 304 B | 2 × 8, `ep8` with DP | 38.0 B → 304 GB | Measured: out of memory in the first optimizer step, 243–250 GiB allocated of 267.7 | optimizer state on 40.2B trainable per rank: weights and gradients fit, AdamWBF16's moments do not |
+| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | ~200 GB by arithmetic | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
 | **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~75 GB left on the 288 GB device for activations and the allocator's reserve at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~580 GB output) |

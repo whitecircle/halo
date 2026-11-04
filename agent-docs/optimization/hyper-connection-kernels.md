@@ -23,6 +23,8 @@ One B300, `hc_mult` 4, `H` 4096, 20 Sinkhorn iterations, bf16, frozen hyper-conn
 
 Each takes a fixed launch cost plus a per-token term, so doubling the tokens costs less than double; at 16384 the weights take 0.44 ms and 1.29 ms, the mix 0.20 ms and 0.81 ms. The first use compiles for about 2 s on a cold `TRITON_CACHE_DIR`, outside any DeepEP dispatch-to-combine window, so no warm-up runs ahead of it.
 
+In a whole step, on GLM-5.3-Flash's LoRA at `ep8` and 8,192 tokens on a per-part clock, the weights take 1.31 s against 7.17 (5.5×) and the mix 0.44 s against 3.39 (7.7×) ([GLM-5 Next → Throughput](../models/glm5-next.md#throughput)). No DeepSeek-V4 release has run on these kernels, so that family has no rate. Tiny DeepSeek-V4 and GLM-5 Next models hold them to upstream's forwards through reentrant recompute, frozen weights, LoRA, FSDP2 and pipeline stages.
+
 The tile is tuned for a production run's bf16 streams. On fp32 streams the weights forward takes 1.48 ms against upstream's 1.78 ms; the rest of the gain holds.
 
 ## Numerics

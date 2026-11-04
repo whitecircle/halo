@@ -116,7 +116,8 @@ The scope Halo 1.2.0 is validated on:
   engines, and the two PP recipes (training; the Qwen3-8B one also a per-node save, resume, merge
   and load). The other multi-node shapes run as a two-node simulation on one host
   ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
-- **Model size:** full-size checkpoints ran up to Qwen3.6-35B-A3B (`ep8`), plus Nemotron 3.5 Super VL at `ep8`
+- **Model size:** full-size checkpoints ran up to GLM-5.3-Flash (321B): `ep8` LoRA on one machine, `ep16` and
+  `pp2 × ep8` full fine-tunes on two 8-GPU machines. Also Qwen3.6-35B-A3B (`ep8`), Nemotron 3.5 Super VL at `ep8`
   for 5 to 20 steps per recipe, a few full-depth EP8 LoRA steps of Qwen3.8-Flash-Next, and Step-3.7 Flash as a weight
   push at EP=2 and one expert-LoRA step at EP=4. gpt-oss-120b and Qwen3.5-122B-A10B at EP8 last ran on earlier code.
 - **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored (step counters continue, every

@@ -13,7 +13,7 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
   classes with no conversion step.
 - **GPUs:** EP8 on eight B300s, 64 experts per GPU.
 - **Lightning:** `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` is the same text class with no vision tower. Its
-  recipe, `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`, ran 5 steps at EP8 and 8,192 tokens at 9,986
+  recipe, `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`, ran 20 steps at EP8 and 8,192 tokens at 9,986
   tok/s per GPU and 55–60 GB reserved. A full-depth export serves as saved
   ([Lightning](../../agent-docs/models/nemotron-h.md#lightning) ↗). The rest of this page is Super VL.
 - **What ran.** All four recipes and the image recipe ran on the release on eight B300s, 5 to 20 steps each, plus an
@@ -22,7 +22,7 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
 
 | Recipe | Length | tok/s per GPU | Reserved by GPU |
 | --- | ---: | ---: | ---: |
-| Full fine-tune | 8,192 | 3,057 | 186–202 GB |
+| Full fine-tune | 8,192 | 3,054 | 185–202 GB |
 | Full fine-tune | 32,000 | 3,221 | 268–283 GB |
 | Full, experts frozen | 50,000 | 3,246 | 241–283 GB |
 | LoRA | 16,384 | 3,000 | 118–165 GB |

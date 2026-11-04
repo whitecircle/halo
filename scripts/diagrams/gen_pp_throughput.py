@@ -1,57 +1,77 @@
 """Generate the pipeline-parallel throughput chart for parallelism/pipeline-parallelism.md.
 
-The doc's two measured tables as bars: slate runs without PP, pale teal PP with gradient checkpointing, teal PP
-without it. Each GC-off row names its gain and its peak against the row it is compared to; the tables carry the rest.
+The doc's like-for-like arms as bars: slate runs without PP, teal with it. Each PP row names its gap to the layouts of
+its group, and a layout that did not fit keeps a row with its reason. A PP rate is attended tokens over its step time,
+as the doc's note says; the tables carry the gradient-checkpointed arms and the peaks.
 """
 
 import matplotlib.pyplot as plt
 from _chart_style import *
 
-# (row, tokens/s/GPU, allocated peak GiB, the earlier row a label compares it to, that row's name in the label)
-ONE_HOST = [
-    ("Qwen3-8B dp8, GC on", 17062, 33.0, None, None),
-    ("Qwen3-8B pp2 × dp4, GC on", 16291, 27.9, None, None),
-    ("Qwen3-8B pp2 × dp4, GC off", 19445, 66.3, 0, "dp8"),
-    ("gpt-oss-20b ep8, GC off", 20066, 63.1, None, None),
-    ("gpt-oss-20b pp2 × ep4, GC on", 17398, 35.3, None, None),
-    ("gpt-oss-20b pp2 × ep4, GC off", 22223, 62.6, 3, "ep8"),
+# (row, tokens/s/GPU or the reason it has none, the earlier and later rows of the group a PP row compares with)
+FAST_LINK = [
+    ("Qwen3-8B dp16", 18337, ()),
+    ("Qwen3-8B pp2 × dp8", 17608, ((0, "dp16"), (2, "dp8 × tp2"))),
+    ("Qwen3-8B dp8 × tp2", 10780, ()),
+    ("gpt-oss-20b ep8 with DP", 18685, ()),
+    ("gpt-oss-20b pp2 × ep8", 15715, ((3, "ep8 with DP"), (5, "ep16"))),
+    ("gpt-oss-20b ep16 global", 4115, ()),
 ]
-TWO_NODES = [
-    ("Qwen3-8B pp2, max_length 4096, GC on", 14970, 22.1, None, None),
-    ("Qwen3-8B pp2, max_length 4096, GC off", 17740, 41.3, 0, "GC on"),
-    ("gpt-oss-20b pp2 × ep8, max_length 8192, GC on", 12755, 24.2, None, None),
-    ("gpt-oss-20b pp2 × ep8, max_length 8192, GC off", 15500, 45.2, 2, "GC on"),
+PLAIN_SOCKETS = [
+    ("Qwen3-8B dp16", 1117, ()),
+    ("Qwen3-8B pp2 × dp8", 15414, ((0, "dp16"),)),
+]
+ONE_MACHINE = [
+    ("Qwen3-8B dp8", 21359, ()),
+    ("Qwen3-8B pp2 × dp4", 19537, ((0, "dp8"),)),
+    ("gpt-oss-20b ep8", 19989, ()),
+    ("gpt-oss-20b pp2 × ep4", 21836, ((2, "ep8"),)),
+]
+GLM = [
+    ("ep8 with DP", "out of memory in the first optimizer step", ()),
+    ("ep16 global", 1504, ()),
+    ("pp2 × ep8", 2423, ((1, "ep16"),)),
 ]
 
 PANELS = (
-    ("One 8-GPU host · max_length 8192 · m = 16 · the stages exchange over host shared memory", ONE_HOST),
-    ("Two nodes, 2 × 8 · shipped recipes · m = 8 · the stages exchange over EFA", TWO_NODES),
+    ("Two 8-GPU machines, fast link · max_length 4096 and 8192 · m = 8 · no checkpointing", FAST_LINK),
+    (
+        "The same two machines forced onto plain TCP sockets · max_length 4096 · m = 8 · no checkpointing",
+        PLAIN_SOCKETS,
+    ),
+    (
+        "One 8-GPU machine, the stages over host shared memory · max_length 8192 · m = 16 · no checkpointing",
+        ONE_MACHINE,
+    ),
+    ("GLM-5.3-Flash full fine-tune, two 8-GPU machines · max_length 8192 · m = 8 · gradient checkpointing", GLM),
 )
 
 
-def bar_style(row):
-    """Slate without PP, teal with it; the GC-on PP rows are the pale ones."""
-    if "pp2" not in row:
-        return {"color": SLATE}
-    if row.endswith("GC on"):
-        return {"color": TEAL_T, "edgecolor": TEAL, "linewidth": 0.9}
-    return {"color": TEAL}
+def gap(rate, other):
+    """A close layout as a percentage, a far one as a multiple."""
+    ratio = rate / other
+    if ratio >= 1.5:
+        return f"{ratio:.3g}×"
+    return f"{ratio - 1:+.1%}".replace("-", "−") + " against"
 
 
 def draw_panel(ax, caption, rows):
     ys = list(range(len(rows)))[::-1]
-    for y, (row, rate, peak, base, base_name) in zip(ys, rows, strict=True):
-        ax.barh(y, rate, height=0.62, zorder=2, **bar_style(row))
-        if base is None:
+    for y, (row, rate, compared) in zip(ys, rows, strict=True):
+        if isinstance(rate, str):
+            ax.text(250, y, rate, va="center", fontsize=SMALL, color=INK2, zorder=3)
             continue
-        base_rate, base_peak = rows[base][1], rows[base][2]
+        ax.barh(y, rate, height=0.62, zorder=2, color=TEAL if "pp2" in row else SLATE)
+        label = f"{rate:,}"
+        if compared:
+            label += " · " + ", ".join(f"{gap(rate, rows[i][1])} {name}" for i, name in compared)
         ax.text(
             rate + 300,
             y,
-            f"+{rate / base_rate - 1:.1%} over {base_name}, {peak / base_peak:.1f}× its peak",
+            label,
             va="center",
             fontsize=SMALL,
-            fontweight="bold",
+            fontweight="bold" if compared else "normal",
             color=INK,
             zorder=3,
             bbox={"facecolor": BG, "edgecolor": "none", "pad": 1.5},
@@ -59,21 +79,23 @@ def draw_panel(ax, caption, rows):
     ax.set_yticks(ys)
     ax.set_yticklabels([row[0] for row in rows], fontsize=SMALL)
     ax.set_title(caption, loc="left", fontsize=SMALL, color=INK2, pad=6)
-    ax.set_xlim(0, 34000)
+    ax.set_ylim(-0.6, len(rows) - 0.4)
+    ax.set_xlim(0, 36000)
     ax.set_xticks(range(0, 25001, 5000))
     k_ticks(ax.xaxis)
     tidy(ax, "x")
 
 
 fig, axes = plt.subplots(
-    2,
+    len(PANELS),
     1,
-    figsize=(11.2, 5.5),
+    figsize=(11.2, 7.6),
     sharex=True,
-    gridspec_kw={"height_ratios": [len(ONE_HOST), len(TWO_NODES)], "hspace": 0.2},
+    gridspec_kw={"height_ratios": [len(rows) for _, rows in PANELS], "hspace": 0.27},
 )
-fig.subplots_adjust(top=0.82, left=0.255, right=0.99)
-heading(fig, "Pipeline parallelism", "B300 · packed ultrachat_200k · tokens/s/GPU over the steady steps")
+fig.subplots_adjust(top=0.875, left=0.17, right=0.99, bottom=0.07)
+heading(fig, "Pipeline parallelism", "B300 · tokens/s/GPU over the steady steps · slate = no PP · teal = PP")
+fig.texts[1].set_y(0.945)
 for ax, (caption, rows) in zip(axes, PANELS, strict=True):
     draw_panel(ax, caption, rows)
 axes[-1].set_xlabel("tokens/s/GPU", fontsize=SMALL, color=INK2)

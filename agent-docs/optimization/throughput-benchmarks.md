@@ -17,13 +17,14 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
     Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
 - **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110), the
-  [EP phase split](#where-the-ep-steps-time-goes) and the NUMA A/B ran on 1.2.0 code; every other table ran on Halo
+  [EP phase split](#where-the-ep-steps-time-goes), [recipes and real text](#recipes-and-real-text) and the NUMA A/B ran on 1.2.0 code; every other table ran on Halo
   1.1.0 code or earlier. Those older rows predate 1.2.0's
   MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
   ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
   tok/s than the clock these rows used. Their per-GPU rates count a shared batch once ([Metrics](#metrics)).
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
+- **Cold compiles**: on a fresh `TRITON_CACHE_DIR` a recipe's first ~20 steps run about 40% of its steady rate while one-off kernels compile, once per kernel shape: Qwen3.5-35B-A3B's recipe reads about 7,100 tok/s/GPU cold against 17,225 warm. Read a rate on a warm cache.
 
 ## 1.2.0 against 1.1.0
 
@@ -55,7 +56,11 @@ its group and its clock leaves out the host time between steps. Peak is the high
   cost of [two decoder layers per shard group](../parallelism/data-parallelism.md#shard-groups).
 - The gathered save takes 29.13 s on 1.1.0 and 29.08 s on 1.2.0, at 4.94 and 4.87 GiB peak host RSS.
 - The 1.2.0 arm is a release candidate from before the rollout-engine fixes, Nemotron-H and MTP heads, whose commits
-  also touch shared EP, FSDP2 and kernel code.
+  also touch shared EP, FSDP2 and kernel code. Rerun on the release's code, as medians of three on another machine,
+  the eight shapes the band covers stay within 2% of these rates and their allocated peaks within 0.01 GiB, which puts
+  ep4 × etp2 at 2.04× against the same 1.1.0 rate. Single repeats can leave that range: Qwen3-8B CP2 read 8,377 once, and
+  FSDP2 12,758 on a cold first row. The other four rows, on a logged rate: ep8 × cp2 9,107 (8,749 on its first run),
+  ep8 `legacy` 9,699, and Qwen3.5-35B-A3B 8,960 at s4096 and 13,951 at s16384, the last 2.3% under its row.
 
 `make bench BAND=1` holds eight of these shapes and the gathered save to the five-repeat baselines in
 `tests/baselines/bench/`, measured on the same code. Same-code A/Bs of the largest changes sit on their owner pages:
@@ -65,7 +70,9 @@ its group and its clock leaves out the host time between steps. Peak is the high
 the [routing sort](grouped-gemm.md#performance),
 the [single Ulysses exchange](../parallelism/context-parallelism.md#how-ulysses-works) and the
 [fused AdamWBF16 step](bf16-optimizer.md#benchmarks). Pipeline parallelism did not run on 1.1.0; its 1.2.0 rates are on
-[its own page](../parallelism/pipeline-parallelism.md#measured-throughput).
+[its own page](../parallelism/pipeline-parallelism.md#measured-throughput), including what a logged PP rate counts.
+GLM-5.3-Flash's rates, with and without its kernels, are on [GLM-5 Next](../models/glm5-next.md#throughput), and
+Nemotron-H's on [its page](../models/nemotron-h.md#memory).
 
 ## Full-parameter SFT framework comparison
 
@@ -171,7 +178,8 @@ for TP).
 
 `rank_tokens`, the tokens this rank computes over, = `num_input_tokens_seen / world_size`, further divided by
 `cp_size` (each CP rank receives the full `input_ids`; the wrapper splits inside forward). It equals tok/s/GPU ×
-step time only where no batch is shared: a TP, expert-TP or pipeline group runs one batch on every member.
+step time only where no batch is shared: a TP, expert-TP or pipeline group runs one batch on every member. Under PP
+it also [counts padding](../parallelism/pipeline-parallelism.md#measured-throughput).
 
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
 forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,
@@ -414,6 +422,14 @@ ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the hi
 At ep2 batch 4 on 1.2.0, expert compute takes 74.3% of the EP phases ([split](#where-the-ep-steps-time-goes)). Sequence 8192 runs **17,446 tok/s/GPU** (b4).
 
 Two kernels are load-bearing here: [grouped GEMM](grouped-gemm.md#grouped-vs-the-loop-path), with 128 local experts/rank, and [Liger](liger-kernels.md), whose RMSNorm + CE add **+6.6% throughput and −15 GiB**.
+
+### Recipes and real text
+
+Halo 1.2.0, ep8, real conversations, FA2 as the recipes set it, GC on, warm Triton cache, one run per row.
+
+- **The packed recipe** (`qwen3.5-35b-a3b-ultrachat-ep.yaml`, 33,000 tokens per row, gradient accumulation 8, 20 steps): Qwen3.5-35B-A3B **17,225** tok/s/GPU at 15.14 s/step and 155.5 GiB peak. Qwen3.6-35B on that shape, under its own render: 17,096 at 15.21 s/step and 155.5 GiB.
+- **One conversation per row, Qwen3.6-35B:** 11,977 at 16,384 tokens (96.2 GiB), 10,643 at 32,768 (136.3 GiB) and 8,113 at 65,536 (217.2 GiB, 259.5 GiB reserved, about 63,200 tokens per row).
+- **Packed to 32,768:** 16,344, 1.54× the unpacked rate at that length.
 
 ### EP throughput vs sequence length (ep8, b1, GC on)
 
