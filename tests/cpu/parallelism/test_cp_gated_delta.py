@@ -23,7 +23,13 @@ from halo.trainers.sft import DistributedSFTTrainer
 from halo.trainers.trainer_rules import reject_hybrid_cp_training
 from tests.common.equivalence.cp_equivalence import reference_flash_attn
 from tests.common.gloo import run_gloo_ranks
-from tests.common.hybrid_cp import build_hybrid_model, hybrid_hidden_batch, hybrid_text_config
+from tests.common.hybrid_cp import (
+    build_hybrid_model,
+    hybrid_hidden_batch,
+    hybrid_tensor_agreement,
+    hybrid_text_config,
+    hybrid_token_batch,
+)
 
 
 def _capture(layer, hidden, mask, targets, *, checkpointing=False):
@@ -271,6 +277,28 @@ def test_sft_subclasses_must_declare_hybrid_support_on_the_concrete_trainer():
     assert trainer.SUPPORTS_HYBRID_CP
     with pytest.raises(CPConfigError, match="SFT only"):
         trainer._adopt_cp_wrapper()
+
+
+def test_gpu_oracle_gradient_bars_keep_expected_zero_and_small_parameters_observable():
+    zero = torch.zeros(4)
+    assert hybrid_tensor_agreement(zero, zero, gradient=True)[0]
+    assert not hybrid_tensor_agreement(zero + 1e-10, zero, gradient=True)[0]
+    expected = torch.tensor([1e-9, -2e-9, 3e-9])
+    assert hybrid_tensor_agreement(expected, expected, gradient=True)[0]
+    assert not hybrid_tensor_agreement(expected * 2, expected, gradient=True)[0]
+    assert not hybrid_tensor_agreement(-expected, expected, gradient=True)[0]
+
+
+def test_gpu_logical_batches_pin_boundary_and_zero_supervision_shards():
+    ordinary = hybrid_token_batch(3, 64)
+    boundary = hybrid_token_batch(3, 64, boundary_only=True)
+    assert torch.equal(ordinary["input_ids"], boundary["input_ids"])
+    assert not (ordinary["labels"][:, 1:66] != -100).any()
+    assert (ordinary["labels"][:, 66:] != -100).any()
+    assert torch.equal((boundary["labels"] != -100).sum(1), torch.ones(3, dtype=torch.long))
+    assert (boundary["labels"][:, 65] != -100).all()
+    with pytest.raises(ValueError, match="excluded"):
+        hybrid_token_batch(1, 64, length=16386)
 
 
 if __name__ == "__main__":
