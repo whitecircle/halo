@@ -233,6 +233,7 @@ def reject_unsupported_collator_options(
     keeps_packed_rows: bool,
     allow_cross_document_linear_attention: bool = False,
     per_device_eval_batch_size: int = 0,
+    pad_to_multiple_of: int | None = None,
 ) -> None:
     """Refuse (or warn about) what no collator can serve, reading only arguments, backend and segment markers."""
     reject_padding_free_conflicts(
@@ -272,3 +273,8 @@ def reject_unsupported_collator_options(
     if train_on_last_assistant_only and not train_on_completions_only:
         raise ValueError("train_on_last_assistant_only=True requires train_on_completions_only=True")
     reject_context_parallel_packing(packing=packing, use_context_parallel=use_context_parallel)
+    if pad_to_multiple_of is not None and (packing or padding_free):
+        raise ValueError(
+            f"pad_to_multiple_of={pad_to_multiple_of} pads a batch to a common length, and packing and padding_free "
+            "rows carry no padding. Drop one of them."
+        )

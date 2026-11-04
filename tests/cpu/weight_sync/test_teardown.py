@@ -246,6 +246,15 @@ def test_a_destroy_that_returns_is_not_aborted(monkeypatch):
     assert aborted == []
 
 
+@pytest.mark.parametrize(("status", "answers"), [(200, True), (503, True), (500, False)])
+def test_a_step_past_the_servers_health_window_is_no_dead_engine(monkeypatch, status, answers):
+    """Aborting on the 503 of a busy scheduler strands the engine's half of the destroy."""
+    client = offline_client(SGLangWeightSyncClient)
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=status))
+
+    assert client._engine_answers() is answers
+
+
 def test_an_unreachable_engine_reads_as_not_answering(monkeypatch):
     client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:9")
     assert client._engine_answers() is False

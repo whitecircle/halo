@@ -39,6 +39,7 @@ from halo.models.module_tree import (
     find_module_path,
     media_module_names,
 )
+from halo.models.moe.family_specs import find_moe_family_spec
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.composite_rows import COMPOSITE_FAMILIES, composite_model_and_rows, text_row
 from tests.common.gloo import run_gloo_ranks
@@ -283,9 +284,13 @@ def test_only_a_reentrant_checkpoint_takes_a_new_input(family, use_reentrant):
 
 
 _TEXT_ONLY = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
+# Refused at load, by a class patch that outlives the load in a shared process.
+_REFUSES_CHECKPOINTING = {
+    name for name in TINY_MOE_FAMILIES if not find_moe_family_spec(name).supports_gradient_checkpointing
+}
 
 
-@pytest.mark.parametrize("family", sorted(set(_TEXT_ONLY) - set(COMPOSITE_FAMILIES)))
+@pytest.mark.parametrize("family", sorted(set(_TEXT_ONLY) - set(COMPOSITE_FAMILIES) - _REFUSES_CHECKPOINTING))
 def test_a_text_model_takes_no_new_input_behind_a_frozen_embedding(family):
     """The input-grad hook reaches every text layer, so the fix stays out of the stack that carries a run's cost."""
     torch.manual_seed(0)

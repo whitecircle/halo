@@ -416,7 +416,7 @@ def test_mfu_zeroed_when_unconfigured(clock, flops, peak):
 def test_smfu_sparse_value(clock):
     cb = _peaked(replace(_DENSE_FLOPS, active_model_flops_per_token=1.5e9, sparsity_factor=0.25))
     _measured_step(clock, cb, tokens=1000, step_time=0.5)
-    # step_active_flops = 1000 * 1.5e9 = 1.5e12; /0.5 = 3e12; /1e15*100 = 0.3%
+    # Active FLOPs: 1000 * 1.5e9 = 1.5e12; /0.5 = 3e12; /1e15*100 = 0.3%
     assert cb.smfu.step_smfu_percent == pytest.approx(0.3, abs=1e-6)
     assert cb.smfu.step_smfu_tflops_per_sec == pytest.approx(3.0, abs=1e-6)
 

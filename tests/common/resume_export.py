@@ -7,13 +7,26 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
-from transformers import AutoConfig
+from transformers import AutoConfig, AutoModelForCausalLM
+from trl import SFTConfig
 
 import halo.checkpoint.parallel.optimizer as optimizer_store
+from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_tokenizer
 from halo.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems, resume_checkpoint_checks
-from tests.common.memory import finish_phase
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import (
+    RestorePointSnapshot,
+    loading_problems,
+    resume_checkpoint_checks,
+    save_context,
+    save_schedule,
+)
+from tests.common.datasets import create_sft_dataset
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.numerics import max_or_nan, relative_l2
 from tests.common.optimizer_state import optimizer_state_matches
 from tests.common.rank_log import log, logged_messages
@@ -29,6 +42,13 @@ EXPORT_CHECKS = (
     "export_head_trained",
     "export_backbone_trained",
 )
+# A real release's EP SFT row: a checkpoint halfway through a run short enough to replay at its depth.
+RELEASE_DATA_ROWS = 32
+RELEASE_DATA_SEED = 0
+RELEASE_MAX_LENGTH = 512
+RELEASE_LR = 1e-4
+RELEASE_SAVE_STEP = 3
+RELEASE_TOTAL_STEPS = 2 * RELEASE_SAVE_STEP
 
 
 @dataclass(frozen=True)
@@ -236,3 +256,61 @@ def run_resume_export(
     resume_checks |= ctx.broadcast_checks(rank0)
     checks |= {f"resume_{name}": ok for name, ok in resume_checks.items()}
     return checks, metrics
+
+
+def save_gathered_ep(ctx, model, parallelism_config: ParallelismConfig, tokenizer, directory: str) -> None:
+    """COLLECTIVE. The gathered EP save and tokenizer, as a run's save writes them."""
+    save = save_context(model, parallelism_config, tokenizer=tokenizer, has_ep_layers=True)
+    save_tokenizer(save, directory)
+    save_ep_gathered_checkpoint(save, directory)
+    ctx.barrier()
+
+
+def run_release_resume(ctx, load: Callable[[ParallelismConfig], tuple]) -> dict:
+    """COLLECTIVE. The phase on an EP SFT run of a real release's text class, on SDPA, from a gathered save of what
+    ``load`` builds for the config it is given: ``(model, tokenizer)``."""
+    # The resumed run replays the unbroken one exactly, which DeepEP's atomic receive order would not.
+    pin_deterministic_ep_dispatch()
+    parallelism_config = ParallelismConfig(ep_size=ctx.world_size)
+    root = shared_output_dir(ctx)
+    base = os.path.join(root, "base")
+    model, tokenizer = load(parallelism_config)
+    save_gathered_ep(ctx, model, parallelism_config, tokenizer, base)
+    del model
+    cleanup_memory()
+    train_dataset = create_sft_dataset(RELEASE_DATA_ROWS, tokenizer, seed=RELEASE_DATA_SEED)
+
+    def build_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint):
+        return DistributedSFTTrainer(
+            model=model,
+            args=SFTConfig(
+                output_dir=output_dir,
+                max_steps=max_steps,
+                **save_schedule(save_every),
+                per_device_train_batch_size=1,
+                learning_rate=RELEASE_LR,
+                bf16=True,
+                gradient_checkpointing=True,
+                logging_steps=1,
+                report_to=[],
+                logging_nan_inf_filter=False,
+                max_length=RELEASE_MAX_LENGTH,
+                dataloader_drop_last=True,
+                dataloader_num_workers=0,
+            ),
+            train_dataset=train_dataset,
+            processing_class=tokenizer,
+            parallelism_config=parallelism_config,
+        )
+
+    route = ResumeExportRoute(build_trainer, AutoModelForCausalLM, dtype=torch.bfloat16, attn_implementation="sdpa")
+    checks, metrics = run_resume_export(
+        ctx,
+        route,
+        parallelism_config,
+        base=base,
+        root=root,
+        save_step=RELEASE_SAVE_STEP,
+        total_steps=RELEASE_TOTAL_STEPS,
+    )
+    return {"checks": checks, "metrics": metrics}

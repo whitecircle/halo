@@ -90,10 +90,10 @@ remove_unused_columns: false
 dataloader_num_workers: 2
 
 # --- Tokens & chat template ---
-# GLM-5 ships GLM-4's role-token set (<|user|>/<|assistant|>, pad == eos
-# <|endoftext|>), so the GLM multi-turn template applies unchanged.
+# GLM-5's own non-thinking turn (<think></think>, then the answer), without the hub's Reasoning Effort
+# system line and with <|endoftext|> closing the final turn. Role tokens as on GLM-4, pad == eos.
 assistant_message_template: "<|assistant|>"
 pad_token: <|endoftext|>
 eos_token: <|endoftext|>
-chat_template: jinja-templates/glm/glm-chat.jinja
+chat_template: jinja-templates/glm/glm5-chat.jinja
 force_chat_template: true

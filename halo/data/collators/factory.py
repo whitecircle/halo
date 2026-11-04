@@ -56,6 +56,7 @@ def select_data_collator(
         keeps_packed_rows=keeps_packed_rows,
         allow_cross_document_linear_attention=allow_cross_document_linear_attention,
         per_device_eval_batch_size=per_device_eval_batch_size,
+        pad_to_multiple_of=pad_to_multiple_of,
     )
     markers = segment_markers_for(model_config)
     completion_kwargs = {
@@ -98,7 +99,9 @@ def select_data_collator(
         collator = DataCollatorWithPacking(tokenizer=tokenizer, **packed_markers)
     elif train_on_completions_only:
         prefix, name = "📝", f"DataCollatorForCompletionOnlyLM{last_only}"
-        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs, emit_varlen_one_document=one_document)
+        collator = DataCollatorForCompletionOnlyLM(
+            **completion_kwargs, emit_varlen_one_document=one_document, pad_to_multiple_of=pad_to_multiple_of
+        )
     elif one_document:
         prefix, name = "ℹ️", "DataCollatorForLanguageModelingWithVarlen (TRL's, with the one-document varlen set)"
         collator = DataCollatorForLanguageModelingWithVarlen(

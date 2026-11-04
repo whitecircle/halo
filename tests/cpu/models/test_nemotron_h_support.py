@@ -55,7 +55,6 @@ E = TINY_NEMOTRON_H_CONFIG["n_routed_experts"]
 H = TINY_NEMOTRON_H_CONFIG["hidden_size"]
 L = TINY_NEMOTRON_H_CONFIG["moe_latent_size"]
 M = TINY_NEMOTRON_H_CONFIG["moe_intermediate_size"]
-K = TINY_NEMOTRON_H_CONFIG["num_experts_per_tok"]
 TOKENS = (2, 32)
 # ~6x the measured worst case, as the roster's own comparison; a real disagreement clears it by orders of magnitude.
 _RELATIVE_BAND = 2e-6

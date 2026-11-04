@@ -238,9 +238,11 @@ def test_preprocessed_completion_masking_match_passes(metadata_cls):
     _validate_masking(metadata_cls, baked=True, runtime=True)
 
 
-def test_preprocessed_completion_masking_old_metadata_warns_not_crashes(metadata_cls):
+def test_preprocessed_completion_masking_old_metadata_warns_not_crashes(metadata_cls, caplog):
     # Metadata written before the field existed carries no signal, so it must not raise.
-    _validate_masking(metadata_cls, baked=None, runtime=True)
+    with caplog.at_level("WARNING", logger=PreprocessedDatasetMetadata.__module__):
+        _validate_masking(metadata_cls, baked=None, runtime=True)
+    assert "predates the train_on_completions_only field" in caplog.text
 
 
 def test_sft_forwards_the_runtime_masking_flag_to_the_preprocessed_check():

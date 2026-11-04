@@ -36,7 +36,9 @@ from halo.checkpoint.format import (
 from halo.checkpoint.hub_layout import save_pretrained_layout
 from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.reading import (
+    FP8_HEADER_DTYPE,
     checkpoint_shard_files,
+    iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
     read_checkpoint_config,
     resolve_checkpoint_weights,
@@ -46,6 +48,7 @@ from halo.checkpoint.writing import sweep_after_full_save
 from halo.hardware import available_host_ram_bytes
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.mtp.head import mtp_head_path
 from halo.models.mtp.spec import (
     declared_tail_fields,
@@ -284,13 +287,13 @@ def _warn_on_dropped_mtp_tail(model, model_id: str, output_dir: str, weight_map,
 def carried_mtp_tail(
     model, model_id: str, output_dir: str, *, tool: str, dtype: torch.dtype
 ) -> dict[str, torch.Tensor]:
-    """The MTP head ``model``'s class dropped at load, for the save to write back at ``dtype``, so a conversion keeps a
-    head the source trained. The trunk copies a release stores come off the live embeddings, which a vocabulary patch
-    grows. A tail with no spec stays dropped, as nothing says which of its tensors follow the vocabulary, and warns with
-    the config field its output keeps; so does a class with no output embedding for a head to share, and a quantized
-    source, whose tail holds no float tensors to cast. Header-only until a head is carried; a family with no spec whose
-    class names no tail and whose config declares none never looks at the source, as a Hub id's snapshot fetches files
-    its load did not need."""
+    """The MTP head ``model``'s class dropped at load, for the save to write back at ``dtype``, its fp32 pins and
+    balancing tensors as stored, so a conversion keeps a head the source trained. The trunk copies a release stores come
+    off the live embeddings, which a vocabulary patch grows. A tail with no spec stays dropped, as nothing says which of
+    its tensors follow the vocabulary, and warns with the config field its output keeps; so does a class with no output
+    embedding for a head to share, and a quantized source, whose tail holds no float tensors to cast. Header-only until
+    a head is carried; a family with no spec whose class names no tail and whose config declares none never looks at
+    the source, as a Hub id's snapshot fetches files its load did not need."""
     spec = find_mtp_head_spec(model.config)
     if spec is None and not tail_load_patterns(_class_load_ignores(model)) and not declared_tail_fields(model.config):
         return {}
@@ -312,7 +315,7 @@ def carried_mtp_tail(
     pinned = fp32_pin_matches(weight_map, declared_fp32_pins(model)) if spec.tail_keeps_fp32_pins else frozenset()
     tail = {
         f"{path}.{key[len(prefix) :]}": tensor.to(dtype)
-        if tensor.is_floating_point() and key not in pinned
+        if tensor.is_floating_point() and key not in pinned and not is_balancing_state_key(key)
         else tensor
         for key, tensor in iter_checkpoint_tensors(
             source, predicate=lambda key: key.startswith(prefix) and key not in copies
@@ -322,6 +325,16 @@ def carried_mtp_tail(
         f"{tool}: carried the {len(tail)} MTP head tensor(s) {model_id} stores under {path}.* to {output_dir}."
     )
     return {**tail, **copies}
+
+
+def reject_source_without_fp8(source: str, *, tool: str) -> None:
+    """A source with no fp8 tensor would convert to a plain copy and report success. Headers only."""
+    headers = (reader.get_slice(key) for _shard, reader, key in iter_checkpoint_shard_entries(source))
+    if not any(header.get_dtype() == FP8_HEADER_DTYPE for header in headers):
+        raise ValueError(
+            f"{source} stores no fp8 tensor: the checkpoint is not the fp8 release {tool} dequantizes. An "
+            f"already-BF16 checkpoint trains directly; point model_name_or_path at it instead."
+        )
 
 
 def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:

@@ -346,7 +346,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             response = self.request("GET", "/health", retry=False, timeout=_ENGINE_ANSWER_TIMEOUT_S, check=False)
         except requests.exceptions.RequestException:
             return False
-        return response.status_code == 200
+        # A 503 is a scheduler step past the server's own 20 s window: alive, and the destroy's join bounds a wedged one.
+        return response.status_code in (200, 503)
 
     def _destroy_remote_group(self):
         """Best-effort; never masks the caller's failure."""

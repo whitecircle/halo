@@ -23,15 +23,15 @@ checkpoints/*
 
 # Distribution / packaging
 .Python
-build/
+/build/
 develop-eggs/
 dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
-parts/
+/parts/
 sdist/
 var/
 wheels/
@@ -73,8 +73,10 @@ ipython_config.py
 
 # Environments
 .env
+.env.*
+!.env.example
 .venv
-env/
+/env/
 venv/
 ENV/
 env.bak/
@@ -97,14 +99,10 @@ cython_debug/
 # PyCharm
 .idea/
 
-models/
-!halo/models/
-!agent-docs/models/
-!tests/cpu/models/
-!tests/gpu/models/
+/models/
 
 # Run output (training scripts and profiling write these at the repo root)
-out/
+/out/
 trainer_output/
 # Equivalence harness records (make verify-move / verify-artifacts), one per head commit
 /evidence/

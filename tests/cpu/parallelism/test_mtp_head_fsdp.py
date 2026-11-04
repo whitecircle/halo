@@ -23,12 +23,13 @@ from halo.distributed.fsdp import (
     reshard_fsdp2_modules,
 )
 from halo.distributed.mesh import build_dp_mesh
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger import cross_entropy
 from halo.models.mtp.head import freeze_trunk_for_head
 from halo.trainers.parallelism.ep_layers import EPLayersMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from tests.common.gloo import run_gloo_ranks
-from tests.common.mtp_heads import LABEL_IGNORE, install_term, tiny_model_with_head
+from tests.common.mtp_heads import install_term, tiny_model_with_head
 from tests.common.parallelism import single_process_ep_config
 
 _WORLD = 2
@@ -111,7 +112,7 @@ def _row_of_rank(rank: int) -> dict[str, torch.Tensor]:
     generator = torch.Generator().manual_seed(3)
     input_ids = torch.randint(4, 90, (_WORLD, 24), generator=generator)
     labels = input_ids.clone()
-    labels[:, : 3 + 2 * rank] = LABEL_IGNORE
+    labels[:, : 3 + 2 * rank] = LABEL_IGNORE_INDEX
     return {"input_ids": input_ids[rank : rank + 1], "labels": labels[rank : rank + 1], "use_cache": False}
 
 

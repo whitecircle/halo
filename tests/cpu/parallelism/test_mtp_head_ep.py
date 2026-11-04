@@ -14,13 +14,14 @@ from halo.distributed.expert_parallel.deepep import backends as ep_backends
 from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.mtp_head import attach_mtp_head
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.mtp.head import find_mtp_head
 from halo.models.mtp.spec import MtpHeadRequest, MtpObjective
 from tests.common.ep_stubs import LoopbackBackend, no_ep_dispatcher
-from tests.common.mtp_heads import LABEL_IGNORE, MTP_TINY_FAMILIES, padded_rows, write_checkpoint_with_tail
+from tests.common.mtp_heads import MTP_TINY_FAMILIES, padded_rows, write_checkpoint_with_tail
 from tests.common.parallelism import single_process_ep_config, stubbed_rank_ep_config
 from tests.common.tiny_models import tiny_family_model
 
@@ -100,7 +101,10 @@ def test_checkpointing_replays_the_heads_dispatch_and_soft_issues_the_ops_of_har
     "rows",
     [
         {"input_ids": padded_rows()["input_ids"][:, :2], "labels": padded_rows()["input_ids"][:, :2]},
-        {"input_ids": padded_rows()["input_ids"], "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE)},
+        {
+            "input_ids": padded_rows()["input_ids"],
+            "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE_INDEX),
+        },
     ],
     ids=["too_short", "all_masked"],
 )
@@ -120,7 +124,10 @@ def test_a_row_with_no_head_target_keeps_the_heads_ops(rows, scope, loss_type, t
     "rows",
     [
         {"input_ids": padded_rows()["input_ids"], "labels": padded_rows()["labels"]},
-        {"input_ids": padded_rows()["input_ids"], "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE)},
+        {
+            "input_ids": padded_rows()["input_ids"],
+            "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE_INDEX),
+        },
     ],
     ids=["scored", "all_masked"],
 )
@@ -133,7 +140,7 @@ def test_a_held_out_forward_walks_the_heads_dispatch_with_no_backward_on_every_r
     model = _live(name, tmp_path, log, loss_type="soft").eval()
     output = model(**rows, use_cache=False)
     assert _head_ops(model, log) == _FORWARD_ORDER
-    assert int(output.mtp_acceptance.positions) == int((rows["labels"][:, 2:] != LABEL_IGNORE).sum())
+    assert int(output.mtp_acceptance.positions) == int((rows["labels"][:, 2:] != LABEL_IGNORE_INDEX).sum())
 
 
 class _CapacityBackend(LoopbackBackend):

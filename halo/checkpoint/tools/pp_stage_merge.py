@@ -2,13 +2,14 @@
 non-shared output filesystem each node's directory holds the index, its stage parts, the wrapper parts and its ranks'
 resume state."""
 
+import json
 import logging
 import os
 import shutil
 from collections.abc import Sequence
 
 from halo.checkpoint.atomic import link_or_copy_file
-from halo.checkpoint.format import PP_STAGE_PART_RE
+from halo.checkpoint.format import PP_STAGE_PART_RE, TRAINER_STATE_FILE
 from halo.checkpoint.reading import read_checkpoint_index, reject_partial_checkpoint
 from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
@@ -21,10 +22,30 @@ from halo.checkpoint.writing import write_merged_index
 logger = logging.getLogger(__name__)
 
 
+def _saved_step(input_dir: str) -> int | None:
+    """The step a node directory's trainer state records; None without one, as a ``save_model`` export has none."""
+    path = os.path.join(input_dir, TRAINER_STATE_FILE)
+    if not os.path.isfile(path):
+        return None
+    with open(path) as state:
+        return json.load(state)["global_step"]
+
+
+def _reject_different_steps(input_dirs: Sequence[str]) -> None:
+    """Two steps of one run share an index and an optimizer meta, and neither names a step. The base save writes the
+    trainer state on every node of a per-node filesystem, last, so one node without it did not finish that save."""
+    steps = {input_dir: _saved_step(input_dir) for input_dir in input_dirs}
+    if len(set(steps.values())) > 1:
+        raise ValueError(
+            f"The node directories record different steps in {TRAINER_STATE_FILE} ({steps}; None holds no such file): "
+            f"they are not node directories of one save, or one node's save did not complete."
+        )
+
+
 def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
     """Write ``output_dir`` from one PP save's per-node directories; the result resumes exactly on the save's topology.
-    Every input must carry the same index and every check runs before the first write. Parts copy from their first
-    holder, per-rank resume files hard-link where the filesystem allows, and the index lands last."""
+    Every input must carry the same index and step, and every check runs before the first write. Parts copy from their
+    first holder, per-rank resume files hard-link where the filesystem allows, and the index lands last."""
     for input_dir in input_dirs:
         reject_in_place_conversion(input_dir, output_dir)
     index = read_checkpoint_index(input_dirs[0])
@@ -34,6 +55,12 @@ def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
                 f"{input_dir} and {input_dirs[0]} carry different safetensors indexes: they are not "
                 f"node directories of one pipeline-parallel save."
             )
+    if not any(PP_STAGE_PART_RE.match(part) for part in index["weight_map"].values()):
+        raise ValueError(
+            f"The index in {input_dirs[0]} names no stage part: this is not a pipeline-parallel save, and merging "
+            f"would keep the first input's weights alone."
+        )
+    _reject_different_steps(input_dirs)
 
     sources: dict[str, str] = {}
     unheld: list[str] = []

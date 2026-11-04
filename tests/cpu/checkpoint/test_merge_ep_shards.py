@@ -237,7 +237,7 @@ def test_transform_individual():
         assert torch.equal(d, down[i].transpose(0, 1))
 
 
-def testgroup_expert_weights():
+def test_group_expert_weights():
     weights = {
         f"{PREFIX}.mlp.gate_proj": torch.randn(E, H, M),
         f"{PREFIX}.mlp.up_proj": torch.randn(E, H, M),

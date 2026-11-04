@@ -19,6 +19,7 @@ from halo.checkpoint.reading import (
 from halo.checkpoint.tools.offline_export import (
     preflight_resource_warning,
     reject_in_place_conversion,
+    reject_source_without_fp8,
     resolve_checkpoint_source,
     save_full_checkpoint,
 )
@@ -80,6 +81,7 @@ def convert_deepseek_v4_checkpoint(
     reject_in_place_conversion(source, output_dir)
 
     config = source_config(source, trust_remote_code=trust_remote_code)
+    reject_source_without_fp8(source, tool="convert_deepseek_v4_bf16")
     quantization = getattr(config, "quantization_config", None) or {}
     block = tuple(quantization.get("weight_block_size") or FineGrainedFP8Config().weight_block_size)
     reject_uneven_fp8_blocks(source, block)

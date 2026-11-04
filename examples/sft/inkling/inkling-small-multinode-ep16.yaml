@@ -1,4 +1,4 @@
-# Inkling-Small (276B total / 12B active) — cross-node EP SFT on 2 nodes × 8 GPUs, EP=16 global
+# Inkling-Small (266B total / 12B active) — cross-node EP SFT on 2 nodes × 8 GPUs, EP=16 global
 # (532 GB of BF16 weights do not fit node-local EP=8 with full-FT optimizer states).
 # Launch per node:
 #   torchrun --nnodes=2 --node-rank=<r> --nproc-per-node=8 \

@@ -19,7 +19,6 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.numerics import fro_rel_err
 
-WINDOW = TINY_STEP3P7_CONFIG["sliding_window"]
 LAYERS = TINY_STEP3P7_CONFIG["num_hidden_layers"]
 PACKINGS = ([150, 30, 90], [100, 7, 200])
 GEMMA4_LAYER_TYPES = ["sliding_attention", "full_attention"]

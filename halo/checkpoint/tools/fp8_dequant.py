@@ -26,6 +26,7 @@ from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
+    reject_source_without_fp8,
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter, cast_to_save_dtype
@@ -121,6 +122,7 @@ def run_dequant_conversion(
     reject_in_place_conversion(source, destination)
 
     conversion = rules(source)
+    reject_source_without_fp8(source, tool=tool)
     output_bytes = _preflight_dequant_shards(source, destination, tool=tool, rules=conversion)
     logger.info("Validated %d input shards; BF16 output will be %.1f GiB", len(input_shards), output_bytes / 1024**3)
 

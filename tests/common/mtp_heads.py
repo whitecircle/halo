@@ -13,6 +13,7 @@ from safetensors.torch import save_file
 from torch import nn
 
 from halo.checkpoint.reading import iter_checkpoint_tensors
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger.cross_entropy import head_token_ce_sum
 from halo.models.config_access import text_config
 from halo.models.module_tree import backbone_with_layers
@@ -42,7 +43,6 @@ MTP_TINY_FAMILIES = {
     "nemotron_h_no_latent": TINY_NEMOTRON_H_NO_LATENT_FAMILY,
     "nemotron_h_omni": TINY_MOE_VLM_FAMILIES["nemotron_h_omni"],
 }
-LABEL_IGNORE = -100
 # The GPU rows' shard layouts, each with the ranks it runs on. ``fsdp`` leaves a MoE's experts as its class builds them,
 # ``fsdp_zero3`` and ``ep1`` take the EP layer at one rank per group, and all three hold every parameter as a DTensor.
 MTP_GPU_MODES: dict[str, tuple[dict, int]] = {
@@ -139,8 +139,8 @@ def padded_rows(seed: int = 3) -> dict[str, torch.Tensor]:
     generator = torch.Generator().manual_seed(seed)
     input_ids = torch.randint(4, 90, (2, 24), generator=generator)
     labels = input_ids.clone()
-    labels[:, :5] = LABEL_IGNORE
-    labels[1, 20:] = LABEL_IGNORE
+    labels[:, :5] = LABEL_IGNORE_INDEX
+    labels[1, 20:] = LABEL_IGNORE_INDEX
     attention_mask = torch.ones_like(input_ids)
     attention_mask[1, 20:] = 0
     return {"input_ids": input_ids, "labels": labels, "attention_mask": attention_mask, "use_cache": False}
@@ -152,7 +152,7 @@ def packed_rows(seed: int = 3) -> dict[str, torch.Tensor]:
     input_ids = torch.randint(4, 90, (1, 24), generator=generator)
     position_ids = torch.cat([torch.arange(12), torch.arange(12)])[None]
     labels = input_ids.clone()
-    labels[position_ids == 0] = LABEL_IGNORE
+    labels[position_ids == 0] = LABEL_IGNORE_INDEX
     return {"input_ids": input_ids, "labels": labels, "position_ids": position_ids, "use_cache": False}
 
 
@@ -216,7 +216,7 @@ def tokenized_rows(vocab_size: int, count: int, *, seed: int, length: int, promp
     generator = torch.Generator().manual_seed(seed)
     input_ids = torch.randint(4, vocab_size, (count, length), generator=generator)
     labels = input_ids.clone()
-    labels[:, :prompt] = LABEL_IGNORE
+    labels[:, :prompt] = LABEL_IGNORE_INDEX
     return Dataset.from_dict(
         {"input_ids": input_ids.tolist(), "labels": labels.tolist(), "attention_mask": [[1] * length] * count}
     )

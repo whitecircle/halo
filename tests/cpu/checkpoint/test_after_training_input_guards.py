@@ -563,10 +563,29 @@ def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, mon
     assert not out.exists(), "a refused patch must not create its output directory"
 
 
+@pytest.mark.parametrize(
+    ("tool", "model_type"),
+    [(convert_mistral4_bf16, "mistral4"), (convert_glm5_bf16, "glm5_next"), (convert_deepseek_v4_bf16, "deepseek_v4")],
+    ids=["mistral4", "glm5", "deepseek_v4"],
+)
+def test_a_converter_refuses_a_source_that_stores_no_fp8(tmp_path, monkeypatch, tool, model_type):
+    """Each would otherwise write a plain copy of a checkpoint that needs no conversion and report success."""
+    src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type=model_type)
+    out = tmp_path / "out"
+    monkeypatch.setattr(sys, "argv", [f"{tool.__name__}.py", "--model_id", str(src), "--output_dir", str(out)])
+    with pytest.raises(ValueError, match="the checkpoint is not the fp8"):
+        tool.main()
+    assert not out.exists(), "a refused conversion must not create its output directory"
+
+
 def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monkeypatch):
     """A raw ``from_pretrained`` only warns, re-saving random experts as ~580 GB; the real FP8 load needs the hub
     checkpoint, so this pins the wiring."""
-    src = _write_gathered_checkpoint(tmp_path / "src", _fused_moe_tensors(), model_type="deepseek_v4")
+    tensors = {
+        **_fused_moe_tensors(),
+        "model.layers.0.self_attn.q_proj.weight": torch.ones(4, 4, dtype=torch.float8_e4m3fn),
+    }
+    src = _write_gathered_checkpoint(tmp_path / "src", tensors, model_type="deepseek_v4")
     out = tmp_path / "out"
 
     class _GateReached(Exception):

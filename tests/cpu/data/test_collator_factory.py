@@ -85,6 +85,20 @@ def test_cp_packing_rejected():
         )
 
 
+def test_pad_to_multiple_of_reaches_the_completion_collator_outside_cp():
+    collator = _select(
+        train_on_completions_only=True, assistant_message_template="<|assistant|>", pad_to_multiple_of=8
+    )
+    assert type(collator).__name__ == "DataCollatorForCompletionOnlyLM"
+    assert collator.pad_to_multiple_of == 8
+
+
+@pytest.mark.parametrize("rows", ["packing", "padding_free"])
+def test_pad_to_multiple_of_is_refused_on_rows_that_carry_no_padding(rows):
+    with pytest.raises(ValueError, match="pad_to_multiple_of=8 pads a batch"):
+        _select(**{rows: True}, pad_to_multiple_of=8)
+
+
 def test_cp_no_packing():
     """A labels-less collator makes every CP SFT step fail with 'model did not return a loss'."""
     collator = _select(use_context_parallel=True, pad_to_multiple_of=8)

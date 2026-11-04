@@ -94,7 +94,7 @@ A resume writes the bytes of a run that never stopped. It reads the checkpoint's
 
 | Tool | A stored head |
 |---|---|
-| `convert_to_bf16`, `patch_vocab` | Written back at the output's dtype on a family with a head, in the expert layout of the class's save, GLM-4's copies off the live embeddings a patch grew, Nemotron-H's router bias at its stored fp32. Any other family's tail drops, with a warning naming the config field its output keeps. |
+| `convert_to_bf16`, `patch_vocab` | Written back at the output's dtype on a family with a head, in the expert layout of the class's save, GLM-4's copies off the live embeddings a patch grew, a router bias at its stored width (Nemotron-H's fp32 pin, or a slot `bias_update` trained). Any other family's tail drops, with a warning naming the config field its output keeps. |
 | `merge_ep_shards` | Merged with the trunk's experts into the gathered save's bytes. A family whose export writes trunk copies refuses `save_sharded_ep`, and Nemotron-H refuses it for its trunk's names. |
 | `merge_models` | Merged where every input carries it, refused where only some do, except a base's under `task_arithmetic` or `ties` that no fine-tune stores, which the merge leaves out. |
 | `reattach_vision_tower` | The export's head supersedes the base's whole, at the composite's level; with none, the base's is carried with a warning, which offers a `head_only` fit only on a family with a head spec. |
@@ -143,7 +143,8 @@ The loss cannot make this call: a released head at `learning_rate: 1e-4` with no
 
 | Recipe | Fits |
 |---|---|
-| `examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml`, `examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml` | The head over a frozen trunk, at the learning rate and warmup the gate does not warn off |
+| `examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-head-only.yaml` | The head over a frozen trunk, at the learning rate and warmup the gate does not warn off |
+| `examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml` | The same fit at the same rate, which the gate stopped on GLM-4's first-turn rows, so this recipe's run may exit non-zero |
 | `examples/sft/nemotron_h/nemotron-3.5-lightning-mtp-head-only.yaml` | The same fit, at the lower learning rate whose fit passed the gate on first-turn rows |
 | `examples/sft/qwen3_5/qwen3.6-35b-a3b-mtp-joint.yaml` | The head inside the SFT recipe's objective, at the weight DeepSeek-V3 published for pretraining |
 
@@ -170,6 +171,6 @@ Neither render shows a served gain. Each recipe's rows are ultrachat replies, no
 
 ## Refusals
 
-Before the load (`reject_unsupported_mtp_options`, `halo/trainers/sft_rules.py`): context, tensor and pipeline parallelism, HSDP, an accelerate launch, adapters and quantized loads, `lowp_precision`, `torch_compile`, `tree_packing`, image rows, label smoothing, `loss_type` other than `nll` or `chunked_nll`, `save_sharded_ep` where the export writes trunk copies, and `mtp_head_source` under `init_from_scratch`. `head_only` also refuses gradient checkpointing and `gradient_checkpointing_plan`, freeze patterns, `init_from_scratch`, a balancing mode that updates off the trunk, `fp32_non_ep_params`, `fp32_experts`, and a gate with no eval split. A trainer whose forward takes no labels raises at construction, as does a head the freeze patterns froze whole.
+Before the load (`reject_unsupported_mtp_options`, `halo/trainers/sft_rules.py`): context, tensor and pipeline parallelism, HSDP, an accelerate launch, adapters and quantized loads, `lowp_precision`, `torch_compile`, `tree_packing`, image rows, label smoothing, `loss_type` other than `nll` or `chunked_nll`, `save_sharded_ep` where the export writes trunk copies, and `mtp_head_source` under `init_from_scratch`. `head_only` also refuses gradient checkpointing and `gradient_checkpointing_plan`, freeze patterns, `init_from_scratch`, a balancing mode that updates off the trunk, `fp32_non_ep_params`, `fp32_experts`, and a gate with no eval split. A trainer whose forward takes no labels raises at construction, as does a head the freeze patterns froze whole. `added_special_tokens` past the checkpoint's rows raises at tokenizer setup: the resize replaces the output embedding the head's term holds. Grow the vocabulary first with `patch_vocab.py`, which carries the head.
 
 A run trained under context or tensor parallelism gets a head through a `head_only` fit on its export, at rows short enough to run without either.

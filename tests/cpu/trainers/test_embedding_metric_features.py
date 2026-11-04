@@ -16,7 +16,6 @@ from tests.common.repo import probe_findings
 from tests.common.tiny_models import word_level_tokenizer
 
 _WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")
-_ROWS = 4
 _COLUMNS = {
     "anchor": ["alpha bravo", "charlie", "delta echo foxtrot", "golf"],
     "positive": ["bravo alpha", "charlie delta", "foxtrot", "golf hotel alpha"],

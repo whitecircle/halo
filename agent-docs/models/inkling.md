@@ -1,6 +1,6 @@
 # Inkling
 
-Thinking Machines' `InklingForConditionalGeneration` (`thinkingmachines/Inkling-Small`, 276B total / 12B active) — a multimodal MoE routing to 256 experts with top-6 selection, 2 always-on shared experts, and 40 MoE layers (of 42 — `dense_mlp_idx: 2` keeps the first two dense) at hidden 4096.
+Thinking Machines' `InklingForConditionalGeneration` (`thinkingmachines/Inkling-Small`, 266B total / 12B active) — a multimodal MoE routing to 256 experts with top-6 selection, 2 always-on shared experts, and 40 MoE layers (of 42 — `dense_mlp_idx: 2` keeps the first two dense) at hidden 4096.
 
 Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — position enters as an additive relative-logits bias — plus depthwise causal short convolutions (`InklingShortConvolution`) on the projected K/V and around each decoder sublayer.
 

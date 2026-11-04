@@ -102,8 +102,8 @@ def add_prompt_field_args(parser: argparse.ArgumentParser) -> argparse.ArgumentP
     return parser
 
 
-def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int | None) -> argparse.ArgumentParser:
-    """One bind policy for every Gradio app; a ``None`` port leaves the choice to Gradio's free-port search."""
+def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int) -> argparse.ArgumentParser:
+    """One bind policy for every Gradio app."""
     group = parser.add_argument_group("Server Configuration")
     group.add_argument(
         "--host",
@@ -115,8 +115,7 @@ def add_gradio_server_args(parser: argparse.ArgumentParser, *, port_default: int
             "UI, and with it the key's spend, to everything that can reach this box."
         ),
     )
-    port_help = port_default if port_default is not None else "the first free port from 7860, or $GRADIO_SERVER_PORT"
-    group.add_argument("--port", type=int, default=port_default, help=f"Port to serve on (default: {port_help})")
+    group.add_argument("--port", type=int, default=port_default, help="Port to serve on (default: %(default)s)")
     group.add_argument("--share", action="store_true", help="Create public Gradio link")
     return parser
 

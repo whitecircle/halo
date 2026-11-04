@@ -167,7 +167,7 @@ def test_drain_single_process():
 
 
 def test_drain_dedups_replicated_ranks(monkeypatch):
-    # TP/ETP/CP: both ranks hold identical data, so non_dp_factor=2 divides the duplicate out.
+    # TP/ETP/CP: both ranks hold identical data, so the duplicate divides out.
     _peers(monkeypatch, [0, 5, 0])
     me = _fake_self(num_processes=2, data_parallel_size=1)
     _accumulate(me, torch.tensor(5))
@@ -176,7 +176,7 @@ def test_drain_dedups_replicated_ranks(monkeypatch):
 
 
 def test_drain_sums_distinct_dp_ranks(monkeypatch):
-    # Pure DP: distinct batches, non_dp_factor=1, so the counts sum.
+    # Pure DP: distinct batches, so the counts sum.
     _peers(monkeypatch, [0, 3, 0])
     me = _fake_self(num_processes=2, data_parallel_size=2)
     _accumulate(me, torch.tensor(5))

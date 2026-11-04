@@ -102,6 +102,7 @@ from tests.common.memory import finish_phase
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.numerics import worst_relative_l2
 from tests.common.pinned_params import SEED, load_row_model, tiny_family_checkpoint
+from tests.common.poisoned_step import final_norm
 from tests.common.pp_equivalence import build_dense_model, build_patched_moe_model
 from tests.common.pp_trainers import build_sft_rows
 from tests.common.rank_log import log
@@ -176,11 +177,6 @@ AXES = MODE.axes | (FP32_MASTER_AXES if ARGS.fp32_masters else {})
 NORM_ONLY = ARGS.max_grad_norm <= 0
 
 
-def _final_norm(model) -> torch.nn.Module:
-    (norm,) = [module for name, module in model.named_modules() if name.split(".")[-1] == "norm"]
-    return norm
-
-
 class _PoisonSteps(TrainerCallback):
     """The last rank multiplies its final norm's output by NaN on the optimizer steps in ``steps``."""
 
@@ -188,7 +184,7 @@ class _PoisonSteps(TrainerCallback):
         self.steps = frozenset(steps)
         self.armed = False
         if self.steps and dist.get_rank() == dist.get_world_size() - 1:
-            _final_norm(trainer.model).register_forward_hook(self._poison)
+            final_norm(trainer.model).register_forward_hook(self._poison)
 
     def _poison(self, module, inputs, output):
         return output * float("nan") if self.armed else None

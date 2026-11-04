@@ -14,6 +14,7 @@ from transformers.utils import cached_file
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
 from halo.models.config_access import set_config_field
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.models.mtp.head import find_mtp_head
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
@@ -261,11 +262,22 @@ def _reject_token_indexed_table_grow(base: PreTrainedModel, num_tokens: int) -> 
     )
 
 
+def _reject_grow_under_mtp_head(model: PreTrainedModel, num_tokens: int) -> None:
+    """The resize replaces the output embedding, while an attached head's term keeps projecting through the old one."""
+    if find_mtp_head(model) is not None:
+        raise ValueError(
+            f"Growing {type(model).__name__}'s vocabulary to {num_tokens} rows would leave its attached MTP head "
+            f"scoring the old output embedding. Grow the vocabulary before the run with "
+            f"scripts/before_training/patch_vocab.py, which carries the head."
+        )
+
+
 def grow_vocabulary(model: PreTrainedModel, num_tokens: int, *, mean_resizing: bool = True) -> None:
     """Resize the embeddings (and an untied head) up to ``num_tokens`` rows and mark the plain transformers model
     grown, which an adapter save reads back. ``mean_resizing=False`` is for a caller overwriting the rows."""
     base = base_transformers_model(model)
     _reject_token_indexed_table_grow(base, num_tokens)
+    _reject_grow_under_mtp_head(base, num_tokens)
     model.resize_token_embeddings(num_tokens, mean_resizing=mean_resizing)
     setattr(base, _GROWN_VOCABULARY_ATTR, True)
 

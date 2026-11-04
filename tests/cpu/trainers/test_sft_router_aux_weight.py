@@ -21,7 +21,7 @@ LOSS_PATHS = {"model": {}, "label_smoothing": {"label_smoothing_factor": 0.1}, "
 
 def _trainer(tmp_path, processes: int, monkeypatch, coef: float = COEF, **loss_args) -> DistributedSFTTrainer:
     torch.manual_seed(0)
-    # output_router_logits as the loader sets it for moe_balancing=aux_loss (apply_balancing_strategy)
+    # output_router_logits as the loader sets it for moe_balancing=aux_loss (apply_balancing_mode)
     overrides = {"router_aux_loss_coef": coef, "output_router_logits": True}
     model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"], overrides=overrides)
     args = SFTConfig(

@@ -22,10 +22,7 @@ from huggingface_hub.errors import LocalEntryNotFoundError
 from safetensors import safe_open
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.models.nemotron_h import modeling_nemotron_h as nemotron_modeling
-from trl import SFTConfig
 
-from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from halo.checkpoint.parallel.save import save_tokenizer
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -37,15 +34,14 @@ from halo.models.config_access import text_config
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.nemotron_h import _document_chunk_scan
 from halo.models.segment_markers import SegmentMarkers, segment_marker_kwargs
-from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import loading_problems, save_context, save_schedule
-from tests.common.datasets import create_sft_dataset, repository_text_rows
-from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.checkpoint_io import loading_problems
+from tests.common.datasets import repository_text_rows
+from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.memory import cleanup_memory, host_peak_rss_gib, reset_host_peak_rss
 from tests.common.nemotron_h import NEMOTRON_RELEASES, expected_hub_keys, hub_text_prefix, release_model_id
 from tests.common.rank_log import log
-from tests.common.resume_export import ResumeExportRoute, run_resume_export
+from tests.common.resume_export import run_release_resume, save_gathered_ep
 
 SEED = 0
 BIAS_SLOT = "e_score_correction_bias"
@@ -63,10 +59,6 @@ ROUTING_FLIP_MAX_FRACTION = 2e-2
 EXPORT_TEXT_ROWS = 2
 EXPORT_TEXT_LENGTH = 2048
 EXPORT_NLL_ABS_MAX = 2e-2
-RESUME_MAX_LENGTH = 512
-RESUME_LR = 1e-4
-SAVE_STEP = 3
-TOTAL_STEPS = 2 * SAVE_STEP
 # Random weights score ln(131072) = 11.8 on any text; the release reads prose near 1.
 TRAINED_TEXT_LOSS_MAX = 4.0
 # Mean |logit difference|: without its marker a Mamba layer alone moves by whole percents of its output, far above what
@@ -301,14 +293,6 @@ def _reload_checks(export: str, rows: torch.Tensor, trained: torch.Tensor, text_
     return {"reload_loads_every_weight": not problems, "reload_scores_at_the_trained_nll": gap <= EXPORT_NLL_ABS_MAX}
 
 
-def _save_gathered(ctx, model, parallelism_config: ParallelismConfig, tokenizer, directory: str) -> None:
-    """COLLECTIVE. The gathered EP save and tokenizer, as a run's save writes them."""
-    save = save_context(model, parallelism_config, tokenizer=tokenizer, has_ep_layers=True)
-    save_tokenizer(save, directory)
-    save_ep_gathered_checkpoint(save, directory)
-    ctx.barrier()
-
-
 def run_export(ctx, source: str, args) -> dict:
     parallelism_config = ParallelismConfig(ep_size=ctx.world_size)
     text_only = args.route == "text"
@@ -316,7 +300,7 @@ def run_export(ctx, source: str, args) -> dict:
     rows = _text_rows(tokenizer, EXPORT_TEXT_ROWS, EXPORT_TEXT_LENGTH, ctx.device)
     trained = _token_scores(model.eval(), rows)
     export = args.export_dir or os.path.join(shared_output_dir(ctx), "export")
-    _save_gathered(ctx, model, parallelism_config, tokenizer, export)
+    save_gathered_ep(ctx, model, parallelism_config, tokenizer, export)
     del model
     cleanup_memory()
     checks = {}
@@ -328,45 +312,7 @@ def run_export(ctx, source: str, args) -> dict:
 
 
 def run_resume(ctx, source: str, args) -> dict:
-    # The resumed run replays the unbroken one exactly, which DeepEP's atomic receive order would not.
-    pin_deterministic_ep_dispatch()
-    parallelism_config = ParallelismConfig(ep_size=ctx.world_size)
-    root = shared_output_dir(ctx)
-    base = os.path.join(root, "base")
-    model, tokenizer = _load(source, parallelism_config, args.layers)
-    _save_gathered(ctx, model, parallelism_config, tokenizer, base)
-    del model
-    cleanup_memory()
-    train_dataset = create_sft_dataset(32, tokenizer, seed=SEED)
-
-    def build_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint):
-        return DistributedSFTTrainer(
-            model=model,
-            args=SFTConfig(
-                output_dir=output_dir,
-                max_steps=max_steps,
-                **save_schedule(save_every),
-                per_device_train_batch_size=1,
-                learning_rate=RESUME_LR,
-                bf16=True,
-                gradient_checkpointing=True,
-                logging_steps=1,
-                report_to=[],
-                logging_nan_inf_filter=False,
-                max_length=RESUME_MAX_LENGTH,
-                dataloader_drop_last=True,
-                dataloader_num_workers=0,
-            ),
-            train_dataset=train_dataset,
-            processing_class=tokenizer,
-            parallelism_config=parallelism_config,
-        )
-
-    route = ResumeExportRoute(build_trainer, AutoModelForCausalLM, dtype=torch.bfloat16, attn_implementation="sdpa")
-    checks, metrics = run_resume_export(
-        ctx, route, parallelism_config, base=base, root=root, save_step=SAVE_STEP, total_steps=TOTAL_STEPS
-    )
-    return {"checks": checks, "metrics": metrics}
+    return run_release_resume(ctx, lambda parallelism_config: _load(source, parallelism_config, args.layers))
 
 
 class _BlockClock:

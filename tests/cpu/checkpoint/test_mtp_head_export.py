@@ -34,6 +34,13 @@ from halo.trainers.grpo.rollout.weight_push import _dense_params
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
+from tests.common.models import (
+    GLM4_FLASH,
+    NEMOTRON_3_5_LIGHTNING,
+    NEMOTRON_3_5_SUPER_VL,
+    QWEN3_5_MOE_122B,
+    QWEN3_NEXT_80B_A3B,
+)
 from tests.common.mtp_heads import (
     MTP_TINY_FAMILIES,
     run_entry,
@@ -50,13 +57,13 @@ from tests.common.tiny_models import tiny_family_model
 _RELEASE_TAILS = json.loads((REPO_ROOT / "tests/common/mtp_release_tails.json").read_text(encoding="utf-8"))
 _RELEASE_OF_FAMILY = {
     "qwen3_5": "Qwen/Qwen3.8-27B",
-    "qwen3_5_moe_text": "Qwen/Qwen3.5-122B-A10B",
-    "qwen3_5_moe": "Qwen/Qwen3.5-122B-A10B",
-    "qwen3_next": "Qwen/Qwen3-Next-80B-A3B-Instruct",
-    "glm4_moe_lite": "zai-org/GLM-4.7-Flash",
-    "nemotron_h": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
-    "nemotron_h_no_latent": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16",
-    "nemotron_h_omni": "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16",
+    "qwen3_5_moe_text": QWEN3_5_MOE_122B,
+    "qwen3_5_moe": QWEN3_5_MOE_122B,
+    "qwen3_next": QWEN3_NEXT_80B_A3B,
+    "glm4_moe_lite": GLM4_FLASH,
+    "nemotron_h": NEMOTRON_3_5_SUPER_VL,
+    "nemotron_h_no_latent": NEMOTRON_3_5_LIGHTNING,
+    "nemotron_h_omni": NEMOTRON_3_5_SUPER_VL,
 }
 _HEAD_PATHS = {"glm4_moe_lite": "model.layers.2.", "nemotron_h_omni": "language_model.mtp."}
 _RELEASE_PATHS = {

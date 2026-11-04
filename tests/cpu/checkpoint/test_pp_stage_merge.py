@@ -2,6 +2,7 @@
 """``merge_pp_stage_parts``: the export step of a PP save on a non-shared filesystem. A stage whose parts no
 directory holds fails the merge; resume state is hard-linked where it can be."""
 
+import json
 import os
 import shutil
 import stat
@@ -15,6 +16,7 @@ from halo.checkpoint.format import (
     OPTIMIZER_META_FILE,
     PP_STAGE_PART_RE,
     SAFETENSORS_INDEX_FILE,
+    TRAINER_STATE_FILE,
     optimizer_shard_filename,
     pp_stage_part_prefix,
 )
@@ -79,6 +81,11 @@ def _write_resume_state(node_dirs: list[str], meta: dict = OPTIMIZER_META) -> No
             )
             torch.save({"python": rank}, os.path.join(node_dir, f"rng_state_{rank}.pth"))
         torch.save(meta, os.path.join(node_dir, OPTIMIZER_META_FILE))
+
+
+def _write_trainer_state(node_dir: str, global_step: int) -> None:
+    with open(os.path.join(node_dir, TRAINER_STATE_FILE), "w") as state:
+        json.dump({"global_step": global_step}, state)
 
 
 def _resume_holders(node_dirs: list[str]) -> dict[str, str]:
@@ -257,6 +264,55 @@ def test_directories_of_different_saves_are_refused(saved, tmp_path):
     shutil.copytree(other[1], node_dirs[1])
     with pytest.raises(ValueError, match="different safetensors indexes"):
         merge_pp_stage_parts(node_dirs, str(tmp_path / "merged"))
+
+
+def test_a_later_steps_node_directory_is_refused_though_its_index_and_meta_match(saved, tmp_path):
+    """The same shapes give the same index, and no meta names a step, so only the trainer state tells them apart."""
+    node_dirs, state = saved
+    later = _write_node_directories(
+        str(tmp_path / "later"),
+        {key: tensor + 1 if tensor.is_floating_point() else tensor for key, tensor in state.items()},
+        Qwen3Config(**TINY_QWEN3_CONFIG),
+    )
+    _write_resume_state(node_dirs)
+    _write_resume_state(later)
+    for directories, step in ((node_dirs, 100), (later, 200)):
+        for node_dir in directories:
+            _write_trainer_state(node_dir, step)
+    merged = tmp_path / "merged"
+    with pytest.raises(ValueError, match=f"different steps in {TRAINER_STATE_FILE}"):
+        merge_pp_stage_parts([node_dirs[0], later[1]], str(merged))
+    assert not merged.exists()
+
+
+def test_a_node_that_did_not_publish_its_trainer_state_is_refused(saved, tmp_path):
+    node_dirs, _ = saved
+    _write_trainer_state(node_dirs[0], 100)
+    with pytest.raises(ValueError, match=f"different steps in {TRAINER_STATE_FILE}"):
+        merge_pp_stage_parts(node_dirs, str(tmp_path / "merged"))
+
+
+def test_node_directories_of_one_step_merge_and_carry_it(saved, tmp_path):
+    node_dirs, _ = saved
+    for node_dir in node_dirs:
+        _write_trainer_state(node_dir, 100)
+    merged = tmp_path / "merged"
+    merge_pp_stage_parts(node_dirs, str(merged))
+    assert json.loads((merged / TRAINER_STATE_FILE).read_text()) == {"global_step": 100}
+
+
+def test_two_checkpoints_that_are_no_pp_save_are_refused(tmp_path):
+    """Every part is held by the first input, so the merge would keep it and drop the second input's weights."""
+    config = Qwen3Config(**TINY_QWEN3_CONFIG)
+    inputs = []
+    for seed in (0, 1):
+        torch.manual_seed(seed)
+        inputs.append(str(tmp_path / f"input{seed}"))
+        Qwen3ForCausalLM(config).save_pretrained(inputs[-1], max_shard_size="64KB")
+    merged = tmp_path / "merged"
+    with pytest.raises(ValueError, match="names no stage part"):
+        merge_pp_stage_parts(inputs, str(merged))
+    assert not merged.exists()
 
 
 def test_the_stage_part_pattern_reads_back_the_builders_names():

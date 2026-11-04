@@ -16,7 +16,9 @@ from transformers import (
     NemotronH_Omni_Reasoning_V3_Config,
 )
 
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger import cross_entropy
+from halo.model_loading.tokenizer_setup import grow_vocabulary
 from halo.models.config_access import text_config
 from halo.models.module_tree import backbone_with_layers, decoder_layers
 from halo.models.mtp.head import (
@@ -27,9 +29,13 @@ from halo.models.mtp.head import (
     mtp_head_path,
 )
 from halo.models.mtp.spec import mtp_draft_layer_index, require_mtp_head_spec
-from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG, NEMOTRON_H_RELEASE_VISION_CONFIG
+from tests.common.models import (
+    NEMOTRON_3_5_LIGHTNING,
+    NEMOTRON_3_5_SUPER_VL,
+    NEMOTRON_H_RELEASE_TEXT_CONFIG,
+    NEMOTRON_H_RELEASE_VISION_CONFIG,
+)
 from tests.common.mtp_heads import (
-    LABEL_IGNORE,
     MTP_TINY_FAMILIES,
     install_term,
     packed_rows,
@@ -38,6 +44,7 @@ from tests.common.mtp_heads import (
 )
 from tests.common.nemotron_h_hub_keys import nemotron_h_hub_keys
 from tests.common.repo import REPO_ROOT
+from tests.common.tiny_models import tiny_family_model
 
 _WEIGHT = 0.7
 # Read from each release's safetensors headers and config.json.
@@ -45,8 +52,6 @@ _RELEASE_TAILS = json.loads((REPO_ROOT / "tests/common/mtp_release_tails.json").
 _FAMILIES = sorted(MTP_TINY_FAMILIES)
 _MOE_TEXT_FAMILIES = ("qwen3_5_moe_text", "qwen3_next", "glm4_moe_lite", "nemotron_h")
 _NEMOTRON_ROUTES = ("nemotron_h", "nemotron_h_omni")
-_LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
-_SUPER_VL = "nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16"
 _SUPER_VL_TAIL_LEVEL = "language_model."
 
 
@@ -105,10 +110,10 @@ def test_the_term_is_the_cross_entropy_two_tokens_ahead_over_the_next_token_norm
         F.cross_entropy(
             F.linear(draft_seen[0][:, :-2], weight).reshape(-1, weight.size(0)),
             labels[:, 2:].reshape(-1),
-            ignore_index=LABEL_IGNORE,
+            ignore_index=LABEL_IGNORE_INDEX,
             reduction="sum",
         )
-        / (labels[:, 1:] != LABEL_IGNORE).sum()
+        / (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()
     )
     assert expected > 0
     assert torch.isclose(loss - baseline, _WEIGHT * expected, rtol=1e-9), "wrong target offset, weight or normalizer"
@@ -124,7 +129,7 @@ def test_a_given_normalizer_divides_the_term_too(name):
     install_term(model, head, weight=1.0)
     term_over_given = model(**rows, num_items_in_batch=given).loss - plain(**rows, num_items_in_batch=given).loss
     term_over_own = model(**rows).loss - plain(**rows).loss
-    tokens = (rows["labels"][:, 1:] != LABEL_IGNORE).sum()
+    tokens = (rows["labels"][:, 1:] != LABEL_IGNORE_INDEX).sum()
     assert term_over_own > 0
     assert torch.isclose(term_over_given * given, term_over_own * tokens, rtol=1e-9)
 
@@ -157,10 +162,10 @@ def test_soft_gives_the_head_the_kl_gradient_with_the_next_token_distribution_as
     model.zero_grad()
     weight = model.get_output_embeddings().weight.detach()
     labels = rows["labels"]
-    keep = labels[:, 2:] != LABEL_IGNORE
+    keep = labels[:, 2:] != LABEL_IGNORE_INDEX
     teacher = F.softmax(F.linear(hidden_seen[0][:, 1:-1], weight), dim=-1)
     student = F.log_softmax(F.linear(draft_seen[0][:, :-2], weight), dim=-1)
-    (_WEIGHT * (-(teacher * student).sum(-1) * keep).sum() / (labels[:, 1:] != LABEL_IGNORE).sum()).backward()
+    (_WEIGHT * (-(teacher * student).sum(-1) * keep).sum() / (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()).backward()
 
     kl = _grads(head)
     assert kl, "the direct KL reached no head parameter"
@@ -185,8 +190,8 @@ def _next_token_plus_kl(name: str, rows: dict, *, teacher_stopped: bool):
     teacher_hidden = hidden_seen[0][:, 1:-1]
     teacher = F.softmax(F.linear(teacher_hidden.detach() if teacher_stopped else teacher_hidden, weight), dim=-1)
     student = F.log_softmax(F.linear(draft_seen[0][:, :-2], weight), dim=-1)
-    kl = -(teacher * student).sum(-1) * (labels[:, 2:] != LABEL_IGNORE)
-    (loss + _WEIGHT * kl.sum() / (labels[:, 1:] != LABEL_IGNORE).sum()).backward()
+    kl = -(teacher * student).sum(-1) * (labels[:, 2:] != LABEL_IGNORE_INDEX)
+    (loss + _WEIGHT * kl.sum() / (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()).backward()
     written = model.get_output_embeddings().weight
     return {key: value for key, value in _grads(model).items() if model.get_parameter(key) is not written}
 
@@ -298,8 +303,8 @@ def test_a_row_past_the_chunk_size_keeps_every_gradient(name, loss_type, scope, 
 def test_the_split_reports_each_cross_entropy_over_its_own_targets(name):
     rows = padded_rows()
     # A target at position 1, which the next-token loss scores and the head, predicting two ahead, cannot.
-    rows["labels"] = rows["input_ids"].masked_fill(rows["labels"][:, -1:] == LABEL_IGNORE, LABEL_IGNORE)
-    rows["labels"][:, 0] = LABEL_IGNORE
+    rows["labels"] = rows["input_ids"].masked_fill(rows["labels"][:, -1:] == LABEL_IGNORE_INDEX, LABEL_IGNORE_INDEX)
+    rows["labels"][:, 0] = LABEL_IGNORE_INDEX
     plain, _ = tiny_model_with_head(name)
     next_token_mean = plain(**rows).loss.detach()
     model, head = tiny_model_with_head(name)
@@ -313,11 +318,11 @@ def test_the_split_reports_each_cross_entropy_over_its_own_targets(name):
     head_sum = F.cross_entropy(
         F.linear(draft_seen[0][:, :-2], weight).reshape(-1, weight.size(0)),
         labels[:, 2:].reshape(-1),
-        ignore_index=LABEL_IGNORE,
+        ignore_index=LABEL_IGNORE_INDEX,
         reduction="sum",
     )
-    assert split.next_token_targets == (labels[:, 1:] != LABEL_IGNORE).sum()
-    assert split.head_targets == (labels[:, 2:] != LABEL_IGNORE).sum()
+    assert split.next_token_targets == (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()
+    assert split.head_targets == (labels[:, 2:] != LABEL_IGNORE_INDEX).sum()
     assert split.head_targets != split.next_token_targets, "one count for both would hide a wrong denominator"
     # HF's loss reduces in fp32 on this fp64 model.
     assert torch.isclose(split.next_token_sum / split.next_token_targets, next_token_mean, rtol=1e-6)
@@ -448,10 +453,10 @@ def test_no_draft_scores_or_routes_across_a_document_boundary(name):
     model.zero_grad()
     weight = model.get_output_embeddings().weight.detach()
     labels, positions = rows["labels"], rows["position_ids"]
-    keep = (labels[:, 2:] != LABEL_IGNORE) & (positions[:, 1:-1] != 0)
+    keep = (labels[:, 2:] != LABEL_IGNORE_INDEX) & (positions[:, 1:-1] != 0)
     teacher = F.softmax(F.linear(hidden_seen[0][:, 1:-1], weight), dim=-1)
     student = F.log_softmax(F.linear(draft_seen[0][:, :-2], weight), dim=-1)
-    (_WEIGHT * (-(teacher * student).sum(-1) * keep).sum() / (labels[:, 1:] != LABEL_IGNORE).sum()).backward()
+    (_WEIGHT * (-(teacher * student).sum(-1) * keep).sum() / (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()).backward()
     assert _worst(_grads(soft_head), _grads(head)) < 1e-5
 
 
@@ -545,12 +550,12 @@ def test_the_head_shares_the_trunks_output_embedding_past_its_final_norm(name):
     expected = F.cross_entropy(
         F.linear(draft_seen[0][:, :-2], weight).reshape(-1, weight.size(0)),
         labels[:, 2:].reshape(-1),
-        ignore_index=LABEL_IGNORE,
+        ignore_index=LABEL_IGNORE_INDEX,
         reduction="sum",
     )
     plain, _ = tiny_model_with_head(name)
     assert torch.isclose(
-        (loss - plain(**padded_rows()).loss) * (labels[:, 1:] != LABEL_IGNORE).sum(), _WEIGHT * expected
+        (loss - plain(**padded_rows()).loss) * (labels[:, 1:] != LABEL_IGNORE_INDEX).sum(), _WEIGHT * expected
     )
 
 
@@ -667,7 +672,7 @@ def test_the_head_holds_a_release_tail_key_for_key_and_shape_for_shape(repo):
     assert live == _release_head_shapes(release, spec)
 
 
-@pytest.mark.parametrize(("repo", "keys"), [(_LIGHTNING, 270), (_SUPER_VL, 1040)])
+@pytest.mark.parametrize(("repo", "keys"), [(NEMOTRON_3_5_LIGHTNING, 270), (NEMOTRON_3_5_SUPER_VL, 1040)])
 def test_the_pinned_nemotron_tails_expand_to_the_release_key_counts(repo, keys):
     """Read off each release's safetensors headers, 16 and 18 spellings, so a dropped row is not a shorter pass."""
     release = _RELEASE_TAILS[repo]
@@ -679,11 +684,11 @@ def test_the_pinned_nemotron_tails_expand_to_the_release_key_counts(repo, keys):
 
 def test_the_pinned_super_vl_tail_is_the_digest_pinned_release_index():
     expected = {re.sub(r"\.experts\.\d+\.", ".experts.N.", key) for key in nemotron_h_hub_keys() if ".mtp." in key}
-    assert set(_RELEASE_TAILS[_SUPER_VL]["tail"]) == expected
+    assert set(_RELEASE_TAILS[NEMOTRON_3_5_SUPER_VL]["tail"]) == expected
 
 
 def test_super_vls_composite_holds_its_tail_at_the_release_path():
-    release = _RELEASE_TAILS[_SUPER_VL]
+    release = _RELEASE_TAILS[NEMOTRON_3_5_SUPER_VL]
     config = NemotronH_Omni_Reasoning_V3_Config(
         text_config=NEMOTRON_H_RELEASE_TEXT_CONFIG,
         vision_config=NEMOTRON_H_RELEASE_VISION_CONFIG,
@@ -706,6 +711,20 @@ def test_the_head_is_found_on_both_placements_and_absent_elsewhere():
         assert find_mtp_head(model) is head
     bare = MTP_TINY_FAMILIES["qwen3_next"].build({})
     assert find_mtp_head(bare) is None
+
+
+@pytest.mark.parametrize("name", _FAMILIES)
+def test_a_vocabulary_grow_under_an_attached_head_is_refused(name):
+    """The resize replaces the output embedding, and the head's term would keep projecting through the old one."""
+    model, _head = tiny_model_with_head(name)
+    rows = model.get_output_embeddings().out_features
+    with pytest.raises(ValueError, match="patch_vocab.py"):
+        grow_vocabulary(model, rows + 3)
+    assert model.get_output_embeddings().out_features == rows
+
+    without_head = tiny_family_model(MTP_TINY_FAMILIES[name])
+    grow_vocabulary(without_head, rows + 3)
+    assert without_head.get_output_embeddings().out_features == rows + 3
 
 
 if __name__ == "__main__":

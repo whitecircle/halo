@@ -8,6 +8,7 @@ import logging
 
 import pytest
 import torch
+from datasets import Dataset, DatasetDict
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig
 
@@ -17,6 +18,7 @@ from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
 from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.tools.vocab_patch import patch_vocabulary
 from halo.model_loading.model_preparation import auto_load_model
+from halo.models.moe.balancing import is_balancing_state_key
 from tests.common.mtp_heads import run_entry, saved_tensors, write_entry_corpus, write_entry_run
 from tests.common.tiny_models import (
     TINY_BAILING_LING3_MLA_FAMILY,
@@ -226,7 +228,37 @@ def test_a_trained_heads_conversion_holds_its_bytes_and_every_key(name, tmp_path
     written = saved_tensors(out)
     assert set(written) == set(trained)
     head = [key for key in trained if key.startswith("mtp." if name == "qwen3_5_moe_text" else "model.layers.2.")]
-    assert head and all(torch.equal(written[key], trained[key].to(torch.bfloat16)) for key in head)
+    expected = {key: trained[key] if is_balancing_state_key(key) else trained[key].to(torch.bfloat16) for key in head}
+    assert head and all(torch.equal(written[key], tensor) for key, tensor in expected.items())
+
+
+def test_a_list_heads_trained_bias_keeps_its_width_through_a_conversion(tmp_path, corpus):
+    """bf16 rounds a bias near 1 by 4e-3, past a sign step's 1e-3, while the trunk's keeps its fp32."""
+    config = write_entry_run(
+        "glm4_moe_lite",
+        tmp_path,
+        corpus,
+        steps=3,
+        save_steps=3,
+        mtp_loss_weight=0.3,
+        mtp_train_scope="detached",
+        moe_balancing="bias_update",
+        router_balancing_rate=1.37e-3,
+        bf16=True,
+    )
+    done = run_entry(config, ranks=2)
+    assert done.returncode == 0, (done.stderr + done.stdout)[-3000:]
+    checkpoint = tmp_path / "run" / "checkpoint-3"
+    trained = saved_tensors(checkpoint)
+    bias = "model.layers.2.mlp.gate.e_score_correction_bias"
+    assert trained[bias].dtype == torch.float32
+    assert not torch.equal(trained[bias].to(torch.bfloat16).float(), trained[bias]), "premise: bf16 rounds this bias"
+    out = tmp_path / "out"
+    convert_to_bf16(str(checkpoint), str(out), "causal_lm", trust_remote_code=False)
+    written = saved_tensors(out)
+    assert written[bias].dtype == torch.float32
+    assert torch.equal(written[bias], trained[bias])
+    assert written["model.layers.2.eh_proj.weight"].dtype == torch.bfloat16
 
 
 def test_a_vocabulary_patch_regrows_a_list_heads_trunk_copies(tmp_path, corpus):
@@ -251,6 +283,45 @@ def test_a_vocabulary_patch_regrows_a_list_heads_trunk_copies(tmp_path, corpus):
     assert torch.equal(
         written["model.layers.2.eh_proj.weight"], trained["model.layers.2.eh_proj.weight"].to(torch.bfloat16)
     )
+
+
+@pytest.mark.parametrize("name", ["glm4_moe_lite", "qwen3_5_moe_text"])
+def test_tokens_past_the_rows_reach_a_head_through_a_patched_checkpoint(tmp_path, corpus, name):
+    """Added in the run, the grow would leave the head on the old output embedding; through ``patch_vocab`` a row
+    holding one trains. The patterns run past the padding rows the tiny base's embedding carries beyond its tokenizer."""
+    tokens = [f"<|grown {index}|>" for index in range(64)]
+    fields = {"mtp_loss_weight": 0.3, "mtp_loss_type": "soft", "added_special_tokens": tokens}
+    refused = run_entry(write_entry_run(name, tmp_path, corpus, steps=1, save_steps=1, **fields))
+    assert refused.returncode != 0
+    assert "scripts/before_training/patch_vocab.py" in refused.stderr + refused.stdout, refused.stderr[-3000:]
+
+    without_tokens = {key: value for key, value in fields.items() if key != "added_special_tokens"}
+    done = run_entry(write_entry_run(name, tmp_path, corpus, steps=1, save_steps=1, **without_tokens))
+    assert done.returncode == 0, (done.stderr + done.stdout)[-3000:]
+    patched = tmp_path / "patched"
+    patch_vocabulary(str(tmp_path / "run" / "checkpoint-1"), str(patched), patterns=tokens, trust_remote_code=False)
+
+    rows = [
+        {"prompt": [{"role": "user", "content": f"Say {i}"}, {"role": "assistant", "content": f"{tokens[-1]} {i}"}]}
+        for i in range(16)
+    ]
+    grown_corpus = tmp_path / "grown-corpus"
+    DatasetDict({"train": Dataset.from_list(rows[:12]), "test": Dataset.from_list(rows[12:])}).save_to_disk(
+        grown_corpus
+    )
+    config = write_entry_run(
+        name,
+        tmp_path,
+        str(grown_corpus),
+        steps=1,
+        save_steps=1,
+        model_name_or_path=str(patched),
+        mtp_head_source=None,
+        output_dir=str(tmp_path / "patched-run"),
+        **fields,
+    )
+    done = run_entry(config)
+    assert done.returncode == 0, (done.stderr + done.stdout)[-3000:]
 
 
 def test_merged_fine_tunes_that_all_carry_a_head_merge_it(tmp_path):

@@ -6,6 +6,7 @@ Reasoning Effort line and ends the final turn with ``<|endoftext|>``; tool data 
 import hashlib
 
 import pytest
+import yaml
 from jinja2.exceptions import TemplateError
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
@@ -14,6 +15,7 @@ from tests.common.repo import REPO_ROOT
 TEMPLATE_PATH = REPO_ROOT / "jinja-templates" / "glm" / "glm5-chat.jinja"
 HUB_TEMPLATE_PATH = REPO_ROOT / "tests" / "common" / "hub_templates" / "glm-5.3-flash.jinja"
 HUB_TEMPLATE_SHA256 = "2614a3c896d53e265f564c23701173c0049f985dacfbae79fc4bcd9f5ba083f4"
+RECIPES = sorted((REPO_ROOT / "examples" / "sft" / "glm5_next").glob("*.yaml"))
 
 PREAMBLE = "[gMASK]<sop>"
 HUB_EFFORT_LINE = "<|system|>Reasoning Effort: Max"
@@ -112,6 +114,15 @@ def test_the_generation_prompt_opens_the_turn_the_hub_renders(template, hub_temp
         assert prompt + answer["content"].strip() == answered, f"{name}, answer {end}"
         hub_prompt = _without_effort_line(_render(hub_template, messages[:end], add_generation_prompt=True))
         assert prompt.startswith(hub_prompt)
+
+
+@pytest.mark.parametrize("recipe", RECIPES, ids=lambda path: path.stem)
+def test_a_recipe_trains_the_turn_the_hub_renders(hub_template, recipe):
+    """GLM-4's template spells the empty block ``</think>`` alone, which its marker check cannot tell apart."""
+    pinned = yaml.safe_load(recipe.read_text())["chat_template"]
+    messages = CONVERSATIONS["system-multi-turn"]
+    expected = _without_effort_line(_render(hub_template, messages)) + FINAL_TURN_END
+    assert _render((REPO_ROOT / pinned).read_text(), messages) == expected
 
 
 @pytest.mark.parametrize("name", sorted(TOOL_DATA))

@@ -4,7 +4,6 @@ checkpoint its config was read from, through the keys transformers would concate
 from __future__ import annotations
 
 import itertools
-import logging
 import os
 import threading
 from collections.abc import Callable
@@ -15,8 +14,6 @@ from halo.models.config_access import set_config_field_run_scoped
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_tables
 from halo.models.param_roles import persistent_buffers
 from halo.runtime.ranks import is_local_main_process
-
-logger = logging.getLogger(__name__)
 
 
 def _weights_directory(model, weights_dir: str | None) -> str:

@@ -14,6 +14,7 @@ from huggingface_hub import snapshot_download
 from huggingface_hub.errors import LocalEntryNotFoundError
 
 from halo.env import env_str
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.mtp.acceptance import MTP_ACCEPTANCE_GREEDY, MTP_ACCEPTANCE_TV, MTP_SCORED_POSITIONS
 from tests.common.models import QWEN3_5_MOE_35B, QWEN3_6_MOE_35B
 
@@ -21,7 +22,6 @@ REAL_MODEL = env_str("HALO_TEST_MTP_REAL_MODEL", QWEN3_6_MOE_35B)
 REAL_STALE_HEAD = env_str("HALO_TEST_MTP_REAL_STALE_HEAD", QWEN3_5_MOE_35B)
 # The numbers below were read off these weights, and hold for no other.
 REAL_BARS_APPLY = REAL_MODEL == QWEN3_6_MOE_35B and REAL_STALE_HEAD == QWEN3_5_MOE_35B
-LABEL_IGNORE = -100
 ULTRACHAT_DATASET = "HuggingFaceH4/ultrachat_200k"
 _READING_TV = f"eval_{MTP_ACCEPTANCE_TV}"
 _READING_GREEDY = f"eval_{MTP_ACCEPTANCE_GREEDY}"
@@ -83,7 +83,7 @@ def rows_dataset(rows: list[tuple[list[int], int]]) -> Dataset:
     return Dataset.from_dict(
         {
             "input_ids": [ids for ids, _start in rows],
-            "labels": [[LABEL_IGNORE] * start + ids[start:] for ids, start in rows],
+            "labels": [[LABEL_IGNORE_INDEX] * start + ids[start:] for ids, start in rows],
             "attention_mask": [[1] * len(ids) for ids, _start in rows],
         }
     )
@@ -94,7 +94,7 @@ def off_by_one_rows_dataset(rows: list[tuple[list[int], int]]) -> Dataset:
     return Dataset.from_dict(
         {
             "input_ids": [ids for ids, _start in rows],
-            "labels": [[LABEL_IGNORE] * start + ids[start - 1 : -1] for ids, start in rows],
+            "labels": [[LABEL_IGNORE_INDEX] * start + ids[start - 1 : -1] for ids, start in rows],
             "attention_mask": [[1] * len(ids) for ids, _start in rows],
         }
     )

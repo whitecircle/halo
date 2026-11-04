@@ -5,7 +5,6 @@
 from __future__ import annotations
 
 import pytest
-from torch import nn
 
 from halo.checkpoint.parallel.ep import _save_key_remap
 
@@ -16,15 +15,6 @@ LAYER = "base_model.model.model.layers.0"
 
 def _remap(*, cp: bool = False, peft: bool = True):
     return _save_key_remap(cp_key_remap=cp, peft_prefix=PEFT_PREFIX if peft else None)
-
-
-class _TinyLM(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.q_proj = nn.Linear(8, 8, bias=False)
-
-    def forward(self, x):
-        return self.q_proj(x)
 
 
 def test_lora_wrapped_base_weight_gets_its_plain_name():

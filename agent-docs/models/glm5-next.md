@@ -90,6 +90,8 @@ assistant_message_template: "<|assistant|>"
 
 `examples/sft/glm5_next/glm-5.3-flash-ultrachat-ep-lora.yaml` trains LoRA + expert-LoRA at EP=8 on one
 8-GPU node, the only shape expected to fit one 8×Blackwell node (~110 GB static of a 288 GB card,
-unmeasured). Full fine-tuning puts ~38B of experts on each rank, ~304 GB at 8 B/param.
+unmeasured). Full fine-tuning puts ~38B of experts on each rank, ~304 GB at 8 B/param. It renders with
+`glm5-chat.jinja`, GLM-5's own non-thinking turn ([Tree packing](#tree-packing)); GLM-4's `glm-chat.jinja`
+writes a lone `</think>` GLM-5 never does.
 
 The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

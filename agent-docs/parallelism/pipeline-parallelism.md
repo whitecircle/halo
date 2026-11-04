@@ -539,13 +539,16 @@ python scripts/after_training/merge_pp_stages.py \
     --output_dir /models/merged
 ```
 
-The inputs must carry identical indexes. Each part, a stage's table files included, comes from the first input
+The inputs must carry identical indexes that name stage parts, so an ordinary checkpoint is refused, and
+one `global_step`, since two steps of a run share an index and an optimizer meta and only
+`trainer_state.json` tells them apart. Each part, a stage's table files included, comes from the first input
 holding it; every
 input's optimizer shards, RNG and prefetch states come along with one `optimizer_meta.pt`, hard-linked
 when the output is on their filesystem (so the optimizer state is not stored twice) and copied with
 their mode otherwise, and the config, tokenizer, trainer state and scheduler come from the first input.
-A part no input holds, metas that differ, a per-rank file held at two sizes or a rank whose shard no
-input holds is refused before the first write; the index lands last. The merged directory loads with
+A part no input holds, metas or steps that differ, a node with no trainer state beside one that has it, a
+per-rank file held at two sizes or a rank whose shard no input holds is refused before the first write; the
+index lands last. The merged directory loads with
 `from_pretrained`, uploads like a shared-filesystem save, and resumes exactly on the save's topology.
 A linked file outlives its input's deletion, and a later training save into either directory replaces it
 rather than writing through the link
