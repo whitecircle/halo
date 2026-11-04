@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Actual FSDP2/EP2 DPO scoring with FP32 masters, declared compute dtype and a full FP32-head oracle."""
+"""Dense FP32-master or ordinary BF16 EP2 DPO scoring against a full FP32-head oracle."""
 
 import argparse
 

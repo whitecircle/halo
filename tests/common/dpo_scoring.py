@@ -94,6 +94,18 @@ def assert_sgd_deltas_match(first, second, learning_rate):
         raise AssertionError("DPO SGD delta differs beyond the gradient and predicted storage-rounding error")
 
 
+def verify_dpo_numerical_storage(trainer, *, family: str) -> None:
+    """Require dense FP32 masters or ordinary BF16 EP parameters after the parallel wrap."""
+    reshard_fsdp2_modules(trainer.model)
+    expected = torch.float32 if family == "dense" else torch.bfloat16
+    parameters = list(trainer.model.named_parameters())
+    if not parameters:
+        raise AssertionError("DPO numerical fixture has no model parameters")
+    for name, parameter in parameters:
+        if parameter.dtype != expected:
+            raise AssertionError(f"DPO {family} numerical fixture requires {expected} storage: {name}")
+
+
 def _parity_loss(logps, batch, *, beta, weight):
     chosen, rejected = logps.sum(1, dtype=torch.float64).chunk(2)
     delta = (chosen - batch["ref_chosen_logps"].double()) - (rejected - batch["ref_rejected_logps"].double())
@@ -153,8 +165,7 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
     pc = ParallelismConfig(
         ep_size=2 if family == "qwen3_moe" else 1,
         bf16_optimizer=False,
-        fp32_non_ep_params=True,
-        ep_fp32_experts=family == "qwen3_moe",
+        fp32_non_ep_params=family == "dense",
     )
     model, tokenizer = load_distributed_model(
         model_name_or_path=checkpoint,
@@ -282,10 +293,14 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
     full, full_dtypes = _build_trainer(ctx, checkpoint, family=family, dtype=dtype, bounded=False)
     checks = parallel_shape_checks(bounded.model, bounded.parallelism_config)
     checks["actual_fsdp2_groups_present"] = bool(fsdp2_param_groups(bounded.model))
-    checks["numerical_row_uses_fp32_master_parameters"] = all(
-        parameter.dtype == torch.float32 for parameter in bounded.model.parameters()
-    )
+    for trainer in (bounded, full):
+        verify_dpo_numerical_storage(trainer, family=family)
+    checks["dense_fp32_masters" if family == "dense" else "ordinary_bf16_ep_storage"] = True
     metrics = {}
+    expert_ids = bounded._get_sharded_expert_param_ids()
+    expert_names = {name for name, parameter in bounded.model.named_parameters() if id(parameter) in expert_ids}
+    if family == "qwen3_moe":
+        assert expert_names, "the EP numerical row has no local expert parameters"
     for name, first, second in (
         ("train", bounded.train_dataset, full.train_dataset),
         ("eval", bounded.eval_dataset, full.eval_dataset),
@@ -346,6 +361,13 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
                 (before[1][name], gradients[1][name], updated[1][name]),
                 LEARNING_RATE,
             )
+        if expert_names:
+            counts = [
+                sum(not torch.equal(before[arm][name], updated[arm][name]) for name in expert_names) for arm in (0, 1)
+            ]
+            assert all(counts), "the DPO SGD step did not move any local expert parameter"
+            checks[f"step{step + 1}_local_expert_weights_really_moved"] = True
+            metrics[f"step{step + 1}_local_expert_tensors_updated"] = min(counts)
         actual, expected = (_local_snapshot(trainer, gradients=False) for trainer in (bounded, full))
         assert actual.keys() == expected.keys()
         for name, value in actual.items():

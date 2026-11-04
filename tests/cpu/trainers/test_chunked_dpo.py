@@ -637,9 +637,13 @@ def test_fp32_objective_gate_rejects_constant_offset_even_when_gradients_match()
         assert_dpo_loss_matches(changed, loss)
 
 
-@pytest.mark.parametrize("omitted", ["head.weight", "backbone.weight"])
+@pytest.mark.parametrize("omitted", ["head.weight", "backbone.weight", "expert.gate_up_proj"])
 def test_sgd_proof_rejects_one_omitted_parameter_update(omitted):
-    before = {"head.weight": torch.full((8,), 0.7), "backbone.weight": torch.full((4,), 0.25)}
+    before = {
+        "head.weight": torch.full((8,), 0.7),
+        "backbone.weight": torch.full((4,), 0.25),
+        "expert.gate_up_proj": torch.full((4, 8), 0.7, dtype=torch.bfloat16),
+    }
     gradients = {name: torch.full_like(value, 0.3) for name, value in before.items()}
     after = {name: value.clone().add_(gradients[name], alpha=-0.05) for name, value in before.items()}
     for name in before:
@@ -681,8 +685,18 @@ def test_gpu_numerical_row_passes_real_preallocation_model_and_precision_guards(
         dpo_scoring._build_trainer(
             SimpleNamespace(), "/unread/local/fixture", family=family, dtype=torch.bfloat16, bounded=True
         )
-    assert len(observed) == 1 and observed[0].fp32_non_ep_params
-    assert observed[0].ep_fp32_experts == (family == "qwen3_moe")
+    assert len(observed) == 1 and observed[0].fp32_non_ep_params == (family == "dense")
+    assert not observed[0].ep_fp32_experts
+
+
+@pytest.mark.parametrize("family,dtype", [("dense", torch.float32), ("qwen3_moe", torch.bfloat16)])
+def test_gpu_numerical_storage_guard_rejects_one_wrong_parameter(family, dtype):
+    model = torch.nn.Linear(4, 3).to(dtype)
+    trainer = SimpleNamespace(model=model)
+    dpo_scoring.verify_dpo_numerical_storage(trainer, family=family)
+    model.bias.data = model.bias.data.to(torch.bfloat16 if dtype == torch.float32 else torch.float32)
+    with pytest.raises(AssertionError, match=f"DPO {family} numerical fixture requires .*storage: bias"):
+        dpo_scoring.verify_dpo_numerical_storage(trainer, family=family)
 
 
 @pytest.mark.parametrize("module", [dpo_scoring, precompute_e2e], ids=["equivalence", "lifecycle"])

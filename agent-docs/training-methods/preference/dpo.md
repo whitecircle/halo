@@ -110,7 +110,7 @@ Covering tests:
 
 - `pytest tests/cpu/trainers -m cpu`
 - `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py`
-- bounded scoring: `tests/cpu/trainers/test_chunked_dpo.py`; dense DP2 and Qwen3-MoE EP2 token scores, references, every parameter gradient, two SGD updates and a zero-target rank against a full FP32 head in `tests/gpu/trainers/preference/test_dpo_chunked_equivalence.py` (FP32 masters, FP32 or BF16 compute); train, eval, save, resume and stock HF export in `test_dpo_chunked_lifecycle.py` beside it
+- bounded scoring: `tests/cpu/trainers/test_chunked_dpo.py`; dense DP2 and Qwen3-MoE EP2 token scores, references, every parameter gradient, two SGD updates and a zero-target rank against a full FP32 head in `tests/gpu/trainers/preference/test_dpo_chunked_equivalence.py` (dense FP32 masters with FP32 or BF16 compute; ordinary BF16 EP parameters); train, eval, save, resume and stock HF export in `test_dpo_chunked_lifecycle.py` beside it
 - pipeline parallelism on precomputed reference log-probs: `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer dpo`, and its save, exact resume and export: `test_pp_trainer_checkpoints.py --trainer dpo`
 - precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model in the core tier; every other EP family, with TP and EP+TP where its attention has a TP plan, and EP+ETP on four ranks for every EP family in the full tier)
 
