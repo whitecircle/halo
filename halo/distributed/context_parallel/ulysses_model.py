@@ -15,7 +15,7 @@ import torch.nn as nn
 from accelerate.utils import is_peft_model
 
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
-from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, ULYSSES_GATED_DELTA_MAP
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, split_sequence_for_cp
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
@@ -317,7 +317,9 @@ def apply_ulysses_attention(model: nn.Module, cp_group: dist.ProcessGroup, cp_si
         logger.debug(f"Patched {path} ({type(attention).__name__}) -> {wrapper_cls.__name__}: {wrapper.extra_repr()}")
         return wrapper
 
-    patched = len(swap_registered_modules(model, ULYSSES_ATTENTION_MAP, build, descend_into_match=True))
+    patched = len(
+        swap_registered_modules(model, ULYSSES_ATTENTION_MAP | ULYSSES_GATED_DELTA_MAP, build, descend_into_match=True)
+    )
 
     if patched == 0:
         raise CPConfigError(

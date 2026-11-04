@@ -25,6 +25,7 @@ from halo.trainers.trainer_rules import (
     reject_cp_trainer_args,
     reject_ep_layers_under_accelerate,
     reject_fsdp_knobs_under_qlora,
+    reject_hybrid_cp_training,
 )
 
 logger = logging.getLogger(__name__)
@@ -182,7 +183,11 @@ class ModeSetupMixin:
             compute_metrics=getattr(self, "compute_metrics", None),
             preprocess_logits_for_metrics=getattr(self, "preprocess_logits_for_metrics", None),
         )
-        self.cp_config = require_ulysses_model(self._top_level_model()).cp_config
+        model = self._top_level_model()
+        reject_hybrid_cp_training(
+            model, self.args, self.parallelism_config, supported=vars(type(self)).get("SUPPORTS_HYBRID_CP", False)
+        )
+        self.cp_config = require_ulysses_model(model).cp_config
         if is_global_main_process():
             logger.info("✓ CP configured (NVLink-domain-local)")
 

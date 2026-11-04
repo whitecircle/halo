@@ -208,7 +208,7 @@ advanced parallelism. What each family is for:
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP on tiny models and one 20-step Qwen3-30B-A3B run at `pp2` × `ep4`, with `moe_balancing: none` |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text rows only; SFT and SMPO refuse an image run under CP |
-| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | CP2 SFT | Yes | Yes | [Hybrid CP restrictions and validation status](../agent-docs/parallelism/context-parallelism.md#dense-hybrid-sft) ↗; the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower, with `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | tiny models only |
 | Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental, text rows: EP8 trains the release cut to four layers, PP ran the whole text tower for 13 steps with checkpointing on, the rest runs on tiny models; full fine-tuning or LoRA; PP takes the text tower, full fine-tuning with `moe_balancing: none`; the 95 GiB n-gram table stays in host memory; `ep_size: 1` loads about 246 GiB on every GPU ([details](../agent-docs/models/qwen4_exp.md) ↗) |
@@ -236,8 +236,8 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B and Nemotron 3.5 Super VL and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
-| QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
+| LoRA | supported except under TP, EP+TP, PP and hybrid CP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B and Nemotron 3.5 Super VL and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
+| QLoRA | DDP, FSDP and non-hybrid CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |

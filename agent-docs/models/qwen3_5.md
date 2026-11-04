@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). Dense text towers have an [unpacked CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft); MoE hybrid CP remains refused. Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -76,14 +76,14 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
-## Why CP is blocked on real checkpoints
+## Why MoE hybrid CP is refused
 
-Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
+MoE checkpoints ship hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
 
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+The validator refuses MoE GatedDeltaNet and unclaimed linear-attention layers. Dense CP2 SFT instead redistributes heads before these sequence operations ([Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)); it does not use FLA's CP context. For MoE, train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards pretrained linear-attention weights).
 
 ## TP and ETP
 

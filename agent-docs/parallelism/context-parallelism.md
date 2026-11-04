@@ -178,9 +178,27 @@ accept list to keep in sync.
 | `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE | [cohere2-moe.md](../models/cohere2-moe.md) |
 
 Every other attention class raises `CPConfigError`, and a model carrying state along the sequence
-axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name even
-where its attention is wrapped — Qwen3.5/3.6 on every released checkpoint. Per family, with the reason
+axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name unless
+its sequence layer has a CP implementation. Per family, with the reason
 on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
+
+### Dense hybrid SFT
+
+Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. Both linear-attention
+key and value head counts must divide CP2. MoE, adapters, quantized weights, packed rows,
+multimodal models, cache use and other trainers remain refused for this hybrid path.
+
+`ULYSSES_GATED_DELTA_MAP` installs `Qwen3_5UlyssesGatedDelta` separately from the softmax-attention
+wrappers. One existing fused all-to-all redistributes Q/K/V and decay/beta inputs from sequence
+shards to head shards. Each head shard runs the native causal convolution and gated delta rule
+over the full row; Q/K expand to value heads after convolution. The inverse restores local sequence
+order before the native gated norm and output projection. Parameter slices stay attached to the
+original module, and the existing export key stripping restores native checkpoint names.
+
+The dense path passes no layer padding mask. Use right-padded rows: causal real-token outputs
+do not depend on trailing padding, and ignored labels exclude it from the loss. CPU Gloo tests
+compare native Torch-dispatched GatedDeltaNet outputs and every gradient; they do not qualify
+CUDA kernels, NCCL or the FSDP2 training lifecycle.
 
 ## CP with EP
 

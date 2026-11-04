@@ -641,6 +641,12 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/cp/test_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
+    "trainers/sft/test_sft_hybrid_cp.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "cp", "qwen3"),
+        args_matrix=("--batch-size 1", "--batch-size 3 --gc"),
+        timeout=900,
+    ),
     "parallelism/cp/test_cp_grpo_scoring.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "cp", "qwen3"), timeout=900
     ),

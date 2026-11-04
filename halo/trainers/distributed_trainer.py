@@ -80,6 +80,7 @@ from halo.trainers.step_guard import NonFiniteStepGuardMixin
 from halo.trainers.token_metrics import TokenMetricsMixin
 from halo.trainers.trainer_rules import (
     INERT_AUX_LOSS_DETAIL,
+    reject_hybrid_cp_training,
     reject_inert_aux_loss_balancing,
     reject_reference_sinks_mismatch,
     reject_stock_adamw_on_mixed_params,
@@ -185,6 +186,7 @@ class DistributedTrainerMixin(
 
     # CP and PP are declare-to-enable: both fail silently on a loss nobody verified under them.
     SUPPORTS_CP: ClassVar[bool] = False
+    SUPPORTS_HYBRID_CP: ClassVar[bool] = False
     # Why this trainer refuses PP; None admits it.
     PP_REFUSAL: ClassVar[str | None] = (
         "a pipeline stage holds only a contiguous subset of the layers, so this trainer's "
@@ -253,6 +255,13 @@ class DistributedTrainerMixin(
         model, ctor_training_args = get_ctor_model_and_config(ctor_args, kwargs, ctor_positions)
         if training_args is None:
             training_args = ctor_training_args
+        reject_hybrid_cp_training(
+            model,
+            training_args,
+            parallelism_config,
+            supported=vars(type(self)).get("SUPPORTS_HYBRID_CP", False),
+            peft_config=kwargs.get("peft_config"),
+        )
         model_config = getattr(model, "config", None)
         self._accelerate_manages_fsdp = accelerate_manages_fsdp(parallelism_config)
         self._accelerate_manages_ddp = accelerate_manages_ddp(parallelism_config)
