@@ -14,9 +14,13 @@ import torch.nn as nn
 
 from halo.checkpoint.config_export import save_model_config
 from halo.checkpoint.external_tables import write_external_tables
+from halo.checkpoint.format import STREAM_PART_PREFIX, stripe_writer_part_prefix
 from halo.checkpoint.writing import (
     StreamingShardWriter,
+    WriterStripe,
     is_tie_reconcile_key,
+    merge_streamed_parts,
+    publish_hf_parts,
     reconcile_tie_word_embeddings,
 )
 from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
@@ -25,7 +29,8 @@ from halo.models.config_access import ties_word_embeddings
 from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from halo.models.mtp.head import mtp_trunk_copy_keys
 from halo.models.param_roles import persistent_buffers
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.collectives import combine_across_ranks
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.ranks import is_global_main_process
 
@@ -98,13 +103,19 @@ def stream_gathered_checkpoint(
     is_save_rank: bool,
     max_shard_size: str,
     normalize: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
+    stripe: WriterStripe | None = None,
 ) -> tuple[int, int]:
     """COLLECTIVE: write a gathered save to safetensors parts, then its config, external tables and index. ``chunks``
-    is a retain-gated gather driven on every rank; ``normalize`` brings each chunk to its on-disk names and dtypes. A
-    failing write is deferred to a collective, so it raises on every rank. Returns ``(tensors, bytes)``, zeros off the
-    save rank."""
+    is a retain-gated gather driven on every rank; ``normalize`` brings each chunk to its on-disk names and dtypes. With
+    a ``stripe`` of several writers, each retains and writes the chunks it owns (``chunks`` retains per ``stripe.owns``)
+    under its own part prefix, and the save rank, the stripe's first writer, renames the parts and writes the one
+    index; without one the save rank alone writes. A failing write is deferred to a collective, so it raises on every
+    rank. Returns ``(tensors, bytes)``, the whole checkpoint's on the save rank."""
+    stripe = stripe or WriterStripe(0 if is_save_rank else None, 1)
+    striped = stripe.count > 1
+    prefix = stripe_writer_part_prefix(stripe.index) if striped and stripe.is_writer else STREAM_PART_PREFIX
     # Entered, so the parts are written in the background; the exit waits them out before any raise leaves.
-    with StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank) as writer:
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=stripe.is_writer, filename_prefix=prefix) as writer:
         guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
         # Held only where the reconcile below can act on them; these are two of the largest tensors in the checkpoint.
         keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
@@ -125,8 +136,8 @@ def stream_gathered_checkpoint(
                     written += 1
 
         for chunk in chunks:
-            # Driven on every rank, as its gathers are collective; only the writer has a chunk to normalize.
-            if is_save_rank:
+            # Driven on every rank, as its gathers are collective; only a writer holds a chunk to normalize.
+            if stripe.is_writer and chunk:
                 guard.run(partial(stage, chunk))
             del chunk  # released before the next chunk is gathered
         # Collective, so a stream failed anywhere stops the job before an index over tensors never written.
@@ -140,8 +151,19 @@ def stream_gathered_checkpoint(
                 reconcile_tie_word_embeddings(model, tied)
                 finalize.run(partial(save_model_config, model, output_dir))
             finalize.run(partial(write_external_tables, model, writer))
-            # The index is the last thing written: the parts are only a checkpoint once it names them.
-            total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
-        # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
-        finalize.store_reject("checkpoint/gathered_finalize")
+        if striped:
+            parts = finalize.run(writer.close_parts) if stripe.is_writer else None
+            # Over the store: the peers wait out the slowest writer's last part, unbounded on slow storage.
+            finalize.store_reject("checkpoint/gathered_finalize")
+            merged = combine_across_ranks(parts, merge_streamed_parts, what="the checkpoint index")
+            with barrier_on_exit(f"Writing the checkpoint index to {output_dir}"):
+                if is_save_rank:
+                    total_bytes = publish_hf_parts(output_dir, merged)
+                    written = len(merged.weight_map)
+        else:
+            if is_save_rank:
+                # The index is the last thing written: the parts are only a checkpoint once it names them.
+                total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
+            # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
+            finalize.store_reject("checkpoint/gathered_finalize")
     return written, total_bytes

@@ -18,8 +18,10 @@ from halo.checkpoint.hub_layout import export_conversions, reversed_export_trans
 from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.writing import gather_hand_sliced_params, stream_gathered_checkpoint
 from halo.checkpoint.writing import (
+    WriterStripe,
     merge_shard_index,
     reconcile_tie_word_embeddings,
+    resolve_writer_stripe,
     save_dtype_caster,
     write_merged_index,
 )
@@ -75,11 +77,13 @@ def _ep_gathered_chunks(
     lora_folds: LoraFolds | None,
     cast: Callable[[str, torch.Tensor], torch.Tensor],
     *,
-    retain: bool,
+    stripe: WriterStripe,
     merge_lora: bool,
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: the non-expert tensors, then one chunk per EP layer's gather, live-named. Only ``retain`` keeps the
-    host copies; the walk is name-based, so dropping an adapter skips its collective on every rank alike."""
+    """COLLECTIVE: the non-expert tensors, then one chunk per EP layer's gather, live-named. Only the stripe's owner of
+    a chunk keeps its host copies (every rank holds the layer after its all-gather); the walk is name-based, so
+    dropping an adapter skips its collective on every rank alike."""
+    retain = stripe.owns(0)
     # Anchored prefixes: an unanchored substring test could over-match a sibling param and drop it.
     ep_prefixes = tuple(f"{path}." for path, _ in ep_layers)
     # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
@@ -103,8 +107,8 @@ def _ep_gathered_chunks(
             state.setdefault(name, sink)
     yield state
     del state
-    for path, layer in ep_layers:
-        yield layer.gather_layer_state_dict(path, merge_lora=merge_lora, retain=retain)
+    for chunk, (path, layer) in enumerate(ep_layers, start=1):
+        yield layer.gather_layer_state_dict(path, merge_lora=merge_lora, retain=stripe.owns(chunk))
 
 
 def _ep_chunk_normalizer(
@@ -145,8 +149,9 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
 
     remap = _save_key_remap(cp_key_remap=ctx.parallelism_config.is_cp_mode, peft_prefix=peft_prefix)
     cast = save_dtype_caster(model, keep_live_dtype=ctx.training_checkpoint)
+    stripe = resolve_writer_stripe(is_save_rank=ctx.is_save_rank)
     chunks = _ep_gathered_chunks(
-        model, ep_layers, remap, lora_folds, cast, retain=ctx.is_save_rank, merge_lora=ctx.merges_expert_lora
+        model, ep_layers, remap, lora_folds, cast, stripe=stripe, merge_lora=ctx.merges_expert_lora
     )
     written, total_bytes = stream_gathered_checkpoint(
         model,
@@ -155,6 +160,7 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
         is_save_rank=ctx.is_save_rank,
         max_shard_size=ctx.max_shard_size,
         normalize=_ep_chunk_normalizer(model, remap, cast),
+        stripe=stripe,
     )
     if ctx.is_save_rank and is_global_main_process():
         logger.info(f"✓ Model saved to {output_dir} ({written} parameters, {total_bytes / 1e9:.2f}GB streamed)")

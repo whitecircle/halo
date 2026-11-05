@@ -9,6 +9,7 @@ import logging
 import os
 from collections import deque
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -32,6 +33,8 @@ from halo.models.config_access import ties_word_embeddings, untie_word_embedding
 from halo.models.moe.balancing import balancing_param_keys, is_balancing_state_key
 from halo.models.param_roles import fp32_pinned_names, norm_param_keys
 from halo.models.unwrapping import strip_peft_adapter_segment
+from halo.runtime.filesystem import is_output_shared_filesystem
+from halo.runtime.ranks import get_local_rank, get_local_world_size, get_node_rank, get_num_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ _SAVE_DTYPE = torch.bfloat16
 # The tied pair, in the order reconcile_tie_word_embeddings reads them.
 _TIE_KEY_SUFFIXES = ("lm_head.weight", "embed_tokens.weight")
 DEFAULT_CHECKPOINT_WRITE_THREADS = 0
+DEFAULT_CHECKPOINT_WRITERS_PER_NODE = 1
 
 
 def cast_to_save_dtype(t: torch.Tensor) -> torch.Tensor:
@@ -189,6 +193,87 @@ def validate_checkpoint_write_threads(threads: int) -> int:
     return threads
 
 
+def resolve_checkpoint_writers_per_node() -> int:
+    """``HALO_CHECKPOINT_WRITERS_PER_NODE`` as set, before its ``>= 1`` check: the count a job's ranks agree on."""
+    return env_int("HALO_CHECKPOINT_WRITERS_PER_NODE", DEFAULT_CHECKPOINT_WRITERS_PER_NODE)
+
+
+def validate_checkpoint_writers_per_node(writers: int) -> int:
+    """Ranks per node that write a gathered save on a shared filesystem; a count below 1 raises."""
+    if writers < 1:
+        raise ValueError(
+            f"HALO_CHECKPOINT_WRITERS_PER_NODE={writers}: expected a writer count >= 1 (1 writes a gathered save from "
+            f"each node's first rank)."
+        )
+    return writers
+
+
+@dataclass(frozen=True)
+class WriterStripe:
+    """The ranks that write one gathered save and the chunks each owns. ``index`` is this rank's place among the
+    ``count`` writers, ``None`` off them. Every rank holds the whole chunk after its gather, so ownership only decides
+    who pays the host copy and the write."""
+
+    index: int | None
+    count: int
+
+    @property
+    def is_writer(self) -> bool:
+        return self.index is not None
+
+    def owns(self, chunk: int) -> bool:
+        """Chunk 0 (the replicated tensors, tied embeddings and tables) is the first writer's; each later chunk, one
+        decoder layer, goes round-robin."""
+        return self.index is not None and self.index == (max(chunk - 1, 0) % self.count)
+
+
+def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
+    """The stripe of a gathered save. A shared output filesystem takes ``HALO_CHECKPOINT_WRITERS_PER_NODE`` writers
+    per node, the save rank first; per-node storage keeps the save rank alone, as each node's directory must hold the
+    whole checkpoint."""
+    if not is_output_shared_filesystem():
+        return WriterStripe(0 if is_save_rank else None, 1)
+    per_node = min(validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node()), get_local_world_size())
+    count = get_num_nodes() * per_node
+    if is_save_rank:
+        return WriterStripe(0, count)
+    local_rank = get_local_rank()
+    return WriterStripe(get_node_rank() * per_node + local_rank if local_rank < per_node else None, count)
+
+
+@dataclass(frozen=True)
+class StreamedParts:
+    """One writer's finished output: its part files in write order, every key's file (parts and files already in
+    place) and the bytes."""
+
+    part_names: tuple[str, ...]
+    weight_map: dict[str, str]
+    nbytes: int
+
+
+def publish_hf_parts(output_dir: str, parts: StreamedParts) -> int:
+    """Rename the parts to HF's names, then index them or, when one file holds everything, sweep to it; returns the
+    bytes. Valid only when ``parts`` is every ``model*.safetensors`` in the directory, since it deletes the rest."""
+    if not parts.part_names:
+        raise RuntimeError(
+            f"Refusing to finalize an empty checkpoint in {output_dir}: no writer staged a tensor, so there is "
+            f"nothing to name and the existing files there would be deleted for nothing."
+        )
+    indexed = len(parts.part_names) > 1 or bool(set(parts.weight_map.values()) - set(parts.part_names))
+    renamed = {
+        part_name: hf_shard_filename(i, len(parts.part_names), indexed=indexed)
+        for i, part_name in enumerate(parts.part_names, start=1)
+    }
+    for part_name, final in renamed.items():
+        os.replace(os.path.join(output_dir, part_name), os.path.join(output_dir, final))
+    if indexed:
+        weight_map = {key: renamed.get(file, file) for key, file in parts.weight_map.items()}
+        write_merged_index(output_dir, weight_map, {"total_size": parts.nbytes})
+    else:
+        remove_stale_checkpoint_files(output_dir, set(renamed.values()))
+    return parts.nbytes
+
+
 class StreamingShardWriter:
     """Flush tensors to numbered safetensors parts whenever the next would overflow ``max_shard_size``;
     ``enabled=False`` is a no-op for non-writer ranks, which still enter each collective gather. Entered as a context
@@ -286,41 +371,27 @@ class StreamingShardWriter:
         self._written_map.update(weight_map)
         self._written_bytes += nbytes
 
+    def close_parts(self) -> StreamedParts:
+        """Flush the remainder and return the finished parts, once every one is on disk."""
+        if not self.enabled:
+            return StreamedParts((), {}, 0)
+        self._flush()
+        self._settle_writes(0)
+        return StreamedParts(
+            tuple(self._part_names),
+            {**self._weight_map, **self._written_map},
+            self._total_bytes + self._written_bytes,
+        )
+
     def close(self) -> tuple[dict[str, str], int]:
         """Flush the remainder and return ``(weight_map fragment, bytes written)``, before the index exchange."""
-        if not self.enabled:
-            return {}, 0
-        self._flush()
-        self._settle_writes(0)
-        return {**self._weight_map, **self._written_map}, self._total_bytes + self._written_bytes
+        parts = self.close_parts()
+        return parts.weight_map, parts.nbytes
 
     def close_as_hf_checkpoint(self) -> int:
-        """Flush, rename the parts to HF's names once all are on disk, then index or sweep; returns the bytes written.
-        Valid only when this writer owns every ``model*.safetensors`` in the directory, since it deletes the rest."""
-        if not self.enabled:
-            return 0
-        self._flush()
-        self._settle_writes(0)
-        if not self._part:
-            raise RuntimeError(
-                f"Refusing to finalize an empty checkpoint in {self.output_dir}: this writer is the "
-                f"designated save rank but no tensors were staged, so there is nothing to name and "
-                f"the existing files there would be deleted for nothing."
-            )
-        indexed = self._part > 1 or bool(self._written_map)
-        renamed = {
-            part_name: hf_shard_filename(i, self._part, indexed=indexed)
-            for i, part_name in enumerate(self._part_names, start=1)
-        }
-        for part_name, final in renamed.items():
-            os.replace(os.path.join(self.output_dir, part_name), os.path.join(self.output_dir, final))
-        total_bytes = self._total_bytes + self._written_bytes
-        if indexed:
-            weight_map = {key: renamed[part_name] for key, part_name in self._weight_map.items()}
-            write_merged_index(self.output_dir, {**weight_map, **self._written_map}, {"total_size": total_bytes})
-        else:
-            remove_stale_checkpoint_files(self.output_dir, set(renamed.values()))
-        return total_bytes
+        """Flush, then :func:`publish_hf_parts`; returns the bytes written. Valid only when this writer owns every
+        ``model*.safetensors`` in the directory."""
+        return publish_hf_parts(self.output_dir, self.close_parts()) if self.enabled else 0
 
     def _flush(self) -> None:
         if not self._pending:
@@ -377,3 +448,11 @@ def merge_shard_index(gathered: list[tuple[dict[str, str], int] | None]) -> tupl
             total_size += fragment_bytes
             counted_files |= files
     return weight_map, total_size
+
+
+def merge_streamed_parts(gathered: list[StreamedParts | None]) -> StreamedParts:
+    """Fold the writers' parts, in rank order, into one; a key two writers claim raises (see
+    :func:`merge_shard_index`). Runs on rank 0 inside ``combine_across_ranks``."""
+    written = [parts for parts in gathered if parts]
+    weight_map, nbytes = merge_shard_index([(parts.weight_map, parts.nbytes) for parts in written])
+    return StreamedParts(tuple(name for parts in written for name in parts.part_names), weight_map, nbytes)

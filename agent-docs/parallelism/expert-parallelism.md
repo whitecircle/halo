@@ -526,7 +526,8 @@ The save streams into a `StreamingShardWriter` one chunk at a time, the non-expe
 then one EP layer per chunk, and finalizes with `close_as_hf_checkpoint()`. Its host RAM holds the
 current chunk, the part it is filling and one part per background write thread
 (`save_max_shard_size`, default `5GB`; `HALO_CHECKPOINT_WRITE_THREADS`, default `0`), not the whole
-checkpoint. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
+checkpoint. A multi-node shared-filesystem save stripes the layers over each node's first rank
+([Checkpoints](../reference/checkpoints.md)), so each writer holds its own current layer and parts. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
 (`ep8`) and about 21 GB at Qwen3.5-397B-A17B (`ep64`); each write thread adds up to one part.
 
 The plain FSDP2, CP and TP gathered saves stream through the same writer

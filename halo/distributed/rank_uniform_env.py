@@ -3,7 +3,12 @@
 import os
 from datetime import timedelta
 
-from halo.checkpoint.writing import resolve_checkpoint_write_threads, validate_checkpoint_write_threads
+from halo.checkpoint.writing import (
+    resolve_checkpoint_write_threads,
+    resolve_checkpoint_writers_per_node,
+    validate_checkpoint_write_threads,
+    validate_checkpoint_writers_per_node,
+)
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from halo.distributed.expert_parallel.deepep.settings import (
     DEEPEP_GPU_TIMEOUT_S,
@@ -36,6 +41,7 @@ def rank_uniform_settings() -> dict[str, object]:
         # In the operator's unit, so a divergence message names a value they can grep for.
         "HALO_GRAD_BUCKET_MB": GRAD_BUCKET_MB,
         "HALO_CHECKPOINT_WRITE_THREADS": resolve_checkpoint_write_threads(),
+        "HALO_CHECKPOINT_WRITERS_PER_NODE": resolve_checkpoint_writers_per_node(),
         "DIST_NCCL_TIMEOUT_MINUTES": nccl_timeout() // timedelta(minutes=1),
         "DIST_STORE_TIMEOUT_HOURS": store_timeout() // timedelta(hours=1),
         "DIST_FS_PROBE_TIMEOUT_SECONDS": fs_probe_timeout() // timedelta(seconds=1),
@@ -49,7 +55,8 @@ def rank_uniform_settings() -> dict[str, object]:
 def agree_rank_uniform_env() -> None:
     """COLLECTIVE over the world, once per process: raise when ranks disagree on a setting, since a divergence hangs
     (with ``HALO_EP_CAPACITY_DEDUP`` off a rank runs the capacity all-reduce on every MoE layer, its peers once).
-    Latches only once a process group exists. Also refuses a negative ``HALO_CHECKPOINT_WRITE_THREADS``."""
+    Latches only once a process group exists. Also refuses a negative ``HALO_CHECKPOINT_WRITE_THREADS`` and a
+    ``HALO_CHECKPOINT_WRITERS_PER_NODE`` below 1."""
     global _env_uniformity_verified
     if _env_uniformity_verified:
         return
@@ -60,6 +67,7 @@ def agree_rank_uniform_env() -> None:
         "HALO_EP_CAPACITY_DEDUP changes how many collectives a rank runs, HALO_GRAD_BUCKET_MB sets "
         "the chunk boundaries of the bucketed gradient reductions (EP, TP and QLoRA sweeps alike), "
         "HALO_CHECKPOINT_WRITE_THREADS whether a rank refuses a save its peers have entered, "
+        "HALO_CHECKPOINT_WRITERS_PER_NODE which ranks retain which chunks of a gathered save, "
         "DIST_NCCL_TIMEOUT_MINUTES / DIST_STORE_TIMEOUT_HOURS decide which rank gives up on a join "
         "first, DIST_FS_PROBE_TIMEOUT_SECONDS how long every rank looks for the filesystem probe's file, "
         "FLASH_ATTENTION_DETERMINISTIC which attention backend a head_dim-256 model loads (FA4 or its "
@@ -69,4 +77,5 @@ def agree_rank_uniform_env() -> None:
     )
     # Agreed by now, so a refused count raises on every rank before a save's first gather.
     validate_checkpoint_write_threads(resolve_checkpoint_write_threads())
+    validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node())
     _env_uniformity_verified = has_process_group()

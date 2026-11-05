@@ -41,10 +41,11 @@ tensor exceeds it (a fused expert pair on a 100B+ MoE)
 ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)). The ceiling is the
 fabric behind one GPU (its NICs over EFA) and the single-producer fan-out below.
 
-**Checkpoint save is synchronous, and the gathered save funnels through one rank.** Training pauses
-during each gathered save; there is no async save. Every gathered save streams (EP layer by layer,
-FSDP2/CP/TP chunk by chunk through the shared writer), so all of them are bounded by write throughput
-on one rank rather than by host RAM. `HALO_CHECKPOINT_WRITE_THREADS` (opt-in) overlaps the save
+**Checkpoint save is synchronous.** Training pauses during each gathered save; there is no async save.
+Every gathered save streams (EP layer by layer, FSDP2/CP/TP chunk by chunk through the shared writer),
+so all of them are bounded by write throughput rather than by host RAM. The EP save funnels through one
+rank per node (`HALO_CHECKPOINT_WRITERS_PER_NODE`), so a multi-node shared-filesystem save scales with
+the node count; the FSDP2, CP and TP saves keep one writer. `HALO_CHECKPOINT_WRITE_THREADS` (opt-in) overlaps the save
 rank's part writes with the next chunk's gather inside that pause ([Checkpoints](checkpoints.md)).
 
 The parallel-write escape hatch covers the flagship pure-EP layouts only. `save_sharded_ep` requires

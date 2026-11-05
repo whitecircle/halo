@@ -862,6 +862,20 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    "parallelism/ep/test_ep_striped_save.py": TestSpec(
+        nproc=2,
+        markers=(
+            "gpu",
+            "core",
+            "2gpu",
+            "ep",
+            "moe",
+            *_family_markers(
+                ("gpt_oss", "qwen3_moe", "qwen3_5_moe_text", "laguna", "cohere2_moe", "deepseek_v4", "glm5_next")
+            ),
+        ),
+        timeout=900,
+    ),
     "parallelism/ep/test_routing_replay.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=900
     ),

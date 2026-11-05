@@ -211,7 +211,7 @@ For the definitive "which collective did rank K miss?", enable the NCCL flight r
 
 One class of hang is refused up front instead: a job whose ranks disagree on an EP, timeout, save, attention
 or matmul-precision knob (`HALO_EP_CAPACITY_DEDUP`, the DeepEP wire parameters, `HALO_GRAD_BUCKET_MB`,
-`HALO_CHECKPOINT_WRITE_THREADS`, `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`,
+`HALO_CHECKPOINT_WRITE_THREADS`, `HALO_CHECKPOINT_WRITERS_PER_NODE`, `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`,
 `DIST_FS_PROBE_TIMEOUT_SECONDS`, `FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`,
 `HALO_FP32_MATMUL_PRECISION`) raises
 `Rank-uniform toolkit environment` in distributed setup, before the weight load — a per-node `--env-file`

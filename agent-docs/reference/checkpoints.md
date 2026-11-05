@@ -17,7 +17,7 @@ writes its own copy.
 | **PEFT adapters** | `save_peft_adapters` — adapter weights only ([PEFT saving](#peft-lora-saving)) | Save rank | `full_tensor()` of DTensor adapters |
 | **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | `save_pp_checkpoint` — each stage writes its own complete tensors | one writer per stage (`stage_local_rank == 0`; per node on a non-shared FS) | world-wide index exchange |
 | **Expert LoRA** (adapter-only) | `save_expert_lora_adapters` — the gathered grouped adapters | Save rank | EP all-gather |
-| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_gathered_checkpoint` | Save rank | EP all-gather (+ `full_tensor()` under TP) |
+| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_gathered_checkpoint` | Save rank, plus a node's first rank per node on a shared FS (striped, see below the table) | EP all-gather (+ `full_tensor()` under TP) |
 | **EP sharded** | `save_ep_sharded_checkpoint` — each rank writes its expert shard | All ranks | `combine_across_ranks` (gather to rank 0, broadcast back) |
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
 | **CP** | `save_cp_checkpoint` — remap Ulysses wrapper keys to HF paths | Save rank | `full_tensor()` |
@@ -47,6 +47,18 @@ line; opting in with a positive count writes the finished parts on that many thr
 gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
 one failing while the save is already raising another error is logged beside it.
+
+**Striped writers.** After an EP layer's all-gather every rank of the EP group holds the whole layer, and `retain`
+only decides who pays the host copy, so the write is striped without a new collective. On a shared output filesystem
+`WriterStripe` (`halo/checkpoint/writing.py`) names the first rank of each node a writer (more per node with
+`HALO_CHECKPOINT_WRITERS_PER_NODE`); the save rank owns chunk 0 (the non-expert tensors, tied embeddings, MTP trunk
+copies, external tables) and every later layer goes round-robin. Each writer gets its own part prefix
+(`stripe_writer_part_prefix`), closes its parts, and the save rank joins the fragments (`merge_streamed_parts`, which
+refuses a key two writers claim), renames all parts to HF's names and writes the index last, so `trainer_state.json` still
+commits after every part. A striped checkpoint holds the same tensors and loads the same as a
+single-writer one; only part boundaries differ (one trailing short part per writer). It assumes every EP group holds
+equal copies, which training keeps. Per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) keeps the one writer per node.
+The FSDP2, CP, TP and PP savers keep their single writer (PP already writes one shard per stage).
 
 The tokenizer is written once per save, before the weights (`save_tokenizer`), so a save stopped after
 its index names the weight files is already loadable with its tokenizer. A failed tokenizer write raises
