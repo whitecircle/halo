@@ -305,6 +305,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             description=mcp_tool.description or f"MCP tool: {name}",
             parameters=parameters,
             async_handler=mcp_handler,
+            # ``$schema`` names the JSON-schema draft, which tells the model nothing.
+            input_schema={key: value for key, value in schema.items() if key != "$schema"},
         )
 
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:

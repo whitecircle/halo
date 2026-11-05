@@ -240,8 +240,8 @@ async def test_a_failing_mcp_tool_is_logged_once_by_the_protocol(caplog):
 
 
 async def test_an_mcp_property_without_a_declared_type_takes_any_value():
-    """A property typed through ``anyOf`` declares no top-level ``type``; ``3`` and ``null`` both reach the server,
-    and only a declared ``string`` is held to one."""
+    """A property typed through ``anyOf`` declares no top-level ``type``; the engine is shown its alternatives as
+    the server wrote them, and ``3`` and ``null`` both reach the server. Only a declared ``string`` is held to one."""
     env = _StubMCPEnv()
     input_schema = {
         "properties": {
@@ -265,7 +265,7 @@ async def test_an_mcp_property_without_a_declared_type_takes_any_value():
     env.stub_session.call_tool = call_tool
     ids, _ = await env.reset_async(["task"])
     (schema,) = env.get_tools_schema()
-    assert schema["function"]["parameters"]["properties"]["max_length"] == {"description": ""}
+    assert schema["function"]["parameters"]["properties"]["max_length"] == input_schema["properties"]["max_length"]
     calls = [
         {"id": "a", "function": {"name": "fetch", "arguments": '{"url": "x", "max_length": 3}'}},
         {"id": "b", "function": {"name": "fetch", "arguments": '{"url": "x", "max_length": null}'}},
@@ -276,6 +276,50 @@ async def test_an_mcp_property_without_a_declared_type_takes_any_value():
     assert received == [{"url": "x", "max_length": 3}, {"url": "x", "max_length": None}]
     replies = [m.content for m in env.get_trajectories(ids)[0].messages if m.role == "tool"]
     assert replies[2] == "Error: fetch: url must be a string, got list"
+
+
+async def test_an_mcp_tool_schema_reaches_the_engine_as_the_server_advertised_it():
+    """The ``memory`` preset's ``create_entities`` takes an array of objects; the engine must see the item shape, or
+    the model can only guess it and learn from the server's validation errors. Only the ``$schema`` draft URL is
+    left out, and the advertised ``required`` still refuses a call unrun."""
+    env = _StubMCPEnv()
+    entity = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "entityType": {"type": "string"},
+            "observations": {"type": "array", "items": {"type": "string"}},
+        },
+        "required": ["name", "entityType", "observations"],
+    }
+    input_schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "type": "object",
+        "properties": {"entities": {"type": "array", "items": entity}},
+        "required": ["entities"],
+    }
+
+    async def list_tools():
+        tool = types.SimpleNamespace(name="create_entities", description="add entities", inputSchema=input_schema)
+        return types.SimpleNamespace(tools=[tool])
+
+    received = []
+
+    async def call_tool(name, arguments):
+        received.append(arguments)
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text="ok")], isError=False)
+
+    env.stub_session.list_tools = list_tools
+    env.stub_session.call_tool = call_tool
+    ids, _ = await env.reset_async(["task"])
+    (schema,) = env.get_tools_schema()
+    assert schema["function"]["parameters"] == {key: value for key, value in input_schema.items() if key != "$schema"}
+    call = {"id": "a", "function": {"name": "create_entities", "arguments": "{}"}}
+    await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": [call]}])
+    await env.disconnect()
+    assert received == []
+    replies = [m.content for m in env.get_trajectories(ids)[0].messages if m.role == "tool"]
+    assert replies == ["Error: create_entities: missing a required argument: 'entities'"]
 
 
 async def test_episode_scratch_gives_each_episode_its_own_server_and_directory():
