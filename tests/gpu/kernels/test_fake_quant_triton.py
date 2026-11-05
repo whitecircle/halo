@@ -57,7 +57,8 @@ def _assert_bits_equal(out, ref, name):
 
 
 def _kernel_supported() -> bool:
-    return q._fp8_triton_supported(torch.cuda.current_device())
+    """Read from the device, not from ``_fp8_triton_supported``, so a wrong guard on SM 8.9+ fails the tests."""
+    return torch.cuda.get_device_capability() >= (8, 9)
 
 
 class _Spy:
