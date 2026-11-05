@@ -151,6 +151,7 @@ def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(serve
     would fail a chunk the knob allows."""
     monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
     monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
+    monkeypatch.setattr(client_base, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
     deadlines = []
     real_start = client._start_collective_rpc
 
@@ -402,7 +403,7 @@ def test_a_failed_snapshot_completion_still_closes_the_update(server, client, mo
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "complete_snapshots", sticky_cuda_error)
 
     client.update_named_param("w", torch.zeros(4, dtype=torch.bfloat16))
     with pytest.raises(RuntimeError, match="illegal memory access"):
@@ -426,7 +427,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "complete_snapshots", sticky_cuda_error)
     with pytest.raises(RuntimeError, match="illegal memory access"):
         client.finish_weight_update()
 
@@ -452,12 +453,12 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
 
     event = _Event()
     client._snapshot_event = event
-    client._complete_snapshots()
+    client.complete_snapshots()
     assert event.waited == 1, "the flush did not wait for the staged copies"
     assert synchronized == [], "the flush synchronized the whole device instead of the staged copies"
 
     client._snapshot_event = None
-    client._complete_snapshots()
+    client.complete_snapshots()
     assert synchronized == [] and event.waited == 1
 
 
@@ -534,10 +535,10 @@ def test_sglang_replicas_are_refused_while_attention_dp_sizes_the_group_off_its_
     server.tp_size = 4
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
-        assert client._fetch_engine_world_size() == 4
+        assert client.fetch_engine_world_size() == 4
         server.dp_size = 2
         with pytest.raises(RuntimeError, match="plain --dp-size 2 server") as refused:
-            client._fetch_engine_world_size()
+            client.fetch_engine_world_size()
     finally:
         server.close()
     assert "--attn-dp-size" in str(refused.value) and "--enable-dp-attention" not in str(refused.value)
@@ -552,7 +553,7 @@ def test_a_paused_sglang_server_is_refused_with_the_route_that_lifts_it(monkeypa
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         with pytest.raises(RuntimeError, match="paused or wedged") as refused:
-            client._fetch_engine_world_size()
+            client.fetch_engine_world_size()
     finally:
         server.close()
     assert "/continue_generation" in str(refused.value) and "RESTARTED" in str(refused.value)
@@ -578,10 +579,10 @@ def test_a_join_clears_a_dead_trainers_open_session_on_sglang(monkeypatch):
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         server.session_open = True
-        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2)
         call.join(5.0)
         assert server.session_open is False
-        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2)
         call.join(5.0)
         assert server.count("POST /end_weight_update") == 2
     finally:

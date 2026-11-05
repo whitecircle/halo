@@ -154,7 +154,10 @@ index) and `vllm_group_port` for online GRPO
 ([fields and defaults](../agent-docs/reference/configuration-reference.md#asyncrolloutconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
-  all of them bind on the trainer.
+  all of them bind on the trainer. `rollout_sync_topology: single_group` instead
+  forms one group over every server, sends each chunk once, and takes the one
+  `rollout_group_port`
+  ([how it fails](../agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server) ↗).
 - **Name the trainer's address** when the server cannot dial back to the one on
   the route to it (asymmetric routing on a multi-homed host): `VLLM_GROUP_HOST`
   (or `SGLANG_GROUP_HOST`) in the trainer's environment, or a `group_host` entry

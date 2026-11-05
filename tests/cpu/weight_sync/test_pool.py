@@ -282,7 +282,7 @@ def test_a_later_sync_that_fails_before_opening_is_still_retried(monkeypatch):
     def sticky_cuda_error():
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    clients[0]._complete_snapshots = sticky_cuda_error
+    clients[0].complete_snapshots = sticky_cuda_error
     with pytest.raises(RuntimeError, match="reconnect retry failed"):
         push_past_the_budget()
 

@@ -188,6 +188,27 @@ def _verify_server_flags_on_rank0(
         logger.info(f"Rollout server {url}: launch flags {flags}")
 
 
+def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls: list[str]) -> None:
+    """One group broadcasts one set of tensors to every server, so servers that disagree on the model or the MoE backend
+    would each load it differently behind a 200."""
+    served: dict[str, str] = {}
+    backends: dict[str, str] = {}
+    for url in urls:
+        model = _probe_server(client_cls, url, client_cls.served_model_id, None, "read the served model of")
+        flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
+        if model is not None:
+            served[url] = model
+        if flags is not None and flags.moe_backend is not None:
+            backends[url] = flags.moe_backend
+    for what, found in (("served model", served), ("MoE backend", backends)):
+        if len(set(found.values())) > 1:
+            raise ValueError(
+                f"Rollout servers disagree on their {what} ({found}), but rollout_sync_topology: single_group "
+                f"broadcasts one set of tensors to all of them. Serve one {what}, or set "
+                f"rollout_sync_topology: per_server."
+            )
+
+
 def _probe_top_logprobs(
     client: WeightSyncClientBase, model_id: str, temperature: float, top_p: float, filters: Mapping[str, int | float]
 ) -> list[float] | None:
@@ -458,6 +479,11 @@ def verify_server_flags(
     """COLLECTIVE. Refuses a server off the toolkit's image or launched with a flag the run's sync or log-probs need,
     each silently wrong otherwise."""
     _on_rank0(_verify_server_flags_on_rank0, backend, urls, connection_timeout, needs)
+
+
+def verify_group_servers(urls: list[str], *, backend: str, connection_timeout: float) -> None:
+    """COLLECTIVE. Refuses servers of one weight-sync group that serve different models or MoE backends."""
+    _on_rank0(_verify_group_servers_on_rank0, backend, urls, connection_timeout)
 
 
 def verify_server_chat_template(

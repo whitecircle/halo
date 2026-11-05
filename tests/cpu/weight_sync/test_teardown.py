@@ -23,7 +23,7 @@ def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
         "release_weight_update_group",
         lambda group, *, destroy: calls.append(("destroy" if destroy else "drop", group)),
     )
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: calls.append(("remote", None)))
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: calls.append(("remote", None)))
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
     return calls
 
@@ -146,7 +146,7 @@ def test_the_engine_is_asked_before_its_half_of_the_destroy_starts(monkeypatch):
     client._transport = (object(), None)
     _teardown_probe(client, monkeypatch)
     order: list[str] = []
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: order.append("remote"))
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: order.append("remote"))
     monkeypatch.setattr(client, "_engine_answers", lambda: order.append("health") or True)
 
     client._release_transport(at_exit=False)
@@ -174,7 +174,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
     client._transport = (object(), None)
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
     remote_started = threading.Event()
-    monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
+    monkeypatch.setattr(client, "destroy_remote_group", remote_started.set)
     seen_during_destroy: list[bool] = []
     monkeypatch.setattr(
         sglang_module,
@@ -219,7 +219,7 @@ def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
     group = object()
     client._transport = (group, None)
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
     aborted = _aborts(monkeypatch)
     released = threading.Event()
@@ -307,8 +307,8 @@ def test_init_registers_the_no_destroy_close_at_atexit(monkeypatch):
     client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
     registered: list[tuple[object, tuple, dict]] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *args, **kwargs: registered.append((fn, args, kwargs)))
-    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 0)
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
     monkeypatch.setattr(sglang_module, "build_weight_update_group", lambda **kwargs: (object(), None))
 

@@ -1721,6 +1721,35 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=600,
     ),
+    # SGLang's single_group topology ships only if the empty-declare probe tells a registered group from an unregistered one.
+    "trainers/grpo/test_sglang_membership_probe.py": TestSpec(
+        nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=300
+    ),
+    # One group over 1, 2 and 4 servers per engine (the URL lists are HALO_TEST_{VLLM,SGLANG}_SERVER_URLS); the time
+    # bar compares the N-server push with a one-server group.
+    "trainers/grpo/test_single_group_sync.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        args_matrix=(
+            "--backend vllm --servers 1",
+            "--backend vllm --servers 2",
+            "--backend vllm --servers 4",
+            Row("--backend sglang --servers 1", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 2", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 4", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+        ),
+        timeout=1800,
+    ),
+    # Restarts and kills servers through HALO_TEST_SYNC_SERVER_CONTROL; skips without it.
+    "trainers/grpo/test_single_group_failure.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        args_matrix=(
+            "--backend vllm --servers 2",
+            Row("--backend sglang --servers 2", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+        ),
+        timeout=3600,
+    ),
     "trainers/grpo/test_weight_sync_pool_reconnect.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),

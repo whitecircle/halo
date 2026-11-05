@@ -94,7 +94,7 @@ def _route_source_ip(host: str) -> str:
             return "127.0.0.1"
 
 
-def _is_local_address(host: str) -> bool:
+def is_local_address(host: str) -> bool:
     if is_loopback(host):
         return True
     try:
@@ -113,9 +113,9 @@ def _master_address(
     master_address = advertised_host or env_str(host_env)
     if not master_address:
         # Same-host groups stay on loopback, as firewalls drop hairpin traffic on the external NIC.
-        master_address = "127.0.0.1" if _is_local_address(server_host) else _route_source_ip(server_host)
+        master_address = "127.0.0.1" if is_local_address(server_host) else _route_source_ip(server_host)
 
-    if is_loopback(master_address) and not _is_local_address(server_host):
+    if is_loopback(master_address) and not is_local_address(server_host):
         raise RuntimeError(
             f"{engine} server {server_url} is on a remote host ({server_host}) but the "
             f"NCCL weight-sync group address resolved to loopback ({master_address}): the address set is "
@@ -150,8 +150,8 @@ def _bind_address(master_address: str, *, engine: str, server_host: str, host_en
         return _ALL_INTERFACES
     if (
         bind_address == _ALL_INTERFACES
-        or not _is_local_address(bind_address)
-        or (is_loopback(bind_address) and not _is_local_address(server_host))
+        or not is_local_address(bind_address)
+        or (is_loopback(bind_address) and not is_local_address(server_host))
     ):
         raise RuntimeError(
             f"{engine} weight-sync group address {master_address} (resolves to "

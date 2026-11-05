@@ -94,7 +94,7 @@ round's generation.
   steps.
 - `rollout_group_port` (default `51216`, either backend) is bound on the **trainer** host, one listener per server, so
   two servers sharing a port collide even on distinct hosts. With several servers it is the base: an entry with no
-  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0`. TRL's `vllm_group_port` is refused here; Online GRPO reads it.
+  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0` (under `single_group` it is the one port of the one group). TRL's `vllm_group_port` is refused here; Online GRPO reads it.
 - Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
   syncs is the exception: the client reconnects and re-sends, with a warning
   ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
@@ -116,6 +116,10 @@ rollout_server_configs:
   - {url: "http://localhost:8001", group_port: 51217}
 ```
 
+- `rollout_sync_topology: single_group` forms one weight-sync group over every server and broadcasts each chunk once,
+  where the default `per_server` sends each chunk to each server over its own group
+  ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)); it takes one
+  `rollout_group_port` and no per-entry `group_port`.
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
   rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
   and the actors re-issue them, losing the decode they had done.

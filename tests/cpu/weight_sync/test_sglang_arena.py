@@ -280,7 +280,7 @@ def _stage_the_next_chunk(client) -> None:
 
 
 def _end_the_sync(client) -> None:
-    client._release_arena()
+    client.release_send_buffers()
 
 
 @pytest.mark.parametrize("settle", [_stage_the_next_chunk, _end_the_sync], ids=["next-chunk", "end-of-sync"])

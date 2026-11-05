@@ -84,6 +84,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     ServerRequirements,
     verify_context_window,
     verify_engine_prompt_logprobs,
+    verify_group_servers,
     verify_sampler_logprob_reference,
     verify_server_chat_template,
     verify_server_flags,
@@ -396,6 +397,12 @@ def main():
         backend=async_config.rollout_backend,
         connection_timeout=async_config.rollout_connection_timeout,
     )
+    if async_config.rollout_sync_topology == "single_group":
+        verify_group_servers(
+            async_config.get_server_urls(),
+            backend=async_config.rollout_backend,
+            connection_timeout=async_config.rollout_connection_timeout,
+        )
     verify_served_template(async_config, probe_env, tokenizer)
     # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
     verify_sampler_logprob_reference(

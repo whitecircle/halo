@@ -194,6 +194,8 @@ class FakeVLLMServer(FakeEngineServer):
         self.version = self.VERSION
         self.update_open = False
         self.world_size = 1
+        # The launch id a restart changes; reported only when set, as an engine whose id the client never read.
+        self.instance_id: str | None = None
         self.strict_tool_calling = False
         self.returns_token_ids = True
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
@@ -209,6 +211,7 @@ class FakeVLLMServer(FakeEngineServer):
             if self.toolkit_image:
                 env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
             config = {
+                **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
@@ -235,6 +238,8 @@ class FakeVLLMServer(FakeEngineServer):
             address = (init["master_address"], init["master_port"], init["world_size"])
             for _ in range(self.world_size):
                 threading.Thread(target=self._join_store, args=address, daemon=True).start()
+            return 200, {}
+        if method == "POST" and path == "/shutdown_weight_transfer_engine":
             return 200, {}
         if method == "POST" and path in ("/pause", "/resume"):
             self.paused = path == "/pause"
@@ -283,6 +288,7 @@ class FakeSGLangServer(FakeEngineServer):
         super().__init__()
         self.tp_size = 1
         self.dp_size = 1
+        self.pp_size = 1
         self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
@@ -292,6 +298,7 @@ class FakeSGLangServer(FakeEngineServer):
             info = {
                 "tp_size": self.tp_size,
                 "dp_size": self.dp_size,
+                "pp_size": self.pp_size,
                 "moe_runner_backend": self.moe_backend,
                 # SGLang reports a parser it has none of as null.
                 "reasoning_parser": self.reasoning_parser or None,
@@ -325,6 +332,8 @@ class FakeSGLangServer(FakeEngineServer):
         if path == "/update_weights_from_distributed":
             if not self.session_open:
                 return 400, {"message": "must run between begin_weight_update() and end_weight_update()"}
+            if body["group_name"] not in self.groups:
+                return 400, {"message": f"weight update group {body['group_name']} is not registered"}
             return 200, {}
         if path == "/flush_cache":
             return 200, {}

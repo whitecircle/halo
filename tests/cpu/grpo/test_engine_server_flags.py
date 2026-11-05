@@ -65,7 +65,7 @@ def test_an_upstream_server_is_refused_by_the_preflight_and_by_group_formation(e
         _verify(server, client_cls, is_moe=False)
     client = client_cls(base_url=server.url)
     with pytest.raises(RuntimeError, match="toolkit's image"):
-        client._fetch_engine_world_size()
+        client.fetch_engine_world_size()
 
 
 def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog):
@@ -75,7 +75,7 @@ def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog)
         server.status["/server_info"] = 500
         client = VLLMWeightSyncClient(base_url=server.url)
         with caplog.at_level(logging.WARNING):
-            assert client._fetch_engine_world_size() == 1
+            assert client.fetch_engine_world_size() == 1
         assert "its image goes unchecked" in caplog.text
     finally:
         server.close()

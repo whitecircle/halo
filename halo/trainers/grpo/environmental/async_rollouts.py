@@ -197,6 +197,7 @@ class AsyncRolloutMixin:
             connection_timeout=config.rollout_connection_timeout,
             client_cls=resolve_weight_sync_client(config.rollout_backend),
             base_group_port=config.rollout_group_port,
+            topology=config.rollout_sync_topology,
         )
         self._weight_sync_client.init_communicator(device=self.accelerator.device)
 

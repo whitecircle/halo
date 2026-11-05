@@ -104,10 +104,11 @@ SGLang's arena, grown to the largest chunk, or vLLM's packed buffer, so 12.9 + 8
 from the fused bank's 8.6 GB). A family whose hub split is a reverse converter (Step-3.7) also holds the split copies
 beside the layer.
 
-With several servers (`rollout_server_configs`) one snapshot per parameter is shared, each chunk goes
-to every server on concurrent threads, and it is released once all have it. The threads share the
-forwarding rank's GPU, NICs and process, so the fan-out costs the sum, not the max: two servers each
-push at half of one server's rate.
+With several servers (`rollout_server_configs`) one snapshot per parameter is shared and released once every
+server has it. By default each chunk goes to every server on concurrent threads over a group of its own; the
+threads share the forwarding rank's GPU, NICs and process, so that fan-out costs the sum, not the max: two servers
+each push at half of one server's rate. `rollout_sync_topology: single_group` sends each chunk once
+([below](#one-group-over-every-server)).
 
 **The quiesce spans the streaming.** It opens with the first full chunk and closes when the last
 lands, so a server stops serving for as long as the gather runs (minutes at 397B), and every push
@@ -154,6 +155,41 @@ recorded for the send stream, so a reconnect strands no allocator pool; `HALO_WE
 brackets each sync with a per-rank `[mem rankNN] weight-sync pre/post` line, and `reserved` far above
 `peak_alloc` on the forwarding rank means stranded pools
 ([Debugging](../reference/debugging.md#3-gpu-memory-profiling)).
+
+### One group over every server
+
+`rollout_sync_topology: single_group` forms one NCCL group of the trainer (rank 0) and every server's workers, so
+each chunk is broadcast once. The default `per_server` is unchanged. Both engines take the join's `rank_offset` and
+`world_size` as given, so no engine patch is involved: SGLang ranks a worker `rank_offset + tp_rank`, vLLM
+`rank_offset + dp_index * (TP * PP) + rank_in_dp`, and each server takes the next block after the one before it.
+
+- **Layout.** Servers sort by their entry's `node` label (default: the URL host; config order kept within a node), so one
+  node's servers are one contiguous rank block and a ring over the group crosses each node's links once. Two labels
+  resolving to one address raise; an IP and a DNS name of one node are such labels, so give them one `node`. Neither
+  engine reports its host, and a server whose TP spans nodes cannot be placed: the label is a requirement.
+- **Config.** One rendezvous on `rollout_group_port`, one `group_host`. A per-entry `group_port` and differing
+  `group_host` values raise where the config is built, with their remedy. `verify_group_servers` (startup preflight)
+  refuses servers that serve different models or MoE backends. SGLang with `--pp-size > 1` is refused at formation, as
+  its stages would all rank `rank_offset + tp_rank`; `per_server` is not touched.
+- **Formation.** Every server's join RPC and the trainer's half start together, as vLLM's join blocks until the whole group
+  arrived and SGLang's first collective needs every rank; the first failure destroys every engine's half and raises
+  naming the server. The group name carries a generation (`weight_update_group_g{n}`).
+- **A sync.** Each server is probed (vLLM's `instance_id`), then all are paused with their sessions opened together; the
+  log names each server's pause and how long the first chunk waited on the slowest. SGLang then takes a membership
+  probe, an empty declare that a server holding the group answers as a no-op. A server found restarted by either check
+  re-forms the group once, with every server paused, and the sync replays; a second miss closes the sessions, resumes
+  every server and raises. Each chunk is declared on every server and sent once, paced by the slowest server; new
+  weights go live per server at its own close.
+- **A failure after the first declare is global.** A server that refuses its declare after peers accepted theirs
+  leaves them parked in a receive no trainer-side call frees, so the group aborts the trainer's half, marks **every**
+  server unusable and leaves it paused, and raises `RESTART the … servers:` with the failed one first. The pause stays
+  until all are restarted; chunk 0 is not replayed. A resume that fails after a good push is retried three times, per
+  server.
+- **Not covered.** An engine-side bounded receive, a dedicated SGLang membership route and the engines' reporting of
+  host and NCCL environment need image changes. SGLang `single_group` rests on the probe: the GPU row
+  `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` and the
+  default flip wait on the GPU rows of `test_single_group_sync.py` (1, 2 and 4 servers per engine, cross-node and
+  colocated containers).
 
 ### Served weights stay in checkpoint layout
 
@@ -315,6 +351,7 @@ carry reads as unread, so a renamed upstream field cannot refuse a good server.
 |---|---|
 | A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
+| Servers of a `single_group` run that serve different models or MoE backends | One broadcast reaches all of them, and each would load it differently |
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |

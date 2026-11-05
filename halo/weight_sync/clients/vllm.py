@@ -5,16 +5,19 @@ import logging
 import re
 from collections.abc import Callable
 from functools import partial
+from typing import NoReturn
 
 import requests
 import torch
 
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
+    CLEANUP_TIMEOUT_S,
     GENERATION_PROBE_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    GroupMembershipLost,
     ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
@@ -155,7 +158,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         )
         return not (reply.status_code == 400 and "--tool-call-parser" in reply.text)
 
-    def _fetch_engine_world_size(self) -> int:
+    def fetch_engine_world_size(self) -> int:
         # An engine off this wire, off this image, paused or generation-wedged is reported before the group forms.
         self._check_server_version()
         try:
@@ -169,7 +172,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self.probe_generation()
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
-    def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
+    def request_engine_join(
+        self, master_address: str, port: int, world_size: int, rank_offset: int = 1, group_name: str | None = None
+    ) -> AsyncCall:
+        """The engine keeps one group, so ``group_name`` has nothing to name."""
         # Told before the store is built, as the master blocks until every worker joined.
         return self._start_collective_rpc(
             "/init_weight_transfer_engine",
@@ -178,7 +184,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 "init_info": {
                     "master_address": master_address,
                     "master_port": port,
-                    "rank_offset": 1,
+                    "rank_offset": rank_offset,
                     "world_size": world_size,
                     # Read once per connection; unset, the engine receives tensor by tensor.
                     "packed": True,
@@ -188,7 +194,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             },
         )
 
-    def _prepare_local_formation(
+    def prepare_local_formation(
         self, master_address: str, listener: RendezvousListener, world_size: int
     ) -> Callable[[], PyNcclCommunicator]:
         self._unique_id_store = UniqueIdStore.create(host=master_address, listener=listener, world_size=world_size)
@@ -212,26 +218,39 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         # The launch this client's group formed with, ``None`` when unread.
         self._group_instance: str | None = None
 
-    def _prepare_transport(self) -> None:
+    def require_transport(self) -> None:
         self._require_communicator()
 
     def _start_engine_update(self) -> None:
         # A restarted engine takes the pause and the session, which unloads its model, and only the first chunk then
         # finds no group. Refused before either, so the pool's reconnect replays this sync over a new group.
+        self.verify_engine_identity()
+        super()._start_engine_update()
+
+    def verify_engine_identity(self) -> None:
         if self._group_instance is not None:
             instance = self.read_server_flags().instance_id
             if instance != self._group_instance:
-                raise RuntimeError(
+                raise GroupMembershipLost(
                     f"vLLM server {self.base_url} restarted after this client's group formed (instance "
                     f"{self._group_instance}, now {instance}), so that group is gone."
                 )
-        super()._start_engine_update()
 
-    def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
-        """``final`` is unused, as this engine closes with its own ``/finish_weight_update``."""
-        names, dtype_names, shapes = describe_chunk(chunk)
+    def adopt_engine_identity(self) -> None:
+        self._group_instance = self.read_server_flags().instance_id
 
-        # Everything that can refuse the chunk runs first, as the RPC holds the engine in its collective.
+    def destroy_remote_group(self) -> None:
+        try:
+            self.request("POST", "/shutdown_weight_transfer_engine", retry=False, timeout=CLEANUP_TIMEOUT_S)
+        except Exception as e:
+            logger.debug(f"Could not shut down the weight-transfer engine of {self.base_url}: {e}")
+
+    def abort_transport(self) -> None:
+        if self._transport is not None:
+            self._transport.abort()
+
+    def prepare_chunk_send(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+        """Everything that can refuse the chunk runs first, as the RPC holds the engine in its collective."""
         communicator = self._require_communicator()
         device = communicator.device
         if self._packed_streams is None and torch.device(device).type == "cuda":
@@ -245,19 +264,23 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 f"taken there once init_communicator ran."
             )
 
-        # vLLM replies once it has received the chunk, so the RPC is bounded by the chunk's own deadline.
-        server_call = self._start_collective_rpc(
+    def declare_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> AsyncCall:
+        """``final`` is unused, as this engine closes with its own ``/finish_weight_update``. vLLM replies once it has
+        received the chunk, so the RPC is bounded by the chunk's own deadline."""
+        names, dtype_names, shapes = describe_chunk(chunk)
+        return self._start_collective_rpc(
             "/update_weights",
             timeout=CHUNK_SYNC_TIMEOUT_S,
             json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
         )
-        try:
-            packed_broadcast_producer(iterator=iter(chunk), group=communicator, streams=self._packed_streams)
-            server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
-        except Exception as e:
-            self._raise_if_server_failed(e, server_call)
-            raise
+
+    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+        packed_broadcast_producer(iterator=iter(chunk), group=self._transport, streams=self._packed_streams)
         logger.debug(f"Streamed {len(chunk)} params to vLLM")
+
+    def _fail_chunk(self, error: Exception, declared: AsyncCall) -> NoReturn:
+        self._raise_if_server_failed(error, declared)
+        raise error
 
     def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         self._transmit_chunk(tail, final=True)

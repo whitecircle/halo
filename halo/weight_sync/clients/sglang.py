@@ -5,6 +5,7 @@ import logging
 from collections import deque
 from collections.abc import Callable, Iterator
 from functools import partial
+from typing import NoReturn
 from urllib.parse import urlparse
 
 import requests
@@ -20,6 +21,7 @@ from halo.weight_sync.clients.base import (
     POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
     SESSION_CLOSE_TIMEOUT_S,
+    GroupMembershipLost,
     ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
@@ -120,7 +122,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def _server_info(self) -> dict:
         return self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
 
-    def _fetch_engine_world_size(self) -> int:
+    def fetch_engine_world_size(self) -> int:
         """Workers join as ``rank_offset + tp_rank``; under ``--attn-dp-size`` ``tp_rank`` spans every GPU."""
         info = self._server_info()
         self._require_toolkit_image(self._flags_in(info))
@@ -142,10 +144,14 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             )
         return tp_size
 
-    def _request_engine_join(self, master_address: str, port: int, world_size: int) -> AsyncCall:
+    def request_engine_join(
+        self, master_address: str, port: int, world_size: int, rank_offset: int = 1, group_name: str | None = None
+    ) -> AsyncCall:
+        if group_name is not None:
+            self.group_name = group_name
         # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, and a
         # second begin under its open session. Unchecked, as with no session open the close answers 400.
-        self._destroy_remote_group()
+        self.destroy_remote_group()
         self.request(
             "POST",
             self.SESSION_CLOSE_ENDPOINT,
@@ -160,14 +166,14 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             json={
                 "master_address": master_address,
                 "master_port": port,
-                "rank_offset": 1,
+                "rank_offset": rank_offset,
                 "world_size": world_size,
                 "group_name": self.group_name,
                 "backend": "nccl",
             },
         )
 
-    def _prepare_local_formation(
+    def prepare_local_formation(
         self, master_address: str, listener: RendezvousListener, world_size: int
     ) -> Callable[[], tuple[dist.ProcessGroup, dist.TCPStore]]:
         return partial(
@@ -189,16 +195,16 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         answers = not (destroy and group is not None) or self._engine_answers()
         # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
         # no local group, or the server refuses every later join.
-        remote = AsyncCall(self._destroy_remote_group)
+        remote = AsyncCall(self.destroy_remote_group)
         if not answers:
             logger.warning(f"SGLang server {self.base_url} does not answer, so its weight-update group is aborted.")
-            self._abort_group()
+            self.abort_transport()
             destroy = False
         # An engine that never enters its half parks the destroy, with the failure that brought us here unraised.
         local = AsyncCall(partial(release_weight_update_group, group, destroy=destroy), name="weight-update destroy")
         if local.join(CLEANUP_TIMEOUT_S).is_alive():
             logger.error(f"Destroying the weight-update group of {self.base_url} is still blocked; aborting it.")
-            self._abort_group()
+            self.abort_transport()
         remote.join(CLEANUP_TIMEOUT_S)
         self._arena = None
         self._inflight.clear()
@@ -213,7 +219,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # On the caller's stream a synchronous broadcast would order the next copies and the trainer's work behind it.
         self._send_stream: torch.cuda.Stream | None = None
 
-    def _prepare_transport(self) -> None:
+    def require_transport(self) -> None:
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._aborted:
@@ -225,9 +231,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         if self.sync_device is not None and self.sync_device.type == "cuda":
             torch.cuda.set_device(self.sync_device)
 
-    def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
-        """The engine allocates every declared tensor before receiving any, so the chunk budget bounds it."""
-        names, dtypes, shapes = describe_chunk(chunk)
+    def prepare_chunk_send(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+        names = [name for name, _ in chunk]
         if len(set(names)) != len(names):
             repeated = sorted({name for name in names if names.count(name) > 1})
             raise ValueError(
@@ -235,7 +240,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 f"receives each name once, so the broadcast order would desynchronize."
             )
 
-        server_call = self._start_collective_rpc(
+    def declare_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> AsyncCall:
+        """The engine allocates every declared tensor before receiving any, so the chunk budget bounds it."""
+        names, dtypes, shapes = describe_chunk(chunk)
+        return self._start_collective_rpc(
             "/update_weights_from_distributed",
             timeout=CHUNK_SYNC_TIMEOUT_S,
             json={
@@ -247,54 +255,85 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 "flush_cache": final,
             },
         )
-        # The engine replies on queueing its receives; the sends settle two chunks later, or below on failure.
+
+    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+        """The engine replies on queueing its receives; the sends settle two chunks later, or on failure."""
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
         caller_stream = torch.cuda.current_stream(self.sync_device)
         # The arena's block may last have been used on the caller's stream (``allocate_send_buffer``).
         self._send_stream.wait_stream(caller_stream)
-        try:
-            with torch.cuda.stream(self._send_stream):
-                for tensor in self._upload_to_arena([param for _, param in chunk], caller_stream):
-                    # Synchronous at stream level only; an async_op work per tensor would flood the watchdog.
-                    dist.broadcast(tensor, src=0, group=self._transport[0])
-                event = torch.cuda.Event()
-                event.record(self._send_stream)
-            self._inflight.append(event)
-            server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
-        except Exception as e:
-            # A kernel whose peer failed spins and hangs every later device sync, so the drain's deadline aborts it.
-            # A passed deadline is usually the engine's own rejection, so that is read first.
-            self._inflight.clear()
-            drain_error: RuntimeError | None = None
+        with torch.cuda.stream(self._send_stream):
+            for tensor in self._upload_to_arena([param for _, param in chunk], caller_stream):
+                # Synchronous at stream level only; an async_op work per tensor would flood the watchdog.
+                dist.broadcast(tensor, src=0, group=self._transport[0])
+            event = torch.cuda.Event()
+            event.record(self._send_stream)
+        self._inflight.append(event)
+
+    def _fail_chunk(self, error: Exception, declared: AsyncCall) -> NoReturn:
+        # A kernel whose peer failed spins and hangs every later device sync, so the drain's deadline aborts it.
+        # A passed deadline is usually the engine's own rejection, so that is read first.
+        self._inflight.clear()
+        drain_error: RuntimeError | None = None
+        if self._send_stream is not None:
             try:
                 bounded_stream_sync(
                     self._send_stream,
                     timeout_s=CLEANUP_TIMEOUT_S,
                     what=f"{self.BACKEND_NAME} weight broadcast",
-                    abort=self._abort_group,
+                    abort=self.abort_transport,
                 )
             except RuntimeError as deadline:
                 drain_error = deadline
-            self._raise_if_server_failed(
-                e,
-                server_call,
-                hint=(
-                    " The engine reports a partially updated model after such a failure — restart "
-                    "the server before serving again."
-                ),
-            )
-            if drain_error is not None:
-                raise drain_error from e
-            raise
+        self._raise_if_server_failed(
+            error,
+            declared,
+            hint=(
+                " The engine reports a partially updated model after such a failure — restart "
+                "the server before serving again."
+            ),
+        )
+        if drain_error is not None:
+            raise drain_error from error
+        raise error
 
     def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         if tail:
             self._transmit_chunk(tail, final=True)
         else:
-            # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
-            self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
-        self._release_arena()
+            self.flush_engine_cache()
+        self.release_send_buffers()
+
+    def flush_engine_cache(self) -> None:
+        """With no final chunk to ride on, the flush is requested directly, or the new weights serve a stale cache."""
+        self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
+
+    def verify_group_membership(self) -> None:
+        """An empty declare is a no-op on an engine that holds the group and an error on one that does not, which a
+        real declare would turn into peers parked in a receive nobody can free."""
+        try:
+            self._start_collective_rpc(
+                "/update_weights_from_distributed",
+                timeout=POST_TIMEOUT_S,
+                json={"names": [], "dtypes": [], "shapes": [], "group_name": self.group_name, "flush_cache": False},
+            ).wait(timeout=POST_TIMEOUT_S)
+        except requests.exceptions.HTTPError as e:
+            raise GroupMembershipLost(
+                f"SGLang server {self.base_url} holds no weight-update group {self.group_name!r} ({e}); it restarted "
+                f"since the group formed."
+            ) from e
+
+    def reject_group_membership(self) -> None:
+        """``pp_size`` is read by no rank formula, so a pipeline-parallel engine's stages would all take
+        ``rank_offset + tp_rank`` and collide."""
+        pp_size = int(self._server_info().get("pp_size", 1) or 1)
+        if pp_size > 1:
+            raise RuntimeError(
+                f"SGLang server {self.base_url} runs --pp-size {pp_size}: its workers rank as rank_offset + tp_rank, "
+                f"so the stages collide in a group shared with other servers. Serve with --pp-size 1, or set "
+                f"rollout_sync_topology: per_server."
+            )
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
@@ -349,7 +388,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # A 503 is a scheduler step past the server's own 20 s window: alive, and the destroy's join bounds a wedged one.
         return response.status_code in (200, 503)
 
-    def _destroy_remote_group(self):
+    def destroy_remote_group(self):
         """Best-effort; never masks the caller's failure."""
         try:
             self.request(
@@ -375,7 +414,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             total += (param.nbytes + 255) // 256 * 256
         if self._arena is None or self._arena.numel() < total:
             # Only once the previous sends retired, as they still read the old arena.
-            self._release_arena()
+            self.release_send_buffers()
             self._arena = allocate_send_buffer(
                 max(total, WEIGHT_SYNC_CHUNK_BYTES),
                 self.sync_device,
@@ -395,14 +434,14 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 self._inflight.popleft(),
                 timeout_s=CHUNK_SYNC_TIMEOUT_S,
                 what=f"{self.BACKEND_NAME} weight broadcast",
-                abort=self._abort_group,
+                abort=self.abort_transport,
             )
 
-    def _abort_group(self) -> None:
+    def abort_transport(self) -> None:
         self._aborted = True
         abort_weight_update_group(self._transport[0])
 
-    def _release_arena(self) -> None:
+    def release_send_buffers(self) -> None:
         """Held across syncs, the arena would pin the sync GPU."""
         self._settle_inflight(keep=0)
         self._arena = None

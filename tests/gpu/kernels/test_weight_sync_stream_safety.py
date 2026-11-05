@@ -87,7 +87,7 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
         client._broadcast_chunk([(f"p{i}", s) for i, s in enumerate(sources)], final=False)
         del sources
         _overwrites = _refill_freed_blocks(device)
-        client._release_arena()
+        client.release_send_buffers()
     torch.cuda.synchronize()
 
     corrupted = [

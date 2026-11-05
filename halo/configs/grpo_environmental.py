@@ -35,10 +35,11 @@ from halo.environments.rollout_config import (
 from halo.inference.endpoints import DEFAULT_LOCAL_SERVER_URL
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from halo.runtime.ranks import is_global_main_process
+from halo.weight_sync.group_layout import SyncTopology, resolve_group_host
 
 logger = logging.getLogger(__name__)
 
-_ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host"})
+_ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host", "node"})
 
 
 @dataclass(frozen=True)
@@ -323,6 +324,15 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/setup.md#weight-synchronization."
         },
     )
+    rollout_sync_topology: SyncTopology = field(
+        default="per_server",
+        metadata={
+            "help": "How the trainer's weight-sync groups span the rollout servers: per_server forms one NCCL group per "
+            "server, single_group one group over all of them that broadcasts each chunk once. single_group takes one "
+            "rollout_group_port, one group_host, and an optional 'node' label per rollout_server_configs entry that "
+            "orders the servers by node. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
+        },
+    )
     sync_weights_every_n_steps: int = field(
         default=1, metadata={"help": "Sync weights to the rollout servers every N training steps, N >= 1."}
     )
@@ -586,6 +596,15 @@ class AsyncRolloutConfig(
                 require_int(where, ge=0, le=65535, group_port=server["group_port"])
             if "group_host" in server:
                 require_text(where, group_host=server["group_host"])
+            if "node" in server:
+                require_text(where, node=server["node"])
+                if self.rollout_sync_topology != "single_group":
+                    raise ValueError(
+                        f"{where} sets node, which only orders the servers of one group. Remove it, or set "
+                        f"rollout_sync_topology: single_group."
+                    )
+        if self.rollout_sync_topology == "single_group":
+            resolve_group_host(servers)
         if servers and differs_from_default(self, "rollout_server_url"):
             raise ValueError(
                 f"{owner}: rollout_server_url={self.rollout_server_url!r} is set beside rollout_server_configs, whose "

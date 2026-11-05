@@ -164,9 +164,9 @@ def client(request, monkeypatch, engine_requests, server_calls, opened_listeners
     else:
         monkeypatch.delenv("SGLANG_GROUP_HOST", raising=False)
         client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
-        monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 0)
+        monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
         monkeypatch.setattr(
-            client, "_destroy_remote_group", lambda: server_calls.append("/destroy_weights_update_group")
+            client, "destroy_remote_group", lambda: server_calls.append("/destroy_weights_update_group")
         )
         monkeypatch.setattr(c10d, "_new_process_group_helper", _group_without_nccl)
         monkeypatch.setattr(sglang_module, "AsyncCall", _InlineCall)
