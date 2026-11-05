@@ -1362,6 +1362,13 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_environmental_grpo_benchmarks.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
+    # The packed window against the per-row one on FA2; the --moe row adds DeepEP dispatch per bin and R2/R3 replay.
+    "trainers/grpo/test_env_packed_microbatches.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=("", Row("--moe", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"))),
+        timeout=900,
+    ),
     "trainers/grpo/test_env_length_ordered_rows.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),

@@ -67,6 +67,7 @@ def world_accelerator() -> types.SimpleNamespace:
         num_processes=dist.get_world_size(),
         sync_gradients=True,
         is_main_process=dist.get_rank() == 0,
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
 
@@ -193,7 +194,9 @@ def packed_host(model, *, slots: int, iterations: int = 1, loss_type: str = "dap
     return host
 
 
-def train_window(host, batch: dict, plan: MicrobatchPlan | None = None) -> tuple[float, list[torch.Tensor]]:
+def train_window(
+    host, batch: dict, plan: MicrobatchPlan | None = None, seed: int = 7
+) -> tuple[float, list[torch.Tensor]]:
     """One optimizer step's micro-steps through the trainer's own ``compute_loss`` and TRL's buffer: a round one row per
     chunk, or under ``plan`` its packed slots. ``(summed loss, parameter gradients)``."""
     host._step, host._buffered_inputs = 0, None
@@ -203,6 +206,7 @@ def train_window(host, batch: dict, plan: MicrobatchPlan | None = None) -> tuple
         host._generate_and_score_completions = lambda _inputs: host._lay_out_packed_round(dict(batch), plan)
     for param in host.model.parameters():
         param.grad = None
+    torch.manual_seed(seed)
     total = 0.0
     for _ in range(host.args.gradient_accumulation_steps):
         inputs = host._prepare_inputs({})
@@ -210,7 +214,8 @@ def train_window(host, batch: dict, plan: MicrobatchPlan | None = None) -> tuple
         loss = DistributedAsyncEnvironmentalGRPOTrainer.compute_loss(host, host.model, inputs)
         loss.backward()
         total += loss.item()
-    return total, [p.grad.clone() for p in host.model.parameters()]
+    grads = [p.grad.to_local() if hasattr(p.grad, "to_local") else p.grad for p in host.model.parameters()]
+    return total, [grad.float().clone() for grad in grads]
 
 
 def with_world_normalizer(batch: dict) -> dict:

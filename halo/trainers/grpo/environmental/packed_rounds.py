@@ -7,6 +7,7 @@ import logging
 import torch
 
 from halo.models.attention.selection import effective_attn_implementation
+from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_undispatchable_budget,
@@ -60,11 +61,32 @@ class PackedMicrobatchMixin:
         self._orders_rows_by_length = False
         self._stashes_row_spans = False
         self._packs_microbatches = True
+        self._warm_packed_row_kernels()
         if is_global_main_process():
             logger.info(
                 f"Packed micro-batches: up to {budget} attended tokens per rank in each of at most "
                 f"{self.args.steps_per_generation} slots."
             )
+
+    def _warm_packed_row_kernels(self) -> None:
+        """COLLECTIVE. A two-document packed forward and backward through the trainer's own scorer, so the varlen
+        attention and the delta-rule and conv variants a packed call launches compile and load here, on every rank,
+        and not between a MoE dispatch and its combine in the first step. The gradients it leaves are dropped."""
+        if not torch.cuda.is_available():
+            return
+        model, device, keep = self.model, self.accelerator.device, 4
+        ids = torch.zeros(2, 2 * keep, dtype=torch.long, device=device)
+        mask = torch.ones_like(ids)
+        was_training = model.training
+        model.train()
+        try:
+            logps, _, _ = self._get_per_token_logps_and_entropies(model, ids, mask, keep, compute_entropy=False)
+            logps.sum().backward()
+            self._finish_fsdp2_backward(model)
+        finally:
+            model.zero_grad(set_to_none=True)
+            model.train(was_training)
+        barrier()
 
     def _plan_packed_round(self, step: StepRows, num_dummy_rows: int) -> MicrobatchPlan:
         """COLLECTIVE. The round's real rows planned into bins, the world's bin count and widest bin agreed."""

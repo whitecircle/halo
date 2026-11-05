@@ -28,10 +28,12 @@ from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.modality import config_declares_multimodality
 from halo.models.module_tree import embedding_module, find_module_path, hidden_state_backbone
 from halo.models.moe.family_specs import attention_reads_row_positions
+from halo.models.segment_markers import segment_markers_for
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.grpo.packed_forward import build_packed_rows
 from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
@@ -256,6 +258,10 @@ class LogprobScoringMixin:
     ):
         batch_size = batch_size or input_ids.size(0)
         sweep = self._head_sweep(unwrapped_model)
+        if self._packs_microbatches and self.model.training:
+            return self._packed_logps(
+                unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep
+            )
         dense = rows_forward_densely(unwrapped_model, batch_size)
         spans, completions = self._row_spans_for(attention_mask, logits_to_keep) if dense else ([], [])
         all_logps, all_entropies = [], []
@@ -290,6 +296,36 @@ class LogprobScoringMixin:
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         return logps, entropies
+
+    def _packed_logps(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep):
+        """All rows handed in as one flattened varlen backbone call (their ``batch_size`` chunking ignored: the caller
+        picked the micro-batch). Each row's positions restart at 0, so it scores as it does alone."""
+        if self._completion_logits_sink is not None:
+            raise RuntimeError("Packed micro-batches score no completion logits for a loss that needs them.")
+        spans, n_comps = self._row_spans_for(attention_mask, logits_to_keep)
+        widths = [max(n_comp, 1) for n_comp in n_comps]
+        rows = build_packed_rows(input_ids, spans, widths, segment_markers_for(unwrapped_model.config))
+        hidden = self._packed_hidden_state(unwrapped_model, rows)
+        completion_ids = input_ids[:, -logits_to_keep:]
+        targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
+        logps, entropies = sweep(hidden, targets, compute_entropy)
+        return (
+            _completion_window(logps.split(widths), logits_to_keep),
+            _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None,
+        )
+
+    def _packed_hidden_state(self, unwrapped_model, rows):
+        """Hidden states at the rows' scored positions, from one backbone call under one EP capacity scope."""
+        bump_forward_generation()
+        backbone = hidden_state_backbone(unwrapped_model)
+        hidden = backbone(
+            input_ids=rows.input_ids,
+            attention_mask=None,
+            position_ids=rows.position_ids,
+            use_cache=False,
+            **rows.kwargs,
+        ).last_hidden_state
+        return hidden[0, rows.hidden_index]
 
     def _head_logits(self, unwrapped_model, hidden: torch.Tensor) -> torch.Tensor:
         """Called inside the redirected forward, where FSDP2 has gathered the head."""

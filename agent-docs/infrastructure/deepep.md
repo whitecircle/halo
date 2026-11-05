@@ -252,7 +252,7 @@ chosen and rejected together, divided by `cp_size`) through the dispatcher's own
 capacity alignment and refuses it, naming the budget, the capacity and the EP group. The row length is
 `max_length`; unbounded, `max_prompt_length + max_completion_length` where the config bounds both, else
 the model's context window. The dispatcher's check stays the backstop for the batch in hand and the
-only check for online and async GRPO, which declare no budget. Whether the Gin ceiling applies is
+only check for online and async GRPO, which declare no budget, except that async GRPO's `packed_microbatch_tokens` is a per-rank budget checked the same way at construction, and its planner caps every bin at the same wire and Gin ceiling. Whether the Gin ceiling applies is
 decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
 There is no lower "symmetric-window" ceiling. What carries long-context ep8 is the int64 program offset
