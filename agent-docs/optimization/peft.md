@@ -330,7 +330,8 @@ On online / async GRPO, where no adapter wraps the model — a full fine-tune, o
 run, which builds no `PeftModel` — `beta != 0` holds a frozen reference: the script loads the base the
 way the policy loads and the trainer hands it to TRL in place of the fp32 copy TRL would build
 ([Online GRPO](../training-methods/grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an
-unparallelized replica per rank, warned about under EP and TP. Add an attention LoRA target (it wraps the
+unparallelized replica per rank, refused before it loads when it exceeds half the free GPU memory or 80% of the node's
+available host RAM across its ranks. Add an attention LoRA target (it wraps the
 model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
 ## Online RL — rollout-server weight sync

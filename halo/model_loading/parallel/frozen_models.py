@@ -14,13 +14,16 @@ from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
+from halo.hardware import available_host_ram_bytes, current_device
 from halo.log import warn_once
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from halo.model_loading.finalization import finalize_loaded_model
+from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.model_preparation import (
     apply_family_patches,
     apply_run_model_policies,
     auto_load_model,
+    resolve_auto_model_class,
     resolve_build_config,
 )
 from halo.model_loading.parallel.model_source import resolve_model_source
@@ -29,7 +32,9 @@ from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
+from halo.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from halo.runtime.load_coordination import joined_node_load
+from halo.runtime.ranks import get_local_world_size
 
 if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits beside this package.
@@ -64,6 +69,12 @@ ON_POLICY_GRPO_REFERENCE_ALTERNATIVES = ReferenceAlternatives(
     peft="use_peft: true with an attention target scores the reference as the policy with its adapter disabled.",
 )
 
+# The share of the device memory free beside the loaded policy, and of the node's available host RAM, a whole frozen
+# reference may take: the optimizer, gradients and activations still have to fit beside it, and every rank stages its
+# copy on the host first.
+_REFERENCE_DEVICE_FRACTION = 0.5
+_REFERENCE_HOST_FRACTION = 0.8
+
 # Messages already reported: the script loader and the trainer gate report one reference once.
 _reported_references: set[str] = set()
 
@@ -82,6 +93,78 @@ def warn_unparallelized_reference(parallelism_config: ParallelismConfig, avoid: 
             f"{avoid.under(parallelism_config)}"
         )
         warn_once(logger, _reported_references, message, message)
+
+
+def estimate_reference_bytes(model_config: ModelArguments, training_config) -> int:
+    """Bytes of the frozen reference at the run dtype, from a config-only meta shell: no weight is read."""
+    dtype = resolve_training_dtype(training_config)
+    name = model_config.model_name_or_path
+    revision = getattr(model_config, "model_revision", None)
+    config = resolve_build_config(name, revision=revision, trust_remote_code=model_config.trust_remote_code)
+    shell = instantiate_on_meta(
+        name,
+        resolve_auto_model_class(config),
+        config,
+        dtype,
+        trust_remote_code=model_config.trust_remote_code,
+        config_only=True,
+        revision=revision,
+    )
+    return sum(p.numel() for p in shell.parameters()) * torch.empty((), dtype=dtype).element_size()
+
+
+def resolve_reference_misfit(
+    reference_bytes: int,
+    *,
+    free_device_bytes: int | None,
+    available_host_bytes: int | None,
+    ranks_per_node: int,
+) -> str | None:
+    """Why a whole frozen reference per rank does not fit, or ``None`` where it does. A side that is ``None`` could not
+    be read and is skipped."""
+    gb = 1e9
+    if free_device_bytes is not None and reference_bytes > _REFERENCE_DEVICE_FRACTION * free_device_bytes:
+        return (
+            f"it is ~{reference_bytes / gb:.0f} GB on every GPU, over {_REFERENCE_DEVICE_FRACTION:.0%} of the "
+            f"~{free_device_bytes / gb:.0f} GB free beside the loaded policy"
+        )
+    node_bytes = ranks_per_node * reference_bytes
+    if available_host_bytes is not None and node_bytes > _REFERENCE_HOST_FRACTION * available_host_bytes:
+        return (
+            f"the {ranks_per_node} ranks of a node each stage ~{reference_bytes / gb:.0f} GB of it in host memory "
+            f"at once (~{node_bytes / gb:.0f} GB), over {_REFERENCE_HOST_FRACTION:.0%} of the "
+            f"~{available_host_bytes / gb:.0f} GB available"
+        )
+    return None
+
+
+def reject_unfit_reference(
+    model_config: ModelArguments,
+    training_config,
+    parallelism_config: ParallelismConfig,
+    avoid: ReferenceAlternatives,
+) -> None:
+    """COLLECTIVE. Refuse, before it loads, a frozen reference too large to hold whole on every rank: it is never
+    sharded, so it costs the full model per GPU and per host slot at any parallelism."""
+    what = "Sizing the frozen reference"
+    guard = DeferredRankFailure(what, ValueError)
+    reference_bytes = guard.run(lambda: estimate_reference_bytes(model_config, training_config))
+    reason = guard.reason
+    if reference_bytes is not None:
+        misfit = resolve_reference_misfit(
+            reference_bytes,
+            free_device_bytes=torch.cuda.mem_get_info(current_device())[0] if torch.cuda.is_available() else None,
+            available_host_bytes=available_host_ram_bytes(),
+            ranks_per_node=get_local_world_size(),
+        )
+        if misfit is not None:
+            reason = (
+                f"beta != 0 holds a frozen KL reference as a whole, unsharded copy of the model on every rank "
+                f"(expert_parallel_size={parallelism_config.ep_size}, tensor_parallel_size="
+                f"{parallelism_config.tp_size}, data_parallel_size={parallelism_config.data_parallel_size}), and "
+                f"{misfit}. {avoid.under(parallelism_config)} Offline GRPO precomputes the reference once instead."
+            )
+    reject_across_ranks(reason, what, exc_type=ValueError)
 
 
 def on_policy_grpo_holds_reference(beta: float, peft_config, model=None) -> bool:
@@ -212,7 +295,7 @@ def load_reference_model_for_on_policy_grpo(
     the policy's."""
     if not on_policy_grpo_holds_reference(training_config.beta, peft_config):
         return None
-    warn_unparallelized_reference(parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
+    reject_unfit_reference(model_config, training_config, parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
     return load_frozen_reference_model(
         args,
         model_config,

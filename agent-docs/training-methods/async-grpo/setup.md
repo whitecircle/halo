@@ -81,7 +81,8 @@ rejected at config time: `ep4` on 4 trainer GPUs passes, on 8 it does not
 - `beta > 0` without PEFT holds a frozen reference: the script loads it like the policy (run dtype, `model_revision`,
   attention, `reset_sinks`), from `model_name_or_path` and never a resume checkpoint, and hands it to TRL in place of
   TRL's fp32 copy ([Online GRPO](../grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an unsharded dense
-  replica per rank, warned about under EP, ETP and TP. Use `beta: 0`, or `use_peft: true` with an attention target
+  replica per rank, refused before it loads when it exceeds half the free GPU memory or 80% of the node's available host RAM
+  across its ranks ([sizing](../grpo/online.md#grpo-objective-for-verifiable-rewards)). Use `beta: 0`, or `use_peft: true` with an attention target
   off TP (which refuses adapters), to hold none.
 
 ## Weight synchronization
