@@ -50,7 +50,7 @@ one failing while the save is already raising another error is logged beside it.
 
 **Striped writers.** After an EP layer's all-gather every rank of the EP group holds the whole layer, and `retain`
 only decides who pays the host copy, so the write is striped without a new collective. On a shared output filesystem
-`WriterStripe` (`halo/checkpoint/writing.py`) names the first rank of each node a writer (more per node with
+`WriterStripe` (`halo/checkpoint/parallel/writing.py`) names the first rank of each node a writer (more per node with
 `HALO_CHECKPOINT_WRITERS_PER_NODE`); the save rank owns chunk 0 (the non-expert tensors, tied embeddings, MTP trunk
 copies, external tables) and every later layer goes round-robin. Each writer gets its own part prefix
 (`stripe_writer_part_prefix`), closes its parts, and the save rank joins the fragments (`merge_streamed_parts`, which

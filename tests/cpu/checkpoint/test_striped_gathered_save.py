@@ -14,16 +14,11 @@ import torch
 import torch.distributed as dist
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-import halo.checkpoint.writing as writing
+import halo.checkpoint.parallel.writing as gathered_writing
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from halo.checkpoint.writing import (
-    StreamedParts,
-    StreamingShardWriter,
-    WriterStripe,
-    merge_streamed_parts,
-    resolve_writer_stripe,
-)
+from halo.checkpoint.parallel.writing import WriterStripe, resolve_writer_stripe
+from halo.checkpoint.writing import StreamedParts, StreamingShardWriter, merge_streamed_parts
 from tests.common.checkpoint_io import file_digests, safetensors_state_dict, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
@@ -215,10 +210,10 @@ def test_the_stripe_follows_the_filesystem_and_node_layout(
 ):
     monkeypatch.setenv(WRITERS_ENV, str(per_node))
     monkeypatch.setenv(SHARED_ENV, "1" if shared else "0")
-    monkeypatch.setattr(writing, "get_num_nodes", lambda: 4)
-    monkeypatch.setattr(writing, "get_local_world_size", lambda: local_world_size)
-    monkeypatch.setattr(writing, "get_node_rank", lambda: rank // local_world_size)
-    monkeypatch.setattr(writing, "get_local_rank", lambda: rank % local_world_size)
+    monkeypatch.setattr(gathered_writing, "get_num_nodes", lambda: 4)
+    monkeypatch.setattr(gathered_writing, "get_local_world_size", lambda: local_world_size)
+    monkeypatch.setattr(gathered_writing, "get_node_rank", lambda: rank // local_world_size)
+    monkeypatch.setattr(gathered_writing, "get_local_rank", lambda: rank % local_world_size)
     is_save_rank = rank == 0 if shared else rank % local_world_size == 0
     assert resolve_writer_stripe(is_save_rank=is_save_rank) == expected
 

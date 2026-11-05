@@ -33,8 +33,6 @@ from halo.models.config_access import ties_word_embeddings, untie_word_embedding
 from halo.models.moe.balancing import balancing_param_keys, is_balancing_state_key
 from halo.models.param_roles import fp32_pinned_names, norm_param_keys
 from halo.models.unwrapping import strip_peft_adapter_segment
-from halo.runtime.filesystem import is_output_shared_filesystem
-from halo.runtime.ranks import get_local_rank, get_local_world_size, get_node_rank, get_num_nodes
 
 logger = logging.getLogger(__name__)
 
@@ -206,39 +204,6 @@ def validate_checkpoint_writers_per_node(writers: int) -> int:
             f"each node's first rank)."
         )
     return writers
-
-
-@dataclass(frozen=True)
-class WriterStripe:
-    """The ranks that write one gathered save and the chunks each owns. ``index`` is this rank's place among the
-    ``count`` writers, ``None`` off them. Every rank holds the whole chunk after its gather, so ownership only decides
-    who pays the host copy and the write."""
-
-    index: int | None
-    count: int
-
-    @property
-    def is_writer(self) -> bool:
-        return self.index is not None
-
-    def owns(self, chunk: int) -> bool:
-        """Chunk 0 (the replicated tensors, tied embeddings and tables) is the first writer's; each later chunk, one
-        decoder layer, goes round-robin."""
-        return self.index is not None and self.index == (max(chunk - 1, 0) % self.count)
-
-
-def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
-    """The stripe of a gathered save. A shared output filesystem takes ``HALO_CHECKPOINT_WRITERS_PER_NODE`` writers
-    per node, the save rank first; per-node storage keeps the save rank alone, as each node's directory must hold the
-    whole checkpoint."""
-    if not is_output_shared_filesystem():
-        return WriterStripe(0 if is_save_rank else None, 1)
-    per_node = min(validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node()), get_local_world_size())
-    count = get_num_nodes() * per_node
-    if is_save_rank:
-        return WriterStripe(0, count)
-    local_rank = get_local_rank()
-    return WriterStripe(get_node_rank() * per_node + local_rank if local_rank < per_node else None, count)
 
 
 @dataclass(frozen=True)

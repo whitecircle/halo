@@ -7,6 +7,7 @@ import itertools
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import dataclass
 from functools import partial
 
 import torch
@@ -17,11 +18,12 @@ from halo.checkpoint.external_tables import write_external_tables
 from halo.checkpoint.format import STREAM_PART_PREFIX, stripe_writer_part_prefix
 from halo.checkpoint.writing import (
     StreamingShardWriter,
-    WriterStripe,
     is_tie_reconcile_key,
     merge_streamed_parts,
     publish_hf_parts,
     reconcile_tie_word_embeddings,
+    resolve_checkpoint_writers_per_node,
+    validate_checkpoint_writers_per_node,
 )
 from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
@@ -32,11 +34,51 @@ from halo.models.param_roles import persistent_buffers
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
-from halo.runtime.ranks import is_global_main_process
+from halo.runtime.filesystem import is_output_shared_filesystem
+from halo.runtime.ranks import (
+    get_local_rank,
+    get_local_world_size,
+    get_node_rank,
+    get_num_nodes,
+    is_global_main_process,
+)
 
 logger = logging.getLogger(__name__)
 
 _LAYER_CHUNK_RE = re.compile(rf"^((?:.*\.)?(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
+
+
+@dataclass(frozen=True)
+class WriterStripe:
+    """The ranks that write one gathered save and the chunks each owns. ``index`` is this rank's place among the
+    ``count`` writers, ``None`` off them. Every rank holds the whole chunk after its gather, so ownership only decides
+    who pays the host copy and the write."""
+
+    index: int | None
+    count: int
+
+    @property
+    def is_writer(self) -> bool:
+        return self.index is not None
+
+    def owns(self, chunk: int) -> bool:
+        """Chunk 0 (the replicated tensors, tied embeddings and tables) is the first writer's; each later chunk, one
+        decoder layer, goes round-robin."""
+        return self.index is not None and self.index == (max(chunk - 1, 0) % self.count)
+
+
+def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
+    """The stripe of a gathered save. A shared output filesystem takes ``HALO_CHECKPOINT_WRITERS_PER_NODE`` writers
+    per node, the save rank first; per-node storage keeps the save rank alone, as each node's directory must hold the
+    whole checkpoint."""
+    if not is_output_shared_filesystem():
+        return WriterStripe(0 if is_save_rank else None, 1)
+    per_node = min(validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node()), get_local_world_size())
+    count = get_num_nodes() * per_node
+    if is_save_rank:
+        return WriterStripe(0, count)
+    local_rank = get_local_rank()
+    return WriterStripe(get_node_rank() * per_node + local_rank if local_rank < per_node else None, count)
 
 
 def saveable_items(

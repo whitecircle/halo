@@ -16,12 +16,15 @@ from halo.checkpoint.config_export import save_model_config
 from halo.checkpoint.format import EP_SHARD_KEY_INFIX, ep_shard_filename, ep_sharded_index_metadata
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
 from halo.checkpoint.parallel.context import CheckpointContext
-from halo.checkpoint.parallel.writing import gather_hand_sliced_params, stream_gathered_checkpoint
-from halo.checkpoint.writing import (
+from halo.checkpoint.parallel.writing import (
     WriterStripe,
+    gather_hand_sliced_params,
+    resolve_writer_stripe,
+    stream_gathered_checkpoint,
+)
+from halo.checkpoint.writing import (
     merge_shard_index,
     reconcile_tie_word_embeddings,
-    resolve_writer_stripe,
     save_dtype_caster,
     write_merged_index,
 )
