@@ -295,7 +295,8 @@ async def test_an_mcp_tool_schema_reaches_the_engine_as_the_server_advertised_it
     input_schema = {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "type": "object",
-        "properties": {"entities": {"type": "array", "items": entity}},
+        "$defs": {"entity": entity},
+        "properties": {"entities": {"type": "array", "items": {"$ref": "#/$defs/entity"}}},
         "required": ["entities"],
     }
 

@@ -307,6 +307,9 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             async_handler=mcp_handler,
             # ``$schema`` names the JSON-schema draft, which tells the model nothing.
             input_schema={key: value for key, value in schema.items() if key != "$schema"},
+            # The model sees the server's schema; admission still checks ``parameters``, so a schema that
+            # explicitly permits extra keys through ``additionalProperties``/``patternProperties`` will have
+            # those calls refused before the server. The local refusal keeps a typo from costing a server call.
         )
 
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:

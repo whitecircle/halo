@@ -85,6 +85,8 @@ class NativeTool:
     input_schema: dict[str, Any] | None = None
 
     def to_openai_schema(self) -> dict[str, Any]:
+        """The function declaration the engine reads. ``input_schema`` wins when set, so a server-authored schema
+        reaches the model with its array items, nested objects and references intact."""
         if self.input_schema is not None:
             return {
                 "type": "function",
