@@ -450,6 +450,28 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_hd256_strided_inputs.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1800
     ),
+    # One launch per family and emission: an illegal address poisons the process. The first three emissions bisect the
+    # M-RoPE fault; the markers row of each family is the emission the packed GRPO forward uses.
+    "kernels/test_packed_rl_forward_mrope.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "qwen3"),
+        args_matrix=(
+            "--family qwen3_5 --emission markers",
+            "--family qwen3_5 --emission position_ids",
+            "--family qwen3_5 --emission flash_varlen",
+            "--family qwen3_5 --emission mrope_plane",
+            Row("--family qwen3_5_moe_text --emission markers", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family qwen3_5_composite --emission markers", markers=("gpu", "core", "1gpu", "qwen3")),
+            Row("--family qwen3_5_moe_composite --emission markers", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family qwen3_next --emission markers", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family qwen3_next --emission flash_varlen", markers=("gpu", "full", "1gpu", "moe", "qwen3")),
+            Row("--family qwen3_moe --emission markers", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family llama --emission markers", markers=("gpu", "core", "1gpu")),
+            Row("--family nemotron_h --emission markers", markers=("gpu", "full", "1gpu", "moe", "nemotron")),
+            Row("--family lfm2_moe --emission markers", markers=("gpu", "full", "1gpu", "moe", "lfm2")),
+            Row("--family gpt_oss --emission markers", markers=("gpu", "full", "1gpu", "moe", "gptoss")),
+        ),
+    ),
     "kernels/test_fa4_hd256_family_parity.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "qwen3"),
