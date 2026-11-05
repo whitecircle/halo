@@ -11,6 +11,7 @@ import torch
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.models.moe.expert_layout import to_hub_expert_tensors
+from halo.models.moe.expert_lora_spec import expert_lora_delta
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.models.param_roles import persistent_buffers
 from halo.runtime.collectives import all_gather_cat
@@ -91,7 +92,7 @@ class EPGatherMixin:
             if merge_lora and attr in self._expert_lora_attrs:
                 lora_a = materialize_dtensor(getattr(self, f"{attr}_lora_A").data)
                 lora_b = materialize_dtensor(getattr(self, f"{attr}_lora_B").data)
-                delta = self.expert_lora_scaling * torch.bmm(lora_a.float(), lora_b.float())
+                delta = expert_lora_delta(lora_a, lora_b, self.expert_lora_scaling)
                 local[attr] = (local[attr].float() + delta).to(local[attr].dtype)
         gathered = self.gather_expert_tensors(local, retain=retain)
         del local

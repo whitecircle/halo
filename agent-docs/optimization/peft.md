@@ -502,9 +502,9 @@ The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LO
 `nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight` and merges normally; only the grouped
 namespace is refused.
 
-`merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for
-expert-only **and** mixed runs alike. Set it from the first save: a mixed adapter saved without it resumes here,
-and `merge_peft_adapters` refuses it. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
+`merge_peft_adapters.py` folds such an adapter after the fact through its [streaming merge](#streaming-merge),
+automatically for expert-only and mixed adapters. `merge_expert_lora_on_save: true` produces the merged servable
+checkpoint at training time instead, for expert-only **and** mixed runs alike. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
 base, so the run continues from its trained adapters rather than the fold
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
@@ -517,6 +517,24 @@ deltas out of place into each tensor as it is written, with the weight sync's fo
 unchanged. The fold happens
 in the gathered EP save under mixin-managed FSDP2 (torchrun); it is rejected under accelerate-managed FSDP
 and with `save_sharded_ep: true`.
+
+
+### Streaming merge
+
+`merge_peft_adapters.py --streaming` (automatic for an adapter holding native expert LoRA, whose in-memory merge is
+refused) loads no model: it reads each tensor of the base's safetensors shards, folds the adapter into the ones it
+targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
+expert deltas of the layers a shard touches and the writer's parts, whatever the model's size. Linear LoRA (rslora,
+rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
+merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
+arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
+the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype`, `--device_map`, `--fp32_norms` and
+`--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
+first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
+a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
+grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
+those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
+the adapter config lands in `original_adapter_config/`.
 
 ## Tests and benchmarks
 

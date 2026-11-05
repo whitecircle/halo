@@ -86,7 +86,7 @@ changes.
 | `halo/checkpoint/parallel/reading.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/optimizer.py`, `halo/checkpoint/parallel/optimizer_meta.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`, `agent-docs/data/filesystem-handling.md` |
 | `halo/checkpoint/config_export.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
-| `halo/checkpoint/tools/adapter_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
+| `halo/checkpoint/tools/adapter_merge.py`, `halo/checkpoint/tools/adapter_stream_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
 | `halo/checkpoint/model_card.py` | `agent-docs/reference/checkpoints.md`, `human-docs/checkpoints.md` |
 | `halo/checkpoint/parallel/writing.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `halo/models/unwrapping.py`, `halo/models/param_roles.py`, `halo/models/model_classes.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |

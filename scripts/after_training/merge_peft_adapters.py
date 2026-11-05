@@ -3,6 +3,7 @@
 
 Covers causal-LM and sequence-classification (``--task classification``) adapters; a VLM base is detected from its
 config. ``--fp32_norms`` writes normalization leaves in fp32, the layout ``convert_to_bf16.py`` writes.
+``--streaming`` (automatic for native expert LoRA) folds shard by shard with no model loaded.
 ``--output_dir`` is written fresh: any ``model*.safetensors`` or index the save did not produce is removed."""
 
 import argparse
@@ -37,6 +38,12 @@ Examples:
         --adapter_dir checkpoints/reward-lora \\
         --output_dir checkpoints/reward-merged \\
         --task classification --num_labels 1
+
+    # Larger than one host's memory, or an adapter with native expert LoRA (no model is loaded)
+    python scripts/after_training/merge_peft_adapters.py \\
+        --adapter_dir checkpoints/large-lora \\
+        --output_dir checkpoints/large-merged \\
+        --streaming
 
     # Large model with device offloading
     python scripts/after_training/merge_peft_adapters.py \\
@@ -74,6 +81,14 @@ Examples:
         help="Write every normalization leaf in fp32 instead of --dtype (convert_to_bf16.py's layout)",
     )
     parser.add_argument(
+        "--streaming",
+        action="store_true",
+        help="Fold the adapter into the base shard by shard without loading a model: memory stays at a tensor plus "
+        "the writer's parts, tensors keep the base's stored dtype and key spelling, and --dtype, --device_map, "
+        "--fp32_norms and --task classification are refused. Automatic for an adapter holding native expert LoRA, "
+        "which no in-memory merge folds.",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Suppress verbose output",
@@ -92,6 +107,7 @@ Examples:
         max_shard_size=args.max_shard_size,
         trust_remote_code=args.trust_remote_code,
         fp32_norms=args.fp32_norms,
+        streaming=args.streaming,
         verbose=not args.quiet,
     )
 
