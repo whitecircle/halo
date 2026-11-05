@@ -231,7 +231,9 @@ combine reuses that layout through the `handle`. The count exchange earns its co
 real tokens instead of a capacity-padded buffer. Within one NVLink domain the dispatch is 9–13% of the EP phases, and
 at ep8 the combine's larger share is mostly the wait for the busiest rank
 ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). Levers:
-`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN, and
+`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN (+2.1–2.5% on Qwen3.5-35B-A3B and
+Qwen3.6-35B-A3B EP8 at 16k, with a small reduction-order shift in the gradients; it cost 4.6% on Qwen3.5-122B-A10B EP8
+with activation offload at 64k), and
 `HALO_DEEPEP_NUM_SMS` tunes the split.
 
 ## Dispatch wire-index limit

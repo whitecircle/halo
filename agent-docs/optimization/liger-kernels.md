@@ -281,10 +281,12 @@ rotates a stale buffer from the second launch of a shape at the latest, backward
 
 **CrossEntropy** (default) replaces only the loss function; the model still materializes the
 `[batch, seq, vocab]` logits. Logits stay available for metrics (entropy, token accuracy), it works with
-every trainer, and it is slightly faster than FLCE on most models.
+every trainer.
 
 **FusedLinearCrossEntropy** fuses `lm_head` with the loss, never materializing logits ([measured
-saving](#benchmarks)). Trade-offs: `outputs.logits` is `None` (entropy logging disabled); SFT-only
+saving](#benchmarks)). On Halo 1.2.0 it runs at equal speed or faster: Qwen3-8B and Qwen3-30B-A3B at 16k within 0.2%
+with 12.5–13.2 GiB lower peak, gpt-oss-20b at 4k–16k 2.7–3.4% faster with 15–16.5 GiB lower, and Qwen3.5-9B at 64k
++4.4% with 133 → 54 GiB (batch 1, full checkpointing, FA2 on both sides). Trade-offs: `outputs.logits` is `None` (entropy logging disabled); SFT-only
 (other trainers need logits for log-probs).
 
 **Eval.** Liger's `lce_forward` defaults `skip_logits` to `self.training and labels is not None`, so a plain
@@ -388,7 +390,7 @@ loss path's memory saving.
 
 Upstream Liger's `gpt_oss` applier accepts a `swiglu` flag but has no patch block for it: GptOss's custom
 clamped/interleaved expert FFN has no standard-SwiGLU equivalent, so `swiglu` is a no-op at any value and
-defaults off. FLCE is supported; on gpt-oss-20b it runs 3–20% slower than CE at b1, least at long sequence and high EP ([vs Stock TRL](halo-vs-stock-trl.md#fused-linear-cross-entropy)).
+defaults off. FLCE is supported and runs 2.7–3.4% faster than CE on gpt-oss-20b EP1 at 4k–16k, at 15–16.5 GiB lower peak.
 
 Effective options: `rope`, `cross_entropy`, `fused_linear_cross_entropy`, `rms_norm`. The last is served by
 the toolkit's spec with Gemma's casting mode (`GptOssRMSNorm` multiplies its weight in fp32 before the cast
@@ -416,7 +418,7 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 | Liger + CrossEntropy | 18,956 | 141.0 GiB | +39%, −28 GiB |
 | Liger + FusedLinearCE | 17,927 | 139.5 GiB | +31%, −29 GiB |
 
-At this shape FLCE saves only 1.5 GiB more than CE and costs 5% throughput. FLCE's saving is the logits
+At this shape (Halo 1.1.0 or earlier) FLCE saves only 1.5 GiB more than CE and costs 5% throughput; at 16k on EP1 in 1.2.0 the two are within 0.2%. FLCE's saving is the logits
 plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
 
 **Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%

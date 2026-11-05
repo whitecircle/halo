@@ -11,7 +11,7 @@ Built on HuggingFace Transformers, Accelerate, and TRL — every distributed tra
 
 ## Framework comparison
 
-Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases), Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
+Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases; every TRL cell below describes 1.14.2, and the throughput comparisons run TRL 1.17.1), Unsloth, Axolotl 0.19.0, MS-SWIFT 4.0, veRL (Megatron backend), Megatron-LM/Core. "Via Megatron" = needs a Megatron backend + an HF↔MCore checkpoint conversion; "—" = out of scope (a layer the others build on).
 
 | Feature | This Toolkit | HF TRL | Accelerate | Unsloth | Axolotl | MS-SWIFT | veRL | Megatron-LM |
 |---------|:------------:|:------:|:----------:|:-------:|:-------:|:--------:|:----:|:-----------:|
@@ -49,8 +49,9 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 | Broad model coverage + no-code UI | MS-SWIFT | 600+ models, Gradio Web UI |
 | Dense pre-training at 1000+ GPU scale | Megatron-LM | TE/FP8 kernels, peak utilization |
 
-Measured throughput against NeMo AutoModel, Megatron-LM, Axolotl, MS-SWIFT, Unsloth and transformers' own
-expert-parallel path: [Throughput Benchmarks](../optimization/throughput-benchmarks.md#published-numbers-in-similar-setups).
+Measured throughput against TRL, NeMo AutoModel, Megatron Bridge, Axolotl, MS-SWIFT and Unsloth:
+[Throughput Benchmarks](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison); the TRL side in
+[Halo vs stock TRL](../optimization/halo-vs-stock-trl.md).
 
 Notes on individual frameworks:
 
