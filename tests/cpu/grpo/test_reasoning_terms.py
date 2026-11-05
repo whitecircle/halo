@@ -23,6 +23,7 @@ from halo.trainers.grpo.environmental.reasoning import (
 )
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
@@ -428,6 +429,7 @@ class _Round:
     """Records what each consumer was handed. ``leader`` stands in for the TP/ETP group leader's broadcast rollouts."""
 
     _collect_and_score_rollouts = DistributedAsyncEnvironmentalGRPOTrainer._collect_and_score_rollouts
+    _phase_timers = PhaseTimedMixin._phase_timers
     _tool_call_watch = None
     _extract_prompts_and_contexts = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts
     eval_split_rows = DistributedAsyncEnvironmentalGRPOTrainer.eval_split_rows

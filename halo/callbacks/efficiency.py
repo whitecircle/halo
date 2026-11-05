@@ -1,7 +1,6 @@
 """MFU / throughput accounting: step time, token throughput, MFU / S-MFU and GPU memory per step."""
 
 import logging
-import time
 import weakref
 from dataclasses import asdict, dataclass, field
 from typing import NamedTuple
@@ -10,6 +9,7 @@ import torch
 import transformers
 
 from halo.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
+from halo.diagnostics.phase_timers import BoundaryMark, mark_boundary, seconds_between
 from halo.diagnostics.profiling import read_cuda_memory
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -33,16 +33,13 @@ _TOKEN_DELTA_UPPER_BOUND = 2 * 1.25
 _TERA = 10**12
 _DISPLAY_DECIMALS = 2
 
-# A CUDA event on the current stream, or the host clock without a GPU.
-_BoundaryMark = torch.cuda.Event | float
-
 
 @dataclass
 class _RunState:
     n_warmup_steps: int = 0
     global_start_step: int = 0
     # Where the next step's time starts: the last step's end, or its own begin where none precedes it (``None``).
-    step_start: _BoundaryMark | None = None
+    step_start: BoundaryMark | None = None
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
     step_times: list[float] = field(default_factory=list)
@@ -104,8 +101,8 @@ class _MemoryMetrics:
 class _PendingStep(NamedTuple):
     """A measured step whose time is read once its end mark is: its boundary marks and the work it did."""
 
-    start: _BoundaryMark
-    end: _BoundaryMark
+    start: BoundaryMark
+    end: BoundaryMark
     rank_tokens: int
     cluster_tokens: int
     measured_attention_flops: float | None
@@ -122,24 +119,6 @@ class _Utilization(NamedTuple):
 
 # Zeroed rather than left as is, so an unknown FLOPS/token or GPU peak never republishes stale figures.
 _UNKNOWN_UTILIZATION = _Utilization(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-
-def _mark_boundary() -> _BoundaryMark:
-    """An event recorded behind the queued work, timing the step without draining the queue as a clock read would."""
-    if not torch.cuda.is_available():
-        return time.perf_counter()
-    event = torch.cuda.Event(enable_timing=True)
-    event.record()
-    return event
-
-
-def _seconds_between(start: _BoundaryMark, end: _BoundaryMark) -> float:
-    """Seconds from ``start`` to ``end``, waiting only for an end event the device has not reached yet."""
-    if isinstance(end, float):
-        return end - start
-    if not end.query():
-        end.synchronize()
-    return start.elapsed_time(end) / 1000.0
 
 
 def _utilization_report(
@@ -273,12 +252,12 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def on_step_begin(self, args, state, control, **kwargs):
         self._initialize_once_model_arrives(args, kwargs)
         if self._run.step_start is None:
-            self._run.step_start = _mark_boundary()
+            self._run.step_start = mark_boundary()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
     def on_step_end(self, args, state, control, **kwargs):
-        step_end = _mark_boundary()
+        step_end = mark_boundary()
         # Before the warmup gate, so a warmup step's work never leaks into the first measured one.
         measured_attention_flops = self._drain_measured_attention_flops()
         if not self._is_warmup_step(state):
@@ -419,7 +398,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._pending_steps.clear()
 
     def _record_step(self, step: _PendingStep) -> None:
-        step_time = self._record_step_time(_seconds_between(step.start, step.end))
+        step_time = self._record_step_time(seconds_between(step.start, step.end))
         self._record_token_throughput(step.cluster_tokens, step_time)
         flops = self.flops_model
         dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None

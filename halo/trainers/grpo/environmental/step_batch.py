@@ -291,17 +291,24 @@ class StepBatchMixin:
         """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
         the policy's. Both forwards run in the deal's order; scores come back in batch order."""
         order = self._no_grad_row_order(step.attention_mask, mode)
-        recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
-            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, rollout_routing_masks, mode, order
-        )
+        with self._phase_timers.span("no_grad"):
+            recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
+                step.prompt_completion_ids,
+                step.attention_mask,
+                step.logits_to_keep,
+                rollout_routing_masks,
+                mode,
+                order,
+            )
         ratio, logps_diff, corrected_mask, traj_row_ids = self._apply_is_correction(
             recompute_logps, step, rows, engine_logps
         )
         if self._is_correction and self._forced_close_ids is not None:
             ratio = self._zero_forced_closes(ratio, step)
-        ref_logps = self._compute_ref_logps(
-            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order
-        )
+        with self._phase_timers.span("no_grad_ref"):
+            ref_logps = self._compute_ref_logps(
+                step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order
+            )
         kl_clamped = None
         if ref_logps is not None and recompute_logps is not None:
             ref_logps, kl_clamped = clamp_ref_logps(ref_logps, recompute_logps)

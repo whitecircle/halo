@@ -25,6 +25,7 @@ from halo.trainers.grpo.environmental.environmental_rules import reject_unsuppor
 from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
+from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY
 from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
@@ -397,5 +398,11 @@ class RoutingReplayMixin:
         if masks is None:
             return
         attended = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
-        spans = dense_row_spans(attended)[0] if self._replay_row_spans else None
+        stashed = inputs.get(ROW_SPANS_KEY)
+        if not self._replay_row_spans:
+            spans = None
+        elif stashed is not None:
+            spans = [(lo, hi) for lo, hi, _ in stashed.tolist()]
+        else:
+            spans = dense_row_spans(attended)[0]
         self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), row_spans=spans)

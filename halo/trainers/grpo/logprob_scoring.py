@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from typing import ClassVar
 
 import torch
 import torch.nn.functional as F
@@ -73,31 +74,50 @@ def full_logits_verdict(
     )
 
 
+def row_spans_on_device(attention_mask: torch.Tensor, completion_width: int = 0) -> torch.Tensor:
+    """``[rows, 4]`` int64 on the mask's device, no host sync: each row's real-token span ``lo, hi`` (a 1-token span is
+    widened by a neighbour so the next-token shift leaves a position), its count in the mask's last
+    ``completion_width`` columns, and whether it is malformed (no real token, or a hole in them)."""
+    real = attention_mask.detach().bool()
+    width = real.size(1)
+    columns = torch.arange(width, device=real.device)
+    lo = torch.where(real, columns, width).amin(dim=1)
+    hi = torch.where(real, columns + 1, 0).amax(dim=1)
+    malformed = real.sum(dim=1) != hi - lo
+    completion = real[:, -completion_width:].sum(dim=1) if completion_width > 0 else torch.zeros_like(lo)
+    thin = hi - lo < 2
+    widen_left = thin & (lo > 0)
+    return torch.stack(
+        [
+            torch.where(widen_left, lo - 1, lo),
+            torch.where(thin & ~widen_left, hi + 1, hi),
+            completion,
+            malformed.long(),
+        ],
+        dim=1,
+    )
+
+
+def reject_malformed_rows(spans: torch.Tensor) -> None:
+    """Raise on the first malformed row of a host-side :func:`row_spans_on_device` table. A hole in the mask shifts
+    every log-prob after it, as the dense path tail-aligns."""
+    malformed = spans[:, 3].nonzero()
+    if malformed.numel():
+        raise ValueError(
+            f"Row {int(malformed[0])} has an empty or non-contiguous attention mask; the per-row dense log-prob path "
+            f"requires one contiguous real-token span per row."
+        )
+
+
 def dense_row_spans(
     attention_mask: torch.Tensor, completion_width: int = 0
 ) -> tuple[list[tuple[int, int]], list[int]]:
-    """Real-token span ``[lo, hi)`` per row and each row's count in the mask's last ``completion_width`` columns. A
-    1-token span is widened by a neighbour so the next-token shift leaves a position."""
+    """Real-token span ``[lo, hi)`` per row and each row's count in the mask's last ``completion_width`` columns."""
     # One D2H for the whole mask: a per-row read serializes CPU and GPU on every row, which defeats
     # CPU launch-ahead on a path that runs repeatedly per gradient microbatch.
-    mask = attention_mask.detach().to("cpu", torch.bool)
-    spans = []
-    for i in range(mask.size(0)):
-        real = mask[i].nonzero().view(-1)
-        lo, hi = int(real[0]), int(real[-1]) + 1
-        if len(real) != hi - lo:
-            # A hole in the mask shifts every logprob after it (the dense path tail-aligns).
-            raise ValueError(
-                f"dense_row_spans: row {i} has a non-contiguous attention mask "
-                f"({len(real)} real tokens across span [{lo}, {hi})); the per-row dense "
-                f"logprob path requires one contiguous real-token span per row."
-            )
-        if hi - lo < 2:
-            lo, hi = (lo - 1, hi) if lo > 0 else (lo, hi + 1)
-        spans.append((lo, hi))
-    if completion_width <= 0:
-        return spans, [0] * len(spans)
-    return spans, mask[:, -completion_width:].sum(dim=1).tolist()
+    table = row_spans_on_device(attention_mask, completion_width).cpu()
+    reject_malformed_rows(table)
+    return [(lo, hi) for lo, hi in table[:, :2].tolist()], table[:, 2].tolist()
 
 
 def _completion_window(parts: Sequence[torch.Tensor], width: int) -> torch.Tensor:
@@ -122,6 +142,10 @@ class LogprobScoringMixin:
 
     # Armed by :meth:`_capturing_completion_logits`: where the scoring forward also leaves its logits.
     _completion_logits_sink: list[torch.Tensor] | None = None
+    # Armed for one loss forward: the ``[rows, 3]`` host table of ``lo, hi, completion`` its masks were built with.
+    _armed_row_spans: torch.Tensor | None = None
+    # Rows whose armed span disagreed with the mask the forward read, summed on the device.
+    _row_span_mismatches: torch.Tensor | None = None
 
     @contextmanager
     def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
@@ -230,6 +254,7 @@ class LogprobScoringMixin:
         batch_size = batch_size or input_ids.size(0)
         sweep = self._head_sweep(unwrapped_model)
         dense = rows_forward_densely(unwrapped_model, batch_size)
+        spans, completions = self._row_spans_for(attention_mask, logits_to_keep) if dense else ([], [])
         all_logps, all_entropies = [], []
         for start in range(0, input_ids.size(0), batch_size):
             ids = input_ids[start : start + batch_size]
@@ -245,7 +270,10 @@ class LogprobScoringMixin:
                 continue
             # Dense rows: one sweep over every row's real completion tokens, the window's zero tail masked
             # downstream, so the head pays the rows' lengths, not the padded width, and runs once.
-            hidden, widths = self._dense_last_hidden_state(unwrapped_model, ids, mask, logits_to_keep)
+            rows = slice(start, start + batch_size)
+            hidden, widths = self._dense_last_hidden_state(
+                unwrapped_model, ids, mask, logits_to_keep, spans=(spans[rows], completions[rows])
+            )
             targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
             logps, entropies = sweep(hidden, targets, compute_entropy)
             all_logps.append(_completion_window(logps.split(widths), logits_to_keep))
@@ -264,11 +292,34 @@ class LogprobScoringMixin:
         """Called inside the redirected forward, where FSDP2 has gathered the head."""
         return self._head_transform(unwrapped_model).project(unwrapped_model.get_output_embeddings(), hidden)
 
-    def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
+    def _row_spans_for(self, attention_mask, logits_to_keep) -> tuple[list[tuple[int, int]], list[int]]:
+        """:func:`dense_row_spans` of the whole batch, or the armed table of a loss forward, whose agreement with the
+        mask read here is tallied on the device and refused at the window's end (``RowSpanStashMixin``)."""
+        armed = self._armed_row_spans
+        if armed is None:
+            return dense_row_spans(attention_mask, logits_to_keep)
+        rows, width = attention_mask.shape
+        if armed.shape != (rows, 3) or (rows and int(armed[:, 1].max()) > width):
+            raise RuntimeError(
+                f"The armed row spans {tuple(armed.shape)} do not fit the {rows}-row, {width}-column batch the loss "
+                f"forward scores: a stage reshaped the batch after its spans were built."
+            )
+        fresh = row_spans_on_device(attention_mask, logits_to_keep)[:, :3]
+        # Pinned: a non-blocking copy from pageable memory is staged by the host.
+        expected = (armed.pin_memory() if fresh.is_cuda else armed).to(fresh.device, non_blocking=True)
+        mismatched = (fresh != expected).any(dim=1).sum()
+        self._row_span_mismatches = (
+            mismatched if self._row_span_mismatches is None else self._row_span_mismatches + mismatched
+        )
+        table = armed.tolist()
+        return [(lo, hi) for lo, hi, _ in table], [completion for _, _, completion in table]
+
+    def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, spans=None):
         """Each row's width is at least 1 so it stays autograd-connected (a pruned row drops its FSDP/EP backward
         collectives). Trimming with ``attention_mask=None`` keeps FA4 on its dense kernel and restores positions
-        ``[0, len)``, so a row scores as it does alone."""
-        spans, n_comps = dense_row_spans(attention_mask, logits_to_keep)
+        ``[0, len)``, so a row scores as it does alone. ``spans`` are the rows' :meth:`_row_spans_for` when the caller
+        holds them."""
+        spans, n_comps = spans if spans is not None else dense_row_spans(attention_mask, logits_to_keep)
         widths = [max(n_comp, 1) for n_comp in n_comps]
         rows = [
             self._backbone_hidden_state(unwrapped_model, input_ids[i : i + 1, lo:hi], None, width)[0, -width:]
@@ -367,6 +418,10 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
     """TRL's full-logits scorer serves the gate off and multimodal inputs. Mixed in ahead of ``GRPOTrainer`` and behind
     ``ProtectedTokenEntropyMixin``, whose override reaches it through ``super()``."""
 
+    # Whether this trainer's scored batches can carry images. A trainer that builds its batches text-only sets False
+    # and its composite scoring forwards skip the cross-rank image consensus (one all-reduce and host read each).
+    _SCORED_BATCHES_CARRY_IMAGES: ClassVar[bool] = True
+
     # Derived from TRL's full-logits scorer's signature, so a release adding a modality input does not slip past this
     # gate into the text-only chunked path.
     _MODALITY_KEYS = frozenset(inspect.signature(GRPOTrainer._full_logits_logps).parameters) - {
@@ -411,7 +466,15 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
         # Mixed full (image) / chunked (text) paths across ranks diverge FSDP2's collectives and deadlock
         # backward, so any multimodal batch routes all ranks to the full forward; text-only models skip this.
         if chunked and self._model_accepts_multimodal:
-            is_multimodal = rank_consensus(is_multimodal).any_ok
+            if self._SCORED_BATCHES_CARRY_IMAGES:
+                is_multimodal = rank_consensus(is_multimodal).any_ok
+            elif is_multimodal:
+                # A bug trap: this rank alone raises, so a peer waits until the collective timeout.
+                raise RuntimeError(
+                    f"{type(self).__name__} scores a batch with modality inputs, but its batches are built text-only "
+                    f"and its scoring skips the cross-rank image check. Set _SCORED_BATCHES_CARRY_IMAGES where "
+                    f"batches carry images."
+                )
         if not chunked or is_multimodal:
             # TRL's own dispatch would send a use_liger_kernel run to its chunked head, which skips the
             # family's head transform and the EP capacity scope.

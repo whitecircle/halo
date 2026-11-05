@@ -240,7 +240,7 @@ class AsyncRolloutMixin:
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
             return False
         self._form_weight_sync_group()
-        with profiling_context(self, "weight_sync"):
+        with profiling_context(self, "weight_sync"), self._phase_timers.span("sync", "host"):
             sync_trainer_weights(self, self._weight_sync_client)
         self._last_pushed_step = self.state.global_step
         return True

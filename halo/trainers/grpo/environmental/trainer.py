@@ -40,7 +40,9 @@ from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryToken
 from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
+from halo.trainers.grpo.row_span_stash import RowSpanStashMixin
 from halo.trainers.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.world_metrics import WorldMetrics
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -80,11 +82,16 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     GenerationRoundMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
+    PhaseTimedMixin,
+    RowSpanStashMixin,
     DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
     """Its environment is given as ``environment_config`` or ``environment_cls`` + ``environment_kwargs``."""
+
+    # The batches are built text-only: the build assembles a fixed set of text tensors.
+    _SCORED_BATCHES_CARRY_IMAGES = False
 
     PP_REFUSAL = (
         "inherits online GRPO's cross-stage engine weight-sync and rollout-phase forward blockers, and "
@@ -100,6 +107,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def __init__(self, *args, **kwargs):
         self.async_config = kwargs.pop("async_config", None) or AsyncRolloutConfig()
         self._use_chunked_grpo_logprobs = self.async_config.use_chunked_grpo_logprobs
+        self._log_phase_times = self.async_config.log_phase_times
         _, kwargs = self._begin_on_policy_init(args, kwargs)
         self._environment_spec, self._env_config_dict = _resolve_environment_spec(
             kwargs.pop("environment_config", None),
@@ -144,6 +152,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         reject_unread_grpo_knobs(self.args)
         self._init_async_state()
         self._finish_on_policy_init()
+        self._configure_phase_timers()
+        self._resolve_row_span_stash()
         # After _configure_distributed_modes (needs the EP layers); eager, so an unsupported setup fails now.
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
         # After the model is placed: the deal reads its attention implementation.
@@ -204,7 +214,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     ) -> dict[str, torch.Tensor | Any]:
         """The TP/ETP leader's batch on every group rank: ranks sample apart, and compute_loss expects
         DTensor-consistent inputs."""
-        return self._broadcast_tensors_from_tp_leader(self._collect_and_score_rollouts(inputs))
+        return self._with_row_spans(self._broadcast_tensors_from_tp_leader(self._collect_and_score_rollouts(inputs)))
 
     def _collect_and_score_rollouts(
         self, inputs: list[dict[str, torch.Tensor | Any]]
@@ -218,7 +228,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Before the rollout: an unusable prompt would cost a full round and fail first inside a Ray actor.
         self._batch_errors.reject()
 
-        with profiling_context(self, "rollout_acquire"):
+        with profiling_context(self, "rollout_acquire"), self._phase_timers.span("rollout", "host"):
             rollout_results = None
             if self._prefetch_enabled and mode == "train":
                 rollout_results = self._acquire_prefetched_round()
@@ -243,7 +253,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Counted once: the reasoning terms price these and the rollout metrics slice them.
         reasoning_tokens = [reasoning_token_counts(self._tokenizer, r.trajectory) for r in rollout_results]
 
-        with profiling_context(self, "build_training_tensors"):
+        with profiling_context(self, "build_training_tensors"), self._phase_timers.span("build", "host"):
             result = self._build_training_tensors(
                 rollout_results, device, mode, len(inputs) - episodes, reasoning_tokens
             )

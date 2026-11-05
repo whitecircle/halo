@@ -72,6 +72,15 @@ Only the row order changes. Each row is forwarded on its own, so its log-probs, 
 
 On a six-GPU async GRPO test row (1.2.0) the deal takes the update phase from 480.5 to 328.3 s (1.46×), the no-grad pass from 170.7 to 114.0 s (1.50×) and peak memory from 210.25 to 183.35 GiB, the recompute bitwise.
 
+## Host work per step
+
+The loss and no-grad loops run once per row at `per_device_train_batch_size: 1`, so a host read or collective inside them recurs 32 or more times per optimizer step, each draining the launch queue the next op was queued behind. A sync only costs the overlap between the host launching ahead and the device still running, so the gain is bounded by the smaller of the loop's launch time and its device time; on EP lanes DeepEP's own host reads inside each layer already drain the stream. [`log_phase_times`](monitoring.md#phase-times) shows where a step goes.
+
+- **Row spans.** The dense path trims each row to its attended span, which takes one device-to-host copy of the mask. The no-grad pass reads the spans of its whole batch once, not once per row chunk. The round's build also reads them once and attaches them as `row_spans`, a host table riding TRL's shuffle, split and the length-ordered deal with the other row-aligned keys, so no loss forward copies a mask. Every loss forward recomputes its micro-batch's spans on the device and tallies disagreements without a host read; the window's last micro-step reads the tally and raises on every rank if any row read spans built from another mask, naming the stage to rebuild after (`_with_row_spans`). Under TP and ETP each micro-batch is re-broadcast from the group leader, so the table is not attached and each forward reads its own spans (logged once at startup).
+- **Image consensus.** A composite's scoring forwards agree across ranks whether any batch carries images, since mixed full and chunked paths would deadlock FSDP2. The environmental trainer's batches are text-only, so its scoring skips that all-reduce and host read; online GRPO and SDPG keep one per scoring forward.
+
+TRL's loss forward reduces six metrics across the ranks per micro-step (entropy, three clip ratios and two clip extremes), each ending in a host read; Halo leaves that block as TRL has it.
+
 ## Sizing a run
 
 For a new model, environment or GPU, size in order:

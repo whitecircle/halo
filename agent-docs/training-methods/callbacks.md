@@ -14,6 +14,7 @@ Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/e
 | `MoEMetricsCallback` | `moe/*` per-expert load | `enable_moe_metrics: true` (default) |
 | `BalancingBiasCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
+| `PhaseTimerCallback` | The `reduce` and `optimizer` phases and the step boundary of the on-policy GRPO [phase times](async-grpo/monitoring.md#phase-times) | `log_phase_times: true`, registered by the trainer |
 | `GradientCheckpointingPlanCallback` | Relaxes gradient checkpointing to what the memory budget needs | `gradient_checkpointing_plan: auto` |
 | `VariableSchedulerCallback` | Schedules a model attribute | Added by SMPO (`use_margin_schedule`) and offline GRPO (`initial_min_log_prob`) |
 | `MtpAcceptanceGate` | Fails a head fit whose held-out acceptance fell | `mtp_train_scope: head_only` ([MTP heads](../optimization/mtp-heads.md#acceptance)) |

@@ -1350,6 +1350,7 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    "trainers/grpo/test_row_spans_sync_free.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "trainers/grpo/test_sglang_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
     ),
@@ -1412,6 +1413,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",
                     "--ep-size 2 --routing-replay rollout --chunked",
                     "--ep-size 2 --routing-replay rollout --chunked --length-ordered false",
+                    "--ep-size 2 --chunked --phase-times",
+                    "--tp-size 2 --chunked --phase-times",
                     "--ep-size 1 --zero3",
                     "--ep-size 1 --zero3 --routing-replay rollout --chunked",
                     "--ep-size 1 --unsharded-ep1-experts",

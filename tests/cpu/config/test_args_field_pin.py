@@ -109,6 +109,7 @@ _EXPECTED = {
         "early_stop_entropy_band": "None",
         "early_stop_logratio_gap": "None",
         "early_stop_patience": "3",
+        "log_phase_times": "False",
         "max_prompt_length": "None",
         "opd_positive_advantage_only": "True",
         "prompt_field": "'prompt'",

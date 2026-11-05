@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from halo.callbacks import efficiency
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.callbacks.model_flops import RankFlopsModel
+from halo.diagnostics import phase_timers
 from halo.models.attention.layout import AttentionLayout, LayerAttention
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from halo.trainers.token_metrics import TokenMetricsMixin
@@ -72,7 +72,7 @@ def _callback(parallelism=_NO_PARALLELISM, layout=LAYOUT, attention_share=1.0):
 
 def _step_tflops(monkeypatch, callback, tokens: int) -> tuple[float, float]:
     clock = iter((0.0, STEP_SECONDS))
-    monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+    monkeypatch.setattr(phase_timers, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
     callback.on_step_begin(None, SimpleNamespace(global_step=0, num_input_tokens_seen=0), None)
     callback.on_step_end(None, SimpleNamespace(global_step=1, num_input_tokens_seen=tokens), None)
     callback.on_log(None, SimpleNamespace(global_step=1), None, logs={})

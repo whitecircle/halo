@@ -72,6 +72,26 @@ Each episode's resolved effort level slices the metrics as `effort/<level>/*`, a
 
 `profiling/Time taken: <Trainer>.<name>` (main process) includes `rollout_acquire` (the generation wait, near zero on a prefetch hit), `build_training_tensors` and `weight_sync`.
 
+### Phase times
+
+`log_phase_times: true` on the online and environmental trainers logs where each optimizer step's wall time goes, as `phase_time/<phase>_s` (the mean over the ranks) and `phase_time/<phase>_max_s` (the slowest rank), seconds per step averaged since the last log. Each phase is its own time, less the phases nested in it, so the keys add up to the step's wall time. The slowest-rank key shows skew the mean hides: an EP rank waiting on a hot peer, or one rank's slow rollout.
+
+| Phase | Time between |
+|---|---|
+| `rollout` | the generation wait: the environmental trainer's round acquisition (near zero on a prefetch hit), online GRPO's engine generation |
+| `sync` | the engine weight push |
+| `build` | the rest of building a round's training tensors, the recompute forwards aside on the environmental trainer |
+| `no_grad`, `no_grad_ref` | the policy's and the KL reference's no-grad forwards (environmental trainer; online GRPO's sit in `build`) |
+| `loss_forward` | `_compute_loss`, summed over micro-steps |
+| `post_backward_finish` | completing FSDP2's post-backward after each micro-step |
+| `micro_step` | the rest of each `training_step`: mostly the backward |
+| `reduce` | the last micro-step's end to the optimizer: the clip, the norm all-reduce, the deferred EP and TP gradient sweeps |
+| `optimizer` | the optimizer step |
+| `log_emit` | the `log` call, completions record included |
+| `unaccounted` | the step's wall time no phase holds (an untimed phase, an eval round, a checkpoint save); negative where spans overlap that should nest |
+
+Phases run on CUDA events recorded on the current stream, so timing does not drain the queue; the report costs one all-reduce per log.
+
 ## Reading the metrics
 
 - **`reward_std` is not the learning signal.** Between-problem difficulty dominates it. The advantage uses `reward/within_group_std` (the mean per-group std): near zero means degenerate groups and no gradient ([Advantages](objective.md#advantages)).

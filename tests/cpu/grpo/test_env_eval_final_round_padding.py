@@ -18,6 +18,7 @@ from halo.environments.episode_keys import SOLVE_RATE_KEY
 from halo.environments.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.env_grpo_batch import batch_host, row
 
 
@@ -97,6 +98,7 @@ class _EvalRound:
     """The real round entry; records the rows rolled out and what the batch build and rollout metrics were handed."""
 
     _collect_and_score_rollouts = _Trainer._collect_and_score_rollouts
+    _phase_timers = PhaseTimedMixin._phase_timers
     _tool_call_watch = None
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _Trainer._extract_prompts_and_contexts

@@ -23,6 +23,7 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.repo import load_script_module
 
 
@@ -40,6 +41,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
     two-server run at ``depth``."""
 
     _collect_and_score_rollouts = _T._collect_and_score_rollouts
+    _phase_timers = PhaseTimedMixin._phase_timers
     _tool_call_watch = None
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts

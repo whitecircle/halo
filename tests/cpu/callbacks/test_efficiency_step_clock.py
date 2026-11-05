@@ -9,6 +9,7 @@ import torch
 
 from halo.callbacks import efficiency
 from halo.callbacks.efficiency import EfficiencyCallback
+from halo.diagnostics import phase_timers
 from tests.common.parallelism import make_parallelism_config
 
 STEP_TOKENS = 1000
@@ -82,7 +83,7 @@ class _StepWorkSource:
 @pytest.fixture
 def device(monkeypatch) -> _Device:
     scripted = _Device()
-    monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=scripted.perf_counter))
+    monkeypatch.setattr(phase_timers, "time", SimpleNamespace(perf_counter=scripted.perf_counter))
     monkeypatch.setattr(efficiency, "read_cuda_memory", lambda: None)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "synchronize", scripted.synchronize)

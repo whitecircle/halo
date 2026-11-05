@@ -264,6 +264,7 @@ def main():
         balance_token_mass=args.balance_token_mass,
         early_stop=args.build_early_stop_config(),
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
+        log_phase_times=args.log_phase_times,
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )

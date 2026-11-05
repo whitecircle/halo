@@ -568,7 +568,9 @@ The `halo/trainers/grpo/` package keeps the online trainer (`online.py`), the `o
 packages, and these shared leaves at the top level: `on_policy.py`, the constructor spine
 (`OnPolicyGRPOInitMixin`) and generation-round geometry (`GenerationRoundMixin`) both on-policy trainers
 compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
-constructor; `early_stop.py`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
+constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase spans and their report at each log) and
+`row_span_stash.py` (`RowSpanStashMixin`, the round's row spans), both composed by the on-policy trainers ahead of
+`DistributedTrainerMixin`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
 `halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
