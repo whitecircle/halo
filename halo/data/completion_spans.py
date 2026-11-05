@@ -2,7 +2,7 @@
 refusal of a setup that would train nothing."""
 
 import warnings
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import torch
@@ -316,18 +316,18 @@ def build_training_labels(
 
 def reject_untrainable_completions(
     render: Callable[[list[dict[str, Any]]], Any],
-    probe_conversation: list[dict[str, Any]],
+    probe_conversations: Sequence[list[dict[str, Any]]],
     tokenizer,
     response_prompt_template: str,
     eos_token_ids: frozenset[int],
     span_policy: dict[str, bool],
     subject: str,
 ) -> None:
-    """Refuse completion-only labels that would train no token of ``probe_conversation``: a marker the template never
+    """Refuse completion-only labels that would train no token of any of ``probe_conversations``: a marker the template never
     emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another family until
     ``eos_token`` names its closing token."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
-    for text in verify_marker_renders(render, (probe_conversation,), response_prompt_template):
+    for text in verify_marker_renders(render, probe_conversations, response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         starts, ends = resolve_completion_spans(input_ids, response_token_ids, eos_token_ids, **span_policy)
         if starts and all(end == -1 for end in ends):

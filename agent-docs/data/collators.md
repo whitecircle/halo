@@ -64,10 +64,14 @@ Whether the packed documents actually stay isolated is **per family**, not unive
 
 Where the attention path is isolated, the remaining difference between backends is cost. The non-varlen path builds a dense `[L, L]` mask over the *flattened* row, so `L` is the whole batch's token count (up to `per_device_train_batch_size × max_length`) and the mask exhausts memory at long context. `select_data_collator` **warns** there, telling you to keep `per_device_train_batch_size` at 1.
 
-It detects packed data via the `seq_lengths` field that TRL's `pack_dataset()` emits for the `bfd` and
-`bfd_split` strategies. The `wrapped` strategy emits no `seq_lengths` column at all, so each row
-collates as **one** document and anything concatenated inside it attends across itself; the collator
-warns once per instance when it sees such rows.
+It detects packed data via the `seq_lengths` field: TRL's `pack_dataset()` emits it for `bfd` and `bfd_split`, and
+`coordinated_pack` adds it to `wrapped` rows, one entry per piece of a source document, cut at document ends and at the
+row edge and summing to the row length. A document cut by the row edge is two pieces in two rows, each isolated from
+its row's other documents. The first token of a piece has no earlier token in its row to be predicted from, so its
+label is masked like any document's first token, a continuation's included; under completion-only masking a
+continuation piece holds no assistant marker and trains nothing. Rows without `seq_lengths` (a corpus baked by an
+earlier release) collate as **one** document, so concatenated documents attend across each other; the collator warns
+once per instance when it sees such rows.
 
 Online packing (`packing: true` at training time) and the offline `prepare_dataset.py` pipeline both
 accept all three strategies (see [Pre-Processing](dataset-preparation.md#parameters)).
@@ -278,12 +282,14 @@ A family outside the table above and the family specs gets a warning on every ba
     zero tokens at loss ≈ 0. The text probe renders both a plain and a `thinking` assistant turn, so a
     marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
 
-    The VLM collators also refuse assistant turns that end in no turn terminator
-    (`reject_untrainable_completions`): they render two exchanges through the processor's template
-    and mask them under their own span policy, so a template borrowed from another family (a Gemma
-    template on PaliGemma, whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused
-    until `eos_token` names the token it closes a turn with. The self-distillation policy runs a
-    terminator-less span to the row end, so it passes there.
+    `select_data_collator` and the VLM collators also refuse assistant turns that end in no turn
+    terminator (`reject_untrainable_completions`): they render two exchanges through the chat template
+    and mask them under the route's span policy (packed and padding-free rows run the packed policy, the
+    rest the padded one), so a template borrowed from another family (a Gemma template on PaliGemma,
+    whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused until `eos_token` names
+    the token it closes a turn with. A template that ends a turn at the next role marker (GLM's) passes
+    through the model config's terminator set. The self-distillation policy runs a terminator-less span
+    to the row end, so it passes there.
 
 ## EOS, pad, and the response template
 

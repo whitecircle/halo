@@ -218,7 +218,7 @@ These configs come from [TRL](https://huggingface.co/docs/trl) and are used dire
 |-----------|------|---------|-------------|
 | `max_length` | `int \| None` | `1024` | Total sequence budget. Over-length conversations are dropped by the chat processor; under `packing` it is the fixed pack size and must be explicit. `null` → model context window. |
 | `packing` | `bool` | `False` | Pack multiple sequences into one example. |
-| `packing_strategy` | `str` | `"bfd"` | `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk, which emits no document boundaries). |
+| `packing_strategy` | `str` | `"bfd"` | `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk, cutting a document at the row edge). |
 | `eval_packing` | `bool \| None` | `None` | Packing for eval. Defaults to `packing`; it can only turn packing off for the eval split (`true` without `packing` raises), and a pre-processed dataset refuses it. |
 | `padding_free` | `bool` | `False` | Flatten the batch into one varlen sequence instead of padding it. Needs a varlen Flash kernel (FA2/FA3/FA4) and **raises** on any other resolved `attn_implementation` — the `cu_seqlens` it exists to emit go unread there. See [Padding-Free](../optimization/padding-free-collator.md). |
 | `dataset_text_field` | `str` | `"text"` | TRL's pre-formatted text column. Halo SFT renders `conversation_field` through the chat template and never reads it, so a non-default value raises. |

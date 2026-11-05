@@ -128,9 +128,8 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             warnings.warn(
                 "DataCollatorWithPacking received rows without `seq_lengths`: each row collates as "
                 "ONE document, so any concatenated documents inside it attend across each other. "
-                "This is what `packing_strategy: wrapped` produces (pack_dataset emits no "
-                "boundaries there); use `bfd`/`bfd_split` for document isolation, or ignore this "
-                "if cross-document attention is intended.",
+                "Pack with `bfd`, `bfd_split` or `wrapped`, which all emit the document lengths, "
+                "or ignore this if cross-document attention is intended.",
                 stacklevel=2,
             )
 

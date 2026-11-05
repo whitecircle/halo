@@ -13,6 +13,20 @@ from halo.runtime.ranks import is_global_main_process
 logger = logging.getLogger(__name__)
 
 
+def _probe_conversation(**assistant_fields: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", **assistant_fields},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", **assistant_fields},
+    ]
+
+
+# Two exchanges, so a template ending a turn at the next role marker (GLM) closes one; the second variant carries
+# ``thinking``, the only message gpt-oss harmony emits its marker for.
+TEXT_PROBE_CONVERSATIONS = (_probe_conversation(), _probe_conversation(thinking="t"))
+
+
 def reject_missing_response_marker(
     response_prompt_template: str | list[int] | None,
     train_on_completions_only: bool,
@@ -52,13 +66,9 @@ def verify_marker_renders_in_chat_template(
 ) -> None:
     """An absent marker would mask every label. Probes with and without ``thinking`` (gpt-oss harmony emits the marker
     only for a thinking message)."""
-    probe_conversations = (
-        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
-        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "thinking": "t"}],
-    )
     verify_marker_renders(
         lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
-        probe_conversations,
+        TEXT_PROBE_CONVERSATIONS,
         assistant_message_template,
     )
 
