@@ -280,6 +280,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         return server.session
 
     def _build_mcp_tool(self, mcp_tool: Any) -> NativeTool:
+        """Build the engine's declaration from the server's tool. ``parameters`` carries the names admission
+        checks; ``input_schema`` is the server's schema minus the ``$schema`` draft URL."""
         name = mcp_tool.name
         parameters = []
         schema = mcp_tool.inputSchema
