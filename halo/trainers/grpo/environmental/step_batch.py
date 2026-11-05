@@ -17,6 +17,7 @@ from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
+from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages, valid_group_stats
 from halo.trainers.grpo.objective.logratio import (
     KL_CLAMP_FRAC_KEY,
@@ -160,9 +161,11 @@ class StepBatchMixin:
         )
         step = self._stack_rows(rows, device)
         rollout_routing_masks = self._assemble_rollout_routing(rows, step, device, mode)
+        # Config- and mode-gated, so every rank agrees the bin count or none does.
+        plan = self._plan_packed_round(step, num_dummy_rows) if self._packs_microbatches and mode == "train" else None
 
         with torch.no_grad():
-            scores = self._score_step(step, batch_rows, rollout_routing_masks, engine_logps, mode)
+            scores = self._score_step(step, batch_rows, rollout_routing_masks, engine_logps, mode, plan)
 
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
         episode_state, traj_advantages, local_advantages = self._step_advantages(
@@ -209,7 +212,7 @@ class StepBatchMixin:
         if scores.routing_masks is not None:
             # Rides the batch dict like old_per_token_logps so TRL's shuffle/slice keep it row-aligned.
             result[ROUTING_MASKS_KEY] = scores.routing_masks
-        return result
+        return result if plan is None else self._lay_out_packed_round(result, plan)
 
     def _rows_for_step(
         self, rollout_results: list[RolloutResult], num_padding: int, device: torch.device
@@ -287,10 +290,16 @@ class StepBatchMixin:
         rollout_routing_masks: torch.Tensor | None,
         engine_logps: list[torch.Tensor | None] | None,
         mode: str,
+        plan: MicrobatchPlan | None,
     ) -> StepScores:
         """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
-        the policy's. Both forwards run in the deal's order; scores come back in batch order."""
-        order = self._no_grad_row_order(step.attention_mask, mode)
+        the policy's. Both forwards run in the deal's order, or one scoring call per bin of a packed round; scores
+        come back in batch order."""
+        order = (
+            self._no_grad_row_order(step.attention_mask, mode)
+            if plan is None
+            else torch.tensor(plan.order, dtype=torch.long, device=step.attention_mask.device)
+        )
         with self._phase_timers.span("no_grad"):
             recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
                 step.prompt_completion_ids,
@@ -299,6 +308,7 @@ class StepBatchMixin:
                 rollout_routing_masks,
                 mode,
                 order,
+                plan,
             )
         ratio, logps_diff, corrected_mask, traj_row_ids = self._apply_is_correction(
             recompute_logps, step, rows, engine_logps
@@ -307,7 +317,7 @@ class StepBatchMixin:
             ratio = self._zero_forced_closes(ratio, step)
         with self._phase_timers.span("no_grad_ref"):
             ref_logps = self._compute_ref_logps(
-                step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order
+                step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order, plan
             )
         kl_clamped = None
         if ref_logps is not None and recompute_logps is not None:
@@ -334,6 +344,7 @@ class StepBatchMixin:
         rollout_routing_masks: torch.Tensor | None,
         mode: str,
         order: torch.Tensor | None = None,
+        plan: MicrobatchPlan | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Both in batch order. The gate is config-derived, so the forward and its EP dispatch are entered by every
         rank or by none."""
@@ -354,7 +365,7 @@ class StepBatchMixin:
                 captured = (
                     capture_stack.enter_context(
                         self._routing_injector.capture(
-                            ids.size(0), ids.size(1), row_spans=replay_spans, row_order=order
+                            attention_mask.size(0), ids.size(1), row_spans=replay_spans, row_order=order
                         )
                     )
                     if self._routing_injector is not None and mode == "train" and not self._rollout_routing_replay
@@ -365,7 +376,7 @@ class StepBatchMixin:
                     # the ratio comes from a different token distribution than the policy trains on.
                     self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans, row_order=order)
                 try:
-                    recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order)
+                    recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order, plan)
                 finally:
                     if rollout_routing_masks is not None:
                         self._routing_injector.disarm()
@@ -379,13 +390,14 @@ class StepBatchMixin:
         attention_mask: torch.Tensor,
         logits_to_keep: int,
         order: torch.Tensor | None = None,
+        plan: MicrobatchPlan | None = None,
     ) -> torch.Tensor | None:
         if self.beta == 0.0:
             return None
         if order is not None:
             prompt_completion_ids, attention_mask = prompt_completion_ids[order], attention_mask[order]
         with self._reference_policy() as model:
-            return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order)
+            return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order, plan)
 
     def _scored_rows(
         self,
@@ -394,12 +406,35 @@ class StepBatchMixin:
         attention_mask: torch.Tensor,
         logits_to_keep: int,
         order: torch.Tensor | None,
+        plan: MicrobatchPlan | None = None,
     ) -> torch.Tensor:
-        """``model``'s per-token log-probs of rows already taken in ``order``, put back in batch order."""
-        logps, _, _ = self._get_per_token_logps_and_entropies(
-            model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
+        """``model``'s per-token log-probs of rows already taken in ``order``, put back in batch order. Under a ``plan``
+        one scoring call per bin runs, an empty bin an inert row, and the rows no bin holds score 0."""
+        if plan is None:
+            logps, _, _ = self._get_per_token_logps_and_entropies(
+                model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
+            )
+            return logps if order is None else logps[torch.argsort(order)]
+        scored, start = [], 0
+        for size in plan.bin_sizes:
+            if size == 0:
+                self._score_inert_row(model, logits_to_keep, input_ids.device)
+                continue
+            bin_rows = slice(start, start + size)
+            start += size
+            logps, _, _ = self._get_per_token_logps_and_entropies(
+                model, input_ids[bin_rows], attention_mask[bin_rows], logits_to_keep, compute_entropy=False
+            )
+            scored.append(logps)
+        in_batch_order = torch.zeros(
+            plan.round_rows,
+            logits_to_keep,
+            dtype=scored[0].dtype if scored else torch.float32,
+            device=input_ids.device,
         )
-        return logps if order is None else logps[torch.argsort(order)]
+        if scored:
+            in_batch_order[order] = torch.cat(scored)
+        return in_batch_order
 
     def _step_advantages(
         self, rewards: torch.Tensor, rows: TrajectoryRowMap, num_padding: int, num_generations: int

@@ -230,6 +230,19 @@ class RoutingReplayInjector:
             )
         result.append(torch.stack(per_layer, dim=2))  # [rows, seq, layers, top_k] int16
 
+    @contextlib.contextmanager
+    def paused(self):
+        """Neither capture nor replay for the block's forwards, which route naturally and leave the cursor where it
+        was: a rank with no row in a bin still forwards an inert one, to keep every rank's dispatch count equal."""
+        saved = [(layer._capture_routing, layer._forced_topk_indices) for layer in self._layers]
+        for layer in self._layers:
+            layer._capture_routing, layer._forced_topk_indices = False, None
+        try:
+            yield
+        finally:
+            for layer, (capturing, forced) in zip(self._layers, saved, strict=True):
+                layer._capture_routing, layer._forced_topk_indices = capturing, forced
+
     def arm(
         self,
         masks: torch.Tensor,
@@ -245,10 +258,11 @@ class RoutingReplayInjector:
                 f"routing mask shape {tuple(masks.shape)} does not match "
                 f"[rows, seq, {len(self._layers)} EP layers, top_k]"
             )
-        if row_spans is not None and len(row_spans) != masks.size(0):
-            raise RuntimeError(f"row_spans has {len(row_spans)} entries for {masks.size(0)} mask rows")
-        if row_order is not None and row_order.numel() != masks.size(0):
-            raise RuntimeError(f"row_order has {row_order.numel()} entries for {masks.size(0)} mask rows")
+        forwarded = masks.size(0) if row_order is None else row_order.numel()
+        if row_spans is not None and len(row_spans) != forwarded:
+            raise RuntimeError(f"row_spans has {len(row_spans)} entries for {forwarded} forwarded rows")
+        if forwarded > masks.size(0):
+            raise RuntimeError(f"row_order has {forwarded} entries for {masks.size(0)} mask rows")
         sources = list(range(masks.size(0))) if row_order is None else row_order.tolist()
         for i, layer in enumerate(self._layers):
             layer_masks = masks[:, :, i, :]

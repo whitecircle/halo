@@ -10,7 +10,6 @@ import types
 import pytest
 import torch
 import trl.trainer.grpo_trainer as trl_grpo_trainer
-from transformers import LlamaConfig, LlamaForCausalLM
 from trl import GRPOTrainer
 from trl.trainer.utils import shuffle_sequence_dict
 
@@ -32,6 +31,7 @@ from tests.common.length_deal import (
     scoring_host,
     single_process_accelerator,
     stacked,
+    tiny_llama,
     train_round,
 )
 from tests.common.routing import BareEPLayer
@@ -187,7 +187,8 @@ def test_a_trl_refill_that_no_longer_calls_its_shuffle_is_refused(monkeypatch):
 
 def test_the_trainer_deals_ahead_of_the_tp_resync_and_resolves_the_knob_at_construction():
     mro = DistributedAsyncEnvironmentalGRPOTrainer.__mro__
-    assert DistributedAsyncEnvironmentalGRPOTrainer._prepare_inputs is LengthOrderedRowsMixin._prepare_inputs
+    owners = [c for c in mro if "_prepare_inputs" in vars(c)]
+    assert owners.index(LengthOrderedRowsMixin) < owners.index(GenerationRoundMixin)
     assert mro.index(LengthOrderedRowsMixin) < mro.index(GenerationRoundMixin)
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__)))
     called = {n.func.attr for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
@@ -363,23 +364,10 @@ def test_the_step_batch_routes_every_dealt_row_as_its_batch_order_run(mode):
         assert torch.equal(dealt_replayed[key], value), f"row/layer {key[1]} replayed another row's routing"
 
 
-def _tiny_llama(seed: int) -> LlamaForCausalLM:
-    config = LlamaConfig(
-        vocab_size=_VOCAB,
-        hidden_size=32,
-        intermediate_size=64,
-        num_hidden_layers=2,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        max_position_embeddings=64,
-    )
-    config._attn_implementation = "sdpa"
-    torch.manual_seed(seed)
-    return LlamaForCausalLM(config)
-
-
 def test_the_dealt_recompute_and_reference_forwards_are_bitwise_the_batch_orders():
-    host = scoring_host(_tiny_llama(0), _tiny_llama(1).eval(), chunks=4, accelerator=single_process_accelerator())
+    host = scoring_host(
+        tiny_llama(_VOCAB, 0), tiny_llama(_VOCAB, 1).eval(), chunks=4, accelerator=single_process_accelerator()
+    )
     host.beta = 0.04
     ids, mask, keep = stacked(_round(12, seed=5))
     order = host._no_grad_row_order(mask, "train")
@@ -412,7 +400,7 @@ def test_the_batch_build_reads_bitwise_the_same_ratio_masks_and_advantages_dealt
     for deal in (False, True):
         host = batch_host(rows, torch.zeros(1), training=True, is_correction=True)
         host._get_per_token_logps_and_entropies = rowwise_scores
-        host._compute_ref_logps = lambda ids, mask, keep, order: reference_orders.append(order)
+        host._compute_ref_logps = lambda ids, mask, keep, order, plan=None: reference_orders.append(order)
         host._orders_rows_by_length = deal
         results[deal] = build(host, episodes)
     built, dealt = forwarded
@@ -434,7 +422,9 @@ def _loss_runs(loss_type: str) -> dict[bool, tuple[float, dict, list[torch.Tenso
     batch = _round(rows, seed=9)
     runs = {}
     for deal in (False, True):
-        host = loss_host(_tiny_llama(0), chunks=chunks, accelerator=single_process_accelerator(), loss_type=loss_type)
+        host = loss_host(
+            tiny_llama(_VOCAB, 0), chunks=chunks, accelerator=single_process_accelerator(), loss_type=loss_type
+        )
         total, row_logps = train_round(host, batch, deal=deal)
         runs[deal] = total, row_logps, [p.grad.clone() for p in host.model.parameters()]
     assert runs[False][1].keys() == runs[True][1].keys() == set(range(rows))

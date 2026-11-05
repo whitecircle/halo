@@ -7,11 +7,29 @@ from collections import defaultdict
 
 import torch
 import torch.distributed as dist
+from transformers import LlamaConfig, LlamaForCausalLM
 from trl import GRPOTrainer
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 
 MAX_COMPLETION_LENGTH = 64
+
+
+def tiny_llama(vocab: int, seed: int) -> LlamaForCausalLM:
+    """A seeded two-layer SDPA Llama, small enough to forward on the host."""
+    config = LlamaConfig(
+        vocab_size=vocab,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    config._attn_implementation = "sdpa"
+    torch.manual_seed(seed)
+    return LlamaForCausalLM(config)
 
 
 def single_process_accelerator() -> types.SimpleNamespace:
@@ -23,6 +41,7 @@ def single_process_accelerator() -> types.SimpleNamespace:
         num_processes=1,
         sync_gradients=True,
         is_main_process=False,
+        device=torch.device("cpu"),
     )
 
 
@@ -157,6 +176,41 @@ def train_round(host, batch: dict, *, deal: bool, seed: int = 7) -> tuple[float,
     finally:
         del host._get_per_token_logps_and_entropies
     return total, row_logps
+
+
+def packed_host(model, *, slots: int, iterations: int = 1, loss_type: str = "dapo", accelerator):
+    """:func:`loss_host` as the packed trainer sees a window: ``slots`` micro-steps of one generation cycle,
+    ``iterations`` cycles to the optimizer step, the round held in the store."""
+    host = loss_host(model, chunks=slots, accelerator=accelerator, loss_type=loss_type)
+    host.num_iterations = iterations
+    host.current_gradient_accumulation_steps = host.args.gradient_accumulation_steps = slots * iterations
+    host._packs_microbatches = True
+    host._round_store = None
+    host._orders_rows_by_length = False
+    host.pad_token_id = 0
+    host.use_liger_kernel = False
+    host._get_tp_or_etp_process_group = lambda: None
+    return host
+
+
+def train_window(host, batch: dict, plan: MicrobatchPlan | None = None) -> tuple[float, list[torch.Tensor]]:
+    """One optimizer step's micro-steps through the trainer's own ``compute_loss`` and TRL's buffer: a round one row per
+    chunk, or under ``plan`` its packed slots. ``(summed loss, parameter gradients)``."""
+    host._step, host._buffered_inputs = 0, None
+    if plan is None:
+        host._generate_and_score_completions = lambda _inputs: dict(batch)
+    else:
+        host._generate_and_score_completions = lambda _inputs: host._lay_out_packed_round(dict(batch), plan)
+    for param in host.model.parameters():
+        param.grad = None
+    total = 0.0
+    for _ in range(host.args.gradient_accumulation_steps):
+        inputs = host._prepare_inputs({})
+        host._step += 1
+        loss = DistributedAsyncEnvironmentalGRPOTrainer.compute_loss(host, host.model, inputs)
+        loss.backward()
+        total += loss.item()
+    return total, [p.grad.clone() for p in host.model.parameters()]
 
 
 def with_world_normalizer(batch: dict) -> dict:

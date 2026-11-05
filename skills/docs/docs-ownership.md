@@ -64,6 +64,7 @@ changes.
 | `halo/trainers/grpo/rollout/trl_vllm_client.py` | `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/trainer-architecture.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/rollout/engine_preflight.py` | `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/training-methods/grpo/online.md` |
 | `halo/trainers/grpo/environmental/async_rollouts.py` | `agent-docs/training-methods/async-grpo/setup.md` |
+| `halo/trainers/grpo/{microbatch_plan}.py`, `halo/trainers/grpo/environmental/{packed_rounds,row_order}.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/environmental/{trainer,environmental_rules}.py` | `agent-docs/training-methods/async-grpo/{setup,objective,reasoning}.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/grpo/environmental/{step_batch,importance_sampling}.py` | `agent-docs/training-methods/async-grpo/{objective,monitoring}.md` |
 | `halo/trainers/grpo/environmental/routing_replay.py` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |

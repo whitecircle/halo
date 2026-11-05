@@ -185,7 +185,7 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 
 A rollout with no learning signal (a raised episode, an `episode_timeout` cancellation, an invalid one) enters as a zero-masked row outside its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second consecutive one**.
 
-Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed. A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
+Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed into shared rows unless `packed_microbatch_tokens` is set ([Packed micro-batches](performance.md#packed-micro-batches)). A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
 
 `per_device_train_batch_size` counts rows (completions); unique prompts per step are the rollout total ÷ `num_generations` ([online-GRPO count](../grpo/online.md#data-flow-and-batch-construction)).
 

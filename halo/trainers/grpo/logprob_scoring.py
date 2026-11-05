@@ -140,6 +140,9 @@ class LogprobScoringMixin:
     """Hosts provide ``temperature``, ``accelerator``, ``args``, ``model``, ``ref_model`` and
     ``_use_chunked_grpo_logprobs``."""
 
+    # Set by a trainer whose train-mode rows reach the backbone as flattened micro-batches (a packed varlen call per
+    # call of the scorer) instead of one call per row.
+    _packs_microbatches = False
     # Armed by :meth:`_capturing_completion_logits`: where the scoring forward also leaves its logits.
     _completion_logits_sink: list[torch.Tensor] | None = None
     # Armed for one loss forward: the ``[rows, 3]`` host table of ``lo, hi, completion`` its masks were built with.

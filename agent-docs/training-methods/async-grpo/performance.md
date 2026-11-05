@@ -72,6 +72,15 @@ Only the row order changes. Each row is forwarded on its own, so its log-probs, 
 
 On a six-GPU async GRPO test row (1.2.0) the deal takes the update phase from 480.5 to 328.3 s (1.46×), the no-grad pass from 170.7 to 114.0 s (1.50×) and peak memory from 210.25 to 183.35 GiB, the recompute bitwise.
 
+## Packed micro-batches
+
+`packed_microbatch_tokens` replaces one micro-batch per row by token-budget bins. After the round's rewards, advantages and masks exist, each rank plans its real rows into bins of at most that many attended tokens (first-fit-decreasing; a row over the budget keeps its own bin; more bins than `steps_per_generation` are relaxed to that many balanced ones). The world agrees the largest bin count `K` and the widest bin, every rank re-partitions into exactly `K` bins, and the window's last `K` slots train one bin each. The leading `steps_per_generation - K` slots are no-ops that run no forward and no collective, so the window still ends on a real backward and FSDP2's window toggles, DDP's `no_sync` and the optimizer step see the window they see without the knob. The round's tensors stay as built in a round store; TRL's buffer carries only the slot index tensors, and each slot's `[rows_per_bin, width]` view is gathered from the store just before its loss (filler rows are inert: one attended prompt token, a masked completion, ratio 1).
+
+- **Objective.** Row-mean losses (`grpo`, `sapo`, `dr_grpo`, `luspo`) are rescaled by `rows_per_bin × steps_per_generation ÷ round_rows`, so a window sums to the per-row run's loss and gradient; `steps_per_generation`, not `gradient_accumulation_steps`, is the factor, as each of `num_iterations` cycles carries the objective once. `dapo` and `cispo` divide by a round-global token count and need none. `bnpo` divides each micro-batch by its own token count and is refused.
+- **No-grad passes.** The recompute and the KL reference run one scoring call per bin on every rank, an empty bin an inert row that routes naturally and is left out of routing capture and replay. Scores come back in batch order; rows no bin holds (the dummy rows that pad a round across ranks) score 0.
+- **Budget.** It is checked at construction against the DeepEP wire index and, on a group spanning NVLink domains, the proxy-GIN ceiling. A rank whose round tokens exceed `steps_per_generation` bins of that ceiling raises on every rank.
+- **Metrics.** TRL's per-micro-step metrics become means over bins, so their logged values shift without any gradient change.
+
 ## Host work per step
 
 The loss and no-grad loops run once per row at `per_device_train_batch_size: 1`, so a host read or collective inside them recurs 32 or more times per optimizer step, each draining the launch queue the next op was queued behind. A sync only costs the overlap between the host launching ahead and the device still running, so the gain is bounded by the smaller of the loop's launch time and its device time; on EP lanes DeepEP's own host reads inside each layer already drain the stream. [`log_phase_times`](monitoring.md#phase-times) shows where a step goes.

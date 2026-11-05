@@ -30,6 +30,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_vespo_loss,
 )
 from halo.trainers.grpo.environmental.importance_sampling import ImportanceSamplingMixin
+from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, reasoning_token_counts
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
@@ -72,6 +73,7 @@ def placeholder_reward_func(prompts, _completions, **_kwargs) -> list[float]:
 class DistributedAsyncEnvironmentalGRPOTrainer(
     OnPolicyGRPOInitMixin,
     StepBatchMixin,
+    PackedMicrobatchMixin,
     LengthOrderedRowsMixin,
     ImportanceSamplingMixin,
     ReasoningBudgetMixin,
@@ -158,6 +160,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
         # After the model is placed: the deal reads its attention implementation.
         self._resolve_length_ordered_rows()
+        self._configure_packed_microbatches()
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
@@ -303,12 +306,16 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """The routing mask stays armed through the backward, whose reentrant-GC recompute reads it;
-        :meth:`training_step` disarms."""
+        :meth:`training_step` disarms. A no-op slot of a packed window returns before arming, as the mask it would arm
+        has no forward to consume it."""
+        if self._is_noop_slot(model, inputs):
+            return self._noop_loss()
         if self._routing_injector is not None and model.training and isinstance(inputs, dict):
             self._arm_loss_forward_replay(inputs)
-        return super().compute_loss(
+        loss = super().compute_loss(
             model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
         )
+        return self._scale_packed_loss(loss, inputs)
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         mode = "eval" if not self.model.training else "train"

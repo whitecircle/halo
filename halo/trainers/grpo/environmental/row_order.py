@@ -4,7 +4,7 @@ changes, and only objectives that read no micro-batch composition are admitted."
 
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import torch
 import trl.trainer.grpo_trainer as trl_grpo_trainer
@@ -13,9 +13,13 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# TRL loss types whose round loss is the same however rows fall into equal-sized micro-batches: a row mean, a
-# fixed-width or a round-global normalizer. bnpo is not one, as it divides each micro-batch by its own token count.
-MICROBATCH_INVARIANT_LOSS_TYPES = ("grpo", "sapo", "dr_grpo", "dapo", "cispo", "luspo")
+# TRL loss types that average over a micro-batch's rows, whose per-slot value therefore scales with the row count.
+ROW_MEAN_LOSS_TYPES = ("grpo", "sapo", "dr_grpo", "luspo")
+# Those normalized by a round-global token count, which no micro-batch's composition enters.
+TOKEN_GLOBAL_LOSS_TYPES = ("dapo", "cispo")
+# The round loss is the same however rows fall into micro-batches. bnpo is not one, as it divides each micro-batch by
+# its own token count.
+MICROBATCH_INVARIANT_LOSS_TYPES = ROW_MEAN_LOSS_TYPES + TOKEN_GLOBAL_LOSS_TYPES
 
 
 def length_deal_order(lengths: torch.Tensor, chunks: int) -> torch.Tensor:
@@ -42,6 +46,23 @@ def permute_rows(batch: dict, order: torch.Tensor) -> dict:
         return [value[i] for i in order.tolist()]
 
     return {key: permute(value) for key, value in batch.items()}
+
+
+@contextlib.contextmanager
+def replacing_trl_shuffle(replacement: Callable[[dict], dict]) -> Iterator[list[bool]]:
+    """Swap TRL's ``shuffle_sequence_dict`` for ``replacement`` for the block; the yielded list records each call."""
+    called: list[bool] = []
+
+    def replaced(batch: dict) -> dict:
+        called.append(True)
+        return replacement(batch)
+
+    shuffle = trl_grpo_trainer.shuffle_sequence_dict
+    trl_grpo_trainer.shuffle_sequence_dict = replaced
+    try:
+        yield called
+    finally:
+        trl_grpo_trainer.shuffle_sequence_dict = shuffle
 
 
 class LengthOrderedRowsMixin:
@@ -100,22 +121,12 @@ class LengthOrderedRowsMixin:
             )
         return inputs
 
-    @contextlib.contextmanager
-    def _dealing_in_place_of_trl_shuffle(self) -> Iterator[list[bool]]:
-        """Swap TRL's ``shuffle_sequence_dict`` for the deal for the block; the yielded list records each deal."""
-        dealt: list[bool] = []
-
+    def _dealing_in_place_of_trl_shuffle(self) -> contextlib.AbstractContextManager[list[bool]]:
         def deal(batch: dict) -> dict:
-            dealt.append(True)
             lengths = torch.cat([batch["prompt_mask"], batch["completion_mask"]], dim=1).sum(dim=1)
             return permute_rows(batch, length_deal_order(lengths, self.args.steps_per_generation))
 
-        shuffle = trl_grpo_trainer.shuffle_sequence_dict
-        trl_grpo_trainer.shuffle_sequence_dict = deal
-        try:
-            yield dealt
-        finally:
-            trl_grpo_trainer.shuffle_sequence_dict = shuffle
+        return replacing_trl_shuffle(deal)
 
     def _no_grad_row_order(self, attention_mask: torch.Tensor, mode: str) -> torch.Tensor | None:
         """On the mask's device; ``None`` when the deal is off or in eval, where rows keep their batch order."""
