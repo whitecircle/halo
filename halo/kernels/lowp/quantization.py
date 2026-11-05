@@ -65,6 +65,12 @@ def _device_constant(values: tuple[float, ...], device: torch.device, dtype: tor
     return torch.tensor(values, device=device, dtype=dtype)
 
 
+@functools.cache
+def _fp8_triton_supported(device_index: int) -> bool:
+    """Triton lowers its fp8 type only on SM 8.9 and newer, so older GPUs keep the eager mxfp8 path."""
+    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+
+
 def _constant_tensor(values: tuple[float, ...], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
     """Eager calls reuse one copy per device and dtype, as a fresh table on every activation quantize is a blocking
     host-to-device copy; a compiled graph bakes the literal in instead of tracing the cache."""
@@ -257,6 +263,7 @@ class _FakeQuant(torch.autograd.Function):
             and t.is_contiguous()
             and axis in (-1, t.ndim - 1)
             and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
+            and _fp8_triton_supported(t.device.index)
         ):
             return fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE[fmt], E4M3_MAX, _AMAX_FLOOR)
         # Eager, as activation shapes vary and a compiled form would recompile constantly.

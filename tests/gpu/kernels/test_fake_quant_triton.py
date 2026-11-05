@@ -4,6 +4,7 @@
   powers of two, the 448 scale boundary, zeros, -0.0, subnormals, overflow, NaN, inf, e4m3 rounding
   midpoints, an fp32 one-ulp scale edge, and a near-subnormal scale,
 - ``fake_quant`` routes CUDA / contiguous / last-axis / mxfp8 through it and everything else to eager,
+  including GPUs older than SM 8.9,
 - the straight-through backward is unchanged.
 
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
@@ -49,6 +50,9 @@ def _cases():
 def _assert_bits_equal(out, ref, name):
     assert out.dtype == ref.dtype and out.shape == ref.shape, name
     torch.testing.assert_close(out, ref, rtol=0, atol=0, equal_nan=True, msg=name)
+    # assert_close treats -0.0 == 0.0, so compare sign bits outside NaN positions as well.
+    keep = ~torch.isnan(ref)
+    assert torch.equal(torch.signbit(out[keep]), torch.signbit(ref[keep])), f"{name}: sign bit differs"
 
 
 class _Spy:
@@ -100,6 +104,22 @@ def test_routing():
     print("  routing and fallbacks — OK")
 
 
+def test_pre_sm89_falls_back():
+    """A GPU below SM 8.9 cannot compile the fp8 kernel, so mxfp8 runs eager there."""
+    t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
+    orig = torch.cuda.get_device_capability
+    q._fp8_triton_supported.cache_clear()
+    torch.cuda.get_device_capability = lambda *_: (8, 0)
+    try:
+        with _Spy() as s:
+            _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), "sm80")
+            assert s.calls == 0, "SM 8.0 took the fp8 Triton path"
+    finally:
+        torch.cuda.get_device_capability = orig
+        q._fp8_triton_supported.cache_clear()
+    print("  pre-SM 8.9 eager fallback — OK")
+
+
 def test_ste_backward():
     """Straight-through: the gradient passes unchanged through the fast path."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16, requires_grad=True)
@@ -114,6 +134,7 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "bit_exact_against_eager", test_bit_exact_against_eager)
     record_check(checks, "routing", test_routing)
+    record_check(checks, "pre_sm89_falls_back", test_pre_sm89_falls_back)
     record_check(checks, "ste_backward", test_ste_backward)
     return {"checks": checks}
 
