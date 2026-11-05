@@ -11,10 +11,12 @@ import argparse
 import math
 import re
 import sys
+from pathlib import Path
 
 import requests
 import torch
 import torch.nn.functional as F
+from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -41,11 +43,18 @@ from tests.common.models import (
 )
 from tests.common.on_policy_e2e import PolicyLayout, load_policy
 from tests.common.rank_log import log
+from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.weight_sync import SGLANG_SERVER_URL, weight_transfer_port
 
 WORLD_SIZE = 2
-# Every serving family plus Qwen3.6, a second release of Qwen3.5's block. Step-3.7 serves the tiny checkpoint its own
-# suite writes (tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py --write-checkpoint).
+# The families served from a tiny checkpoint the row writes (``--write-checkpoint``) or the Step-3.7 suite does
+# (tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py), each named by the env var holding its directory.
+TINY_CHECKPOINT_KNOBS = {"glm5_next": "HALO_TEST_GLM5_NEXT_MODEL", "step3p7": "HALO_TEST_STEP3P7_MODEL"}
+# Where a written tiny checkpoint takes its tokenizer, chat template and image-processor files: the served architecture
+# builds its multimodal processor from the checkpoint.
+_TINY_CHECKPOINT_HUB = {"glm5_next": "zai-org/GLM-5.3-Flash"}
+_TINY_CHECKPOINT_HUB_FILES = ("tokenizer*", "special_tokens_map.json", "chat_template*", "*processor*.json")
+# Every serving family plus Qwen3.6, a second release of Qwen3.5's block.
 CHECKPOINTS: dict[str, str | None] = {
     "bailing_moe": BAILING_MOE_LING_MINI,
     "gemma4_text": GEMMA4_26B_A4B,
@@ -57,7 +66,7 @@ CHECKPOINTS: dict[str, str | None] = {
     "qwen3_5_moe_text": QWEN3_5_MOE_35B,
     "qwen3_6_moe_text": QWEN3_6_MOE_35B,
     "qwen3_moe": QWEN3_30B_A3B,
-    "step3p7": env_str("HALO_TEST_STEP3P7_MODEL"),
+    **{family: env_str(knob) for family, knob in TINY_CHECKPOINT_KNOBS.items()},
 }
 # That checkpoint's auto_map exists for the server's config parse; the trainer takes the native class, as its suite does.
 _TRAINER_LOAD_OVERRIDES = {"step3p7": {"trust_remote_code": False, "attn_implementation": "sdpa"}}
@@ -98,14 +107,37 @@ _CONFIDENT_LOGPROB = math.log(0.1)
 def parse_row(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--family", choices=sorted(CHECKPOINTS), required=True)
-    parser.add_argument("--backend", choices=rollout_backends(), required=True)
+    parser.add_argument("--backend", choices=rollout_backends())
     parser.add_argument("--ep-size", type=int, default=1)
     parser.add_argument("--tp-size", type=int, default=1)
     parser.add_argument("--reach", action="store_true", help="scale each forwarded name in turn, one push each")
     parser.add_argument(
         "--reach-leave-out", default=None, help="negative control: this name pattern's reach round must fail"
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--write-checkpoint", type=Path, help="write this family's tiny checkpoint to DIR and exit (needs the Hub)"
+    )
+    args = parser.parse_args(argv)
+    if args.backend is None and args.write_checkpoint is None:
+        parser.error("--backend is required unless --write-checkpoint is given")
+    return args
+
+
+def write_tiny_checkpoint_if_asked(row: argparse.Namespace) -> None:
+    """Rank 0 writes the row's seeded tiny checkpoint under the release's tokenizer and processor files, then exits."""
+    if row.write_checkpoint is None:
+        return
+    if row.family not in _TINY_CHECKPOINT_HUB:
+        sys.exit(f"--write-checkpoint covers {sorted(_TINY_CHECKPOINT_HUB)}, not {row.family}")
+    snapshot_download(
+        _TINY_CHECKPOINT_HUB[row.family],
+        allow_patterns=list(_TINY_CHECKPOINT_HUB_FILES),
+        local_dir=row.write_checkpoint,
+    )
+    tokenizer = AutoTokenizer.from_pretrained(row.write_checkpoint)
+    build_tiny_family_checkpoint(TINY_MOE_FAMILIES[row.family], str(row.write_checkpoint), tokenizer)
+    log(f"wrote {row.family}'s tiny checkpoint to {row.write_checkpoint}")
+    sys.exit(0)
 
 
 def _server_url(backend: str) -> str:
@@ -128,7 +160,7 @@ def skip_unless_a_fresh_server_holds_the_row(row: argparse.Namespace) -> None:
         sys.exit(0)
     checkpoint = _row_checkpoint(row.family)
     if checkpoint is None:
-        log(f"SKIP: --family {row.family} has no default checkpoint (set HALO_TEST_STEP3P7_MODEL)")
+        log(f"SKIP: --family {row.family} has no default checkpoint (set {TINY_CHECKPOINT_KNOBS[row.family]})")
         sys.exit(0)
     url = _server_url(row.backend)
     served = requests.get(f"{url}/v1/models", timeout=60).json()["data"][0]["id"]

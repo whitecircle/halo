@@ -17,7 +17,6 @@ from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 # (test_rollout_backend_selection.py).
 EXPECTED_UNSUPPORTED = {
     "EPCohere2MoELayer",
-    "EPGlm5NextMoELayer",
     "EPInklingMoELayer",
     "EPNemotronHMoELayer",
     "EPQwen3NextMoELayer",

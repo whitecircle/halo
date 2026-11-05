@@ -179,12 +179,12 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
     | Kind | Hub layout | Families |
     |---|---|---|
     | `FUSED` (default) | fused `experts.gate_up_proj` / `down_proj`, `F.linear` convention; `key_prefix=""` drops `experts.` where the EP layer replaces the container itself | Cohere2 MoE, DeepSeek-V4, GLM-5 Next, Qwen3.5/3.6, Qwen3.8-Flash-Next, Mistral4, Inkling, Step-3.7, Zaya; Gemma4 bare |
-    | `FUSED_SPLIT_PER_EXPERT` | the fused bank split into `experts.{i}.<gate\|up\|down>.weight` | GLM-4, Laguna, Qwen3-Next, LFM-2 (`w1`/`w3`/`w2`) |
+    | `FUSED_SPLIT_PER_EXPERT` | the fused bank split into `experts.{i}.<gate\|up\|down>.weight` | GLM-4, GLM-5 Next, Laguna, Qwen3-Next, LFM-2 (`w1`/`w3`/`w2`) |
     | `SEPARATE_GLU` | gate/up/down stored apart, written per expert | Qwen3, Bailing |
     | `SEPARATE_MLP` | up and down of a gateless expert, written per expert under those names | Nemotron-H |
     | `INTERLEAVED_GLU` | GPT-OSS's interleaved `[g0, u0, ...]` pair with biases, matmul convention | GPT-OSS |
 
-    `per_expert_keys` names the `(gate, up, down)` per-expert spelling. A `FUSED` family declares it where transformers also loads that spelling — its hub's for DeepSeek-V4, Cohere2 MoE and GLM-5 Next, the one `unfuse_moe_experts.py` writes for Qwen3.5/3.6 and Qwen3.8-Flash-Next; a family without one is what that tool refuses, `SEPARATE_MLP` included, whose saves are per expert already. A runtime tensor a layout has no branch for raises rather than dropping out of the export.
+    `per_expert_keys` names the `(gate, up, down)` per-expert spelling. A `FUSED` family declares it where transformers also loads that spelling — its hub's for DeepSeek-V4 and Cohere2 MoE, the one `unfuse_moe_experts.py` writes for Qwen3.5/3.6 and Qwen3.8-Flash-Next; a family without one is what that tool refuses, `SEPARATE_MLP` included, whose saves are per expert already. A runtime tensor a layout has no branch for raises rather than dropping out of the export.
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout the family's `ExpertLayout` writes, so nothing here is per engine.
 

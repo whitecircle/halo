@@ -44,6 +44,8 @@ _LEFT_OUT_OF_THE_PUSH = {
     # Its decoder-layer module holds no other direct tensor.
     "gemma4_text": {"model.layers.N.layer_scalar"},
     "glm4_moe_lite": {"model.layers.N.mlp.gate.e_score_correction_bias"},
+    # The same skip-listed name on vLLM; SGLang copies by name, so the launch value stays.
+    "glm5_next": {"model.language_model.layers.N.mlp.gate.e_score_correction_bias"},
     # vLLM maps the hub key onto the gate's ``e_score_correction_bias``.
     "lfm2_moe": {"model.layers.N.feed_forward.expert_bias"},
     # ``router_bias`` on vLLM's block module, which holds no other direct tensor.

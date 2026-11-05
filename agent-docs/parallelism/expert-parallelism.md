@@ -81,7 +81,6 @@ EP surface. The table is pinned against the specs and classes by
 | Zaya | routing replay | `FAMILY.supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
-| GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | RL weight sync — both pinned engines serve the release, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | training the composite through the release's modeling file — its forward hands the text tower no `seq_idx` and reads no `image_grid_hw` | `FAMILY.remote_composite_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |

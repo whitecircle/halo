@@ -184,10 +184,6 @@ GLM5_NEXT = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("glm5_next",),
-    weight_sync_refusal=(
-        "both pinned rollout engines register glm5_next and load the per-expert keys the gather emits, but no "
-        "online update into either has been validated end to end"
-    ),
 )
 GPT_OSS = MoEFamilySpec(
     model_types=("gpt_oss",),
