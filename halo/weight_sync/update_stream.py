@@ -15,7 +15,8 @@ logger = logging.getLogger(__name__)
 class UpdateStream(ABC):
     """Snapshots buffered by reference, cut into chunks and sent into an update that opens with the first chunk and
     closes with the tail. A fact declared by annotation alone has no default, so a subclass that leaves one out fails
-    by name where it is read."""
+    by name where it is read. A client declares these on its class; a group, which wraps whichever backend its servers
+    run, sets them on the instance."""
 
     BACKEND_NAME: str
     # Per-module parameter suffixes the engine's loader takes only together, so they ride one chunk.
