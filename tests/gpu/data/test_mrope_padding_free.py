@@ -16,7 +16,7 @@ from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import DataCollatorWithFlattening
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.attention.layout import has_mrope_rotary
+from halo.models.config_access import text_config
 from halo.models.segment_markers import segment_markers_for
 from tests.common.attention_kernels import kernel_calls
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
@@ -51,6 +51,11 @@ PARSER = argparse.ArgumentParser()
 PARSER.add_argument("--family", choices=sorted(FAMILIES), required=True)
 PARSER.add_argument("--attn", choices=[FA2, FA4], required=True)
 ARGS = PARSER.parse_args()
+
+
+def _rotates_by_mrope(config) -> bool:
+    """The text config's class lists ``mrope_section`` among the rope keys transformers' validation skips."""
+    return "mrope_section" in (getattr(text_config(config), "ignore_keys_at_rope_validation", None) or ())
 
 
 def _documents(generator: torch.Generator, vocab: int) -> list[list[int]]:
@@ -104,7 +109,9 @@ def run(ctx) -> dict:
     model.eval()
     label = model.config._attn_implementation
     markers = segment_markers_for(model.config)
-    log(f"=== {ARGS.family}: requested {ARGS.attn}, resolved {label}, M-RoPE decoder {has_mrope_rotary(model.config)}")
+    log(
+        f"=== {ARGS.family}: requested {ARGS.attn}, resolved {label}, M-RoPE decoder {_rotates_by_mrope(model.config)}"
+    )
 
     flattening = DataCollatorWithFlattening(tokenizer=tokenizer, return_seq_idx=markers.seq_idx)
     packing = select_data_collator(
@@ -168,7 +175,7 @@ def run(ctx) -> dict:
     log(f"  metrics {metrics}, kernels {dict(calls)}")
     checks = {
         "resolves_the_requested_backend": label == ARGS.attn and set(calls) == {ARGS.attn},
-        "decoder_rotates_by_mrope": has_mrope_rotary(model.config),
+        "decoder_rotates_by_mrope": _rotates_by_mrope(model.config),
         "packing_matches_each_document_alone": metrics["packing_rel"] <= ISOLATED_REL_MAX,
         "padding_free_within_the_packing_floor": metrics["padding_free_rel"] <= packing_floor,
         "stacked_position_ids_within_the_packing_floor": metrics["stacked_position_ids_rel"] <= packing_floor,

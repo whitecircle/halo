@@ -414,7 +414,7 @@ Values that differ from it or are load-bearing at 397B:
 |---|---|---|
 | `expert_parallel_size` / `ep_scope` | per the table above / `global` | node-scope EP caps `X` at 8 and cannot hold `P_e` |
 | `attn_implementation` | `flash_attention_2` | unset, these packed rows load FA2 on Blackwell too (unpacked rows take FA4, [Qwen3.5 → Configs](../models/qwen3_5.md#configs)) and Hopper picks FA3; the pin keeps Hopper on FA2 as well. An explicit FA2 is kept as-is |
-| `packing` / `padding_free` | `true` / `false` | fixed-length only — the M-RoPE varlen path crashes FA2 |
+| `packing` / `padding_free` | `true` / `false` | fixed-length rows, as the shipped recipe |
 | `fsdp_reshard_after_forward` | `false` | ZeRO-3 is rejected under EP |
 | `gradient_checkpointing` | `true` | the activation column assumes it |
 | `bf16` + `optim` | as shipped | AdamWBF16 auto-enables whenever `bf16: true` and `optim` is `adamw_torch_fused`/`adamw_torch` outside accelerate-managed DDP — both are already the defaults, so neither key has to be written to get the 8 B/param cost. `optim: muon` or `flash_adamw` opts out |

@@ -4,7 +4,6 @@ FlashAttention's varlen kernel."""
 import logging
 
 from halo.data.turn_markers import reject_unusable_response_marker
-from halo.models.attention.layout import has_mrope_rotary
 from halo.models.attention.selection import (
     VARLEN_ATTN_IMPLEMENTATIONS,
     declares_flash_attention,
@@ -133,18 +132,6 @@ def _warn_unmeasured_multi_document_family(model_config, *, multi_document: bool
         )
 
 
-def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
-    """On every backend: M-RoPE's flattened row faults the flash varlen kernels, and no dense kernel serves one."""
-    if not padding_free or model_config is None or not has_mrope_rotary(model_config):
-        return
-    raise ValueError(
-        f"padding_free is refused for model_type={getattr(model_config, 'model_type', None)!r}: its decoder "
-        f"rotates by M-RoPE, and a flattened M-RoPE row faults the flash varlen kernels (cudaErrorIllegalAddress "
-        f"under flash_attention_2), while the dense backends take no cu_seqlens at all. Set padding_free: false; "
-        f"under SFT, packing: true keeps the documents apart on the same kernels."
-    )
-
-
 def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_context_parallel: bool) -> None:
     """Reads only the flags, so a script can run it before the model load."""
     if packing and padding_free:
@@ -188,12 +175,11 @@ def reject_multi_document_rows(
     keeps_packed_rows: bool,
     varlen_rows: bool,
 ) -> None:
-    """Refuse the rows ``model_config`` cannot keep apart or no kernel can serve: a multi-document row on an M-RoPE
-    decoder (padding-free), compressed-KV layers, a dense ``attn_impl``, GatedDeltaNet layers without segment-aware
-    kernels, or linear attention no segment marker reaches unless ``allow_cross_document_linear_attention``; a packed
-    row a pipeline stage keeps; and FA4 on rows reaching its varlen call."""
+    """Refuse the rows ``model_config`` cannot keep apart or no kernel can serve: compressed-KV layers, a dense
+    ``attn_impl``, GatedDeltaNet layers without segment-aware kernels, or linear attention no segment marker reaches
+    unless ``allow_cross_document_linear_attention``; a packed row a pipeline stage keeps; and FA4 on rows reaching its
+    varlen call."""
     padding_free, packing = mode == "padding_free", mode == "packing"
-    reject_mrope_padding_free(model_config, padding_free=padding_free)
     if mode is not None:
         reject_compressed_kv_rows(model_config, mode)
     reject_dense_attention_rows(model_config, attn_impl, padding_free=padding_free, packing=packing)

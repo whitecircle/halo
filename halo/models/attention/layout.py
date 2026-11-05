@@ -343,12 +343,6 @@ def resolve_num_key_value_heads(cfg) -> int:
     return int(get_config_field(cfg, "num_attention_heads", per_layer_reduce=max))
 
 
-def has_mrope_rotary(cfg) -> bool:
-    """Read off the text config's class, which lists ``mrope_section`` among the rope keys transformers' validation
-    skips, as a checkpoint may omit the section and take the rotary's own default."""
-    return "mrope_section" in (getattr(text_config(cfg), "ignore_keys_at_rope_validation", None) or ())
-
-
 class AttentionCall(NamedTuple):
     """The geometry a compiled kernel keys on. ``head_dim`` is the query/key width and ``v_head_dim`` the value width,
     which the flash path pads up to ``head_dim`` and SDPA takes as is; FA4 hashes ``softcap`` into its key."""
