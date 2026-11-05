@@ -50,9 +50,14 @@ def _cases():
 def _assert_bits_equal(out, ref, name):
     assert out.dtype == ref.dtype and out.shape == ref.shape, name
     torch.testing.assert_close(out, ref, rtol=0, atol=0, equal_nan=True, msg=name)
-    # assert_close treats -0.0 == 0.0, so compare sign bits outside NaN positions as well.
-    keep = ~torch.isnan(ref)
-    assert torch.equal(torch.signbit(out[keep]), torch.signbit(ref[keep])), f"{name}: sign bit differs"
+    # assert_close treats -0.0 == 0.0, so compare sign bits outside NaN positions as well. Masks only, as boolean
+    # indexing would build int64 indices several GiB large for the 32x2880x2880 case.
+    flipped = (torch.signbit(out) != torch.signbit(ref)) & ~torch.isnan(ref)
+    assert not flipped.any(), f"{name}: sign bit differs"
+
+
+def _kernel_supported() -> bool:
+    return q._fp8_triton_supported(torch.cuda.current_device())
 
 
 class _Spy:
@@ -77,6 +82,9 @@ class _Spy:
 
 def test_bit_exact_against_eager():
     """The kernel reproduces the eager quantizer bit-for-bit, NaN blocks included."""
+    if not _kernel_supported():
+        print("  below SM 8.9, the fp8 kernel cannot compile — skipped")
+        return
     n = 0
     for name, t in _cases():
         ref = _block_round_trip(t, "mxfp8", -1).to(t.dtype)
@@ -88,14 +96,15 @@ def test_bit_exact_against_eager():
 def test_routing():
     """fake_quant takes the fast path only for CUDA / contiguous / last-axis / mxfp8 / K % 32 == 0."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
+    fast = int(_kernel_supported())  # below SM 8.9 even the canonical case runs eager
     with _Spy() as s:
         _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), "wired")
-        assert s.calls == 1, "fast path not taken for the canonical case"
+        assert s.calls == fast, f"canonical case: {s.calls} fast-path calls, expected {fast}"
         fake_quant(t, "mxfp8", axis=0)  # non-last axis → eager
         fake_quant(t, "mxfp4")  # other format → eager
         fake_quant(t.t().contiguous().t(), "mxfp8")  # non-contiguous → eager
         fake_quant(t.cpu(), "mxfp8")  # CPU → eager
-        assert s.calls == 1, f"fallback cases took the fast path ({s.calls - 1} extra calls)"
+        assert s.calls == fast, f"fallback cases took the fast path ({s.calls - fast} extra calls)"
     try:
         fake_quant(torch.randn(8, 33, device=DEV, dtype=torch.bfloat16), "mxfp8")
         raise AssertionError("non-divisible K did not raise")
