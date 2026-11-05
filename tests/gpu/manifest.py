@@ -2748,6 +2748,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_lowp_kernels.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",
+    "profiling/bench_ep_arena_headroom.py",
     "profiling/benchmark_sft_dense.py",
     "profiling/benchmark_sft_ep.py",
     "profiling/benchmark_smpo_ep.py",

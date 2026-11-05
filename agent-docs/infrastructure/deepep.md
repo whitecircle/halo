@@ -153,9 +153,14 @@ eval, raises it for the rest of the run. A grow *retires* the previous arena rat
 in-flight microbatch's backward may still name it); the trainer frees the retired arenas once the
 optimizer step's last backward is done, on every rank of the group. Within the step that grew, the group
 holds the **sum** of the capacities it grew through (~4 GiB per generation at `ep64` with 8k
-tokens/rank), and from the next step only the live arena. Each growth still rebuilds the arena, so avoid
-the growths: pack the corpus, or let the first forward present the run's maximum tokens per rank. The
-`DeepEP arena grew …` line (once per EP group) marks each one. Packed batches above batch 1 flatten to a
+tokens/rank), and from the next step only the live arena. A build or grow takes the tokens/rank the forward
+needs times 1.5 (`ARENA_HEADROOM`, a constant so every rank sizes alike), rounded up to 256 and held to the largest
+aligned capacity both limits of the dispatch check allow (the 32-bit wire index; across NVLink domains the Gin
+ceiling), so a rising high-water mark rebuilds the arena a few times per run, and an arena already at a ceiling takes
+no headroom. The capacity dedup still caches the exact need, and the legacy arena is never grown. Each growth still
+rebuilds the arena: pack the corpus, or let the first forward present the run's maximum tokens per rank. The
+`DeepEP arena grew …` line (once per EP group, old and new capacity) marks each one;
+`tests/gpu/profiling/bench_ep_arena_headroom.py` times dispatch and combine at an exact and a headroomed capacity. Packed batches above batch 1 flatten to a
 row of variable width, so a later step can still set a new high-water mark, bounded by
 `per_device_train_batch_size × max_length`.
 

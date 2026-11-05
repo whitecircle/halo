@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from halo.distributed.expert_parallel.deepep.settings import EP_CAPACITY_DEDUP
@@ -22,6 +24,9 @@ DEEPEP_INDEX_LIMIT = 2**31
 # Cross-node (Gin) dispatch above this many tokens/rank wedges instead of erroring; 0 disables.
 # Boundary and fault signatures: agent-docs/infrastructure/deepep.md#expert-parallelism-over-aws-efa.
 GIN_MAX_TOKENS_PER_RANK = env_non_negative_int("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", 8192)
+# A build or grow sizes the elastic arena to this multiple of the capacity needed, so a slowly rising high-water
+# mark does not rebuild it mid-step. A constant, not a knob: the size feeds a collective every rank must agree on.
+ARENA_HEADROOM = 1.5
 
 
 class CapacityScope:
@@ -105,8 +110,28 @@ def reject_legacy_backend_topology(dispatch_size: int, *, is_cross_node: bool, g
         )
 
 
+def max_dispatch_capacity(*, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
+    """The most tokens/rank one dispatch may carry: under the 32-bit wire index and, on a group spanning NVLink
+    domains, the proxy-Gin ceiling."""
+    limit = (DEEPEP_INDEX_LIMIT - 1) // (num_topk * padded_hidden)
+    if spans_domains and GIN_MAX_TOKENS_PER_RANK:
+        limit = min(limit, GIN_MAX_TOKENS_PER_RANK)
+    return limit
+
+
+def arena_capacity(needed: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
+    """The tokens/rank to build or grow an elastic arena to: ``needed`` times :data:`ARENA_HEADROOM` rounded up to
+    :data:`EP_CAPACITY_ALIGN`, held to the largest aligned capacity :func:`max_dispatch_capacity` allows and never
+    below ``needed``. A function of group-uniform inputs, so every rank of the group builds the same size."""
+    ceiling = max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
+    headroom = ep_dispatch_capacity(math.ceil(needed * ARENA_HEADROOM))
+    return max(needed, min(headroom, ceiling // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN))
+
+
 def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> None:
     """Raise past the 32-bit wire index or, on a group spanning NVLink domains, past the proxy-Gin ceiling."""
+    if capacity <= max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains):
+        return
     index_extent = capacity * num_topk * padded_hidden
     if index_extent >= DEEPEP_INDEX_LIMIT:
         raise ValueError(
@@ -118,14 +143,13 @@ def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: in
             f"generations / shorter trajectories (reasoning effort / max_turns / rollout length). The ceiling here "
             f"is {DEEPEP_INDEX_LIMIT // (num_topk * padded_hidden):,} tokens/rank."
         )
-    if spans_domains and GIN_MAX_TOKENS_PER_RANK and capacity > GIN_MAX_TOKENS_PER_RANK:
-        raise ValueError(
-            f"Cross-node DeepEP GIN dispatch: num_max_tokens_per_rank={capacity} exceeds the validated "
-            f"EFA proxy-GIN ceiling ({GIN_MAX_TOKENS_PER_RANK}). A larger dispatch wedges in transit "
-            f"instead of erroring — the receive counts never arrive ('Dispatch CPU wait ... received "
-            f"count 0', or Xid 109 CTX SWITCH TIMEOUT cascading into Xid 43). Reduce the tokens in one "
-            f"MoE forward (per_device_train_batch_size, max_length), or prefer node-local EP "
-            f"(ep_scope=node) with DP across nodes — cross-node dispatch is also latency-bound and "
-            f"several times slower. HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK overrides (0 disables) after "
-            f"validating a larger dispatch end-to-end on your fabric."
-        )
+    raise ValueError(
+        f"Cross-node DeepEP GIN dispatch: num_max_tokens_per_rank={capacity} exceeds the validated "
+        f"EFA proxy-GIN ceiling ({GIN_MAX_TOKENS_PER_RANK}). A larger dispatch wedges in transit "
+        f"instead of erroring — the receive counts never arrive ('Dispatch CPU wait ... received "
+        f"count 0', or Xid 109 CTX SWITCH TIMEOUT cascading into Xid 43). Reduce the tokens in one "
+        f"MoE forward (per_device_train_batch_size, max_length), or prefer node-local EP "
+        f"(ep_scope=node) with DP across nodes — cross-node dispatch is also latency-bound and "
+        f"several times slower. HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK overrides (0 disables) after "
+        f"validating a larger dispatch end-to-end on your fabric."
+    )

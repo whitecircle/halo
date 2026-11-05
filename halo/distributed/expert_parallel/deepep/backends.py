@@ -17,6 +17,7 @@ import torch.distributed as dist
 
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.expert_parallel.deepep.capacity import (
+    arena_capacity,
     capacity_scope,
     ep_dispatch_capacity,
     padded_wire_hidden,
@@ -297,11 +298,17 @@ class _ElasticBackend(DeepEPBackend):
             self._arena = _ElasticArena.acquire(
                 d.dispatch_group, self._padded_hidden, num_topk, DEEPEP_NUM_QPS, deterministic
             )
-        built = self._arena.ensure(needed)
+        # A shared arena already holding `needed` is reused as it is; only a build or grow takes headroom.
+        target = needed
+        if needed > self._arena.capacity:
+            target = arena_capacity(
+                needed, num_topk=num_topk, padded_hidden=self._padded_hidden, spans_domains=d.spans_domains
+            )
+        built = self._arena.ensure(target)
         self._num_topk = num_topk
         self._resolved_num_sms = self._resolve_num_sms(num_topk)
         if built:
-            self._log_built(needed, deterministic)
+            self._log_built(self._arena.capacity, deterministic)
 
     def _resolve_capacity(self, num_tokens: int, num_topk: int) -> int:
         """The arena capacity this forward needs: the first MoE layer all-reduces it, the rest reuse it."""
@@ -340,7 +347,7 @@ class _ElasticBackend(DeepEPBackend):
             )
             return DEEPEP_DEFAULT_INTERNODE_NUM_SMS
 
-    def _log_built(self, needed: int, deterministic: bool) -> None:
+    def _log_built(self, capacity: int, deterministic: bool) -> None:
         d = self._d
         mode = "inter-node (Gin)" if d.spans_domains else "intra-node (NVLink)"
         ep_tp = d.ep_config.expert_tp_size
@@ -350,7 +357,7 @@ class _ElasticBackend(DeepEPBackend):
         det_info = ", deterministic dispatch" if deterministic else ""
         logger.info(
             f"DeepEP ElasticBuffer ({mode}, {scope}): ep_size={d.ep_size}, hidden={d.hidden_dim}"
-            f"{pad_info}, num_max_tokens_per_rank={needed}, num_sms={self._resolved_num_sms}{tp_info}"
+            f"{pad_info}, num_max_tokens_per_rank={capacity}, num_sms={self._resolved_num_sms}{tp_info}"
             f"{det_info}"
         )
 
