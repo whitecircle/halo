@@ -180,13 +180,13 @@ GLM4 = MoEFamilySpec(
 GLM5_NEXT = MoEFamilySpec(
     model_types=("glm5_next", "glm5_next_text"),
     dense_packing_leaks=True,
-    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("glm5_next",),
     weight_sync_refusal=(
-        "both pinned rollout engines register glm5_next, but their expert loaders take only per-expert keys "
-        "where the gather emits the fused pair, and no online update into either has been validated"
+        "both pinned rollout engines register glm5_next and load the per-expert keys the gather emits, but no "
+        "online update into either has been validated end to end"
     ),
 )
 GPT_OSS = MoEFamilySpec(

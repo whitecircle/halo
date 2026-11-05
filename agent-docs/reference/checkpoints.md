@@ -292,8 +292,10 @@ Qwen3.5/3.6, Qwen3.8-Flash-Next and Zaya ship the fused pair. Writers without an
 base-Trainer save write the layout the model was loaded from (a model with no record reverts through the
 family's mapping — per-expert for Qwen3.5/3.6); an EP-gathered save writes the layout the family spec
 declares (`MoEFamilySpec.expert_layout`, `halo/models/moe/family_specs.py`): the fused pair under the
-default `FUSED` layout, which DeepSeek-V4, Cohere2 MoE and GLM-5 Next keep although their hubs are
-per-expert. A reload into a built model maps any of
+default `FUSED` layout, which DeepSeek-V4 and Cohere2 MoE keep although their hubs are
+per-expert. GLM-5 Next writes the hub's per-expert layout (`FUSED_SPLIT_PER_EXPERT`), so its gathered saves, sharded
+saves merged by `merge_ep_shards.py` and weight sync need no rewrite; a checkpoint an earlier release saved with the fused
+pair still loads and un-fuses with `unfuse_moe_experts.py`. A reload into a built model maps any of
 these back ([Resuming training](#resuming-training)). Rewrite such a checkpoint only for a
 per-expert-only serving loader, with `scripts/after_training/unfuse_moe_experts.py`; Step-3.7 Flash needs
 no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` namespace,
@@ -304,14 +306,14 @@ no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` na
 | vLLM 0.32.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
 | vLLM 0.32.0 `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | loaded directly, the n-gram table included ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#checkpoints-and-serving)) |
 | vLLM 0.32.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
-| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next and DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
+| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises on a fused export), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next's own gathered saves are per-expert already; DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
 | vLLM 0.32.0 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |
 | vLLM 0.32.0 — no model class | Mistral4, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
 | vLLM 0.32.0 — no native class | Zaya | resolves through vLLM's generic transformers backend; unvalidated ([Zaya](../models/zaya.md)) |
 | vLLM 0.32.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
 
 SGLang 0.5.22 reads each family's hub layout through its own per-family loader, so the same un-fuse rule
-applies, Cohere2 MoE, DeepSeek-V4 and GLM-5 Next included (their loaders drop the fused pair without an
+applies, Cohere2 MoE and DeepSeek-V4 included (their loaders drop the fused pair without an
 error; a DeepSeek-V4 export is unverified there even after the rewrite), except that its LFM-2 loader also
 takes the fused pair; it registers no class for
 Mistral4 or Ring's architecture, and its Zaya loader reads a per-expert layout the gathered export does

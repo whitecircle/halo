@@ -366,8 +366,7 @@ model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
-  Inkling (no engine run has validated its sync), GLM-5 Next (both engines' per-expert loaders refuse
-  the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
+  Inkling (no engine run has validated its sync), GLM-5 Next (no engine run has validated its sync), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
   SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
   [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)), Nemotron-H (no engine run has validated its sync)
   and Cohere2 MoE carry on both engines.

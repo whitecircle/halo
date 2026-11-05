@@ -15,7 +15,6 @@ from peft import LoraConfig, get_peft_model
 
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS
 from halo.trainers.grpo.rollout import weight_push
 from halo.trainers.grpo.rollout.weight_push import (
@@ -26,10 +25,15 @@ from halo.trainers.grpo.rollout.weight_push import (
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.checkpoint_io import save_context, written_keys
 from tests.common.lora_sync_exactness import syncable_moe_families
-from tests.common.parallelism import single_process_ep_config
 from tests.common.repo import REPO_ROOT
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.weight_sync import RecordingSender, Wire, gathering_on_the_host, offline_client
+from tests.common.weight_sync import (
+    RecordingSender,
+    Wire,
+    ep_model,
+    gathering_on_the_host,
+    offline_client,
+    pushed_values,
+)
 
 _BIAS = "gate.expert_bias"
 _PARITY_FIXTURES = os.path.join(REPO_ROOT, "docker", "vllm", "parity", "fixtures")
@@ -53,21 +57,6 @@ def _gather_on_the_host():
         yield
 
 
-def _ep_model(family: str, overrides: dict | None = None):
-    torch.manual_seed(0)
-    model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(torch.bfloat16)
-    apply_ep_layers(model, single_process_ep_config())
-    assert named_ep_layers(model), f"{family}: no EP layer to gather"
-    return model
-
-
-def _pushed(model) -> dict[str, torch.Tensor]:
-    sender = RecordingSender(keep_values=True)
-    gather_and_send_weights(model, sender)
-    assert len(sender.names) == len(set(sender.names)), "a tensor was forwarded twice"
-    return {param.name: param.value for param in sender.params}
-
-
 def _distinct_biases(model) -> dict[str, torch.Tensor]:
     """Filled per layer, so a tensor sent under another layer's name or the zeros of a fresh buffer cannot match."""
     biases = {}
@@ -83,7 +72,7 @@ def _per_layer_spelling(names) -> set[str]:
 
 
 def _laguna_with_bias(value: float):
-    model = _ep_model("laguna")
+    model = ep_model("laguna")
     for _, layer in named_ep_layers(model):
         layer.get_submodule("gate").e_score_correction_bias.data.fill_(value)
     return model
@@ -110,7 +99,7 @@ def test_a_laguna_at_its_zero_release_bias_is_silent(caplog):
 
 
 def test_a_family_whose_engine_loads_its_bias_is_silent(caplog):
-    model = _ep_model("glm4_moe_lite")
+    model = ep_model("glm4_moe_lite")
     for _, layer in named_ep_layers(model):
         layer.get_submodule("gate").e_score_correction_bias.data.fill_(0.25)
     with caplog.at_level("WARNING"):
@@ -119,9 +108,9 @@ def test_a_family_whose_engine_loads_its_bias_is_silent(caplog):
 
 
 def test_a_ling_push_carries_each_gate_bias_at_the_value_the_trainer_routes_with():
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     biases = _distinct_biases(model)
-    pushed = _pushed(model)
+    pushed = pushed_values(model)
 
     assert len(biases) == sum(1 for name in pushed if name.endswith("mlp.gate.weight")) > 0
     for name, bias in biases.items():
@@ -131,21 +120,21 @@ def test_a_ling_push_carries_each_gate_bias_at_the_value_the_trainer_routes_with
 def test_a_ling_checkpoint_without_the_bias_sends_none():
     """Both engines create the tensor on this flag and vLLM's loader raises on the name without it, while the release's
     gate registers the buffer either way."""
-    model = _ep_model("bailing_moe", {"moe_router_enable_expert_bias": False})
+    model = ep_model("bailing_moe", {"moe_router_enable_expert_bias": False})
     assert all(layer.get_buffer(_BIAS) is not None for _, layer in named_ep_layers(model))
 
-    pushed = _pushed(model)
+    pushed = pushed_values(model)
 
     assert not [name for name in pushed if name.endswith(_BIAS)]
     assert any(name.endswith("mlp.gate.weight") for name in pushed)
 
 
 def test_a_lora_push_carries_the_bias_under_its_hub_name():
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     biases = _distinct_biases(model)
     peft_model = get_peft_model(model, LoraConfig(r=2, target_modules=["query_key_value"]))
 
-    pushed = _pushed(peft_model)
+    pushed = pushed_values(peft_model)
 
     for name, bias in biases.items():
         assert torch.equal(pushed[name], bias)
@@ -155,7 +144,7 @@ def test_a_lora_push_carries_the_bias_under_its_hub_name():
 def test_a_gate_under_modules_to_save_pushes_the_bias_it_routes_with(backend):
     """``lora_modules_to_save: [gate]`` is a documented target: it puts PEFT's wrapper between the layer and the buffer,
     and the trainable copy behind it is the one that routes."""
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     names = list(_distinct_biases(model))
     peft_model = get_peft_model(model, LoraConfig(r=2, target_modules=["query_key_value"], modules_to_save=["gate"]))
     routed = {}
@@ -164,7 +153,7 @@ def test_a_gate_under_modules_to_save_pushes_the_bias_it_routes_with(backend):
         routed[name].add_(1.0)
 
     reject_unsyncable_model(peft_model, backend)
-    pushed = _pushed(peft_model)
+    pushed = pushed_values(peft_model)
 
     for name, bias in routed.items():
         assert torch.equal(pushed[name], bias)
@@ -174,7 +163,7 @@ def test_a_gate_under_modules_to_save_pushes_the_bias_it_routes_with(backend):
 @pytest.mark.parametrize("backend", rollout_backends())
 def test_the_bias_reaches_the_wire_of_both_engines(backend):
     """SGLang needs it less, as its loader copies name by name, and takes it as a parameter of the same name."""
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     biases = _distinct_biases(model)
     wire = Wire()
     client = wire.attach(offline_client(resolve_weight_sync_client(backend)))
@@ -190,9 +179,9 @@ def test_the_bias_reaches_the_wire_of_both_engines(backend):
 def test_a_push_covers_the_gathered_checkpoint_on_every_syncable_family(family, tmp_path):
     """Every tensor a served checkpoint holds is pushed under its own name, but for the ones a family's engine keeps
     apart. A new buffer on any family lands here until someone reads what the engine does with it."""
-    model = _ep_model(family)
+    model = ep_model(family)
     save_ep_gathered_checkpoint(save_context(model), str(tmp_path))
-    checkpoint, pushed = written_keys(str(tmp_path)), set(_pushed(model))
+    checkpoint, pushed = written_keys(str(tmp_path)), set(pushed_values(model))
 
     assert _per_layer_spelling(checkpoint - pushed) == _LEFT_OUT_OF_THE_PUSH.get(family, set())
     assert pushed <= checkpoint
@@ -205,7 +194,7 @@ def test_the_left_out_table_names_only_syncable_families():
 @pytest.mark.parametrize("backend", rollout_backends())
 def test_a_declared_buffer_the_layer_lost_is_refused_at_construction(backend):
     """An upstream rename would otherwise raise mid-push, after the engine already took a chunk."""
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     reject_unsyncable_model(model, backend)
 
     (_, layer), *_ = named_ep_layers(model)
@@ -217,7 +206,7 @@ def test_a_declared_buffer_the_layer_lost_is_refused_at_construction(backend):
 
 def test_a_declared_buffer_that_became_a_parameter_is_refused_at_construction():
     """The dense push sends a parameter already, and two copies of one name stall vLLM's count and fail SGLang's chunk."""
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     (_, layer), *_ = named_ep_layers(model)
     bias = layer.gate._buffers.pop("expert_bias")
     layer.gate.register_parameter("expert_bias", torch.nn.Parameter(bias))
@@ -228,7 +217,7 @@ def test_a_declared_buffer_that_became_a_parameter_is_refused_at_construction():
 
 def test_a_rank_with_no_sender_walks_the_same_buffers_in_the_same_order(monkeypatch):
     """A sharded buffer would be a collective, which every rank must join in one order."""
-    model = _ep_model("bailing_moe")
+    model = ep_model("bailing_moe")
     biases = {id(bias) for bias in _distinct_biases(model).values()}
     walked: list[int | None] = []
     materialize = weight_push.materialize_dtensor

@@ -42,7 +42,7 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 - Routing: sigmoid scores plus the fp32 `gate.e_score_correction_bias` on **selection only** (the routed weight comes from the unbiased scores), top-8, `norm_topk_prob`, then `routed_scaling_factor` — fp32 top-k weights, expert load recorded for balancing.
 - Experts: fused `Glm5NextTextExperts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. The hub spells them per-expert (`experts.{i}.gate_proj/up_proj/down_proj`); transformers' weight converter restores the fused layout on load and, on a `save_pretrained` with no EP layer, the per-expert spelling on save.
 
-    An EP-gathered save writes the hub's vendor namespace (`hc_attn_*`, the KDA `f_a_proj`/`A_log` family, the split `q/k/v_conv1d`) and keeps the experts as the fused pair; `unfuse_moe_experts.py` turns it into the hub checkpoint. The lazy loaders and `from_pretrained` read either layout.
+    An EP-gathered save writes the hub's vendor namespace (`hc_attn_*`, the KDA `f_a_proj`/`A_log` family, the split `q/k/v_conv1d`) and the experts per expert (`FUSED_SPLIT_PER_EXPERT`), the hub checkpoint's own layout, so no un-fuse step follows. A checkpoint saved before that carries the fused pair: `unfuse_moe_experts.py` still converts it, and the lazy loaders and `from_pretrained` read either layout.
 
 - Shared expert: one `Glm5NextTextMLP`, replicated per rank, added after DeepEP combine.
 - The 3 dense leading layers keep their plain MLP — EP swaps MoE blocks only.
@@ -53,7 +53,7 @@ EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor names
 
 There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), a 73–75 GiB host RSS peak per rank while its shard handles are open, and 2.3 GiB after. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 
-RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next`, but their expert loaders take only per-expert keys where the gather emits the fused pair, and no online update into either has been validated.
+RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next` and load the per-expert keys the gather emits, but no online update into either has been validated end to end.
 
 ## Router balancing
 
