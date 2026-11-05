@@ -757,10 +757,12 @@ off, since every node's local rank 0 would otherwise write and rotate the same f
 forces it on, all nodes must hold equivalent checkpoint dirs at the same path, and each node's local rank 0
 creates the directory before a barrier.
 
-A known limit there: transformers' `save_pretrained` writes weights and config on global rank 0 only
-(`should_save_on_this_rank`), so a save that goes through it for a plain model (DDP, or the embedding trainer's
-sentence-transformers path) leaves the other nodes' copies without weights, with no error. The toolkit's own savers
-and PEFT adapter saves are not gated this way.
+transformers' `save_pretrained` writes weights and config only where `is_main_process` holds and the process is global
+rank 0, so the toolkit's two plain-model calls (the trainer's base save for a DDP or single-process model, and the
+embedding trainer's sentence-transformers backbone save) run inside `save_pretrained_on_save_rank`
+(`halo/checkpoint/parallel/writing.py`): the filesystem-aware save rank, each node's local rank 0 on a per-node output
+filesystem, writes the weights there, and global rank 0 alone on a shared one. The toolkit's own savers and PEFT
+adapter saves write on that rank without it.
 
 A gathered save holds the non-writers in the next chunk's gather while the writer flushes a part, so
 `DIST_NCCL_TIMEOUT_MINUTES` must cover one part (`save_max_shard_size`) at the filesystem's write speed;

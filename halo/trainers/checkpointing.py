@@ -26,6 +26,7 @@ from halo.checkpoint.parallel.resume_source import resolve_resume_checkpoint
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases, save_lr_scheduler
+from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
 from halo.checkpoint.weights_source import config_schema_source
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
@@ -258,10 +259,12 @@ class CheckpointingMixin:
             # The base save has no re-emission seam, so restore the sinks FA2 drops to None and the config's run-scoped
             # router mutations for the write, and keep save_pretrained from re-adding a prefix a text-only load
             # stripped.
+            base_model = base_transformers_model(ctx.model)
             with (
                 gpt_oss_sinks_restored(ctx.model),
                 config_export_ready(getattr(ctx.model, "config", None)),
-                save_pretrained_layout(base_transformers_model(ctx.model)),
+                save_pretrained_layout(base_model),
+                save_pretrained_on_save_rank(base_model),
             ):
                 super().save_model(output_dir, _internal_call=_internal_call)
             # A family-less vendor config (Bailing/Ling) or a source-schema family (Step-3.7) saved single-GPU/DDP is

@@ -7,6 +7,7 @@ import itertools
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
 
@@ -34,7 +35,7 @@ from halo.models.param_roles import persistent_buffers
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
-from halo.runtime.filesystem import is_output_shared_filesystem
+from halo.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
 from halo.runtime.ranks import (
     get_local_rank,
     get_local_world_size,
@@ -210,3 +211,18 @@ def stream_gathered_checkpoint(
             # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
             finalize.store_reject("checkpoint/gathered_finalize")
     return written, total_bytes
+
+
+@contextmanager
+def save_pretrained_on_save_rank(model: torch.nn.Module) -> Iterator[None]:
+    """Let ``model.save_pretrained`` write on the filesystem-aware save rank. transformers requires global rank 0
+    besides ``is_main_process``, so on per-node output storage nodes 1..N would keep no weights; on shared storage the
+    save rank is global rank 0 and nothing changes. Enter it only where the save rank calls ``save_pretrained``."""
+    held = model.__dict__.pop("should_save_on_this_rank", None)
+    model.should_save_on_this_rank = lambda is_main_process: is_main_process and is_fs_save_rank()
+    try:
+        yield
+    finally:
+        del model.should_save_on_this_rank
+        if held is not None:
+            model.should_save_on_this_rank = held
