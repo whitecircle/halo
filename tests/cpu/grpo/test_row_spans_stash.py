@@ -163,6 +163,14 @@ def test_a_table_that_does_not_fit_the_batch_raises(rows):
         harness.score(ids, mask)
 
 
+def test_a_table_off_the_host_is_refused_rather_than_synced():
+    ids, mask = _batch()
+    harness = _Harness()
+    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, :3].to("meta")
+    with pytest.raises(RuntimeError, match="not the host"):
+        harness.score(ids, mask)
+
+
 class _Loop:
     """The loop below the mixin: records what the loss forward would find armed."""
 
@@ -229,7 +237,7 @@ def _fresh(batch: dict) -> torch.Tensor:
 def test_the_stash_resolves_where_rows_forward_densely_and_no_tp_group_re_syncs_them():
     for dense, group, expected in [(True, None, True), (False, None, False), (True, object(), False)]:
         host = _Host(dense=dense, tp_group=group)
-        host._resolve_row_span_stash()
+        host._configure_row_span_stash()
         assert host._stashes_row_spans is expected
 
 

@@ -40,6 +40,22 @@ def test_a_disabled_timer_takes_no_mark_and_reports_nothing(monkeypatch):
     assert timers.drain() == {}
 
 
+def test_a_suspended_timer_records_no_span_but_the_wall_time_counts(clock):
+    timers = PhaseTimers(enabled=True)
+    timers.begin_run()
+    with timers.suspended():
+        with timers.span("loss_forward"):
+            clock[0] = 4.0
+        timers.checkpoint(MICRO_STEP_END)
+    clock[0] = 6.0
+    timers.finish_step()
+
+    assert timers.drain() == {UNACCOUNTED: 6.0}
+    with timers.span("loss_forward"):
+        pass
+    assert "loss_forward" in {span.name for span in timers._spans}, "recording resumes after the block"
+
+
 def test_a_span_reports_its_time_less_the_spans_nested_in_it(clock):
     timers = PhaseTimers(enabled=True)
     timers.begin_run()

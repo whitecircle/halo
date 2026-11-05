@@ -153,7 +153,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._init_async_state()
         self._finish_on_policy_init()
         self._configure_phase_timers()
-        self._resolve_row_span_stash()
+        self._configure_row_span_stash()
         # After _configure_distributed_modes (needs the EP layers); eager, so an unsupported setup fails now.
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
         # After the model is placed: the deal reads its attention implementation.

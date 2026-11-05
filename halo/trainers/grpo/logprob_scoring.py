@@ -299,6 +299,11 @@ class LogprobScoringMixin:
         if armed is None:
             return dense_row_spans(attention_mask, logits_to_keep)
         rows, width = attention_mask.shape
+        if armed.device.type != "cpu":
+            raise RuntimeError(
+                f"The armed row spans sit on {armed.device}, not the host: a stage moved the batch to the device, "
+                f"which would make the spans' read a sync. Keep ROW_SPANS_KEY on the CPU."
+            )
         if armed.shape != (rows, 3) or (rows and int(armed[:, 1].max()) > width):
             raise RuntimeError(
                 f"The armed row spans {tuple(armed.shape)} do not fit the {rows}-row, {width}-column batch the loss "

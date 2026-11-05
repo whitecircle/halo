@@ -17,12 +17,12 @@ ROW_SPANS_KEY = "row_spans"
 
 class RowSpanStashMixin:
     """Mixed in ahead of ``DistributedTrainerMixin``. The host provides ``_trains_rows_densely`` and calls
-    :meth:`_resolve_row_span_stash` once the model is placed and :meth:`_with_row_spans` on the last statement of each
+    :meth:`_configure_row_span_stash` once the model is placed and :meth:`_with_row_spans` on the last statement of each
     train round's batch build."""
 
     _stashes_row_spans = False
 
-    def _resolve_row_span_stash(self) -> None:
+    def _configure_row_span_stash(self) -> None:
         """Stash where rows forward densely. Not under TP/ETP, where every micro-batch is re-broadcast from the group
         leader as device tensors (TRL's per-rank shuffle differs across the group), so a table built before the
         shuffle would not follow the leader's rows."""
@@ -60,10 +60,10 @@ class RowSpanStashMixin:
         so a misalignment raises on every rank where it would otherwise slice the wrong tokens."""
         loss = super().training_step(model, inputs, num_items_in_batch)
         if self._stashes_row_spans and self.accelerator.sync_gradients:
-            self._reject_misaligned_row_spans()
+            self._verify_row_span_alignment()
         return loss
 
-    def _reject_misaligned_row_spans(self) -> None:
+    def _verify_row_span_alignment(self) -> None:
         tally, self._row_span_mismatches = self._row_span_mismatches, None
         rows = 0 if tally is None else int(tally)
         reject_across_ranks(

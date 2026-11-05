@@ -56,10 +56,20 @@ class PhaseTimers:
         self._steps = 0
         self._wall = 0.0
         self._step_started: float | None = None
+        self._suspended = False
 
     def span(self, name: str, kind: SpanKind = "stream") -> AbstractContextManager[None]:
         """Time the block under ``name``, nested inside the span open around it."""
-        return self._timed(name, kind) if self.enabled else _NO_SPAN
+        return self._timed(name, kind) if self.enabled and not self._suspended else _NO_SPAN
+
+    @contextmanager
+    def suspended(self):
+        """Record no span inside the block; the step's wall time still counts."""
+        self._suspended = True
+        try:
+            yield
+        finally:
+            self._suspended = False
 
     def checkpoint(self, name: str) -> None:
         """Remember now under ``name``, for :meth:`since`."""
@@ -68,7 +78,7 @@ class PhaseTimers:
 
     def since(self, checkpoint: str, name: str) -> None:
         """Record a span called ``name`` from ``checkpoint`` to now."""
-        if self.enabled:
+        if self.enabled and not self._suspended:
             self._spans.append(_Span(name, None, self._checkpoints[checkpoint], mark_boundary()))
 
     def begin_run(self) -> None:

@@ -31,6 +31,11 @@ class PhaseTimedMixin:
         self._phase_timers.checkpoint(MICRO_STEP_END)
         return loss
 
+    def evaluate(self, *args, **kwargs):
+        """COLLECTIVE. An eval round's spans are not the train step's: its wall time lands in ``unaccounted``."""
+        with self._phase_timers.suspended():
+            return super().evaluate(*args, **kwargs)
+
     def _compute_loss(self, model, inputs):
         with self._phase_timers.span("loss_forward"):
             return super()._compute_loss(model, inputs)
@@ -50,4 +55,9 @@ class PhaseTimedMixin:
         for phase, seconds in self._phase_timers.drain().items():
             self._phase_metrics.mean(f"{PHASE_TIME_PREFIX}{phase}_s", seconds)
             self._phase_metrics.maximum(f"{PHASE_TIME_PREFIX}{phase}_max_s", seconds)
-        return self._phase_metrics.flush()
+        return self._phase_metrics.flush(
+            key_mismatch_error=lambda keys_by_rank: RuntimeError(
+                f"Phase-time keys differ across ranks: {keys_by_rank}. Every rank must run each timed span, since log "
+                f"reduces each phase over the world."
+            )
+        )

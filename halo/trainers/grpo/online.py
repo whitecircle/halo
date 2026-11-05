@@ -113,7 +113,7 @@ class DistributedOnlineGRPOTrainer(
 
         self._finish_on_policy_init()
         self._configure_phase_timers()
-        self._resolve_row_span_stash()
+        self._configure_row_span_stash()
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
