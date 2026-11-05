@@ -11,11 +11,13 @@ from collections import deque
 import pytest
 import torch
 
+from halo.weight_sync.chunking import declared_co_load_groups
 from halo.weight_sync.clients import base as client_base
 from halo.weight_sync.clients.base import GroupMembershipLost
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.pool import WeightSyncPool
+from tests.common.fake_engines import FakeSGLangServer
 from tests.common.weight_sync import Wire
 from tests.common.weight_sync_ring import FakeRing, fake_servers, ring_client_class
 from tests.cpu.weight_sync.test_pool import _bare_pool
@@ -117,22 +119,37 @@ def test_a_push_declares_every_chunk_on_every_server_and_sends_each_once(rig, en
         assert not server.paused
 
 
-def test_negative_control_a_group_that_sent_per_server_fails_the_one_send_check(rig, monkeypatch):
+def _assert_each_chunk_crossed_the_ring_once(ring: FakeRing, names: list[str]) -> None:
+    assert len(ring.chunks) == len({tuple(chunk) for chunk in ring.chunks}), "a chunk crossed the ring twice"
+    assert sorted(name for chunk in ring.chunks for name in chunk) == sorted(names), "the ring carried other names"
+
+
+def test_a_push_sends_each_chunk_across_the_ring_once(rig, monkeypatch):
     monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
     pool, _, ring = rig("sglang", [1, 1])
     pool.init_communicator("cpu")
-    real = pool._group._send_on_leader
+
+    names = _push(pool)
+
+    assert len(ring.chunks) > 1, "the budget never cut a chunk, so the test would be vacuous"
+    _assert_each_chunk_crossed_the_ring_once(ring, names)
+
+
+def test_negative_control_the_once_check_fails_on_a_group_that_sends_each_chunk_twice(rig, monkeypatch):
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
+    pool, _, ring = rig("sglang", [1, 1])
+    pool.init_communicator("cpu")
+    real = pool.group._send_on_leader
 
     def twice(chunk):
         real(chunk)
         real(chunk)
 
-    monkeypatch.setattr(pool._group, "_send_on_leader", twice)
+    monkeypatch.setattr(pool.group, "_send_on_leader", twice)
     names = _push(pool)
 
-    with pytest.raises(AssertionError):
-        assert len(ring.chunks) == len({tuple(chunk) for chunk in ring.chunks}), "a chunk crossed the ring twice"
-    assert sorted(name for chunk in ring.chunks for name in chunk) != sorted(names)
+    with pytest.raises(AssertionError, match="crossed the ring twice"):
+        _assert_each_chunk_crossed_the_ring_once(ring, names)
 
 
 def test_sorted_servers_take_their_blocks_in_node_order(rig, monkeypatch):
@@ -173,9 +190,9 @@ def test_a_failed_declare_after_a_peer_accepted_its_own_is_global_and_prompt(rig
     assert ring.aborted.is_set(), "the trainer's half was not aborted"
     assert all(server.paused for server in servers), "a server was resumed with a half-updated model"
     assert all(server.count(f"POST {_RESUME[engine]}") == 0 for server in servers)
-    assert all(member._unusable_reason for member in pool._group._members)
+    assert all(member._unusable_reason for member in pool.group._members)
     with pytest.raises(RuntimeError, match="left mid-update"):
-        pool._group._open_update()
+        pool.group._open_update()
     assert str(failure.value).index(servers[1].url) < str(failure.value).index(servers[0].url)
 
 
@@ -191,7 +208,7 @@ def test_a_pause_that_fails_on_one_server_resumes_the_rest_and_leaves_the_sync_r
 
     assert ring.chunks == [], "a chunk was declared with a server that never paused"
     assert not any(server.paused for server in servers[:2]), "a server that paused stayed paused"
-    assert all(member._unusable_reason is None for member in pool._group._members)
+    assert all(member._unusable_reason is None for member in pool.group._members)
     servers[2].status.clear()
     pool.update_named_param("w", torch.zeros(8, dtype=torch.float32))
     pool.finish_weight_update()
@@ -234,7 +251,7 @@ def test_a_group_that_stays_stale_after_its_one_re_form_raises_with_every_server
         def lost() -> None:
             raise GroupMembershipLost("restarted")
 
-        for member in pool._group._members:
+        for member in pool.group._members:
             monkeypatch.setattr(member, "verify_engine_identity", lost)
     pool.update_named_param("w", torch.zeros(8, dtype=torch.float32))
 
@@ -259,7 +276,7 @@ def test_a_re_form_that_fails_names_the_lost_group_on_the_next_sync(rig, engine)
         pool.finish_weight_update()
 
     with pytest.raises(RuntimeError, match="lost in a failed re-form"):
-        pool._group._open_update()
+        pool.group._open_update()
 
 
 @pytest.mark.parametrize("engine", _ENGINES)
@@ -319,7 +336,7 @@ def test_a_pipeline_parallel_sglang_server_is_refused_in_a_group_and_not_per_ser
     with pytest.raises(RuntimeError, match=r"--pp-size 2.*rollout_sync_topology: per_server"):
         pool.init_communicator("cpu")
 
-    assert SGLangWeightSyncClient(base_url=servers[1].url).fetch_engine_world_size() == 1
+    assert SGLangWeightSyncClient(base_url=servers[1].url).require_engine_world_size() == 1
 
 
 def test_the_group_leader_is_the_first_server_of_the_lowest_node(rig, monkeypatch):
@@ -327,8 +344,152 @@ def test_the_group_leader_is_the_first_server_of_the_lowest_node(rig, monkeypatc
     pool, servers, _ = rig("sglang", [1, 1], configs=[{"node": "z"}, {"node": "a"}])
     pool.init_communicator("cpu")
 
-    assert isinstance(pool._group, WeightSyncGroup)
-    assert pool._group.leader.base_url == servers[1].url
+    assert isinstance(pool.group, WeightSyncGroup)
+    assert pool.group.leader.base_url == servers[1].url
+
+
+def _set_world(engine, server, world):
+    if engine == "sglang":
+        server.tp_size = world
+    else:
+        server.world_size = world
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_server_that_restarts_with_another_layout_re_forms_on_its_new_block(rig, engine):
+    """The re-form reads every layout again: a stale block would overlap the next server's ranks or leave a hole."""
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    _restart(engine, servers[0])
+    _set_world(engine, servers[0], 3)
+
+    _push(pool, 2)
+
+    bodies = [_join_body(engine, server) for server in servers]
+    assert {body["world_size"] for body in bodies} == {1 + 3 + 1}
+    ranks = sorted(
+        rank
+        for body, size in zip(bodies, (3, 1), strict=True)
+        for rank in range(body["rank_offset"], body["rank_offset"] + size)
+    )
+    assert ranks == [1, 2, 3, 4], f"ranks {ranks} collide or leave a hole"
+    assert pool.group.rank_blocks == [(1, 3), (4, 1)]
+
+
+def test_a_vllm_server_with_no_launch_id_refuses_group_formation_before_any_join(rig):
+    pool, servers, _ = rig("vllm", [1, 1])
+    servers[1].instance_id = None
+
+    with pytest.raises(RuntimeError, match="reports no launch id"):
+        pool.init_communicator("cpu")
+
+    assert all(server.count(f"POST {_JOIN['vllm']}") == 0 for server in servers)
+
+
+def test_a_vllm_server_whose_report_cannot_be_read_refuses_group_formation_before_any_join(rig):
+    pool, servers, _ = rig("vllm", [1, 1])
+    servers[1].instance_id = "launch-0"
+    servers[1].status["/server_info"] = 500
+
+    with pytest.raises(RuntimeError, match="read its launch"):
+        pool.init_communicator("cpu")
+
+    assert all(server.count(f"POST {_JOIN['vllm']}") == 0 for server in servers)
+
+
+def test_local_and_remote_servers_share_one_address_only_where_group_host_names_it(rig, monkeypatch):
+    locality = iter([True, False])
+    monkeypatch.setattr("halo.weight_sync.group.is_local_address", lambda host: next(locality, True))
+    pool, servers, _ = rig("sglang", [1, 1])
+
+    with pytest.raises(RuntimeError, match=r"run on this host and the rest on others.*group_host"):
+        pool.init_communicator("cpu")
+
+    assert all(server.count(f"POST {_JOIN['sglang']}") == 0 for server in servers)
+    locality = iter([True, False])
+    pool, servers, _ = rig("sglang", [1, 1], configs=[{"group_host": "127.0.0.1"}] * 2)
+    pool.init_communicator("cpu")
+    assert pool.group is not None
+
+
+def test_a_join_clears_the_group_a_dead_trainer_left_under_either_topology_s_name():
+    server = FakeSGLangServer()
+    try:
+        client = SGLangWeightSyncClient(base_url=server.url)
+        per_server_name = client.group_name
+        server.groups = {per_server_name, "weight_update_group_g1"}
+
+        client.request_engine_join("127.0.0.1", 1, 2, 1, "weight_update_group_g1").wait(timeout=10)
+
+        assert server.groups == {"weight_update_group_g1"}, f"a dead trainer's group leaked: {server.groups}"
+    finally:
+        server.close()
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_closing_a_group_releases_each_servers_remote_half_once(rig, engine):
+    route = {"sglang": "/destroy_weights_update_group", "vllm": "/shutdown_weight_transfer_engine"}[engine]
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    before = [server.count(f"POST {route}") for server in servers]
+
+    pool.close_communicator()
+
+    assert [server.count(f"POST {route}") - base for server, base in zip(servers, before, strict=True)] == [1, 1]
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_group_whose_formation_fails_is_closed_and_the_pool_can_form_it_again(rig, engine):
+    pool, servers, ring = rig(engine, [1, 1])
+    servers[1].status[_JOIN[engine]] = 500
+
+    with pytest.raises(RuntimeError, match=r"failed to form.*failed to join"):
+        pool.init_communicator("cpu")
+
+    assert pool.group is None
+    assert ring.released >= 1, "the trainer's half of the half-built group was never released"
+    if engine == "sglang":
+        assert all(not server.groups for server in servers), "an engine kept its half of the failed group"
+    else:
+        assert all(server.count("POST /shutdown_weight_transfer_engine") >= 1 for server in servers)
+    servers[1].status.clear()
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    assert ring.chunks == [["w0", "w1"]]
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_chunk_flush_that_fails_drops_the_buffer_and_leaves_the_pool_abortable(rig, engine, monkeypatch):
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _fail_declare(engine, servers[1])
+
+    with pytest.raises(RuntimeError, match="failed mid-stream"):
+        _push(pool)
+
+    assert pool.group.buffered_bytes == 0 and not pool.group.drain_param_buffer(), "the failed sync kept its buffer"
+    pool.abort_weight_update()
+    assert pool._buffered_bytes == 0
+
+
+def test_an_incomplete_co_load_group_at_the_tail_fails_the_group_sync_and_the_scope_reaches_the_group(rig):
+    partner = "model.layers.0.self_attn.kv_a_proj_with_mqa"
+    scoped = declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, [partner])
+    pool, _, ring = rig("sglang", [1, 1])
+    pool.scope_co_load_groups([partner])
+    pool.init_communicator("cpu")
+    assert pool.group._co_load_groups == scoped, "a scope set before formation never reached the group"
+    pool.scope_co_load_groups([])
+    assert pool.group._co_load_groups == declared_co_load_groups(SGLangWeightSyncClient.CO_LOADED_PARAM_GROUPS, [])
+
+    pool.scope_co_load_groups(["model.layers.0.self_attn.q_a_proj", partner])
+    pool.update_named_param("model.layers.0.self_attn.q_a_proj.weight", torch.zeros(8))
+    with pytest.raises(RuntimeError, match="co-loaded parameters missing their partners"):
+        pool.finish_weight_update()
+
+    assert ring.chunks == []
 
 
 if __name__ == "__main__":

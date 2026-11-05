@@ -54,6 +54,7 @@ def host(monkeypatch):
             rollout_server_configs=None,
             rollout_connection_timeout=1.0,
             rollout_group_port=51216,
+            rollout_sync_topology="per_server",
         ),
     )
     AsyncRolloutMixin._init_weight_sync_client(host)

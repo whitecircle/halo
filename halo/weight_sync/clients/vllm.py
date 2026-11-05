@@ -17,7 +17,6 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    GroupMembershipLost,
     ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
@@ -50,6 +49,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     BACKEND_NAME = "vLLM"
     ENGINE_RELEASE = "vLLM 0.32.0"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
+    REPORTS_INSTANCE_ID = True
     PAUSE_ENDPOINT = "/pause"
     # mode=keep resumes in-flight generations under the new weights (the staleness the IS ratio corrects);
     # vLLM's default abort returns each as a fragment with an ordinary stop reason.
@@ -106,12 +106,15 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         ).json()
         env, config = info.get("vllm_env", {}), info.get("vllm_config")
         config = config if isinstance(config, dict) else {}
+        model = config.get("model_config", {})
         return ServerFlags(
             toolkit_image=bool(env.get(_IDENTITY_KEY)),
             moe_backend=config.get("kernel_config", {}).get("moe_backend"),
             reasoning_parser=config.get("structured_outputs_config", {}).get("reasoning_parser"),
             strict_tool_calling=env.get(_STRICT_TOOL_CALLING_KEY),
             captures_routing=config.get("aux_output_config", {}).get("enable_return_routed_experts"),
+            dtype=model.get("dtype"),
+            quantization=(model["quantization"] or "") if "quantization" in model else None,
             instance_id=config.get("instance_id"),
         )
 
@@ -158,22 +161,25 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         )
         return not (reply.status_code == 400 and "--tool-call-parser" in reply.text)
 
-    def fetch_engine_world_size(self) -> int:
+    def require_engine_world_size(self) -> int:
         # An engine off this wire, off this image, paused or generation-wedged is reported before the group forms.
         self._check_server_version()
         try:
             flags = self.read_server_flags()
         except (requests.exceptions.RequestException, ValueError) as e:
-            # As in the preflights, a report that cannot be read refuses nothing.
+            # As in the preflights, a report that cannot be read refuses nothing; a group needs the launch id, though.
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
         else:
             self._require_toolkit_image(flags)
             self._group_instance = flags.instance_id
         self.probe_generation()
+        return self.get_engine_world_size()
+
+    def get_engine_world_size(self) -> int:
         return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
 
     def request_engine_join(
-        self, master_address: str, port: int, world_size: int, rank_offset: int = 1, group_name: str | None = None
+        self, master_address: str, port: int, world_size: int, rank_offset: int, group_name: str | None
     ) -> AsyncCall:
         """The engine keeps one group, so ``group_name`` has nothing to name."""
         # Told before the store is built, as the master blocks until every worker joined.
@@ -215,29 +221,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._unique_id_store: UniqueIdStore | None = None
         # Created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
-        # The launch this client's group formed with, ``None`` when unread.
-        self._group_instance: str | None = None
 
     def require_transport(self) -> None:
         self._require_communicator()
-
-    def _start_engine_update(self) -> None:
-        # A restarted engine takes the pause and the session, which unloads its model, and only the first chunk then
-        # finds no group. Refused before either, so the pool's reconnect replays this sync over a new group.
-        self.verify_engine_identity()
-        super()._start_engine_update()
-
-    def verify_engine_identity(self) -> None:
-        if self._group_instance is not None:
-            instance = self.read_server_flags().instance_id
-            if instance != self._group_instance:
-                raise GroupMembershipLost(
-                    f"vLLM server {self.base_url} restarted after this client's group formed (instance "
-                    f"{self._group_instance}, now {instance}), so that group is gone."
-                )
-
-    def adopt_engine_identity(self) -> None:
-        self._group_instance = self.read_server_flags().instance_id
 
     def destroy_remote_group(self) -> None:
         try:
@@ -282,8 +268,8 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._raise_if_server_failed(error, declared)
         raise error
 
-    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        self._transmit_chunk(tail, final=True)
+    def release_send_buffers(self) -> None:
+        """A packed broadcast stages nothing between syncs."""
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

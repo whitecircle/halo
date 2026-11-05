@@ -67,7 +67,8 @@ class RingSGLangClient(SGLangWeightSyncClient):
 
     def _release_transport(self, *, at_exit: bool) -> None:
         self.ring.released += 1
-        self.destroy_remote_group()
+        if not self.group_releases_remote_half:
+            self.destroy_remote_group()
 
 
 class RingVLLMClient(VLLMWeightSyncClient):

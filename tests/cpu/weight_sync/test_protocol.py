@@ -535,10 +535,10 @@ def test_sglang_replicas_are_refused_while_attention_dp_sizes_the_group_off_its_
     server.tp_size = 4
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
-        assert client.fetch_engine_world_size() == 4
+        assert client.require_engine_world_size() == 4
         server.dp_size = 2
         with pytest.raises(RuntimeError, match="plain --dp-size 2 server") as refused:
-            client.fetch_engine_world_size()
+            client.require_engine_world_size()
     finally:
         server.close()
     assert "--attn-dp-size" in str(refused.value) and "--enable-dp-attention" not in str(refused.value)
@@ -553,7 +553,7 @@ def test_a_paused_sglang_server_is_refused_with_the_route_that_lifts_it(monkeypa
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         with pytest.raises(RuntimeError, match="paused or wedged") as refused:
-            client.fetch_engine_world_size()
+            client.require_engine_world_size()
     finally:
         server.close()
     assert "/continue_generation" in str(refused.value) and "RESTARTED" in str(refused.value)
@@ -579,10 +579,10 @@ def test_a_join_clears_a_dead_trainers_open_session_on_sglang(monkeypatch):
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         server.session_open = True
-        call = client.request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2, 1, None)
         call.join(5.0)
         assert server.session_open is False
-        call = client.request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2, 1, None)
         call.join(5.0)
         assert server.count("POST /end_weight_update") == 2
     finally:

@@ -1,6 +1,6 @@
 """One NCCL group across several rollout servers: the trainer is rank 0, each server's workers a contiguous block of
-ranks, and every chunk is broadcast once. The first server's client owns the transport and the chunk buffer; every
-server's client keeps its own pause, session and declare RPCs."""
+ranks, and every chunk is broadcast once. The first server's client owns the transport; every server's client keeps
+its own pause, session and declare RPCs."""
 
 import atexit
 import itertools
@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
+from operator import methodcaller
 from typing import NoReturn
 
 import torch
@@ -22,9 +23,15 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
 )
 from halo.weight_sync.clients.server_calls import AsyncCall, wait_for_calls
-from halo.weight_sync.group_layout import reject_split_nodes, resolve_group_layout
+from halo.weight_sync.group_layout import (
+    reject_mixed_localities,
+    reject_pipeline_stages,
+    reject_split_nodes,
+    resolve_group_layout,
+)
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import is_local_address, open_group_rendezvous
+from halo.weight_sync.update_stream import UpdateStream
 
 logger = logging.getLogger(__name__)
 
@@ -32,9 +39,9 @@ logger = logging.getLogger(__name__)
 _generations = itertools.count(1)
 
 
-class WeightSyncGroup:
-    """The weight-sync clients of several servers behind one client's interface. Until the first chunk is declared an
-    update can be cancelled or replayed over a re-formed group; from then on a failure leaves every server paused and
+class WeightSyncGroup(UpdateStream):
+    """The weight-sync clients of several servers behind one update stream. Until the first chunk is declared an update
+    can be cancelled or replayed over a re-formed group; from then on a failure leaves every server paused and
     unusable, as parked receives cannot be freed from the trainer."""
 
     def __init__(
@@ -46,7 +53,12 @@ class WeightSyncGroup:
         group_host: str | None,
     ):
         """``members`` and ``nodes`` are in config order; formation sorts both by node."""
+        self.BACKEND_NAME = members[0].BACKEND_NAME
+        self.CO_LOADED_PARAM_GROUPS = members[0].CO_LOADED_PARAM_GROUPS
+        super().__init__()
         self._members = list(members)
+        for member in self._members:
+            member.group_releases_remote_half = True
         self._nodes = list(nodes)
         self._group_port = group_port
         self._group_host = group_host
@@ -54,9 +66,6 @@ class WeightSyncGroup:
         self._offsets: list[int] = []
         self._engine_worlds: list[int] = []
         self._world_size = 0
-        self._chunks_sent = 0
-        self._update_open = False
-        self._unusable_reason: str | None = None
 
     @property
     def world_size(self) -> int:
@@ -75,80 +84,74 @@ class WeightSyncGroup:
 
     @property
     def leader(self) -> WeightSyncClientBase:
-        """The client that owns the transport and the chunk buffer."""
+        """The client that owns the transport."""
         return self._members[0]
 
     def init_communicator(self, device: torch.device | str | int = 0) -> None:
         """Form one group over every server, the trainer's half on ``device``; any failure leaves nothing held."""
         sync_device = resolve_sync_device(device)
-        worlds = self._require_all(self._run_on_members(self._read_engine_layout), "read its layout")
-        reject_split_nodes(self._nodes, [member.host for member in self._members], self._urls)
-        layout = resolve_group_layout(self._nodes, worlds)
-        self._members = [self._members[i] for i in layout.order]
-        self._offsets = [layout.rank_offsets[i] for i in layout.order]
-        self._engine_worlds = [worlds[i] for i in layout.order]
-        self._world_size = layout.world_size
+        self._resolve_layout(methodcaller("require_engine_world_size"))
         self.leader.sync_device = sync_device
         self._form()
         atexit.register(self.close_communicator, at_exit=True)
         logger.info(
-            f"Weight-sync group of {len(self._members)} {self.leader.BACKEND_NAME} servers formed: "
+            f"Weight-sync group of {len(self._members)} {self.BACKEND_NAME} servers formed: "
             + ", ".join(
                 f"{url} ranks {offset}-{offset + world - 1}"
                 for url, offset, world in zip(self._urls, self._offsets, self._engine_worlds, strict=True)
             )
         )
 
-    def flush_chunk(self) -> None:
-        """Send what is buffered as one chunk into the open update; an incomplete co-load group stays buffered."""
-        chunk, held = self.leader.pending_chunk()
-        if not chunk:
-            return
-        self._open_update()
-        self._transmit_chunk(chunk)
-        self.leader.commit_sent_chunk(held)
-
-    def finish_weight_update(self) -> None:
-        """Send the tail chunk, close every server's update and resume it; no-op if nothing was buffered."""
-        if not self.leader.has_buffered_params and not self._update_open:
-            return
-        self.leader.require_no_held_params()
-        self._open_update()
-        self._close_update(self.leader.drain_param_buffer())
-        self._chunks_sent = 0
-
     def abort_weight_update(self) -> None:
-        """Drop the buffer and close an update the sync cannot finish; never raises. Once a chunk went out the servers
-        hold neither policy, so they stay paused."""
-        self.leader.drain_param_buffer()
+        self.drain_param_buffer()
         if not self._update_open:
             return
         self._update_open = False
         if self._chunks_sent:
-            self._mark_all_unusable(self._chunks_sent, "the sync was interrupted between chunks")
+            self._mark_unusable("the sync was interrupted between chunks")
             return
         self._run_on_members(lambda member: member.cancel_engine_update("after an interrupted sync"))
 
     def close_communicator(self, *, at_exit: bool = False) -> None:
-        """Close an interrupted update, lift every pause and release both halves of the group."""
         self.abort_weight_update()
         halves = self._destroy_remote_halves()
         self._run_on_members(lambda member: member.close_communicator(at_exit=at_exit))
         self._join_all(halves)
         atexit.unregister(self.close_communicator)
 
+    def resume_engine(self) -> None:
+        self._run_on_members(lambda member: member.resume_engine())
+
+    def require_resumed(self) -> None:
+        self._require_all(self._run_on_members(lambda member: member.require_resumed()), "resume")
+
     @property
     def _urls(self) -> list[str]:
         return [member.base_url for member in self._members]
 
-    def _read_engine_layout(self, member: WeightSyncClientBase) -> int:
-        world = member.fetch_engine_world_size()
-        member.reject_group_membership()
-        return world
+    def _resolve_layout(self, read_world: Callable[[WeightSyncClientBase], int]) -> None:
+        """Read every server's layout and give each a block of ranks, node by node. Re-run on a re-form, as a restarted
+        server may come back with another layout."""
+        readings = self._require_all(
+            self._run_on_members(lambda member: (read_world(member), member.get_pipeline_size())), "read its layout"
+        )
+        worlds = [world for world, _ in readings]
+        reject_pipeline_stages(self.BACKEND_NAME, self._urls, [stages for _, stages in readings])
+        reject_split_nodes(self._nodes, [member.host for member in self._members], self._urls)
+        reject_mixed_localities(
+            self._urls, [is_local_address(member.host) for member in self._members], self._group_host
+        )
+        layout = resolve_group_layout(self._nodes, worlds)
+        self._members = [self._members[i] for i in layout.order]
+        self._nodes = [self._nodes[i] for i in layout.order]
+        self._offsets = [layout.rank_offsets[i] for i in layout.order]
+        self._engine_worlds = [worlds[i] for i in layout.order]
+        self._world_size = layout.world_size
 
     def _form(self) -> None:
         """Rendezvous, every server's join and the trainer's half run together, as each blocks until the others
         arrive."""
+        self._require_all(self._run_on_members(lambda member: member.adopt_engine_identity()), "read its launch")
         self._group_name = f"weight_update_group_g{next(_generations)}"
         leader = self.leader
         # A loopback address must be refused when any server is remote, and a route read toward a remote one.
@@ -212,14 +215,9 @@ class WeightSyncGroup:
         for call in calls:
             call.join(CLEANUP_TIMEOUT_S)
 
-    def _open_update(self) -> None:
+    def _start_engine_update(self) -> None:
         """Probe every server, then quiesce them together. A server that restarted since the group formed is found
         before any chunk is declared, so the group re-forms once with every server paused and the update replays."""
-        if self._update_open:
-            return
-        if self._unusable_reason is not None:
-            raise RuntimeError(self._unusable_reason)
-        self._chunks_sent = 0
         self.leader.require_transport()
         stale = self._stale_members(lambda member: member.verify_engine_identity())
         self._quiesce_members()
@@ -238,11 +236,10 @@ class WeightSyncGroup:
             self._run_on_members(lambda member: member.cancel_engine_update("after a failed group probe"))
             if not self.leader.has_transport:
                 self._unusable_reason = (
-                    f"The {self.leader.BACKEND_NAME} weight-sync group was lost in a failed re-form. RESTART the "
+                    f"The {self.BACKEND_NAME} weight-sync group was lost in a failed re-form. RESTART the "
                     f"servers: {', '.join(self._urls)}."
                 )
             raise
-        self._update_open = True
 
     def _stale_members(self, probe: Callable[[WeightSyncClientBase], None]) -> list[tuple[str, Exception]]:
         """``(url, error)`` of each server that lost the group; any other failure raises, naming its server."""
@@ -284,18 +281,14 @@ class WeightSyncGroup:
         halves = self._destroy_remote_halves()
         self.leader.discard_transport(None)
         self._join_all(halves)
-        self._require_all(
-            self._run_on_members(lambda member: member.adopt_engine_identity()), "read its launch after the restart"
-        )
+        self._resolve_layout(methodcaller("get_engine_world_size"))
         self._form()
         self._require_all(self._run_on_members(lambda member: member.open_update_session()), "reopen its session")
 
-    def _transmit_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool = False) -> None:
+    def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """Declare ``chunk`` on every server and broadcast it once. From the first declare on a failure is global. The
         send runs on its own thread, as a server that refused its declare would otherwise leave the trainer blocked in
         a broadcast that cannot finish until its deadline."""
-        if not chunk:
-            return
         self.leader.prepare_chunk_send(chunk)
         declared: list[AsyncCall] = []
         try:
@@ -305,7 +298,6 @@ class WeightSyncGroup:
             wait_for_calls([*declared, sent], timeout=CHUNK_SYNC_TIMEOUT_S)
         except BaseException as e:
             self._fail_group(e, declared)
-        self._chunks_sent += 1
 
     def _send_on_leader(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
         device = self.leader.sync_device
@@ -325,48 +317,33 @@ class WeightSyncGroup:
         ]
         cause = next((call.error for call in declared if call.error is not None), error)
         rest = [url for url in self._urls if url not in failed]
-        self._mark_all_unusable(self._chunks_sent + 1, f"a chunk failed: {type(cause).__name__}: {cause}")
+        self._chunks_sent += 1
+        self._mark_unusable(f"a chunk failed: {type(cause).__name__}: {cause}")
         raise RuntimeError(
-            f"{self.leader.BACKEND_NAME} weight sync to {len(self._members)} servers failed mid-stream "
+            f"{self.BACKEND_NAME} weight sync to {len(self._members)} servers failed mid-stream "
             f"({type(cause).__name__}: {cause}). One broken group leaves every server holding "
             f"{self.leader.INTERRUPTED_UPDATE_STATE}, so all are left PAUSED and refuse further syncs. RESTART the "
-            f"{self.leader.BACKEND_NAME} servers: {', '.join([*failed, *rest])}."
+            f"{self.BACKEND_NAME} servers: {', '.join([*failed, *rest])}."
         ) from error
 
-    def _mark_all_unusable(self, chunks_sent: int, why: str) -> None:
+    def _mark_unusable(self, why: str = "a sync failed after its first chunk") -> None:
+        if self._unusable_reason is not None:
+            return
         logger.error(f"Weight-sync group of {len(self._members)} servers is unusable: {why}")
         self._update_open = False
         self._unusable_reason = (
-            f"The {self.leader.BACKEND_NAME} weight-sync group was left mid-update ({why}), so every server is left "
+            f"The {self.BACKEND_NAME} weight-sync group was left mid-update ({why}), so every server is left "
             f"PAUSED. RESTART the servers: {', '.join(self._urls)}."
         )
         for member in self._members:
-            member.mark_unusable_after(chunks_sent)
+            member.mark_unusable_after(self._chunks_sent)
 
-    def _close_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send the final chunk, close every session and resume every server, whatever the tail does."""
-        snapshot_error: Exception | None = None
-        try:
-            self.leader.complete_snapshots()
-        except Exception as e:
-            # Only the close can end the open sessions. The tail goes, as its copies may not have landed.
-            logger.error(f"Weight-sync snapshots did not complete: {e}")
-            snapshot_error, tail = e, []
-            if self._chunks_sent:
-                self._mark_all_unusable(self._chunks_sent, "the tail's snapshots did not complete")
-        try:
-            self._transmit_chunk(tail, final=True)
-            self.leader.release_send_buffers()
-            self._require_all(
-                self._run_on_members(
-                    lambda member: member.close_engine_update(flushed=bool(tail), chunks_sent=self._chunks_sent)
-                ),
-                "close its update",
-            )
-        finally:
-            self._update_open = False
-        if snapshot_error is not None:
-            raise snapshot_error
+    def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
+        self._transmit_chunk(tail, final=True)
+        self.leader.release_send_buffers()
+        self._require_all(
+            self._run_on_members(lambda member: member.end_engine_update(flushed=bool(tail))), "close its update"
+        )
 
     def _run_on_members(
         self, step: Callable[[WeightSyncClientBase], object], members: Sequence[WeightSyncClientBase] | None = None

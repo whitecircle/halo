@@ -5,10 +5,13 @@ adjacent: the ranks over every server are exactly ``1 .. world_size - 1`` with n
 import pytest
 
 from halo.weight_sync.group_layout import (
+    reject_mixed_localities,
+    reject_pipeline_stages,
     reject_split_nodes,
     resolve_group_host,
     resolve_group_layout,
     resolve_node_label,
+    validate_sync_topology,
 )
 
 # Engine worlds a server reports: TP1, TP2, TP4, an attn-dp SGLang server spanning 8 GPUs, a vLLM DP2 x TP2 x PP2.
@@ -67,17 +70,40 @@ def test_the_node_label_defaults_to_the_url_host():
 
 
 def test_one_group_takes_one_address_and_no_per_server_port():
-    assert (
-        resolve_group_host(
-            [{"url": "u"}, {"url": "v", "group_host": "10.0.0.9"}, {"url": "w", "group_host": "10.0.0.9"}]
-        )
-        == "10.0.0.9"
-    )
+    one_host = [{"url": "u"}, {"url": "v", "group_host": "10.0.0.9"}, {"url": "w", "group_host": "10.0.0.9"}]
+    validate_sync_topology("single_group", one_host)
+    assert resolve_group_host(one_host) == "10.0.0.9"
     assert resolve_group_host([{"url": "u"}]) is None
     with pytest.raises(ValueError, match="Set rollout_group_port once, or use rollout_sync_topology: per_server"):
-        resolve_group_host([{"url": "u", "group_port": 1}])
+        validate_sync_topology("single_group", [{"url": "u", "group_port": 1}])
     with pytest.raises(ValueError, match="one group_host, or rollout_sync_topology: per_server"):
-        resolve_group_host([{"url": "u", "group_host": "10.0.0.1"}, {"url": "v", "group_host": "10.0.0.2"}])
+        validate_sync_topology(
+            "single_group", [{"url": "u", "group_host": "10.0.0.1"}, {"url": "v", "group_host": "10.0.0.2"}]
+        )
+
+
+def test_the_one_validator_refuses_an_unknown_topology_and_a_node_label_per_server_cannot_use():
+    with pytest.raises(ValueError, match="Unknown rollout_sync_topology 'ring'"):
+        validate_sync_topology("ring", [{"url": "u"}])
+    with pytest.raises(ValueError, match="rollout_sync_topology: single_group"):
+        validate_sync_topology("per_server", [{"url": "u", "node": "a"}])
+    validate_sync_topology("per_server", [{"url": "u", "group_port": 1, "group_host": "h"}])
+
+
+def test_local_and_remote_servers_share_one_address_only_where_the_user_named_it():
+    urls = ["http://a:1", "http://b:1"]
+    for found in ([True, True], [False, False], [True, False]):
+        reject_mixed_localities(urls, found, "10.0.0.1")
+    for found in ([True, True], [False, False]):
+        reject_mixed_localities(urls, found, None)
+    with pytest.raises(ValueError, match=r"http://a:1.*Set group_host"):
+        reject_mixed_localities(urls, [True, False], None)
+
+
+def test_a_pipeline_parallel_server_cannot_take_a_rank_block():
+    reject_pipeline_stages("SGLang", ["u", "v"], [1, 1])
+    with pytest.raises(RuntimeError, match=r"server v runs --pp-size 2"):
+        reject_pipeline_stages("SGLang", ["u", "v"], [1, 2])
 
 
 if __name__ == "__main__":

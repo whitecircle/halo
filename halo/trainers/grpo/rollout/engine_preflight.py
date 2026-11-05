@@ -32,6 +32,8 @@ _PROBE_RETRY = Retry(
     allowed_methods=["POST", "GET"],
 )
 _PROBE_TIMEOUT_S = 60.0
+# A launch flag the servers of one group must agree on: every one but the image check, and the id each launch has alone.
+_GROUP_UNIFORM_FLAGS = tuple(name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id"))
 
 # The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
 # model is sure of the token but reaches several nats at low-probability ones (Gemma 4 on vLLM, SGLang and the
@@ -189,10 +191,10 @@ def _verify_server_flags_on_rank0(
 
 
 def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls: list[str]) -> None:
-    """One group broadcasts one set of tensors to every server, so servers that disagree on the model or the MoE backend
-    would each load it differently behind a 200."""
-    served: dict[str, str] = {}
-    backends: dict[str, str] = {}
+    """One group broadcasts one set of tensors to every server, so servers that disagree on the model or on a launch
+    flag (dtype, quantization, MoE backend, parsers) would each load or serve it differently behind a 200. A flag a
+    server does not report is not compared."""
+    readings: dict[str, dict[str, object]] = {"served model": {}}
     for url in urls:
         model = _probe_server(client_cls, url, client_cls.served_model_id, None, "read the served model of")
         flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
@@ -202,10 +204,11 @@ def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls:
                 f"rollout_sync_topology: single_group cannot tell whether it loads what the group broadcasts. "
                 f"Start every server before the trainer, or set rollout_sync_topology: per_server."
             )
-        served[url] = model
-        if flags.moe_backend is not None:
-            backends[url] = flags.moe_backend
-    for what, found in (("served model", served), ("MoE backend", backends)):
+        readings["served model"][url] = model
+        for name in _GROUP_UNIFORM_FLAGS:
+            if (value := getattr(flags, name)) is not None:
+                readings.setdefault(name, {})[url] = value
+    for what, found in readings.items():
         if len(set(found.values())) > 1:
             raise ValueError(
                 f"Rollout servers disagree on their {what} ({found}), but rollout_sync_topology: single_group "

@@ -53,6 +53,9 @@ class FakeEngineServer:
         self.moe_backend = "triton"
         self.reasoning_parser = ""
         self.tool_call_parser = "family"
+        self.dtype = "bfloat16"
+        # Empty for a server that runs unquantized.
+        self.quantization = ""
         # The prompt ids a chat completion's reply carries.
         self.render_prompt = lambda body: [1, 2, 3]
         self.captures_routing = False
@@ -215,6 +218,7 @@ class FakeVLLMServer(FakeEngineServer):
                 "kernel_config": {"moe_backend": self.moe_backend},
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
+                "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
             }
             return 200, {"vllm_env": env, "vllm_config": config}
         if (method, path) == ("POST", "/v1/chat/completions"):
@@ -305,6 +309,8 @@ class FakeSGLangServer(FakeEngineServer):
                 "tool_call_parser": self.tool_call_parser or None,
                 "enable_return_routed_experts": self.captures_routing,
                 "enable_torch_compile": self.torch_compile,
+                "dtype": self.dtype,
+                "quantization": self.quantization or None,
             }
             if self.toolkit_image:
                 info["halo_patches"] = True

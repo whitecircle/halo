@@ -35,7 +35,7 @@ from halo.environments.rollout_config import (
 from halo.inference.endpoints import DEFAULT_LOCAL_SERVER_URL
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from halo.runtime.ranks import is_global_main_process
-from halo.weight_sync.group_layout import SyncTopology, resolve_group_host
+from halo.weight_sync.group_layout import SyncTopology, validate_sync_topology
 
 logger = logging.getLogger(__name__)
 
@@ -598,13 +598,7 @@ class AsyncRolloutConfig(
                 require_text(where, group_host=server["group_host"])
             if "node" in server:
                 require_text(where, node=server["node"])
-                if self.rollout_sync_topology != "single_group":
-                    raise ValueError(
-                        f"{where} sets node, which only orders the servers of one group. Remove it, or set "
-                        f"rollout_sync_topology: single_group."
-                    )
-        if self.rollout_sync_topology == "single_group":
-            resolve_group_host(servers)
+        validate_sync_topology(self.rollout_sync_topology, servers)
         if servers and differs_from_default(self, "rollout_server_url"):
             raise ValueError(
                 f"{owner}: rollout_server_url={self.rollout_server_url!r} is set beside rollout_server_configs, whose "

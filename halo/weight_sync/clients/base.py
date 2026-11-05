@@ -6,7 +6,7 @@ import logging
 import socket
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Mapping
 from typing import Any, NamedTuple, NoReturn
 from urllib.parse import urlparse
 
@@ -15,16 +15,11 @@ import torch
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from halo.weight_sync.chunking import (
-    WEIGHT_SYNC_CHUNK_BYTES,
-    declared_co_load_groups,
-    resolve_sync_device,
-    snapshot_to_sync_device,
-    split_co_loaded,
-)
+from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.server_calls import AsyncCall, wait_for_calls
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
+from halo.weight_sync.update_stream import UpdateStream
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +29,8 @@ HTTP_PROBE_TIMEOUT_S = 10
 # A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
 GENERATION_PROBE_TIMEOUT_S = 60.0
 GROUP_FORMATION_TIMEOUT_S = 120
+# The trainer is rank 0.
+FIRST_ENGINE_RANK = 1
 # The close waits for the engine to finish applying the last chunk.
 SESSION_CLOSE_TIMEOUT_S = 600
 # Cleanup runs on a failing path, where a long block only delays the real raise.
@@ -70,6 +67,9 @@ class ServerFlags(NamedTuple):
     strict_tool_calling: bool | None = None
     captures_routing: bool | None = None
     torch_compile: bool | None = None
+    dtype: str | None = None
+    # Empty when the server runs unquantized.
+    quantization: str | None = None
     instance_id: str | None = None
 
 
@@ -86,13 +86,11 @@ def unservable_bailing_model_types(release: str) -> dict[str, str]:
     }
 
 
-class WeightSyncClientBase(ABC):
-    """One engine's weight-sync client. A fact declared by annotation alone has no default, so a client that
-    leaves one out fails by name where it is read."""
+class WeightSyncClientBase(UpdateStream, ABC):
+    """One engine's weight-sync client."""
 
     # The ``rollout_backend`` value the registry keys this client by.
     BACKEND_KEY: str
-    BACKEND_NAME: str
     LIVENESS_ROUTE: str = "/health"
     # The pinned server release every roster fact below describes.
     ENGINE_RELEASE: str
@@ -112,13 +110,17 @@ class WeightSyncClientBase(ABC):
     SESSION_REQUEST: Mapping[str, object] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
-    # Per-module parameter suffixes the engine's loader takes only together, so they ride one chunk.
-    CO_LOADED_PARAM_GROUPS: tuple[tuple[str, ...], ...] = ()
     # Families whose exported router balancing bias the engine's loader drops at serve time.
     DROPPED_BALANCING_BIAS_MODEL_TYPES: frozenset[str] = frozenset()
     # ``model_type`` → why the engine accepts a thinking budget for the family that it can never enforce.
     UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES: Mapping[str, str] = {}
     SUPPORTS_ENGINE_RESCORE = True
+    # The engine reports a launch id on /server_info, which tells a restart from a live group.
+    REPORTS_INSTANCE_ID = False
+    # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
+    PROBES_GROUP_MEMBERSHIP = False
+    # Route that flushes the engine's caches of the old weights where its final chunk carries no flag for it.
+    CACHE_FLUSH_ENDPOINT: str | None = None
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal.
     INTERRUPTED_UPDATE_STATE = "a model that is part old weights and part new"
     # The launch flags a preflight refusal names as the remedy.
@@ -142,6 +144,7 @@ class WeightSyncClientBase(ABC):
         *,
         retry_policy: Retry = _DEFAULT_RETRY,
     ):
+        super().__init__()
         self._session = requests.Session()
         adapter = HTTPAdapter(max_retries=retry_policy)
         self._session.mount("http://", adapter)
@@ -162,8 +165,6 @@ class WeightSyncClientBase(ABC):
         # A pool flushes on worker threads, where the current device is thread-local.
         self._sync_device: torch.device | None = None
         self._served_model_id: str | None = None
-        # Set once an interrupted sync left the engine unservable; every later sync is refused with it.
-        self._unusable_reason: str | None = None
         # The close or the exit hook must lift a quiesced engine.
         self._paused = False
         # An update session opened server-side (its reply possibly lost), which only the session close ends.
@@ -171,18 +172,24 @@ class WeightSyncClientBase(ABC):
         # The engine answered the open.
         self._update_session_confirmed = False
         self._transport: Any = None
-        self._reset_buffer_state()
+        # The launch this client's group formed with, ``None`` when unread.
+        self._group_instance: str | None = None
+        # Set by a group that releases the engine's half of its group itself, beside the trainer's.
+        self.group_releases_remote_half = False
         self._reset_transport_state()
         self.check_server(connection_timeout)
 
     @abstractmethod
-    def fetch_engine_world_size(self) -> int:
-        """Number of engine ranks that will join the group, read from the server; refuses an engine, image or state no
-        update could reach."""
+    def require_engine_world_size(self) -> int:
+        """Number of engine ranks that will join the group; refuses an engine, image or state no update could reach."""
+
+    @abstractmethod
+    def get_engine_world_size(self) -> int:
+        """Number of engine ranks that will join the group, read from the server; refuses a layout no rank can address."""
 
     @abstractmethod
     def request_engine_join(
-        self, master_address: str, port: int, world_size: int, rank_offset: int = 1, group_name: str | None = None
+        self, master_address: str, port: int, world_size: int, rank_offset: int, group_name: str | None
     ) -> AsyncCall:
         """Start the engine's request to join the group as ranks ``rank_offset`` onward, on a background thread.
         ``group_name`` names a group of several servers on an engine that keeps many (SGLang adopts it)."""
@@ -232,8 +239,12 @@ class WeightSyncClientBase(ABC):
         left in a state a later close can release."""
 
     @abstractmethod
-    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send ``tail`` (possibly empty) as the final chunk; the session close follows."""
+    def release_send_buffers(self) -> None:
+        """Release the staging the transport holds between syncs, which would pin the sync GPU."""
+
+    def get_pipeline_size(self) -> int:
+        """Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages collide."""
+        return 1
 
     @property
     def has_transport(self) -> bool:
@@ -247,20 +258,6 @@ class WeightSyncClientBase(ABC):
     @sync_device.setter
     def sync_device(self, device: torch.device | str | int) -> None:
         self._sync_device = resolve_sync_device(device)
-
-    @property
-    def buffered_bytes(self) -> int:
-        """Bytes buffered for the next chunk, members held for a co-load partner included."""
-        return self._buffered_bytes
-
-    @property
-    def has_buffered_params(self) -> bool:
-        return bool(self._param_buffer)
-
-    @property
-    def can_replay_sync(self) -> bool:
-        """False once a chunk is on the wire: the trainer keeps no copy, so a replay would send only the tail."""
-        return self._chunks_sent == 0
 
     def request(
         self, method: str, path: str, *, retry: bool, timeout: float, check: bool = True, **kwargs
@@ -398,7 +395,7 @@ class WeightSyncClientBase(ABC):
 
     def init_communicator(self, device: torch.device | str | int = 0) -> None:
         """Form the weight-transfer group: the trainer is rank 0, the engine's workers 1..N."""
-        world_size = self.fetch_engine_world_size() + 1
+        world_size = self.require_engine_world_size() + 1
         self._sync_device = resolve_sync_device(device)
         master_address, listener = open_group_rendezvous(
             engine=self.BACKEND_NAME,
@@ -416,7 +413,7 @@ class WeightSyncClientBase(ABC):
         )
         # Closed on exit unless the store took the listener over.
         with listener:
-            server_call = self.request_engine_join(master_address, master_port, world_size)
+            server_call = self.request_engine_join(master_address, master_port, world_size, FIRST_ENGINE_RANK, None)
             local_call: AsyncCall | None = None
             try:
                 # Both halves block until the other arrives, so they run concurrently and the first failure wins.
@@ -450,11 +447,8 @@ class WeightSyncClientBase(ABC):
             self._transport = formed.join(SERVER_ERROR_GRACE_S).result
         self._release_transport(at_exit=False)
         self._transport = None
+        self._group_instance = None
         self._reset_transport_state()
-
-    def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
-        """Narrow the co-load groups to the members the pushed model's modules declare."""
-        self._co_load_groups = declared_co_load_groups(self.CO_LOADED_PARAM_GROUPS, module_names)
 
     def update_named_param(self, name: str, weights: torch.Tensor):
         """Buffer a snapshot of one gathered param, sending the pending chunk first when it would overflow."""
@@ -467,61 +461,6 @@ class WeightSyncClientBase(ABC):
             flush=self.flush_chunk,
         )
         self.buffer_param(name, snapshot)
-
-    def buffer_param(self, name: str, snapshot: torch.Tensor):
-        """Buffer a snapshot by reference for the next chunk; a pool shares it across clients, read-only."""
-        self._param_buffer.append((name, snapshot))
-        self._buffered_bytes += snapshot.nbytes
-        if snapshot.is_cuda:
-            # Re-recorded per param on the copy's own stream, so the newest record covers every copy before it.
-            if self._snapshot_event is None:
-                self._snapshot_event = torch.cuda.Event()
-            self._snapshot_event.record(torch.cuda.current_stream(snapshot.device))
-
-    def pending_chunk(self) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
-        """``(chunk, held)``: what is buffered and ready to send, and the members of a co-load group still waiting for
-        a partner. The snapshots are complete on return, ahead of any quiesce, so a sticky CUDA error leaves the engine
-        serving."""
-        chunk, held = split_co_loaded(self._param_buffer, self._co_load_groups)
-        if chunk:
-            self.complete_snapshots()
-        return chunk, held
-
-    def commit_sent_chunk(self, held: list[tuple[str, torch.Tensor]]) -> None:
-        """Drop the sent chunk from the buffer, keeping ``held``; only once on the wire, as a replayable failed chunk
-        is re-sent by the reconnect path."""
-        self._param_buffer = held
-        self._buffered_bytes = sum(snapshot.nbytes for _, snapshot in held)
-
-    def require_no_held_params(self) -> None:
-        """A co-load group still incomplete at the tail never completes, and the engine drops a lone half silently."""
-        _, held = split_co_loaded(self._param_buffer, self._co_load_groups)
-        if held:
-            raise RuntimeError(
-                f"the weight sync ended with co-loaded parameters missing their partners: "
-                f"{[name for name, _ in held]}. The {self.BACKEND_NAME} loader discards a half that "
-                f"arrives on its own, so this update cannot be closed as complete."
-            )
-
-    def flush_chunk(self):
-        """Send what is buffered as one chunk into the open update; an incomplete co-load group stays buffered."""
-        chunk, held = self.pending_chunk()
-        if not chunk:
-            return
-        self._open_update()
-        self._transmit_chunk(chunk)
-        self.commit_sent_chunk(held)
-
-    def finish_weight_update(self) -> None:
-        """Send the tail chunk, close the update and resume the engine; no-op if nothing was buffered."""
-        if not self._param_buffer and not self._update_open:
-            return
-        self.require_no_held_params()
-        self._open_update()
-        self._close_update(self._param_buffer)
-        self.drain_param_buffer()  # only once the tail landed
-        # A later failure before the next open concerns an engine this sync finished with.
-        self._chunks_sent = 0
 
     def abort_weight_update(self):
         """Close an update the sync opened but cannot finish and drop the buffer; never raises. Once a chunk went
@@ -539,12 +478,6 @@ class WeightSyncClientBase(ABC):
         self._update_open = False
         self._mark_unusable()
 
-    def drain_param_buffer(self) -> list[tuple[str, torch.Tensor]]:
-        buffered = self._param_buffer
-        self._param_buffer = []
-        self._buffered_bytes = 0
-        return buffered
-
     def close_communicator(self, *, at_exit: bool = False) -> None:
         """Close an interrupted update, lift the pause and release the transport; ``at_exit`` is the exit hook's
         call. An engine an abort left unservable keeps its pause."""
@@ -561,15 +494,6 @@ class WeightSyncClientBase(ABC):
     def close_http_session(self) -> None:
         self._session.close()
 
-    def _reset_buffer_state(self) -> None:
-        self._param_buffer: list[tuple[str, torch.Tensor]] = []
-        self._buffered_bytes = 0
-        self._co_load_groups = self.CO_LOADED_PARAM_GROUPS
-        self._update_open = False
-        # Non-zero means the engine is partly rewritten.
-        self._chunks_sent = 0
-        self._snapshot_event: torch.cuda.Event | None = None
-
     def _served_model_cards(self) -> list[dict]:
         return list(self.request("GET", "/v1/models", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json().get("data", []))
 
@@ -577,22 +501,9 @@ class WeightSyncClientBase(ABC):
         """A single-shot POST on a background thread, for a route answered once the engine's collective returned."""
         return AsyncCall(name=path, fn=lambda: self.request("POST", path, retry=False, timeout=timeout, json=json))
 
-    def complete_snapshots(self) -> None:
-        """Wait on the newest copy's event; a device synchronize would also wait on every server's broadcasts."""
-        if self._snapshot_event is not None:
-            self._snapshot_event.synchronize()
-
-    def _open_update(self):
-        if self._update_open:
-            return
-        if self._unusable_reason is not None:
-            raise RuntimeError(self._unusable_reason)
-        # Before the engine is touched, so a failure to open leaves the sync replayable.
-        self._chunks_sent = 0
-        self._start_engine_update()
-        self._update_open = True
-
     def _start_engine_update(self) -> None:
+        # Before the pause and the session, which unload a restarted engine's model: its first chunk would find no group.
+        self.verify_engine_identity()
         self.require_transport()
         self.open_engine_update()
 
@@ -610,40 +521,54 @@ class WeightSyncClientBase(ABC):
         self.abandon_update_session()
         self._lift_pause(CLEANUP_TIMEOUT_S, context=context)
 
-    def close_engine_update(self, *, flushed: bool, chunks_sent: int) -> None:
-        """Close the session once its update landed and resume the engine. ``flushed`` says the final chunk carried the
-        engine's cache flush; ``chunks_sent`` is the sync's count, as a close that fails after any leaves the engine
-        paused. Raises if the close failed or the resume did, retried as after any sync."""
+    def end_engine_update(self, *, flushed: bool) -> None:
+        """End the session once its update landed. ``flushed`` says the final chunk carried the engine's cache flush;
+        raises if the close failed, as the update is then not complete."""
         try:
-            if not flushed:
-                self.flush_engine_cache()
+            if not flushed and self.CACHE_FLUSH_ENDPOINT is not None:
+                self.request("POST", self.CACHE_FLUSH_ENDPOINT, retry=True, timeout=POST_TIMEOUT_S)
             self._end_update_session()
-        except BaseException:
-            if chunks_sent:
-                self.mark_unusable_after(chunks_sent)
-            raise
         finally:
             self.abandon_update_session()
-            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
-        self._require_resumed()
 
-    def release_send_buffers(self) -> None:  # noqa: B027 — optional hook; an engine whose transport stages nothing between syncs holds none
-        """Release the staging the transport holds between syncs, which would pin the sync GPU."""
+    def adopt_engine_identity(self) -> None:
+        """Take the engine's current launch as the one its group forms with. Raises where an engine that reports launch
+        ids reports none, as a restart could then not be told from a live group."""
+        if not self.REPORTS_INSTANCE_ID:
+            return
+        instance = self.read_server_flags().instance_id
+        if instance is None:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} server {self.base_url} reports no launch id on /server_info, so a restart of "
+                f"it could not be told from a live weight-sync group. Serve from the toolkit's image: {self.IMAGE_REMEDY}"
+            )
+        self._group_instance = instance
 
-    def flush_engine_cache(self) -> None:  # noqa: B027 — optional hook; an engine whose final chunk carries the flush has none to send
-        """Flush the engine's caches of the old weights where its update has no flag for it on the final chunk."""
+    def verify_engine_identity(self) -> None:
+        """Raise :class:`GroupMembershipLost` when the engine is not the launch this client's group formed with; an
+        unread launch is not checked."""
+        if self._group_instance is None:
+            return
+        instance = self.read_server_flags().instance_id
+        if instance != self._group_instance:
+            raise GroupMembershipLost(
+                f"{self.BACKEND_NAME} server {self.base_url} restarted after this client's group formed (instance "
+                f"{self._group_instance}, now {instance}), so that group is gone."
+            )
 
-    def adopt_engine_identity(self) -> None:  # noqa: B027 — optional hook; an engine that reports no launch id has none to adopt
-        """Take the engine's current launch as the one its group forms with, after a restart."""
-
-    def verify_engine_identity(self) -> None:  # noqa: B027 — optional hook; an engine that reports no launch id has none to verify
-        """Raise :class:`GroupMembershipLost` when the engine is not the launch this client's group formed with."""
-
-    def verify_group_membership(self) -> None:  # noqa: B027 — optional hook; an engine that reports its restart through its launch id needs no probe
-        """Raise :class:`GroupMembershipLost` when the engine, in its open session, holds no such group."""
-
-    def reject_group_membership(self) -> None:  # noqa: B027 — optional hook; an engine whose ranks cannot collide refuses nothing
-        """Refuse an engine layout whose workers cannot take ranks in a group shared with other servers."""
+    def verify_group_membership(self) -> None:
+        """Raise :class:`GroupMembershipLost` when the engine, in its open session, holds no such group. An empty
+        declare is a no-op on an engine that holds the group and an error on one that does not, which a real declare
+        would turn into peers parked in a receive nobody can free."""
+        if not self.PROBES_GROUP_MEMBERSHIP:
+            return
+        try:
+            self.declare_chunk([], False).wait(timeout=POST_TIMEOUT_S)
+        except requests.exceptions.HTTPError as e:
+            raise GroupMembershipLost(
+                f"{self.BACKEND_NAME} server {self.base_url} holds no weight-update group ({e}); it restarted since "
+                f"the group formed."
+            ) from e
 
     def _quiesce(self) -> None:
         """Pause the engine for an update; flagged first, since an engine pauses before its reply can be lost."""
@@ -694,19 +619,6 @@ class WeightSyncClientBase(ABC):
         except Exception as e:  # a paused server wedges later rollouts, but so does raising
             logger.warning(f"Failed to resume paused {self.BACKEND_NAME} server {context}: {e}")
 
-    def _transmit_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool = False) -> None:
-        """Put one chunk on the wire, counting it and disowning the engine when it fails mid-update."""
-        if not chunk:
-            return
-        try:
-            self._broadcast_chunk(chunk, final)
-        except BaseException:
-            # Marked before the close's finally would resume the engine.
-            if self._chunks_sent:
-                self._mark_unusable()
-            raise
-        self._chunks_sent += 1
-
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """Declare and broadcast one chunk, returning once the engine has it; ``final`` marks the last."""
         self.prepare_chunk_send(chunk)
@@ -747,35 +659,10 @@ class WeightSyncClientBase(ABC):
         )
         logger.error(self._unusable_reason)
 
-    def _close_update(self, tail: list[tuple[str, torch.Tensor]]):
-        """Send the final chunk, close the update and resume, whatever the tail does. ``_chunks_sent`` stays, so a
-        failed close still reports the sync unreplayable."""
-        snapshot_error: Exception | None = None
-        try:
-            self.complete_snapshots()
-        except Exception as e:
-            # Only the close can end the open update. The tail goes, as its copies may not have landed.
-            logger.error(f"Weight-sync snapshots did not complete for {self.base_url}: {e}")
-            snapshot_error, tail = e, []
-            if self._chunks_sent:
-                # Dropping the tail after earlier chunks landed leaves a mixed model, as a failed chunk does.
-                self._mark_unusable()
-        try:
-            self._finish_engine_update(tail)
-        except BaseException:
-            # A close that failed after chunks landed leaves the reload unfinished: the pause stays, as for a failed
-            # chunk, and is marked before the finally would lift it.
-            if self._chunks_sent:
-                self._mark_unusable()
-            raise
-        finally:
-            self._update_open = False
-            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
-        if snapshot_error is not None:
-            raise snapshot_error
-        self._require_resumed()
+    def resume_engine(self) -> None:
+        self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
 
-    def _require_resumed(self) -> None:
+    def require_resumed(self) -> None:
         """A good push still counts for nothing if the pause stays: every rollout would wait out its request timeouts and
         the run would die on a timeout that never names the pause. After the close only, as a raise from its finally
         would mask the failure it unwinds."""
@@ -783,7 +670,7 @@ class WeightSyncClientBase(ABC):
             if not self._paused:
                 return
             time.sleep(backoff)
-            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
+            self.resume_engine()
         if self._paused:
             raise RuntimeError(
                 f"{self.BACKEND_NAME} server {self.base_url} stayed paused after a good weight push: POST "
@@ -794,7 +681,8 @@ class WeightSyncClientBase(ABC):
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         """Send ``tail`` and close the update; the resume follows."""
         try:
-            self._send_tail(tail)
-            self._end_update_session()
+            self._transmit_chunk(tail, final=True)
+            self.release_send_buffers()
+            self.end_engine_update(flushed=bool(tail))
         finally:
             self.abandon_update_session()

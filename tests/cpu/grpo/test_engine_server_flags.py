@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_server_flags
+from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_group_servers, verify_server_flags
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import _IDENTITY_KEY, VLLMWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
@@ -65,7 +65,7 @@ def test_an_upstream_server_is_refused_by_the_preflight_and_by_group_formation(e
         _verify(server, client_cls, is_moe=False)
     client = client_cls(base_url=server.url)
     with pytest.raises(RuntimeError, match="toolkit's image"):
-        client.fetch_engine_world_size()
+        client.require_engine_world_size()
 
 
 def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog):
@@ -75,7 +75,7 @@ def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog)
         server.status["/server_info"] = 500
         client = VLLMWeightSyncClient(base_url=server.url)
         with caplog.at_level(logging.WARNING):
-            assert client.fetch_engine_world_size() == 1
+            assert client.require_engine_world_size() == 1
         assert "its image goes unchecked" in caplog.text
     finally:
         server.close()
@@ -95,6 +95,27 @@ def test_a_repacking_moe_backend_is_refused_on_a_moe_and_passes_on_a_dense_model
     with pytest.raises(ValueError, match="repacks expert weights"):
         _verify(server, client_cls, is_moe=True)
     _verify(server, client_cls, is_moe=False)
+
+
+@pytest.mark.parametrize(
+    ("flag", "other"),
+    [("dtype", "float16"), ("quantization", "fp8"), ("moe_backend", "auto"), ("reasoning_parser", "other")],
+)
+@pytest.mark.parametrize("server_cls", [FakeVLLMServer, FakeSGLangServer], ids=["vllm", "sglang"])
+def test_servers_of_one_group_must_agree_on_every_launch_flag_that_changes_how_the_weights_load(
+    server_cls, flag, other
+):
+    servers = [server_cls(), server_cls()]
+    try:
+        urls = [server.url for server in servers]
+        backend = server_cls.CLIENT_CLASS.BACKEND_KEY
+        verify_group_servers(urls, backend=backend, connection_timeout=5.0)
+        setattr(servers[1], flag, other)
+        with pytest.raises(ValueError, match=f"disagree on their {flag}"):
+            verify_group_servers(urls, backend=backend, connection_timeout=5.0)
+    finally:
+        for server in servers:
+            server.close()
 
 
 def test_strict_tool_calling_is_refused_only_where_a_request_carries_tools():

@@ -18,10 +18,8 @@ from halo.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
-    POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
     SESSION_CLOSE_TIMEOUT_S,
-    GroupMembershipLost,
     ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
@@ -51,6 +49,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     LIVENESS_ROUTE = "/v1/models"
     ENGINE_RELEASE = "SGLang 0.5.22"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
+    PROBES_GROUP_MEMBERSHIP = True
+    # With no final chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
+    CACHE_FLUSH_ENDPOINT = "/flush_cache"
     UNSERVABLE_MODEL_TYPES = {
         "mistral4": f"{ENGINE_RELEASE} registers no Mistral4 model class (agent-docs/models/mistral4.md#serving)",
         **unservable_bailing_model_types(ENGINE_RELEASE),
@@ -102,7 +103,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def __init__(self, *args, group_name: str | None = None, **kwargs):
         super().__init__(*args, **kwargs)
         # c10d registers group names process-globally, and keying on group_port 0 would collide auto-port clients.
-        self.group_name = group_name or f"weight_update_group_{urlparse(self.base_url).netloc}"
+        self._own_group_name = f"weight_update_group_{urlparse(self.base_url).netloc}"
+        self.group_name = group_name or self._own_group_name
 
     def read_server_flags(self) -> ServerFlags:
         return self._flags_in(self._server_info())
@@ -117,16 +119,15 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             tool_call_parser=(info["tool_call_parser"] or "") if "tool_call_parser" in info else None,
             captures_routing=info.get("enable_return_routed_experts"),
             torch_compile=info.get("enable_torch_compile"),
+            dtype=info.get("dtype"),
+            quantization=(info["quantization"] or "") if "quantization" in info else None,
         )
 
     def _server_info(self) -> dict:
         return self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
 
-    def fetch_engine_world_size(self) -> int:
+    def _world_size_in(self, info: dict) -> int:
         """Workers join as ``rank_offset + tp_rank``; under ``--attn-dp-size`` ``tp_rank`` spans every GPU."""
-        info = self._server_info()
-        self._require_toolkit_image(self._flags_in(info))
-        self.probe_generation()
         try:
             tp_size = int(info["tp_size"])
             dp_size = int(info.get("dp_size", 1) or 1)
@@ -144,14 +145,28 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             )
         return tp_size
 
+    def require_engine_world_size(self) -> int:
+        info = self._server_info()
+        self._require_toolkit_image(self._flags_in(info))
+        self.probe_generation()
+        return self._world_size_in(info)
+
+    def get_engine_world_size(self) -> int:
+        return self._world_size_in(self._server_info())
+
+    def get_pipeline_size(self) -> int:
+        return int(self._server_info().get("pp_size", 1) or 1)
+
     def request_engine_join(
-        self, master_address: str, port: int, world_size: int, rank_offset: int = 1, group_name: str | None = None
+        self, master_address: str, port: int, world_size: int, rank_offset: int, group_name: str | None
     ) -> AsyncCall:
         if group_name is not None:
             self.group_name = group_name
-        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, and a
-        # second begin under its open session. Unchecked, as with no session open the close answers 400.
-        self.destroy_remote_group()
+        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, under
+        # the per-server name too, as a restart may switch topology, and a second begin under its open session.
+        # Unchecked, as with no session open the close answers 400.
+        for name in dict.fromkeys((self._own_group_name, self.group_name)):
+            self._destroy_group_named(name)
         self.request(
             "POST",
             self.SESSION_CLOSE_ENDPOINT,
@@ -194,8 +209,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # it a healthy engine reads as dead, and aborting here strands its half of the destroy.
         answers = not (destroy and group is not None) or self._engine_answers()
         # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
-        # no local group, or the server refuses every later join.
-        remote = AsyncCall(self.destroy_remote_group)
+        # no local group, or the server refuses every later join. A group that runs it for every server does so itself.
+        remote = None if self.group_releases_remote_half else AsyncCall(self.destroy_remote_group)
         if not answers:
             logger.warning(f"SGLang server {self.base_url} does not answer, so its weight-update group is aborted.")
             self.abort_transport()
@@ -205,7 +220,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         if local.join(CLEANUP_TIMEOUT_S).is_alive():
             logger.error(f"Destroying the weight-update group of {self.base_url} is still blocked; aborting it.")
             self.abort_transport()
-        remote.join(CLEANUP_TIMEOUT_S)
+        if remote is not None:
+            remote.join(CLEANUP_TIMEOUT_S)
         self._arena = None
         self._inflight.clear()
         self._send_stream = None
@@ -298,43 +314,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             raise drain_error from error
         raise error
 
-    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        if tail:
-            self._transmit_chunk(tail, final=True)
-        else:
-            self.flush_engine_cache()
-        self.release_send_buffers()
-
-    def flush_engine_cache(self) -> None:
-        """With no final chunk to ride on, the flush is requested directly, or the new weights serve a stale cache."""
-        self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
-
-    def verify_group_membership(self) -> None:
-        """An empty declare is a no-op on an engine that holds the group and an error on one that does not, which a
-        real declare would turn into peers parked in a receive nobody can free."""
-        try:
-            self._start_collective_rpc(
-                "/update_weights_from_distributed",
-                timeout=POST_TIMEOUT_S,
-                json={"names": [], "dtypes": [], "shapes": [], "group_name": self.group_name, "flush_cache": False},
-            ).wait(timeout=POST_TIMEOUT_S)
-        except requests.exceptions.HTTPError as e:
-            raise GroupMembershipLost(
-                f"SGLang server {self.base_url} holds no weight-update group {self.group_name!r} ({e}); it restarted "
-                f"since the group formed."
-            ) from e
-
-    def reject_group_membership(self) -> None:
-        """``pp_size`` is read by no rank formula, so a pipeline-parallel engine's stages would all take
-        ``rank_offset + tp_rank`` and collide."""
-        pp_size = int(self._server_info().get("pp_size", 1) or 1)
-        if pp_size > 1:
-            raise RuntimeError(
-                f"SGLang server {self.base_url} runs --pp-size {pp_size}: its workers rank as rank_offset + tp_rank, "
-                f"so the stages collide in a group shared with other servers. Serve with --pp-size 1, or set "
-                f"rollout_sync_topology: per_server."
-            )
-
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
@@ -388,7 +367,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # A 503 is a scheduler step past the server's own 20 s window: alive, and the destroy's join bounds a wedged one.
         return response.status_code in (200, 503)
 
-    def destroy_remote_group(self):
+    def destroy_remote_group(self) -> None:
+        self._destroy_group_named(self.group_name)
+
+    def _destroy_group_named(self, group_name: str) -> None:
         """Best-effort; never masks the caller's failure."""
         try:
             self.request(
@@ -396,10 +378,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 "/destroy_weights_update_group",
                 retry=False,
                 timeout=CLEANUP_TIMEOUT_S,
-                json={"group_name": self.group_name},
+                json={"group_name": group_name},
             )
         except Exception as e:
-            logger.debug(f"Could not clear weight-update group {self.group_name!r} on {self.base_url}: {e}")
+            logger.debug(f"Could not clear weight-update group {group_name!r} on {self.base_url}: {e}")
 
     def _upload_to_arena(self, params: list[torch.Tensor], pool_stream: torch.cuda.Stream) -> Iterator[torch.Tensor]:
         """Yield each tensor's arena view as its copy is issued. One arena, since a block freed mid-chunk carries a

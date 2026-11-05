@@ -159,6 +159,7 @@ def _trainer_outside_train(rank: int):
     trainer.args = SimpleNamespace(report_to=[])
     trainer.async_config = SimpleNamespace(
         rollout_group_port=51216,
+        rollout_sync_topology="per_server",
         sync_weights_every_n_steps=1,
         rollout_backend="vllm",
         rollout_server_url="http://engine:8000",

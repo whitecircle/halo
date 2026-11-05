@@ -48,7 +48,7 @@ def test_sglang_releases_a_group_it_formed_when_the_server_half_fails(monkeypatc
         built.set()
         return group, store
 
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
+    monkeypatch.setattr(client, "require_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
     monkeypatch.setattr(client, "request", _failing_server_call(built))
@@ -80,7 +80,7 @@ def test_sglang_releases_the_group_when_the_local_half_cannot_even_start(monkeyp
             raise RuntimeError("can't start new thread")
         return real_async_call(fn, name=name)
 
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
+    monkeypatch.setattr(client, "require_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
     monkeypatch.setattr(base_module, "AsyncCall", no_threads)
@@ -118,7 +118,7 @@ def test_vllm_aborts_a_communicator_it_built_when_the_server_half_fails(monkeypa
         def close(self):
             closed.append("close")
 
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 1)
+    monkeypatch.setattr(client, "require_engine_world_size", lambda: 1)
     monkeypatch.setattr(client, "request", _failing_server_call(built))
     monkeypatch.setattr(vllm_module, "UniqueIdStore", _FakeStore)
     monkeypatch.setattr(vllm_module, "PyNcclCommunicator", _FakeCommunicator)

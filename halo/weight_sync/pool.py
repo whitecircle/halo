@@ -6,14 +6,15 @@ import logging
 import threading
 from collections.abc import Callable, Iterable
 from functools import partial
-from typing import Any, get_args
+from typing import Any
 
 import torch
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.group import WeightSyncGroup
-from halo.weight_sync.group_layout import SyncTopology, resolve_group_host, resolve_node_label
+from halo.weight_sync.group_layout import SyncTopology, resolve_group_host, resolve_node_label, validate_sync_topology
+from halo.weight_sync.update_stream import UpdateStream
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,8 @@ class WeightSyncPool:
         self.server_configs = server_configs
         self.connection_timeout = connection_timeout
         self.base_group_port = base_group_port
-        self._clients: list[WeightSyncClientBase] = []
+        # One client per server, or under ``single_group`` the one group.
+        self._clients: list[UpdateStream] = []
         self._initialized = False
         self._device: torch.device | None = None
         self._co_load_module_names: tuple[str, ...] | None = None
@@ -46,9 +48,7 @@ class WeightSyncPool:
         # NCCL groups cannot form concurrently, so reconnects from parallel flush threads take turns.
         self._reconnect_lock = threading.Lock()
         self._client_cls = client_cls
-        if topology not in get_args(SyncTopology):
-            raise ValueError(f"Unknown rollout_sync_topology {topology!r}; supported: {list(get_args(SyncTopology))}")
-        self._group: WeightSyncGroup | None = None
+        validate_sync_topology(topology, server_configs)
         self._group_host = resolve_group_host(server_configs) if topology == "single_group" else None
         self._topology = topology
 
@@ -103,7 +103,7 @@ class WeightSyncPool:
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
         """Narrow every client's co-load groups to the pushed model, rebuilt clients included."""
         self._co_load_module_names = tuple(module_names)
-        for client in self._buffer_holders:
+        for client in self._clients:
             client.scope_co_load_groups(self._co_load_module_names)
 
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
@@ -121,7 +121,7 @@ class WeightSyncPool:
             budget=WEIGHT_SYNC_CHUNK_BYTES,
             flush=self._flush_chunk_to_every_server,
         )
-        for client in self._buffer_holders:
+        for client in self._clients:
             client.buffer_param(name, snapshot)
         self._buffered_bytes += snapshot.nbytes
 
@@ -147,22 +147,17 @@ class WeightSyncPool:
                 logger.warning(f"Error closing client: {e}")
 
         self._clients = []
-        self._group = None
         self._initialized = False
         logger.info("WeightSyncPool closed all connections")
 
     @property
     def group(self) -> WeightSyncGroup | None:
         """The one group over every server, ``None`` under ``per_server`` or before formation."""
-        return self._group
-
-    @property
-    def _buffer_holders(self) -> list[WeightSyncClientBase]:
-        """The clients that hold the shared snapshots: every server's own, or the group's leader."""
-        return [self._group.leader] if self._group is not None else self._clients
+        return next((client for client in self._clients if isinstance(client, WeightSyncGroup)), None)
 
     def _init_group(self, device: torch.device) -> None:
-        """Build every server's client and form the one group; a failure closes it and raises with the cause."""
+        """Build every server's client and form the one group; a failed formation leaves nothing held and raises with
+        the cause."""
         clients = [
             self._client_cls(
                 base_url=config["url"],
@@ -180,15 +175,13 @@ class WeightSyncPool:
         try:
             group.init_communicator(device)
         except Exception as e:
-            group.close_communicator()
             raise RuntimeError(
                 f"{self._client_cls.BACKEND_NAME} weight-sync group over {len(clients)} servers failed to form "
                 f"(group port {self.base_group_port}): {type(e).__name__}: {e}"
             ) from e
-        self._group = group
         self._clients = [group]
         if self._co_load_module_names is not None:
-            group.leader.scope_co_load_groups(self._co_load_module_names)
+            group.scope_co_load_groups(self._co_load_module_names)
         self._device = device
         self._initialized = True
         logger.info(f"WeightSyncPool initialized: one group over {len(clients)} servers")
@@ -215,16 +208,16 @@ class WeightSyncPool:
     def _flush_chunk_to_every_server(self) -> None:
         self._run_on_every_client(lambda index: self._clients[index].flush_chunk(), "chunk flush")
         # Every client holds the same snapshots, so what one kept back for a co-load partner they all did.
-        self._buffered_bytes = max((client.buffered_bytes for client in self._buffer_holders), default=0)
+        self._buffered_bytes = max((client.buffered_bytes for client in self._clients), default=0)
 
     def _run_on_every_client(self, operation: Callable[[int], None], what: str) -> None:
         """Run ``operation(index)`` on every client concurrently, raising one aggregated failure. Indexed, so a
         retry reaches the client a reconnect swapped in. A group recovers itself, and its failure is final."""
-        if self._group is not None:
+        if self._topology == "single_group":
             try:
                 operation(0)
             except Exception:
-                self._group.leader.drain_param_buffer()
+                self._clients[0].drain_param_buffer()
                 raise
             return
         run = partial(self._with_recovery, operation, what)

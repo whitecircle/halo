@@ -74,7 +74,7 @@ def test_group_formation_records_the_instance(monkeypatch):
     monkeypatch.setattr(client, "_check_server_version", lambda: None)
     monkeypatch.setattr(client, "probe_generation", lambda: None)
 
-    client.fetch_engine_world_size()
+    client.require_engine_world_size()
 
     assert client._group_instance == "launch-1"
 

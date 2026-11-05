@@ -307,7 +307,7 @@ def test_init_registers_the_no_destroy_close_at_atexit(monkeypatch):
     client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
     registered: list[tuple[object, tuple, dict]] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *args, **kwargs: registered.append((fn, args, kwargs)))
-    monkeypatch.setattr(client, "fetch_engine_world_size", lambda: 0)
+    monkeypatch.setattr(client, "require_engine_world_size", lambda: 0)
     monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
     monkeypatch.setattr(sglang_module, "build_weight_update_group", lambda **kwargs: (object(), None))
@@ -373,6 +373,22 @@ def test_aborting_a_group_that_never_formed_does_not_enter_torch(monkeypatch):
     c10d_group.abort_weight_update_group(None)
 
     assert entered == [], "abort_weight_update_group(None) called torch's abort"
+
+
+def test_a_client_whose_group_releases_the_remote_half_does_not_destroy_it_again(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    destroyed: list[str] = []
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: destroyed.append("remote"))
+
+    client._release_transport(at_exit=False)
+    assert destroyed == ["remote"]
+
+    destroyed.clear()
+    client.group_releases_remote_half = True
+    client._release_transport(at_exit=False)
+    assert destroyed == []
 
 
 if __name__ == "__main__":
