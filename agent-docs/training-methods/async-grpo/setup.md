@@ -119,7 +119,7 @@ rollout_server_configs:
 - `rollout_sync_topology: single_group` forms one weight-sync group over every server and broadcasts each chunk once,
   where the default `per_server` sends each chunk to each server over its own group
   ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)); it takes one
-  `rollout_group_port` and no per-entry `group_port`.
+  `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
   rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
   and the actors re-issue them, losing the decode they had done.

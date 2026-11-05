@@ -12,6 +12,7 @@ import torch
 import halo.weight_sync.clients.sglang as sglang_module
 import halo.weight_sync.transport.packed_broadcast as packed_broadcast
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client
@@ -69,12 +70,15 @@ def test_the_vllm_producer_holds_its_inputs_for_the_pack_stream():
     )
 
 
-def test_the_sglang_client_holds_its_sources_for_the_send_stream():
+def _assert_sglang_holds_its_sources(*, through_group: bool) -> None:
+    """The client sends on the caller's thread; a group sends on a worker thread, whose current stream is its own."""
     device = torch.device("cuda", torch.cuda.current_device())
     client = offline_client(SGLangWeightSyncClient)
     client._sync_device = device
     client._transport = (object(), None)
     client._send_stream = torch.cuda.Stream(device=device)
+    group = WeightSyncGroup([client], nodes=["node"], group_port=0, group_host=None)
+    send = group._broadcast_chunk if through_group else client._broadcast_chunk
     sources = _sources(device)
     expected = [source.clone() for source in sources]
     sent: list[torch.Tensor] = []
@@ -84,7 +88,7 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
         mock.patch.object(sglang_module.dist, "broadcast", lambda tensor, src, group: sent.append(tensor.clone())),
         mock.patch.object(client, "request", return_value=None),
     ):
-        client._broadcast_chunk([(f"p{i}", s) for i, s in enumerate(sources)], final=False)
+        send([(f"p{i}", s) for i, s in enumerate(sources)], final=False)
         del sources
         _overwrites = _refill_freed_blocks(device)
         client.release_send_buffers()
@@ -98,12 +102,25 @@ def test_the_sglang_client_holds_its_sources_for_the_send_stream():
     )
 
 
+def test_the_sglang_client_holds_its_sources_for_the_send_stream():
+    _assert_sglang_holds_its_sources(through_group=False)
+
+
+def test_the_group_holds_its_sources_for_the_send_stream_it_sends_on_from_a_worker_thread():
+    _assert_sglang_holds_its_sources(through_group=True)
+
+
 @gpu_test_main(exact_world_size=1, prefix="weight_sync_stream_safety", partial_state=False)
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "vllm_producer_holds_its_inputs", test_the_vllm_producer_holds_its_inputs_for_the_pack_stream)
     record_check(
         checks, "sglang_client_holds_its_sources", test_the_sglang_client_holds_its_sources_for_the_send_stream
+    )
+    record_check(
+        checks,
+        "sglang_group_holds_its_sources",
+        test_the_group_holds_its_sources_for_the_send_stream_it_sends_on_from_a_worker_thread,
     )
     return {"checks": checks}
 

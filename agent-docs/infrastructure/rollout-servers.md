@@ -159,7 +159,8 @@ brackets each sync with a per-rank `[mem rankNN] weight-sync pre/post` line, and
 ### One group over every server
 
 `rollout_sync_topology: single_group` forms one NCCL group of the trainer (rank 0) and every server's workers, so
-each chunk is broadcast once. The default `per_server` is unchanged. Both engines take the join's `rank_offset` and
+each chunk is broadcast once. It belongs to environmental GRPO, which drives several servers; online GRPO talks to
+one server and has no such field. The default `per_server` is unchanged. Both engines take the join's `rank_offset` and
 `world_size` as given, so no engine patch is involved: SGLang ranks a worker `rank_offset + tp_rank`, vLLM
 `rank_offset + dp_index * (TP * PP) + rank_in_dp`, and each server takes the next block after the one before it.
 
@@ -167,17 +168,25 @@ each chunk is broadcast once. The default `per_server` is unchanged. Both engine
   node's servers are one contiguous rank block and a ring over the group crosses each node's links once. Two labels
   resolving to one address raise; an IP and a DNS name of one node are such labels, so give them one `node`. Neither
   engine reports its host, and a server whose TP spans nodes cannot be placed: the label is a requirement.
-- **Config.** One rendezvous on `rollout_group_port`, one `group_host`. A per-entry `group_port` and differing
-  `group_host` values raise where the config is built, with their remedy. `verify_group_servers` (startup preflight)
-  refuses servers that serve different models or MoE backends, and a server that does not answer for them. Toolkit-image and NCCL parity hold as documented requirements: the image identity is checked per server when its engine world is read. SGLang with `--pp-size > 1` is refused at formation, as
-  its stages would all rank `rank_offset + tp_rank`; `per_server` is not touched.
+- **Config.** One rendezvous on `rollout_group_port`, one `group_host`. A per-entry `group_port`, differing
+  `group_host` values and a `node` label under `per_server` raise where the config is built, and again where the pool
+  is built, from one validator (`validate_sync_topology`). Servers on this host beside servers on others advertise one
+  address that is loopback to the remote ones or the external NIC to the local ones, whose hairpin traffic firewalls
+  drop, so formation refuses that mix unless `group_host` is set. `verify_group_servers` (startup preflight) refuses
+  servers that serve different models or disagree on any launch flag `/server_info` reports (dtype, quantization, MoE
+  backend, parsers, strict tool calling, routing capture, `torch.compile`), and a server that does not answer for
+  them; a flag a server does not report is not compared. The image identity is checked per server when its engine
+  world is read. SGLang with `--pp-size > 1` is refused at formation, as its stages would all rank
+  `rank_offset + tp_rank`; `per_server` is not touched.
 - **Formation.** Every server's join RPC and the trainer's half start together, as vLLM's join blocks until the whole group
   arrived and SGLang's first collective needs every rank; the first failure destroys every engine's half and raises
-  naming the server. The group name carries a generation (`weight_update_group_g{n}`).
+  naming the server. The group name carries a generation (`weight_update_group_g{n}`), and an SGLang join clears a dead
+  trainer's group under both the per-server name and the group's. A vLLM server whose `instance_id` cannot be read
+  refuses formation, as its restart could not be told from a live group.
 - **A sync.** Each server is probed (vLLM's `instance_id`), then all are paused with their sessions opened together; the
   log names each server's pause and how long the first chunk waited on the slowest. SGLang then takes a membership
   probe, an empty declare that a server holding the group answers as a no-op. A server found restarted by either check
-  re-forms the group once, with every server paused, and the sync replays; a second miss closes the sessions, resumes
+  re-forms the group once, with every server paused, reading each server's layout again, and the sync replays; a second miss closes the sessions, resumes
   every server and raises. Each chunk is declared on every server and sent once, paced by the slowest server; new
   weights go live per server at its own close.
 - **A failure after the first declare is global.** A server that refuses its declare after peers accepted theirs
@@ -351,7 +360,7 @@ carry reads as unread, so a renamed upstream field cannot refuse a good server.
 |---|---|
 | A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
-| Servers of a `single_group` run that serve different models or MoE backends | One broadcast reaches all of them, and each would load it differently |
+| Servers of a `single_group` run that serve different models or launch flags | One broadcast reaches all of them, and each would load it differently |
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
