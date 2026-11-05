@@ -93,7 +93,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     CHAT_TEMPLATE_FLAG = "--chat-template (SGLANG_CHAT_TEMPLATE)"
     _INIT_LOG = "SGLang NCCL init: engine_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "SGLang NCCL weight transfer initialized"
-    _FORMATION_STEP = "weight-update group formation"
+    FORMATION_STEP = "weight-update group formation"
     _FORMATION_FAILURE = (
         "SGLang weight-update group formation failed (advertised master {master}:{port}; server {url}). If the "
         "SGLang node cannot reach that address, set {env} to an interface routable from it."

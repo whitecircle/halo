@@ -178,8 +178,8 @@ class WeightSyncGroup:
                     "start joining the group",
                 )
                 local = AsyncCall(
-                    lambda: leader.prepare_local_formation(master_address, listener, self._world_size)(),
-                    name="the trainer's half of the weight-sync group",
+                    leader.prepare_local_formation(master_address, listener, self._world_size),
+                    name=leader.FORMATION_STEP,
                 )
                 wait_for_calls([*joins, local], timeout=GROUP_FORMATION_TIMEOUT_S)
                 leader.adopt_transport(local)
@@ -236,6 +236,11 @@ class WeightSyncGroup:
                     )
         except Exception:
             self._run_on_members(lambda member: member.cancel_engine_update("after a failed group probe"))
+            if not self.leader.has_transport:
+                self._unusable_reason = (
+                    f"The {self.leader.BACKEND_NAME} weight-sync group was lost in a failed re-form. RESTART the "
+                    f"servers: {', '.join(self._urls)}."
+                )
             raise
         self._update_open = True
 
@@ -294,7 +299,8 @@ class WeightSyncGroup:
         self.leader.prepare_chunk_send(chunk)
         declared: list[AsyncCall] = []
         try:
-            declared = [member.declare_chunk(chunk, final) for member in self._members]
+            for member in self._members:
+                declared.append(member.declare_chunk(chunk, final))
             sent = AsyncCall(partial(self._send_on_leader, chunk), name="the group's broadcast")
             wait_for_calls([*declared, sent], timeout=CHUNK_SYNC_TIMEOUT_S)
         except BaseException as e:

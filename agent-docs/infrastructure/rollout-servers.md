@@ -169,7 +169,7 @@ each chunk is broadcast once. The default `per_server` is unchanged. Both engine
   engine reports its host, and a server whose TP spans nodes cannot be placed: the label is a requirement.
 - **Config.** One rendezvous on `rollout_group_port`, one `group_host`. A per-entry `group_port` and differing
   `group_host` values raise where the config is built, with their remedy. `verify_group_servers` (startup preflight)
-  refuses servers that serve different models or MoE backends. SGLang with `--pp-size > 1` is refused at formation, as
+  refuses servers that serve different models or MoE backends, and a server that does not answer for them. Toolkit-image and NCCL parity hold as documented requirements: the image identity is checked per server when its engine world is read. SGLang with `--pp-size > 1` is refused at formation, as
   its stages would all rank `rank_offset + tp_rank`; `per_server` is not touched.
 - **Formation.** Every server's join RPC and the trainer's half start together, as vLLM's join blocks until the whole group
   arrived and SGLang's first collective needs every rank; the first failure destroys every engine's half and raises

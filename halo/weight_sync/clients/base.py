@@ -130,7 +130,7 @@ class WeightSyncClientBase(ABC):
     # Format fields: init log ``engine_ws, master, port, bind``; failure hint ``master, port, url, env``.
     _INIT_LOG: str
     _READY_LOG: str
-    _FORMATION_STEP: str
+    FORMATION_STEP: str
     _FORMATION_FAILURE: str
 
     def __init__(
@@ -234,6 +234,10 @@ class WeightSyncClientBase(ABC):
     @abstractmethod
     def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         """Send ``tail`` (possibly empty) as the final chunk; the session close follows."""
+
+    @property
+    def has_transport(self) -> bool:
+        return self._transport is not None
 
     @property
     def sync_device(self) -> torch.device | None:
@@ -417,7 +421,7 @@ class WeightSyncClientBase(ABC):
             try:
                 # Both halves block until the other arrives, so they run concurrently and the first failure wins.
                 local_call = AsyncCall(
-                    self.prepare_local_formation(master_address, listener, world_size), name=self._FORMATION_STEP
+                    self.prepare_local_formation(master_address, listener, world_size), name=self.FORMATION_STEP
                 )
                 wait_for_calls([server_call, local_call], timeout=GROUP_FORMATION_TIMEOUT_S)
                 self.adopt_transport(local_call)

@@ -196,9 +196,14 @@ def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls:
     for url in urls:
         model = _probe_server(client_cls, url, client_cls.served_model_id, None, "read the served model of")
         flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
-        if model is not None:
-            served[url] = model
-        if flags is not None and flags.moe_backend is not None:
+        if model is None or flags is None:
+            raise ValueError(
+                f"Rollout server {url} did not answer for its served model and launch flags, and "
+                f"rollout_sync_topology: single_group cannot tell whether it loads what the group broadcasts. "
+                f"Start every server before the trainer, or set rollout_sync_topology: per_server."
+            )
+        served[url] = model
+        if flags.moe_backend is not None:
             backends[url] = flags.moe_backend
     for what, found in (("served model", served), ("MoE backend", backends)):
         if len(set(found.values())) > 1:

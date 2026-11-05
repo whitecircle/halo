@@ -93,7 +93,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     )
     _INIT_LOG = "NCCL init: inference_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "NCCL weight transfer initialized"
-    _FORMATION_STEP = "NCCL group formation"
+    FORMATION_STEP = "NCCL group formation"
     _FORMATION_FAILURE = (
         "Weight-transfer group formation failed (advertised master {master}:{port}; vLLM server {url}). If the "
         "vLLM node cannot reach that address, set {env} to an interface routable from the vLLM server (and "

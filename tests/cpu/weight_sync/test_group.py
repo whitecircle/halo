@@ -247,6 +247,22 @@ def test_a_group_that_stays_stale_after_its_one_re_form_raises_with_every_server
 
 
 @pytest.mark.parametrize("engine", _ENGINES)
+def test_a_re_form_that_fails_names_the_lost_group_on_the_next_sync(rig, engine):
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    _restart(engine, servers[1])
+    servers[0].status[_JOIN[engine]] = 500
+    pool.update_named_param("w", torch.zeros(8, dtype=torch.float32))
+
+    with pytest.raises(RuntimeError, match="failed to join"):
+        pool.finish_weight_update()
+
+    with pytest.raises(RuntimeError, match="lost in a failed re-form"):
+        pool._group._open_update()
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
 def test_a_resume_that_keeps_failing_after_a_good_push_is_retried_three_times_then_raises(rig, engine, monkeypatch):
     monkeypatch.setattr(client_base, "_RESUME_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
     pool, servers, _ = rig(engine, [1, 1])
