@@ -69,11 +69,12 @@ class WriterStripe:
 
 def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
     """The stripe of a gathered save. A shared output filesystem takes ``HALO_CHECKPOINT_WRITERS_PER_NODE`` writers
-    per node, the save rank first; per-node storage keeps the save rank alone, as each node's directory must hold the
-    whole checkpoint."""
-    if not is_output_shared_filesystem():
+    per node, the save rank first; a count of 0, or per-node storage (each node's directory must hold the whole
+    checkpoint), keeps the save rank alone."""
+    requested = validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node())
+    if requested == 0 or not is_output_shared_filesystem():
         return WriterStripe(0 if is_save_rank else None, 1)
-    per_node = min(validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node()), get_local_world_size())
+    per_node = min(requested, get_local_world_size())
     count = get_num_nodes() * per_node
     if is_save_rank:
         return WriterStripe(0, count)

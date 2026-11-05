@@ -20,8 +20,10 @@ from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, MERGED_ADAPTER_CONF
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.adapter_stream_merge import _FUSED_GATE_UP_KINDS, _required_attrs
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
@@ -252,6 +254,14 @@ def test_the_merged_checkpoint_carries_the_adapter_config_and_the_base_config(tm
     assert (out / MERGED_ADAPTER_CONFIG_DIR / "adapter_config.json").is_file()
     assert not (out / "adapter_config.json").exists(), "an adapter config in the root reads the merge as an adapter"
     assert os.path.isfile(out / "tokenizer.json"), "the adapter's tokenizer did not ship"
+
+
+def test_every_expert_layout_kind_has_a_streaming_attribute_set():
+    """A new ``ExpertLayoutKind`` must be classified in the streaming merge, not fall into the fused-gate-up branch."""
+    separate = {ExpertLayoutKind.SEPARATE_GLU, ExpertLayoutKind.SEPARATE_MLP}
+    assert separate | _FUSED_GATE_UP_KINDS == set(ExpertLayoutKind)
+    for kind in ExpertLayoutKind:
+        assert _required_attrs(kind, {"down_proj"})
 
 
 if __name__ == "__main__":

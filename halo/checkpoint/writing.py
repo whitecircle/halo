@@ -192,16 +192,17 @@ def validate_checkpoint_write_threads(threads: int) -> int:
 
 
 def resolve_checkpoint_writers_per_node() -> int:
-    """``HALO_CHECKPOINT_WRITERS_PER_NODE`` as set, before its ``>= 1`` check: the count a job's ranks agree on."""
+    """``HALO_CHECKPOINT_WRITERS_PER_NODE`` as set, before its ``>= 0`` check: the count a job's ranks agree on."""
     return env_int("HALO_CHECKPOINT_WRITERS_PER_NODE", DEFAULT_CHECKPOINT_WRITERS_PER_NODE)
 
 
 def validate_checkpoint_writers_per_node(writers: int) -> int:
-    """Ranks per node that write a gathered save on a shared filesystem; a count below 1 raises."""
-    if writers < 1:
+    """Ranks per node that write a gathered save on a shared filesystem (0 keeps the save rank the only writer); a
+    negative count raises."""
+    if writers < 0:
         raise ValueError(
-            f"HALO_CHECKPOINT_WRITERS_PER_NODE={writers}: expected a writer count >= 1 (1 writes a gathered save from "
-            f"each node's first rank)."
+            f"HALO_CHECKPOINT_WRITERS_PER_NODE={writers}: expected a writer count >= 0 (0 writes a gathered save from "
+            f"the save rank alone, 1 from each node's first rank)."
         )
     return writers
 

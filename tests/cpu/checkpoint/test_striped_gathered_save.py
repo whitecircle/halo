@@ -200,6 +200,9 @@ def test_ownership_covers_every_chunk_exactly_once():
         (True, 8, 18, 2, WriterStripe(None, 8)),
         # A count past the node's ranks is capped at them.
         (True, 8, 3, 99, WriterStripe(3, 32)),
+        # A count of 0 is the opt-out: the save rank writes alone.
+        (True, 8, 0, 0, WriterStripe(0, 1)),
+        (True, 8, 8, 0, WriterStripe(None, 1)),
         # Per-node storage: each node's first rank writes the whole checkpoint.
         (False, 8, 8, 4, WriterStripe(0, 1)),
         (False, 8, 9, 4, WriterStripe(None, 1)),
@@ -218,10 +221,10 @@ def test_the_stripe_follows_the_filesystem_and_node_layout(
     assert resolve_writer_stripe(is_save_rank=is_save_rank) == expected
 
 
-def test_a_writer_count_below_one_is_refused(monkeypatch):
-    monkeypatch.setenv(WRITERS_ENV, "0")
+def test_a_negative_writer_count_is_refused(monkeypatch):
+    monkeypatch.setenv(WRITERS_ENV, "-1")
     monkeypatch.setenv(SHARED_ENV, "1")
-    with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITERS_PER_NODE=0"):
+    with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITERS_PER_NODE=-1"):
         resolve_writer_stripe(is_save_rank=True)
 
 

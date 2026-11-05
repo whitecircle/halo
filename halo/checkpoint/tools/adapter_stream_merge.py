@@ -1,6 +1,6 @@
 """Fold a saved LoRA adapter (attention and dense, DoRA, native expert) into its base one safetensors tensor at a time and
-write the merged checkpoint through :class:`StreamingShardWriter`, holding the adapter, one tensor and the expert deltas
-of the layers a shard touches."""
+write the merged checkpoint through :class:`StreamingShardWriter`, holding the adapter, one tensor, the writer's parts
+and one expert layer's fp32 deltas at a time."""
 
 from __future__ import annotations
 
@@ -120,12 +120,19 @@ class _ExpertLayer:
         return (base.float() + delta).to(base.dtype)
 
 
+_FUSED_GATE_UP_KINDS = frozenset(
+    {ExpertLayoutKind.FUSED, ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, ExpertLayoutKind.INTERLEAVED_GLU}
+)
+
+
 def _required_attrs(kind: ExpertLayoutKind, present: set[str]) -> set[str]:
     """The runtime attributes ``kind``'s layout reads when ``present`` ones carry an adapter."""
     if kind is ExpertLayoutKind.SEPARATE_GLU:
         return set(SEPARATE_GLU_PROJECTIONS)
     if kind is ExpertLayoutKind.SEPARATE_MLP:
         return set(SEPARATE_MLP_PROJECTIONS)
+    if kind not in _FUSED_GATE_UP_KINDS:
+        raise ValueError(f"No streaming-merge attribute set for expert layout kind {kind.name}.")
     halves = [attr for attr in ("gate_proj", "up_proj") if attr in present or f"{attr}_gmm" in present]
     if halves:
         suffix = "_gmm" if any(attr.endswith("_gmm") for attr in present) else ""

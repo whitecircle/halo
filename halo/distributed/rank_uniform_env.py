@@ -56,7 +56,7 @@ def agree_rank_uniform_env() -> None:
     """COLLECTIVE over the world, once per process: raise when ranks disagree on a setting, since a divergence hangs
     (with ``HALO_EP_CAPACITY_DEDUP`` off a rank runs the capacity all-reduce on every MoE layer, its peers once).
     Latches only once a process group exists. Also refuses a negative ``HALO_CHECKPOINT_WRITE_THREADS`` and a
-    ``HALO_CHECKPOINT_WRITERS_PER_NODE`` below 1."""
+    negative ``HALO_CHECKPOINT_WRITERS_PER_NODE``."""
     global _env_uniformity_verified
     if _env_uniformity_verified:
         return

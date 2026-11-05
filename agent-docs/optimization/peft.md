@@ -438,9 +438,10 @@ The mixed label keeps every `LoraConfig` field beside it, plus an `ep_expert_lor
 half's `r`/`lora_alpha`/`lora_dropout`/`use_rslora`/`expert_projections`; resume reads the tensors directly
 and the file only for its scaling check (below).
 
-The repo's merge and convert scripts check those markers (`reject_expert_lora_adapter`) and fall through
+The in-memory merge and convert paths check those markers (`reject_expert_lora_adapter`) and fall through
 to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
-holding `.experts.<attr>.lora_{A,B}` keys is refused too.
+holding `.experts.<attr>.lora_{A,B}` keys is refused too; `merge_peft_adapters.py` routes such an adapter to the
+[streaming merge](#streaming-merge).
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
@@ -524,7 +525,8 @@ and with `save_sharded_ep: true`.
 `merge_peft_adapters.py --streaming` (automatic for an adapter holding native expert LoRA, whose in-memory merge is
 refused) loads no model: it reads each tensor of the base's safetensors shards, folds the adapter into the ones it
 targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
-expert deltas of the layers a shard touches and the writer's parts, whatever the model's size. Linear LoRA (rslora,
+fp32 expert deltas of the layer being folded and the writer's parts: about one expert layer's fp32 delta times a small
+factor (the preflight budgets 3x), which at 397B scale is tens of GB per layer. Linear LoRA (rslora,
 rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
 merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
 arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace

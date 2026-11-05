@@ -57,7 +57,7 @@ copies, external tables) and every later layer goes round-robin. Each writer get
 refuses a key two writers claim), renames all parts to HF's names and writes the index last, so `trainer_state.json` still
 commits after every part. A striped checkpoint holds the same tensors and loads the same as a
 single-writer one; only part boundaries differ (one trailing short part per writer). It assumes every EP group holds
-equal copies, which training keeps. Per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) keeps the one writer per node.
+equal copies, which training keeps. Per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) keeps the one writer per node, and `HALO_CHECKPOINT_WRITERS_PER_NODE=0` keeps the save rank the only writer.
 The FSDP2, CP, TP and PP savers keep their single writer (PP already writes one shard per stage).
 
 The tokenizer is written once per save, before the weights (`save_tokenizer`), so a save stopped after
