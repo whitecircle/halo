@@ -3,11 +3,12 @@ in fp32: bf16 cancellation in ``log p - log q`` can flip its sign."""
 
 import functools
 import inspect
+import math
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
-from torch.nn.functional import cosine_similarity, cross_entropy, kl_div, log_softmax, mse_loss
+from torch.nn.functional import cosine_similarity, cross_entropy, log_softmax, mse_loss
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, at_least_fp32, map_token_chunks
 from halo.model_loading.parallel.frozen_models import place_and_freeze
@@ -108,18 +109,59 @@ def cosine_similarity_loss(student_logits: torch.Tensor, teacher_logits: torch.T
     return 1 - cosine_similarity(student_logits.float(), teacher_logits.float(), dim=-1)
 
 
-def jensen_shannon_divergence(
-    student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float
+def generalized_jsd_loss(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, temperature: float, *, jsd_beta: float
 ) -> torch.Tensor:
-    """Jensen-Shannon divergence ``0.5 * (KL(P||M) + KL(Q||M))``, ``M = 0.5 * (P + Q)``. ``kl_div(input,
-    target)`` is ``KL(target||exp(input))``, so ``log M`` is the input; swapped, it would be the unbounded
-    ``KL(M||P) + KL(M||Q)``."""
-    student_probs = softened_log_probs(student_logits, temperature).exp()
-    teacher_probs = softened_log_probs(teacher_logits, temperature).exp()
-    m = 0.5 * (teacher_probs + student_probs)
-    log_m = m.clamp_min(1e-12).log()
-    jsd = 0.5 * (kl_div(log_m, student_probs, reduction="none") + kl_div(log_m, teacher_probs, reduction="none"))
-    return temperature_rescaled(jsd, temperature)
+    """Generalized JSD (GKD, arXiv:2306.13649 Eq. 1) ``β·KL(q || M) + (1 - β)·KL(p || M)`` with
+    ``M = β·q + (1 - β)·p``, ``q`` the detached teacher, per (token, vocab). ``β = 0`` and ``β = 1`` are the exact
+    forward and reverse KL, ``β = 0.5`` the symmetric JSD. ``log M`` is a ``logaddexp`` of the log-probs, exact where a
+    probability underflows."""
+    if not 0.0 <= jsd_beta <= 1.0:
+        raise ValueError(f"jsd_beta must be in [0, 1], got {jsd_beta}")
+    if jsd_beta == 0.0:
+        return forward_kl_loss(student_logits, teacher_logits, temperature)
+    if jsd_beta == 1.0:
+        return reverse_kl_loss(student_logits, teacher_logits, temperature)
+    student_logprobs = softened_log_probs(student_logits, temperature)
+    teacher_logprobs = softened_log_probs(teacher_logits.detach(), temperature)
+    mixture_logprobs = torch.logaddexp(teacher_logprobs + math.log(jsd_beta), student_logprobs + math.log1p(-jsd_beta))
+    teacher_term = teacher_logprobs.exp() * (teacher_logprobs - mixture_logprobs)
+    student_term = student_logprobs.exp() * (student_logprobs - mixture_logprobs)
+    return temperature_rescaled(jsd_beta * teacher_term + (1.0 - jsd_beta) * student_term, temperature)
+
+
+def _with_tail_bin(logprobs: torch.Tensor, support: torch.Tensor) -> torch.Tensor:
+    """``logprobs`` on ``support`` plus one bin holding the log-mass off it. The tail sums the off-support tokens
+    rather than taking ``log(1 - support mass)``: once a student's support mass rounds to 1 in fp32, that form
+    leaves the tail constant and the student gets no gradient toward the teacher's tail mass."""
+    tail_log_mass = logprobs.scatter(-1, support, float("-inf")).logsumexp(dim=-1, keepdim=True)
+    return torch.cat([logprobs.gather(-1, support), tail_log_mass], dim=-1)
+
+
+def teacher_topk_log_probs(
+    student_logits: torch.Tensor, teacher_logits: torch.Tensor, topk: int, temperature: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Student and teacher softened log-probs ``[..., topk + 1]`` on the teacher's top-``topk`` tokens plus a tail
+    bin, each row a distribution over the same bins. Merging tokens never increases a divergence, so a divergence
+    of these bins lower-bounds the full-vocab one."""
+    student_logprobs = softened_log_probs(student_logits, temperature)
+    teacher_logprobs = softened_log_probs(teacher_logits.detach(), temperature)
+    support = teacher_logprobs.topk(topk, dim=-1).indices
+    return _with_tail_bin(student_logprobs, support), _with_tail_bin(teacher_logprobs, support)
+
+
+def teacher_topk_loss(
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temperature: float,
+    *,
+    loss_fn: Callable[..., torch.Tensor],
+    topk: int,
+) -> torch.Tensor:
+    """``loss_fn`` on :func:`teacher_topk_log_probs`, scored at ``T = 1`` since the softening already ran over the
+    full vocabulary, so the ``T**2`` rescale is applied here instead."""
+    student_logprobs, teacher_logprobs = teacher_topk_log_probs(student_logits, teacher_logits, topk, temperature)
+    return temperature_rescaled(loss_fn(student_logprobs, teacher_logprobs, 1.0), temperature)
 
 
 # Pinned by a test against each arm's config Literal (SelfDistillationLoss, TeacherDistillationConfig.distill_loss):
@@ -130,23 +172,35 @@ DIVERGENCES: dict[str, Callable[..., torch.Tensor]] = {
     "unnormalized_kl": unnormalized_kl_loss,
     "kl_divergence": forward_kl_loss,
     "soft_cross_entropy": soft_target_cross_entropy_loss,
-    "jensen_shannon": jensen_shannon_divergence,
+    "jensen_shannon": generalized_jsd_loss,
     "slim": slim_loss,
     "mse": mse_loss_fn,
     "cosine_similarity": cosine_similarity_loss,
 }
 
 
-def require_divergence(name: str) -> Callable[..., torch.Tensor]:
-    if name not in DIVERGENCES:
-        raise ValueError(f"Unsupported distillation divergence {name!r}. Available: {sorted(DIVERGENCES)}")
-    return DIVERGENCES[name]
-
-
 @functools.cache
 def _declared_parameters(loss_fn: Callable) -> frozenset[str]:
     """The parameter names ``loss_fn`` declares, read once per function: the dispatch runs per token chunk."""
     return frozenset(inspect.signature(loss_fn).parameters)
+
+
+def require_divergence(
+    name: str, *, jsd_beta: float | None = None, topk: int | None = None
+) -> Callable[..., torch.Tensor]:
+    """The ``name`` divergence with its ``jsd_beta`` bound, scored on the teacher's top-``topk`` + tail bins
+    (:func:`teacher_topk_loss`) when ``topk`` is set. A divergence that takes a β raises without one, so it never
+    runs on a β nobody configured."""
+    if name not in DIVERGENCES:
+        raise ValueError(f"Unsupported distillation divergence {name!r}. Available: {sorted(DIVERGENCES)}")
+    loss_fn = DIVERGENCES[name]
+    if "jsd_beta" in _declared_parameters(loss_fn):
+        if jsd_beta is None:
+            raise ValueError(f"distillation divergence {name!r} takes a jsd_beta, and none was given.")
+        loss_fn = functools.partial(loss_fn, jsd_beta=jsd_beta)
+    if topk is None:
+        return loss_fn
+    return functools.partial(teacher_topk_loss, loss_fn=loss_fn, topk=topk)
 
 
 def uses_hard_labels(loss_fn: Callable) -> bool:
@@ -283,6 +337,19 @@ def resolve_shared_vocab_width(config, scorer_config, tokenizer, scorer_tokenize
             f"rows than the tokenizer's {len(tokenizer)} ids, so some token has no logit to compare."
         )
     return len(tokenizer)
+
+
+def reject_topk_covering_vocab(topk: int | None, vocab_width: int | None, model) -> None:
+    """Refuse a ``topk`` that leaves no token for the tail bin. ``vocab_width`` is the compared width
+    (:func:`resolve_shared_vocab_width`), ``None`` for the whole row of ``model``'s vocabulary."""
+    if topk is None:
+        return
+    width = model.config.get_text_config().vocab_size if vocab_width is None else vocab_width
+    if topk >= width:
+        raise ValueError(
+            f"distill_topk={topk} covers the whole compared vocabulary ({width} tokens), so no tail is left to bin. "
+            f"Set distill_topk: null for the full-vocab loss, or a k below {width}."
+        )
 
 
 def place_frozen_scorer(

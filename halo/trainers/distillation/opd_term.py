@@ -46,7 +46,7 @@ class OPDTermMixin:
 
     def _adopt_sdpg_arguments(self, kwargs: dict, *, exclude: frozenset[str] = frozenset()) -> None:
         self.sdpg = SDPGArguments.pop_from(kwargs, exclude=exclude)
-        self.sdpg_loss_fn = require_divergence(self.sdpg.sdpg_loss)
+        self.sdpg_loss_fn = require_divergence(self.sdpg.sdpg_loss, jsd_beta=self.sdpg.sdpg_jsd_beta)
 
     def _opd_beta(self) -> float:
         return beta_warmup_decay(

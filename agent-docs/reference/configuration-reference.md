@@ -413,8 +413,10 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `distill_loss` | `"kl_divergence" \| "mse" \| "soft_cross_entropy" \| "cosine_similarity" \| "jensen_shannon" \| "slim"` | `"kl_divergence"` | Teacher-distillation divergence. |
-| `distill_temperature` | `float` | `1.0` | Softmax temperature — forwarded only to the losses that declare it (`kl_divergence`, `soft_cross_entropy`, `jensen_shannon`, `slim`). Refused off its default under `mse` and `cosine_similarity`, whose definitions take none. Must be `> 0`. |
+| `distill_loss` | `"kl_divergence" \| "reverse_kl" \| "mse" \| "soft_cross_entropy" \| "cosine_similarity" \| "jensen_shannon" \| "slim"` | `"kl_divergence"` | Teacher-distillation divergence. |
+| `distill_temperature` | `float` | `1.0` | Softmax temperature — forwarded only to the losses that declare it (`kl_divergence`, `reverse_kl`, `soft_cross_entropy`, `jensen_shannon`, `slim`). Refused off its default under `mse` and `cosine_similarity`, whose definitions take none. Must be `> 0`. |
+| `distill_jsd_beta` | `float` | `0.5` | β of the generalized `jensen_shannon` loss, in `[0, 1]`: `0` = forward KL, `1` = reverse KL ([Generalized JSD](../training-methods/distillation/teacher-distillation.md#generalized-jsd)). Refused off its default under any other `distill_loss`. |
+| `distill_topk` | `int \| None` | `None` | Score the loss on the teacher's top-k tokens plus a tail bin, a lower bound on the full-vocab loss that saves no memory ([Top-k](../training-methods/distillation/teacher-distillation.md#top-k)). An integer `>= 1`, below the compared vocabulary width; `kl_divergence` and `soft_cross_entropy` only. `None` = the full vocabulary. |
 | `distill_alpha` | `float` | `1.0` | Weight of distillation vs CLM loss. `1.0` = distillation only. Must be in `[0, 1]`. |
 | `apply_hard_labels` | `bool` | `False` | Gate the distillation term per token on the gold token ([Teacher Distillation](../training-methods/distillation/teacher-distillation.md)). Refused at trainer construction with `distill_loss: slim`, which applies its own gold-token weight. |
 | `max_length` | `int \| None` | `2048` | Maximum tokenized sequence length. Over-length conversations are **dropped**, not truncated; `null` → the student's context window. |
@@ -667,7 +669,8 @@ The privileged-teacher OPD term, shared by [online SDPG](../training-methods/dis
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `sdpg_hint_template` | `str` | `"\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"` | `str.format` template the teacher forward sees after its prompt. `{answer}` fills on both arms, `{solution}` on self-distillation only; any other placeholder is refused at parse time. |
-| `sdpg_loss` | `"reverse_kl" \| "forward_kl" \| "unnormalized_kl"` | `"reverse_kl"` | OPD loss. |
+| `sdpg_loss` | `"reverse_kl" \| "forward_kl" \| "unnormalized_kl" \| "jensen_shannon"` | `"reverse_kl"` | OPD loss. |
+| `sdpg_jsd_beta` | `float` | `0.5` | β of `jensen_shannon`, in `[0, 1]` ([Generalized JSD](../training-methods/distillation/teacher-distillation.md#generalized-jsd)). Refused off its default under any other `sdpg_loss`. |
 | `sdpg_temperature` | `float` | `1.0` | OPD softmax temperature; finite, `> 0`. |
 | `sdpg_beta_base` | `float` | `1.0` | Base OPD coefficient; finite, `>= 0`. `0` drops the term. |
 | `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `int` | `0` / `0` | Steps over which beta ramps from 0 to `sdpg_beta_base`, and the final steps over which it decays back to 0; `>= 0`. |

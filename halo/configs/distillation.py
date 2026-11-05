@@ -17,10 +17,16 @@ from halo.data.collators.self_distill import format_field_names
 
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
 
-# Keys of the trainer-side divergence registry (``divergences.DIVERGENCES``), which a test pins this to.
-SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+# Keys of the trainer-side divergence registry (``divergences.DIVERGENCES``), which a test pins these to. The reference
+# term takes no jensen_shannon: that loss needs a β, and only the OPD term has one (sdpg_jsd_beta).
+ReferenceKLLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+SelfDistillationLoss = Literal[ReferenceKLLoss, "jensen_shannon"]
 # The teacher-distillation divergences whose definition takes no temperature, pinned the same way.
 TEMPERATURE_FREE_DISTILL_LOSSES = frozenset({"mse", "cosine_similarity"})
+# Top-k keeps the teacher's most likely tokens, so it only fits losses weighted by the teacher's probabilities.
+# Reverse KL and JSD also weight by the student's, whose likely tokens may fall into the tail bin; slim weighs each
+# token by its gold label, which a bin no longer indexes; MSE and cosine compare raw logits, which can't be binned.
+TOPK_DISTILL_LOSSES = frozenset({"kl_divergence", "soft_cross_entropy"})
 
 
 @dataclass
@@ -42,7 +48,17 @@ class SDPGArguments(ValidatedConfig):
     )
     sdpg_loss: SelfDistillationLoss = field(
         default="reverse_kl",
-        metadata={"help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', or 'unnormalized_kl' (k3/UKL)."},
+        metadata={
+            "help": "OPD loss: 'reverse_kl' (SDPG), 'forward_kl', 'unnormalized_kl' (k3/UKL), or 'jensen_shannon' "
+            "(generalized JSD at sdpg_jsd_beta)."
+        },
+    )
+    sdpg_jsd_beta: float = field(
+        default=0.5,
+        metadata={
+            "help": "Generalized-JSD β in [0, 1] for sdpg_loss: jensen_shannon. 0 = forward KL, 1 = reverse KL, "
+            "0.5 = symmetric JSD. Refused off its default under any other sdpg_loss."
+        },
     )
     sdpg_temperature: float = field(
         default=1.0, metadata={"help": "Softmax temperature for the OPD loss (finite, > 0)."}
@@ -77,6 +93,9 @@ class SDPGArguments(ValidatedConfig):
             raise ValueError(f"sdpg_loss must be one of {get_args(SelfDistillationLoss)}, got {self.sdpg_loss!r}")
         # Divides both distributions' logits: zero NaNs the OPD loss without a raise, a negative one inverts them.
         require_finite(type(self).__name__, gt=0, sdpg_temperature=self.sdpg_temperature)
+        require_finite(type(self).__name__, ge=0, le=1, sdpg_jsd_beta=self.sdpg_jsd_beta)
+        if self.sdpg_loss != "jensen_shannon":
+            reject_non_default_args(f"The OPD term under sdpg_loss={self.sdpg_loss}", self, "sdpg_jsd_beta")
         # A NaN coefficient NaNs every loss; a negative one trains the student away from the teacher.
         require_finite(type(self).__name__, ge=0, sdpg_beta_base=self.sdpg_beta_base)
         # The schedule reads a negative length as off, so one is a typo the run would not report.
@@ -144,7 +163,7 @@ class SelfDistillScriptArguments(
             "(no reference model is loaded)."
         },
     )
-    reference_kl_loss: SelfDistillationLoss = field(
+    reference_kl_loss: ReferenceKLLoss = field(
         default="unnormalized_kl",
         metadata={"help": "Reference-policy regularizer: 'unnormalized_kl' (k3/UKL), 'reverse_kl', or 'forward_kl'."},
     )
@@ -238,20 +257,35 @@ class TeacherDistillScriptArguments(VisionTrainingArguments, ConversationRenderA
 @dataclass
 class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
     distill_loss: Literal[
-        "kl_divergence", "mse", "soft_cross_entropy", "cosine_similarity", "jensen_shannon", "slim"
+        "kl_divergence", "reverse_kl", "mse", "soft_cross_entropy", "cosine_similarity", "jensen_shannon", "slim"
     ] = field(
         default="kl_divergence",
         metadata={
-            "help": "Distillation loss: kl_divergence, mse, soft_cross_entropy, cosine_similarity, jensen_shannon "
-            "or slim."
+            "help": "Distillation loss: kl_divergence (forward KL), reverse_kl, mse, soft_cross_entropy, "
+            "cosine_similarity, jensen_shannon (generalized JSD at distill_jsd_beta) or slim."
         },
     )
     distill_temperature: float = field(
         default=1.0,
         metadata={
             "help": "Softmax temperature for the temperature-based distillation losses "
-            "(kl_divergence, soft_cross_entropy, jensen_shannon, slim). Refused off its default under mse and "
-            "cosine_similarity, whose definitions take no temperature."
+            "(kl_divergence, reverse_kl, soft_cross_entropy, jensen_shannon, slim). Refused off its default under "
+            "mse and cosine_similarity, whose definitions take no temperature."
+        },
+    )
+    distill_jsd_beta: float = field(
+        default=0.5,
+        metadata={
+            "help": "Generalized-JSD β in [0, 1] for distill_loss: jensen_shannon. 0 = forward KL, 1 = reverse KL, "
+            "0.5 = symmetric JSD. Refused off its default under any other distill_loss."
+        },
+    )
+    distill_topk: int | None = field(
+        default=None,
+        metadata={
+            "help": "Score the loss on the teacher's top-k tokens plus one tail bin holding the rest of the "
+            "vocabulary: a lower bound on the full-vocab loss that saves no memory. kl_divergence and "
+            "soft_cross_entropy only, and below the vocab size; null = the full vocabulary."
         },
     )
     distill_alpha: float = field(
@@ -285,6 +319,11 @@ class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, Traini
             reject_non_default_args(
                 f"Distillation under distill_loss={self.distill_loss}", self, "distill_temperature"
             )
-        require_finite(owner, ge=0, le=1, distill_alpha=self.distill_alpha)
+        require_finite(owner, ge=0, le=1, distill_alpha=self.distill_alpha, distill_jsd_beta=self.distill_jsd_beta)
+        if self.distill_loss != "jensen_shannon":
+            reject_non_default_args(f"Distillation under distill_loss={self.distill_loss}", self, "distill_jsd_beta")
+        require_int(owner, ge=1, **present(distill_topk=self.distill_topk))
+        if self.distill_loss not in TOPK_DISTILL_LOSSES:
+            reject_non_default_args(f"Distillation under distill_loss={self.distill_loss}", self, "distill_topk")
         # A non-positive length is legal: it resolves to the student's context window at launch.
         require_int(owner, **present(max_length=self.max_length))

@@ -66,6 +66,7 @@ def _soft_cross_entropy_spelling(student, teacher, temperature):
 
 
 def _jensen_shannon_spelling(student, teacher, temperature):
+    """The symmetric JSD, which ``jensen_shannon`` is at β = 0.5."""
     student_probs = softmax(student.float() / temperature, dim=-1)
     teacher_probs = softmax(teacher.float() / temperature, dim=-1)
     log_m = (0.5 * (student_probs + teacher_probs)).clamp_min(1e-12).log()
@@ -88,7 +89,7 @@ def _logits(dtype, seed=0):
 
 
 def _teacher_loss(name):
-    loss_fn = require_divergence(name)
+    loss_fn = require_divergence(name, jsd_beta=0.5)
     hard_labels = torch.zeros(BATCH, SEQ, dtype=torch.long)
     return lambda student, teacher, temperature: call_divergence(loss_fn, student, teacher, temperature, hard_labels)
 
@@ -147,7 +148,11 @@ def _finite_value_and_grad(loss_fn, student, teacher, temperature):
 
 
 @pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
-@pytest.mark.parametrize("loss_fn", [reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss])
+@pytest.mark.parametrize(
+    "loss_fn",
+    [reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss, require_divergence("jensen_shannon", jsd_beta=0.3)],
+    ids=["reverse_kl", "forward_kl", "unnormalized_kl", "jensen_shannon"],
+)
 def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperature):
     """Self-distillation scores student and teacher with one model, so both pad the same columns."""
     student, teacher = _logits(torch.float32, seed=3)

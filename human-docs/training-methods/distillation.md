@@ -27,7 +27,8 @@ halo launch teacher-distill \
 ```
 
 `distill_alpha` weights the divergence against the cross-entropy term, and `distill_loss` picks the
-divergence; `cosine_similarity` tolerates a teacher whose logit scale differs.
+divergence; `cosine_similarity` tolerates a teacher whose logit scale differs, and `jensen_shannon`
+moves from forward KL (`distill_jsd_beta: 0`) to reverse KL (`1`).
 
 ## Self-distillation
 
