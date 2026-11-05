@@ -357,6 +357,22 @@ error, so there the bit-identical rows, the CPU test and `--reach` hold the sync
 in turn and requires the served log-probs to move, since an engine that drops a name still answers `200`, and only a
 change that fails to reach the model shows it.
 
+### First-push parity probe
+
+An engine answers `200` for a tensor its loader does not map and keeps the launch value, and one it stacks or
+reshapes wrongly serves another model. After a trainer's first push (online GRPO's, the environmental trainer's
+forced start push) every rank scores one fixed 1,100-token counting row with the trainer's own log-prob path
+(`_get_per_token_logps_and_entropies`), rank 0 scores it through the client's `score_completion_logprobs`, and a mean
+gap above 1 nat per position (`PARITY_MAX_MEAN_GAP_NATS`, above the 0.65 floor of the worst family) raises on every
+rank. The row is cut to the served window; a pool scores on its first server. Later pushes pay nothing.
+
+The probe sees a skipped name only where the trainer's value differs from the engine's launch value (a resumed run, a
+server launched from another revision), and a scrambled load wherever it happens. On a fresh run both hold the same
+weights, so a dropped name reads exact until training moves it: `test_weight_push_exact.py --reach` is the per-name
+check on a live server, and the recorded loader names ([GLM-5 Next](../models/glm5-next.md#rl-weight-sync)) pin the
+names on the CPU tier. `HALO_WEIGHT_SYNC_PARITY_PROBE=0` turns it off; context parallelism skips it, as its batches
+shard the row.
+
 ### Construction gates
 
 The online and async GRPO trainers refuse at construction a model the selected engine cannot take a

@@ -53,7 +53,10 @@ EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor names
 
 There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), a 73–75 GiB host RSS peak per rank while its shard handles are open, and 2.3 GiB after. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 
-RL weight sync is off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next` and load the per-expert keys the gather emits, but no online update into either has been validated end to end.
+
+## RL weight sync
+
+Off (the spec's `weight_sync_refusal`): both pinned rollout engines register `glm5_next` and load the per-expert keys the gather emits, but no online update into either has been validated end to end.
 
 ## Router balancing
 

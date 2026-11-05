@@ -40,6 +40,7 @@ from halo.trainers.grpo.packed_rules import PACKED_KNOB
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rank_balance import RANK_BALANCE_KNOB, RankBalancedRoundMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
+from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.grpo.row_order import reject_trainer_refusal
@@ -74,6 +75,8 @@ class DistributedOnlineGRPOTrainer(
     )
     # TRL's server-mode generation is vLLM-only, so the engine the weight-sync gate reads is fixed here.
     _rollout_backend = VLLM_BACKEND
+    # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
+    first_push_verified: bool = False
 
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
@@ -196,8 +199,10 @@ class DistributedOnlineGRPOTrainer(
     def _distributed_sync_weights(self) -> None:
         """COLLECTIVE. The client TRL holds on ``vllm_generation`` forwards from the main process."""
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
-        with self._phase_timers.span(Phase.SYNC, "host"), self.unbinned_scoring():
-            sync_trainer_weights(self, client)
+        with self.unbinned_scoring():
+            with self._phase_timers.span(Phase.SYNC, "host"):
+                sync_trainer_weights(self, client)
+            verify_first_push_parity(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):
         """TRL slices the result by ``process_index``, so TP ranks land on different completions and deadlock at the

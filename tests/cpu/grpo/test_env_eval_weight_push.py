@@ -80,6 +80,7 @@ def test_the_real_cadence_gate_records_what_the_engines_hold(monkeypatch):
     del trainer._sync_weights_to_engine_fenced
     module = "halo.trainers.grpo.environmental.async_rollouts"
     monkeypatch.setattr(f"{module}.sync_trainer_weights", lambda trainer, client: None)
+    trainer.first_push_verified = True
     monkeypatch.setattr(f"{module}.profiling_context", lambda trainer, name: contextlib.nullcontext())
     trainer._weight_sync_group_formed = True
     trainer._weight_sync_client = object()

@@ -37,6 +37,7 @@ from halo.runtime.ranks import (
     is_global_main_process,
 )
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
+from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -79,6 +80,8 @@ class AsyncRolloutMixin:
     # Whether the rollout components are up, held alike on every rank (a TP/ETP follower builds no manager, so the
     # manager cannot say): set by the init, cleared by the cleanup.
     _async_components_started: bool = False
+    # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
+    first_push_verified: bool = False
 
     def _init_async_state(self):
         self._rollout_manager = None
@@ -283,6 +286,7 @@ class AsyncRolloutMixin:
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):
             sync_trainer_weights(self, self._weight_sync_client)
+        verify_first_push_parity(self, self._weight_sync_client)
         self._last_pushed_step = self.state.global_step
         return True
 

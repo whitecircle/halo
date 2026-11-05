@@ -108,6 +108,13 @@ class WeightSyncPool:
         self._initialized = True
         logger.info(f"WeightSyncPool initialized: {len(self._clients)} clients connected")
 
+    @property
+    def scoring_client(self) -> WeightSyncClientBase:
+        """The first server's client: replicas of one policy answer a probe alike."""
+        if not self._clients:
+            raise RuntimeError("WeightSyncPool has no connected client to score on. Call init_communicator() first.")
+        return self._clients[0]
+
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
         """Narrow every client's co-load groups to the pushed model, rebuilt clients included."""
         self._co_load_module_names = tuple(module_names)

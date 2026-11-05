@@ -495,12 +495,16 @@ def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -
     return -sum(whole) / len(whole), gap, length
 
 
+def counting_probe_token_ids(tokenizer) -> list[int]:
+    """A counting sequence cut past vLLM's CUDA-graph capture range (512 tokens), so a server prefills it eagerly."""
+    counting = " ".join(str(n) for n in range(2048))
+    return resolve_tokenizer(tokenizer)(counting)["input_ids"][:1100]
+
+
 def _verify_engine_prompt_logprobs_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], tokenizer
 ) -> None:
-    # A counting sequence cut past vLLM's CUDA-graph capture range (512 tokens), so the whole prefills eagerly.
-    counting = " ".join(str(n) for n in range(2048))
-    token_ids = resolve_tokenizer(tokenizer)(counting)["input_ids"][:1100]
+    token_ids = counting_probe_token_ids(tokenizer)
     probe = partial(_probe_prompt_logprobs, token_ids=token_ids)
     results = _probe_servers(client_cls, urls, probe, None, "probe the prompt log-probs of")
     for url, result in zip(urls, results, strict=True):

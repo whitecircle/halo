@@ -180,6 +180,7 @@ def _trainer_outside_train(rank: int):
     )
     trainer._weight_sync_client = trainer._rollout_manager = trainer._loop = None
     trainer._prefetch_thread = trainer._engine_rescore_clients = None
+    trainer.first_push_verified = True
     return trainer
 
 
