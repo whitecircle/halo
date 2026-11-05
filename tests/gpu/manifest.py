@@ -331,6 +331,17 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    "data/test_mrope_padding_free.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "qwen3"),
+        args_matrix=(
+            "--family qwen3_5 --attn flash_attention_2",
+            "--family qwen3_5 --attn flash_attention_4",
+            "--family qwen3_vl --attn flash_attention_2",
+            "--family qwen3_vl --attn flash_attention_4",
+        ),
+        timeout=900,
+    ),
     "data/test_packing_isolation.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "data/test_family_packing_isolation.py": TestSpec(
         nproc=1,
@@ -2737,6 +2748,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "optimizers/bench_adamw_bf16.py",
     "optimizers/bench_muon.py",
     "optimizers/bench_muon_qwen3_5.py",
+    "profiling/bench_ep_arena_headroom.py",
     "profiling/bench_ep_buffer_backends.py",
     "profiling/benchmark_attention_implementations.py",
     "profiling/benchmark_collators.py",
@@ -2748,7 +2760,6 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_lowp_kernels.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",
-    "profiling/bench_ep_arena_headroom.py",
     "profiling/benchmark_sft_dense.py",
     "profiling/benchmark_sft_ep.py",
     "profiling/benchmark_smpo_ep.py",
