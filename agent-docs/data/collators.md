@@ -69,7 +69,8 @@ It detects packed data via the `seq_lengths` field: TRL's `pack_dataset()` emits
 row edge and summing to the row length. A document cut by the row edge is two pieces in two rows, each isolated from
 its row's other documents. The first token of a piece has no earlier token in its row to be predicted from, so its
 label is masked like any document's first token, a continuation's included; under completion-only masking a
-continuation piece holds no assistant marker and trains nothing. Rows without `seq_lengths` (a corpus baked by an
+continuation piece holds no assistant marker and trains nothing. A continuation also restarts its `position_ids`
+at 0, so it sees none of the prefix; under completion-only masking prefer `bfd_split` over `wrapped`. Rows without `seq_lengths` (a corpus baked by an
 earlier release) collate as **one** document, so concatenated documents attend across each other; the collator warns
 once per instance when it sees such rows.
 
@@ -288,7 +289,9 @@ A family outside the table above and the family specs gets a warning on every ba
     whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused until `eos_token` names
     the token it closes a turn with. A template that ends a turn at the next role marker (GLM's) passes
     through the model config's terminator set. The self-distillation policy runs a terminator-less span
-    to the row end, so it passes there.
+    to the row end, so it passes there. The packed and padding-free routes still accept a terminator-less template
+    (their policy trains the final turn), and the offline bake and tree packing do not go through this probe, so the
+    refusal holds for padded rows.
 
 ## EOS, pad, and the response template
 
