@@ -3,7 +3,7 @@
 import functools
 import itertools
 import pickle
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any, TypeVar
 
 import torch
@@ -92,6 +92,29 @@ def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.P
     return my_group
 
 
+def _gather_windows(
+    source: torch.Tensor,
+    begin: int,
+    end: int,
+    total: int,
+    *,
+    dst: int,
+    group: dist.ProcessGroup | None,
+    window_of: Callable[[int, int], torch.Tensor],
+) -> Iterator[tuple[int, torch.Tensor]]:
+    """COLLECTIVE per step: SUM-reduce the ``total`` bytes to ``dst`` in windows, this rank contributing ``source``
+    (uint8) at ``[begin, end)`` and zeros elsewhere. ``window_of(start, stop)`` supplies the buffer of a window, which
+    is zeroed first and yielded with its start after each reduce."""
+    for start in range(0, total, _GATHER_WINDOW_BYTES):
+        stop = min(start + _GATHER_WINDOW_BYTES, total)
+        window = window_of(start, stop).zero_()
+        low, high = max(begin, start), min(end, stop)
+        if low < high:
+            window[low - start : high - start].copy_(source[low - begin : high - begin])
+        dist.reduce(window, dst=dst, group=group)
+        yield start, window
+
+
 def gather_on_rank0(payload: Any) -> list[Any] | None:
     """COLLECTIVE: every rank's ``payload`` in rank order on rank 0, None on the others. SUM-reduces the pickles laid
     end to end over the communicator's existing ring; ``gather_object`` under NCCL connects every peer to rank 0 point
@@ -106,15 +129,12 @@ def gather_on_rank0(payload: Any) -> list[Any] | None:
     offsets = list(itertools.accumulate(sizes.tolist(), initial=0))
     begin, end, total = offsets[rank], offsets[rank + 1], offsets[-1]
     received = memoryview(bytearray(total)) if rank == 0 else None
-    window = torch.empty(min(total, _GATHER_WINDOW_BYTES), dtype=torch.uint8, device=device)
-    for start in range(0, total, _GATHER_WINDOW_BYTES):
-        span = window[: min(_GATHER_WINDOW_BYTES, total - start)].zero_()
-        low, high = max(begin, start), min(end, start + span.numel())
-        if low < high:
-            span[low - start : high - start].copy_(mine[low - begin : high - begin])
-        dist.reduce(span, dst=0)
+    buffer = torch.empty(min(total, _GATHER_WINDOW_BYTES), dtype=torch.uint8, device=device)
+    for start, window in _gather_windows(
+        mine, begin, end, total, dst=0, group=None, window_of=lambda start, stop: buffer[: stop - start]
+    ):
         if received is not None:
-            received[start : start + span.numel()] = span.cpu().numpy()
+            received[start : start + window.numel()] = window.cpu().numpy()
     if received is None:
         return None
     return [pickle.loads(received[offsets[peer] : offsets[peer + 1]]) for peer in range(world)]
@@ -197,11 +217,14 @@ def gather_cat_to_rank(
         wire = result.view(-1).view(torch.uint8)
     else:
         scratch = torch.empty(min(total, _GATHER_WINDOW_BYTES), dtype=torch.uint8, device=tensor.device)
-    for start in range(0, total, _GATHER_WINDOW_BYTES):
-        stop = min(start + _GATHER_WINDOW_BYTES, total)
-        window = (wire[start:stop] if result is not None else scratch[: stop - start]).zero_()
-        low, high = max(begin, start), min(end, stop)
-        if low < high:
-            window[low - start : high - start].copy_(sends[low - begin : high - begin])
-        dist.reduce(window, dst=dst, group=group)
+    for _ in _gather_windows(
+        sends,
+        begin,
+        end,
+        total,
+        dst=dst,
+        group=group,
+        window_of=lambda start, stop: wire[start:stop] if result is not None else scratch[: stop - start],
+    ):
+        pass
     return result
