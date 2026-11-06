@@ -320,6 +320,8 @@ each forward.
 norms batch-`all_reduce(SUM)`ed via `._local_tensor` → expert norms `all_reduce(SUM)`ed over the
 expert-TP group, then the **dispatch** group → `sqrt(expert² + non_expert² + tp_shard²)`. Replicas
 across EP groups need no reduce: the clip runs the deferred sweep first, which leaves them identical.
+The [striped checkpoint save](../reference/checkpoints.md) relies on it: its writers take layers from different EP groups, so a
+change to the sweep's cadence that leaves the groups unequal at a save writes a mixed checkpoint.
 
 ## Determinism
 
