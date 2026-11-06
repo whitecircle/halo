@@ -214,7 +214,7 @@ that wheel's (the base's older system copy would otherwise reach the weight-sync
 The runtime cuBLAS is the pip wheel `nvidia-cublas`, pinned by an `override-dependencies` entry in
 `pyproject.toml` because torch's `cuda-toolkit[cublas]` extra locks 13.1.0.3, which drops the trailing
 rows of some bf16 matmuls ([pytorch/pytorch#203481](https://github.com/pytorch/pytorch/issues/203481)).
-13.8.0.4 passes every reproducer case; 13.7.0.27 still fails. The wheel's `nvidia-cuda-nvrtc`
+13.8.0.4 passes the reproducer cases; 13.7.0.27 was reported to still fail. The wheel's `nvidia-cuda-nvrtc`
 dependency is unpinned and stays at torch's lock. `docker/training/verify_image.py` fails the build when
 the library torch loads is not that wheel.
 
