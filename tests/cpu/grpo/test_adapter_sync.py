@@ -18,9 +18,11 @@ from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,
     AdapterSync,
+    build_adapter_requirements,
     reject_unadaptable_config,
     reject_unadaptable_model,
     resolve_adapter_serving,
+    resolve_live_versions,
 )
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements, verify_adapter_servers
 from halo.weight_sync.adapter_servers import AdapterServers
@@ -311,6 +313,14 @@ def test_a_config_the_engine_cannot_serve_is_refused(overrides, reason):
 
 def test_a_servable_config_passes():
     reject_unadaptable_config(_config())
+
+
+@pytest.mark.parametrize(("prefetch_depth", "active", "live"), [(3, True, 5), (1, True, 3), (3, False, 2)])
+def test_the_live_versions_cover_the_rounds_in_flight_and_the_retiring_one(prefetch_depth, active, live):
+    async_config = SimpleNamespace(prefetch_depth=prefetch_depth, prefetch_active=lambda: active)
+    assert resolve_live_versions(async_config) == live
+    serving = resolve_adapter_serving(_peft_model())
+    assert build_adapter_requirements(serving, async_config).live_versions == live
 
 
 _NEEDS = AdapterRequirements(rank=8, modules=("q_proj", "v_proj"), live_versions=3)
