@@ -38,6 +38,25 @@ def sampler_certain_mask(
     return sampled_token_mask(completion_mask, row_has_sampling) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
 
 
+def engine_forced_close_mask(
+    sampling_logps: torch.Tensor,
+    completion_mask: torch.Tensor,
+    row_has_sampling: torch.Tensor,
+    completion_ids: torch.Tensor,
+    reasoning_end_ids: tuple[int, ...],
+) -> torch.Tensor:
+    """Tokens of a reasoning close the engine forced at a turn's thinking cap, from the sampling side alone."""
+    certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
+    width = len(reasoning_end_ids)
+    forced = torch.zeros_like(certain)
+    if completion_ids.shape[1] >= width:
+        end = completion_ids.new_tensor(reasoning_end_ids)
+        starts = ((completion_ids.unfold(1, width, 1) == end) & certain.unfold(1, width, 1)).all(-1)
+        for offset in range(width):
+            forced[:, offset : offset + starts.shape[1]] |= starts
+    return forced
+
+
 def zero_engine_forced_closes(
     ratio: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -48,14 +67,9 @@ def zero_engine_forced_closes(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The ratio zeroed at reasoning closes the engine forced at a turn's thinking cap. Trained with the episode's
     advantage, repeated forced closes drive down the model's own probability of ending its reasoning."""
-    certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
-    width = len(reasoning_end_ids)
-    forced = torch.zeros_like(certain)
-    if completion_ids.shape[1] >= width:
-        end = completion_ids.new_tensor(reasoning_end_ids)
-        starts = ((completion_ids.unfold(1, width, 1) == end) & certain.unfold(1, width, 1)).all(-1)
-        for offset in range(width):
-            forced[:, offset : offset + starts.shape[1]] |= starts
+    forced = engine_forced_close_mask(
+        sampling_logps, completion_mask, row_has_sampling, completion_ids, reasoning_end_ids
+    )
     return ratio.masked_fill(forced, 0.0), forced
 
 
@@ -73,6 +87,24 @@ def kl_clamp_counts(clamped: torch.Tensor, loss_mask: torch.Tensor) -> tuple[tor
     return (clamped & loss_mask).sum(), loss_mask.sum()
 
 
+def corrected_token_mask(
+    sampling_logps: torch.Tensor, completion_mask: torch.Tensor, row_has_sampling: torch.Tensor
+) -> torch.Tensor:
+    """The tokens the importance ratio corrects: sampled, and not emitted with probability 1."""
+    return sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
+        sampling_logps, completion_mask, row_has_sampling
+    )
+
+
+def compute_token_is_ratio(
+    logps: torch.Tensor, sampling_logps: torch.Tensor, corrected_mask: torch.Tensor, clip_max: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``clamp(exp(logπ − logπ_sampling), clip_max)`` on the corrected tokens, exactly 1 elsewhere, and the masked
+    log-ratio it came from. Returns ``(ratio, logps_diff)``."""
+    logps_diff = (logps - sampling_logps) * corrected_mask
+    return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff
+
+
 def compute_is_ratio(
     recompute_logps: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -83,11 +115,9 @@ def compute_is_ratio(
     """Truncated per-token ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``. Rows without sampling
     logprobs, non-policy tokens and sampler-certain tokens get exactly 1, so one bad row cannot perturb the others and
     no band or veto trips. Returns ``(ratio, logps_diff, corrected_mask)``."""
-    corrected_mask = sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
-        sampling_logps, completion_mask, row_has_sampling
-    )
-    logps_diff = (recompute_logps - sampling_logps) * corrected_mask
-    return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
+    corrected_mask = corrected_token_mask(sampling_logps, completion_mask, row_has_sampling)
+    ratio, logps_diff = compute_token_is_ratio(recompute_logps, sampling_logps, corrected_mask, clip_max)
+    return ratio, logps_diff, corrected_mask
 
 
 def select_mask_logratio(

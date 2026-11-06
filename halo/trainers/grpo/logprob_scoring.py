@@ -151,6 +151,8 @@ class LogprobScoringMixin:
     _armed_row_spans: torch.Tensor | None = None
     # Rows whose armed span disagreed with the mask the forward read, summed on the device.
     _row_span_mismatches: torch.Tensor | None = None
+    # Set by :meth:`_scoring_with_row_spans`: the host spans of the one mask the next scoring call reads.
+    _given_row_spans: tuple[list[tuple[int, int]], list[int]] | None = None
 
     @contextmanager
     def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
@@ -214,6 +216,16 @@ class LogprobScoringMixin:
             return
         with self.accelerator.unwrap_model(self.model).disable_adapter():
             yield self.model
+
+    @contextmanager
+    def _scoring_with_row_spans(self, spans: tuple[list[tuple[int, int]], list[int]]) -> Iterator[None]:
+        """The block's scoring forwards take ``spans`` (:func:`dense_row_spans` of the very mask they are handed) in
+        place of reading it again, for a caller that already holds them."""
+        self._given_row_spans = spans
+        try:
+            yield
+        finally:
+            self._given_row_spans = None
 
     def _chunked_completion_logps(
         self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
@@ -332,8 +344,17 @@ class LogprobScoringMixin:
         return self._head_transform(unwrapped_model).project(unwrapped_model.get_output_embeddings(), hidden)
 
     def _row_spans_for(self, attention_mask, logits_to_keep) -> tuple[list[tuple[int, int]], list[int]]:
-        """:func:`dense_row_spans` of the whole batch, or the armed table of a loss forward, whose agreement with the
-        mask read here is tallied on the device and refused at the window's end (``RowSpanStashMixin``)."""
+        """:func:`dense_row_spans` of the whole batch, the spans a caller gave (:meth:`_scoring_with_row_spans`), or the
+        armed table of a loss forward, whose agreement with the mask read here is tallied on the device and refused at
+        the window's end (``RowSpanStashMixin``)."""
+        given = self._given_row_spans
+        if given is not None:
+            if len(given[0]) != attention_mask.size(0):
+                raise RuntimeError(
+                    f"Row spans for {len(given[0])} rows were given to a scoring call over {attention_mask.size(0)} rows: "
+                    f"they describe another mask."
+                )
+            return given
         armed = self._armed_row_spans
         if armed is None:
             return dense_row_spans(attention_mask, logits_to_keep)

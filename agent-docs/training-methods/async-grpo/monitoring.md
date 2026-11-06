@@ -13,7 +13,7 @@ Async GRPO metrics are namespaced by the question they answer. The rollout, `sam
 | `judge/*`, `reward_model/*` | external reward terms | `<source>/<name>/scored` plus per-source keys: [judge](../grpo/rewards/judge.md#metrics), [reward model](../grpo/rewards/reward-model.md) |
 | `logps/*` | policy confidence | `sampling_mean`, `advantage_cov`; the related `kl`, `entropy`, `kl_clamp_frac` are unnamespaced |
 | `advantage/*` | the round's push on the sampled tokens | `net_token_mass`, `token_mass_scale`, `negative_only_mass` ([Token-mass balance](objective.md#token-mass-balance)) |
-| `sampling/*` | engine/trainer agreement | `is_correction_active`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac`, `zero_gradient_round` |
+| `sampling/*` | engine/trainer agreement | `is_correction_active`, `is_weights_from_loss_forward`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac`, `zero_gradient_round` |
 | `routing/*` | MoE [routing replay](objective.md#routing-replay) | `replay_flip_rate`; under R3 ([rollout replay](objective.md#routing-replay)), the capture shape classes `rollout_full_frac`, `rollout_engine_omits_last_frac`, `rollout_completion_only_frac`, `rollout_unresolved_frac`, plus `rollout_prompt_len_mismatch_frac` |
 | unnamespaced | TRL loss internals | `clip_ratio/*`, `cispo_clip_ratio` (under `loss_type: cispo`), `step_time` |
 
@@ -55,6 +55,7 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 | `is_ratio_extreme_frac` | Share of corrected tokens whose raw ratio lies outside `[1/c, c]` before any mask, `c` being `vllm_importance_sampling_clip_max` |
 | `is_ess_frac` | Normalized effective sample size `(Σw)² / (n Σw²)` of the applied IS weights; it falls as a few tokens carry the correction |
 | `is_ratio_mean` / `is_ratio_max` | The ratios that survive the mask stages |
+| `is_weights_from_loss_forward` | 1 on a round whose IS weights came from the loss forward, 0 on one a no-grad pass weighed ([Weight from the loss forward](performance.md#weight-from-the-loss-forward)). On a 1 round `logratio_mean`, `is_ratio_*` and `is_ess_frac` read loss tokens only and `is_masked_frac` is absent (no mask stage can run) |
 | `sampler_certain_frac` | Tokens the engine emitted with probability 1, which carry no correction (a forced reasoning close instead gets ratio 0, `forced_close_frac`) |
 
 ### `routing/*`

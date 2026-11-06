@@ -42,6 +42,8 @@ ROUTING_MASKS_KEY = "routing_masks"
 # means the rollout path is down.
 EMPTY_ROLLOUT_STEP_LIMIT = 2
 ZERO_GRADIENT_ROUND_KEY = "sampling/zero_gradient_round"
+# 1 on a round whose importance weights came from the loss forward, 0 on one a no-grad pass weighed.
+IS_WEIGHTS_FROM_LOSS_FORWARD_KEY = "sampling/is_weights_from_loss_forward"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -81,7 +83,9 @@ class StepRows:
 
 @dataclasses.dataclass(frozen=True)
 class StepScores:
-    """What the step's no-grad pass scored; ``old_logps`` is the recompute where the loss reads it."""
+    """What the step's no-grad pass scored; ``old_logps`` is the recompute where the loss reads it. A ``fused`` round
+    ran no pass: its ``ratio`` holds only the forced closes' zeros (the loss forward builds the weight), and the
+    reference log-probs come unclamped."""
 
     recompute_logps: torch.Tensor | None
     old_logps: torch.Tensor | None
@@ -92,6 +96,8 @@ class StepScores:
     traj_row_ids: torch.Tensor | None
     ref_logps: torch.Tensor | None
     kl_clamped: torch.Tensor | None
+    forced_zero: torch.Tensor | None
+    fused: bool
 
 
 class BatchBuildFence(DeferredRankFailure):
@@ -180,7 +186,7 @@ class StepBatchMixin:
         )
         if scores.kl_clamped is not None:
             self._world_metrics.fraction(KL_CLAMP_FRAC_KEY, *kl_clamp_counts(scores.kl_clamped, loss_mask))
-        if mode == "train":
+        if mode == "train" and not scores.fused:
             local_advantages, traj_advantages = self._apply_token_mass_balance(
                 local_advantages, traj_advantages, loss_mask, scores.ratio, step.negative_only
             )
@@ -209,6 +215,8 @@ class StepBatchMixin:
             "importance_sampling_ratio": scores.ratio,
             "num_items_in_batch": num_items_in_batch,
         }
+        if scores.fused:
+            result = self._with_loss_forward_inputs(result, step, scores)
         if scores.routing_masks is not None:
             # Rides the batch dict like old_per_token_logps so TRL's shuffle/slice keep it row-aligned.
             result[ROUTING_MASKS_KEY] = scores.routing_masks
@@ -294,7 +302,8 @@ class StepBatchMixin:
     ) -> StepScores:
         """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
         the policy's. Both forwards run in the deal's order, or one scoring call per bin of a packed round; scores
-        come back in batch order."""
+        come back in batch order. A fused round runs no recompute: the loss forward weighs and clamps."""
+        fused = self._fuses_weights(mode)
         order = (
             self._no_grad_row_order(step.attention_mask, mode)
             if plan is None
@@ -311,10 +320,11 @@ class StepBatchMixin:
                 plan,
             )
         ratio, logps_diff, corrected_mask, traj_row_ids = self._apply_is_correction(
-            recompute_logps, step, rows, engine_logps
+            recompute_logps, step, rows, engine_logps, fused=fused
         )
+        forced_zero = None
         if self._is_correction and self._forced_close_ids is not None:
-            ratio = self._zero_forced_closes(ratio, step)
+            ratio, forced_zero = self._zero_forced_closes(ratio, step)
         with self._phase_timers.span("no_grad_ref"):
             ref_logps = self._compute_ref_logps(
                 step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order, plan
@@ -334,6 +344,8 @@ class StepBatchMixin:
             traj_row_ids,
             ref_logps,
             kl_clamped,
+            forced_zero,
+            fused,
         )
 
     def _recompute_logps_and_routing_masks(
@@ -346,22 +358,26 @@ class StepBatchMixin:
         order: torch.Tensor | None = None,
         plan: MicrobatchPlan | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Both in batch order. The gate is config-derived, so the forward and its EP dispatch are entered by every
-        rank or by none."""
+        """Both in batch order. The gate is config- and mode-derived, so the forward and its EP dispatch are entered by
+        every rank or by none."""
         # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
         routing_masks = rollout_routing_masks
-        if self._runs_logprob_recompute:
+        if self._runs_logprob_recompute and not self._fuses_weights(mode):
             ids, mask = prompt_completion_ids, attention_mask
             if order is not None:
                 ids, mask = ids[order], mask[order]
-            # Capture is scoped to this call: the ref-logps forward that follows is a different policy.
-            replay_spans = (
-                dense_row_spans(mask)[0]
+            # Capture is scoped to this call: the ref-logps forward that follows is a different policy. The scorer
+            # takes the spans read here, as it reads the same mask whole when no plan splits it into bins.
+            read_spans = (
+                dense_row_spans(mask, logits_to_keep)
                 if self._routing_injector is not None and self._replay_row_spans and mode == "train"
                 else None
             )
+            replay_spans = None if read_spans is None else read_spans[0]
             with contextlib.ExitStack() as capture_stack:
+                if read_spans is not None and plan is None:
+                    capture_stack.enter_context(self._scoring_with_row_spans(read_spans))
                 captured = (
                     capture_stack.enter_context(
                         self._routing_injector.capture(
@@ -578,8 +594,11 @@ class StepBatchMixin:
         episodes = gathered_state >= 0
         self._log_headline_rewards(gathered_rewards[episodes], gathered_state[episodes] == 1, num_generations, mode)
         self._metrics[mode]["sampling/is_correction_active"].append(float(self._is_correction))
+        self._metrics[mode][IS_WEIGHTS_FROM_LOSS_FORWARD_KEY].append(float(scores.fused))
         if scores.corrected_mask is not None:
-            eff_corrected = self._narrow_corrected_mask_and_record(scores.ratio, scores.corrected_mask, loss_mask)
+            eff_corrected = self._narrow_corrected_mask_and_record(
+                scores.ratio, scores.corrected_mask, loss_mask, fused=scores.fused
+            )
             if self._update_breaker_tripped(
                 scores.ratio, eff_corrected, scores.traj_row_ids, len(rollout_results), mode
             ):

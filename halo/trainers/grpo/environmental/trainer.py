@@ -30,6 +30,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_vespo_loss,
 )
 from halo.trainers.grpo.environmental.importance_sampling import ImportanceSamplingMixin
+from halo.trainers.grpo.environmental.loss_forward_weights import LossForwardImportanceMixin
 from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, reasoning_token_counts
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
@@ -82,6 +83,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     RolloutMetricsMixin,
     TrajectoryTokenizeMixin,
     GenerationRoundMixin,
+    LossForwardImportanceMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
     PhaseTimedMixin,
@@ -161,6 +163,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # After the model is placed: the deal reads its attention implementation.
         self._resolve_length_ordered_rows()
         self._configure_packed_microbatches()
+        self._resolve_loss_forward_weights()
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config

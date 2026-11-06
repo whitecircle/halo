@@ -25,6 +25,7 @@ from halo.trainers.grpo.objective.logratio import (
     apply_is_masks,
     apply_opsm,
     compute_is_ratio,
+    corrected_token_mask,
     sampled_token_mask,
     sampler_certain_mask,
     select_mask_logratio,
@@ -173,44 +174,51 @@ class ImportanceSamplingMixin:
         step: StepRows,
         rows: TrajectoryRowMap,
         engine_logps: list[torch.Tensor | None] | None = None,
+        fused: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """All-ones with the rest ``None`` when the correction is off. ``logps_diff`` is what the mask stages read, the
-        engine's diff on re-scored rows under ``isr_engine_reference``; the weight is always trainer-vs-sampling."""
+        engine's diff on re-scored rows under ``isr_engine_reference``; the weight is always trainer-vs-sampling. A
+        ``fused`` round has no recompute: the weight stays all-ones for the loss forward to build, and only the
+        sampling-side mask and metrics come back."""
         importance_sampling_ratio = torch.ones_like(step.completion_mask, dtype=torch.float32)
         corrected_mask = None
         logps_diff = None
         traj_row_ids = None
         if self._is_correction:
-            importance_sampling_ratio, logps_diff, corrected_mask = compute_is_ratio(
-                recompute_logps,
-                step.sampling_logps,
-                step.completion_mask,
-                step.has_sampling,
-                self.vllm_importance_sampling_clip_max,
-            )
-            # Unclamped mean log-ratio (nats): ~0 when conditioning matches the engine's exact prompt.
-            self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
-            clip_max = self.vllm_importance_sampling_clip_max
-            # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
-            # band [1/clip_max, clip_max] is empty at or below 1.
-            if clip_max > 1:
-                extreme = corrected_mask & (logps_diff.abs() > math.log(clip_max))
-                self._world_metrics.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), corrected_mask.sum())
+            if fused:
+                corrected_mask = corrected_token_mask(step.sampling_logps, step.completion_mask, step.has_sampling)
+            else:
+                importance_sampling_ratio, logps_diff, corrected_mask = compute_is_ratio(
+                    recompute_logps,
+                    step.sampling_logps,
+                    step.completion_mask,
+                    step.has_sampling,
+                    self.vllm_importance_sampling_clip_max,
+                )
+                # Unclamped mean log-ratio (nats): ~0 when conditioning matches the engine's exact prompt.
+                self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
+                clip_max = self.vllm_importance_sampling_clip_max
+                # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
+                # band [1/clip_max, clip_max] is empty at or below 1.
+                if clip_max > 1:
+                    extreme = corrected_mask & (logps_diff.abs() > math.log(clip_max))
+                    self._world_metrics.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), corrected_mask.sum())
             # Policy tokens the sampler emitted with probability 1 (budget-forced closes): uncorrected.
             certain = sampler_certain_mask(step.sampling_logps, step.completion_mask, step.has_sampling)
             sampled = sampled_token_mask(step.completion_mask, step.has_sampling)
             self._world_metrics.fraction("sampling/sampler_certain_frac", certain.sum(), sampled.sum())
-            traj_row_ids = rows.traj_row_ids(step.completion_mask.device)
-            if engine_logps is not None:
-                logps_diff = self._engine_mask_logratio(
-                    logps_diff, recompute_logps, step, corrected_mask, engine_logps
-                )
-            if self._isr_mask_config.any_mask_active:
-                importance_sampling_ratio, mask_stats = apply_is_masks(
-                    importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._isr_mask_config
-                )
-                for key, (masked, total) in mask_stats.items():
-                    self._world_metrics.fraction(key, masked, total)
+            if not fused:
+                traj_row_ids = rows.traj_row_ids(step.completion_mask.device)
+                if engine_logps is not None:
+                    logps_diff = self._engine_mask_logratio(
+                        logps_diff, recompute_logps, step, corrected_mask, engine_logps
+                    )
+                if self._isr_mask_config.any_mask_active:
+                    importance_sampling_ratio, mask_stats = apply_is_masks(
+                        importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._isr_mask_config
+                    )
+                    for key, (masked, total) in mask_stats.items():
+                        self._world_metrics.fraction(key, masked, total)
         return importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids
 
     def _engine_mask_logratio(
@@ -233,8 +241,8 @@ class ImportanceSamplingMixin:
             self._world_metrics.fraction(key, numerator, denominator)
         return logps_diff
 
-    def _zero_forced_closes(self, ratio: torch.Tensor, step: StepRows) -> torch.Tensor:
-        """So no forced close trains with its episode's advantage."""
+    def _zero_forced_closes(self, ratio: torch.Tensor, step: StepRows) -> tuple[torch.Tensor, torch.Tensor]:
+        """So no forced close trains with its episode's advantage. Returns ``(ratio, forced)``."""
         ratio, forced = zero_engine_forced_closes(
             ratio,
             step.sampling_logps,
@@ -246,7 +254,7 @@ class ImportanceSamplingMixin:
         # Over the tokens that carry sampling log-probs: no other token can be a forced close.
         sampled = sampled_token_mask(step.completion_mask, step.has_sampling)
         self._world_metrics.fraction("sampling/forced_close_frac", forced.sum(), sampled.sum())
-        return ratio
+        return ratio, forced
 
     def _apply_opsm_stage(self, scores: StepScores, advantages: torch.Tensor) -> StepScores:
         """OPSM masks negative-advantage trajectories only, so it runs once the per-row ``advantages`` exist."""
@@ -264,21 +272,24 @@ class ImportanceSamplingMixin:
         importance_sampling_ratio: torch.Tensor,
         corrected_mask: torch.Tensor,
         loss_mask: torch.Tensor,
+        fused: bool = False,
     ) -> torch.Tensor:
-        """The drop-narrowed corrected mask the breaker reads; also records coverage and surviving-ratio metrics."""
+        """The drop-narrowed corrected mask the breaker reads; also records coverage and surviving-ratio metrics. A
+        ``fused`` round has no weights yet: the loss forward records those."""
         # corrected_mask predates the drop narrowing; intersect so coverage cannot exceed 1.
         eff_corrected = corrected_mask & loss_mask
         world = self._world_metrics
         world.fraction("sampling/is_correction_coverage", eff_corrected.sum(), loss_mask.sum())
-        # Masked ratios are zeroed in place, so a raw mean collapses as masking grows; report survivors.
-        ratios = importance_sampling_ratio[eff_corrected]
-        surviving = ratios[ratios > 0]
-        world.fraction("sampling/is_masked_frac", ratios.numel() - surviving.numel(), ratios.numel())
-        if surviving.numel():
-            world.fraction("sampling/is_ratio_mean", surviving.sum(), surviving.numel())
-            world.maximum("sampling/is_ratio_max", surviving.max())
-        # Over the weights the loss applies, masked ones as zeros: a thrown-away token is a lost sample.
-        world.effective_sample_frac("sampling/is_ess_frac", importance_sampling_ratio, eff_corrected)
+        if not fused:
+            # Masked ratios are zeroed in place, so a raw mean collapses as masking grows; report survivors.
+            ratios = importance_sampling_ratio[eff_corrected]
+            surviving = ratios[ratios > 0]
+            world.fraction("sampling/is_masked_frac", ratios.numel() - surviving.numel(), ratios.numel())
+            if surviving.numel():
+                world.fraction("sampling/is_ratio_mean", surviving.sum(), surviving.numel())
+                world.maximum("sampling/is_ratio_max", surviving.max())
+            # Over the weights the loss applies, masked ones as zeros: a thrown-away token is a lost sample.
+            world.effective_sample_frac("sampling/is_ess_frac", importance_sampling_ratio, eff_corrected)
         return eff_corrected
 
     def _update_breaker_tripped(

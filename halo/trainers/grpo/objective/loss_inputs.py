@@ -11,6 +11,17 @@ DEGENERATE_GROUP_FRAC_KEY = "sampling/degenerate_group_frac"
 NET_TOKEN_MASS_KEY = "advantage/net_token_mass"
 TOKEN_MASS_SCALE_KEY = "advantage/token_mass_scale"
 NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"
+# Batch keys of the importance weight's inputs when the loss forward builds the weight: the engine's log-probs, the
+# tokens it corrects, the forced closes it zeroes, the untrainable-turn rows, and the reference log-probs before the
+# loss forward clamps them against the policy's.
+IS_SAMPLING_LOGPS_KEY = "is_sampling_logps"
+IS_CORRECTED_MASK_KEY = "is_corrected_mask"
+IS_FORCED_ZERO_KEY = "is_forced_zero_mask"
+NEGATIVE_ONLY_ROWS_KEY = "negative_only_rows"
+UNCLAMPED_REF_LOGPS_KEY = "unclamped_ref_per_token_logps"
+# Metric sums a micro-batch adds to the round's token masses: trainable positive, trainable negative, and the
+# negative-only rows' negative mass.
+TOKEN_MASS_SUM_KEYS = ("loss_forward/positive_mass", "loss_forward/negative_mass", "loss_forward/negative_only_mass")
 # TRL loss types whose loss tokens of a step share one normalizer, so a row pulls with its advantage times its
 # token weight: the only losses the token-mass balance is exact for.
 TOKEN_SUM_LOSS_TYPES = ("cispo", "dapo", "dr_grpo")
@@ -44,16 +55,14 @@ def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> tor
     return torch.stack([(advantages.clamp_min(0) * weights).sum(), (advantages.clamp_max(0).neg() * weights).sum()])
 
 
-def _world_masses(local: torch.Tensor, gather_fn: Callable[[torch.Tensor], torch.Tensor]) -> list[float]:
-    """COLLECTIVE. A non-finite sum raises on every rank alike: a NaN or infinite advantage or IS ratio reached it, and
-    so the loss."""
-    masses = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
+def _check_finite_masses(masses: list[float]) -> None:
+    """A non-finite sum raises on every rank alike: a NaN or infinite advantage or IS ratio reached it, and so the
+    loss."""
     if not all(math.isfinite(mass) for mass in masses):
         raise RuntimeError(
             f"The round's token-weighted advantage masses are not finite ({masses}): a NaN or infinite "
             "advantage or IS ratio reached the loss."
         )
-    return masses
 
 
 def _balance(positive: float, negative: float) -> TokenMassBalance:
@@ -64,6 +73,40 @@ def _balance(positive: float, negative: float) -> TokenMassBalance:
     if negative > positive:
         return TokenMassBalance(net=net, negative_scale=positive / negative)
     return TokenMassBalance(net=net, positive_scale=negative / positive)
+
+
+def token_mass_sums(
+    advantages: torch.Tensor,
+    loss_mask: torch.Tensor,
+    importance_ratio: torch.Tensor | None,
+    negative_only: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """This rank's additive token-weighted masses: ``[positive, negative]``, and with ``negative_only`` rows (outside
+    the balance) a third, theirs."""
+    weights = (loss_mask if importance_ratio is None else loss_mask * importance_ratio).sum(dim=1)
+    if negative_only is None:
+        return _signed_masses(advantages, weights)
+    flagged = negative_only.to(advantages.device)
+    trainable = _signed_masses(advantages[~flagged], weights[~flagged])
+    return torch.cat([trainable, _signed_masses(advantages[flagged], weights[flagged])[1:]])
+
+
+def record_world_token_mass(
+    masses: list[float], metrics: MutableMapping[str, list[float]], enabled: bool, with_negative_only: bool
+) -> TokenMassBalance | None:
+    """The world's summed ``masses`` of :func:`token_mass_sums` as metrics, and the balance when ``enabled``. Raises on
+    a non-finite mass."""
+    _check_finite_masses(masses)
+    result = _balance(masses[0], masses[1])
+    metrics[NET_TOKEN_MASS_KEY].append(result.net)
+    if with_negative_only:
+        scales = result if enabled else TokenMassBalance(net=result.net)
+        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale + masses[2]
+        metrics[NEGATIVE_ONLY_MASS_KEY].append(masses[2] / trained if trained > 0 else 0.0)
+    if not enabled:
+        return None
+    metrics[TOKEN_MASS_SCALE_KEY].append(result.scale)
+    return result
 
 
 def record_token_mass(
@@ -78,24 +121,9 @@ def record_token_mass(
     """COLLECTIVE. A group's advantages sum to zero but their token-weighted sum does not: longer failures push down
     the tokens the policy sampled (entropy rises), longer solves sharpen it. ``negative_only`` rows are neither weighed
     nor scaled; pass them to :meth:`TokenMassBalance.apply` too."""
-    weights = (loss_mask if importance_ratio is None else loss_mask * importance_ratio).sum(dim=1)
-    if negative_only is None:
-        local = _signed_masses(advantages, weights)
-    else:
-        flagged = negative_only.to(advantages.device)
-        trainable = _signed_masses(advantages[~flagged], weights[~flagged])
-        local = torch.cat([trainable, _signed_masses(advantages[flagged], weights[flagged])[1:]])
-    masses = _world_masses(local, gather_fn)
-    result = _balance(masses[0], masses[1])
-    metrics[NET_TOKEN_MASS_KEY].append(result.net)
-    if negative_only is not None:
-        scales = result if enabled else TokenMassBalance(net=result.net)
-        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale + masses[2]
-        metrics[NEGATIVE_ONLY_MASS_KEY].append(masses[2] / trained if trained > 0 else 0.0)
-    if not enabled:
-        return None
-    metrics[TOKEN_MASS_SCALE_KEY].append(result.scale)
-    return result
+    local = token_mass_sums(advantages, loss_mask, importance_ratio, negative_only)
+    masses = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
+    return record_world_token_mass(masses, metrics, enabled, negative_only is not None)
 
 
 def narrow_loss_masks(drop_rows: torch.Tensor, *masks: torch.Tensor) -> tuple[torch.Tensor, ...]:
