@@ -278,6 +278,8 @@ class WeightSyncGroup(UpdateStream):
         joined again under a new generation, then the sessions reopen."""
         logger.warning(f"Re-forming the weight-sync group: {'; '.join(f'{url}: {error}' for url, error in stale)}")
         self._run_on_members(lambda member: member.abandon_update_session())
+        # A lost member never enters its half, so a destroy of ours would wait on it and strand the survivors' halves.
+        self.leader.abort_transport()
         halves = self._destroy_remote_halves()
         self.leader.discard_transport(None)
         self._join_all(halves)

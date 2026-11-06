@@ -2,6 +2,7 @@
 TCPStore, mirroring ``sglang.srt.utils.common.init_custom_process_group``, asserted by ``Dockerfile.sglang``."""
 
 import logging
+import threading
 from contextlib import contextmanager
 from datetime import timedelta
 
@@ -84,11 +85,23 @@ def release_weight_update_group(group: dist.ProcessGroup | None, *, destroy: boo
     c10d._world.pg_group_ranks.pop(group, None)
 
 
-def abort_weight_update_group(group: dist.ProcessGroup | None) -> None:
-    """Abort ``group``, ending kernels spinning on a silent peer; no destroy may follow. Never raises."""
+def abort_weight_update_group(group: dist.ProcessGroup | None, *, timeout_s: float) -> None:
+    """Abort ``group``, ending kernels spinning on a silent peer; no destroy may follow. Never raises, and returns after
+    ``timeout_s`` even when the abort does not: torch's abort waits on a communicator another thread may be tearing
+    down, which leaves the group parked on its own thread."""
     if group is None:
         return
-    try:
-        c10d._abort_process_group(group)
-    except Exception as e:
-        logger.warning(f"Aborting the SGLang weight-update group failed: {e}")
+
+    def abort() -> None:
+        try:
+            c10d._abort_process_group(group)
+        except Exception as e:
+            logger.warning(f"Aborting the SGLang weight-update group failed: {e}")
+
+    aborting = threading.Thread(target=abort, name="weight-update abort", daemon=True)
+    aborting.start()
+    aborting.join(timeout_s)
+    if aborting.is_alive():
+        logger.error(
+            f"Aborting the SGLang weight-update group did not return within {timeout_s:.0f}s; it is left parked."
+        )

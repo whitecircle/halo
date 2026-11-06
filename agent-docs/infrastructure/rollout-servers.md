@@ -141,7 +141,9 @@ Each chunk runs under one 600 s deadline on both engines (`HALO_NCCL_SYNC_TIMEOU
 update request that declares it and the drain of its sends. A failed chunk drains the stream under a
 30 s deadline, and on expiry the group is aborted instead of parking the trainer. Closing an SGLang group is bounded
 the same way: a server that does not answer `/health` is aborted outright, and a destroy still blocked after 30 s, as
-under a wedged engine that never enters its half, is aborted too, so the failure that brought the close raises.
+under a wedged engine that never enters its half, is aborted too, so the failure that brought the close raises. An
+abort runs on its own thread and the close returns after 30 s even when torch's abort does not, as it waits on a
+communicator another thread may be destroying.
 SGLang's `/health` generates through the scheduler, so the client asks it before the destroy occupies the scheduler,
 for longer than the 20 s the server allows a step. It waits for a server on `/v1/models`, which a pause does not hold
 and which answers ahead of the warm-up generate, then through `/health`'s 503s until that generate ends, as its first
@@ -187,7 +189,9 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   log names each server's pause and how long the first chunk waited on the slowest. SGLang then takes a membership
   probe, an empty declare that a server holding the group answers as a no-op. A server found restarted by either check
   re-forms the group once, with every server paused, reading each server's layout again, and the sync replays; a second miss closes the sessions, resumes
-  every server and raises. Each chunk is declared on every server and sent once, paced by the slowest server; new
+  every server and raises. A re-form aborts the trainer's half before any server destroys its own, as a lost member
+  never enters the destroy and a graceful one would park the survivors' schedulers; an SGLang join whose session close
+  gets no answer in 30 s raises naming the server, which then needs a restart. Each chunk is declared on every server and sent once, paced by the slowest server; new
   weights go live per server at its own close.
 - **A failure after the first declare is global.** A server that refuses its declare after peers accepted theirs
   leaves them parked in a receive no trainer-side call frees, so the group aborts the trainer's half, marks **every**
@@ -198,7 +202,8 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   host and NCCL environment need image changes. SGLang `single_group` rests on the probe: the GPU row
   `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` and the
   default flip wait on the GPU rows of `test_single_group_sync.py` (1, 2 and 4 servers per engine, cross-node and
-  colocated containers).
+  colocated containers). A SGLang group builds its NCCL communicator lazily in its first push, which grows with the
+  ranks, so the row bounds the second push and reports the first beside it.
 
 ### Served weights stay in checkpoint layout
 

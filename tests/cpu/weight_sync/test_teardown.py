@@ -4,6 +4,7 @@ other, so the engine-side release runs during the local destroy. At exit the des
 import atexit
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -192,7 +193,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 
 def _aborts(monkeypatch) -> list[object]:
     aborted: list[object] = []
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", aborted.append)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: aborted.append(group))
     return aborted
 
 
@@ -233,6 +234,25 @@ def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
     finally:
         released.set()
     assert aborted == [group]
+
+
+def test_a_join_to_a_scheduler_parked_in_a_destroy_fails_within_the_cleanup_bound(monkeypatch):
+    """The close that clears a dead trainer's session queues behind a destroy the scheduler never finishes."""
+    client = offline_client(SGLangWeightSyncClient)
+    timeouts: list[float] = []
+
+    def request(method, path, *, timeout, **kwargs):
+        if path == client.SESSION_CLOSE_ENDPOINT:
+            timeouts.append(timeout)
+            raise requests.exceptions.ReadTimeout(path)
+        return SimpleNamespace(status_code=400)
+
+    monkeypatch.setattr(client, "request", request)
+
+    with pytest.raises(RuntimeError, match="only a restart frees"):
+        client.request_engine_join("127.0.0.1", 1, 2, 1, None)
+
+    assert timeouts == [client_base.CLEANUP_TIMEOUT_S]
 
 
 def test_a_destroy_that_returns_is_not_aborted(monkeypatch):
@@ -358,7 +378,7 @@ def test_a_failing_abort_warns_instead_of_raising(monkeypatch, caplog):
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", failing_abort)
 
     with caplog.at_level(logging.WARNING, logger=c10d_group.logger.name):
-        c10d_group.abort_weight_update_group(object())
+        c10d_group.abort_weight_update_group(object(), timeout_s=5.0)
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("abort refused by NCCL" in message for message in warnings), (
@@ -366,11 +386,25 @@ def test_a_failing_abort_warns_instead_of_raising(monkeypatch, caplog):
     )
 
 
+def test_an_abort_that_never_returns_ends_at_its_deadline(monkeypatch, caplog):
+    """Torch's abort waits on a communicator another thread may be destroying, and then parks for good."""
+    parked = threading.Event()
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: parked.wait(30))
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.ERROR, logger=c10d_group.logger.name):
+            c10d_group.abort_weight_update_group(object(), timeout_s=0.2)
+        assert time.monotonic() - started < 5.0, "the abort held its caller past the deadline"
+        assert any("did not return" in record.getMessage() for record in caplog.records)
+    finally:
+        parked.set()
+
+
 def test_aborting_a_group_that_never_formed_does_not_enter_torch(monkeypatch):
     entered: list[object] = []
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", entered.append)
 
-    c10d_group.abort_weight_update_group(None)
+    c10d_group.abort_weight_update_group(None, timeout_s=5.0)
 
     assert entered == [], "abort_weight_update_group(None) called torch's abort"
 

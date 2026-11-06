@@ -25,6 +25,10 @@ class FakeRing:
         self.aborted = threading.Event()
         self.released = 0
 
+    def form_group(self) -> None:
+        """A re-formed group is a new communicator, which the previous one's abort does not reach."""
+        self.aborted.clear()
+
     def send(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
         self.chunks.append([name for name, _ in chunk])
         while not (self.peers_ready.is_set() or self.aborted.is_set()):
@@ -53,6 +57,7 @@ class RingSGLangClient(SGLangWeightSyncClient):
     ring: FakeRing
 
     def prepare_local_formation(self, master_address, listener, world_size):
+        self.ring.form_group()
         return lambda: object()
 
     def require_transport(self) -> None:
@@ -78,6 +83,7 @@ class RingVLLMClient(VLLMWeightSyncClient):
 
     def prepare_local_formation(self, master_address, listener, world_size):
         self._unique_id_store = UniqueIdStore.create(host=master_address, listener=listener, world_size=world_size)
+        self.ring.form_group()
         return lambda: _FakeComm(self.ring)
 
     def prepare_chunk_send(self, chunk) -> None:

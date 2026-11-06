@@ -19,7 +19,6 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    SESSION_CLOSE_TIMEOUT_S,
     ServerFlags,
     WeightSyncClientBase,
     unservable_bailing_model_types,
@@ -167,14 +166,21 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Unchecked, as with no session open the close answers 400.
         for name in dict.fromkeys((self._own_group_name, self.group_name)):
             self._destroy_group_named(name)
-        self.request(
-            "POST",
-            self.SESSION_CLOSE_ENDPOINT,
-            retry=False,
-            timeout=SESSION_CLOSE_TIMEOUT_S,
-            check=False,
-            **self.SESSION_REQUEST,
-        )
+        try:
+            self.request(
+                "POST",
+                self.SESSION_CLOSE_ENDPOINT,
+                retry=False,
+                timeout=CLEANUP_TIMEOUT_S,
+                check=False,
+                **self.SESSION_REQUEST,
+            )
+        except requests.exceptions.Timeout as e:
+            raise RuntimeError(
+                f"SGLang server {self.base_url} did not answer a session close within {CLEANUP_TIMEOUT_S}s, so it "
+                f"cannot join a weight-update group. Its scheduler is likely parked in the destroy of an earlier "
+                f"group, which only a restart frees."
+            ) from e
         return self._start_collective_rpc(
             "/init_weights_update_group",
             timeout=GROUP_FORMATION_TIMEOUT_S,
@@ -421,7 +427,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def abort_transport(self) -> None:
         self._aborted = True
-        abort_weight_update_group(self._transport[0])
+        abort_weight_update_group(self._transport[0], timeout_s=CLEANUP_TIMEOUT_S)
 
     def release_send_buffers(self) -> None:
         """Held across syncs, the arena would pin the sync GPU."""

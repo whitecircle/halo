@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """``rollout_sync_topology: single_group`` against live servers: one group over every server lands the same bytes on
-all of them, in the one rank block each, and costs about what one server does.
+all of them, in the one rank block each, and costs about what one server does. A group's first push also brings up its
+NCCL communicator, lazily on SGLang and growing with the ranks, so the bar is on the second push and the first is
+reported beside it.
 
 ``--backend`` picks the engine, ``--servers`` how many of its servers (``HALO_TEST_VLLM_SERVER_URLS`` or
 ``HALO_TEST_SGLANG_SERVER_URLS``, each serving the same checkpoint on its own GPUs; mix TP sizes in the list for the
@@ -41,6 +43,7 @@ def run(ctx) -> dict:
     try:
         ranks = sorted(rank for offset, world in group.rank_blocks for rank in range(offset, offset + world))
         checks["ranks_are_exactly_the_group"] = ranks == list(range(1, group.world_size))
+        first_s = timed_push(pool, everything)
         serve_s = timed_push(pool, everything)
         baseline = [probe_top_logprobs(url, VLLM_REINIT_MODEL) for url in urls]
         checks["servers_serve_one_policy"] = all(probe == baseline[0] for probe in baseline)
@@ -67,6 +70,7 @@ def run(ctx) -> dict:
 
     one = form_group(client_cls, urls[:1], port, ctx.device)
     try:
+        one_first_s = timed_push(one, everything)
         one_s = timed_push(one, everything)
     finally:
         one.close_communicator()
@@ -74,7 +78,9 @@ def run(ctx) -> dict:
     gigabytes = sum(t.nbytes for _, t in everything) / 1e9
     metrics = {
         "servers": len(urls),
+        "group_first_sync_s": first_s,
         "group_sync_s": serve_s,
+        "one_server_first_sync_s": one_first_s,
         "one_server_sync_s": one_s,
         "gb_per_s_per_unique_byte": gigabytes / serve_s,
     }

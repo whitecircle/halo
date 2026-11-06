@@ -241,6 +241,28 @@ def test_a_server_restarted_between_syncs_re_forms_the_group_once_and_the_sync_c
 
 
 @pytest.mark.parametrize("engine", _ENGINES)
+def test_a_re_form_aborts_the_trainers_half_before_any_server_destroys_its_own(rig, engine):
+    """A lost member never enters the destroy, so a graceful one of ours would wait on it and park the survivors'."""
+    pool, servers, ring = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    aborted_at_destroy: list[bool] = []
+    for member in pool.group._members:
+        destroy = member.destroy_remote_group
+
+        def record(destroy=destroy):
+            aborted_at_destroy.append(ring.aborted.is_set())
+            destroy()
+
+        member.destroy_remote_group = record
+    _restart(engine, servers[1])
+
+    _push(pool, 2)
+
+    assert aborted_at_destroy and all(aborted_at_destroy), aborted_at_destroy
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
 def test_a_group_that_stays_stale_after_its_one_re_form_raises_with_every_server_resumed(rig, engine, monkeypatch):
     pool, servers, ring = rig(engine, [1, 1])
     pool.init_communicator("cpu")

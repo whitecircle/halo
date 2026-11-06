@@ -3,6 +3,9 @@
 import threading
 import time
 
+# A group's chunk waits on its declares and its send, so the poll's period is added to every chunk of every sync.
+_POLL_PERIOD_S = 0.005
+
 
 class AsyncCall:
     def __init__(self, fn, name: str = "server call"):
@@ -49,4 +52,4 @@ def wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
         if time.monotonic() > deadline:
             blocked = ", ".join(call.name for call in calls if call.is_alive())
             raise TimeoutError(f"Weight-transfer setup still blocked after {timeout:.0f}s: {blocked}")
-        time.sleep(0.1)
+        time.sleep(_POLL_PERIOD_S)
