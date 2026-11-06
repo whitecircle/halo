@@ -3,9 +3,14 @@
 import json
 
 import pytest
-from transformers import Glm5NextConfig, Glm5NextTextConfig
+from transformers import Glm5NextConfig, Glm5NextTextConfig, Glm5NextVisionConfig
 
-from tests.common.models import GLM5_ENGINE_GATED_DIMS, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
+from tests.common.models import (
+    GLM5_ENGINE_GATED_DIMS,
+    GLM5_ENGINE_GATED_VISION_DIMS,
+    TINY_GLM5_CONFIG,
+    TINY_GLM5_VISION_CONFIG,
+)
 
 # Read by vLLM's glm5next and SGLang's glm5_next without a default, and not declared by transformers' class.
 ENGINE_READ_RELEASE_KEYS = (
@@ -68,6 +73,35 @@ def test_the_kernel_gated_dims_meet_the_engine_limits():
     # FlashInfer's TRT-LLM sparse MLA kernel and FlashMLA take 16, 32, 64 or 128 heads.
     assert dims["num_attention_heads"] in (16, 32, 64, 128)
     assert dims["hidden_size"] % 256 == 0
+
+
+def test_the_vision_dims_are_the_releases():
+    release = Glm5NextVisionConfig()
+    drifted = {
+        key: (TINY_GLM5_VISION_CONFIG[key], getattr(release, key))
+        for key in GLM5_ENGINE_GATED_VISION_DIMS
+        if TINY_GLM5_VISION_CONFIG[key] != getattr(release, key)
+    }
+    assert not drifted, f"tiny vision dims differ from the release (tiny, release): {drifted}"
+    assert TINY_GLM5_VISION_CONFIG["hidden_size"] // TINY_GLM5_VISION_CONFIG["num_heads"] == (
+        release.hidden_size // release.num_heads
+    )
+
+
+def test_the_vision_dims_meet_the_engine_limits():
+    vision = TINY_GLM5_VISION_CONFIG
+    # The processors flatten a patch to 3 x 2 x 14 x 14 = 1176 values (vLLM's profiling reports 37,632,000 values for
+    # 32,000 patches); both patch embeds view each row as (channels, temporal, patch, patch).
+    channels = Glm5NextVisionConfig().in_channels
+    assert channels * vision["temporal_patch_size"] * vision["patch_size"] ** 2 == 1176
+    # The processors resize to a multiple of patch x merge, so the square canvas must be one.
+    assert vision["image_size"] % (vision["patch_size"] * vision["spatial_merge_size"]) == 0
+    # SGLang builds the vision rotary table with rotary_dim = head_dim // 2 and vLLM with a 0.5 partial factor, both
+    # over a 64-wide head; the attention kernels take 64 or 128.
+    assert vision["hidden_size"] // vision["num_heads"] == 64
+    # The projector's output width is the text hidden size; the heads split across the engines' tensor parallelism.
+    assert vision["out_hidden_size"] == TINY_GLM5_CONFIG["hidden_size"]
+    assert vision["num_heads"] % 8 == 0
 
 
 if __name__ == "__main__":
