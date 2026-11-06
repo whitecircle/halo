@@ -62,6 +62,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2, worst_relative_l2
 from tests.common.rank_log import log, log_all
+from tests.common.routing import distinct_expert_picks
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 # The stage recipes' attention. No gradient checkpointing: what the deal changes is the row order alone.
@@ -136,8 +137,7 @@ def _engine_masks(mask: torch.Tensor, injector: RoutingReplayInjector, seed: int
     padding."""
     rows, seq = mask.shape
     generator = torch.Generator().manual_seed(seed)
-    scores = torch.rand(rows, seq, injector.num_ep_layers, injector.num_experts, generator=generator)
-    picks = scores.topk(injector.top_k, dim=-1).indices.to(torch.int16)
+    picks = distinct_expert_picks((rows, seq), injector.num_ep_layers, injector.top_k, injector.num_experts, generator)
     return picks.masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(mask.device)
 
 

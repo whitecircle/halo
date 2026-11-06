@@ -25,7 +25,7 @@ SAMPLED = [44, 55]
 
 def _routing_payload(tokens: int) -> str:
     """SGLang's wire form, one row per decoder layer."""
-    return raw_routing_payload(np.zeros((tokens, ENGINE_LAYERS, TOP_K), dtype=np.int32))
+    return raw_routing_payload(np.tile(np.arange(TOP_K, dtype=np.int32), (tokens, ENGINE_LAYERS, 1)))
 
 
 def _rollout(

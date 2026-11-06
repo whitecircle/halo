@@ -560,9 +560,20 @@ def test_assemble_rollout_masks_rejects_drift_and_counts_unresolved():
         assemble_rollout_masks(bad_ids, [1], [2], 2, 3, 2, K, E)
     # A coverage matching no convention is counted, never raised, since a per-rank raise would desync ranks into a
     # collective hang. The row keeps natural routing.
-    odd_len = [(torch.zeros(9, 2, K, dtype=torch.int16), None)]
+    odd_len = [(torch.arange(9 * 2 * K, dtype=torch.int16).reshape(9, 2, K) % E, None)]
     out, stats = assemble_rollout_masks(odd_len, [1], [2], 2, 3, 2, K, E)
     assert stats["unresolved"] == 1 and (out == -1).all()
+
+
+@pytest.mark.parametrize("bad", ["repeated", "out_of_range"])
+def test_a_mask_deepep_would_fault_on_is_refused_at_assembly(bad):
+    mask = torch.arange(8 * 2 * K, dtype=torch.int16).reshape(8, 2, K) % E
+    if bad == "repeated":
+        mask[2, 1, 1] = mask[2, 1, 0]
+    else:
+        mask[2, 1, 1] = E
+    with pytest.raises(ValueError, match="twice|outside"):
+        assemble_rollout_masks([(mask, 4)], [4], [4], 4, 4, 2, K, E)
 
 
 if __name__ == "__main__":

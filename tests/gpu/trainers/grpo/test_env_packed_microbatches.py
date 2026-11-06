@@ -56,7 +56,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.rank_log import log, log_all
-from tests.common.routing import check_flips_are_near_ties, router_margins
+from tests.common.routing import check_flips_are_near_ties, distinct_expert_picks, router_margins
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -249,8 +249,10 @@ def run_moe(ctx) -> dict:
             raise AssertionError("the check passed a packed forward over tokens shifted one position")
 
     def r3_recompute_and_loss_forwards_consume_the_armed_masks():
-        engine = torch.randint(0, injector.num_experts, (ROWS, ids.size(1), injector.num_ep_layers, injector.top_k))
-        engine = engine.to(torch.int16).masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(ctx.device)
+        engine = distinct_expert_picks(
+            (ROWS, ids.size(1)), injector.num_ep_layers, injector.top_k, injector.num_experts
+        )
+        engine = engine.masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(ctx.device)
         built = host()
         built._rollout_routing_replay = True
         with torch.no_grad():

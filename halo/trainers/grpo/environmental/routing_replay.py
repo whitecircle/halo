@@ -98,6 +98,13 @@ def assemble_rollout_masks(
                 f"routed_experts mask row {i} contains expert ids outside [0, {num_experts}) — the "
                 f"engine is serving a different expert layout than the trainer."
             )
+        picks = mask.sort(dim=-1).values
+        if (picks[..., 1:] == picks[..., :-1]).any():
+            # A router never picks an expert twice for a token; DeepEP dispatch faults on a repeated id.
+            raise ValueError(
+                f"routed_experts mask row {i} names one expert twice in a token's top-{top_k} — the engine's "
+                f"routing is not a top-k selection."
+            )
         p, c = prompt_lens[i], completion_lens[i]
         ep = engine_p if engine_p is not None else p
         tokens = mask.shape[0]

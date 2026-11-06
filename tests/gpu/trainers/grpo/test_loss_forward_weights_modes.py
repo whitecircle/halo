@@ -51,6 +51,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.rank_log import log_all
+from tests.common.routing import distinct_expert_picks
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -234,8 +235,10 @@ def run_moe(ctx) -> dict:
     def r3_loss_forward_replays_engine_masks():
         """Fused, with the engine's masks in the batch: the loss forwards arm them and consume each whole."""
         ids, mask, keep = stacked(batch)
-        engine = torch.randint(0, injector.num_experts, (ROWS, ids.size(1), injector.num_ep_layers, injector.top_k))
-        engine = engine.to(torch.int16).masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(ctx.device)
+        engine = distinct_expert_picks(
+            (ROWS, ids.size(1)), injector.num_ep_layers, injector.top_k, injector.num_experts
+        )
+        engine = engine.masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(ctx.device)
         _, fused, _ = _inputs(model, batch)
         built = _host(model, fused=True, injector=injector)
         built._rollout_routing_replay = True

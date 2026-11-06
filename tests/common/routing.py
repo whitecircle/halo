@@ -101,3 +101,12 @@ def npy_routing_payload(array) -> str:
 def raw_routing_payload(array) -> str:
     """SGLang's wire form: base64 raw little-endian int32 rows, the shape implied."""
     return base64.b64encode(np.asarray(array, dtype=np.int32).tobytes()).decode()
+
+
+def distinct_expert_picks(
+    prefix: tuple[int, ...], layers: int, top_k: int, num_experts: int, generator: torch.Generator | None = None
+) -> torch.Tensor:
+    """An engine's ``[*prefix, layers, top_k]`` int16 picks: random experts, distinct within a token as a router's
+    top-k is (a repeated id faults DeepEP dispatch)."""
+    scores = torch.rand(*prefix, layers, num_experts, generator=generator)
+    return scores.topk(top_k, dim=-1).indices.to(torch.int16)
