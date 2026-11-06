@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 
 import requests
 import torch
+import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
@@ -268,10 +269,17 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Send ``method`` to ``path``, raising on an error status unless ``check`` is off. ``retry`` goes over the
         retrying session; a blocking engine RPC must not, since a retry queues a second collective call."""
         url = f"{self.base_url}{path}"
-        if retry:
-            resp = self._session.request(method, url, timeout=timeout, **kwargs)
-        else:
-            resp = requests.request(method, url, timeout=timeout, **kwargs)
+        try:
+            if retry:
+                resp = self._session.request(method, url, timeout=timeout, **kwargs)
+            else:
+                resp = requests.request(method, url, timeout=timeout, **kwargs)
+        except requests.exceptions.ConnectionError as e:
+            # A body that stalls after the headers surfaces as a ConnectionError wrapping urllib3's read timeout,
+            # which no bounded wait would name as an expiry.
+            if e.args and isinstance(e.args[0], urllib3.exceptions.ReadTimeoutError):
+                raise requests.exceptions.ReadTimeout(e.args[0], request=e.request) from e
+            raise
         if check:
             try:
                 resp.raise_for_status()

@@ -3,6 +3,7 @@
 out; a wait that ends early says nothing more."""
 
 import logging
+import socket
 import threading
 import time
 from types import SimpleNamespace
@@ -118,6 +119,39 @@ def test_an_abort_that_never_returns_says_it_gave_up(monkeypatch, caplog, parked
 def test_a_remote_destroy_that_gets_no_answer_says_it_gave_up(monkeypatch, caplog, short_bounds):
     client = offline_client(SGLangWeightSyncClient)
     monkeypatch.setattr(client, "request", _read_timeout)
+    with caplog.at_level(logging.INFO):
+        client.destroy_remote_group()
+    _expect_one_expiry(caplog, client, "to be destroyed")
+
+
+@pytest.fixture
+def stalled_body_server():
+    """Answers every request with headers promising a body that never arrives."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    connections: list[socket.socket] = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            connections.append(conn)
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n")
+
+    threading.Thread(target=serve, daemon=True).start()
+    yield f"http://127.0.0.1:{listener.getsockname()[1]}"
+    listener.close()
+    for conn in connections:
+        conn.close()
+
+
+def test_a_destroy_whose_body_stalls_after_the_headers_says_it_gave_up(caplog, short_bounds, stalled_body_server):
+    client = offline_client(SGLangWeightSyncClient)
+    client.base_url = stalled_body_server
     with caplog.at_level(logging.INFO):
         client.destroy_remote_group()
     _expect_one_expiry(caplog, client, "to be destroyed")
