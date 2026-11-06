@@ -19,7 +19,7 @@ from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.pool import WeightSyncPool
 from tests.common.fake_engines import FakeSGLangServer
-from tests.common.weight_sync import Wire
+from tests.common.weight_sync import Wire, offline_client
 from tests.common.weight_sync_ring import FakeRing, fake_servers, ring_client_class
 from tests.cpu.weight_sync.test_pool import _bare_pool
 
@@ -458,6 +458,37 @@ def test_a_join_clears_the_group_a_dead_trainer_left_under_either_topology_s_nam
         assert server.groups == {"weight_update_group_g1"}, f"a dead trainer's group leaked: {server.groups}"
     finally:
         server.close()
+
+
+def test_a_rejoin_under_a_group_name_skips_the_per_server_name_it_never_formed(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    destroyed = []
+    monkeypatch.setattr(client, "_destroy_group_named", destroyed.append)
+    monkeypatch.setattr(client, "request", lambda *a, **k: None)
+    monkeypatch.setattr(client, "_start_collective_rpc", lambda *a, **k: None)
+
+    client.request_engine_join("127.0.0.1", 1, 2, 1, "weight_update_group_g1")
+    client.request_engine_join("127.0.0.1", 1, 2, 1, "weight_update_group_g2")
+
+    assert destroyed == [
+        client._own_group_name,
+        "weight_update_group_g1",
+        "weight_update_group_g2",
+    ], destroyed
+
+
+def test_a_rejoin_still_destroys_the_per_server_name_this_client_formed(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    destroyed = []
+    monkeypatch.setattr(client, "_destroy_group_named", destroyed.append)
+    monkeypatch.setattr(client, "request", lambda *a, **k: None)
+    monkeypatch.setattr(client, "_start_collective_rpc", lambda *a, **k: None)
+
+    client.request_engine_join("127.0.0.1", 1, 2, 1, None)
+    destroyed.clear()
+    client.request_engine_join("127.0.0.1", 1, 2, 1, "weight_update_group_g1")
+
+    assert destroyed == [client._own_group_name, "weight_update_group_g1"], destroyed
 
 
 @pytest.mark.parametrize("engine", _ENGINES)

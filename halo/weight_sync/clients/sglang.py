@@ -125,6 +125,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # c10d registers group names process-globally, and keying on group_port 0 would collide auto-port clients.
         self._own_group_name = f"weight_update_group_{urlparse(self.base_url).netloc}"
         self.group_name = group_name or self._own_group_name
+        self._joined_names: set[str] = set()
 
     def read_server_flags(self) -> ServerFlags:
         return self._flags_in(self._server_info())
@@ -188,11 +189,17 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     ) -> AsyncCall:
         if group_name is not None:
             self.group_name = group_name
-        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, under
-        # the per-server name too, as a restart may switch topology, and a second begin under its open session.
-        # Unchecked, as with no session open the close answers 400.
-        for name in dict.fromkeys((self._own_group_name, self.group_name)):
+        # The engine refuses a second join under a registered name, so a dead trainer's entry is cleared first, and a
+        # second begin under its open session. Unchecked, as with no session open the close answers 400. The
+        # per-server name is cleared too on the first join (a restart may switch topology), but later only if this
+        # client formed it: on a server still parked in an earlier destroy, asking for a group that was never
+        # formed here is answered only when that destroy ends.
+        names = [self.group_name]
+        if not self._joined_names or self._own_group_name in self._joined_names:
+            names.insert(0, self._own_group_name)
+        for name in dict.fromkeys(names):
             self._destroy_group_named(name)
+        self._joined_names.add(self.group_name)
         try:
             with announced_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S):
                 self.request(

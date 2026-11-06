@@ -206,7 +206,8 @@ one server and has no such field. Both engines take the join's `rank_offset` and
 - **Formation.** Every server's join RPC and the trainer's half start together, as vLLM's join blocks until the whole group
   arrived and SGLang's first collective needs every rank; the first failure destroys every engine's half and raises
   naming the server. The group name carries a generation (`weight_update_group_g{n}`), and an SGLang join clears a dead
-  trainer's group under both the per-server name and the group's. A vLLM server whose `instance_id` cannot be read
+  trainer's group under the group's name, and under the per-server name on a client's first join and later only if it
+  formed that name. A vLLM server whose `instance_id` cannot be read
   refuses formation, as its restart could not be told from a live group.
 - **A sync.** Each server is probed (vLLM's `instance_id`), then all are paused with their sessions opened together; the
   log names each server's pause and how long the first chunk waited on the slowest. SGLang then takes a membership
@@ -219,8 +220,8 @@ one server and has no such field. Both engines take the join's `rank_offset` and
   whose session close gets no answer in 30 s raises naming the server, which then needs a restart. Every bounded wait of
   a re-form or teardown (a layout read, a group destroy, an abort, a session close) logs its server, purpose and bound
   once when it starts, and once more when the bound expires. A wait expires when its call is still running after the
-  join or ended in a request timeout. A survivor's destroy during a re-form is waited out to its bound, since SGLang has
-  no route to abort a server's half and the join that follows needs its scheduler free. An SGLang release stops the
+  join or ended in a request timeout. A survivor's destroy during a re-form is waited out to its bound (about 30 s, the main
+  cost of a re-form), since SGLang has no route to abort a server's half and the join that follows needs its scheduler free. An SGLang release stops the
   rendezvous socket listening itself, so a destroy or abort left parked, which keeps the store alive through its group, does not hold the group
   port. Each chunk is declared on every server and sent once, paced by the slowest server; new weights go live per
   server at its own close.
