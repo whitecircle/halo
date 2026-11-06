@@ -40,9 +40,9 @@ _ROLLOUT_OWNED_SAMPLING_KNOBS = ("top_p", "top_k", "min_p", "repetition_penalty"
 # from above); it and TRL's default pass.
 _ENV_IS_MODE = "token_truncate"
 # Whether packed micro-batches run on M-RoPE decoders (Qwen3.5/3.6), whose flattened rows faulted the flash
-# varlen kernels under ``padding_free``. Set by the verdict of tests/gpu/kernels/test_packed_rl_forward_mrope.py; False
-# refuses the knob on them and leaves them one backbone call per row.
-PACKED_MICROBATCH_ADMITS_MROPE = True
+# varlen kernels under ``padding_free``. Flip to True only with a passing run of
+# tests/gpu/kernels/test_packed_rl_forward_mrope.py; False refuses the knob on them (one backbone call per row).
+PACKED_MICROBATCH_ADMITS_MROPE = False
 
 
 def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:

@@ -7,6 +7,7 @@ import logging
 import torch
 
 from halo.models.attention.selection import effective_attn_implementation
+from halo.models.moe.balancing import iter_balancing_routers
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import (
@@ -71,7 +72,8 @@ class PackedMicrobatchMixin:
     def _warm_packed_row_kernels(self) -> None:
         """COLLECTIVE. A two-document packed forward and backward through the trainer's own scorer, so the varlen
         attention and the delta-rule and conv variants a packed call launches compile and load here, on every rank,
-        and not between a MoE dispatch and its combine in the first step. The gradients it leaves are dropped."""
+        and not between a MoE dispatch and its combine in the first step. The gradients it leaves are dropped, and the
+        expert loads it counted are reset so no bias update sees its tokens."""
         if not torch.cuda.is_available():
             return
         model, device, keep = self.model, self.accelerator.device, 4
@@ -86,6 +88,8 @@ class PackedMicrobatchMixin:
         finally:
             model.zero_grad(set_to_none=True)
             model.train(was_training)
+            for router in iter_balancing_routers(model):
+                router.expert_load_counter = None
         barrier()
 
     def _plan_packed_round(self, step: StepRows, num_dummy_rows: int) -> MicrobatchPlan:
@@ -129,9 +133,9 @@ class PackedMicrobatchMixin:
                 "keep the identity for: the installed TRL moved its buffer shuffle. Unset packed_microbatch_tokens "
                 "until the slot layout follows it."
             )
-        return self._gather_slot(inputs)
+        return self._build_slot_view(inputs)
 
-    def _gather_slot(self, slot: dict) -> dict:
+    def _build_slot_view(self, slot: dict) -> dict:
         """The micro-step's ``[rows_per_bin, width]`` view of the round: real rows by index, filler rows inert. A no-op
         slot carries only its flag."""
         rows = slot[SLOT_ROWS_KEY].tolist()

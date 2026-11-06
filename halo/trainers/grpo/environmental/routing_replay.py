@@ -248,10 +248,11 @@ class RoutingReplayInjector:
         masks: torch.Tensor,
         row_spans: list[tuple[int, int]] | None = None,
         row_order: torch.Tensor | None = None,
+        forwards_subset: bool = False,
     ) -> None:
         """One microbatch's mask, consumed cursor-wise across row-chunked forwards (a GC forward saves its slice for
         the recompute) and armed through backward. ``row_spans`` trims each forwarded row and ``row_order[p]`` names
-        its mask row."""
+        its mask row; ``forwards_subset`` admits an order shorter than the mask (a packed plan's rows)."""
         _require_spans_with_order(row_spans, row_order)
         if masks.dim() != 4 or masks.size(2) != len(self._layers):
             raise RuntimeError(
@@ -261,7 +262,7 @@ class RoutingReplayInjector:
         forwarded = masks.size(0) if row_order is None else row_order.numel()
         if row_spans is not None and len(row_spans) != forwarded:
             raise RuntimeError(f"row_spans has {len(row_spans)} entries for {forwarded} forwarded rows")
-        if forwarded > masks.size(0):
+        if forwarded > masks.size(0) or (forwarded != masks.size(0) and not forwards_subset):
             raise RuntimeError(f"row_order has {forwarded} entries for {masks.size(0)} mask rows")
         sources = list(range(masks.size(0))) if row_order is None else row_order.tolist()
         for i, layer in enumerate(self._layers):

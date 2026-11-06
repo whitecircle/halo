@@ -211,7 +211,7 @@ def test_an_inert_forward_inside_a_capture_miscounts_unless_it_is_paused():
 def test_pausing_hides_an_armed_mask_from_the_forward_and_restores_it_with_its_cursor():
     injector, mask = _injector(), _mask(len(_SPANS))
     forwarded = torch.tensor([2, 0])
-    injector.arm(mask, row_spans=[_SPANS[r] for r in forwarded.tolist()], row_order=forwarded)
+    injector.arm(mask, row_spans=[_SPANS[r] for r in forwarded.tolist()], row_order=forwarded, forwards_subset=True)
     armed = [layer._forced_topk_indices for layer in injector._layers]
     for layer in injector._layers:
         layer._forced_cursor = 2
@@ -227,6 +227,15 @@ def test_arming_checks_the_forwarded_rows_not_the_masks_rows():
     injector = _injector()
     with pytest.raises(RuntimeError, match="row_spans has 2 entries for 3 forwarded rows"):
         injector.arm(_mask(6), row_spans=[_SPANS[0], _SPANS[1]], row_order=torch.tensor([0, 1, 2]))
+
+
+def test_a_row_order_shorter_than_the_mask_is_refused_unless_the_caller_declares_a_subset():
+    injector, mask = _injector(), _mask(len(_SPANS))
+    forwarded = torch.tensor([2, 0])
+    spans = [_SPANS[r] for r in forwarded.tolist()]
+    with pytest.raises(RuntimeError, match="row_order has 2 entries"):
+        injector.arm(mask, row_spans=spans, row_order=forwarded)
+    injector.arm(mask, row_spans=spans, row_order=forwarded, forwards_subset=True)
 
 
 def _noop_host(*, injector=None):
@@ -256,6 +265,30 @@ def test_a_no_op_flag_is_ignored_outside_training():
     assert not host._is_noop_slot(types.SimpleNamespace(training=True), {"advantages": None})
 
 
+def test_the_construction_warm_up_leaves_no_expert_load_for_the_first_bias_update(monkeypatch):
+    class Router(torch.nn.Module):
+        balancing_biases = torch.zeros(2)
+        expert_load_counter = None
+
+    router = Router()
+    model = torch.nn.Sequential(router)
+    host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.model = model
+    host.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
+    leaf = torch.zeros(1, requires_grad=True)
+
+    def score(_model, ids, *_args, **_kwargs):
+        router.expert_load_counter = torch.ones(2)
+        return leaf * ids.sum(), None, None
+
+    host._get_per_token_logps_and_entropies = score
+    host._finish_fsdp2_backward = lambda _model: None
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr("halo.trainers.grpo.environmental.packed_rounds.barrier", lambda: None)
+    host._warm_packed_row_kernels()
+    assert router.expert_load_counter is None
+
+
 def _refill_host(batch_slots: dict, *, packed=True, training=True):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.model = types.SimpleNamespace(training=training)
@@ -266,7 +299,7 @@ def _refill_host(batch_slots: dict, *, packed=True, training=True):
     host._orders_rows_by_length = False
     host._generate_and_score_completions = lambda _inputs: dict(batch_slots)
     host._broadcast_tensors_from_tp_leader = lambda inputs: inputs
-    host._gather_slot = lambda slot: slot
+    host._build_slot_view = lambda slot: slot
     return host
 
 
@@ -301,7 +334,7 @@ def test_a_trl_refill_that_no_longer_shuffles_is_refused_for_packed_rounds(monke
 
 def test_evaluation_rounds_never_take_the_packed_path():
     host = _refill_host({"advantages": torch.zeros(2)}, training=False)
-    host._gather_slot = lambda slot: pytest.fail("an eval round was gathered as a slot")
+    host._build_slot_view = lambda slot: pytest.fail("an eval round was gathered as a slot")
     assert host._prepare_inputs({})["advantages"].shape == (2,)
 
 

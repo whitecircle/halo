@@ -374,7 +374,12 @@ class StepBatchMixin:
                 if rollout_routing_masks is not None:
                     # The recompute must run under the same routing the update pass replays, or
                     # the ratio comes from a different token distribution than the policy trains on.
-                    self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans, row_order=order)
+                    self._routing_injector.arm(
+                        rollout_routing_masks,
+                        row_spans=replay_spans,
+                        row_order=order,
+                        forwards_subset=plan is not None,
+                    )
                 try:
                     recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order, plan)
                 finally:
