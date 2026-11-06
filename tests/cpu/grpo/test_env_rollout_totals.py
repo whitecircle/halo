@@ -11,6 +11,7 @@ import pytest
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
 from halo.trainers import world_metrics
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import pooled_states, rank_states
 
 
@@ -125,6 +126,21 @@ def test_an_environment_metric_named_like_a_total_stays_the_environments_mean(mo
     assert not any(key.startswith("async/total_") for key in logged), sorted(logged)
     totals = host.cumulative_rollout_metrics()
     assert totals["async/total_rollouts"] == 2.0 and totals["async/total_generation_tokens"] == 20.0
+
+
+def test_a_rank_without_a_rollout_pool_logs_the_same_totals_keys_as_a_leader(monkeypatch) -> None:
+    cls = DistributedAsyncEnvironmentalGRPOTrainer
+    parent = next(c for c in cls.__mro__[1:] if "log" in vars(c))
+    monkeypatch.setattr(parent, "log", lambda self, logs, start_time=None: None)
+    logged = []
+    for manager in (None, object()):
+        host = object.__new__(cls)
+        host.model = types.SimpleNamespace(training=True)
+        host._routing_injector, host._prefetch_enabled, host._rollout_manager = None, False, manager
+        logs: dict = {}
+        cls.log(host, logs)
+        logged.append(sorted(logs))
+    assert logged[0] == logged[1] and "async/total_rollouts" in logged[0]
 
 
 if __name__ == "__main__":

@@ -333,8 +333,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             flip = self._routing_injector.drain_flip_rate()
             if flip is not None:
                 logs["routing/replay_flip_rate"] = flip
-        if self._rollout_manager:
-            logs.update(self.cumulative_rollout_metrics())
+        logs.update(self.cumulative_rollout_metrics())
         if self._prefetch_enabled:
             logs.update(self.prefetch_metrics())
         super().log(logs, start_time)
