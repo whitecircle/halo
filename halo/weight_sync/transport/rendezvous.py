@@ -40,6 +40,8 @@ class RendezvousListener:
         self.port: int = listener.getsockname()[1]
         self.handed_over = False
         self._socket: socket.socket | None = listener
+        # A second handle on the socket a store took over, kept to stop its listening on demand.
+        self._handed: socket.socket | None = None
         # The handover may run on a formation thread while a failure path closes from the caller's.
         self._lock = threading.Lock()
 
@@ -65,6 +67,7 @@ class RendezvousListener:
                 state = "handed to a store" if self.handed_over else "closed"
                 raise RuntimeError(f"The rendezvous listener on {self.bind_address}:{self.port} was already {state}.")
             self.handed_over = True
+            self._handed = listener.dup()
         try:
             yield listener.fileno()
         finally:
@@ -76,6 +79,21 @@ class RendezvousListener:
             listener, self._socket = self._socket, None
         if listener is not None:
             listener.close()
+
+    def free_port(self) -> None:
+        """Free the port even when the store that took it over is still referenced, as by a group whose teardown is
+        parked: a shutdown stops the socket listening whoever else holds its fd. Idempotent; ends the rendezvous, so
+        call it only once the group is released or abandoned."""
+        self.close()
+        with self._lock:
+            handed, self._handed = self._handed, None
+        if handed is not None:
+            try:
+                handed.shutdown(socket.SHUT_RDWR)
+            except OSError as e:
+                # ENOTCONN is the answer of a socket the store already closed.
+                logger.debug(f"Rendezvous port {self.port} was already released: {e}")
+            handed.close()
 
     def __enter__(self) -> "RendezvousListener":
         return self

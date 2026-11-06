@@ -14,6 +14,8 @@ import halo.weight_sync.clients.base as client_base
 import halo.weight_sync.clients.sglang as sglang_module
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.transport import c10d_group
+from halo.weight_sync.transport.rendezvous import RendezvousListener
+from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
 
@@ -507,3 +509,57 @@ def test_closing_an_interrupted_session_names_its_server_and_bound(monkeypatch, 
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+class _StoreHoldingGroup:
+    """What torch's group does: it references the store it formed over for as long as it is referenced itself."""
+
+    def __init__(self, store):
+        self.store = store
+
+
+def _client_parked_over_a_live_store(monkeypatch, port: int):
+    """A client whose destroy and abort never return, on a rendezvous port a real store has taken over."""
+    client = offline_client(SGLangWeightSyncClient)
+    listener = RendezvousListener("127.0.0.1", port)
+    store = listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+    group = _StoreHoldingGroup(store)
+    client._transport = (group, store)
+    client._rendezvous = listener
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    parked = threading.Event()
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", lambda group, *, destroy: parked.wait(30))
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: parked.wait(30))
+    return client, parked
+
+
+def _binds(port: int) -> bool:
+    with RendezvousListener("127.0.0.1", port):
+        return True
+
+
+def test_a_group_whose_release_and_abort_never_return_still_frees_its_port(monkeypatch, caplog):
+    """The parked threads hold the group and through it the store, so dropping the store frees nothing."""
+    port = free_port()
+    client, parked = _client_parked_over_a_live_store(monkeypatch, port)
+    try:
+        with caplog.at_level(logging.INFO, logger="halo.weight_sync.clients.server_calls"):
+            client.close_communicator()
+        assert _binds(port), "the next group on the same port cannot bind it"
+    finally:
+        parked.set()
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("Gave up waiting" in m and "released" in m for m in messages) == 1, messages
+
+
+def test_a_released_group_frees_its_port_too(monkeypatch):
+    port = free_port()
+    client, parked = _client_parked_over_a_live_store(monkeypatch, port)
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", lambda group, *, destroy: None)
+    try:
+        client.close_communicator()
+        assert _binds(port)
+    finally:
+        parked.set()

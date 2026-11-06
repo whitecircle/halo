@@ -23,7 +23,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait
+from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_announced
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
@@ -206,6 +206,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def prepare_local_formation(
         self, master_address: str, listener: RendezvousListener, world_size: int
     ) -> Callable[[], tuple[dist.ProcessGroup, dist.TCPStore]]:
+        self._rendezvous = listener
         return partial(
             build_weight_update_group,
             master_address=master_address,
@@ -235,13 +236,19 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             destroy = False
         # An engine that never enters its half parks the destroy, with the failure that brought us here unraised.
         local = AsyncCall(partial(release_weight_update_group, group, destroy=destroy), name="weight-update destroy")
-        announce_wait(self.base_url, "the trainer's half of its weight-update group to be released", CLEANUP_TIMEOUT_S)
-        if local.join(CLEANUP_TIMEOUT_S).is_alive():
-            logger.error(f"Destroying the weight-update group of {self.base_url} is still blocked; aborting it.")
+        wait_announced(
+            local, self.base_url, "the trainer's half of its weight-update group to be released", CLEANUP_TIMEOUT_S
+        )
+        if local.is_alive():
             self.abort_transport()
         if remote is not None:
-            announce_wait(self.base_url, "its half of the weight-update group to be destroyed", CLEANUP_TIMEOUT_S)
-            remote.join(CLEANUP_TIMEOUT_S)
+            wait_announced(
+                remote, self.base_url, "its half of the weight-update group to be destroyed", CLEANUP_TIMEOUT_S
+            )
+        # A destroy or abort left running holds the group, and through it the store, so the port is stopped directly.
+        if self._rendezvous is not None:
+            self._rendezvous.free_port()
+            self._rendezvous = None
         self._arena = None
         self._inflight.clear()
         self._send_stream = None
@@ -250,6 +257,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Set once a drain deadline aborted the group, on which a destroy raises and a broadcast hangs.
         self._aborted = False
         self._abort_parked = False
+        self._rendezvous: RendezvousListener | None = None
         self._arena: torch.Tensor | None = None
         # Events recorded after the latest chunks' broadcasts, settled _INFLIGHT_CHUNKS later.
         self._inflight: deque[torch.cuda.Event] = deque()

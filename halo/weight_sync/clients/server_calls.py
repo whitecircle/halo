@@ -15,6 +15,13 @@ def announce_wait(server: str, what: str, bound_s: float) -> None:
     logger.info(f"Waiting on {server} for {what}, for at most {bound_s:.0f}s")
 
 
+def wait_announced(call: "AsyncCall", server: str, what: str, bound_s: float) -> None:
+    """Announce a bounded wait on ``call``, join it, and say once if the bound expired with the call still running."""
+    announce_wait(server, what, bound_s)
+    if call.join(bound_s).is_alive():
+        logger.warning(f"Gave up waiting on {server} for {what} after {bound_s:.0f}s; the call is left running")
+
+
 class AsyncCall:
     def __init__(self, fn, name: str = "server call"):
         self.error: Exception | None = None

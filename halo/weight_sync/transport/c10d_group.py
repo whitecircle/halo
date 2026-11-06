@@ -61,8 +61,8 @@ def build_weight_update_group(
                 timeout=timedelta(seconds=timeout_s),
             )
     except Exception:
-        # Dropped so the listener dies with the failed attempt and a retry can rebind the port.
-        store = None
+        # So the failed attempt does not keep the port from a retry.
+        listener.free_port()
         raise
     # Not a subset of the trainer's world; without SGLang's identity rank map `broadcast(src=0)` cannot find the root.
     c10d._world.pg_group_ranks[group] = {i: i for i in range(world_size)}
