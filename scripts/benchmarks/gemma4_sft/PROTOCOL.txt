@@ -1,0 +1,102 @@
+Gemma 4 26B-A4B full-parameter SFT benchmark protocol (2x B300), September 2026
+
+Every framework trains the same tokens, with the same labels, in the same order, with the same optimizer
+hyperparameters, so throughput, memory and per-step losses are directly comparable.
+
+Hardware   2x NVIDIA B300 SXM6 (288 GB) per run, driver 580.159.03, GPUs attached to containers through CDI (docker
+           run --device nvidia.com/gpu=all). Hosts: see "Hosts" below.
+Model      google/gemma-4-26B-A4B-it, all parameters trainable, BF16 compute, text only. No LoRA or quantized weights.
+Versions   The newest release of each framework (2026-09-24) with the newest torch/transformers it accepts, in the
+           framework's official Docker image where one exists and works: Axolotl 0.19.0 (official image), NeMo
+           AutoModel (container 26.08.00), Megatron Bridge 0.6.1 (official NeMo 26.08.01 image), MS-SWIFT 4.5.3
+           (official image), Unsloth 2026.9.11 (a venv on the Halo image; its official image fails on sm_103), Halo
+           with the MoE kernels and the sliding-window attention (commit 6e66be54) in
+           public.ecr.aws/whitecircle/halo:blackwell.
+Choice     Each framework's configuration at 2,048 tokens is the fastest of those tried (the Axolotl variants tried
+           are in scripts/benchmarks/gemma4_sft/axolotl/configs/). reproduce.sh runs it and turns on the framework's
+           own activation checkpointing only when it runs out of memory.
+
+Data (built once by prepare_data.sh, identical for every framework, sha256 files in scripts/benchmarks/gemma4_sft/data/):
+  $BENCH_ROOT/data/ultrachat_gemma4_2k.jsonl  data/build_dataset.py: UltraChat-200k train_sft conversations
+      concatenated in order until the Gemma 4 chat template renders >= 2,300 tokens; 512 rows.
+  $BENCH_ROOT/data/messages.jsonl             the same 512 rows, with Gemma 4's empty thought channel
+      "<|channel>thought\n<channel|>" written at the start of every assistant message.
+  $BENCH_ROOT/data/canonical_tokens.jsonl     {"row", "input_ids" (2048), "labels" (2048, -100 = masked)}:
+      apply_chat_template(messages, tokenize=False) -> tokenizer(text, add_special_tokens=False) -> first 2,048.
+      labels = assistant spans from right after "<|turn>model\n" through "<turn|>" inclusive, -100 elsewhere;
+      mean label fraction 0.725. transformers' Gemma 4 template strips "<|channel>...<channel|>" from assistant
+      turns in the conversation history, so the thought channel does not reach the tokens (ids 100/101 appear 0 times).
+
+Rules
+  Tokens     Tokens and labels equal canonical_tokens.jsonl exactly. The canonical input_ids/labels are fed directly
+             (a pre-tokenized dataset) where the framework allows; where it must tokenize itself, messages.jsonl is
+             fed with the stock template and truncated to 2,048. Either way the first 4 rows the model actually
+             receives (rank 0 and rank 1) are diffed against the canonical rows and recorded (data_verification).
+  Order      No shuffling. At optimizer step k (1-based), rank r trains canonical row 2*(k-1)+r. HF-Trainer-based
+             frameworks use train_sampling_strategy="sequential" or SequentialSampler + DistributedSampler(shuffle=False).
+             The row ids consumed per rank in the first 3 steps are recorded (order_verification).
+  Batch      micro-batch 1 x 2,048 tokens per GPU, gradient accumulation 1: 4,096 tokens per optimizer step.
+  Loss       The token-weighted mean CE over all label tokens of the global batch (both ranks). Where a framework
+             logs something else (a mean of per-rank means), the token-weighted value is computed per step as well
+             (losses_token_weighted).
+  Optimizer  AdamW, betas (0.9, 0.999), eps 1e-8, weight_decay 0.0 on every parameter, lr 1e-5 constant from step 1
+             (no warmup, no decay), gradient clipping at global L2 norm 1.0, no eval, no saves. Each framework keeps
+             its own optimizer implementation and state precision (fused / bf16 / fp32 master): that is part of what
+             is measured. The effective values from the run log are recorded (optimizer field).
+  Metric     25 optimizer steps; cluster tokens/s = tokens trained in steps 6-25 / wall time of steps 6-25.
+             Peak memory = torch.cuda.max_memory_allocated (and _reserved), max over ranks.
+  Sanity     The step-1 loss is identical across frameworks by construction (same weights, same batch): ~6.9 (high
+             because the model expects an empty thought channel the rendered turns lack), within about 1% of each other.
+  Step 2     Halo's step-2 loss (2.05; 1.86 for Halo 1.0.0) is far below the others' (4.54-4.67) because of AdamWBF16's stochastic rounding
+             of the bf16 weights. The same Halo configuration gives 4.48 with round-to-nearest
+             (results/loss_tests/halo_nearest.json) and 2.56 with exact fp32 updates on the expert weights
+             (fp32_experts, results/loss_tests/halo_fp32_experts.json). The rounding is unbiased: over 64 seeds
+             (scripts/benchmarks/gemma4_sft/analysis/sr_rounding_bias.py) the mean rounded step equals the exact AdamW step (ratio 1.000 at
+             |w| 0.002, 0.02 and 0.2), so the difference is the rounding noise, not a larger mean step. From step 5 on
+             Halo's loss tracks the fp32-master frameworks (Megatron Bridge, MS-SWIFT); the mean of the last five
+             steps at 2,048 tokens is 0.94 for Halo, 0.96-0.97 for those two, 1.08-1.09 for Axolotl, AutoModel and
+             Unsloth, and 1.07 for the round-to-nearest Halo run.
+
+Long rows (BENCH_SEQ > 2048; the 16,384-token results in results/s16384/)
+  Data       data/pack_canonical.py joins k = BENCH_SEQ / 2,048 consecutive canonical rows into one row: input_ids and
+             labels concatenated unchanged, so each row is one plain causal sequence (no per-document attention masks,
+             which not every framework supports alike). At 16,384 the builders take BENCH_ROWS = 1,024 UltraChat rows
+             (the first 512 are the protocol rows, byte-identical) -> 128 rows of 16,384 tokens; sha256 files
+             data/*_1024.jsonl.sha256 and data/*_16384.jsonl.sha256.
+  Steps      BENCH_STEPS = 50: tokens/s over steps 6-50. Micro-batch 1 x 16,384 tokens per GPU: 32,768 per step.
+  Choice     reproduce.sh starts every framework from its 2,048-token configuration; when it runs out of GPU memory,
+             the framework's own activation checkpointing is turned on (Halo, Axolotl: gradient_checkpointing;
+             AutoModel: distributed.activation_checkpointing; Megatron Bridge: full recompute; MS-SWIFT: FSDP
+             activation_checkpointing; Unsloth: use_gradient_checkpointing="unsloth"). Megatron Bridge does not fit
+             with full recompute alone (fp32 master weights and moments hold ~250 GiB), so its last fallback adds the
+             precision-aware optimizer (bf16 Adam moments). The first configuration that fits runs twice.
+  Validity   The step-1 loss is fixed by construction: 6.85-6.93 at 2,048 tokens and 6.33-6.37 at 16,384 across
+             frameworks, the spread of their bf16 kernels. summarize.py compares each run's token-weighted step-1 loss
+             with the median of all runs at that length and marks a run more than 2% away invalid; invalid runs are
+             left out of the means. Unsloth's step-1 loss varies between runs on identical rows whose tokens, labels
+             and order were verified: at 2,048 tokens its first run in each of two fresh environments started at 8.72
+             and 8.69 and the second at 6.90 and 6.86; at 16,384 tokens the first runs in three fresh environments
+             started at 6.35-6.36 and the second runs at 7.76, 6.35 and 6.96. Its rows are the means of its valid
+             runs.
+  Hosts      B300 hosts of one type. The 2,048-token rows of the other frameworks ran on one host, one framework at a
+             time, each in a fresh environment (new container, empty caches and data directories). At 16,384 tokens
+             Axolotl, AutoModel, Megatron Bridge and MS-SWIFT ran on a second host, one run at a time. Every Halo row
+             (both lengths, and both Halo commits below) and Unsloth at 16,384 tokens ran on a third host, one job
+             at a time, each in a fresh environment; Unsloth's six 16,384-token runs come from three such
+             environments.
+
+Layout
+  This directory holds the records: PROTOCOL.txt; results/s2048/ and results/s16384/, one directory per framework with
+  each run's result JSON (per-step times, losses, grad norms, data and order verification), the out-of-memory line of
+  every configuration that did not fit, and summary.tsv; results/s2048/halo_1.0.0/, Halo 1.0.0 (commit 425f0410) on
+  the 2,048-token host; results/s2048/halo_kernels_only/ and results/s16384/halo_kernels_only/, Halo with the MoE
+  kernels only (commit f3bef534, without the sliding-window attention); results/loss_tests/, the Halo runs behind
+  "Step 2".
+  The scripts live in scripts/benchmarks/:
+  paths.env                    every path and host setting the scripts use (only BENCH_ROOT is required)
+  gemma4_sft/reproduce.sh      data, every framework and summary.tsv in one command, at any BENCH_SEQ
+  gemma4_sft/prepare_data.sh   builds every dataset above inside the Halo image and checks the recorded sha256
+  gemma4_sft/data/             dataset builders and checksums
+  gemma4_sft/<framework>/      the framework's launch script, configs and helpers, and its Dockerfiles where the
+                               official image needed a derived one
+  gemma4_sft/halo/launch.sh    the Halo rows in the published image
