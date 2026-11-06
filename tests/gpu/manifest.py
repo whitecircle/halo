@@ -1474,6 +1474,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--ep-size 2 --routing-replay recompute",
                     "--ep-size 2 --prefetch-depth 1",
                     "--ep-size 2 --prefetch-depth 2",
+                    "--tp-size 2 --prefetch-depth 2",
+                    "--etp-size 2 --prefetch-depth 2",
                     "--ep-size 2 --routing-replay rollout --prefetch-depth 1",
                     "--ep-size 1 --routing-replay rollout --chunked",
                     "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",

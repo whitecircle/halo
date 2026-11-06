@@ -76,7 +76,7 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
         _reasoning_end_ids=None,
     )
     with pytest.raises(_Built):
-        AsyncRolloutMixin._start_rank_rollout_components(host)
+        AsyncRolloutMixin._start_rollout_pool(host)
     assert captured["first_server"] == 5
 
 

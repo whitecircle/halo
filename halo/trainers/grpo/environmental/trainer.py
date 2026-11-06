@@ -235,25 +235,31 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Before the rollout: an unusable prompt would cost a full round and fail first inside a Ray actor.
         self._batch_errors.reject()
 
+        # A TP/ETP follower takes the leader's rollouts below, so it neither collects nor prefetches, but joins every
+        # fence the leader joins.
+        collects = not self._is_tp_follower()
+        prefetches = collects and self._prefetch_enabled and mode == "train"
+
         with profiling_context(self, "rollout_acquire"), self._phase_timers.span(Phase.ROLLOUT, "host"):
             rollout_results = None
-            if self._prefetch_enabled and mode == "train":
+            if prefetches:
                 rollout_results = self._acquire_prefetched_round()
 
             # A wedged prefetch is fenced before the synchronous fallback: peers that hit are already
             # waiting here, and a full fallback round can outlast DIST_NCCL_TIMEOUT_MINUTES.
             self._batch_errors.reject()
-            if rollout_results is None:
+            if collects and rollout_results is None:
                 rollout_results = self._loop.run_until_complete(
                     self._rollout_manager.collect_rollouts(expanded_prompts, expanded_contexts)
                 )
 
         # Popped prefetch_depth steps later, that many steps stale (the IS ratio corrects it); a cold round
         # rolls out twice.
-        if self._prefetch_enabled and mode == "train":
+        if prefetches:
             self._submit_for_prefetch(expanded_prompts, expanded_contexts)
 
-        # Every TP/ETP group rank tokenizes the leader's rollouts, or the in-forward collectives deadlock.
+        # Every TP/ETP group rank tokenizes the leader's rollouts (a follower passes ``None``), or the in-forward
+        # collectives deadlock.
         rollout_results = self._broadcast_object_from_tp_leader(rollout_results)
         if self._tool_call_watch is not None and self._tool_call_watch.armed:
             self._tool_call_watch.observe(rollout_results)

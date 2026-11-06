@@ -83,7 +83,8 @@ that the episode errors into a masked row.
 Dispatch is round-robin over actors and over server URLs, one asyncio task per prompt, gated by a
 semaphore of `max_concurrent_rollouts` (default 4× the actor count the rank actually built, clamped
 to at least that count; so with `ray_address` set it derives from `num_rollout_workers //
-world_size`, not from `num_rollout_workers`).
+rollout ranks`, not from `num_rollout_workers`; a rollout rank is a TP/ETP group's leader, or any rank
+without TP/ETP).
 
 Each episode carries an `episode_timeout` deadline and each request a `request_timeout` deadline, both
 counting engine-serving time only (a weight-sync pause is credited back:
@@ -98,11 +99,12 @@ row; the in-flight episode is lost, not retried.
 
 ## Pool sizing
 
-`num_rollout_workers` (default 64) is **per training rank**:
+`num_rollout_workers` (default 64) is **per rollout rank**, the ranks that collect: every rank, or under TP/ETP
+only each group's leader (`data_parallel_size` of them):
 
-- `ray_address: null`: cluster-wide total = `world_size × num_rollout_workers`.
-- `ray_address` set: each rank creates `num_rollout_workers // world_size` actors (floored at 1), so
-  the cluster-wide pool approximates `num_rollout_workers`. The floor means a world size larger than
+- `ray_address: null`: cluster-wide total = `rollout ranks × num_rollout_workers`.
+- `ray_address` set: each rollout rank creates `num_rollout_workers // rollout ranks` actors (floored at 1), so
+  the cluster-wide pool approximates `num_rollout_workers`. The floor means more rollout ranks than
   `num_rollout_workers` overshoots.
 
 The split keys off the **config field**, not Ray's own `RAY_ADDRESS` environment variable: an
@@ -110,16 +112,17 @@ exported `RAY_ADDRESS` joins the cluster (Ray substitutes it for the `address=No
 passes) while `ray_address: null` still has every rank build the full pool. Set the config field.
 
 Three cluster-wide totals bound a large run: actors (above), in-flight episodes
-(`world_size × max_concurrent_rollouts` per round in flight: `prefetch_depth` rounds plus a cold or eval
+(`rollout ranks × max_concurrent_rollouts` per round in flight: `prefetch_depth` rounds plus a cold or eval
 round), and per-node sandbox slots (next section).
 
-**Under TP/ETP, most of that load is discarded.** Every rank collects a full batch, then
-the round entry replaces each rank's results with its TP-group leader's (`_broadcast_object_from_tp_leader`), so all ranks
-tokenize identical trajectories. Actor and rollout-server load therefore scales with `world_size`
-while useful rollouts scale with `data_parallel_size`.
+**Under TP/ETP only each group's leader rolls out.** A follower skips the acquire, the collection and the prefetch
+submit, starts no Ray pool, and takes the leader's results from the round entry's broadcast
+(`_broadcast_object_from_tp_leader`), so every group rank tokenizes identical trajectories while actor and
+rollout-server load scale with `data_parallel_size`, not `world_size`. A follower still joins every fence and
+collective the leader joins, writes its prefetch sidecar with no pending rounds and resubmits none on a resume. Online
+GRPO keeps TRL's collective generation, so its followers still take part in it.
 
-Size the pool and the servers for the former: per-server load is
-`max_concurrent_rollouts × world_size / num_servers` per round in flight
+Per-server load is `max_concurrent_rollouts × rollout ranks / num_servers` per round in flight
 ([Rollout Servers — Throughput](rollout-servers.md#throughput)).
 
 Actors are async, so size the pool to the env's **blocking** per-episode cost, not to HTTP

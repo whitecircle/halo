@@ -434,6 +434,9 @@ class _Round:
     _extract_prompts_and_contexts = DistributedAsyncEnvironmentalGRPOTrainer._extract_prompts_and_contexts
     eval_split_rows = DistributedAsyncEnvironmentalGRPOTrainer.eval_split_rows
 
+    def _is_tp_follower(self) -> bool:
+        return False
+
     def __init__(self, leader: list[RolloutResult] | None = None):
         self.model = types.SimpleNamespace(training=True)
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)

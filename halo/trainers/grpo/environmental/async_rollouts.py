@@ -121,6 +121,14 @@ class AsyncRolloutMixin:
             self.add_callback(self._rollout_start_callback)
 
     def _start_rank_rollout_components(self) -> None:
+        """A TP/ETP follower starts no pool: it takes its group leader's rollouts, and only the score-only clients are
+        built on every rank."""
+        if not self._is_tp_follower():
+            self._start_rollout_pool()
+        if self.async_config.isr_engine_reference:
+            self._engine_rescore_clients = self._build_engine_rescore_clients()
+
+    def _start_rollout_pool(self) -> None:
         if not ray.is_initialized():
             ray.init(**ray_init_kwargs(address=self.async_config.ray_address))
 
@@ -135,7 +143,7 @@ class AsyncRolloutMixin:
                 reasoning_end_token_id=resolve_reasoning_end_token_id(self._reasoning_end_ids),
             ),
             max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
-            pool_replicas=self.accelerator.num_processes if self.async_config.ray_address is not None else 1,
+            pool_replicas=self._rollout_pool_replicas() if self.async_config.ray_address is not None else 1,
             first_server=self.parallelism_config.get_data_parallel_rank(),
         )
         self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
@@ -144,8 +152,10 @@ class AsyncRolloutMixin:
         asyncio.set_event_loop(self._loop)
         self._reject_eval_round_over_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
-        if self.async_config.isr_engine_reference:
-            self._engine_rescore_clients = self._build_engine_rescore_clients()
+
+    def _rollout_pool_replicas(self) -> int:
+        """The ranks that run a pool: one per TP/ETP group, its leader."""
+        return get_global_world_size() // self._get_tp_or_etp_group_size()
 
     def _rollout_node_count(self) -> int:
         """Actors follow the launch across its nodes and spill over a shared Ray cluster's, which a head on this host
@@ -210,7 +220,7 @@ class AsyncRolloutMixin:
         # Stamped though forced: a resumed run's first step at this global_step must not push again.
         self._last_sync_attempt_step = self.state.global_step
         self._sync_weights_to_engine_fenced(force=True)
-        if self._prefetch_enabled:
+        if self._prefetch_enabled and not self._is_tp_follower():
             self._start_prefetch_thread()
             # After the push, so the resumed rounds are drawn from the restored policy.
             for prompts, contexts in self._resumed_prefetch_rounds:
@@ -426,7 +436,8 @@ class AsyncRolloutMixin:
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
         """Write this rank's pending rounds, oldest first, which a resume submits again first: they left the dataloader
-        untrained, and the resumed one starts past them."""
+        untrained, and the resumed one starts past them. A TP/ETP follower holds none and writes an empty list, so
+        every rank has its file."""
         super()._persist_trainer_sidecars(checkpoint_dir)
         if not self._prefetch_enabled:
             return
@@ -488,7 +499,7 @@ class AsyncRolloutMixin:
                 f"{path} holds {len(rounds)} pending prefetch rounds, more than prefetch_depth={depth}: the "
                 f"oldest {depth} are resubmitted, and the newest {len(rounds) - depth} are not trained."
             )
-        self._resumed_prefetch_rounds = rounds[:depth]
+        self._resumed_prefetch_rounds = [] if self._is_tp_follower() else rounds[:depth]
 
     def _cleanup_async_components(self):
         """Run by every rank."""

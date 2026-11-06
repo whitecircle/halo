@@ -125,7 +125,7 @@ TRL's loss forward reduces six metrics across the ranks per micro-step (entropy,
 
 For a new model, environment or GPU, size in order:
 
-- **Rollouts in flight per server** = `world_size × min(max_concurrent_rollouts, per_device_train_batch_size × steps_per_generation) ÷ num_servers` per round, peaking at a round's start, with up to `prefetch_depth` rounds in flight at once; an eval round opens with `world_size × eval_rollout_batch_size ÷ num_servers` ([eval rounds](evaluation.md#during-training)). TP and ETP siblings roll out too, though only each group leader's rollouts are kept ([Ray — Pool sizing](../../infrastructure/ray.md#pool-sizing)).
+- **Rollouts in flight per server** = `rollout ranks × min(max_concurrent_rollouts, per_device_train_batch_size × steps_per_generation) ÷ num_servers` per round, peaking at a round's start, with up to `prefetch_depth` rounds in flight at once; an eval round opens with `rollout ranks × eval_rollout_batch_size ÷ num_servers` ([eval rounds](evaluation.md#during-training)). Rollout ranks are every rank, or under TP/ETP each group's leader alone, as its followers take the leader's rollouts ([Ray — Pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - **Decode speed at that concurrency.** Engine step latency ≈ `a + b × n` (one CPU thread). Measure two concurrencies against a live server with the run's own prompts ([Throughput](../../infrastructure/rollout-servers.md#throughput)).
 - **Timeouts from the per-turn cap**, the turn's total ([Enforced and soft budgets](reasoning.md#enforced-and-soft-budgets)): `rollout_max_tokens`, or the engine's reasoning cap plus `rollout_max_answer_tokens` where that is smaller.
     - `request_timeout ≥ 2 × cap ÷ speed(n_peak)` (default `120`).

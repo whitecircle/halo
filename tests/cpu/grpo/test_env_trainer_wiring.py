@@ -51,6 +51,7 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     )
     trainer._tokenizer = word_level_tokenizer([_STOP])
     trainer.model = torch.nn.Module()
+    trainer.parallelism_config = SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     trainer.callback_handler = CallbackHandler([], trainer.model, trainer._tokenizer, None, None)
     return trainer
 

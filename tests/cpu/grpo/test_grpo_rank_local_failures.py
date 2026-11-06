@@ -92,6 +92,9 @@ class _Host(AsyncRolloutMixin):
         if self._fail_client and self.accelerator.is_main_process:
             raise ConnectionError("the NCCL group to the engine did not form")
 
+    def _is_tp_follower(self) -> bool:
+        return False
+
     def _train_loader_batch_size(self) -> int:
         return 8
 

@@ -805,9 +805,9 @@ compose `cpuset:`). Batch sizes and timeouts:
 **Servers × TP.** Run one engine per GPU, grouped into the fewest servers that hold the model: a second
 engine on one GPU only time-slices it (and two starting at once fail their memory profiling), and
 fewer servers shrink the sync fan-out. Per-server request load is
-`max_concurrent_rollouts × world_size / num_servers` per round in flight (`prefetch_depth` of them under
-prefetch): every rank builds its own actor pool, under TP
-too ([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load, each rank starting at
+`max_concurrent_rollouts × rollout ranks / num_servers` per round in flight (`prefetch_depth` of them under
+prefetch): every rollout rank (a TP/ETP group's leader) builds its own actor pool
+([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load, each rank starting at
 the server its data-parallel rank names, so a round narrower than the server count still spreads.
 
 **Prefix caching** stays on: a multi-turn episode re-sends its whole context every turn, and the

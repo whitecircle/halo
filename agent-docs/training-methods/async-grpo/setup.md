@@ -158,6 +158,8 @@ and a resume resubmits them in order before its first round.
   are not trained. Under a larger one it opens with cold rounds until the pipeline is full.
 - No file for this world size, or one drawn under another group size, round size or DP slice, resumes with cold
   rounds: those batches are skipped and the next ones train twice.
+- Under TP or ETP only each group's leader prefetches: a follower's file holds no rounds, and a resume gives it none to
+  resubmit, whatever the checkpoint's file held.
 - A file present on some ranks only (a non-shared filesystem under another rank-to-node placement, or a torn copy)
   raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds.
 

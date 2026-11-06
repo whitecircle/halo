@@ -404,6 +404,32 @@ def record_prefetch_acquisitions(trainer) -> list[bool]:
     return acquired
 
 
+def record_rollout_pool_starts(trainer) -> list[None]:
+    """One entry per Ray pool this rank starts."""
+    starts: list[None] = []
+    start = trainer._start_rollout_pool
+
+    def recording():
+        starts.append(None)
+        start()
+
+    trainer._start_rollout_pool = recording
+    return starts
+
+
+def record_follower_skips_rollouts(trainer, checks: dict[str, bool], pool_starts: list[None], acquired: list[bool]):
+    """A TP/ETP follower takes its leader's rollouts: it starts no pool and acquires, submits and counts no prefetch
+    round, where the leader starts one pool."""
+    follower = trainer._is_tp_follower()
+    checks["rollout_pool_started_only_by_group_leaders"] = len(pool_starts) == (0 if follower else 1)
+    if follower:
+        checks["follower_acquired_and_submitted_no_prefetch_round"] = (
+            acquired == []
+            and (trainer._prefetch_hits, trainer._prefetch_misses, trainer._prefetch_input_skips) == (0, 0, 0)
+            and trainer._prefetch_input_queue.empty()
+        )
+
+
 def record_prefetch(trainer, checks: dict[str, bool], metrics: dict[str, float], acquired: list[bool], depth: int):
     """The first ``depth`` steps collected their own prompts, later ones popped earlier rounds, and the IS log-ratio is
     finite on every step. A liveness check: at this ``LEARNING_RATE`` no fixed limit separates a stale round from a
@@ -630,6 +656,7 @@ def run_env_grpo_e2e(
         # The deal resolves at construction; only false turns it off on a chunked row.
         checks["rows_dealt_by_length_as_set"] = trainer._orders_rows_by_length is (length_ordered is not False)
     acquired = record_prefetch_acquisitions(trainer) if prefetch_depth is not None else []
+    pool_starts = record_rollout_pool_starts(trainer) if hasattr(trainer, "_start_rollout_pool") else None
     if routing_replay != "none":
         # The probe row as the checkpoint routes it; the trained policy disagreeing with it is a real weight mismatch.
         probe_ids = routing_probe_ids(tokenizer, ctx.device)
@@ -643,7 +670,9 @@ def run_env_grpo_e2e(
     losses, trained = record_step_losses(trainer, checks)
     metrics["steps_logged"] = float(len(losses))
     metrics["training_had_a_gradient"] = float(trained)
-    if prefetch_depth is not None:
+    if pool_starts is not None:
+        record_follower_skips_rollouts(trainer, checks, pool_starts, acquired)
+    if prefetch_depth is not None and not trainer._is_tp_follower():
         record_prefetch(trainer, checks, metrics, acquired, prefetch_depth)
     if environment_type is None:
         record_first_step_gradient(trainer, checks, metrics)

@@ -103,6 +103,9 @@ class _EvalRound:
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _Trainer._extract_prompts_and_contexts
 
+    def _is_tp_follower(self) -> bool:
+        return False
+
     def __init__(self, split_rows: int):
         self.model = types.SimpleNamespace(training=False)
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
