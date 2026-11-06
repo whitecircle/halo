@@ -91,6 +91,15 @@ def test_a_server_that_refuses_the_load_leaves_none_holding_it(servers):
     assert fake.adapters == {} and refusing.adapters == {}, "one policy on one server and none on the other"
 
 
+def test_loading_on_no_server_is_a_no_op(servers):
+    pool, [fake, other] = servers
+    _, payload = _payload()
+
+    pool.load("v0", _CONFIG, payload, urls=[])
+
+    assert not fake.adapters and not other.adapters
+
+
 def test_a_server_launched_without_lora_refuses_by_name(servers):
     pool, [fake, _] = servers
     fake.lora = None

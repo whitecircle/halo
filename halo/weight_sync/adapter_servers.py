@@ -121,5 +121,7 @@ class AdapterServers:
 
     @staticmethod
     def _on_each(clients: list[WeightSyncClientBase], call: Callable[[WeightSyncClientBase], Any]) -> list[Any]:
+        if not clients:
+            return []
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(clients)) as executor:
             return list(executor.map(call, clients))
