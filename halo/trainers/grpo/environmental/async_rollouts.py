@@ -25,9 +25,16 @@ from halo.diagnostics.phase_timers import Phase
 from halo.environments.episode import RolloutResult
 from halo.environments.ray_actors import RolloutManager, ray_init_kwargs
 from halo.environments.rollout_config import resolve_reasoning_end_token_id
+from halo.environments.rollout_pool import RolloutPoolPlan, resolve_rollout_pool
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure, rank_consensus
-from halo.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
+from halo.runtime.ranks import (
+    get_global_rank,
+    get_global_world_size,
+    get_local_world_size,
+    get_num_nodes,
+    is_global_main_process,
+)
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -132,9 +139,12 @@ class AsyncRolloutMixin:
         if not ray.is_initialized():
             ray.init(**ray_init_kwargs(address=self.async_config.ray_address))
 
-        # One manager per rank over its DP shard: on a shared Ray cluster the actor budget is split across ranks.
+        plan = self._resolve_rollout_pool()
+        if is_global_main_process():
+            for warning in plan.warnings:
+                logger.warning(warning)
         self._rollout_manager = RolloutManager(
-            num_workers=self.async_config.num_rollout_workers,
+            num_workers=plan.actors_per_rank,
             env_type=self._environment_spec,
             env_config=self._env_config_dict,
             server_urls=self.async_config.get_server_urls(),
@@ -142,8 +152,7 @@ class AsyncRolloutMixin:
                 stop_token_ids=self._rollout_stop_token_ids,
                 reasoning_end_token_id=resolve_reasoning_end_token_id(self._reasoning_end_ids),
             ),
-            max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
-            pool_replicas=self._rollout_pool_replicas() if self.async_config.ray_address is not None else 1,
+            max_concurrent_rollouts=plan.max_concurrent,
             first_server=self.parallelism_config.get_data_parallel_rank(),
         )
         self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
@@ -153,9 +162,18 @@ class AsyncRolloutMixin:
         self._reject_eval_round_over_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
 
-    def _rollout_pool_replicas(self) -> int:
-        """The ranks that run a pool: one per TP/ETP group, its leader."""
-        return get_global_world_size() // self._get_tp_or_etp_group_size()
+    def _resolve_rollout_pool(self) -> RolloutPoolPlan:
+        """Rollout ranks are one per TP/ETP group, its leader."""
+        group_size = self._get_tp_or_etp_group_size()
+        return resolve_rollout_pool(
+            num_workers=self.async_config.num_rollout_workers,
+            shared_cluster=self.async_config.ray_address is not None,
+            rollout_ranks=get_global_world_size() // group_size,
+            rollout_ranks_per_node=max(1, get_local_world_size() // group_size),
+            rows_per_round=self._train_loader_batch_size(),
+            eval_rows=self.async_config.eval_rollout_batch_size,
+            max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
+        )
 
     def _rollout_node_count(self) -> int:
         """Actors follow the launch across its nodes and spill over a shared Ray cluster's, which a head on this host

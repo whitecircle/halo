@@ -176,8 +176,8 @@ address differs per server.
 - Use resolvable host names. A loopback URL in a run spanning several nodes is refused at startup: it reaches a
   different engine, or none, per node, and only the forwarding rank's node takes weight pushes. A launch on one node
   with a `ray_address` head on it keeps its loopback URL.
-- `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
-  divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
+- `num_rollout_workers` is a per-node budget on a local Ray, split over the node's rollout ranks, and the cluster-wide
+  total on a shared one, split over every rollout rank; actors are soft-pinned to the rank's node ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route
   to each server; set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST` where the server cannot dial that back (NAT, asymmetric
   routing) ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).

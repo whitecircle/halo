@@ -45,9 +45,6 @@ _PausedClock = Callable[[], float | Awaitable[float]]
 _MAX_RAY_TEMP_DIR_LEN = 40
 _RAY_LINK_PARENT = "/tmp"
 
-# Actors multiplex episodes on one loop, so oversubscribing keeps the servers fed while a turn is graded.
-_DEFAULT_ROLLOUTS_PER_WORKER = 4
-
 
 class RolloutHTTPError(RuntimeError):
     """A non-200, status carried as data: re-parsing the server-controlled message could misread a quoted status."""
@@ -228,7 +225,9 @@ class EnvironmentActor:
     def _http_client(self) -> aiohttp.ClientSession:
         # force_close: the server drops idle keepalives between batches, so a pooled socket
         # yields ServerDisconnectedError whose retries stall this rank at the next collective.
-        connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
+        # limit=0: the default 100-connection cap would queue a request inside aiohttp, where the wait counts against
+        # its deadline, when a rank's in-flight cap exceeds 100 per actor; max_concurrent_rollouts is the bound.
+        connector = aiohttp.TCPConnector(limit=0, force_close=True, enable_cleanup_closed=True)
         # No session timeout: aiohttp's would charge a weight-sync pause; _generate's deadline credits it.
         return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
 
@@ -407,28 +406,19 @@ class RolloutManager:
         env_config: dict[str, Any],
         server_urls: list[str],
         rollout_config: RolloutConfig,
-        max_concurrent_rollouts: int | None = None,
-        pool_replicas: int = 1,
+        max_concurrent_rollouts: int,
         first_server: int = 0,
     ):
-        """``num_workers`` is the actor budget for the whole Ray cluster, divided among the ``pool_replicas`` peers
-        building a pool against it (the DP size on a shared cluster, else 1). ``first_server`` offsets this manager's
+        """``num_workers`` is this rank's actor count and ``max_concurrent_rollouts`` its in-flight cap, both resolved
+        by :func:`~halo.environments.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
         round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
         ones."""
-        self.num_workers = max(1, num_workers // max(1, pool_replicas))
+        self.num_workers = num_workers
         self.env_type = env_type
         self.env_config = env_config
         self.server_urls = server_urls
         self.rollout_config = rollout_config
-
-        requested = max_concurrent_rollouts or self.num_workers * _DEFAULT_ROLLOUTS_PER_WORKER
-        if requested < self.num_workers:
-            logger.warning(
-                f"max_concurrent_rollouts ({requested}) < num_workers ({self.num_workers}), "
-                f"clamping to {self.num_workers}"
-            )
-            requested = self.num_workers
-        self.max_concurrent = requested
+        self.max_concurrent = max_concurrent_rollouts
 
         self._actors: list = []
         self._started = False

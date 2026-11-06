@@ -32,8 +32,8 @@ rewards:
 # Shared kwargs: agent-docs/training-methods/async-grpo/environments/README.md; native-tool shaping: .../environments/protocols/native-tool-use.md
 
 # --- Ray Workers (AsyncRolloutConfig fields) ---
-num_rollout_workers: 16
-# max_concurrent_rollouts: null  # 4 × this rank's share of the rollout workers
+num_rollout_workers: 64
+# max_concurrent_rollouts: null  # null = one round's rows, or the eval round's if larger
 # eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
 # ray_address: null  # null = local, or "head-node:6379"
 

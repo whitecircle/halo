@@ -73,7 +73,7 @@ rewards:
     checks: environment        # the environment's audit rubric (CodeContestsEnvironment.JUDGE_CHECKS)
 
 # --- Ray Workers ---
-num_rollout_workers: 48         # >= the 24 episodes a rank has in flight, with headroom
+num_rollout_workers: 288  # per node, split over its trainer ranks
 max_concurrent_rollouts: 48  # >= the per-rank batch (24) and >= eval_rollout_batch_size (36): both must fit one wave
 
 # --- vLLM Servers ---

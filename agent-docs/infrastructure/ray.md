@@ -81,10 +81,10 @@ same observation, up to `max_retries` times (default `3`), rather than stepped a
 that the episode errors into a masked row.
 
 Dispatch is round-robin over actors and over server URLs, one asyncio task per prompt, gated by a
-semaphore of `max_concurrent_rollouts` (default 4× the actor count the rank actually built, clamped
-to at least that count; so with `ray_address` set it derives from `num_rollout_workers //
-rollout ranks`, not from `num_rollout_workers`; a rollout rank is a TP/ETP group's leader, or any rank
-without TP/ETP).
+semaphore of `max_concurrent_rollouts` (default: the larger of a train round's rows and `eval_rollout_batch_size`, so a
+round runs in one wave; never below the rank's actor count). An explicit cap below a round's rows warns with the wave
+count it implies. The aiohttp connector is unlimited (`limit=0`), so a request never queues inside it where the wait
+would count against its deadline.
 
 Each episode carries an `episode_timeout` deadline and each request a `request_timeout` deadline, both
 counting engine-serving time only (a weight-sync pause is credited back:
@@ -99,13 +99,17 @@ row; the in-flight episode is lost, not retried.
 
 ## Pool sizing
 
-`num_rollout_workers` (default 64) is **per rollout rank**, the ranks that collect: every rank, or under TP/ETP
-only each group's leader (`data_parallel_size` of them):
+`num_rollout_workers` (default 256) is an actor **budget**, split over the **rollout ranks**: every rank, or under
+TP/ETP only each group's leader (`data_parallel_size` of them). A rank gets `budget // divisor` actors, at least 1:
 
-- `ray_address: null`: cluster-wide total = `rollout ranks × num_rollout_workers`.
-- `ray_address` set: each rollout rank creates `num_rollout_workers // rollout ranks` actors (floored at 1), so
-  the cluster-wide pool approximates `num_rollout_workers`. The floor means more rollout ranks than
-  `num_rollout_workers` overshoots.
+- `ray_address: null`: the budget is **per node**. Each node's ranks start a local Ray, and the divisor is the rollout
+  ranks on that node (`LOCAL_WORLD_SIZE ÷ TP/ETP group size`). The default is 32 actors per rank on 8 GPUs; a
+  node never runs more than the budget, whatever the node count.
+- `ray_address` set: the budget is the **cluster-wide total**, and the divisor is every rollout rank in the world. More
+  rollout ranks than budget overshoots through the floor of 1.
+
+A split that leaves a rank fewer than 4 actors (or fewer than its round's rows, if that is less) logs a warning on
+rank 0 at pool start, naming the budget that gives each rank 4.
 
 The split keys off the **config field**, not Ray's own `RAY_ADDRESS` environment variable: an
 exported `RAY_ADDRESS` joins the cluster (Ray substitutes it for the `address=None` the toolkit

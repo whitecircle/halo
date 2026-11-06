@@ -7,6 +7,7 @@ import types
 
 import pytest
 
+from halo.environments.rollout_pool import RolloutPoolPlan
 from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 
@@ -70,6 +71,7 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
         ),
         accelerator=types.SimpleNamespace(num_processes=8),
         parallelism_config=types.SimpleNamespace(get_data_parallel_rank=lambda: 5),
+        _resolve_rollout_pool=lambda: RolloutPoolPlan(actors_per_rank=1, max_concurrent=1, warnings=()),
         _environment_spec="env",
         _env_config_dict={},
         _rollout_stop_token_ids=None,

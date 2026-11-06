@@ -260,21 +260,22 @@ class AsyncRolloutConfig(
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""
 
     num_rollout_workers: int = field(
-        default=64,
+        default=256,
         metadata={
-            "help": "Ray environment actors per training rank; each is async and runs many episodes, so this is no "
-            "concurrency limit (max_concurrent_rollouts is). Size it to the CPU-side environment cost; with "
-            "ray_address set each rank takes this // world_size, at least 1. "
+            "help": "Ray environment actors per node, split across that node's rollout ranks; with ray_address set, "
+            "the cluster-wide total, split across every rollout rank. Each actor is async and runs many episodes, so "
+            "this is no concurrency limit (max_concurrent_rollouts is). Size it to the CPU-side environment cost; a "
+            "rank left under 4 actors warns. "
             "See agent-docs/infrastructure/ray.md#pool-sizing."
         },
     )
     max_concurrent_rollouts: int | None = field(
         default=None,
         metadata={
-            "help": "Per-rank cap on one round's rollouts in flight, the generation-throughput throttle; size it to "
-            "one generation cycle's per-rank demand. Each round in flight holds its own cap: the prefetch_depth "
-            "prefetched rounds, and a cold or eval round beside them. Unset = 4 × this rank's share of the rollout "
-            "workers, and an explicit value below that share is raised to it. "
+            "help": "Per-rank cap on one round's rollouts in flight, the generation-throughput throttle. Each round "
+            "in flight holds its own cap: the prefetch_depth prefetched rounds, and a cold or eval round beside them. "
+            "Unset = the larger of a train round's and an eval round's rows, so a round runs in one wave; a value "
+            "below this rank's actor count is raised to it. "
             "See agent-docs/reference/configuration-reference.md#asyncrolloutconfig."
         },
     )

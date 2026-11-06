@@ -86,7 +86,7 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 expert_parallel_size: 4
 environment_type: react_math
 max_turns: 10
-num_rollout_workers: 16            # Ray environment actors per training rank
+num_rollout_workers: 64            # Ray environment actors per node (16 per rank at 4 GPUs)
 rollout_max_tokens: 8192           # budget for ONE turn, not the trajectory
 enable_prefetch: false             # one server; true overlaps rollout with training
 num_generations: 8                 # episodes per prompt

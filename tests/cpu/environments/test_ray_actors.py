@@ -99,6 +99,7 @@ def test_rollout_manager_round_robins_across_servers():
         env_config={},
         server_urls=urls,
         rollout_config=RolloutConfig(),
+        max_concurrent_rollouts=1,
     )
 
     picked = [manager._next_url() for _ in range(len(urls) * 2)]
@@ -117,6 +118,7 @@ def _round_load(*, ranks: list[int], servers: int, rows: int) -> list[list[int]]
             server_urls=urls,
             rollout_config=RolloutConfig(),
             first_server=rank,
+            max_concurrent_rollouts=1,
         )
         for rank in ranks
     ]
@@ -161,6 +163,7 @@ async def test_rollout_manager_start_shutdown():
             env_config={"max_turns": 3},
             server_urls=["http://localhost:8000"],
             rollout_config=RolloutConfig(),
+            max_concurrent_rollouts=2,
         )
 
         await manager.start()
@@ -214,6 +217,7 @@ async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(
         env_config={},
         server_urls=["http://localhost:8000"],
         rollout_config=ray_actors.RolloutConfig(),
+        max_concurrent_rollouts=2,
     )
 
     await manager.start()
@@ -237,7 +241,7 @@ def test_rollout_config_defaults():
     assert restored.model_name == config.model_name
 
 
-def _manager_over_fake_actors(actor, *, num_workers=2, max_concurrent_rollouts=None):
+def _manager_over_fake_actors(actor, *, num_workers=2, max_concurrent_rollouts=8):
     """A started RolloutManager whose pool is ``actor``, so ``collect_rollouts`` runs without Ray."""
     manager = RolloutManager(
         num_workers=num_workers,
@@ -326,6 +330,7 @@ def test_a_loopback_server_url_is_refused_on_several_nodes(url):
             env_config={},
             server_urls=list(urls),
             rollout_config=ray_actors.RolloutConfig(),
+            max_concurrent_rollouts=1,
         )
 
     with pytest.raises(ValueError, match="loopback"):
@@ -1086,28 +1091,6 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     assert not _should_giveup(exc)
     # And a plain RuntimeError carrying the same text is a transport fault, not a client error.
     assert not _should_giveup(RuntimeError("vllm error (status 400): Bad request"))
-
-
-def test_rollout_manager_max_concurrent_clamping():
-    manager = RolloutManager(
-        num_workers=8,
-        env_type="react_math",
-        env_config={},
-        server_urls=["http://localhost:8000"],
-        rollout_config=RolloutConfig(),
-        max_concurrent_rollouts=2,  # Less than num_workers=8
-    )
-    assert manager.max_concurrent == 8  # Clamped to num_workers
-
-    # Left unset, max_concurrent defaults to num_workers * 4
-    manager2 = RolloutManager(
-        num_workers=4,
-        env_type="react_math",
-        env_config={},
-        server_urls=["http://localhost:8000"],
-        rollout_config=RolloutConfig(),
-    )
-    assert manager2.max_concurrent == 16  # 4 * 4
 
 
 def test_async_rollout_config_builds_the_rollout_config():

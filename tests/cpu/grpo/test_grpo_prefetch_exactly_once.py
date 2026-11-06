@@ -227,7 +227,7 @@ class _LifecycleHost:
     _weight_sync_group_formed = False
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _start_rollout_pool = _T._start_rollout_pool
-    _rollout_pool_replicas = _T._rollout_pool_replicas
+    _resolve_rollout_pool = _T._resolve_rollout_pool
     _get_tp_or_etp_group_size = _T._get_tp_or_etp_group_size
     _reject_eval_round_over_cap = _T._reject_eval_round_over_cap
     _rollout_node_count = _T._rollout_node_count
@@ -269,6 +269,9 @@ class _LifecycleHost:
 
     def _init_weight_sync_client(self):
         self._weight_sync_client = object()
+
+    def _train_loader_batch_size(self) -> int:
+        return 4
 
     def _is_tp_follower(self) -> bool:
         return self.follower
@@ -460,13 +463,14 @@ def test_a_tp_follower_still_builds_the_score_only_clients(monkeypatch):
     assert host._engine_rescore_clients == ["client"]
 
 
-@pytest.mark.parametrize(("group_size", "replicas"), [(1, 8), (2, 4), (8, 1)])
-def test_a_shared_ray_cluster_splits_its_actor_budget_among_the_leaders(monkeypatch, group_size, replicas):
+@pytest.mark.parametrize(("group_size", "actors"), [(1, 8), (2, 16), (8, 64)])
+def test_a_shared_ray_cluster_splits_its_actor_budget_among_the_leaders(monkeypatch, group_size, actors):
     """Followers run no pool, so the budget a shared cluster divides is over the groups, else the cluster-wide pool
     would fall to ``group_size`` times less than ``num_rollout_workers``."""
     host = _LifecycleHost(torch.zeros(1))
     host.tp_group_size = group_size
     host.async_config.ray_address = "auto"
+    host.async_config.num_rollout_workers = 64
     built = {}
 
     def manager(**kwargs):
@@ -476,12 +480,13 @@ def test_a_shared_ray_cluster_splits_its_actor_budget_among_the_leaders(monkeypa
     monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, nodes=lambda: []))
     monkeypatch.setattr(async_mod, "RolloutManager", manager)
     monkeypatch.setattr(async_mod, "get_global_world_size", lambda: 8)
+    monkeypatch.setattr(async_mod, "get_local_world_size", lambda: 8)
     monkeypatch.setattr(tp_leader_mod.dist, "get_world_size", lambda group: group.size)
     try:
         host._init_async_components()
     finally:
         host._loop.close()
-    assert built["pool_replicas"] == replicas
+    assert built["num_workers"] == actors
 
 
 def _expected_order(depth: int, steps: int) -> list[str]:

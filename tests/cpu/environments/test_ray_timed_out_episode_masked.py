@@ -64,6 +64,7 @@ async def test_an_episode_past_its_deadline_is_a_masked_error(monkeypatch):
         env_config={},
         server_urls=["http://x"],
         rollout_config=RolloutConfig(episode_timeout=0.05),
+        max_concurrent_rollouts=1,
     )
     manager._actors = [_NeverReturningActor()]
     manager._started = True

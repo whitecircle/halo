@@ -98,6 +98,9 @@ class _Host(AsyncRolloutMixin):
     def _train_loader_batch_size(self) -> int:
         return 8
 
+    def _get_tp_or_etp_group_size(self) -> int:
+        return 1
+
     def add_callback(self, callback):
         self.callbacks.append(callback)
 
