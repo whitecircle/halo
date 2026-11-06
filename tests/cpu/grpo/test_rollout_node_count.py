@@ -82,5 +82,28 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
     assert captured["first_server"] == 5
 
 
+@pytest.mark.parametrize(
+    ("group_size", "local_world", "global_world", "ray_address", "workers", "actors"),
+    [(1, 8, 8, None, 256, 32), (2, 8, 8, None, 256, 64), (8, 8, 16, None, 256, 256), (2, 8, 16, "ray://h:1", 256, 32)],
+    ids=["no-group", "tp2", "etp8-one-leader", "shared-cluster-counts-leaders"],
+)
+def test_a_local_pool_is_split_over_the_leaders_of_the_node_alone(
+    monkeypatch, group_size, local_world, global_world, ray_address, workers, actors
+):
+    monkeypatch.setattr(async_rollouts, "get_local_world_size", lambda: local_world)
+    monkeypatch.setattr(async_rollouts, "get_global_world_size", lambda: global_world)
+    host = types.SimpleNamespace(
+        async_config=types.SimpleNamespace(
+            ray_address=ray_address,
+            num_rollout_workers=workers,
+            eval_rollout_batch_size=None,
+            max_concurrent_rollouts=None,
+        ),
+        _get_tp_or_etp_group_size=lambda: group_size,
+        _train_loader_batch_size=lambda: 8,
+    )
+    assert AsyncRolloutMixin._resolve_rollout_pool(host).actors_per_rank == actors
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
