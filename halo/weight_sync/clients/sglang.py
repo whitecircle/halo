@@ -3,7 +3,7 @@ needs ``NCCL_CUMEM_ENABLE=1``; SGLang otherwise turns cuMem off and the first cr
 
 import logging
 from collections import deque
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from functools import partial
 from typing import NoReturn
 from urllib.parse import urlparse
@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 
 from halo.models.moe.family_specs import STEP3P7
-from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, describe_chunk
+from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
@@ -24,13 +24,14 @@ from halo.weight_sync.clients.base import (
     unservable_bailing_model_types,
 )
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced
+from halo.weight_sync.staging import ArenaChunkStager, StagedChunk
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
     build_weight_update_group,
     release_weight_update_group,
 )
-from halo.weight_sync.transport.packed_broadcast import allocate_send_buffer, hold_for_stream
+from halo.weight_sync.transport.packed_broadcast import hold_for_stream
 from halo.weight_sync.transport.rendezvous import RendezvousListener
 
 logger = logging.getLogger(__name__)
@@ -49,6 +50,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     ENGINE_RELEASE = "SGLang 0.5.22"
     GROUP_HOST_ENV = "SGLANG_GROUP_HOST"
     PROBES_GROUP_MEMBERSHIP = True
+    CHUNK_STAGER = ArenaChunkStager
     # With no final chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
     CACHE_FLUSH_ENDPOINT = "/flush_cache"
     UNSERVABLE_MODEL_TYPES = {
@@ -242,7 +244,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         if self._rendezvous is not None:
             self._rendezvous.free_port()
             self._rendezvous = None
-        self._arena = None
+        self.release_chunk_staging()
         self._inflight.clear()
         self._send_stream = None
 
@@ -251,7 +253,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         self._aborted = False
         self._abort_parked = False
         self._rendezvous: RendezvousListener | None = None
-        self._arena: torch.Tensor | None = None
         # Events recorded after the latest chunks' broadcasts, settled _INFLIGHT_CHUNKS later.
         self._inflight: deque[torch.cuda.Event] = deque()
         # On the caller's stream a synchronous broadcast would order the next copies and the trainer's work behind it.
@@ -294,19 +295,21 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             },
         )
 
-    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+    def send_staged(self, staged: StagedChunk) -> None:
         """The engine replies on queueing its receives; the sends settle two chunks later, or on failure."""
+        self._settle_inflight(keep=_INFLIGHT_CHUNKS - 1)
         if self._send_stream is None:
             self._send_stream = torch.cuda.Stream(device=self.sync_device)
-        caller_stream = torch.cuda.current_stream(self.sync_device)
-        # The arena's block may last have been used on the caller's stream (``allocate_send_buffer``).
-        self._send_stream.wait_stream(caller_stream)
         with torch.cuda.stream(self._send_stream):
-            for tensor in self._upload_to_arena([param for _, param in chunk], caller_stream):
+            if staged.ready is not None:
+                self._send_stream.wait_event(staged.ready)
+            for tensor in staged.wire:
+                hold_for_stream(tensor, self._send_stream)
                 # Synchronous at stream level only; an async_op work per tensor would flood the watchdog.
                 dist.broadcast(tensor, src=0, group=self._transport[0])
             event = torch.cuda.Event()
             event.record(self._send_stream)
+        staged.add_reader(event)
         self._inflight.append(event)
 
     def _fail_chunk(self, error: Exception, declared: AsyncCall) -> NoReturn:
@@ -409,33 +412,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         except Exception as e:
             logger.debug(f"Could not clear weight-update group {group_name!r} on {self.base_url}: {e}")
 
-    def _upload_to_arena(self, params: list[torch.Tensor], pool_stream: torch.cuda.Stream) -> Iterator[torch.Tensor]:
-        """Yield each tensor's arena view as its copy is issued. One arena, since a block freed mid-chunk carries a
-        pending NCCL event the next upload would wait on inside the allocator. Reuse across chunks is safe by stream
-        order, as uploads and sends share ``_send_stream``."""
-        self._settle_inflight(keep=_INFLIGHT_CHUNKS - 1)
-        offsets: list[int] = []
-        total = 0
-        for param in params:
-            offsets.append(total)
-            # 256-byte aligned, a multiple of every dtype's size, so a uint8 slice views as the tensor.
-            total += (param.nbytes + 255) // 256 * 256
-        if self._arena is None or self._arena.numel() < total:
-            # Only once the previous sends retired, as they still read the old arena.
-            self.release_send_buffers()
-            self._arena = allocate_send_buffer(
-                max(total, WEIGHT_SYNC_CHUNK_BYTES),
-                self.sync_device,
-                pool_stream=pool_stream,
-                send_stream=self._send_stream,
-            )
-        arena = self._arena
-        for param, offset in zip(params, offsets, strict=True):
-            view = arena[offset : offset + param.nbytes].view(param.dtype).view(param.shape)
-            view.copy_(param, non_blocking=True)
-            hold_for_stream(param, self._send_stream)
-            yield view
-
     def _settle_inflight(self, *, keep: int) -> None:
         while len(self._inflight) > keep:
             bounded_event_sync(
@@ -457,4 +433,4 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def release_send_buffers(self) -> None:
         """Held across syncs, the arena would pin the sync GPU."""
         self._settle_inflight(keep=0)
-        self._arena = None
+        self.release_chunk_staging()

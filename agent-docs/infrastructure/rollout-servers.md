@@ -99,10 +99,12 @@ staged on the device (8× B300 nodes over EFA; the vLLM rate measured on vLLM 0.
 measured on SGLang 0.5.17).
 
 The forwarding rank's peak during a sync is the assembled EP layer being sent (~13 GB for one 397B
-layer), plus the snapshot of the chunk being sent and the engine path's send buffer, each the size of that chunk:
-SGLang's arena, grown to the largest chunk, or vLLM's packed buffer, so 12.9 + 8.6 + 8.6 GB on vLLM at 397B (calculated
-from the fused bank's 8.6 GB). A family whose hub split is a reverse converter (Step-3.7) also holds the split copies
-beside the layer.
+layer), plus the snapshot of the chunk being sent and the engine path's staged copy of it, each the size of that
+chunk: SGLang's arena, grown to the largest chunk, or vLLM's packed buffers, so 12.9 + 8.6 + 8.6 GB at 397B
+(calculated from the fused bank's 8.6 GB). The staging is made once per chunk and every server's client broadcasts
+from that one read-only buffer, in `per_server` and `single_group` alike, so the figure does not grow with the number
+of servers (`halo/weight_sync/staging.py`). A family whose hub split is a reverse converter (Step-3.7) also holds the
+split copies beside the layer.
 
 With several servers (`rollout_server_configs`) one snapshot per parameter is shared and released once every
 server has it. By default each chunk goes to every server on concurrent threads over a group of its own; the

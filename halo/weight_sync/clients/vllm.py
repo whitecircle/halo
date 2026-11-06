@@ -22,12 +22,9 @@ from halo.weight_sync.clients.base import (
     unservable_bailing_model_types,
 )
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait
+from halo.weight_sync.staging import PackedChunkStager, StagedChunk
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
-from halo.weight_sync.transport.packed_broadcast import (
-    PACKED_BUFFER_BYTES,
-    PACKED_NUM_BUFFERS,
-    packed_broadcast_producer,
-)
+from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES, PACKED_NUM_BUFFERS, broadcast_packed
 from halo.weight_sync.transport.pynccl import PyNcclCommunicator, UniqueIdStore
 from halo.weight_sync.transport.rendezvous import RendezvousListener
 
@@ -50,6 +47,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     ENGINE_RELEASE = "vLLM 0.32.0"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     REPORTS_INSTANCE_ID = True
+    CHUNK_STAGER = PackedChunkStager
     PAUSE_ENDPOINT = "/pause"
     # mode=keep resumes in-flight generations under the new weights (the staleness the IS ratio corrects);
     # vLLM's default abort returns each as a fragment with an ordinary stop reason.
@@ -264,16 +262,16 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
         )
 
-    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
-        packed_broadcast_producer(iterator=iter(chunk), group=self._transport, streams=self._packed_streams)
-        logger.debug(f"Streamed {len(chunk)} params to vLLM")
+    def send_staged(self, staged: StagedChunk) -> None:
+        broadcast_packed(staged.wire, group=self._transport, streams=self._packed_streams, ready=staged.ready)
+        logger.debug(f"Streamed {len(staged.wire)} packed buffers to vLLM")
 
     def _fail_chunk(self, error: Exception, declared: AsyncCall) -> NoReturn:
         self._raise_if_server_failed(error, declared)
         raise error
 
     def release_send_buffers(self) -> None:
-        """A packed broadcast stages nothing between syncs."""
+        self.release_chunk_staging()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

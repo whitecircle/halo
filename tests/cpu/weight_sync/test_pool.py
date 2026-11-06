@@ -13,6 +13,7 @@ from halo.weight_sync.chunking import declared_co_load_groups, resolve_sync_devi
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from halo.weight_sync.pool import WeightSyncPool
+from halo.weight_sync.staging import PackedChunkStager
 from tests.common.weight_sync import ServerlessSGLangClient, Wire, offline_client
 
 _BUDGET = 4096
@@ -108,9 +109,13 @@ def test_pool_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
 
     class _StubClient:
         BACKEND_NAME = "stub"
+        CHUNK_STAGER = PackedChunkStager
 
         def __init__(self, base_url, group_port, connection_timeout, group_host=None):
             self._param_buffer: list = []
+
+        def share_stager(self, stager):
+            pass
 
         def init_communicator(self, device):
             joined.append(device)
@@ -295,6 +300,11 @@ def test_reconnect_retires_the_old_client_before_probing_the_replacement():
     order: list[str] = []
 
     class RecordingClient:
+        CHUNK_STAGER = PackedChunkStager
+
+        def share_stager(self, stager):
+            pass
+
         def __init__(self, **kwargs):
             self.base_url = kwargs["base_url"]
             self.group_port = kwargs.get("group_port")

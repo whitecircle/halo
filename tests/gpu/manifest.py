@@ -580,6 +580,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_lowp_fsdp2_weight_cache.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
+    "kernels/test_weight_sync_stage_once.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stream_safety.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     # Skips without the local Hub snapshot. The cut model holds ~20 GB of experts; each export or resume checkpoint is
     # ~125 GB, ~100 GB of it the n-gram table, written once and hard-linked after.

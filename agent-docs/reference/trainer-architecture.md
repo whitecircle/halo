@@ -610,7 +610,7 @@ vLLM package ([generation](../training-methods/grpo/online.md#server-mode-only))
 
 TRL's default only unfolds DTensors when its `DistributedBackend.is_fsdp` flag is set (an accelerate
 `fsdp_plugin`). FSDP2 is applied manually via `fully_shard` with accelerate in MULTI_GPU mode, so
-the default forwards DTensors verbatim, and the `torch.cat` in `packed_broadcast_producer` triggers
+the default forwards DTensors verbatim, and the `torch.cat` in `pack_tensors` triggers
 a DTensor dispatch that deadlocks against the trainer↔vLLM NCCL group.
 
 `_generate_single_turn` broadcasts the per-rank rollout result from the TP-group leader; without it

@@ -14,6 +14,7 @@ from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_devi
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.group_layout import SyncTopology, resolve_group_host, resolve_node_label, validate_sync_topology
+from halo.weight_sync.staging import ChunkStager
 from halo.weight_sync.update_stream import UpdateStream
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,8 @@ logger = logging.getLogger(__name__)
 
 class WeightSyncPool:
     """One weight-sync client per rollout server, each with its own NCCL group and trainer-side group port, or with
-    ``single_group`` one group over every server, which sends each chunk once."""
+    ``single_group`` one group over every server, which sends each chunk once. Either way each chunk is staged once,
+    and every client broadcasts from that one buffer."""
 
     def __init__(
         self,
@@ -45,6 +47,8 @@ class WeightSyncPool:
         self._co_load_module_names: tuple[str, ...] | None = None
         # Only the pool knows when every server is done with a snapshot.
         self._buffered_bytes = 0
+        # The one staging every client of a ``per_server`` pool broadcasts from.
+        self._stager: ChunkStager = client_cls.CHUNK_STAGER()
         # NCCL groups cannot form concurrently, so reconnects from parallel flush threads take turns.
         self._reconnect_lock = threading.Lock()
         self._client_cls = client_cls
@@ -130,13 +134,17 @@ class WeightSyncPool:
         shares the forwarding rank's GPU and NICs, so it costs the sum of the pushes, not the slowest one."""
         if not self._initialized or not self._clients:
             return
-        self._run_on_every_client(lambda index: self._clients[index].finish_weight_update(), "final flush")
+        try:
+            self._run_on_every_client(lambda index: self._clients[index].finish_weight_update(), "final flush")
+        finally:
+            self._stager.release()
         self._buffered_bytes = 0
 
     def abort_weight_update(self) -> None:
         """Close the open update on every server after a failed sync; never raises."""
         for client in self._clients:
             client.abort_weight_update()
+        self._stager.release()
         self._buffered_bytes = 0
 
     def close_communicator(self) -> None:
@@ -146,6 +154,7 @@ class WeightSyncPool:
             except Exception as e:
                 logger.warning(f"Error closing client: {e}")
 
+        self._stager.release()
         self._clients = []
         self._initialized = False
         logger.info("WeightSyncPool closed all connections")
@@ -200,6 +209,7 @@ class WeightSyncPool:
             connection_timeout=self.connection_timeout,
             group_host=config.get("group_host"),
         )
+        client.share_stager(self._stager)
         client.init_communicator(device=device)
         if self._co_load_module_names is not None:
             client.scope_co_load_groups(self._co_load_module_names)

@@ -21,6 +21,7 @@ from halo.runtime import consensus
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
+from halo.weight_sync.staging import PackedChunkStager
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender
 
@@ -113,6 +114,7 @@ class _EngineClient(RecordingSender):
     """What ``_init_weight_sync_client`` builds on the main process, with no server behind it."""
 
     BACKEND_NAME = "vLLM"
+    CHUNK_STAGER = PackedChunkStager
     BUILT: list["_EngineClient"] = []
     FAIL = False
 
@@ -125,6 +127,9 @@ class _EngineClient(RecordingSender):
 
     def init_communicator(self, device) -> None:
         self.sync_device = device
+
+    def share_stager(self, stager) -> None:
+        """The recording client stages nothing."""
 
     buffer_param = RecordingSender.update_named_param
 

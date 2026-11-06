@@ -18,6 +18,7 @@ from urllib3.util.retry import Retry
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced, wait_for_calls
+from halo.weight_sync.staging import ChunkStager, StagedChunk
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 from halo.weight_sync.update_stream import UpdateStream
@@ -122,6 +123,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
     PROBES_GROUP_MEMBERSHIP = False
+    # How this engine's chunks are staged for its broadcast.
+    CHUNK_STAGER: type[ChunkStager]
     # Route that flushes the engine's caches of the old weights where its final chunk carries no flag for it.
     CACHE_FLUSH_ENDPOINT: str | None = None
     # What an update interrupted mid-stream leaves the engine holding, quoted in the refusal.
@@ -179,6 +182,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
         self._group_instance: str | None = None
         # Set by a group that releases the engine's half of its group itself, beside the trainer's.
         self.group_releases_remote_half = False
+        self._stager = self.CHUNK_STAGER()
+        self._owns_stager = True
         self._reset_transport_state()
         self.check_server(connection_timeout)
 
@@ -233,8 +238,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Start the engine's receive of ``chunk``, on a background thread; ``final`` marks the last."""
 
     @abstractmethod
-    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
-        """Queue ``chunk`` on the group's transport, as rank 0."""
+    def send_staged(self, staged: StagedChunk) -> None:
+        """Queue a staged chunk on the group's transport, as rank 0; it only reads ``staged``."""
 
     @abstractmethod
     def _fail_chunk(self, error: Exception, declared: AsyncCall) -> NoReturn:
@@ -249,6 +254,20 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def layout_read_bound_s(self) -> float:
         """The longest a read of the engine's layout can take."""
         return HTTP_PROBE_TIMEOUT_S
+
+    def send_chunk(self, chunk: list[tuple[str, torch.Tensor]]) -> None:
+        """Stage ``chunk``, unless a client sharing the stager already did, and queue it."""
+        self.send_staged(self._stager.stage(chunk))
+
+    def share_stager(self, stager: ChunkStager) -> None:
+        """Stage through ``stager``, which several clients of one pool share and whose owner releases."""
+        self._stager = stager
+        self._owns_stager = False
+
+    def release_chunk_staging(self) -> None:
+        """Release the staging this client owns; a shared stager is its pool's to release."""
+        if self._owns_stager:
+            self._stager.release()
 
     @property
     def has_transport(self) -> bool:
@@ -479,6 +498,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Close an update the sync opened but cannot finish and drop the buffer; never raises. Once a chunk went
         out there is no state to return to, so the engine stays paused (:meth:`_mark_unusable`)."""
         self.drain_param_buffer()
+        self.release_chunk_staging()
         if not self._update_open:
             return
         if self.can_replay_sync:
