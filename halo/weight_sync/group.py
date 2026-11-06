@@ -22,7 +22,7 @@ from halo.weight_sync.clients.base import (
     GroupMembershipLost,
     WeightSyncClientBase,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_for_calls
 from halo.weight_sync.group_layout import (
     reject_mixed_localities,
     reject_pipeline_stages,
@@ -65,6 +65,7 @@ class WeightSyncGroup(UpdateStream):
         self._group_name = ""
         self._offsets: list[int] = []
         self._engine_worlds: list[int] = []
+        self._pipeline_stages: list[int] = []
         self._world_size = 0
 
     @property
@@ -129,12 +130,21 @@ class WeightSyncGroup(UpdateStream):
     def _urls(self) -> list[str]:
         return [member.base_url for member in self._members]
 
-    def _resolve_layout(self, read_world: Callable[[WeightSyncClientBase], int]) -> None:
-        """Read every server's layout and give each a block of ranks, node by node. Re-run on a re-form, as a restarted
-        server may come back with another layout."""
-        readings = self._require_all(
-            self._run_on_members(lambda member: (read_world(member), member.get_pipeline_size())), "read its layout"
-        )
+    def _resolve_layout(
+        self, read_world: Callable[[WeightSyncClientBase], int], read: Sequence[WeightSyncClientBase] | None = None
+    ) -> None:
+        """Read the layout of ``read`` (default every server) and give each server a block of ranks, node by node. A
+        re-form reads only the servers that lost the group, as a restarted one may come back with another layout while
+        one that kept the group is still the engine it formed with."""
+        known = dict(zip(self._urls, zip(self._engine_worlds, self._pipeline_stages, strict=True), strict=False))
+
+        def read_layout(member: WeightSyncClientBase) -> tuple[int, int]:
+            if read is not None and member not in read:
+                return known[member.base_url]
+            announce_wait(member.base_url, "its parallel layout", member.layout_read_bound_s)
+            return read_world(member), member.get_pipeline_size()
+
+        readings = self._require_all(self._run_on_members(read_layout), "read its layout")
         worlds = [world for world, _ in readings]
         reject_pipeline_stages(self.BACKEND_NAME, self._urls, [stages for _, stages in readings])
         reject_split_nodes(self._nodes, [member.host for member in self._members], self._urls)
@@ -146,12 +156,19 @@ class WeightSyncGroup(UpdateStream):
         self._nodes = [self._nodes[i] for i in layout.order]
         self._offsets = [layout.rank_offsets[i] for i in layout.order]
         self._engine_worlds = [worlds[i] for i in layout.order]
+        self._pipeline_stages = [readings[i][1] for i in layout.order]
         self._world_size = layout.world_size
 
-    def _form(self) -> None:
+    def _form(self, adopt: Sequence[WeightSyncClientBase] | None = None) -> None:
         """Rendezvous, every server's join and the trainer's half run together, as each blocks until the others
-        arrive."""
-        self._require_all(self._run_on_members(lambda member: member.adopt_engine_identity()), "read its launch")
+        arrive. ``adopt`` are the servers whose launch is read first (default every server); one that kept the group
+        is the launch it formed with."""
+
+        def adopt_launch(member: WeightSyncClientBase) -> None:
+            if adopt is None or member in adopt:
+                member.adopt_engine_identity()
+
+        self._require_all(self._run_on_members(adopt_launch), "read its launch")
         self._group_name = f"weight_update_group_g{next(_generations)}"
         leader = self.leader
         # A loopback address must be refused when any server is remote, and a route read toward a remote one.
@@ -224,10 +241,10 @@ class WeightSyncGroup(UpdateStream):
         try:
             stale = stale or self._stale_members(lambda member: member.verify_group_membership())
             if stale:
-                self._reform(stale)
-                stale = self._stale_members(lambda member: member.verify_engine_identity()) or self._stale_members(
-                    lambda member: member.verify_group_membership()
-                )
+                reformed = self._reform(stale)
+                stale = self._stale_members(
+                    lambda member: member.verify_engine_identity(), reformed
+                ) or self._stale_members(lambda member: member.verify_group_membership())
                 if stale:
                     raise RuntimeError(
                         f"The weight-sync group still lacks {[url for url, _ in stale]} after one re-form: {stale[0][1]}"
@@ -241,9 +258,14 @@ class WeightSyncGroup(UpdateStream):
                 )
             raise
 
-    def _stale_members(self, probe: Callable[[WeightSyncClientBase], None]) -> list[tuple[str, Exception]]:
-        """``(url, error)`` of each server that lost the group; any other failure raises, naming its server."""
-        outcomes = self._run_on_members(probe)
+    def _stale_members(
+        self, probe: Callable[[WeightSyncClientBase], None], only: Sequence[WeightSyncClientBase] | None = None
+    ) -> list[tuple[str, Exception]]:
+        """``(url, error)`` of each server that lost the group, probing ``only`` (default every server); any other
+        failure raises, naming its server."""
+        outcomes = self._run_on_members(
+            lambda member: None if only is not None and member not in only else probe(member)
+        )
         self._require_all(
             [(None, None if isinstance(error, GroupMembershipLost) else error) for _, error in outcomes], "be probed"
         )
@@ -273,9 +295,11 @@ class WeightSyncGroup(UpdateStream):
             f"Weight-sync pause {timings}; the first chunk waited {max(pauses) - min(pauses):.2f}s on the slowest"
         )
 
-    def _reform(self, stale: list[tuple[str, Exception]]) -> None:
+    def _reform(self, stale: list[tuple[str, Exception]]) -> list[WeightSyncClientBase]:
         """Re-form the group over servers that are paused: the sessions are closed, both halves destroyed and the group
-        joined again under a new generation, then the sessions reopen."""
+        joined again under a new generation, then the sessions reopen. Only the servers that lost the group have their
+        layout and launch read again; returns them."""
+        lost = [member for member in self._members if member.base_url in {url for url, _ in stale}]
         logger.warning(f"Re-forming the weight-sync group: {'; '.join(f'{url}: {error}' for url, error in stale)}")
         self._run_on_members(lambda member: member.abandon_update_session())
         # A lost member never enters its half, so a destroy of ours would wait on it and strand the survivors' halves.
@@ -283,9 +307,10 @@ class WeightSyncGroup(UpdateStream):
         halves = self._destroy_remote_halves()
         self.leader.discard_transport(None)
         self._join_all(halves)
-        self._resolve_layout(methodcaller("get_engine_world_size"))
-        self._form()
+        self._resolve_layout(methodcaller("get_engine_world_size"), lost)
+        self._form(lost)
         self._require_all(self._run_on_members(lambda member: member.open_update_session()), "reopen its session")
+        return lost
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """Declare ``chunk`` on every server and broadcast it once. From the first declare on a failure is global. The

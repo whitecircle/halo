@@ -21,7 +21,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall
+from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.packed_broadcast import (
     PACKED_BUFFER_BYTES,
@@ -226,6 +226,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._require_communicator()
 
     def destroy_remote_group(self) -> None:
+        announce_wait(self.base_url, "its weight-transfer engine to shut down", CLEANUP_TIMEOUT_S)
         try:
             self.request("POST", "/shutdown_weight_transfer_engine", retry=False, timeout=CLEANUP_TIMEOUT_S)
         except Exception as e:

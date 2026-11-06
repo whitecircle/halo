@@ -1,10 +1,18 @@
 """A blocking server call run on a background thread, joined later, and the wait over several at once."""
 
+import logging
 import threading
 import time
 
+logger = logging.getLogger(__name__)
+
 # A group's chunk waits on its declares and its send, so the poll's period is added to every chunk of every sync.
 _POLL_PERIOD_S = 0.005
+
+
+def announce_wait(server: str, what: str, bound_s: float) -> None:
+    """Say which server a bounded wait is on, for what, and how long it can last, once at its start."""
+    logger.info(f"Waiting on {server} for {what}, for at most {bound_s:.0f}s")
 
 
 class AsyncCall:

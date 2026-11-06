@@ -442,5 +442,68 @@ def test_a_client_whose_group_releases_the_remote_half_does_not_destroy_it_again
     assert destroyed == []
 
 
+def _waits(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.getMessage().startswith("Waiting on ")]
+
+
+def test_each_silent_wait_of_a_release_names_its_server_and_bound_when_it_starts(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    answered = []
+    monkeypatch.setattr(client, "_engine_answers", lambda: answered.append(1) or True)
+    monkeypatch.setattr(client, "group_releases_remote_half", False)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
+
+    with caplog.at_level(logging.INFO):
+        client._release_transport(at_exit=False)
+
+    waits = _waits(caplog)
+    assert len(waits) == 3, waits
+    assert all(client.base_url in wait for wait in waits), waits
+    assert waits[0].endswith("/health before the group's destroy, for at most 30s"), waits
+    assert "trainer's half" in waits[1] and "its half" in waits[2] and waits[2].endswith("at most 30s"), waits
+
+
+def test_a_release_that_asks_for_nothing_announces_no_wait(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    _teardown_probe(client, monkeypatch)
+    monkeypatch.setattr(client, "group_releases_remote_half", True)
+
+    with caplog.at_level(logging.INFO):
+        client._release_transport(at_exit=True)
+
+    assert not any("/health" in wait or "its half" in wait for wait in _waits(caplog)), _waits(caplog)
+
+
+def test_an_abort_and_a_remote_destroy_name_their_server_and_bound(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: True)
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
+
+    with caplog.at_level(logging.INFO):
+        client.abort_transport()
+        client.destroy_remote_group()
+
+    waits = _waits(caplog)
+    assert len(waits) == 2, waits
+    assert all(client.base_url in wait and wait.endswith("at most 30s") for wait in waits), waits
+
+
+def test_closing_an_interrupted_session_names_its_server_and_bound(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._update_session_open = True
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
+
+    with caplog.at_level(logging.INFO):
+        client.abandon_update_session()
+        client.abandon_update_session()
+
+    waits = _waits(caplog)
+    assert len(waits) == 1, "a session already closed waits on nothing, so it announces nothing"
+    assert client.base_url in waits[0] and waits[0].endswith("at most 30s"), waits
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

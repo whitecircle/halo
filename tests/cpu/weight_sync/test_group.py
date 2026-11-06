@@ -4,6 +4,7 @@ sent once, and a failure after the first declare is global while one before it i
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import deque
@@ -512,6 +513,51 @@ def test_an_incomplete_co_load_group_at_the_tail_fails_the_group_sync_and_the_sc
         pool.finish_weight_update()
 
     assert ring.chunks == []
+
+
+def _layout_reads(engine, server) -> int:
+    return server.count("GET /server_info") + server.count("GET /get_world_size")
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_re_form_reads_no_layout_or_launch_from_a_server_that_kept_the_group(rig, engine):
+    """The healthy server's layout and launch were read at formation and it did not restart; a read at the re-form
+    waits out a scheduler parked behind the lost member's destroy."""
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    healthy_before = _layout_reads(engine, servers[0])
+    restarted_before = _layout_reads(engine, servers[1])
+    _restart(engine, servers[1])
+
+    _push(pool, 2)
+
+    # vLLM's per-sync identity check is the one read the healthy server still answers; SGLang reports no launch.
+    assert _layout_reads(engine, servers[0]) - healthy_before == (1 if engine == "vllm" else 0)
+    assert _layout_reads(engine, servers[1]) - restarted_before >= 2, "the restarted server's layout was not read"
+    assert pool.group.rank_blocks == [(1, 1), (2, 1)]
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_re_form_announces_the_layout_read_of_each_server_it_reads_and_only_those(rig, engine, caplog):
+    pool, servers, _ = rig(engine, [1, 1])
+    pool.init_communicator("cpu")
+    _push(pool, 2)
+    _restart(engine, servers[1])
+    caplog.clear()
+
+    with caplog.at_level(logging.INFO):
+        _push(pool, 2)
+
+    reads = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Waiting on ") and "its parallel layout" in record.getMessage()
+    ]
+    assert len(reads) == 1, reads
+    assert servers[1].url in reads[0] and servers[0].url not in reads[0], reads
+    bound = 10 if engine == "vllm" else 6 * 10 + sum(2 * 2**i for i in range(5))
+    assert reads[0].endswith(f"for at most {bound}s"), reads
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
-from halo.weight_sync.clients.server_calls import AsyncCall, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_for_calls
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 from halo.weight_sync.update_stream import UpdateStream
@@ -241,6 +241,11 @@ class WeightSyncClientBase(UpdateStream, ABC):
     @abstractmethod
     def release_send_buffers(self) -> None:
         """Release the staging the transport holds between syncs, which would pin the sync GPU."""
+
+    @property
+    def layout_read_bound_s(self) -> float:
+        """The longest a read of the engine's layout can take."""
+        return HTTP_PROBE_TIMEOUT_S
 
     def get_pipeline_size(self) -> int:
         """Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages collide."""
@@ -594,6 +599,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Close a session left open; never raises, as the caller is already failing."""
         if not self._update_session_open:
             return
+        announce_wait(self.base_url, "the interrupted update session to close", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=CLEANUP_TIMEOUT_S, **self.SESSION_REQUEST

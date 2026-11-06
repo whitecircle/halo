@@ -23,7 +23,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall
+from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
@@ -122,6 +122,14 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             quantization=(info["quantization"] or "") if "quantization" in info else None,
         )
 
+    @property
+    def layout_read_bound_s(self) -> float:
+        """Each attempt of the retried ``/server_info`` read waits ``HTTP_PROBE_TIMEOUT_S``, and the backoff between
+        attempts doubles from the policy's factor."""
+        retry = self._session.get_adapter(self.base_url).max_retries
+        attempts = retry.total + 1
+        return attempts * HTTP_PROBE_TIMEOUT_S + sum(retry.backoff_factor * 2**i for i in range(attempts - 1))
+
     def _server_info(self) -> dict:
         return self.request("GET", "/server_info", retry=True, timeout=HTTP_PROBE_TIMEOUT_S).json()
 
@@ -166,6 +174,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Unchecked, as with no session open the close answers 400.
         for name in dict.fromkeys((self._own_group_name, self.group_name)):
             self._destroy_group_named(name)
+        announce_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST",
@@ -214,6 +223,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         destroy = not at_exit and not self._aborted
         # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
         # it a healthy engine reads as dead, and aborting here strands its half of the destroy.
+        if destroy and group is not None:
+            announce_wait(self.base_url, "/health before the group's destroy", _ENGINE_ANSWER_TIMEOUT_S)
         answers = not (destroy and group is not None) or self._engine_answers()
         # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
         # no local group, or the server refuses every later join. A group that runs it for every server does so itself.
@@ -224,10 +235,12 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             destroy = False
         # An engine that never enters its half parks the destroy, with the failure that brought us here unraised.
         local = AsyncCall(partial(release_weight_update_group, group, destroy=destroy), name="weight-update destroy")
+        announce_wait(self.base_url, "the trainer's half of its weight-update group to be released", CLEANUP_TIMEOUT_S)
         if local.join(CLEANUP_TIMEOUT_S).is_alive():
             logger.error(f"Destroying the weight-update group of {self.base_url} is still blocked; aborting it.")
             self.abort_transport()
         if remote is not None:
+            announce_wait(self.base_url, "its half of the weight-update group to be destroyed", CLEANUP_TIMEOUT_S)
             remote.join(CLEANUP_TIMEOUT_S)
         self._arena = None
         self._inflight.clear()
@@ -380,6 +393,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def _destroy_group_named(self, group_name: str) -> None:
         """Best-effort; never masks the caller's failure."""
+        announce_wait(self.base_url, f"weight-update group {group_name!r} to be destroyed", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST",
@@ -429,6 +443,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def abort_transport(self) -> None:
         self._aborted = True
+        announce_wait(self.base_url, "the trainer's half of its weight-update group to abort", CLEANUP_TIMEOUT_S)
         if not abort_weight_update_group(self._transport[0], timeout_s=CLEANUP_TIMEOUT_S):
             self._abort_parked = True
 
