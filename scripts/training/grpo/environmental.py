@@ -327,6 +327,7 @@ def main():
         dist_args,
         script_prefix=f"env-grpo-{env_config.environment_type}",
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
+        row_sources=(async_config,),
     )
     parallelism_config = context.parallelism_config
 

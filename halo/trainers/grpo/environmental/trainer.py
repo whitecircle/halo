@@ -14,6 +14,7 @@ from halo.environments.messages import task_prompt
 from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.context_window import is_bounded_length
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
@@ -165,6 +166,19 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._resolve_length_ordered_rows()
         self._configure_packed_microbatches()
         self._configure_loss_forward_weights()
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """``max_train_row_tokens``: a row over it leaves the batch. The turn and episode budgets bound only what the
+        model samples, and the tool and observation tokens of a multi-turn row ride beside it."""
+        return next(
+            (
+                int(cap)
+                for source in sources
+                if is_bounded_length(cap := getattr(source, "max_train_row_tokens", None))
+            ),
+            None,
+        )
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config

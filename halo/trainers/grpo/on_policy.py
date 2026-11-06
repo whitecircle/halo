@@ -91,6 +91,7 @@ class OnPolicyGRPOInitMixin:
     POLICY_GRADIENT_LOSS = True
     SYNCS_TO_EXTERNAL_GENERATOR = True
     REFERENCE_ALTERNATIVES = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
+    GENERATION_SHAPED_ROWS = True
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Returns ``(config, kwargs)``. TRL's Liger flag must go off before ``_init_distributed_config``, and

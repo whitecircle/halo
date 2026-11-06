@@ -116,6 +116,7 @@ def main():
         dist_args,
         script_prefix="rlvr-online-grpo",
         trainer_cls=trainer_cls,
+        row_sources=(args,),
     )
     parallelism_config = context.parallelism_config
 

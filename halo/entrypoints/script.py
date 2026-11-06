@@ -130,10 +130,13 @@ def init_training_script(
     trainer_cls: type,
     split_expert_lora: bool = True,
     supports_init_from_scratch: bool = False,
+    row_sources: tuple = (),
 ) -> ScriptContext:
     """The pre-model phase, in the order every script depends on: device bind, ``ParallelismConfig``, run setup and
     resume resolution. ``trainer_cls`` supplies the CP/PP/low-precision gates, so a refused mode fails before any load.
-    ``split_expert_lora`` peels MoE expert targets out of ``lora_target_modules`` into native EP grouped LoRA."""
+    ``split_expert_lora`` peels MoE expert targets out of ``lora_target_modules`` into native EP grouped LoRA.
+    ``row_sources`` are the objects beside ``training_config`` that bound a forward row (``max_prompt_length``,
+    ``max_train_row_tokens``)."""
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
         torch.cuda.set_device(local_rank)
@@ -151,6 +154,7 @@ def init_training_script(
         trainer_cls=trainer_cls,
         expert_lora=split_expert_lora_targets(model_config) if split_expert_lora else None,
         supports_init_from_scratch=supports_init_from_scratch,
+        row_sources=row_sources,
     )
 
     # Before the resume resolves, the run reads its weights from the base.

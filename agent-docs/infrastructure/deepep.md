@@ -256,8 +256,14 @@ declared budget (`per_device_train_batch_size` × the row length, doubled for th
 chosen and rejected together, divided by `cp_size`) through the dispatcher's own
 capacity alignment and refuses it, naming the budget, the capacity and the EP group. The row length is
 `max_length`; unbounded, `max_prompt_length + max_completion_length` where the config bounds both, else
-the model's context window. The dispatcher's check stays the backstop for the batch in hand and the
-only check for online and async GRPO, which declare no budget, except that `packed_microbatch_tokens` (either trainer) is a per-rank budget checked the same way at construction, and its planner caps every bin at the same wire and Gin ceiling. Whether the Gin ceiling applies is
+the model's context window. Online GRPO takes `max_prompt_length` (script argument) plus `max_completion_length`;
+async GRPO takes `max_train_row_tokens` alone, as the turn and episode budgets bound what is sampled, not the tool
+and observation tokens a multi-turn row carries. Both also size `per_device_eval_batch_size` rows when an evaluation
+runs. A row with no such bound is judged against the context window on a group spanning NVLink domains only, so
+cross-node EP needs `max_prompt_length` or `max_train_row_tokens` at or under 8,192 tokens per row, while a
+node-local run with no bound declares nothing. The dispatcher's check stays the backstop for the batch in hand.
+`packed_microbatch_tokens` (either trainer) is a per-rank budget checked the same way at construction, and its planner
+caps every bin at the same wire and Gin ceiling. Whether the Gin ceiling applies is
 decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
 There is no lower "symmetric-window" ceiling. What carries long-context ep8 is the int64 program offset
