@@ -315,7 +315,21 @@ def _declaring_model_types() -> list[str]:
 
 @cache
 def _canonical_checkpoint_keys(model_type: str) -> tuple[str, ...]:
-    return tuple(sorted(_shell(model_type).state_dict()))
+    """The state dict's keys, with a per-expert layout's fused banks spelled as the gathered save writes them."""
+    state = _shell(model_type).state_dict()
+    layout = ep_layer_class_by_model_type()[model_type].FAMILY.expert_layout
+    if layout.kind is not ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT:
+        return tuple(sorted(state))
+    gate, up, down = layout.per_expert_keys
+    keys = []
+    for key, tensor in state.items():
+        root, _, leaf = key.rpartition(".")
+        if not root.endswith("experts") or leaf not in ("gate_up_proj", "down_proj"):
+            keys.append(key)
+            continue
+        names = (gate, up) if leaf == "gate_up_proj" else (down,)
+        keys += [f"{root}.{e}.{name}.weight" for e in range(tensor.shape[0]) for name in names]
+    return tuple(sorted(keys))
 
 
 def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
@@ -351,14 +365,18 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
     ``model.norm.weight``); identity rests on the planner's live-key retry."""
     layer_cls = ep_layer_class_by_model_type()[model_type]
     layout = layer_cls.FAMILY.expert_layout
-    assert layout.kind is ExpertLayoutKind.FUSED and not layer_cls.FAMILY.export_key_renames, (
+    fused = layout.kind in (ExpertLayoutKind.FUSED, ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT)
+    assert fused and not layer_cls.FAMILY.export_key_renames, (
         f"{layer_cls.__name__} exports expert/replicated keys under names the live state dict does "
         f"not carry, so the state dict is no longer the checkpoint key space this test checks — "
         f"extend the oracle with the family's gathered-save layout."
     )
     model = _shell(model_type)
     keys = list(_canonical_checkpoint_keys(model_type))
-    assert any(key.endswith("experts.gate_up_proj") for key in keys), "the oracle must reach the expert keys"
+    expert_suffix = "gate_up_proj" if layout.kind is ExpertLayoutKind.FUSED else f"{layout.per_expert_keys[0]}.weight"
+    assert any(".experts." in key and key.endswith(expert_suffix) for key in keys), (
+        "the oracle must reach the expert keys"
+    )
 
     disk_to_model, fanout = family_key_mapping(model, keys)
 
