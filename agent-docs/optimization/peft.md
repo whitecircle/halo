@@ -497,11 +497,11 @@ The merge re-applies the run's training sidecars to the merged model and copies 
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the
 family's native routing-bias slots, so the merged model routes on the trained bias.
 
-The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
+The in-memory merge **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
 `LORA_WITH_EP_EXPERT_LORA`, or tensor keys ending at `.experts.<attr>.lora_{A,B}`), because
-`PeftModel.merge_and_unload` silently drops the grouped expert deltas. A stock PEFT adapter on a per-expert
-`nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight` and merges normally; only the grouped
-namespace is refused.
+`PeftModel.merge_and_unload` silently drops the grouped expert deltas; `convert_to_bf16.py --peft` shares that
+refusal. A stock PEFT adapter on a per-expert `nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight`
+and merges normally; only the grouped namespace is refused.
 
 `merge_peft_adapters.py` folds such an adapter after the fact through its [streaming merge](#streaming-merge),
 automatically for expert-only and mixed adapters. `merge_expert_lora_on_save: true` produces the merged servable

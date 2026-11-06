@@ -15,7 +15,7 @@ The release has trained through the toolkit at `ep8` on 8× B300, with real weig
 - **Packed rows:** at the cut, a document's mean logit gap against itself alone is at most 5.49e-5 with the markers across the three texts the row has read, with no position past its bar, and 1.13 without them.
 - **Resume:** exact at the 9-layer cut: loss delta 0, final weights equal, optimizer state bit-exact, no warm restart.
 - **Exports:** byte for byte against the release at the 9-layer cut on both routes, with an NLL gap of at most 6e-5 on reload, and at full depth: 41,643 tensors on the text-only route and 42,101 on the composite one (the release's 42,037 plus 64 `lambda1`), each with an NLL gap of 0.0013. `reattach_vision_tower.py` turns the text-only export back into the release's 43,079 tensors with no `config.json` difference.
-- **Adapters:** the LoRA recipe's folded export differs from the release on its targets and the moved bias alone (41,112 tensors, 531 identical), and loads and generates in stock transformers at an NLL of 2.03296 against 2.03301. `merge_peft_adapters.py` merges attention and Mamba adapters byte for byte the same with `--trust_remote_code` on or off, changing 152 tensors of the release (80 Mamba, 32 attention, 40 bias), and refuses a mixed adapter.
+- **Adapters:** the LoRA recipe's folded export differs from the release on its targets and the moved bias alone (41,112 tensors, 531 identical), and loads and generates in stock transformers at an NLL of 2.03296 against 2.03301. `merge_peft_adapters.py` merges attention and Mamba adapters byte for byte the same with `--trust_remote_code` on or off, changing 152 tensors of the release (80 Mamba, 32 attention, 40 bias), and streams the merge of a mixed adapter.
 
 What these rows leave:
 
@@ -156,7 +156,7 @@ The weight sync carries no head and refuses the family, so a server drafts with 
 - An adapter on `conv1d` raises at the first forward, as the mixer reads its weight directly.
 - The latent projections and shared experts have no route.
 - A list target also matches Radio's `q_proj` on the composite. Train adapters with `text_only_model: true`, or pass a regex string, which leaves the experts out.
-- `merge_peft_adapters.py` merges attention and Mamba adapters and refuses expert ones, so the recipe folds both with `merge_expert_lora_on_save: true`, a 251 GB write per save.
+- `merge_peft_adapters.py` merges attention and Mamba adapters and streams the merge of expert ones; the recipe instead folds both with `merge_expert_lora_on_save: true`, a 251 GB write per save.
 
 ## Balancing
 
