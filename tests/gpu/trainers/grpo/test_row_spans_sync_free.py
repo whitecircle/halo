@@ -75,7 +75,7 @@ def check_an_unarmed_forward_trips_the_sync_check(scorer: _Scorer, ids: torch.Te
 
 def check_a_table_of_another_mask_is_tallied_per_row(scorer: _Scorer, ids: torch.Tensor, mask: torch.Tensor):
     table = row_spans_on_device(mask, LTK)[:, :3].cpu()
-    table[1, 1] += 1
+    table[1, 1] -= 1  # row 1 spans the full width: a larger end would be refused as past the batch, not tallied
     table[4, 0] -= 1
     scorer._armed_row_spans = table
     scorer._row_span_mismatches = None
