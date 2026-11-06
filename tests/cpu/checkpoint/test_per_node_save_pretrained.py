@@ -4,14 +4,17 @@ keeps a complete copy. Two gloo ranks stand for two nodes of one process each. t
 
 import glob
 import os
+import types
+from pathlib import Path
 
 import pytest
 from tokenizers import Tokenizer, models
-from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
 from transformers.models.llama.modeling_llama import LlamaModel
 
 from halo.checkpoint.format import SAFETENSORS_FAMILY_GLOB
 from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
+from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from tests.common.gloo import run_gloo_ranks
 
@@ -84,6 +87,61 @@ def test_the_embedding_backbone_save_reaches_every_node(tmp_path):
     )
     for rank in range(WORLD_SIZE):
         assert _weight_files(str(tmp_path / f"embedding-node{rank}")), f"node {rank} holds no weights"
+
+
+class _BaseTrainer:
+    def save_model(self, output_dir, _internal_call=False):
+        self.model.save_pretrained(output_dir)
+
+
+class _Trainer(CheckpointingMixin, _BaseTrainer):
+    def __init__(self, output_dir):
+        self.args = types.SimpleNamespace(output_dir=output_dir, should_save=True)
+        self.model = LlamaForCausalLM(LlamaConfig(**_TINY))
+        self._pristine_special_token_ids = []
+        self.parallelism_config = types.SimpleNamespace(is_pp_mode=False)
+
+    def _top_level_model(self):
+        return self.model
+
+    def _checkpoint_context(self):
+        return types.SimpleNamespace(model=self.model, tokenizer=None)
+
+
+def _trainer_worker(rank: int, root: str) -> None:
+    _be_a_node_of_one()
+    module = "halo.trainers.checkpointing"
+    patches = pytest.MonkeyPatch()
+    patches.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
+    patches.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))
+    patches.setattr(f"{module}.save_balancing_biases", lambda *args, **kwargs: None)
+    _Trainer(os.path.join(root, f"trainer-node{rank}")).save_model()
+
+
+def test_the_trainers_base_save_reaches_every_node(tmp_path):
+    run_gloo_ranks(
+        _trainer_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        env={"LOCAL_WORLD_SIZE": "1", "DIST_OUTPUT_SHARED_FILESYSTEM": "0"},
+    )
+    for rank in range(WORLD_SIZE):
+        assert _weight_files(str(tmp_path / f"trainer-node{rank}")), f"node {rank} holds no weights"
+
+
+def test_the_save_rank_override_needs_the_transformers_hook():
+    """The override replaces a private transformers method; a bump that renames it must fail here, not on node 1."""
+    assert callable(getattr(PreTrainedModel, "should_save_on_this_rank", None))
+
+
+def test_a_nested_save_restores_the_outer_override():
+    model = LlamaForCausalLM(LlamaConfig(**_TINY))
+    with save_pretrained_on_save_rank(model):
+        outer = vars(model)["should_save_on_this_rank"]
+        with save_pretrained_on_save_rank(model):
+            assert vars(model)["should_save_on_this_rank"] is not outer
+        assert vars(model)["should_save_on_this_rank"] is outer
+    assert "should_save_on_this_rank" not in vars(model)
 
 
 if __name__ == "__main__":
