@@ -8,7 +8,6 @@ from collections import defaultdict
 import pytest
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.episode import RolloutResult
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from tests.common.env_grpo_batch import episode
 from tests.common.world_metrics import attach_world_metrics
@@ -66,11 +65,10 @@ def test_a_null_limit_trains_through_anything():
     assert host._episode_error_rounds == 0
 
 
-@pytest.mark.parametrize("field", ["episode_error_rate_limit"])
 @pytest.mark.parametrize("value", [1.0, -0.1])
-def test_a_limit_outside_the_unit_interval_is_refused(field, value):
-    with pytest.raises(ValueError, match=field):
-        AsyncRolloutConfig(**{field: value})
+def test_a_limit_outside_the_unit_interval_is_refused(value):
+    with pytest.raises(ValueError, match="episode_error_rate_limit"):
+        AsyncRolloutConfig(episode_error_rate_limit=value)
 
 
 def test_a_non_positive_round_limit_is_refused():
@@ -83,7 +81,6 @@ def test_the_defaults_leave_a_round_with_a_minority_of_failures_alone():
     for _ in range(10):
         _round(host, "train", 2)
     assert host._episode_error_rounds == 0
-    assert RolloutResult  # the episodes above are real results
 
 
 if __name__ == "__main__":

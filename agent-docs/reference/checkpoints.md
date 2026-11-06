@@ -718,7 +718,8 @@ optimizer whose `state_dict` refuses the live sharding (FlashAdamW on unevenly-s
 `save_only_model: true` is the explicit opt-in for weights-only checkpoints.
 
 **Disk check.** Rotation runs after the new save, so `save_total_limit` + 1 checkpoints coexist at the peak (one
-more save when no limit is set, since nothing is then deleted). At trainer construction each filesystem's save rank
+more save when no limit is set, since nothing is then deleted). The `checkpoint-N` directories already in
+`output_dir` (a resume) hold part of that peak, so only the rest is billed, and never less than the next save. At trainer construction each filesystem's save rank
 (`verify_checkpoint_disk_space`, `halo/checkpoint/parallel/disk_budget.py`) estimates one checkpoint (the model at
 the run dtype, sized from a config-only meta shell so sharded layouts need no gather; the adapters alone where a PEFT
 or native expert-LoRA save writes only those; plus two moments per trainable parameter unless `save_only_model`) and

@@ -113,15 +113,38 @@ def test_the_rotation_peak_is_the_limit_plus_one(tmp_path, monkeypatch):
     model = _model()
     per = _one_checkpoint(model)
     _verify(model, tmp_path, monkeypatch, free=3 * per + 10**6, limit=2)
-    with pytest.raises(ValueError, match=r"3 checkpoint\(s\).*ENOSPC"):
+    with pytest.raises(ValueError, match=r"3 more checkpoint\(s\).*ENOSPC"):
         _verify(model, tmp_path, monkeypatch, free=3 * per - 1, limit=2)
+
+
+def _populate(tmp_path, steps):
+    for step in steps:
+        (tmp_path / f"checkpoint-{step}").mkdir()
+
+
+def test_a_resume_is_billed_only_for_the_checkpoints_rotation_has_not_yet_made(tmp_path, monkeypatch):
+    model = _model()
+    per = _one_checkpoint(model)
+    _populate(tmp_path, (10, 20, 30))
+    _verify(model, tmp_path, monkeypatch, free=per + 10**6, limit=3)
+    with pytest.raises(ValueError, match=r"1 more checkpoint\(s\)"):
+        _verify(model, tmp_path, monkeypatch, free=per - 1, limit=3)
+
+
+def test_a_partly_filled_output_dir_is_billed_for_the_rest_of_the_peak(tmp_path, monkeypatch):
+    model = _model()
+    per = _one_checkpoint(model)
+    _populate(tmp_path, (10,))
+    _verify(model, tmp_path, monkeypatch, free=2 * per + 10**6, limit=2)
+    with pytest.raises(ValueError, match=r"2 more checkpoint\(s\)"):
+        _verify(model, tmp_path, monkeypatch, free=2 * per - 1, limit=2)
 
 
 def test_without_a_limit_only_the_next_save_is_checked(tmp_path, monkeypatch):
     model = _model()
     per = _one_checkpoint(model)
     _verify(model, tmp_path, monkeypatch, free=per + 10**6, limit=None)
-    with pytest.raises(ValueError, match=r"1 checkpoint\(s\)"):
+    with pytest.raises(ValueError, match=r"1 more checkpoint\(s\)"):
         _verify(model, tmp_path, monkeypatch, free=per - 1, limit=None)
 
 

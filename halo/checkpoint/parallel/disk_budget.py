@@ -6,6 +6,7 @@ import logging
 import torch
 from accelerate import init_empty_weights
 from transformers import PreTrainedModel
+from transformers.trainer_utils import sort_checkpoints
 
 from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.save import saves_adapters_only
@@ -70,8 +71,9 @@ def verify_checkpoint_disk_space(
 ) -> None:
     """COLLECTIVE. Refuse, on every rank, a run whose output volume cannot hold its checkpoints; warn when it holds
     them with under 10% to spare. Each filesystem's save rank judges its own volume. Rotation deletes the oldest only
-    after the new save completes, so ``save_total_limit`` + 1 checkpoints coexist at the peak; with no limit nothing
-    is deleted and only the next save is checked."""
+    after the new save completes, so ``save_total_limit`` + 1 checkpoints coexist at the peak; the ``checkpoint-N``
+    directories already in ``output_dir`` (a resume) hold their share of that peak, so at least the next save is
+    still billed. With no limit nothing is deleted and only the next save is checked."""
     reason = None
     if ctx.is_save_rank:
         try:
@@ -82,11 +84,14 @@ def verify_checkpoint_disk_space(
             logger.warning(f"Could not size a checkpoint to check the free disk space of {output_dir}: {exc!r}")
             per_checkpoint = None
         if per_checkpoint is not None:
-            copies = 1 if save_total_limit is None else save_total_limit + 1
+            if save_total_limit is None:
+                copies = 1
+            else:
+                copies = max(1, save_total_limit + 1 - len(sort_checkpoints(output_dir)))
             needed, free = copies * per_checkpoint, free_disk_bytes(output_dir)
             summary = (
-                f"{copies} checkpoint(s) of ~{per_checkpoint / 1e9:.0f} GB need ~{needed / 1e9:.0f} GB at the "
-                f"rotation peak, and the volume of {output_dir} has ~{free / 1e9:.0f} GB free"
+                f"{copies} more checkpoint(s) of ~{per_checkpoint / 1e9:.0f} GB need ~{needed / 1e9:.0f} GB at "
+                f"the rotation peak, and the volume of {output_dir} has ~{free / 1e9:.0f} GB free"
             )
             if free < needed:
                 reason = (
