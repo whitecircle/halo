@@ -21,16 +21,22 @@ from transformers import AutoModelForCausalLM
 
 from halo.distributed.fsdp import apply_fsdp2_for_dp
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.length_deal import ragged_round, with_world_normalizer, world_accelerator
+from tests.common.length_deal import (
+    PACKED_DENSE_BUDGET,
+    PACKED_DENSE_ROW_TOKENS,
+    PACKED_SLOTS,
+    ragged_round,
+    with_world_normalizer,
+    world_accelerator,
+)
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.online_rounds import old_policy_pass, online_host, train_online_window
 from tests.common.rank_log import log_all
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
-ROWS, SLOTS = 16, 4
-ROW_TOKENS = [256 + 192 * i for i in range(ROWS)]
-BUDGET = 6144
+SLOTS = PACKED_SLOTS
+ROW_TOKENS, BUDGET = PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET
 VOCAB = 32_000
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
 GRAD_FLOOR_FACTOR = 2.0
