@@ -22,7 +22,6 @@ from halo.environments.rollout_config import (
     VLLM_BACKEND,
 )
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
-from halo.models.attention.layout import has_mrope_rotary
 from halo.models.attention.selection import is_flash_attn_implementation
 from halo.models.config_access import text_config
 from halo.models.moe.config_fields import resolve_dispatch_width, resolve_router_topk
@@ -39,10 +38,6 @@ _ROLLOUT_OWNED_SAMPLING_KNOBS = ("top_p", "top_k", "min_p", "repetition_penalty"
 # The TRL vllm_importance_sampling_mode that names the environmental correction (each token's ratio truncated
 # from above); it and TRL's default pass.
 _ENV_IS_MODE = "token_truncate"
-# Whether packed micro-batches run on M-RoPE decoders (Qwen3.5/3.6), whose flattened rows faulted the flash
-# varlen kernels under ``padding_free``. Flip to True only with a passing run of
-# tests/gpu/kernels/test_packed_rl_forward_mrope.py; False refuses the knob on them (one backbone call per row).
-PACKED_MICROBATCH_ADMITS_MROPE = False
 
 
 def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
@@ -404,12 +399,6 @@ def reject_unpackable_model(model, attn_impl: str | None) -> None:
     attention sinks. No opt-in: an RL step that mixes documents corrupts the policy gradient without a trace."""
     config = model.config
     knob = "packed_microbatch_tokens"
-    if has_mrope_rotary(config) and not PACKED_MICROBATCH_ADMITS_MROPE:
-        raise ValueError(
-            f"{knob} is refused for model_type={getattr(config, 'model_type', None)!r}: a flattened M-RoPE row faults "
-            f"the flash varlen kernels on this build (the packed-row gate, tests/gpu/kernels/"
-            f"test_packed_rl_forward_mrope.py). Unset {knob}: these rows keep one backbone call each."
-        )
     if attention_reads_row_positions(config):
         raise ValueError(
             f"{knob} is refused for model_type={getattr(config, 'model_type', None)!r}: its attention reads a token's "

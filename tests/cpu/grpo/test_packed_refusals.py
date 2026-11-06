@@ -7,7 +7,6 @@ import types
 import pytest
 
 import halo.models.segment_markers as segment_markers
-import halo.trainers.grpo.environmental.environmental_rules as rules
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from halo.trainers.grpo.environmental.environmental_rules import (
@@ -106,8 +105,7 @@ _ADMITTED = {
 
 
 @pytest.mark.parametrize("case", _ADMITTED, ids=list(_ADMITTED))
-def test_the_families_whose_rows_isolate_are_admitted_on_a_varlen_backend(case, monkeypatch, kernels_present):
-    monkeypatch.setattr(rules, "PACKED_MICROBATCH_ADMITS_MROPE", True)
+def test_the_families_whose_rows_isolate_are_admitted_on_a_varlen_backend(case, kernels_present):
     family, attn = _ADMITTED[case]
     reject_unpackable_model(_model(family), attn)
 
@@ -139,7 +137,6 @@ def test_a_backend_that_is_not_varlen_flash_is_refused_for_every_family(attn, ke
 
 
 def test_a_gated_delta_net_family_without_its_kernels_is_refused(monkeypatch):
-    monkeypatch.setattr(rules, "PACKED_MICROBATCH_ADMITS_MROPE", True)
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("causal_conv1d", lambda: False),))
     with pytest.raises(ValueError, match="causal_conv1d unavailable"):
         reject_unpackable_model(_model(TINY_DENSE_FAMILIES["qwen3_5"]), "flash_attention_2")
@@ -153,21 +150,9 @@ def test_live_sinks_need_fa4_and_neutralized_ones_take_any_varlen_backend(kernel
     reject_unpackable_model(model, "flash_attention_2")
 
 
-def test_the_mrope_switch_is_the_one_place_the_families_it_names_are_refused(monkeypatch, kernels_present):
-    """Until the packed-row gate passes, the M-RoPE decoders (Qwen3.5/3.6, text or composite) are refused and nothing
-    else: Qwen3-Next rotates by plain RoPE. Setting ``PACKED_MICROBATCH_ADMITS_MROPE`` admits them."""
-    assert rules.PACKED_MICROBATCH_ADMITS_MROPE is False
+def test_the_mrope_decoders_are_admitted_with_their_markers(kernels_present):
     for family in (TINY_DENSE_FAMILIES["qwen3_5"], TINY_MOE_FAMILIES["qwen3_5_moe_text"]):
-        with pytest.raises(ValueError, match="flattened M-RoPE row faults"):
-            reject_unpackable_model(_model(family), "flash_attention_2")
-    for family in (
-        TINY_MOE_FAMILIES["qwen3_next"],
-        TINY_DENSE_ATTENTION_FAMILIES["llama"],
-        TINY_MOE_FAMILIES["qwen3_moe"],
-    ):
         reject_unpackable_model(_model(family), "flash_attention_2")
-    monkeypatch.setattr(rules, "PACKED_MICROBATCH_ADMITS_MROPE", True)
-    reject_unpackable_model(_model(TINY_DENSE_FAMILIES["qwen3_5"]), "flash_attention_2")
 
 
 def _parallelism(ep_size: int, requires_rdma: bool = False):
