@@ -12,8 +12,8 @@ On a single node Ray configures itself. The implementation lives in
 
 ## Lifecycle
 
-Every training rank calls `ray.init` (`ignore_reinit_error=True`) and builds its own actor pool at
-the start of `train()`, not at trainer construction: there is no shared coordinator rank, and a
+Every rollout rank (each TP/ETP group's leader, else every rank) calls `ray.init` (`ignore_reinit_error=True`) and
+builds its own actor pool at the start of `train()`, not at trainer construction: there is no shared coordinator rank, and a
 constructed-but-untrained trainer starts no Ray. With `ray_address: null` (the default) each rank
 starts a local Ray instance, unless a `ray start` instance already runs on the host, in which case
 `ray.init` joins it.
