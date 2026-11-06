@@ -251,13 +251,16 @@ class LossForwardImportanceMixin:
         if corrected is None:
             return
         counted = corrected & loss_mask
-        world.fraction(LOGRATIO_MEAN_KEY, (logps_diff * counted).sum(), counted.sum())
+        # A mean, not a fraction: a round with no loss token logs no ratio, as the pass does, not a 0.0.
+        num_counted = counted.sum()
+        world.mean(LOGRATIO_MEAN_KEY, (logps_diff * counted).sum() / num_counted.clamp(min=1), num_counted)
         clip_max = self.vllm_importance_sampling_clip_max
         if clip_max > 1:
             extreme = counted & (logps_diff.abs() > math.log(clip_max))
             world.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), counted.sum())
         survivors = counted & (ratio > 0)
-        world.fraction("sampling/is_ratio_mean", (ratio * survivors).sum(), survivors.sum())
+        num_survivors = survivors.sum()
+        world.mean("sampling/is_ratio_mean", (ratio * survivors).sum() / num_survivors.clamp(min=1), num_survivors)
         world.maximum("sampling/is_ratio_max", (ratio * survivors).max())
         world.effective_sample_frac("sampling/is_ess_frac", ratio, counted)
 

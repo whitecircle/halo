@@ -39,6 +39,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     UNCLAMPED_REF_LOGPS_KEY,
     record_token_mass,
 )
+from halo.trainers.token_metrics import effective_loss_mask
 from halo.trainers.world_metrics import WorldMetrics
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import (
@@ -455,6 +456,25 @@ def test_a_dropped_row_leaves_the_logged_log_ratio_as_decision_d1_says():
     over_all = corrected
     assert fused_mean == pytest.approx((diff * over_loss).sum().item() / over_loss.sum().item(), rel=1e-4)
     assert abs(fused_mean - diff.sum().item() / over_all.sum().item()) > 1e-4
+
+
+def test_a_round_without_loss_tokens_logs_no_ratio_as_the_pass_does():
+    batch = _sampling_side_round()
+    batch["tool_mask"].zero_()  # every group degenerate: no token enters the loss
+    in_pass, fused = _inputs(batch, 0.0)
+    host = types.SimpleNamespace(vllm_importance_sampling_clip_max=_CLIP, _loss_forward_metrics=WorldMetrics())
+    loss_mask = effective_loss_mask(fused).bool()
+    assert not loss_mask.any()
+    ratio = torch.ones_like(fused[IS_SAMPLING_LOGPS_KEY])
+    seam = {"advantages": fused["advantages"], NEGATIVE_ONLY_ROWS_KEY: fused[NEGATIVE_ONLY_ROWS_KEY]}
+    LossForwardImportanceMixin._record_loss_forward_metrics(
+        host, seam, torch.zeros_like(ratio), loss_mask, ratio, torch.zeros_like(ratio), fused[IS_CORRECTED_MASK_KEY]
+    )
+    got = host._loss_forward_metrics.flush()
+    want = _pass_metrics(in_pass, fused)
+    assert "sampling/is_ratio_mean" not in want
+    assert "sampling/is_ratio_mean" not in got
+    assert LOGRATIO_MEAN_KEY not in got
 
 
 def test_a_non_finite_token_mass_raises_at_the_flush():
