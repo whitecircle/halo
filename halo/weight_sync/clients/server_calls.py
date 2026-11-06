@@ -3,23 +3,47 @@
 import logging
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import requests
 
 logger = logging.getLogger(__name__)
 
 # A group's chunk waits on its declares and its send, so the poll's period is added to every chunk of every sync.
 _POLL_PERIOD_S = 0.005
 
+# A call whose own deadline equals its wait's bound ends within this share of the bound before the join does.
+_EXPIRY_SLACK = 0.05
 
-def log_wait(server: str, what: str, bound_s: float) -> None:
-    """Say which server a bounded wait is on, for what, and how long it can last, once at its start."""
+
+_TIMEOUTS = (TimeoutError, requests.exceptions.Timeout)
+
+
+@contextmanager
+def announced_wait(server: str, what: str, bound_s: float) -> Iterator[None]:
+    """Say which server a bounded wait is on, for what and for how long, once at its start, and once more if the
+    block ends in a timeout; a wait that ends early says nothing further. The timeout is re-raised."""
     logger.info(f"Waiting on {server} for {what}, for at most {bound_s:.0f}s")
+    try:
+        yield
+    except _TIMEOUTS:
+        logger.warning(f"Gave up waiting on {server} for {what} after {bound_s:.0f}s")
+        raise
 
 
 def wait_announced(call: "AsyncCall", server: str, what: str, bound_s: float) -> None:
-    """Announce a bounded wait on ``call``, join it, and say once if the bound expired with the call still running."""
-    log_wait(server, what, bound_s)
-    if call.join(bound_s).is_alive():
-        logger.warning(f"Gave up waiting on {server} for {what} after {bound_s:.0f}s; the call is left running")
+    """Join ``call`` for at most ``bound_s`` under :func:`announced_wait`. A call still running, ending in a timeout
+    or ending only as the bound ran out (its own deadline matches the bound) has expired; it is left running."""
+    started = time.monotonic()
+    try:
+        with announced_wait(server, what, bound_s):
+            call.join(bound_s)
+            ran_out = time.monotonic() - started >= bound_s * (1 - _EXPIRY_SLACK)
+            if call.is_alive() or isinstance(call.error, _TIMEOUTS) or ran_out:
+                raise TimeoutError(what)
+    except TimeoutError:
+        pass
 
 
 class AsyncCall:

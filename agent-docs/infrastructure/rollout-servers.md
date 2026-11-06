@@ -195,7 +195,7 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   destroy; the wait is bounded, logs its expiry, and a survivor that stays parked is not freed by it. An SGLang join
   whose session close gets no answer in 30 s raises naming the server, which then needs a restart. Every bounded wait of
   a re-form or teardown (a layout read, a group destroy, an abort, a session close) logs its server, purpose and bound
-  once when it starts, and once more when the bound expires. An SGLang release stops the rendezvous socket listening
+  once when it starts, and once more when the bound expires (a request that times out or a call that ends as its bound runs out counts as expired; one that ends early says nothing more). A survivor's destroy during a re-form is waited out to its bound: SGLang offers no route to abort a server's half, so only the destroy request frees its scheduler for the join that follows, and an early give-up would leave it parked. An SGLang release stops the rendezvous socket listening
   itself, so a destroy or abort left parked, which keeps the store alive through its group, does not hold the group
   port. Each chunk is declared on every server and sent once, paced by the slowest server; new weights go live per
   server at its own close.

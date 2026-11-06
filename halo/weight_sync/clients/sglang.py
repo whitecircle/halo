@@ -23,7 +23,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_announced
+from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
@@ -171,16 +171,16 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Unchecked, as with no session open the close answers 400.
         for name in dict.fromkeys((self._own_group_name, self.group_name)):
             self._destroy_group_named(name)
-        log_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S)
         try:
-            self.request(
-                "POST",
-                self.SESSION_CLOSE_ENDPOINT,
-                retry=False,
-                timeout=CLEANUP_TIMEOUT_S,
-                check=False,
-                **self.SESSION_REQUEST,
-            )
+            with announced_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S):
+                self.request(
+                    "POST",
+                    self.SESSION_CLOSE_ENDPOINT,
+                    retry=False,
+                    timeout=CLEANUP_TIMEOUT_S,
+                    check=False,
+                    **self.SESSION_REQUEST,
+                )
         except requests.exceptions.Timeout as e:
             raise RuntimeError(
                 f"SGLang server {self.base_url} did not answer a session close within {CLEANUP_TIMEOUT_S}s, so it "
@@ -221,8 +221,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         destroy = not at_exit and not self._aborted
         # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
         # it a healthy engine reads as dead, and aborting here strands its half of the destroy.
-        if destroy and group is not None:
-            log_wait(self.base_url, "/health before the group's destroy", _ENGINE_ANSWER_TIMEOUT_S)
         answers = not (destroy and group is not None) or self._engine_answers()
         # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
         # no local group, or the server refuses every later join. A group that runs it for every server does so itself.
@@ -239,9 +237,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         if local.is_alive():
             self.abort_transport()
         if remote is not None:
-            wait_announced(
-                remote, self.base_url, "its half of the weight-update group to be destroyed", CLEANUP_TIMEOUT_S
-            )
+            remote.join(CLEANUP_TIMEOUT_S)
         # A destroy or abort left running holds the group, and through it the store, so the port is stopped directly.
         if self._rendezvous is not None:
             self._rendezvous.free_port()
@@ -387,7 +383,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def _engine_answers(self) -> bool:
         try:
-            response = self.request("GET", "/health", retry=False, timeout=_ENGINE_ANSWER_TIMEOUT_S, check=False)
+            with announced_wait(self.base_url, "/health before the group's destroy", _ENGINE_ANSWER_TIMEOUT_S):
+                response = self.request("GET", "/health", retry=False, timeout=_ENGINE_ANSWER_TIMEOUT_S, check=False)
         except requests.exceptions.RequestException:
             return False
         # A 503 is a scheduler step past the server's own 20 s window: alive, and the destroy's join bounds a wedged one.
@@ -398,15 +395,17 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def _destroy_group_named(self, group_name: str) -> None:
         """Best-effort; never masks the caller's failure."""
-        log_wait(self.base_url, f"weight-update group {group_name!r} to be destroyed", CLEANUP_TIMEOUT_S)
         try:
-            self.request(
-                "POST",
-                "/destroy_weights_update_group",
-                retry=False,
-                timeout=CLEANUP_TIMEOUT_S,
-                json={"group_name": group_name},
-            )
+            with announced_wait(
+                self.base_url, f"weight-update group {group_name!r} to be destroyed", CLEANUP_TIMEOUT_S
+            ):
+                self.request(
+                    "POST",
+                    "/destroy_weights_update_group",
+                    retry=False,
+                    timeout=CLEANUP_TIMEOUT_S,
+                    json={"group_name": group_name},
+                )
         except Exception as e:
             logger.debug(f"Could not clear weight-update group {group_name!r} on {self.base_url}: {e}")
 

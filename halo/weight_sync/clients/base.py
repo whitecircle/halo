@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
-from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced, wait_for_calls
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 from halo.weight_sync.update_stream import UpdateStream
@@ -447,7 +447,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Release what a failed formation left, ``formed`` being its local half if it started. A transport already
         formed lives only on the call handle; unreleased, later reconnects are refused."""
         if formed is not None:
-            self._transport = formed.join(SERVER_ERROR_GRACE_S).result
+            if formed.is_alive():
+                wait_announced(formed, self.base_url, "its local formation step to end", SERVER_ERROR_GRACE_S)
+            self._transport = formed.result
         self._release_transport(at_exit=False)
         self._transport = None
         self._group_instance = None
@@ -597,11 +599,11 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Close a session left open; never raises, as the caller is already failing."""
         if not self._update_session_open:
             return
-        log_wait(self.base_url, "the interrupted update session to close", CLEANUP_TIMEOUT_S)
         try:
-            self.request(
-                "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=CLEANUP_TIMEOUT_S, **self.SESSION_REQUEST
-            )
+            with announced_wait(self.base_url, "the interrupted update session to close", CLEANUP_TIMEOUT_S):
+                self.request(
+                    "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=CLEANUP_TIMEOUT_S, **self.SESSION_REQUEST
+                )
         except Exception as e:
             logger.warning(f"Failed to close the interrupted weight-update session on {self.base_url}: {e}")
             if self._update_session_confirmed and self.SESSION_OPEN_UNLOADS_MODEL:

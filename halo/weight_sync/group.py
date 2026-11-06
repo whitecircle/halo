@@ -21,7 +21,7 @@ from halo.weight_sync.clients.base import (
     GroupMembershipLost,
     WeightSyncClientBase,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced, wait_for_calls
 from halo.weight_sync.group_layout import (
     reject_mixed_localities,
     reject_pipeline_stages,
@@ -138,8 +138,8 @@ class WeightSyncGroup(UpdateStream):
         def read_layout(member: WeightSyncClientBase) -> tuple[int, int]:
             if read is not None and member not in read:
                 return known[member.base_url]
-            log_wait(member.base_url, "its parallel layout", member.layout_read_bound_s)
-            return member.read_engine_layout(require=require)
+            with announced_wait(member.base_url, "its parallel layout", member.layout_read_bound_s):
+                return member.read_engine_layout(require=require)
 
         readings = self._require_all(self._run_on_members(read_layout), "read its layout")
         worlds = [world for world, _ in readings]
@@ -334,8 +334,11 @@ class WeightSyncGroup(UpdateStream):
         unusable and raise naming the failed one."""
         self.leader.abort_transport()
         deadline = time.monotonic() + SERVER_ERROR_GRACE_S
-        for call in declared:
-            call.join(max(0.0, deadline - time.monotonic()))
+        for member, call in zip(self._members, declared, strict=False):
+            if call.is_alive():
+                wait_announced(
+                    call, member.base_url, "its answer to the failed chunk", max(0.0, deadline - time.monotonic())
+                )
         failed = [
             member.base_url for member, call in zip(self._members, declared, strict=False) if call.error is not None
         ]

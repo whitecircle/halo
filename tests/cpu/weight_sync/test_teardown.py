@@ -488,8 +488,8 @@ def test_each_silent_wait_of_a_release_names_its_server_and_bound_when_it_starts
     client = offline_client(SGLangWeightSyncClient)
     client._transport = (object(), None)
     _teardown_probe(client, monkeypatch)
-    answered = []
-    monkeypatch.setattr(client, "_engine_answers", lambda: answered.append(1) or True)
+    monkeypatch.setattr(client, "_engine_answers", SGLangWeightSyncClient._engine_answers.__get__(client))
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
     monkeypatch.setattr(client, "group_releases_remote_half", False)
     monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
 
@@ -497,10 +497,10 @@ def test_each_silent_wait_of_a_release_names_its_server_and_bound_when_it_starts
         client._release_transport(at_exit=False)
 
     waits = _waits(caplog)
-    assert len(waits) == 3, waits
+    assert len(waits) == 2, waits
     assert all(client.base_url in wait for wait in waits), waits
     assert waits[0].endswith("/health before the group's destroy, for at most 30s"), waits
-    assert "trainer's half" in waits[1] and "its half" in waits[2] and waits[2].endswith("at most 30s"), waits
+    assert "trainer's half" in waits[1] and waits[1].endswith("at most 30s"), waits
 
 
 def test_a_release_that_asks_for_nothing_announces_no_wait(monkeypatch, caplog):
