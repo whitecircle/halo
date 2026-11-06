@@ -38,14 +38,17 @@ def build_weight_update_group(
     device: torch.device,
     *,
     group_name: str,
-    timeout_s: float,
+    store_timeout_s: float,
+    group_timeout_s: float,
 ) -> tuple[dist.ProcessGroup, dist.TCPStore]:
     """Join ``group_name`` as rank 0 on a store hosted on ``listener``; the caller keeps the store alive, as dropping
-    it frees the port. Built directly, as ``torch.distributed.rendezvous`` under torchrun returns the elastic agent's.
+    it frees the port. The store waits ``store_timeout_s`` for the engine to join; ``group_timeout_s`` is torch's
+    watchdog deadline for every later work item of the group, so it must outlast a broadcast whose peer posts late.
+    Built directly, as ``torch.distributed.rendezvous`` under torchrun returns the elastic agent's.
     Passing ``device_id`` would init the communicator eagerly and deadlock against SGLang's lazy join."""
     if device.type == "cuda":
         torch.cuda.set_device(device)
-    store = listener.start_store(master_address, world_size, timeout_s=timeout_s, wait_for_workers=False)
+    store = listener.start_store(master_address, world_size, timeout_s=store_timeout_s, wait_for_workers=False)
     # SGLang prefixes its store with the group name; an unprefixed one here reads different keys and hangs.
     prefixed = dist.PrefixStore(group_name, store)
     try:
@@ -57,7 +60,7 @@ def build_weight_update_group(
                 c10d.Backend("nccl"),
                 prefixed,
                 group_name=group_name,
-                timeout=timedelta(seconds=timeout_s),
+                timeout=timedelta(seconds=group_timeout_s),
             )
     except Exception:
         # So the failed attempt does not keep the port from a retry.

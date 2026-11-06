@@ -16,6 +16,7 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
+from halo.env import env_positive_float
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced, wait_for_calls
 from halo.weight_sync.staging import ChunkStager, StagedChunk
@@ -30,7 +31,8 @@ POST_TIMEOUT_S = 60
 HTTP_PROBE_TIMEOUT_S = 10
 # A merely busy scheduler still answers a 1-token probe in time; a wedged one is reported, not waited out.
 GENERATION_PROBE_TIMEOUT_S = 60.0
-GROUP_FORMATION_TIMEOUT_S = 120
+# One group's formation: the engine's join and the trainer's rendezvous. Read once at import, like the chunk deadline.
+GROUP_FORMATION_TIMEOUT_S = env_positive_float("HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS", 120.0)
 # The trainer is rank 0.
 FIRST_ENGINE_RANK = 1
 # The close waits for the engine to finish applying the last chunk.
@@ -75,6 +77,22 @@ class ServerFlags(NamedTuple):
     instance_id: str | None = None
     # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
     pipeline_stages: int | None = None
+    # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
+    extras: Mapping[str, object] = {}
+
+
+def pick_launch_facts(source: Mapping[str, Any], facts: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
+    """``name`` → the value at each key path in ``source``, leaving out a path the reply does not carry."""
+    found: dict[str, object] = {}
+    for name, path in facts.items():
+        value: object = source
+        for key in path:
+            if not isinstance(value, Mapping) or key not in value:
+                break
+            value = value[key]
+        else:
+            found[name] = value
+    return found
 
 
 def unservable_bailing_model_types(release: str) -> dict[str, str]:
@@ -123,6 +141,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
     PROBES_GROUP_MEMBERSHIP = False
+    # ``ServerFlags.extras`` name → key path on the reply of ``/server_info`` (vLLM: under ``vllm_config``).
+    LAUNCH_FACTS: Mapping[str, tuple[str, ...]]
     # How this engine's chunks are staged for its broadcast.
     CHUNK_STAGER: type[ChunkStager]
     # Route that flushes the engine's caches of the old weights where its final chunk carries no flag for it.

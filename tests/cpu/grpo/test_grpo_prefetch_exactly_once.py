@@ -15,6 +15,7 @@ from collections import deque
 import pytest
 import torch
 
+import halo.runtime.consensus as consensus_mod
 import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
 from halo.configs.grpo_environmental import AsyncRolloutConfig
@@ -252,6 +253,25 @@ class _LifecycleHost:
 
     def _start_prefetch_thread(self):
         self.prefetch_starts += 1
+
+
+def test_a_group_formation_failure_is_joined_over_the_store_not_an_nccl_collective(monkeypatch):
+    """Rank 0 forms the groups server by server while the peers wait, for longer than the NCCL watchdog allows."""
+    host = _LifecycleHost(torch.zeros(1))
+    joined: list[tuple[str, str | None]] = []
+
+    def failing_client() -> None:
+        raise RuntimeError("server 3 never loaded")
+
+    def record_join(tag, reason, what, exc_type=RuntimeError, timeout=None):
+        joined.append((tag, reason))
+        raise exc_type(reason)
+
+    host._init_weight_sync_client = failing_client
+    monkeypatch.setattr(consensus_mod, "store_reject_across_ranks", record_join)
+    with pytest.raises(RuntimeError, match="server 3 never loaded"):
+        host._form_weight_sync_group()
+    assert joined == [("rollout/weight_sync_group", "RuntimeError: server 3 never loaded")]
 
 
 def test_generation_starts_only_after_the_resume_restore(monkeypatch):

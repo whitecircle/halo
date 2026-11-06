@@ -150,6 +150,8 @@ sync on that client and logs `RESTART the … server`: restart the container. A 
 retried three times, then raises naming the server, since every rollout would otherwise queue until its request
 timeout.
 
+Forming one group is bounded by `HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS` (120 s): the engine's join and the
+trainer's rendezvous. It does not reach the SGLang process group, whose watchdog uses the chunk deadline below.
 Each chunk runs under one 600 s deadline on both engines (`HALO_NCCL_SYNC_TIMEOUT_SECONDS`): the
 update request that declares it and the drain of its sends. A failed chunk drains the stream under a
 30 s deadline, and on expiry the group is aborted instead of parking the trainer. Closing an SGLang group is bounded
@@ -381,6 +383,14 @@ Offline GRPO needs no server and passes none of these gates.
 Before the second model load rank 0 waits for each server, then reads `/server_info` and refuses, on every rank, what
 it reports wrong (`verify_server_flags`, `halo/trainers/grpo/rollout/engine_preflight.py`). A field the reply does not
 carry reads as unread, so a renamed upstream field cannot refuse a good server.
+
+Rank 0 does this work alone, so the peers wait for it over the c10d store (`DIST_STORE_TIMEOUT_HOURS`), not in an NCCL
+collective under the 30-minute watchdog: a server that loads slowly ends in `ConnectionError` naming
+`rollout_connection_timeout`, never in a watchdog abort. Group formation joins the same way
+(`rollout/weight_sync_group`). The probes of the servers run concurrently on rank 0, up to `HALO_PREFLIGHT_PARALLELISM`
+at once, with results read in server order. Each server's launch-flags line also carries the engine's own launch
+facts from `/server_info` (parallel sizes, batch caps, attention backend, graph mode; `ServerFlags.extras`), and a
+server that does not answer is logged as unread.
 
 | Refused | Because |
 |---|---|

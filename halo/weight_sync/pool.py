@@ -4,6 +4,7 @@ per parameter and one chunk decision, and either each form a group of their own 
 import concurrent.futures
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterable
 from functools import partial
 from typing import Any
@@ -88,6 +89,7 @@ class WeightSyncPool:
                 f"Initializing {self._client_cls.BACKEND_NAME} weight-sync client "
                 f"{i + 1}/{len(self.server_configs)}: {url} (port {port}, device {device})"
             )
+            started = time.monotonic()
             try:
                 client = self._connect_client(i, device)
             except Exception as e:
@@ -98,7 +100,7 @@ class WeightSyncPool:
                     f"for {url} (group_port {port}) failed to initialize: {type(e).__name__}: {e}"
                 ) from e
             self._clients.append(client)
-            logger.info(f"  Connected to {url}")
+            logger.info(f"  Connected to {url} in {time.monotonic() - started:.1f} s")
 
         self._device = device
         self._initialized = True

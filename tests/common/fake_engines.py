@@ -220,7 +220,15 @@ class FakeVLLMServer(FakeEngineServer):
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
                 "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
-                "parallel_config": {"pipeline_parallel_size": self.pp_size},
+                "parallel_config": {
+                    "tensor_parallel_size": 8,
+                    "data_parallel_size": 1,
+                    "enable_expert_parallel": True,
+                    "pipeline_parallel_size": self.pp_size,
+                },
+                "scheduler_config": {"max_num_seqs": 256, "max_num_batched_tokens": 16384},
+                "attention_config": {"backend": "FLASH_ATTN"},
+                "compilation_config": {"mode": "VLLM_COMPILE", "cudagraph_mode": "FULL_AND_PIECEWISE"},
             }
             return 200, {"vllm_env": env, "vllm_config": config}
         if (method, path) == ("POST", "/v1/chat/completions"):
@@ -313,6 +321,8 @@ class FakeSGLangServer(FakeEngineServer):
                 "enable_torch_compile": self.torch_compile,
                 "dtype": self.dtype,
                 "quantization": self.quantization or None,
+                "max_running_requests": 256,
+                "attention_backend": "flashinfer",
             }
             if self.toolkit_image:
                 info["halo_patches"] = True

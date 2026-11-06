@@ -175,12 +175,13 @@ class AsyncRolloutMixin:
         ]
 
     def _form_weight_sync_group(self) -> None:
-        """COLLECTIVE while it forms. The main process's client failure raises on every rank."""
+        """COLLECTIVE while it forms, over the c10d store: rank 0 waits on each server in turn for longer than the
+        NCCL watchdog allows its peers. The main process's client failure raises on every rank."""
         if self._weight_sync_group_formed:
             return
         guard = DeferredRankFailure("Weight-sync client formation")
         guard.run(self._init_weight_sync_client)
-        guard.reject()
+        guard.store_reject("rollout/weight_sync_group")
         self._weight_sync_group_formed = True
 
     def _init_weight_sync_client(self):

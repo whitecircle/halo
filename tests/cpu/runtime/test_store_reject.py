@@ -12,7 +12,12 @@ import pytest
 import torch.distributed as dist
 
 from halo.runtime import consensus
-from halo.runtime.consensus import gathered_failure_summary, store_reject_across_ranks
+from halo.runtime.consensus import (
+    gathered_failure_summary,
+    refusal_text,
+    store_reject_across_ranks,
+    store_run_on_rank0_raising_everywhere,
+)
 from tests.common.distributed import FakeStore
 from tests.common.gloo import run_gloo_ranks
 from tests.common.ports import free_port
@@ -94,6 +99,38 @@ def test_late_rank_may_outlive_the_process_group_timeout(tmp_path):
         with open(tmp_path / f"late_{rank}.txt") as fh:
             result = fh.read()
         assert result == "PASS", f"rank {rank}: {result}"
+
+
+def _slow_rank0_worker(rank: int, tmp_dir: str, failing: bool) -> None:
+    def step() -> None:
+        time.sleep(LATE_JOIN_SEC)
+        if failing:
+            raise ValueError("server 3 refused")
+
+    try:
+        store_run_on_rank0_raising_everywhere("slow-probe", step, refusal_text, ValueError)
+        result = "PASS"
+    except Exception as e:  # The failure modes under test are a watchdog abort and a verdict lost on a peer.
+        result = f"{type(e).__name__}: {e}"
+    with open(os.path.join(tmp_dir, f"verdict_{rank}.txt"), "w") as fh:
+        fh.write(result)
+
+
+def test_a_rank0_step_may_outlive_the_process_group_timeout_and_its_pass_reaches_the_peers(tmp_path):
+    """The preflights and the group formation run server by server on rank 0 while the peers wait."""
+    run_gloo_ranks(
+        _slow_rank0_worker, WORLD_SIZE, str(tmp_path), False, pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
+    )
+    for rank in range(WORLD_SIZE):
+        assert (tmp_path / f"verdict_{rank}.txt").read_text() == "PASS", f"rank {rank}"
+
+
+def test_a_rank0_refusal_after_the_process_group_timeout_raises_verbatim_on_every_rank(tmp_path):
+    run_gloo_ranks(
+        _slow_rank0_worker, WORLD_SIZE, str(tmp_path), True, pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC)
+    )
+    for rank in range(WORLD_SIZE):
+        assert (tmp_path / f"verdict_{rank}.txt").read_text() == "ValueError: server 3 refused", f"rank {rank}"
 
 
 class _OpLog:

@@ -1,21 +1,25 @@
 """COLLECTIVE preflights of each rollout server: its context window, its launch flags, and whether its log-probs are the
 reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass unread; its
-refusal raises everywhere, while a server that is up and then cannot answer a probe only warns."""
+refusal raises everywhere, while a server that is up and then cannot answer a probe only warns. Rank 0 probes the servers
+concurrently and the verdict reaches the peers over the c10d store, so a slow startup is never bounded by the NCCL
+watchdog."""
 
 import logging
 import math
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, TypeVar
 
 import requests
 from urllib3.util.retry import Retry
 
+from halo.env import env_positive_int
 from halo.environments.engine_wire import build_payload, capture_generation_tokens
 from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.runtime.consensus import refusal_text, run_on_rank0_raising_everywhere
+from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
 from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -32,10 +36,13 @@ _PROBE_RETRY = Retry(
     allowed_methods=["POST", "GET"],
 )
 _PROBE_TIMEOUT_S = 60.0
-# A launch flag the servers of one group must agree on: every one but the image check, the id each launch has alone and
-# the pipeline stages, which the group's layout read refuses.
+# Servers probed at once: a thread per server is HTTP only, but 64 simultaneous /server_info reads are a herd.
+_PREFLIGHT_PARALLELISM = env_positive_int("HALO_PREFLIGHT_PARALLELISM", 16)
+_T = TypeVar("_T")
+# A launch flag the servers of one group must agree on: every one but the image check, the id each launch has alone,
+# the pipeline stages, which the group's layout read refuses, and the engine facts that only get logged.
 _GROUP_UNIFORM_FLAGS = tuple(
-    name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id", "pipeline_stages")
+    name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id", "pipeline_stages", "extras")
 )
 
 # The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
@@ -144,8 +151,8 @@ def _verify_server_chat_template_on_rank0(
         logger.warning(f"Could not render the trainer's prompt for the chat-template probe, so it is skipped: {e}")
         return
     probe = partial(_engine_prompt_ids, rollout=rollout, messages=messages, efforts=efforts)
-    for url in urls:
-        engine = _probe_server(client_cls, url, probe, None, "read the prompt ids of")
+    engines = _probe_servers(client_cls, urls, probe, None, "read the prompt ids of")
+    for url, engine in zip(urls, engines, strict=True):
         if engine is None or None in engine:
             continue
         if trainer[0] != trainer[-1] and engine[0] == engine[-1]:
@@ -169,28 +176,22 @@ def _verify_server_chat_template_on_rank0(
 def _verify_server_flags_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], needs: ServerRequirements
 ) -> None:
-    for url in urls:
-        flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
+    readings = _across_servers(partial(_read_server_facts, client_cls, needs=needs), urls)
+    for url, (flags, accepted, sampled) in zip(urls, readings, strict=True):
         refusals = [] if flags is None else _server_flag_refusals(client_cls, flags, needs)
-        if needs.sends_tools:
-            accepted = _probe_server(
-                client_cls, url, client_cls.accepts_tool_requests, None, "probe a tool-bearing request on"
+        if accepted is False:
+            refusals.append(_no_tool_parser(client_cls))
+        if sampled is False:
+            refusals.append(
+                "train_on_sampled_tokens needs the ids a turn sampled, and its logprobs carry no token_id: "
+                "entries, so every turn would train on a re-tokenized render. Serve with "
+                "--return-tokens-as-token-ids, or set train_on_sampled_tokens: false."
             )
-            if accepted is False:
-                refusals.append(_no_tool_parser(client_cls))
-        if needs.sampled_token_ids:
-            sampled = _probe_server(
-                client_cls, url, client_cls.reports_sampled_token_ids, None, "probe the sampled-token ids of"
-            )
-            if sampled is False:
-                refusals.append(
-                    "train_on_sampled_tokens needs the ids a turn sampled, and its logprobs carry no token_id: "
-                    "entries, so every turn would train on a re-tokenized render. Serve with "
-                    "--return-tokens-as-token-ids, or set train_on_sampled_tokens: false."
-                )
         if refusals:
             raise ValueError(f"Rollout server {url} cannot serve this run: " + " ".join(refusals))
-        logger.info(f"Rollout server {url}: launch flags {flags}")
+        logger.info(
+            f"Rollout server {url}: launch flags {'unread, the server did not answer' if flags is None else flags}"
+        )
 
 
 def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls: list[str]) -> None:
@@ -198,9 +199,9 @@ def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls:
     flag (dtype, quantization, MoE backend, parsers) would each load or serve it differently behind a 200. A flag a
     server does not report is not compared."""
     readings: dict[str, dict[str, object]] = {"served model": {}}
-    for url in urls:
-        model = _probe_server(client_cls, url, client_cls.served_model_id, None, "read the served model of")
-        flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
+    models = _probe_servers(client_cls, urls, client_cls.served_model_id, None, "read the served model of")
+    launch_flags = _probe_servers(client_cls, urls, client_cls.read_server_flags, None, "read the launch flags of")
+    for url, model, flags in zip(urls, models, launch_flags, strict=True):
         if model is None or flags is None:
             raise ValueError(
                 f"Rollout server {url} did not answer for its served model and launch flags, and "
@@ -291,14 +292,51 @@ def _probe_server(
             client.close_http_session()
 
 
+def _across_servers(per_server: Callable[[str], _T], urls: list[str]) -> list[_T]:
+    """``per_server(url)`` for every url concurrently, in url order; the first url's failure raises once all finish."""
+    if not urls:
+        return []
+    with ThreadPoolExecutor(max_workers=min(len(urls), _PREFLIGHT_PARALLELISM)) as pool:
+        return list(pool.map(per_server, urls))
+
+
+def _probe_servers(
+    client_cls: type[WeightSyncClientBase],
+    urls: list[str],
+    probe: Callable[[WeightSyncClientBase], Any],
+    default: Any,
+    failure: str,
+) -> list[Any]:
+    """:func:`_probe_server` over every url concurrently, in url order."""
+    return _across_servers(lambda url: _probe_server(client_cls, url, probe, default, failure), urls)
+
+
+def _read_server_facts(
+    client_cls: type[WeightSyncClientBase], url: str, needs: ServerRequirements
+) -> tuple[ServerFlags | None, bool | None, bool | None]:
+    """The launch flags of ``url`` and, where the run needs them, whether it accepts a tool-bearing request and
+    reports the ids it sampled; ``None`` for a probe that did not answer."""
+    flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
+    accepted = sampled = None
+    if needs.sends_tools:
+        accepted = _probe_server(
+            client_cls, url, client_cls.accepts_tool_requests, None, "probe a tool-bearing request on"
+        )
+    if needs.sampled_token_ids:
+        sampled = _probe_server(
+            client_cls, url, client_cls.reports_sampled_token_ids, None, "probe the sampled-token ids of"
+        )
+    return flags, accepted, sampled
+
+
 def _verify_context_window_on_rank0(
     client_cls: type[WeightSyncClientBase],
     urls: list[str],
     single_turn_tokens: int,
     full_trajectory_tokens: int | None,
 ) -> None:
-    for url in urls:
-        mml = _probe_server(client_cls, url, client_cls.served_max_model_len, None, "read max_model_len from")
+    windows = _probe_servers(client_cls, urls, client_cls.served_max_model_len, None, "read max_model_len from")
+    for url, mml in zip(urls, windows, strict=True):
         if mml is None:
             continue
         logger.info(f"Rollout server {url}: max_model_len={mml}")
@@ -388,8 +426,8 @@ def _verify_sampler_logprob_reference_on_rank0(
         return
     # Each probe request moves one knob from the identity sampler, so every other filter goes out off.
     probe = partial(probe_sampler_logprob_semantics, **SAMPLER_FILTERS_OFF)
-    for url in urls:
-        semantics = _probe_server(client_cls, url, probe, (None, None), "probe the sampler-logprob semantics of")
+    readings = _probe_servers(client_cls, urls, probe, (None, None), "probe the sampler-logprob semantics of")
+    for url, semantics in zip(urls, readings, strict=True):
         _verify_probed_sampler(url, temperature, cuts, *semantics)
 
 
@@ -418,8 +456,8 @@ def _verify_engine_prompt_logprobs_on_rank0(
     counting = " ".join(str(n) for n in range(2048))
     token_ids = resolve_tokenizer(tokenizer)(counting)["input_ids"][:1100]
     probe = partial(_probe_prompt_logprobs, token_ids=token_ids)
-    for url in urls:
-        result = _probe_server(client_cls, url, probe, None, "probe the prompt log-probs of")
+    results = _probe_servers(client_cls, urls, probe, None, "probe the prompt log-probs of")
+    for url, result in zip(urls, results, strict=True):
         if result is None:
             continue
         mean_nll, gap, length = result
@@ -450,7 +488,7 @@ def _wait_then_check(
     connection_timeout: float,
     *args,
 ) -> None:
-    for url in urls:
+    def wait_for(url: str) -> None:
         # Building the client polls its liveness route, raising ConnectionError past the deadline. A server held by a
         # dead trainer's pause still answers it, and each probe would wait out its timeout and pass unread.
         client = client_cls(base_url=url, connection_timeout=connection_timeout, retry_policy=_PROBE_RETRY)
@@ -458,15 +496,17 @@ def _wait_then_check(
             client.probe_generation()
         finally:
             client.close_http_session()
+
+    _across_servers(wait_for, urls)
     check(client_cls, urls, *args)
 
 
 def _on_rank0(check: Callable[..., None], backend: str, urls: list[str], connection_timeout: float, *args) -> None:
-    """COLLECTIVE. The backend is resolved on every rank, since a rank-0-only raise there would strand the peers in the
-    verdict broadcast."""
+    """COLLECTIVE over the c10d store, as rank 0 may wait on loading servers for longer than the NCCL watchdog allows.
+    The backend is resolved on every rank, since a rank-0-only raise there would strand the peers in the verdict."""
     client_cls = resolve_weight_sync_client(backend)
     step = partial(_wait_then_check, check, client_cls, urls, connection_timeout, *args)
-    run_on_rank0_raising_everywhere(step, refusal_text, ValueError)
+    store_run_on_rank0_raising_everywhere(f"preflight/{check.__name__}", step, refusal_text, ValueError)
 
 
 def verify_context_window(

@@ -19,6 +19,7 @@ from halo.weight_sync.clients.base import (
     RESCORE_TIMEOUT_S,
     ServerFlags,
     WeightSyncClientBase,
+    pick_launch_facts,
     unservable_bailing_model_types,
 )
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait
@@ -89,6 +90,17 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         "a model that is part old weights and part new, with any layer that straddled the last chunk "
         "boundary materialized from UNINITIALIZED storage by the layerwise reload"
     )
+    LAUNCH_FACTS = {
+        "tensor_parallel_size": ("parallel_config", "tensor_parallel_size"),
+        "data_parallel_size": ("parallel_config", "data_parallel_size"),
+        "pipeline_parallel_size": ("parallel_config", "pipeline_parallel_size"),
+        "expert_parallel": ("parallel_config", "enable_expert_parallel"),
+        "max_num_seqs": ("scheduler_config", "max_num_seqs"),
+        "max_num_batched_tokens": ("scheduler_config", "max_num_batched_tokens"),
+        "attention_backend": ("attention_config", "backend"),
+        "compilation_mode": ("compilation_config", "mode"),
+        "cudagraph_mode": ("compilation_config", "cudagraph_mode"),
+    }
     _INIT_LOG = "NCCL init: inference_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "NCCL weight transfer initialized"
     FORMATION_STEP = "NCCL group formation"
@@ -115,6 +127,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             quantization=(model["quantization"] or "") if "quantization" in model else None,
             instance_id=config.get("instance_id"),
             pipeline_stages=config.get("parallel_config", {}).get("pipeline_parallel_size"),
+            extras=pick_launch_facts(config, self.LAUNCH_FACTS),
         )
 
     def reports_sampled_token_ids(self) -> bool | None:

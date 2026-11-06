@@ -141,16 +141,23 @@ class _EngineClient(RecordingSender):
 
 
 def _counted_verdicts(what: str) -> list[str]:
-    """The rank-uniform verdicts named ``what`` this rank joins from here on."""
+    """The rank-uniform verdicts named ``what`` this rank joins from here on, over a collective or the store."""
     joined = []
     real_reject = consensus.reject_across_ranks
+    real_store_reject = consensus.store_reject_across_ranks
 
     def counting_reject(reason, name, exc_type=RuntimeError):
         if name == what:
             joined.append(name)
         return real_reject(reason, name, exc_type=exc_type)
 
+    def counting_store_reject(tag, reason, name, exc_type=RuntimeError, timeout=None):
+        if name == what:
+            joined.append(name)
+        return real_store_reject(tag, reason, name, exc_type=exc_type, timeout=timeout)
+
     consensus.reject_across_ranks = counting_reject
+    consensus.store_reject_across_ranks = counting_store_reject
     return joined
 
 

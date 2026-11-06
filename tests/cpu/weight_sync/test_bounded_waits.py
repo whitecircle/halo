@@ -16,6 +16,7 @@ from halo.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.repo import probe_findings
 
 _DRAIN_MARKER = "DRAIN_DEADLINE:"
+_FORMATION_MARKER = "FORMATION_DEADLINE:"
 _COMM_HANDLE = 0x5EED
 
 
@@ -135,6 +136,20 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
         f"print({_DRAIN_MARKER!r} + repr(bounded_waits.CHUNK_SYNC_TIMEOUT_S))"
     )
     [deadline] = probe_findings(script, _DRAIN_MARKER)
+    assert float(deadline) == expected
+
+
+@pytest.mark.parametrize(("value", "expected"), [(None, 120.0), ("900", 900.0), ("0", 120.0), ("soon", 120.0)])
+def test_the_formation_deadline_is_read_once_from_the_env(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS", value)
+    script = (
+        "from halo.weight_sync.clients import base; "
+        f"print({_FORMATION_MARKER!r} + repr(base.GROUP_FORMATION_TIMEOUT_S))"
+    )
+    [deadline] = probe_findings(script, _FORMATION_MARKER)
     assert float(deadline) == expected
 
 

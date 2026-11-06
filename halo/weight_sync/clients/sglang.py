@@ -21,6 +21,7 @@ from halo.weight_sync.clients.base import (
     RESCORE_TIMEOUT_S,
     ServerFlags,
     WeightSyncClientBase,
+    pick_launch_facts,
     unservable_bailing_model_types,
 )
 from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced
@@ -93,6 +94,24 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     REASONING_PARSER_FLAG = "--reasoning-parser (SGLANG_REASONING_PARSER)"
     TOOL_PARSER_FLAG = "--tool-call-parser (SGLANG_TOOL_PARSER, the family's name where auto cannot read the template)"
     CHAT_TEMPLATE_FLAG = "--chat-template (SGLANG_CHAT_TEMPLATE)"
+    LAUNCH_FACTS = {
+        name: (name,)
+        for name in (
+            "tp_size",
+            "dp_size",
+            "attn_dp_size",
+            "pp_size",
+            "ep_size",
+            "max_running_requests",
+            "chunked_prefill_size",
+            "max_prefill_tokens",
+            "attention_backend",
+            "prefill_attention_backend",
+            "decode_attention_backend",
+            "disable_cuda_graph",
+            "cuda_graph_config",
+        )
+    }
     _INIT_LOG = "SGLang NCCL init: engine_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "SGLang NCCL weight transfer initialized"
     FORMATION_STEP = "weight-update group formation"
@@ -110,8 +129,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def read_server_flags(self) -> ServerFlags:
         return self._flags_in(self._server_info())
 
-    @staticmethod
-    def _flags_in(info: dict) -> ServerFlags:
+    @classmethod
+    def _flags_in(cls, info: dict) -> ServerFlags:
         return ServerFlags(
             toolkit_image=bool(info.get("halo_patches")),
             moe_backend=info.get("moe_runner_backend"),
@@ -123,6 +142,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             dtype=info.get("dtype"),
             quantization=(info["quantization"] or "") if "quantization" in info else None,
             pipeline_stages=int(info.get("pp_size") or 1),
+            extras=pick_launch_facts(info, cls.LAUNCH_FACTS),
         )
 
     @property
@@ -213,7 +233,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             world_size=world_size,
             device=self.sync_device,
             group_name=self.group_name,
-            timeout_s=GROUP_FORMATION_TIMEOUT_S,
+            store_timeout_s=GROUP_FORMATION_TIMEOUT_S,
+            group_timeout_s=CHUNK_SYNC_TIMEOUT_S,
         )
 
     def _release_transport(self, *, at_exit: bool) -> None:

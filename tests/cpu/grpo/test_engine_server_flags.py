@@ -5,6 +5,7 @@ and a client refuses before forming a group."""
 
 import ast
 import logging
+import threading
 
 import pytest
 
@@ -207,6 +208,100 @@ def test_each_script_runs_the_flag_preflight(script):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_server_flags"
     ]
     assert len(calls) == 1
+
+
+_LAUNCH_FACTS = {
+    FakeVLLMServer: {
+        "tensor_parallel_size": 8,
+        "data_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "expert_parallel": True,
+        "max_num_seqs": 256,
+        "max_num_batched_tokens": 16384,
+        "attention_backend": "FLASH_ATTN",
+        "compilation_mode": "VLLM_COMPILE",
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+    },
+    FakeSGLangServer: {
+        "tp_size": 1,
+        "dp_size": 1,
+        "pp_size": 1,
+        "max_running_requests": 256,
+        "attention_backend": "flashinfer",
+    },
+}
+
+
+@pytest.mark.parametrize("server_cls", [FakeVLLMServer, FakeSGLangServer], ids=["vllm", "sglang"])
+def test_the_launch_facts_a_server_reports_are_read_and_a_fact_it_lacks_is_left_out(server_cls):
+    server = server_cls()
+    try:
+        flags = server_cls.CLIENT_CLASS(base_url=server.url).read_server_flags()
+    finally:
+        server.close()
+    assert dict(flags.extras) == _LAUNCH_FACTS[server_cls]
+
+
+@_ENGINES_FIXTURE
+def test_the_launch_line_carries_every_servers_facts_and_names_one_that_did_not_answer(engine, caplog):
+    server, client_cls = engine
+    silent = type(server)()
+    silent.status["/server_info"] = 500
+    try:
+        with caplog.at_level(logging.INFO):
+            verify_server_flags(
+                [server.url, silent.url],
+                ServerRequirements(is_moe=False),
+                backend=client_cls.BACKEND_KEY,
+                connection_timeout=5.0,
+            )
+    finally:
+        silent.close()
+    launch_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("Rollout server") and "launch flags" in r.getMessage()
+    ]
+    [served] = [line for line in launch_lines if server.url in line]
+    [unanswered] = [line for line in launch_lines if silent.url in line]
+    assert "extras=" in served and "'attention_backend'" in served
+    assert "unread" in unanswered
+
+
+@_ENGINES_FIXTURE
+def test_the_servers_are_probed_at_once(engine):
+    """Every server's /server_info is reached while the first is still unanswered, which a loop over the servers
+    cannot do."""
+    server, client_cls = engine
+    others = [type(server)() for _ in range(2)]
+    servers = [server, *others]
+    for each in servers:
+        each.hold.add("/server_info")
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            verify_server_flags(
+                [each.url for each in servers],
+                ServerRequirements(is_moe=False),
+                backend=client_cls.BACKEND_KEY,
+                connection_timeout=5.0,
+            )
+        except BaseException as e:  # reported below, on the test thread
+            failures.append(e)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        for each in servers:
+            each.wait_for_request("GET /server_info", timeout=10.0)
+    finally:
+        for each in servers:
+            each.release()
+        thread.join(timeout=30.0)
+        for each in others:
+            each.close()
+    assert not failures, failures
 
 
 if __name__ == "__main__":
