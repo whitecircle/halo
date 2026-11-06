@@ -11,6 +11,14 @@ from tests.common.numerics import max_abs_rel_err
 SEED = 0
 # Of the reference's peak, where the per-row error is below what a ratio can resolve.
 ERROR_FLOOR = 2e-3
+# Name markers of the gradient groups, checked in order; every other parameter is a projection.
+_GRAD_GROUPS = (
+    ("gdn_scalars", ("A_log", "dt_bias")),
+    ("router", ("router", "mlp.gate.", "shared_expert_gate")),
+    ("experts", ("experts",)),
+    ("norms", ("norm",)),
+    ("embeddings", ("embed", "lm_head")),
+)
 
 
 def emission_kwargs(emission: str, position_ids: torch.Tensor, config) -> dict:
@@ -67,22 +75,56 @@ def row_step(model, documents: list[torch.Tensor], emission: str | None):
     return logits.detach().float(), grads
 
 
-def grad_error(grads: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> float:
-    return max(max_abs_rel_err(grads[name], ref) for name, ref in reference.items() if name in grads)
+def grad_group(name: str) -> str:
+    """The parameter family a gradient belongs to: a family's gradients share a scale and an accumulation pattern,
+    which a per-parameter maximum over a layer's scalars does not."""
+    for group, markers in _GRAD_GROUPS:
+        if any(marker in name for marker in markers):
+            return group
+    return "projections"
 
 
-def check_isolation(model, attn: str, emission: str, lengths, checks) -> None:
-    """Changing one document leaves every other document's logits where they were, up to kernel noise."""
+def group_grad_errors(grads: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> dict[str, float]:
+    """Per parameter group, the L2 norm of the gradient error over the norm of the reference's, the group's gradients
+    taken as one vector, so a head's scalar sum that flips sign does not stand for the group."""
+    errors = {}
+    for group in sorted({grad_group(name) for name in reference}):
+        names = [name for name in reference if grad_group(name) == group and name in grads]
+        diff = torch.cat([(grads[n].double() - reference[n].double()).flatten() for n in names]).norm()
+        norm = torch.cat([reference[n].double().flatten() for n in names]).norm().clamp(min=1e-12)
+        errors[group] = (diff / norm).item()
+    return errors
+
+
+def grad_noise_floor(
+    per_row: dict[str, torch.Tensor], reordered: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]
+) -> dict[str, float]:
+    """Per group, the larger of the per-row forward's distance from the fp32 reference and its distance from itself on
+    the documents in another order: the same sum accumulated differently, which is all a packed row may differ by."""
+    from_reference = group_grad_errors(per_row, reference)
+    from_reorder = group_grad_errors(reordered, per_row)
+    return {group: max(from_reference[group], from_reorder[group], ERROR_FLOOR) for group in from_reference}
+
+
+def documents_are_isolated(model, attn: str, emission: str, lengths) -> bool:
+    """Whether changing one document leaves every other document's logits where they were, up to kernel noise."""
     set_attention(model, attn)
     device = next(model.parameters()).device
-    documents = build_documents(lengths, model.config.get_text_config().vocab_size, device)
-    changed = [documents[0], (documents[1] + 1) % model.config.get_text_config().vocab_size, *documents[2:]]
+    vocab_size = model.config.get_text_config().vocab_size
+    documents = build_documents(lengths, vocab_size, device)
+    changed = [documents[0], (documents[1] + 1) % vocab_size, *documents[2:]]
     with torch.no_grad():
         before = row_logits(model, documents, emission).float()
         after = row_logits(model, changed, emission).float()
     first = lengths[0]
-    untouched = max_abs_rel_err(after[:first], before[:first])
     third_start = lengths[0] + lengths[1]
-    checks[f"{attn}_a_neighbour_does_not_move_the_documents_around_it"] = (
-        untouched <= ERROR_FLOOR and max_abs_rel_err(after[third_start:], before[third_start:]) <= ERROR_FLOOR
+    return (
+        max_abs_rel_err(after[:first], before[:first]) <= ERROR_FLOOR
+        and max_abs_rel_err(after[third_start:], before[third_start:]) <= ERROR_FLOOR
+    )
+
+
+def check_isolation(model, attn: str, emission: str, lengths, checks) -> None:
+    checks[f"{attn}_a_neighbour_does_not_move_the_documents_around_it"] = documents_are_isolated(
+        model, attn, emission, lengths
     )

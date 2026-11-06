@@ -29,6 +29,23 @@ def test_isolation_check_detects_a_leak_across_documents(model, monkeypatch):
     assert checks["sdpa_a_neighbour_does_not_move_the_documents_around_it"] is False
 
 
+def test_a_group_scalar_that_flips_does_not_stand_for_its_group():
+    reference = {"layers.0.linear_attn.A_log": torch.tensor([1.0, -1.0]), "layers.0.mlp.experts.w": torch.ones(64)}
+    noisy = {"layers.0.linear_attn.A_log": torch.tensor([-1.0, 1.0]), "layers.0.mlp.experts.w": torch.ones(64) * 1.001}
+    errors = gate.group_grad_errors(noisy, reference)
+    assert errors["gdn_scalars"] == pytest.approx(2.0)
+    assert errors["experts"] == pytest.approx(1e-3, rel=1e-3)
+    floors = gate.grad_noise_floor(noisy, reference, reference)
+    assert floors["gdn_scalars"] > 1.0 and floors["experts"] < 1e-2
+
+
+def test_a_leak_into_a_projection_exceeds_the_noise_floor():
+    reference = {"layers.0.self_attn.q_proj.weight": torch.ones(64)}
+    leaked = {"layers.0.self_attn.q_proj.weight": torch.ones(64) * 1.5}
+    floors = gate.grad_noise_floor(reference, reference, reference)
+    assert gate.group_grad_errors(leaked, reference)["projections"] > 2 * floors["projections"]
+
+
 def test_step_returns_gradients_and_logits_carry_the_graph(model):
     documents = gate.build_documents((12, 9), model.config.vocab_size, "cpu")
     logits = gate.row_logits(model, documents, None)

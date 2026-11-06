@@ -3,14 +3,15 @@
 varlen forward score and train as each row alone. Held per family, per emission (what the row hands the model besides
 ``input_ids``), per attention backend and for an ``N`` aligned to 128 and not.
 
-``padding_free`` is refused on M-RoPE decoders because a flattened M-RoPE row faulted the flash varlen kernels, while
-SFT ``packing`` ships on the same decoders; which input faulted was never isolated, so each emission runs here. A CUDA
-fault poisons the process, hence one launch per family and emission. The verdict this file records decides
-``PACKED_MICROBATCH_ADMITS_MROPE`` in ``halo/trainers/grpo/environmental/environmental_rules.py``.
+The ``markers`` and ``mrope_plane`` emissions must score and train as each row alone. ``position_ids`` and
+``flash_varlen`` alone leave a GatedDeltaNet family's conv and delta rule without a document boundary: they are
+negative controls that must leak across documents, which proves the isolation check can fail. A CUDA fault poisons the
+process, hence one launch per family and emission.
 """
 
 import argparse
 import copy
+import sys
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -25,7 +26,9 @@ from tests.common.packed_rows import (
     SEED,
     build_documents,
     check_isolation,
-    grad_error,
+    documents_are_isolated,
+    grad_noise_floor,
+    group_grad_errors,
     row_step,
     set_attention,
 )
@@ -69,6 +72,8 @@ FAMILIES = {
 # Live sinks ride only the FA4 varlen entry (halo/models/attention/gpt_oss_sinks.py), which a Blackwell GPU alone has.
 FA4_ONLY_FAMILIES = frozenset({"gpt_oss"})
 ATTENTION_BACKENDS = ("flash_attention_2", "flash_attention_4")
+# Emissions that hand a GatedDeltaNet family no segment marker: its packed row must leak, so they are controls.
+NEGATIVE_CONTROL_EMISSIONS = frozenset({"position_ids", "flash_varlen"})
 
 
 def _check_attention(family_name, attn, emission, lengths, label, models, checks, metrics) -> None:
@@ -82,13 +87,16 @@ def _check_attention(family_name, attn, emission, lengths, label, models, checks
         per_row_logits, per_row_grads = row_step(model, documents, None)
     with kernel_calls() as packed_calls:
         packed_logits, packed_grads = row_step(model, documents, emission)
+    _, reordered_grads = row_step(model, documents[::-1], None)
     floor = max(max_abs_rel_err(per_row_logits, reference_logits), ERROR_FLOOR)
-    grad_floor = max(grad_error(per_row_grads, reference_grads), ERROR_FLOOR)
+    grad_floors = grad_noise_floor(per_row_grads, reordered_grads, reference_grads)
     packed = max_abs_rel_err(packed_logits, reference_logits)
-    packed_grad = grad_error(packed_grads, reference_grads)
+    packed_grads_error = group_grad_errors(packed_grads, reference_grads)
+    worst_group = max(packed_grads_error, key=lambda group: packed_grads_error[group] / grad_floors[group])
+    packed_grad, grad_floor = packed_grads_error[worst_group], grad_floors[worst_group]
     log(
         f"  [{family_name}/{attn}/{emission}/{label} N={sum(lengths)}] logits {packed:.3e} (per-row {floor:.3e}) "
-        f"grads {packed_grad:.3e} (per-row {grad_floor:.3e}) packed kernels {dict(packed_calls)}"
+        f"grads {packed_grads_error} (floors {grad_floors}, worst group {worst_group}) packed kernels {dict(packed_calls)}"
     )
     key = f"{attn}_{label}"
     finite = torch.isfinite(packed_logits).all().item() and all(
@@ -97,9 +105,11 @@ def _check_attention(family_name, attn, emission, lengths, label, models, checks
     checks[f"{key}_finite"] = bool(finite)
     checks[f"{key}_reaches_the_kernel"] = set(packed_calls) == {attn} == set(per_row_calls)
     checks[f"{key}_logits_match_per_row"] = packed <= PACKED_ERROR_RATIO * floor
-    checks[f"{key}_grads_match_per_row"] = packed_grad <= PACKED_ERROR_RATIO * grad_floor
+    checks[f"{key}_grads_match_per_row"] = all(
+        packed_grads_error[group] <= PACKED_ERROR_RATIO * grad_floors[group] for group in packed_grads_error
+    )
     metrics[f"{key}_logits_error"], metrics[f"{key}_logits_error_per_row"] = packed, floor
-    metrics[f"{key}_grad_error"], metrics[f"{key}_grad_error_per_row"] = packed_grad, grad_floor
+    metrics[f"{key}_grad_error"], metrics[f"{key}_grad_noise_floor"] = packed_grad, grad_floor
 
 
 @gpu_test_main(exact_world_size=1, partial_state=False, prefix="packed_rl_forward")
@@ -120,6 +130,9 @@ def run(ctx):
     if args.family in FA4_ONLY_FAMILIES:
         backends = tuple(b for b in backends if b == "flash_attention_4")
         skip_unless_blackwell("the live-sink varlen row")
+    if args.emission in NEGATIVE_CONTROL_EMISSIONS and "layer_types" not in overrides:
+        log(f"SKIP: {args.emission} is a negative control of the GatedDeltaNet families only")
+        sys.exit(0)
     configure_float32_matmul_precision()
 
     torch.manual_seed(SEED)
@@ -137,6 +150,12 @@ def run(ctx):
     for attn in backends:
         if attn == "flash_attention_4" and not is_blackwell_gpu():
             log(f"  [{args.family}] FA4 skipped: not a Blackwell GPU")
+            continue
+        if args.emission in NEGATIVE_CONTROL_EMISSIONS:
+            set_attention(model, attn)
+            checks[f"{attn}_{args.emission}_control_leaks_across_documents"] = not documents_are_isolated(
+                model, attn, args.emission, UNALIGNED_DOCUMENTS
+            )
             continue
         for label, lengths in (("aligned", ALIGNED_DOCUMENTS), ("unaligned", UNALIGNED_DOCUMENTS)):
             _check_attention(

@@ -450,8 +450,8 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_hd256_strided_inputs.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1800
     ),
-    # One launch per family and emission: an illegal address poisons the process. The first three emissions bisect the
-    # M-RoPE fault; the markers row of each family is the emission the packed GRPO forward uses.
+    # One launch per family and emission: an illegal address poisons the process. The markers row of each family is
+    # the emission the packed GRPO forward uses; position_ids and flash_varlen are negative controls that must leak.
     "kernels/test_packed_rl_forward_mrope.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "qwen3"),
