@@ -64,6 +64,7 @@ DENSE_VOCAB = 32_000
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
 GRAD_FLOOR_FACTOR = 2.0
 GRAD_COSINE_MIN = 0.999
+ROW_MEAN_LOSS = "grpo"
 LOGP_MEAN_ABS_MAX = 1e-2
 MOE_FAMILY, MOE_WORDS, MOE_SEED = "qwen3_moe", 500, 0
 MOE_ROW_TOKENS, MOE_BUDGET = PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET
@@ -91,8 +92,8 @@ def _flat(grads: list[torch.Tensor]) -> torch.Tensor:
     return torch.cat([grad.flatten() for grad in grads])
 
 
-def _window(model, batch: dict, *, plan=None, seed: int = SHUFFLE_SEED, scaled: bool = True):
-    host = packed_host(model, slots=SLOTS, accelerator=world_accelerator())
+def _window(model, batch: dict, *, plan=None, seed: int = SHUFFLE_SEED, scaled: bool = True, loss_type: str = "dapo"):
+    host = packed_host(model, slots=SLOTS, accelerator=world_accelerator(), loss_type=loss_type)
     host.use_liger_kernel = False
     host._packs_microbatches = plan is not None
     if not scaled:
@@ -119,7 +120,31 @@ def _check_window(ctx, model, batch: dict, budget: int, checks: dict, metrics: d
     checks["loss_matches_per_row"] = abs(loss_p - loss_s) <= 5e-3 * max(1.0, abs(loss_s))
     checks["grads_inside_the_floor"] = math.isfinite(packed) and floor > 0.0 and packed <= GRAD_FLOOR_FACTOR * floor
     checks["grads_point_the_same_way"] = cosine >= GRAD_COSINE_MIN
-    checks["negative_control_unscaled_grads_are_off"] = off > 10 * max(floor, packed)
+    checks["token_global_loss_ignores_the_rescale"] = (
+        relative_l2(dict(enumerate(unscaled)), dict(enumerate(grads_p))) <= 0.1 * floor
+    )
+    _check_row_mean_rescale(model, batch, plan, checks, metrics)
+
+
+def _check_row_mean_rescale(model, batch: dict, plan, checks: dict, metrics: dict) -> None:
+    """The default dapo normalizer is one round-global token count, so the per-bin rescale is 1 there and dropping it
+    changes nothing. A row-mean loss divides each slot by its own row count: there the rescale carries the gradient and
+    dropping it (the negative control) moves it by rows_per_bin * slots / round_rows."""
+    _, grads_s = _window(model, batch, loss_type=ROW_MEAN_LOSS)
+    _, grads_f = _window(model, batch, seed=FLOOR_SEED, loss_type=ROW_MEAN_LOSS)
+    _, grads_p = _window(model, batch, plan=plan, loss_type=ROW_MEAN_LOSS)
+    _, unscaled = _window(model, batch, plan=plan, scaled=False, loss_type=ROW_MEAN_LOSS)
+    model.zero_grad(set_to_none=True)
+    reference = dict(enumerate(grads_s))
+    floor = relative_l2(dict(enumerate(grads_f)), reference)
+    packed = relative_l2(dict(enumerate(grads_p)), reference)
+    off = relative_l2(dict(enumerate(unscaled)), reference)
+    metrics.update(row_mean_grad_floor=floor, row_mean_grad_packed=packed, row_mean_grad_unscaled=off)
+    log_all(f"  row-mean {ROW_MEAN_LOSS}: packed {packed:.3e} vs floor {floor:.3e}, unscaled {off:.3e}")
+    checks["row_mean_grads_inside_the_floor"] = (
+        math.isfinite(packed) and floor > 0.0 and packed <= GRAD_FLOOR_FACTOR * floor
+    )
+    checks["negative_control_unscaled_row_mean_grads_are_off"] = off > 10 * max(floor, packed)
 
 
 def run_dense(ctx) -> dict:
