@@ -216,7 +216,8 @@ The runtime cuBLAS is the pip wheel `nvidia-cublas`, pinned by an `override-depe
 rows of some bf16 matmuls ([pytorch/pytorch#203481](https://github.com/pytorch/pytorch/issues/203481)).
 13.8.0.4 passes the reproducer cases; 13.7.0.27 was reported to still fail. The wheel's `nvidia-cuda-nvrtc`
 dependency is unpinned and stays at torch's lock. `docker/training/verify_image.py` fails the build when
-the library torch loads is not that wheel.
+the library torch loads is not that wheel. The pin reaches the two training images only: the vLLM and SGLang
+rollout images keep the cuBLAS of their own bases and neither pin nor check it.
 
 ## RDMA networking (InfiniBand and EFA)
 
