@@ -266,8 +266,17 @@ adapter served ran over 5% slower than merged weights on the model measured.
   re-score sends `lora_path` with the newest version.
 - **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
   others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
-- **Restart.** A server whose `/v1/models` lacks the newest version (it restarted) gets the base and the adapter
-  again at the next sync; the episodes that were running under the lost version fail and are counted as errored.
+- **Restart.** Every step that is not a sync probes each server's `/v1/models` (a refused connection is retried for
+  about a second and logged once per outage). A server that lacks the newest version has restarted, and an episode is
+  routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
+  loaded" is excluded for that version and the episode replayed on another. If the restarted server launched with the
+  trainer's base (its `/server_info` `model_path`, `served_model_name` and `revision` equal the weights the trainer read,
+  the `model_name` its requests name and the config's commit hash; no grown vocabulary), the newest version loads on it
+  at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
+  the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
+  would wait out the broadcast deadline, so the old client is dropped without a destroy, probe or request to the vanished peer); under `single_group` the group re-forms itself. A server that is down at a sync
+  fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
+  it takes the full push.
 - **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). The startup preflight refuses a server whose rank, module list or loaded
   limit is too small for the run (`prefetch_depth` + 2 versions are live at once), one with speculative decoding
   (its draft runs without the adapter), a quantized base or data-parallel replicas. A module outside

@@ -11,12 +11,14 @@ from collections.abc import Callable
 from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
+import requests
 import torch
 from peft.tuners.lora.layer import Linear, LoraLayer
 from transformers.core_model_loading import rename_source_key
 
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms
 from halo.checkpoint.parallel.adapters import gather_adapter_state
+from halo.checkpoint.weights_source import weights_read_from
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.dtype import has_packed_quantized_params
@@ -39,8 +41,10 @@ from halo.weight_sync.adapter_payload import (
     serialize_adapter_tensors,
     wire_adapter_tensors,
 )
+from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 if TYPE_CHECKING:
@@ -62,6 +66,28 @@ class AdapterServing(NamedTuple):
     scaling: float
     # The suffixes of the adapted modules.
     modules: tuple[str, ...]
+
+
+class BasePlan(NamedTuple):
+    """What rank 0's probe of the servers decided, for every rank."""
+
+    push_base: bool
+    # Each probed server's adapters, ``None`` for one that did not answer.
+    holdings: dict[str, list[str] | None]
+
+
+def resolve_launch_base(model: torch.nn.Module, async_config: AsyncRolloutConfig) -> ServedBase | None:
+    """The base the trainer's frozen weights are, spelled as an engine launched with them reports it; ``None`` where
+    they are not a checkpoint an engine could have launched with (a from-scratch init, a grown vocabulary)."""
+    live = unwrap_framework_wrappers(model)
+    path = weights_read_from(live)
+    if path is None or vocabulary_grown(live):
+        return None
+    return ServedBase(
+        model_id=async_config.model_name,
+        path=path.rstrip("/"),
+        revision=getattr(getattr(live, "config", None), "_commit_hash", None),
+    )
 
 
 def resolve_live_versions(async_config: AsyncRolloutConfig) -> int:
@@ -234,9 +260,18 @@ class AdapterSync:
     """Serves the policy as an adapter on the rollout servers. :meth:`sync` is COLLECTIVE; ``servers`` is bound on the
     forwarding rank alone."""
 
-    def __init__(self, serving: AdapterServing, versions: AdapterVersions):
+    def __init__(
+        self,
+        serving: AdapterServing,
+        versions: AdapterVersions,
+        routes: AdapterRoutes,
+        launch_base: ServedBase | None,
+    ):
         self.serving = serving
         self.versions = versions
+        self.routes = routes
+        # What a restarted server serves again when it launched with the trainer's base; ``None`` never matches.
+        self.launch_base = launch_base
         self.servers: AdapterServers | None = None
         # Rank 0's, so no two trainers (or two runs of one) name a version alike on an engine.
         self._nonce: str = broadcast_from_rank0(uuid.uuid4().hex[:8])
@@ -244,19 +279,28 @@ class AdapterSync:
         self._base_pushed = False
         # The versions rank 0 has loaded and not retired.
         self._loaded: list[str] = []
+        # The newest version's load, kept on rank 0 to put it on a server that restarted before the next sync.
+        self._newest_load: tuple[str, dict, str] | None = None
+        # Servers whose weight-sync client lost its peer to a restart that took no base push.
+        self._unreconnected: set[str] = set()
 
     def reset(self) -> None:
         """A second ``train()`` pushes the base again."""
         self._base_pushed = False
         self._loaded = []
+        self._newest_load = None
         if self.servers is not None:
             self.servers.close()
             self.servers = None
 
     def sync(self, trainer, pool) -> None:
-        """The base once, and again when a server lost the adapter it held (a restart), then the adapter."""
+        """The base once, and again when a server lost the adapter it held (a restart) and no longer serves the
+        trainer's base, then the adapter. A restarted server's client reconnects first: its old communicator has no
+        peer, and a push into it waits out the broadcast deadline."""
         model = unwrap_framework_wrappers(trainer.model)
-        if rank0_verdict(self._base_is_stale, "Adapter probe of the rollout servers"):
+        plan = rank0_verdict(partial(self._plan_base_push, pool), "Adapter probe of the rollout servers")
+        self._learn(plan.holdings)
+        if plan.push_base:
             sync_trainer_weights(trainer, pool, fold_adapters=False)
             self._base_pushed = True
             self._retire_predecessor_versions()
@@ -265,12 +309,80 @@ class AdapterSync:
         self._load_adapter(model, name)
         self.versions.publish(name)
         self._retire_unheld(name)
+        self.routes.forget_except(self._tracked_versions())
 
-    def _base_is_stale(self) -> bool:
-        if not self._base_pushed:
-            return True
+    def recover(self) -> None:
+        """COLLECTIVE, between syncs. A server found restarted gets the newest version at once when it serves the
+        trainer's base; one that does not stays out of routing until the next sync pushes the base. Never raises on a
+        server that is down or refuses the load: the next call tries again."""
+        if self.versions.current is None:
+            return
+        holdings = rank0_verdict(self._restore_restarted, "Adapter recovery of restarted rollout servers")
+        self._learn(holdings)
+
+    def _tracked_versions(self) -> set[str]:
         current = self.versions.current
-        return current is None or bool(self._bound_servers().lacking(current))
+        return self.versions.held() | ({current} if current is not None else set())
+
+    def _learn(self, holdings: dict[str, list[str] | None]) -> None:
+        self.routes.learn(holdings, self._tracked_versions())
+
+    def _plan_base_push(self, pool) -> BasePlan:
+        """Whether the base must be pushed; reconnects the clients of servers that lost the newest adapter first."""
+        current = self.versions.current
+        if not self._base_pushed or current is None:
+            if self._unreconnected:
+                pool.reconnect_servers(self._unreconnected)
+                self._unreconnected.clear()
+            return BasePlan(True, {})
+        holdings = self._bound_servers().probe()
+        silent = sorted(url for url, names in holdings.items() if names is None)
+        if silent:
+            raise RuntimeError(
+                f"Rollout server(s) {silent} did not answer the adapter probe (connection refused or timed out): "
+                f"they are down or still restarting. Restart them before the sync."
+            )
+        restarted = [url for url, names in holdings.items() if current not in names]
+        if restarted and all(self._serves_trainers_base(url) for url in restarted):
+            self._unreconnected.update(restarted)
+            return BasePlan(False, holdings)
+        if restarted:
+            pool.reconnect_servers(set(restarted) | self._unreconnected)
+            self._unreconnected.clear()
+        return BasePlan(bool(restarted), holdings)
+
+    def _restore_restarted(self) -> dict[str, list[str] | None]:
+        servers = self._bound_servers()
+        holdings = servers.probe()
+        current = self.versions.current
+        if self._newest_load is None or self._newest_load[0] != current:
+            return holdings
+        restarted = [url for url, names in holdings.items() if names is not None and current not in names]
+        restorable = [url for url in restarted if self._serves_trainers_base(url)]
+        if not restorable:
+            return holdings
+        name, config, payload = self._newest_load
+        try:
+            servers.load(name, config, payload, urls=restorable)
+        except RuntimeError as error:
+            logger.warning(f"Adapter {name} could not be put back on restarted server(s) {restorable}: {error}")
+            return holdings
+        self._unreconnected.update(restorable)
+        for url in restorable:
+            holdings[url] = [*holdings[url], name]
+        logger.info(f"Loaded adapter {name} on restarted rollout server(s) {restorable}; their base is the trainer's.")
+        return holdings
+
+    def _serves_trainers_base(self, url: str) -> bool:
+        """Whether the server, restarted, serves the frozen base the trainer holds: it launched with the weights the
+        trainer read, under the model id its requests name."""
+        if self.launch_base is None:
+            return False
+        try:
+            served = self._bound_servers().served_base(url)
+        except requests.exceptions.RequestException:
+            return False
+        return served == self.launch_base
 
     def _bound_servers(self) -> AdapterServers:
         if self.servers is None:
@@ -303,7 +415,9 @@ class AdapterSync:
     def _send(self, model: torch.nn.Module, name: str, state: dict[str, torch.Tensor]) -> None:
         wire = wire_adapter_tensors(_hub_adapter_state(model, state), self.serving.scaling)
         config = build_adapter_config(rank=self.serving.rank, target_modules=self.serving.modules)
-        self._bound_servers().load(name, config, serialize_adapter_tensors(wire))
+        payload = serialize_adapter_tensors(wire)
+        self._bound_servers().load(name, config, payload)
+        self._newest_load = (name, config, payload)
         self._loaded.append(name)
         logger.info(f"Loaded adapter {name} on the rollout servers ({len(wire)} tensors)")
 

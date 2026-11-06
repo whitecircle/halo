@@ -43,11 +43,13 @@ from halo.trainers.grpo.rollout.adapter_sync import (
     reject_unadaptable_config,
     reject_unadaptable_model,
     resolve_adapter_serving,
+    resolve_launch_base,
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
+from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -94,6 +96,7 @@ class AsyncRolloutMixin:
     first_push_verified: bool = False
     # Set by _install_adapter_sync when the policy is served as an adapter beside the frozen base.
     _adapter_versions: AdapterVersions | None = None
+    _adapter_routes: AdapterRoutes | None = None
     _adapter_sync: AdapterSync | None = None
 
     def _init_async_state(self):
@@ -148,7 +151,10 @@ class AsyncRolloutMixin:
             connection_timeout=config.rollout_connection_timeout,
         )
         self._adapter_versions = AdapterVersions()
-        self._adapter_sync = AdapterSync(serving, self._adapter_versions)
+        self._adapter_routes = AdapterRoutes(resolve_weight_sync_client(config.rollout_backend).is_adapter_missing)
+        self._adapter_sync = AdapterSync(
+            serving, self._adapter_versions, self._adapter_routes, resolve_launch_base(self.model, config)
+        )
 
     def _init_async_components(self):
         """COLLECTIVE. Each failure is deferred to a verdict all ranks join, so none is raised on one rank while its
@@ -204,6 +210,7 @@ class AsyncRolloutMixin:
             first_server=self.parallelism_config.get_data_parallel_rank(),
             adapter_versions=self._adapter_versions,
             adapter_model_name=adapter_model_name,
+            adapter_routes=self._adapter_routes,
         )
         self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
 
@@ -329,6 +336,8 @@ class AsyncRolloutMixin:
         weights went out."""
         # Evaluated alike on every rank: the push it gates is a collective gather.
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
+            if self._adapter_sync is not None:
+                self._adapter_sync.recover()
             return False
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):

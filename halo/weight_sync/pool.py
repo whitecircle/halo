@@ -122,6 +122,18 @@ class WeightSyncPool:
         for client in self._clients:
             client.scope_co_load_groups(self._co_load_module_names)
 
+    def reconnect_servers(self, urls: Iterable[str]) -> None:
+        """Replace the client of each server in ``urls`` with one on a fresh group, for servers known to have
+        restarted; the replacements serve base weights until a full push. A single group re-forms itself at its next
+        update, so it is left alone."""
+        if self._topology == "single_group":
+            return
+        restarted = set(urls)
+        with self._reconnect_lock:
+            for index, config in enumerate(self.server_configs):
+                if config["url"] in restarted:
+                    self._reconnect(index, peer_gone=True)
+
     def update_named_param(self, name: str, weights: torch.Tensor) -> None:
         """Buffer one shared snapshot in every client, sending the pending chunk to every server first when it would
         overflow, as a snapshot may go only once every server sent it."""
@@ -346,9 +358,10 @@ class WeightSyncPool:
             self._clients[index].drain_param_buffer()
             return f"{url}: {first_error} (reconnect retry failed: {retry_error})"
 
-    def _reconnect(self, index: int) -> None:
+    def _reconnect(self, index: int, *, peer_gone: bool = False) -> None:
         """Replace server ``index``'s client, carrying its buffer over; the replacement serves base weights until the
-        re-flush. The old client closes first, lifting its failed sync's pause and freeing the group port."""
+        re-flush. The old client closes first, lifting its failed sync's pause and freeing the group port; with
+        ``peer_gone`` (a server known to have restarted) it is dropped without contacting the old peer."""
         url = self.server_configs[index]["url"]
         old = self._clients[index]
         logger.warning(
@@ -357,7 +370,10 @@ class WeightSyncPool:
         )
         buffered = old.drain_param_buffer()
         try:
-            old.close_communicator()
+            if peer_gone:
+                old.close_communicator_of_restarted_server()
+            else:
+                old.close_communicator()
         except Exception as e:  # the old client is already dead; never mask the rebuild
             logger.warning(f"Error closing stale client for {url}: {e}")
         client = self._connect_client(index, self._device)

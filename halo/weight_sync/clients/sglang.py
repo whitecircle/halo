@@ -19,6 +19,7 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    ServedBase,
     ServerFlags,
     WeightSyncClientBase,
     pick_launch_facts,
@@ -260,9 +261,16 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             group_timeout_s=CHUNK_SYNC_TIMEOUT_S,
         )
 
-    def _release_transport(self, *, at_exit: bool) -> None:
+    def _release_transport(self, *, at_exit: bool, peer_gone: bool = False) -> None:
         # A group whose abort is still running on its thread is left to it: releasing would race that thread.
         group = None if self._transport is None or self._abort_parked else self._transport[0]
+        if peer_gone:
+            # No destroy, health probe or remote release: each waits out a bound on a peer that will never answer.
+            if group is not None:
+                self.abort_transport()
+                release_weight_update_group(group, destroy=False)
+            self._free_transport_leftovers()
+            return
         # Interpreter exit skips the local NCCL destroy, and an aborted group is already gone from torch.
         destroy = not at_exit and not self._aborted
         # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
@@ -284,6 +292,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             self.abort_transport()
         if remote is not None:  # the destroy request announces its own expiry
             remote.join(CLEANUP_TIMEOUT_S)
+        self._free_transport_leftovers()
+
+    def _free_transport_leftovers(self) -> None:
         # A destroy or abort left running holds the group, and through it the store, so the port is stopped directly.
         if self._rendezvous is not None:
             self._rendezvous.free_port()
@@ -415,6 +426,19 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             json={"lora_name": name},
         )
         self._require_adapter_update(response, f"unload adapter {name!r}")
+
+    @classmethod
+    def is_adapter_missing(cls, error: str, adapter: str) -> bool:
+        lowered = error.lower()
+        return adapter in error and ("not loaded" in lowered or "not found" in lowered)
+
+    def served_base(self) -> ServedBase:
+        info = self._server_info()
+        return ServedBase(
+            model_id=info.get("served_model_name"),
+            path=(info.get("model_path") or "").rstrip("/") or None,
+            revision=info.get("revision") or None,
+        )
 
     def loaded_adapters(self) -> list[str]:
         """The adapters registered on the engine: the model cards that name a parent, after the base's own."""

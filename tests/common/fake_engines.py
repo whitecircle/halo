@@ -339,6 +339,10 @@ class FakeSGLangServer(FakeEngineServer):
         # The ``model`` of every chat completion, in arrival order.
         self.completion_models: list[str] = []
         self.generate_lora_paths: list[str | None] = []
+        # The launch facts /server_info reports for the frozen base.
+        self.served_model_name = "org/policy"
+        self.model_path = "/models/policy"
+        self.revision: str | None = None
 
     def restart(self) -> None:
         """A process restart: the registry and the weight-update groups are gone."""
@@ -388,6 +392,9 @@ class FakeSGLangServer(FakeEngineServer):
                 "quantization": self.quantization or None,
                 "max_running_requests": 256,
                 "attention_backend": "flashinfer",
+                "served_model_name": self.served_model_name,
+                "model_path": self.model_path,
+                "revision": self.revision,
             }
             if self.toolkit_image:
                 info["halo_patches"] = True
@@ -424,6 +431,12 @@ class FakeSGLangServer(FakeEngineServer):
             return 200, {}
         if path == "/v1/chat/completions":
             self.completion_models.append(body.get("model"))
+            _, _, adapter = (body.get("model") or "").partition(":")
+            if adapter and adapter not in self.adapters:
+                return 400, {
+                    "error": f"The following requested LoRA adapters are not loaded: {adapter}\nLoaded adapters: "
+                    f"{sorted(self.adapters)}."
+                }
             return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
         if path == "/generate" and body.get("return_logprob"):
             self.generate_lora_paths.append(body.get("lora_path"))

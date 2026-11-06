@@ -4,14 +4,19 @@ left out, each sync loads the adapter under a new name that new episodes select,
 holds it, and a restarted server gets the base and the adapter again. And every model or server the engine cannot serve
 as an adapter is refused with its reason."""
 
+import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
+import requests
 import torch
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.environments.engine_wire import build_payload
+from halo.environments.episode import RolloutResult
+from halo.environments.messages import Trajectory
 from halo.environments.ray_actors import RolloutManager
 from halo.environments.rollout_config import RolloutConfig
 from halo.trainers.grpo.rollout import adapter_sync
@@ -25,8 +30,10 @@ from halo.trainers.grpo.rollout.adapter_sync import (
     resolve_live_versions,
 )
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements, verify_adapter_servers
+from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer
@@ -39,6 +46,8 @@ _LORA = {
 }
 _NO_PARALLELISM = SimpleNamespace(is_tp_mode=False, is_pp_mode=False, is_cp_mode=False)
 _BASE_MODEL = "org/policy"
+# What the fake servers launch with: the trainer's base when a sync is given it.
+_LAUNCH_BASE = ServedBase(model_id=_BASE_MODEL, path="/models/policy", revision=None)
 
 
 def _peft_model(*, targets=("q_proj", "v_proj"), dtype=torch.bfloat16, **lora) -> torch.nn.Module:
@@ -73,33 +82,68 @@ def servers():
         fake.close()
 
 
+class _RecordingPool:
+    def __init__(self, events: list):
+        self.events = events
+
+    def reconnect_servers(self, urls) -> None:
+        self.events.append(("reconnect", sorted(urls)))
+
+
 @pytest.fixture
-def base_pushes(monkeypatch):
+def events():
+    """Reconnects and base pushes in the order a sync made them."""
+    return []
+
+
+@pytest.fixture
+def client_pool(events):
+    return _RecordingPool(events)
+
+
+@pytest.fixture
+def base_pushes(monkeypatch, events):
     """The full pushes the sync asked for, as the ``fold_adapters`` each carried."""
     pushes = []
-    monkeypatch.setattr(
-        adapter_sync, "sync_trainer_weights", lambda trainer, pool, *, fold_adapters=True: pushes.append(fold_adapters)
-    )
+
+    def push(trainer, pool, *, fold_adapters=True):
+        pushes.append(fold_adapters)
+        events.append(("push", fold_adapters))
+
+    monkeypatch.setattr(adapter_sync, "sync_trainer_weights", push)
     return pushes
+
+
+def _adapter_sync(model, pool, launch_base=None) -> AdapterSync:
+    routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
+    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions(), routes, launch_base)
+    sync.servers = pool
+    return sync
 
 
 @pytest.fixture
 def sync_of(servers):
     pool, _ = servers
     model = _peft_model()
-    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions())
-    sync.servers = pool
-    return sync, SimpleNamespace(model=model)
+    return _adapter_sync(model, pool), SimpleNamespace(model=model)
+
+
+@pytest.fixture
+def same_base_sync_of(servers):
+    """A sync whose trainer base is the one the fake servers launch with."""
+    pool, _ = servers
+    model = _peft_model()
+    return _adapter_sync(model, pool, _LAUNCH_BASE), SimpleNamespace(model=model)
 
 
 def _held_everywhere(fakes) -> list[list[str]]:
     return [sorted(fake.adapters) for fake in fakes]
 
 
-def test_the_first_sync_pushes_the_base_unfolded_then_loads_the_adapter(sync_of, servers, base_pushes):
+def test_the_first_sync_pushes_the_base_unfolded_then_loads_the_adapter(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, fakes) = sync_of, servers
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     assert base_pushes == [False], "the base alone: folding the adapter in would count its delta twice"
     [name] = sync.versions.held() | {sync.versions.current}
@@ -107,10 +151,10 @@ def test_the_first_sync_pushes_the_base_unfolded_then_loads_the_adapter(sync_of,
     assert _held_everywhere(fakes) == [[name], [name]]
 
 
-def test_the_wire_adapter_is_the_trainers_with_the_scaling_folded_into_b(sync_of, servers, base_pushes):
+def test_the_wire_adapter_is_the_trainers_with_the_scaling_folded_into_b(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, [fake, _]) = sync_of, servers
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     config, tensors = fake.adapters[sync.versions.current]
     assert config["lora_alpha"] == config["r"] == 8 and config["target_modules"] == ["q_proj", "v_proj"]
@@ -128,54 +172,75 @@ def test_the_wire_adapter_is_the_trainers_with_the_scaling_folded_into_b(sync_of
     assert torch.equal(tensors[f"base_model.model.{layer0_q}.lora_B.weight"], (b.float() * (24 / 8)).bfloat16())
 
 
-def test_a_later_sync_loads_a_new_name_and_retires_the_old_one(sync_of, servers, base_pushes):
+def test_a_later_sync_loads_a_new_name_and_retires_the_old_one(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, fakes) = sync_of, servers
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
     first = sync.versions.current
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     assert base_pushes == [False], "the base is pushed once"
     assert sync.versions.current != first
     assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
 
 
-def test_a_version_an_episode_holds_stays_loaded_until_it_ends(sync_of, servers, base_pushes):
+def test_a_version_an_episode_holds_stays_loaded_until_it_ends(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, fakes) = sync_of, servers
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     with sync.versions.lease() as running:
-        sync.sync(trainer, None)
+        sync.sync(trainer, client_pool)
         assert _held_everywhere(fakes) == [sorted([running, sync.versions.current])] * 2
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
     assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
 
 
-def test_a_restarted_server_gets_the_base_and_the_adapter_again(sync_of, servers, base_pushes):
+def test_a_restarted_server_gets_the_base_and_the_adapter_again(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, [fake, restarted]) = sync_of, servers
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
     restarted.restart()
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     assert base_pushes == [False, False], "the restart's base push is the unfolded one too"
     assert _held_everywhere([fake, restarted]) == [[sync.versions.current]] * 2
 
 
-def test_a_predecessors_versions_are_retired_with_the_first_push(sync_of, servers, base_pushes):
+def test_a_restarted_servers_client_reconnects_before_the_base_is_sent(
+    sync_of, servers, base_pushes, events, client_pool
+):
+    """A push into the restarted server's old communicator waits out the broadcast deadline for a peer that is gone."""
+    (sync, trainer), (_, [_, restarted]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    events.clear()
+    restarted.restart()
+
+    sync.sync(trainer, client_pool)
+
+    assert events == [("reconnect", [restarted.url]), ("push", False)]
+
+
+def test_servers_that_kept_their_adapter_are_not_reconnected(sync_of, base_pushes, events, client_pool):
+    sync, trainer = sync_of
+    sync.sync(trainer, client_pool)
+    sync.sync(trainer, client_pool)
+
+    assert events == [("push", False)], "only the first sync pushes the base, and nothing reconnects"
+
+
+def test_a_predecessors_versions_are_retired_with_the_first_push(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (pool, [fake, _]) = sync_of, servers
-    left = AdapterSync(resolve_adapter_serving(trainer.model), AdapterVersions())
-    left.servers = pool
-    left.sync(trainer, None)
+    left = _adapter_sync(trainer.model, pool)
+    left.sync(trainer, client_pool)
     stale = left.versions.current
 
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
 
     assert stale not in fake.adapters and sync.versions.current in fake.adapters
 
 
-def test_requests_name_the_newest_version_for_a_whole_episode(sync_of, servers, base_pushes):
+def test_requests_name_the_newest_version_for_a_whole_episode(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, [fake, _]) = sync_of, servers
     manager = RolloutManager(
         num_workers=1,
@@ -187,27 +252,268 @@ def test_requests_name_the_newest_version_for_a_whole_episode(sync_of, servers, 
         adapter_versions=sync.versions,
         adapter_model_name=lambda adapter: SGLangWeightSyncClient.adapter_request_model(_BASE_MODEL, adapter),
     )
-    sync.sync(trainer, None)
+    sync.sync(trainer, client_pool)
     first = sync.versions.current
 
-    with manager._episode_config() as old_episode:
-        sync.sync(trainer, None)
-        with manager._episode_config() as new_episode:
+    with manager._episode_config() as (old_episode, old_version):
+        sync.sync(trainer, client_pool)
+        with manager._episode_config() as (new_episode, new_version):
             pass
 
+    assert (old_version, new_version) == (first, sync.versions.current)
     assert build_payload([], old_episode)["model"] == f"{_BASE_MODEL}:{first}"
     assert build_payload([], new_episode)["model"] == f"{_BASE_MODEL}:{sync.versions.current}"
     assert first != sync.versions.current
 
 
+class _FakeActor:
+    """Plays an episode as one chat completion on the server it is given, as an actor's first request would."""
+
+    def __init__(self, failure: str | None = None):
+        self.run_episode = SimpleNamespace(remote=self._run)
+        self.failure = failure
+
+    def _run(self, *, prompt, context, server_url, config):
+        return asyncio.to_thread(self._post, prompt, server_url, config.model_name)
+
+    def _post(self, prompt, url, model):
+        if self.failure is not None:
+            return RolloutResult.errored(prompt, self.failure)
+        reply = requests.post(f"{url}/v1/chat/completions", json={"model": model, "messages": []}, timeout=10)
+        if reply.status_code != 200:
+            return RolloutResult.errored(
+                prompt, f"RolloutHTTPError: sglang error (status {reply.status_code}): {reply.text}"
+            )
+        return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True))
+
+
+def _manager_over(sync, fakes, actor=None) -> RolloutManager:
+    manager = RolloutManager(
+        num_workers=1,
+        env_type="unused",
+        env_config={},
+        server_urls=[fake.url for fake in fakes],
+        rollout_config=RolloutConfig(backend="sglang", model_name=_BASE_MODEL),
+        max_concurrent_rollouts=1,
+        adapter_versions=sync.versions,
+        adapter_model_name=lambda adapter: SGLangWeightSyncClient.adapter_request_model(_BASE_MODEL, adapter),
+        adapter_routes=sync.routes,
+    )
+    manager._actors = [actor or _FakeActor()]
+    manager._started = True
+    return manager
+
+
+def _play(manager, episodes: int) -> list[RolloutResult]:
+    return asyncio.run(manager.collect_rollouts([f"p{i}" for i in range(episodes)]))
+
+
+def test_a_restarted_server_is_left_out_of_routing_once_a_probe_finds_it(sync_of, servers, base_pushes, client_pool):
+    (sync, trainer), (_, [kept, restarted]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+
+    sync.recover()
+    results = _play(_manager_over(sync, [kept, restarted]), 4)
+
+    assert all(result.error is None for result in results)
+    assert restarted.completion_models == [], "no episode was sent to the server without the leased version"
+    assert len(kept.completion_models) == 4
+
+
+def test_a_server_that_answers_not_loaded_is_excluded_and_the_episode_replayed(
+    sync_of, servers, base_pushes, client_pool
+):
+    """No probe saw the restart, so the first episode routed there learns it from the engine's own answer."""
+    (sync, trainer), (_, [kept, restarted]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+
+    results = _play(_manager_over(sync, [kept, restarted]), 4)
+
+    assert all(result.error is None for result in results), "the refused episode ran again on a server that holds it"
+    assert len(restarted.completion_models) == 1, "one refusal, then the server is skipped"
+    assert len(kept.completion_models) == 4
+
+
+def test_an_error_that_is_not_a_missing_adapter_is_not_routed_around(sync_of, servers, base_pushes, client_pool):
+    (sync, trainer), (_, fakes) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    manager = _manager_over(sync, fakes, _FakeActor(failure="RolloutHTTPError: sglang error (status 500): boom"))
+
+    results = _play(manager, 2)
+
+    assert [result.error for result in results] == ["RolloutHTTPError: sglang error (status 500): boom"] * 2
+    assert sync.routes.eligible([fake.url for fake in fakes], sync.versions.current) == [fake.url for fake in fakes]
+
+
+def test_every_server_lacking_the_version_errors_the_episode(sync_of, servers, base_pushes, client_pool):
+    (sync, trainer), (_, fakes) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    for fake in fakes:
+        fake.restart()
+
+    [result] = _play(_manager_over(sync, fakes), 1)
+
+    assert result.error is not None and "not loaded" in result.error
+
+
+def test_a_restarted_server_that_serves_the_trainers_base_gets_the_adapter_at_once(
+    same_base_sync_of, servers, base_pushes, events, client_pool
+):
+    (sync, trainer), (_, [kept, restarted]) = same_base_sync_of, servers
+    sync.sync(trainer, client_pool)
+    version = sync.versions.current
+    events.clear()
+    restarted.restart()
+
+    sync.recover()
+
+    assert version in restarted.adapters and events == [], "loaded again, with no base push and no reconnect"
+    assert restarted.adapters[version][1].keys() == kept.adapters[version][1].keys()
+    results = _play(_manager_over(sync, [kept, restarted]), 4)
+    assert all(result.error is None for result in results)
+    assert len(restarted.completion_models) == 2, "routable again for the version it holds"
+
+    sync.sync(trainer, client_pool)
+
+    assert events == [], "the next sync pushes no base either, as the server's base never changed"
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize(
+    "restart_as",
+    [
+        {"model_path": "/models/other"},
+        {"served_model_name": "org/other"},
+        {"revision": "abc123"},
+    ],
+)
+def test_a_restarted_server_that_serves_another_base_gets_the_full_push(
+    restart_as, same_base_sync_of, servers, base_pushes, events, client_pool
+):
+    (sync, trainer), (_, [kept, restarted]) = same_base_sync_of, servers
+    sync.sync(trainer, client_pool)
+    version = sync.versions.current
+    events.clear()
+    restarted.restart()
+    for field, value in restart_as.items():
+        setattr(restarted, field, value)
+
+    sync.recover()
+
+    assert version not in restarted.adapters and events == [], "no adapter on a base that is not the trainer's"
+    [result] = _play(_manager_over(sync, [restarted, kept]), 1)
+    assert result.error is None and restarted.completion_models == [], "and nothing is routed to it"
+
+    sync.sync(trainer, client_pool)
+
+    assert events == [("reconnect", [restarted.url]), ("push", False)]
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+
+
+def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_of, servers, base_pushes, client_pool):
+    """A from-scratch or vocabulary-grown model has no launch base (``None``), whatever the server reports."""
+    (sync, trainer), (_, [_, restarted]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+
+    sync.recover()
+
+    assert restarted.adapters == {}
+
+
+def test_the_launch_base_is_the_weights_the_trainer_read(monkeypatch):
+    model = _peft_model()
+    model.config._commit_hash = "abc123"
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: "/models/policy/")
+    config = SimpleNamespace(model_name=_BASE_MODEL)
+
+    assert adapter_sync.resolve_launch_base(model, config) == ServedBase(_BASE_MODEL, "/models/policy", "abc123")
+
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: None)
+    assert adapter_sync.resolve_launch_base(model, config) is None
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: "/models/policy")
+    monkeypatch.setattr(adapter_sync, "vocabulary_grown", lambda _: True)
+    assert adapter_sync.resolve_launch_base(model, config) is None
+
+
+def test_a_down_server_is_reported_within_seconds(sync_of, servers, base_pushes, client_pool, caplog):
+    (sync, trainer), (pool, [_, down]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    down.close()
+
+    started = time.monotonic()
+    with caplog.at_level("WARNING"):
+        holdings = pool.probe()
+        pool.probe()
+    elapsed = time.monotonic() - started
+
+    assert holdings[down.url] is None and holdings[servers[1][0].url] is not None
+    assert elapsed < 10, "a refused connection is not retried for a minute"
+    assert [r.getMessage() for r in caplog.records].count(
+        f"Rollout server {down.url} did not answer the adapter probe (down or restarting)."
+    ) == 1, "named once per outage"
+    with pytest.raises(RuntimeError, match="did not answer the adapter probe"):
+        sync.sync(trainer, client_pool)
+
+
+def test_recovery_skips_a_server_that_is_down_and_keeps_routing_to_the_rest(
+    same_base_sync_of, servers, base_pushes, client_pool
+):
+    (sync, trainer), (_, [kept, down]) = same_base_sync_of, servers
+    sync.sync(trainer, client_pool)
+    down.close()
+
+    sync.recover()
+    results = _play(_manager_over(sync, [kept, down]), 3)
+
+    assert all(result.error is None for result in results) and len(kept.completion_models) == 3
+
+
+def test_recovery_survives_a_server_answering_5xx_while_it_warms_up(
+    same_base_sync_of, servers, base_pushes, client_pool
+):
+    (sync, trainer), (_, [kept, warming]) = same_base_sync_of, servers
+    sync.sync(trainer, client_pool)
+    warming.refuse.update({"/v1/models", "/server_info"})
+
+    sync.recover()
+    results = _play(_manager_over(sync, [kept, warming]), 3)
+
+    assert all(result.error is None for result in results) and len(kept.completion_models) == 3
+
+
+def test_the_routes_know_only_what_a_probe_or_a_refusal_told_them():
+    routes = AdapterRoutes(lambda error, adapter: False)
+    urls = ["a", "b"]
+
+    routes.learn({"a": ["v1"], "b": ["v2"]}, ["v1", "v2"])
+    assert routes.eligible(urls, "v1") == ["a"] and routes.eligible(urls, "v2") == ["b"]
+    assert routes.eligible(urls, "v3") == urls, "a version no probe has seen is routable everywhere"
+
+    routes.learn({"b": None}, ["v1", "v2"])
+    assert routes.eligible(urls, "v2") == [], "a server that did not answer lacks every tracked version"
+
+    routes.exclude("a", "v3")
+    assert routes.eligible(urls, "v3") == ["b"]
+    routes.forget_except(["v1"])
+    assert routes.eligible(urls, "v3") == urls
+
+
 def test_a_manager_without_adapters_keeps_its_config(servers):
     config = RolloutConfig(backend="sglang", model_name=_BASE_MODEL)
     manager = RolloutManager(
-        num_workers=1, env_type="unused", env_config={}, server_urls=["http://x"], rollout_config=config
+        num_workers=1,
+        env_type="unused",
+        env_config={},
+        server_urls=["http://x"],
+        rollout_config=config,
+        max_concurrent_rollouts=1,
     )
 
-    with manager._episode_config() as episode:
-        assert episode is config
+    with manager._episode_config() as (episode, version):
+        assert episode is config and version is None
 
 
 def _refusal_cases():

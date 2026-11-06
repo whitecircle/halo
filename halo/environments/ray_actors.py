@@ -36,6 +36,7 @@ from halo.environments.reasoning_effort import EpisodeEffort, bind_episode_effor
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.endpoints import is_loopback
+from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_versions import AdapterVersions
 
 logger = logging.getLogger(__name__)
@@ -412,12 +413,14 @@ class RolloutManager:
         first_server: int = 0,
         adapter_versions: AdapterVersions | None = None,
         adapter_model_name: Callable[[str], str] | None = None,
+        adapter_routes: AdapterRoutes | None = None,
     ):
         """``num_workers`` is this rank's actor count and ``max_concurrent_rollouts`` its in-flight cap, both resolved
         by :func:`~halo.environments.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
         round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
         ones. With ``adapter_versions`` every episode leases the newest adapter and its requests name it through
-        ``adapter_model_name``, for the episode's whole length."""
+        ``adapter_model_name``, for the episode's whole length, and goes only to a server ``adapter_routes`` does not
+        know to lack that version: one that answers "not loaded" is skipped and the episode replayed on another."""
         self.num_workers = num_workers
         self.env_type = env_type
         self.env_config = env_config
@@ -426,6 +429,7 @@ class RolloutManager:
         self.max_concurrent = max_concurrent_rollouts
         self._adapter_versions = adapter_versions
         self._adapter_model_name = adapter_model_name
+        self._adapter_routes = adapter_routes
 
         self._actors: list = []
         self._started = False
@@ -506,24 +510,56 @@ class RolloutManager:
         logger.info("RolloutManager shutdown complete")
 
     @contextlib.contextmanager
-    def _episode_config(self) -> Iterator[RolloutConfig]:
-        """The config an episode plays under: the manager's, or with an adapter served, the newest version's, leased
-        until the episode ends so a retired version never serves a later turn of it."""
+    def _episode_config(self) -> Iterator[tuple[RolloutConfig, str | None]]:
+        """The config an episode plays under and the adapter version it leased: the manager's config, or with an adapter
+        served, the newest version's, leased until the episode ends so a retired version never serves a later turn of
+        it."""
         if self._adapter_versions is None:
-            yield self.rollout_config
+            yield self.rollout_config, None
             return
         with self._adapter_versions.lease() as adapter:
-            yield replace(self.rollout_config, model_name=self._adapter_model_name(adapter))
+            yield replace(self.rollout_config, model_name=self._adapter_model_name(adapter)), adapter
 
     def _next_actor(self):
         actor = self._actors[self._actor_idx % len(self._actors)]
         self._actor_idx += 1
         return actor
 
-    def _next_url(self) -> str:
-        url = self.server_urls[self._url_idx % len(self.server_urls)]
+    def _next_url(self, adapter: str | None = None) -> str:
+        """The next server in the round-robin, among those that hold ``adapter`` when an episode leased one."""
+        urls = self.server_urls
+        if adapter is not None and self._adapter_routes is not None:
+            urls = self._adapter_routes.eligible(urls, adapter)
+            if not urls:
+                raise RuntimeError(
+                    f"No rollout server holds adapter version {adapter!r} ({self.server_urls} all lack it); the next "
+                    f"adapter sync loads it again."
+                )
+        url = urls[self._url_idx % len(urls)]
         self._url_idx += 1
         return url
+
+    async def _play_leased(self, prompt: str, ctx: dict | None, config: RolloutConfig, adapter: str | None):
+        """One episode on a server that holds ``adapter``. A server that answers that it does not is excluded for the
+        version and the episode replayed on the next, as it failed on its first request."""
+        for _ in range(len(self.server_urls)):
+            url = self._next_url(adapter)
+            ref = self._next_actor().run_episode.remote(prompt=prompt, context=ctx, server_url=url, config=config)
+            try:
+                result = await _await_with_deadline(
+                    ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
+                )
+            except TimeoutError:
+                # Ray forbids force=True on an async-actor task, so it would never cancel.
+                ray.cancel(ref, force=False)
+                raise
+            if adapter is None or self._adapter_routes is None or not result.error:
+                return result
+            if not self._adapter_routes.is_missing(result.error, adapter):
+                return result
+            logger.warning(f"Rollout server {url} holds no adapter {adapter}; routing its episodes elsewhere.")
+            self._adapter_routes.exclude(url, adapter)
+        return result
 
     async def collect_rollouts(
         self,
@@ -541,19 +577,10 @@ class RolloutManager:
 
         async def _run(idx: int, prompt: str, ctx: dict | None):
             async with sem:
-                ref = None
                 try:
-                    with self._episode_config() as config:
-                        ref = self._next_actor().run_episode.remote(
-                            prompt=prompt, context=ctx, server_url=self._next_url(), config=config
-                        )
-                        results[idx] = await _await_with_deadline(
-                            ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
-                        )
+                    with self._episode_config() as (config, adapter):
+                        results[idx] = await self._play_leased(prompt, ctx, config, adapter)
                 except Exception as e:
-                    if isinstance(e, TimeoutError):
-                        # Ray forbids force=True on an async-actor task, so it would never cancel.
-                        ray.cancel(ref, force=False)
                     self._log_failure(idx, e)
                     errors[idx] = e
 

@@ -231,6 +231,7 @@ class _LifecycleHost:
     _weight_sync_group_formed = False
     _async_components_started = False
     _adapter_versions = None
+    _adapter_routes = None
     _adapter_sync = None
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _start_rollout_pool = _T._start_rollout_pool

@@ -589,3 +589,52 @@ def test_a_formed_group_keeps_its_port_past_the_formation_block():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def _blocking_peer_probe(client, monkeypatch):
+    """Every release step that needs the old peer blocks for 30 s; the calls list shows which ones were entered."""
+    calls: list[str] = []
+    release = threading.Event()
+
+    def blocked(name):
+        def call(*args, **kwargs):
+            calls.append(name)
+            release.wait(30)
+
+        return call
+
+    monkeypatch.setattr(
+        sglang_module, "release_weight_update_group", lambda group, *, destroy: calls.append(f"drop:{destroy}")
+    )
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: calls.append("abort"))
+    monkeypatch.setattr(client, "destroy_remote_group", blocked("remote"))
+    monkeypatch.setattr(client, "_engine_answers", blocked("probe"))
+    monkeypatch.setattr(client, "request", blocked("request"))
+    return calls, release
+
+
+def test_a_restarted_servers_client_is_dropped_without_waiting_for_the_old_peer(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+
+    started = time.monotonic()
+    client.close_communicator_of_restarted_server()
+    release.set()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["abort", "drop:False"], calls
+    assert client._transport is None
+
+
+def test_a_live_peers_close_still_destroys_and_releases_the_remote_half(monkeypatch):
+    """Negative control: the same fakes through the graceful close are entered, so the local path's skip is its own."""
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+    release.set()
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
+
+    client.close_communicator()
+
+    assert "drop:True" in calls and "remote" in calls, calls

@@ -295,6 +295,30 @@ def test_a_later_sync_that_fails_before_opening_is_still_retried(monkeypatch):
     assert wire.opened == 1, "the failure comes before the second sync opens the engine"
 
 
+def test_reconnect_servers_replaces_only_the_named_servers(monkeypatch):
+    pool, _ = _bare_pool(3)
+    reconnects = []
+    monkeypatch.setattr(
+        WeightSyncPool, "_reconnect", lambda self, index, peer_gone: reconnects.append((index, peer_gone))
+    )
+
+    pool.reconnect_servers(["http://server2:8000", "http://server0:8000"])
+
+    assert reconnects == [(0, True), (2, True)]
+
+
+def test_reconnect_servers_leaves_a_single_group_to_re_form_itself(monkeypatch):
+    pool, _ = _bare_pool(2)
+    pool._topology = "single_group"
+    monkeypatch.setattr(
+        WeightSyncPool,
+        "_reconnect",
+        lambda self, index, peer_gone: pytest.fail("a group member was reconnected alone"),
+    )
+
+    pool.reconnect_servers(["http://server0:8000"])
+
+
 def test_reconnect_retires_the_old_client_before_probing_the_replacement():
     """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed first times out."""
     order: list[str] = []
@@ -414,3 +438,55 @@ def test_a_reconnected_client_is_built_like_the_first_connect():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def _reconnect_probe():
+    closed: list[str] = []
+
+    class Old:
+        def drain_param_buffer(self):
+            return []
+
+        def close_communicator(self):
+            closed.append("graceful")
+
+        def close_communicator_of_restarted_server(self):
+            closed.append("local")
+
+    class New:
+        def __init__(self, **kwargs):
+            pass
+
+        CHUNK_STAGER = PackedChunkStager
+
+        def share_stager(self, stager):
+            pass
+
+        def init_communicator(self, device):
+            pass
+
+    pool = WeightSyncPool(
+        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
+        connection_timeout=0.0,
+        client_cls=New,
+        base_group_port=51216,
+    )
+    pool._clients = [Old()]
+    pool._device = torch.device("cpu")
+    return pool, closed
+
+
+def test_a_known_restart_drops_the_old_client_locally():
+    pool, closed = _reconnect_probe()
+
+    pool.reconnect_servers(["http://server0:8000"])
+
+    assert closed == ["local"]
+
+
+def test_a_failure_triggered_reconnect_still_closes_the_old_client_gracefully():
+    pool, closed = _reconnect_probe()
+
+    pool._reconnect(0)
+
+    assert closed == ["graceful"]

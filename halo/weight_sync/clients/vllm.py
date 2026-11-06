@@ -225,7 +225,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         # ncclCommInitRank blocks with no deadline, so it runs beside the engine's join, not ahead of it.
         return partial(PyNcclCommunicator, self._unique_id_store, device=self._sync_device)
 
-    def _release_transport(self, *, at_exit: bool) -> None:
+    def _release_transport(self, *, at_exit: bool, peer_gone: bool = False) -> None:
         if self._transport is not None:
             # With no __del__, a dropped communicator's ncclComm and pinned memory outlive every retired client.
             self._transport.abort()

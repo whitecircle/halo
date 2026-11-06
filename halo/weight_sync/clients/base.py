@@ -82,6 +82,14 @@ class ServerFlags(NamedTuple):
     extras: Mapping[str, object] = MappingProxyType({})
 
 
+class ServedBase(NamedTuple):
+    """The frozen base an engine serves, as its launch named it; ``None`` where unreported."""
+
+    model_id: str | None
+    path: str | None
+    revision: str | None
+
+
 def pick_launch_facts(source: Mapping[str, Any], facts: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
     """``name`` → the value at each key path in ``source``, leaving out a path the reply does not carry."""
     found: dict[str, object] = {}
@@ -242,8 +250,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Run the caller-thread part of formation; return its blocking step, whose result becomes ``_transport``."""
 
     @abstractmethod
-    def _release_transport(self, *, at_exit: bool) -> None:
-        """Release ``_transport`` (``None`` after a formation that built nothing) and the engine's side."""
+    def _release_transport(self, *, at_exit: bool, peer_gone: bool = False) -> None:
+        """Release ``_transport`` (``None`` after a formation that built nothing) and the engine's side. ``peer_gone``
+        marks a restarted server: nothing may wait for, probe or call the old peer."""
 
     @abstractmethod
     def _reset_transport_state(self) -> None:
@@ -388,6 +397,15 @@ class WeightSyncClientBase(UpdateStream, ABC):
                 raise RuntimeError(f"{self.base_url}/v1/models lists no model")
             self._served_model_id = str(cards[0]["id"])
         return self._served_model_id
+
+    def served_base(self) -> ServedBase:
+        """The base this engine launched with, which a restart serves again."""
+        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+
+    @classmethod
+    def is_adapter_missing(cls, error: str, adapter: str) -> bool:
+        """Whether an episode's ``error`` is the engine saying it holds no adapter ``adapter``."""
+        return False
 
     @abstractmethod
     def read_server_flags(self) -> ServerFlags:
@@ -564,6 +582,16 @@ class WeightSyncClientBase(UpdateStream, ABC):
             self._transport = None
         self._reset_buffer_state()
         # Left registered, the hook pins every retired client and its resume POST until interpreter exit.
+        atexit.unregister(self.close_communicator)
+
+    def close_communicator_of_restarted_server(self) -> None:
+        """Drop the communicator of a server known to have restarted, with no request to the server and no handshake
+        with the old peer, which is gone. The new server holds no pause, update or group of this client's."""
+        self._paused = False
+        if self._transport is not None:
+            self._release_transport(at_exit=False, peer_gone=True)
+            self._transport = None
+        self._reset_buffer_state()
         atexit.unregister(self.close_communicator)
 
     def close_http_session(self) -> None:
