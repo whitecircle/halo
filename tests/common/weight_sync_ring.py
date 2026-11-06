@@ -60,7 +60,7 @@ class RingSGLangClient(SGLangWeightSyncClient):
         self.ring.form_group()
         return lambda: object()
 
-    def require_transport(self) -> None:
+    def verify_transport(self) -> None:
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
 
@@ -87,7 +87,7 @@ class RingVLLMClient(VLLMWeightSyncClient):
         return lambda: _FakeComm(self.ring)
 
     def prepare_chunk_send(self, chunk) -> None:
-        self.require_transport()
+        self.verify_transport()
 
     def send_chunk(self, chunk) -> None:
         self.ring.send(chunk)

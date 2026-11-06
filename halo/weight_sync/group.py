@@ -233,7 +233,7 @@ class WeightSyncGroup(UpdateStream):
     def _start_engine_update(self) -> None:
         """Probe every server, then quiesce them together. A server that restarted since the group formed is found
         before any chunk is declared, so the group re-forms once with every server paused and the update replays."""
-        self.leader.require_transport()
+        self.leader.verify_transport()
         stale = self._stale_members(lambda member: member.verify_engine_identity())
         self._quiesce_members()
         try:

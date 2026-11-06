@@ -246,7 +246,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Set the engine transport's fields to those of a client that formed nothing."""
 
     @abstractmethod
-    def require_transport(self) -> None:
+    def verify_transport(self) -> None:
         """Raise on a transport no update can go over, before the engine is touched."""
 
     @abstractmethod
@@ -558,7 +558,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def _start_engine_update(self) -> None:
         # Before the pause and the session, which unload a restarted engine's model: its first chunk would find no group.
         self.verify_engine_identity()
-        self.require_transport()
+        self.verify_transport()
         self.open_engine_update()
 
     def open_engine_update(self) -> None:

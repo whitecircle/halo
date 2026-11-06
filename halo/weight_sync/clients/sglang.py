@@ -286,7 +286,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # On the caller's stream a synchronous broadcast would order the next copies and the trainer's work behind it.
         self._send_stream: torch.cuda.Stream | None = None
 
-    def require_transport(self) -> None:
+    def verify_transport(self) -> None:
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._aborted:

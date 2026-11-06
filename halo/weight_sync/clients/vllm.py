@@ -236,7 +236,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         # Created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
 
-    def require_transport(self) -> None:
+    def verify_transport(self) -> None:
         self._require_communicator()
 
     def destroy_remote_group(self) -> None:
