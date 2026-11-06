@@ -4,9 +4,7 @@ budgets no EP dispatch carries."""
 
 from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.distributed.expert_parallel.deepep.capacity import (
-    DEEPEP_INDEX_LIMIT,
-    EP_CAPACITY_ALIGN,
-    GIN_MAX_TOKENS_PER_RANK,
+    aligned_dispatch_ceiling,
     ep_dispatch_capacity,
     padded_wire_hidden,
     reject_oversized_dispatch,
@@ -123,10 +121,9 @@ def resolve_dispatch_ceiling(parallelism_config, model_config) -> int | None:
     shape = _dispatch_shape(parallelism_config, model_config)
     if shape is None:
         return None
-    limits = [(DEEPEP_INDEX_LIMIT - 1) // (shape[0] * shape[1])]
-    if parallelism_config.requires_rdma and GIN_MAX_TOKENS_PER_RANK:
-        limits.append(GIN_MAX_TOKENS_PER_RANK)
-    return min(limits) // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN
+    return aligned_dispatch_ceiling(
+        num_topk=shape[0], padded_hidden=shape[1], spans_domains=parallelism_config.requires_rdma
+    )
 
 
 def reject_undispatchable_budget(parallelism_config, model_config, budget: int) -> None:
