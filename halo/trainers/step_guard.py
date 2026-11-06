@@ -196,9 +196,11 @@ class NonFiniteStepGuardMixin:
         return super()._init_training_state(*args, **kwargs)
 
     def get_batch_samples(self, *args, **kwargs):
-        """Fetched ahead of the step's micro-batches, so the loss accumulator here is the value a skip restores."""
+        """Fetched ahead of the step's micro-batches, so the loss accumulator here is the value a skip restores. Every
+        trainer's train loop draws its window here, so the fetches are timed for the data-wait metric."""
         self._tr_loss_before_step = self._tr_loss.clone()
-        return super().get_batch_samples(*args, **kwargs)
+        epoch_iterator, *rest = args
+        return super().get_batch_samples(self.time_batch_fetches(epoch_iterator), *rest, **kwargs)
 
     def _maybe_log_save_evaluate(self, tr_loss, *args, **kwargs):
         """Settle the unread verdict first, so a log reports it and a checkpoint's optimizer state counts applied steps

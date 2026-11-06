@@ -525,6 +525,8 @@ _LOGGED_KEYS = (
     "avg_tokens_per_second",
     "step_cluster_tokens_per_second",
     "avg_cluster_tokens_per_second",
+    "step_data_wait_seconds",
+    "avg_data_wait_seconds",
     "allocated_gb",
     "reserved_gb",
     "peak_allocated_gb",

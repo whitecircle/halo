@@ -154,8 +154,8 @@ def test_a_callback_without_a_layout_keeps_the_trainer_accumulator_off():
     callback, trainer = _bound(layout=None)
     trainer._accumulate_attention_flops(_batch([100, 200]))
     assert trainer._attention_layout is None
-    assert trainer.drain_step_work() == (0.0, 0)
-    assert callback._drain_measured_attention_flops() is None
+    assert trainer.drain_step_work() == (0.0, 0, 0.0)
+    assert callback._drain_step_work().attention_flops is None
 
 
 def test_measured_work_replaces_the_config_term_in_both_estimates(monkeypatch):
@@ -170,7 +170,7 @@ def test_measured_work_replaces_the_config_term_in_both_estimates(monkeypatch):
     assert dense == pytest.approx(_tflops(tokens * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
     assert active == pytest.approx(_tflops(tokens * 0.5 * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
     # The accumulator was reset by the step's drain.
-    assert trainer.drain_step_work() == (0.0, 0)
+    assert trainer.drain_step_work() == (0.0, 0, 0.0)
 
 
 def test_the_measurement_differs_from_the_config_term_on_short_documents():
@@ -198,7 +198,7 @@ def test_measured_work_carries_the_tp_head_share(tp_size):
     callback, trainer = _bound(make_parallelism_config(tp_size=tp_size, world_size=tp_size, gpus_per_node=tp_size))
     lengths = torch.tensor([300, 900])
     trainer._accumulate_attention_flops(_batch(lengths))
-    assert callback._drain_measured_attention_flops() == pytest.approx(
+    assert callback._drain_step_work().attention_flops == pytest.approx(
         float(LAYOUT.flops_for_documents(lengths)) / tp_size, rel=1e-12
     )
 
@@ -207,7 +207,7 @@ def test_measured_work_carries_the_cp_sequence_share():
     callback, trainer = _bound(make_parallelism_config(cp_size=2, world_size=2, gpus_per_node=2))
     lengths = torch.tensor([300, 900])
     trainer._accumulate_attention_flops(_batch(lengths))
-    assert callback._drain_measured_attention_flops() == pytest.approx(
+    assert callback._drain_step_work().attention_flops == pytest.approx(
         float(LAYOUT.flops_for_documents(lengths)) / 2, rel=1e-12
     )
 
@@ -217,7 +217,7 @@ def test_measured_work_carries_the_config_depth_share_under_pp():
     callback, trainer = _bound(attention_share=0.25)
     lengths = torch.tensor([300, 900])
     trainer._accumulate_attention_flops(_batch(lengths))
-    assert callback._drain_measured_attention_flops() == pytest.approx(
+    assert callback._drain_step_work().attention_flops == pytest.approx(
         float(LAYOUT.flops_for_documents(lengths)) * 0.25, rel=1e-12
     )
 
@@ -235,13 +235,13 @@ def test_a_tree_batch_costs_each_node_its_own_tokens_at_its_path_length():
     trainer._accumulate_attention_flops({**row, TREE_ATTENTION_KEY: plan})
     paths, own = torch.tensor([600, *(600 + n for n in branches)]), torch.tensor([600, *branches])
     expected = float(LAYOUT.flops_for_documents(paths, own))
-    assert callback._drain_measured_attention_flops() == pytest.approx(expected, rel=1e-12)
+    assert callback._drain_step_work().attention_flops == pytest.approx(expected, rel=1e-12)
 
     flat = float(LAYOUT.flops_for_documents(torch.tensor([600 + n for n in branches])))
     one_document = float(LAYOUT.flops_for_documents(torch.tensor([len(position_ids)])))
     assert expected < flat and expected != pytest.approx(one_document, rel=1e-3)
     trainer._accumulate_attention_flops(row)
-    assert callback._drain_measured_attention_flops() == pytest.approx(one_document, rel=1e-12)
+    assert callback._drain_step_work().attention_flops == pytest.approx(one_document, rel=1e-12)
 
 
 def test_the_drain_counts_documents_and_ignores_empty_slots():
@@ -251,7 +251,7 @@ def test_the_drain_counts_documents_and_ignores_empty_slots():
         {"input_ids": torch.zeros(1, 4, dtype=torch.long), "position_ids": torch.tensor([[0, 1, 2, 3]])}
     )
     assert trainer.drain_step_work()[1] == 4
-    assert trainer.drain_step_work() == (0.0, 0)
+    assert trainer.drain_step_work() == (0.0, 0, 0.0)
 
 
 if __name__ == "__main__":

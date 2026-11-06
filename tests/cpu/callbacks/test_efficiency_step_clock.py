@@ -73,11 +73,11 @@ class _StepWorkSource:
     def __init__(self, device: _Device):
         self.device = device
 
-    def drain_step_work(self) -> tuple[float, int]:
+    def drain_step_work(self) -> tuple[float, int, float]:
         self.device.launch(COLLECTIVE)
         self.device.read_back()
         self.device.now += DRAIN
-        return 0.0, 0
+        return 0.0, 0, 0.0
 
 
 @pytest.fixture

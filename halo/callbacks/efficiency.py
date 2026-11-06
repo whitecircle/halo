@@ -44,6 +44,7 @@ class _RunState:
     elapsed_time: float = 0.0
     step_times: list[float] = field(default_factory=list)
     elapsed_cluster_tokens: int = 0  # cluster-wide unique
+    elapsed_data_wait: float = 0.0
     total_flops: float = 0.0
     total_active_flops: float = 0.0
 
@@ -89,6 +90,14 @@ class _SMFUMetrics:
 
 
 @dataclass
+class DataWaitMetrics:
+    """Seconds an optimizer step spent blocked fetching batches from the train loader (mean over ranks)."""
+
+    step_data_wait_seconds: float = 0.0
+    avg_data_wait_seconds: float = 0.0
+
+
+@dataclass
 class _MemoryMetrics:
     """GPU memory in GiB; ``peak_allocated_gb`` is this step's, ``training_peak_allocated_gb`` the run's."""
 
@@ -106,6 +115,14 @@ class _PendingStep(NamedTuple):
     rank_tokens: int
     cluster_tokens: int
     measured_attention_flops: float | None
+    data_wait: float
+
+
+class _StepWork(NamedTuple):
+    """What the bound trainer reports for the step that just ended."""
+
+    attention_flops: float | None
+    data_wait: float
 
 
 class _Utilization(NamedTuple):
@@ -210,6 +227,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.flops_model: RankFlopsModel | None = None
         self.time = StepTimeMetrics()
         self.tps = ThroughputMetrics()
+        self.data_wait = DataWaitMetrics()
         self.mfu = MFUMetrics()
         self.smfu = _SMFUMetrics()
         self.memory = _MemoryMetrics()
@@ -259,13 +277,20 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def on_step_end(self, args, state, control, **kwargs):
         step_end = mark_boundary()
         # Before the warmup gate, so a warmup step's work never leaks into the first measured one.
-        measured_attention_flops = self._drain_measured_attention_flops()
+        work = self._drain_step_work()
         if not self._is_warmup_step(state):
             rank_tokens, cluster_tokens = self._step_tokens(state)
             # One step later the earlier end marks have passed, so reading them waits on nothing.
             self._record_pending_steps()
             self._pending_steps.append(
-                _PendingStep(self._run.step_start, step_end, rank_tokens, cluster_tokens, measured_attention_flops)
+                _PendingStep(
+                    self._run.step_start,
+                    step_end,
+                    rank_tokens,
+                    cluster_tokens,
+                    work.attention_flops,
+                    work.data_wait,
+                )
             )
             self._record_memory()
         self._run.step_start = step_end
@@ -284,6 +309,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._record_pending_steps()
         logs.update(asdict(self.time))
         logs.update(asdict(self.tps))
+        logs.update(asdict(self.data_wait))
         logs.update(asdict(self.memory))
         if self._report_mfu_diagnostics:
             logs.update(asdict(self.mfu))
@@ -374,18 +400,20 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 f"(dense: {flops.model_flops_per_token / _TERA:.4f} TFLOPS)"
             )
 
-    def _drain_measured_attention_flops(self) -> float | None:
+    def _drain_step_work(self) -> _StepWork:
         """COLLECTIVE through a bound source, which also sums the step's input tokens into the throughput's state. This
-        rank's measured attention-score FLOPs, or ``None`` with no document measured (the config term stands in)."""
+        rank's measured attention-score FLOPs, or ``None`` with no document measured (the config term stands in), and
+        the step's data wait."""
         source = self._attention_source() if self._attention_source is not None else None
         if source is None:
-            return None
-        flops, documents = source.drain_step_work()
+            return _StepWork(None, 0.0)
+        flops, documents, data_wait = source.drain_step_work()
         if documents <= 0 or self.flops_model is None:
-            return None
+            return _StepWork(None, data_wait)
         parallelism = self._parallelism_config
         # The rank's share of the layout, 1/tp of each layer's heads, and under CP 1/cp of the sequence's heads.
-        return flops * self.flops_model.attention_share / parallelism.tp_size / parallelism.cp_size
+        share = self.flops_model.attention_share / parallelism.tp_size / parallelism.cp_size
+        return _StepWork(flops * share, data_wait)
 
     def _is_warmup_step(self, state) -> bool:
         """HF increments ``global_step`` before ``on_step_end``: the first completed step is
@@ -400,6 +428,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def _record_step(self, step: _PendingStep) -> None:
         step_time = self._record_step_time(seconds_between(step.start, step.end))
         self._record_token_throughput(step.cluster_tokens, step_time)
+        self._record_data_wait(step.data_wait)
         flops = self.flops_model
         dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None
         if flops is not None:
@@ -417,6 +446,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             active_per_token, self._run.total_active_flops, smfu_ratio, *work
         )
         self.smfu = _SMFUMetrics(*report)
+
+    def _record_data_wait(self, seconds: float) -> None:
+        self._run.elapsed_data_wait += seconds
+        self.data_wait = DataWaitMetrics(
+            round(seconds, 4),
+            round(self._run.elapsed_data_wait / len(self._run.step_times), 4),
+        )
 
     def _record_step_time(self, step_time: float) -> float:
         self._run.elapsed_time += step_time
