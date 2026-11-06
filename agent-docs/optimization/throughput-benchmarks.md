@@ -85,6 +85,8 @@ UltraChat 200k rendered with each model's chat template and packed from whole do
 rows). Every framework reads the same rows with documents isolated, and rates count attended tokens. Cells are
 tok/s/GPU (peak GiB); † marks an nvidia-smi peak.
 
+The harness and raw logs behind this comparison and the 16k/4k rows below are not public.
+
 | Model, tokens per row | Halo 1.2.0 | Megatron Bridge | TRL 1.17.1 | NeMo AutoModel 0.7.0 |
 |---|---:|---:|---:|---:|
 | Qwen3.5-9B, 64k | 17,206 (54.3) | **19,431** (245.5†) | 14,735 (56.0) | 10,360 (99.3) |
