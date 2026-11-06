@@ -96,6 +96,7 @@ docker run -d --rm --name <job> \
 | DeepEP V2 (commit `af9a040`, built `9.0+PTX`) | Yes | Yes |
 | NCCL `nvidia-nccl-cu13` at `uv.lock`'s exact pin, shared with the rollout images (asserted at build) | Yes | Yes |
 | EFA userspace: rdma-core, AWS libfabric and one pinned `aws-ofi-nccl` build (`docker/efa/install_efa_userspace.sh`), shared with the rollout images | Yes | Yes |
+| cuBLAS `nvidia-cublas` 13.8.0.4 (CUDA 13.4.3), overriding torch's locked 13.1.0.3; asserted at build | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
 | `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
 | `flash-linear-attention` 0.4.2 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
@@ -209,6 +210,13 @@ The runtime NCCL is the pip wheel `nvidia-nccl-cu13` at the exact `uv.lock` pin;
 pin through `docker/nccl_pin.py`, which also owns the DeepEP V2 floor, and its `--verify` fails the
 build when a later step re-resolved the wheel or when the `libnccl.so.2` a process resolves is not
 that wheel's (the base's older system copy would otherwise reach the weight-sync communicator).
+
+The runtime cuBLAS is the pip wheel `nvidia-cublas`, pinned by an `override-dependencies` entry in
+`pyproject.toml` because torch's `cuda-toolkit[cublas]` extra locks 13.1.0.3, which drops the trailing
+rows of some bf16 matmuls ([pytorch/pytorch#203481](https://github.com/pytorch/pytorch/issues/203481)).
+13.8.0.4 passes every reproducer case; 13.7.0.27 still fails. The wheel's `nvidia-cuda-nvrtc`
+dependency is unpinned and stays at torch's lock. `docker/training/verify_image.py` fails the build when
+the library torch loads is not that wheel.
 
 ## RDMA networking (InfiniBand and EFA)
 
