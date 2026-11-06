@@ -21,6 +21,7 @@ from trl.extras.profiling import profiling_context
 from halo.checkpoint.atomic import atomic_torch_save
 from halo.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from halo.checkpoint.parallel.reading import consensus_read
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.episode import RolloutResult
 from halo.environments.ray_actors import RolloutManager, ray_init_kwargs
 from halo.environments.rollout_config import resolve_reasoning_end_token_id
@@ -240,7 +241,7 @@ class AsyncRolloutMixin:
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
             return False
         self._form_weight_sync_group()
-        with profiling_context(self, "weight_sync"), self._phase_timers.span("sync", "host"):
+        with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):
             sync_trainer_weights(self, self._weight_sync_client)
         self._last_pushed_step = self.state.global_step
         return True

@@ -13,6 +13,7 @@ import trl.generation.vllm_generation as _trl_vllm_generation
 from trl import GRPOTrainer
 
 from halo.configs.grpo import EarlyStopConfig, RLRRConfig
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -180,13 +181,13 @@ class DistributedOnlineGRPOTrainer(
     def _distributed_sync_weights(self) -> None:
         """COLLECTIVE. The client TRL holds on ``vllm_generation`` forwards from the main process."""
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
-        with self._phase_timers.span("sync", "host"):
+        with self._phase_timers.span(Phase.SYNC, "host"):
             sync_trainer_weights(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):
         """TRL slices the result by ``process_index``, so TP ranks land on different completions and deadlock at the
         first all-reduce in ``model.forward``; broadcast from the TP leader."""
-        with self._phase_timers.span("rollout", "host"):
+        with self._phase_timers.span(Phase.ROLLOUT, "host"):
             result = super()._generate_single_turn(*args, **kwargs)
         return self._broadcast_object_from_tp_leader(result)
 
@@ -205,7 +206,7 @@ class DistributedOnlineGRPOTrainer(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
         """Broadcast the scored tensors across the TP/ETP group, since CPU-side post-processing may diverge."""
-        with self._phase_timers.span("build", "host"):
+        with self._phase_timers.span(Phase.BUILD, "host"):
             result = super()._generate_and_score_completions(inputs)
 
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.

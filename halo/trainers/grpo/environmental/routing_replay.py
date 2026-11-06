@@ -24,7 +24,7 @@ from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
 from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
-from halo.trainers.grpo.logprob_scoring import dense_row_spans
+from halo.trainers.grpo.logprob_scoring import dense_row_spans, host_row_spans
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY
 from halo.trainers.world_metrics import world_sums
 
@@ -417,7 +417,7 @@ class RoutingReplayMixin:
         if not self._replay_row_spans:
             spans = None
         elif stashed is not None:
-            spans = [(lo, hi) for lo, hi, _ in stashed.tolist()]
+            spans = host_row_spans(stashed)[0]
         else:
             spans = dense_row_spans(attended)[0]
         self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), row_spans=spans)

@@ -18,7 +18,7 @@ from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
-    HostWorkArguments,
+    PhaseTimerArguments,
     PromptDatasetArguments,
 )
 from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSamplingArguments
@@ -251,7 +251,7 @@ class AsyncRolloutConfig(
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     ChunkedLogprobsArguments,
-    HostWorkArguments,
+    PhaseTimerArguments,
 ):
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""

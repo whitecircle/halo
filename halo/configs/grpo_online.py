@@ -6,7 +6,7 @@ from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
-    HostWorkArguments,
+    PhaseTimerArguments,
     PromptDatasetArguments,
     RLRRArguments,
 )
@@ -20,7 +20,7 @@ from halo.rewards.terms import RewardTerm, parse_reward_terms, read_context_file
 class OnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
-    HostWorkArguments,
+    PhaseTimerArguments,
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     RLRRArguments,

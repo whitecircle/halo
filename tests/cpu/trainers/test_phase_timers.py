@@ -10,7 +10,7 @@ import torch
 from halo.callbacks import efficiency
 from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics import phase_timers
-from halo.diagnostics.phase_timers import UNACCOUNTED, PhaseTimers
+from halo.diagnostics.phase_timers import UNACCOUNTED, Phase, PhaseTimers
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.gloo import run_gloo_ranks
 
@@ -134,6 +134,8 @@ def test_efficiency_reads_the_shared_boundary_marks():
 class _Loop:
     """What the mixin wraps: records the order of the inherited calls."""
 
+    eval_clock = None
+
     def __init__(self):
         self.calls = []
         self.model = SimpleNamespace(training=True)
@@ -155,6 +157,13 @@ class _Loop:
 
     def log(self, logs, start_time=None):
         self.calls.append("log")
+
+    def evaluate(self, *args, **kwargs):
+        """An eval round runs the loss forward and the post-backward completion the train step times."""
+        self._compute_loss(None, None)
+        self._finish_fsdp2_backward(None)
+        self.eval_clock[0] += 5.0
+        return {}
 
 
 class _Timed(PhaseTimedMixin, _Loop):
@@ -213,6 +222,24 @@ def test_an_eval_log_reduces_nothing(clock):
     logs = {}
     trainer.log(logs)
     assert logs == {} and trainer.calls == ["log"]
+
+
+def test_an_eval_round_adds_no_span_to_the_next_drain_and_its_time_is_unaccounted(clock):
+    trainer = _timed(True)
+    trainer.eval_clock = clock
+    timers = trainer._phase_timers
+    timers.begin_run()
+    trainer.training_step(None, None)
+    trainer.evaluate()
+    clock[0] += 1.0
+    timers.finish_step()
+
+    report = timers.drain()
+    assert set(report) == {Phase.MICRO_STEP, UNACCOUNTED}, (
+        "no loss_forward or post_backward_finish from the eval round"
+    )
+    assert report[UNACCOUNTED] == 6.0, "the eval round's 5 s plus the 1 s after it, in no phase"
+    assert trainer.calls == ["training_step", "_compute_loss", "_finish_fsdp2_backward"]
 
 
 def _reduce_worker(rank: int) -> None:

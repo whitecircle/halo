@@ -9,7 +9,7 @@ import torch
 from transformers import PretrainedConfig
 
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, row_spans_on_device
+from halo.trainers.grpo.logprob_scoring import STASHED_COLUMNS, ChunkedGRPOLogprobsMixin, row_spans_on_device
 from tests.common.harness import cuda_syncs_are_errors, gpu_test_main, record_check
 from tests.common.rank_log import log
 
@@ -53,7 +53,7 @@ def _batch(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
 
 
 def check_an_armed_forward_adds_no_host_sync(scorer: _Scorer, ids: torch.Tensor, mask: torch.Tensor):
-    scorer._armed_row_spans = row_spans_on_device(mask, LTK)[:, :3].cpu()
+    scorer._armed_row_spans = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].cpu()
     scorer.score(ids, mask)
     torch.cuda.synchronize()
     with cuda_syncs_are_errors():
@@ -74,7 +74,7 @@ def check_an_unarmed_forward_trips_the_sync_check(scorer: _Scorer, ids: torch.Te
 
 
 def check_a_table_of_another_mask_is_tallied_per_row(scorer: _Scorer, ids: torch.Tensor, mask: torch.Tensor):
-    table = row_spans_on_device(mask, LTK)[:, :3].cpu()
+    table = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].cpu()
     table[1, 1] -= 1  # row 1 spans the full width: a larger end would be refused as past the batch, not tallied
     table[4, 0] -= 1
     scorer._armed_row_spans = table

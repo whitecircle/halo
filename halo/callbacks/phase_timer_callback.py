@@ -3,7 +3,7 @@ last micro-step and the optimizer, the optimizer itself, and the step boundary t
 
 from transformers import TrainerCallback
 
-from halo.diagnostics.phase_timers import PhaseTimers
+from halo.diagnostics.phase_timers import Phase, PhaseTimers
 
 MICRO_STEP_END = "micro_step_end"
 _PRE_OPTIMIZER = "pre_optimizer"
@@ -19,11 +19,11 @@ class PhaseTimerCallback(TrainerCallback):
         self._timers.begin_run()
 
     def on_pre_optimizer_step(self, args, state, control, **kwargs):
-        self._timers.since(MICRO_STEP_END, "reduce")
+        self._timers.since(MICRO_STEP_END, Phase.REDUCE)
         self._timers.checkpoint(_PRE_OPTIMIZER)
 
     def on_optimizer_step(self, args, state, control, **kwargs):
-        self._timers.since(_PRE_OPTIMIZER, "optimizer")
+        self._timers.since(_PRE_OPTIMIZER, Phase.OPTIMIZER)
 
     def on_step_end(self, args, state, control, **kwargs):
         self._timers.finish_step()

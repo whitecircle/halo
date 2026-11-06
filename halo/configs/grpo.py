@@ -256,16 +256,15 @@ class ChunkedLogprobsArguments:
 
 
 @dataclass
-class HostWorkArguments:
-    """Diagnostics of the on-policy GRPO trainers' step loop (online, environmental)."""
+class PhaseTimerArguments:
+    """The phase-timer flag of the on-policy GRPO trainers (online, environmental)."""
 
     log_phase_times: bool = field(
         default=False,
         metadata={
             "help": "Log where each optimizer step's wall time goes as phase_time/<phase>_s (rank mean) and "
-            "phase_time/<phase>_max_s (slowest rank): rollout, sync, build, no_grad, loss_forward, micro_step, "
-            "post_backward_finish, reduce, optimizer, log_emit, and unaccounted (the step's time no phase holds). "
+            "phase_time/<phase>_max_s (slowest rank), with the step's time no phase holds as unaccounted. "
             "Costs a few CUDA events per micro-step and one all-reduce per log. "
-            "See agent-docs/training-methods/async-grpo/performance.md#host-work-per-step."
+            "Phases: agent-docs/training-methods/async-grpo/monitoring.md#phase-times."
         },
     )

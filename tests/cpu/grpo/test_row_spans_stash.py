@@ -17,7 +17,9 @@ from halo.trainers.grpo.environmental.row_order import permute_rows
 from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import (
+    STASHED_COLUMNS,
     ChunkedGRPOLogprobsMixin,
+    RowSpan,
     dense_row_spans,
     row_spans_on_device,
 )
@@ -65,7 +67,7 @@ def test_a_malformed_row_is_refused_where_the_spans_are_read(bad_row):
     mask = torch.tensor([[1, 1, 1, 1, 1], bad_row])
     with pytest.raises(ValueError, match="Row 1 has an empty or non-contiguous attention mask"):
         dense_row_spans(mask)
-    assert row_spans_on_device(mask)[:, 3].tolist() == [0, 1]
+    assert row_spans_on_device(mask)[:, RowSpan.MALFORMED].tolist() == [0, 1]
 
 
 class _Harness(ChunkedGRPOLogprobsMixin):
@@ -126,7 +128,7 @@ def test_an_armed_table_replaces_the_read_and_matches_the_unarmed_scores(host_re
     ids, mask = _batch()
     harness = _Harness()
     unarmed = harness.score(ids, mask)
-    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, :3].cpu()
+    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].cpu()
     host_reads.clear()
     armed = harness.score(ids, mask)
     assert host_reads == [], "an armed forward copies nothing to the host"
@@ -137,14 +139,14 @@ def test_an_armed_table_replaces_the_read_and_matches_the_unarmed_scores(host_re
 def test_a_table_built_from_another_mask_is_tallied_per_misread_row():
     ids, mask = _batch()
     harness = _Harness()
-    table = row_spans_on_device(mask, LTK)[:, :3].clone()
+    table = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].clone()
     table[3, 1] += 1
     table[7, 0] -= 1
     harness._armed_row_spans = table
     harness.score(ids, mask)
     assert int(harness._row_span_mismatches) == 2
 
-    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, :3]
+    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS]
     harness.score(ids, mask)
     assert int(harness._row_span_mismatches) == 2, "a matching table adds nothing"
 
@@ -153,7 +155,7 @@ def test_a_table_built_from_another_mask_is_tallied_per_misread_row():
 def test_a_table_that_does_not_fit_the_batch_raises(rows):
     ids, mask = _batch()
     harness = _Harness()
-    table = row_spans_on_device(mask, LTK)[:, :3].clone()
+    table = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].clone()
     if rows == 5:
         table = table[:rows]
     else:
@@ -166,7 +168,7 @@ def test_a_table_that_does_not_fit_the_batch_raises(rows):
 def test_a_table_off_the_host_is_refused_rather_than_synced():
     ids, mask = _batch()
     harness = _Harness()
-    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, :3].to("meta")
+    harness._armed_row_spans = row_spans_on_device(mask, LTK)[:, STASHED_COLUMNS].to("meta")
     with pytest.raises(RuntimeError, match="not the host"):
         harness.score(ids, mask)
 
@@ -231,7 +233,7 @@ def _attended(batch: dict) -> torch.Tensor:
 
 
 def _fresh(batch: dict) -> torch.Tensor:
-    return row_spans_on_device(_attended(batch), batch["completion_mask"].size(1))[:, :3]
+    return row_spans_on_device(_attended(batch), batch["completion_mask"].size(1))[:, STASHED_COLUMNS]
 
 
 def test_the_stash_resolves_where_rows_forward_densely_and_no_tp_group_re_syncs_them():

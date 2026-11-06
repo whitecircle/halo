@@ -10,6 +10,7 @@ import torch.nn.functional as F
 from accelerate.utils import gather
 from trl.trainer.utils import pad
 
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
 from halo.runtime.consensus import DeferredRankFailure, rank_max, reject_across_ranks
@@ -311,7 +312,7 @@ class StepBatchMixin:
             if plan is None
             else torch.tensor(plan.order, dtype=torch.long, device=step.attention_mask.device)
         )
-        with self._phase_timers.span("no_grad"):
+        with self._phase_timers.span(Phase.NO_GRAD):
             recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
                 step.prompt_completion_ids,
                 step.attention_mask,
@@ -327,7 +328,7 @@ class StepBatchMixin:
         forced_zero = None
         if self._is_correction and self._forced_close_ids is not None:
             ratio, forced_zero = self._zero_forced_closes(ratio, step)
-        with self._phase_timers.span("no_grad_ref"):
+        with self._phase_timers.span(Phase.NO_GRAD_REF):
             ref_logps = self._compute_ref_logps(
                 step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order, plan
             )

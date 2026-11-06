@@ -8,6 +8,7 @@ from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.messages import task_prompt
 from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
@@ -234,7 +235,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Before the rollout: an unusable prompt would cost a full round and fail first inside a Ray actor.
         self._batch_errors.reject()
 
-        with profiling_context(self, "rollout_acquire"), self._phase_timers.span("rollout", "host"):
+        with profiling_context(self, "rollout_acquire"), self._phase_timers.span(Phase.ROLLOUT, "host"):
             rollout_results = None
             if self._prefetch_enabled and mode == "train":
                 rollout_results = self._acquire_prefetched_round()
@@ -259,7 +260,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Counted once: the reasoning terms price these and the rollout metrics slice them.
         reasoning_tokens = [reasoning_token_counts(self._tokenizer, r.trajectory) for r in rollout_results]
 
-        with profiling_context(self, "build_training_tensors"), self._phase_timers.span("build", "host"):
+        with profiling_context(self, "build_training_tensors"), self._phase_timers.span(Phase.BUILD, "host"):
             result = self._build_training_tensors(
                 rollout_results, device, mode, len(inputs) - episodes, reasoning_tokens
             )

@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import ClassVar
 
 import torch
@@ -76,10 +77,22 @@ def full_logits_verdict(
     )
 
 
+class RowSpan(IntEnum):
+    """The columns of a :func:`row_spans_on_device` table. :attr:`MALFORMED` closes the columns a stashed table keeps."""
+
+    LO = 0
+    HI = 1
+    COMPLETION = 2
+    MALFORMED = 3
+
+
+STASHED_COLUMNS = slice(RowSpan.MALFORMED)
+
+
 def row_spans_on_device(attention_mask: torch.Tensor, completion_width: int = 0) -> torch.Tensor:
-    """``[rows, 4]`` int64 on the mask's device, no host sync: each row's real-token span ``lo, hi`` (a 1-token span is
-    widened by a neighbour so the next-token shift leaves a position), its count in the mask's last
-    ``completion_width`` columns, and whether it is malformed (no real token, or a hole in them)."""
+    """``[rows, 4]`` int64 on the mask's device, no host sync, with the columns of :class:`RowSpan`: each row's
+    real-token span (a 1-token span is widened by a neighbour so the next-token shift leaves a position), its count in
+    the mask's last ``completion_width`` columns, and whether it is malformed (no real token, or a hole in them)."""
     real = attention_mask.detach().bool()
     width = real.size(1)
     columns = torch.arange(width, device=real.device)
@@ -103,12 +116,20 @@ def row_spans_on_device(attention_mask: torch.Tensor, completion_width: int = 0)
 def validate_row_spans(spans: torch.Tensor) -> None:
     """Raise on the first malformed row of a host-side :func:`row_spans_on_device` table. A hole in the mask shifts
     every log-prob after it, as the dense path tail-aligns."""
-    malformed = spans[:, 3].nonzero()
+    malformed = spans[:, RowSpan.MALFORMED].nonzero()
     if malformed.numel():
         raise ValueError(
             f"Row {int(malformed[0])} has an empty or non-contiguous attention mask; the per-row dense log-prob path "
             f"requires one contiguous real-token span per row."
         )
+
+
+def host_row_spans(table: torch.Tensor) -> tuple[list[tuple[int, int]], list[int]]:
+    """A host-side table's ``[lo, hi)`` span and completion count per row."""
+    return (
+        [(lo, hi) for lo, hi in table[:, RowSpan.LO : RowSpan.COMPLETION].tolist()],
+        table[:, RowSpan.COMPLETION].tolist(),
+    )
 
 
 def dense_row_spans(
@@ -119,7 +140,7 @@ def dense_row_spans(
     # CPU launch-ahead on a path that runs repeatedly per gradient microbatch.
     table = row_spans_on_device(attention_mask, completion_width).cpu()
     validate_row_spans(table)
-    return [(lo, hi) for lo, hi in table[:, :2].tolist()], table[:, 2].tolist()
+    return host_row_spans(table)
 
 
 def _completion_window(parts: Sequence[torch.Tensor], width: int) -> torch.Tensor:
@@ -364,20 +385,19 @@ class LogprobScoringMixin:
                 f"The armed row spans sit on {armed.device}, not the host: a stage moved the batch to the device, "
                 f"which would make the spans' read a sync. Keep ROW_SPANS_KEY on the CPU."
             )
-        if armed.shape != (rows, 3) or (rows and int(armed[:, 1].max()) > width):
+        if armed.shape != (rows, RowSpan.MALFORMED) or (rows and int(armed[:, RowSpan.HI].max()) > width):
             raise RuntimeError(
                 f"The armed row spans {tuple(armed.shape)} do not fit the {rows}-row, {width}-column batch the loss "
                 f"forward scores: a stage reshaped the batch after its spans were built."
             )
-        fresh = row_spans_on_device(attention_mask, logits_to_keep)[:, :3]
+        fresh = row_spans_on_device(attention_mask, logits_to_keep)[:, STASHED_COLUMNS]
         # Pinned: a non-blocking copy from pageable memory is staged by the host.
         expected = (armed.pin_memory() if fresh.is_cuda else armed).to(fresh.device, non_blocking=True)
         mismatched = (fresh != expected).any(dim=1).sum()
         self._row_span_mismatches = (
             mismatched if self._row_span_mismatches is None else self._row_span_mismatches + mismatched
         )
-        table = armed.tolist()
-        return [(lo, hi) for lo, hi, _ in table], [completion for _, _, completion in table]
+        return host_row_spans(armed)
 
     def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, spans=None):
         """Each row's width is at least 1 so it stays autograd-connected (a pruned row drops its FSDP/EP backward

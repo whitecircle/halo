@@ -4,6 +4,7 @@ the queue as a clock read would. Durations resolve at :meth:`PhaseTimers.drain`,
 import time
 from collections import defaultdict
 from contextlib import AbstractContextManager, contextmanager, nullcontext
+from enum import StrEnum
 from typing import Literal, NamedTuple
 
 import torch
@@ -15,6 +16,23 @@ BoundaryMark = torch.cuda.Event | float
 SpanKind = Literal["host", "stream"]
 
 UNACCOUNTED = "unaccounted"
+
+
+class Phase(StrEnum):
+    """The spans the on-policy GRPO trainers' step loop times, which every caller of :meth:`PhaseTimers.span` names."""
+
+    ROLLOUT = "rollout"
+    SYNC = "sync"
+    BUILD = "build"
+    NO_GRAD = "no_grad"
+    NO_GRAD_REF = "no_grad_ref"
+    MICRO_STEP = "micro_step"
+    LOSS_FORWARD = "loss_forward"
+    POST_BACKWARD_FINISH = "post_backward_finish"
+    REDUCE = "reduce"
+    OPTIMIZER = "optimizer"
+    LOG_EMIT = "log_emit"
+
 
 _NO_SPAN = nullcontext()
 

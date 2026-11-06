@@ -7,7 +7,7 @@ import torch
 
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.logprob_scoring import row_spans_on_device, validate_row_spans
+from halo.trainers.grpo.logprob_scoring import STASHED_COLUMNS, row_spans_on_device, validate_row_spans
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class RowSpanStashMixin:
         attended = torch.cat([batch["prompt_mask"], batch["completion_mask"]], dim=1)
         spans = row_spans_on_device(attended, completion_width).cpu()
         validate_row_spans(spans)
-        batch[ROW_SPANS_KEY] = spans[:, :3].contiguous()
+        batch[ROW_SPANS_KEY] = spans[:, STASHED_COLUMNS].contiguous()
         return batch
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
