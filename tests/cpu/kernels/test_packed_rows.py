@@ -65,6 +65,26 @@ def test_a_doubled_gdn_scalar_gradient_is_past_the_floor_of_a_bf16_model_in_anot
     assert gate.group_grad_errors(split, per_row)["gdn_scalars"] <= floors["gdn_scalars"]
 
 
+def test_a_noise_dominated_scalar_group_is_judged_by_its_norm():
+    """A_log whose bf16 gradient is far from fp32 passes with a flipped direction and equal norm, and fails at 2x
+    and 0.5x; a resolvable projection group keeps the direction rule."""
+    reference = {"l.linear_attn.A_log": torch.tensor([1.0, -1.0, 0.5]), "l.self_attn.q_proj.weight": torch.ones(64)}
+    per_row = {"l.linear_attn.A_log": torch.tensor([0.9, 0.2, -0.4]), "l.self_attn.q_proj.weight": torch.ones(64)}
+    floors = gate.grad_noise_floor(per_row, reference)
+
+    def verdict(packed):
+        return gate.judge_grad_groups(packed, per_row, reference, floors, 2.0)
+
+    same = {**per_row, "l.linear_attn.A_log": torch.tensor([-0.4, 0.9, 0.2])}
+    verdicts, by_norm = verdict(same)
+    assert by_norm == ["gdn_scalars"] and all(verdicts.values())
+    for scale in (2.0, 0.5):
+        scaled = {**per_row, "l.linear_attn.A_log": per_row["l.linear_attn.A_log"] * scale}
+        assert verdict(scaled)[0]["gdn_scalars"] is False
+    wrong = {**per_row, "l.self_attn.q_proj.weight": torch.ones(64) * 1.5}
+    assert verdict(wrong)[0]["projections"] is False
+
+
 def test_the_split_step_sums_to_the_joint_step(model):
     documents = gate.build_documents((12, 9), model.config.vocab_size, "cpu")
     _, joint = gate.row_step(model, documents, None)

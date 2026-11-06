@@ -11,6 +11,13 @@ from tests.common.numerics import max_abs_rel_err
 SEED = 0
 # Of the reference's peak, where the per-row error is below what a ratio can resolve.
 ERROR_FLOOR = 2e-3
+# A group whose per-row bf16 gradient is this far (L2, relative) from fp32 is noise-dominated: bf16 cannot resolve its
+# direction (a few bf16 steps of 2^-8 already, and below the 0.016 floor of the smallest scalar group that failed
+# a direction gate while passing under FA4), so it is judged on its norm.
+UNRESOLVABLE_ERROR = 0.01
+# Packed over per-row gradient norm of such a group: bf16 noise moves it by about the group's error (<= 0.12), a
+# doubled or halved gradient lands outside.
+NORM_BAND = (0.8, 1.25)
 # Name markers of the gradient groups, checked in order; every other parameter is a projection.
 _GRAD_GROUPS = (
     ("gdn_scalars", ("A_log", "dt_bias")),
@@ -118,6 +125,41 @@ def grad_noise_floor(
     rerun distances, not a ratio of the per-row error, set its floor."""
     distances = [group_grad_errors(per_row, reference)] + [group_grad_errors(rerun, per_row) for rerun in reruns]
     return {group: max(ERROR_FLOOR, *(distance[group] for distance in distances)) for group in distances[0]}
+
+
+def group_norm_ratios(grads: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> dict[str, float]:
+    """Per group, the gradient norm over the reference's, each group's gradients taken as one vector."""
+    ratios = {}
+    for group in sorted({grad_group(name) for name in reference}):
+        names = [name for name in reference if grad_group(name) == group and name in grads]
+        mine = torch.cat([grads[n].double().flatten() for n in names]).norm()
+        theirs = torch.cat([reference[n].double().flatten() for n in names]).norm().clamp(min=1e-12)
+        ratios[group] = (mine / theirs).item()
+    return ratios
+
+
+def judge_grad_groups(
+    packed: dict[str, torch.Tensor],
+    per_row: dict[str, torch.Tensor],
+    reference: dict[str, torch.Tensor],
+    floors: dict[str, float],
+    ratio: float,
+) -> tuple[dict[str, bool], list[str]]:
+    """Per group, whether the packed gradients hold, and the groups judged by norm. A group whose per-row bf16
+    gradient is ``UNRESOLVABLE_ERROR`` or more from fp32 cannot be resolved in bf16: its packed/per-row norm ratio must
+    sit in ``NORM_BAND`` and its direction error is not gated. Every other group's error must stay within ``ratio``
+    times its floor."""
+    errors = group_grad_errors(packed, reference)
+    per_row_errors = group_grad_errors(per_row, reference)
+    norm_ratios = group_norm_ratios(packed, per_row)
+    by_norm = [group for group in errors if per_row_errors[group] >= UNRESOLVABLE_ERROR]
+    verdicts = {
+        group: NORM_BAND[0] <= norm_ratios[group] <= NORM_BAND[1]
+        if group in by_norm
+        else errors[group] <= ratio * floors[group]
+        for group in errors
+    }
+    return verdicts, by_norm
 
 
 def documents_are_isolated(model, attn: str, emission: str, lengths) -> bool:

@@ -7,7 +7,9 @@ The ``markers`` and ``mrope_plane`` emissions must score and train as each row a
 ``flash_varlen`` alone leave a GatedDeltaNet family's conv and delta rule without a document boundary: they are
 negative controls that must leak across documents, which proves the isolation check can fail. Gradients compare per
 parameter group against the largest noise reference: the per-row forward's distance from fp32 and from itself with the
-documents reordered and with one backward per document. A CUDA fault poisons the process, hence one launch per family
+documents reordered and with one backward per document. A group whose per-row bf16 gradient is itself far from fp32
+(per-head scalar sums of cancelling terms) is judged on its packed/per-row norm ratio instead, its direction error only
+logged. A CUDA fault poisons the process, hence one launch per family
 and emission.
 """
 
@@ -31,6 +33,7 @@ from tests.common.packed_rows import (
     documents_are_isolated,
     grad_noise_floor,
     group_grad_errors,
+    judge_grad_groups,
     row_step,
     set_attention,
     split_row_step,
@@ -108,9 +111,11 @@ def _check_attention(family_name, attn, emission, lengths, label, models, checks
     checks[f"{key}_finite"] = bool(finite)
     checks[f"{key}_reaches_the_kernel"] = set(packed_calls) == {attn} == set(per_row_calls)
     checks[f"{key}_logits_match_per_row"] = packed <= PACKED_ERROR_RATIO * floor
-    checks[f"{key}_grads_match_per_row"] = all(
-        packed_grads_error[group] <= PACKED_ERROR_RATIO * grad_floors[group] for group in packed_grads_error
+    verdicts, by_norm = judge_grad_groups(
+        packed_grads, per_row_grads, reference_grads, grad_floors, PACKED_ERROR_RATIO
     )
+    log(f"  [{family_name}/{attn}/{emission}/{label}] groups judged by norm ratio: {by_norm or 'none'}")
+    checks[f"{key}_grads_match_per_row"] = all(verdicts.values())
     metrics[f"{key}_logits_error"], metrics[f"{key}_logits_error_per_row"] = packed, floor
     metrics[f"{key}_grad_error"], metrics[f"{key}_grad_noise_floor"] = packed_grad, grad_floor
 
