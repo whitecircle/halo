@@ -887,6 +887,19 @@ def test_a_checkpoint_without_pending_rounds_resumes_cold(tmp_path):
     assert _trained_batches(host) == ["b3", "b3"], "the cold round primes the lag with its own batch"
 
 
+@pytest.mark.parametrize("prefetch", [True, False])
+def test_a_checkpoint_without_a_sidecar_says_its_halting_counters_restart(tmp_path, caplog, monkeypatch, prefetch):
+    """A run that does not prefetch carries its halting patience in the same file, so a missing file resets it."""
+    monkeypatch.setattr(async_mod, "is_global_main_process", lambda: True)
+    host = _Host()
+    host._prefetch_enabled = prefetch
+    with caplog.at_level("WARNING"):
+        host._restore_trainer_sidecars(str(tmp_path))
+    text = " ".join(record.getMessage() for record in caplog.records)
+    assert "halting counters" in text and "restart at zero" in text
+    assert ("cold rounds" in text) is prefetch
+
+
 def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
     host = _Host()
     host._prefetch_enabled = False

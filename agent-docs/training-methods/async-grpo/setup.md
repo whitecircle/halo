@@ -151,6 +151,7 @@ one the round outlasts the update, so it sits near 0 at `prefetch_depth: 1`; a d
 
 A checkpoint stores each rank's submitted-but-untrained rounds, oldest first (`prefetch_pending-<rank>-of-<world>.pt`),
 and a resume resubmits them in order before its first round.
+The same file carries the run's halting counters, so a resume at another world size, or from a checkpoint that has no file, restarts their patience at zero and logs it.
 
 - A save on a generation boundary (every save by default, since `steps_per_generation` equals the accumulation
   steps) resumes onto the batches an uninterrupted run trains. A save inside a round that feeds several optimizer
@@ -162,7 +163,7 @@ and a resume resubmits them in order before its first round.
 - Under TP or ETP only each group's leader prefetches: a follower's file holds no rounds, and a resume gives it none to
   resubmit, whatever the checkpoint's file held.
 - A file present on some ranks only (a non-shared filesystem under another rank-to-node placement, or a torn copy)
-  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds.
+  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds, which also resets the halting counters the files carry.
 
 ![One rollout server (compose default, prefetch unset): the push pauses the engine, so step time is sync + round + update](../../assets/diagrams/environmental_grpo_single_server.png)
 

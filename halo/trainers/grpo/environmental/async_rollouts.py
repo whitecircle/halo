@@ -519,11 +519,17 @@ class AsyncRolloutMixin:
             f"{PREFETCH_PENDING_PREFIX}-* files to open with cold rounds.",
         )
         if path is None:
-            if self._prefetch_enabled and is_global_main_process():
+            if is_global_main_process():
+                prefetched = (
+                    " and opens with cold rounds: if the saving run prefetched, the batches it had drawn but not "
+                    "trained are skipped and the next ones trained twice"
+                    if self._prefetch_enabled
+                    else ""
+                )
                 logger.warning(
-                    f"{checkpoint} holds no pending prefetch rounds for this world size, so the run opens with "
-                    "cold rounds: if the saving run prefetched, the batches it had drawn but not trained are "
-                    "skipped and the next ones trained twice."
+                    f"{checkpoint} holds no resume sidecar for this world size, so the halting counters "
+                    f"(zero-gradient, empty-rollout and episode-error rounds, early-stop streaks) restart at zero"
+                    f"{prefetched}."
                 )
             return
         if "halting" in payload:
