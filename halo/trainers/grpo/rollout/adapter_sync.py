@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import re
 import uuid
 from collections.abc import Callable
 from functools import partial
@@ -13,6 +15,8 @@ from typing import TYPE_CHECKING, NamedTuple
 
 import requests
 import torch
+from huggingface_hub import snapshot_download
+from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 from peft.tuners.lora.layer import Linear, LoraLayer
 from transformers.core_model_loading import rename_source_key
 
@@ -57,6 +61,9 @@ logger = logging.getLogger(__name__)
 # its predecessor left on an engine.
 ADAPTER_NAME_PREFIX = "halo-adapter"
 
+# The cache layout an engine's ``model_path`` takes when it loaded a hub repo: models--<org>--<name>/snapshots/<commit>.
+_HF_SNAPSHOT_PATH = re.compile(r"(?:^|/)models--(?P<repo>[^/]+)/snapshots/(?P<commit>[^/]+)(?:/|$)")
+
 
 class AdapterServing(NamedTuple):
     """What the run's adapters are, as the engine will be asked to serve them."""
@@ -76,18 +83,45 @@ class BasePlan(NamedTuple):
     holdings: dict[str, list[str] | None]
 
 
+def _snapshot_of(path: str) -> tuple[str, str] | None:
+    """The (repo id, commit) a hub-cache snapshot directory names, or ``None`` for any other path."""
+    found = _HF_SNAPSHOT_PATH.search(path)
+    return None if found is None else (found["repo"].replace("--", "/"), found["commit"])
+
+
 def resolve_launch_base(model: torch.nn.Module, async_config: AsyncRolloutConfig) -> ServedBase | None:
-    """The base the trainer's frozen weights are, spelled as an engine launched with them reports it; ``None`` where
-    they are not a checkpoint an engine could have launched with (a from-scratch init, a grown vocabulary)."""
+    """The base the trainer's frozen weights are, spelled as an engine launched with them reports it: a hub id is
+    resolved to its snapshot directory through the cache the trainer loaded from. ``None`` where they are not a
+    checkpoint an engine could have launched with (a from-scratch init, a grown vocabulary, a hub id the cache lacks)."""
     live = unwrap_framework_wrappers(model)
     path = weights_read_from(live)
     if path is None or vocabulary_grown(live):
         return None
+    revision = getattr(getattr(live, "config", None), "_commit_hash", None)
+    if not os.path.isdir(path):
+        try:
+            path = snapshot_download(path, revision=revision, local_files_only=True)
+        except (LocalEntryNotFoundError, HFValidationError):
+            return None
+    path = path.rstrip("/")
+    snapshot = _snapshot_of(path)
     return ServedBase(
-        model_id=async_config.model_name,
-        path=path.rstrip("/"),
-        revision=getattr(getattr(live, "config", None), "_commit_hash", None),
+        model_id=async_config.model_name, path=path, revision=snapshot[1] if snapshot is not None else revision
     )
+
+
+def serves_launch_base(served: ServedBase, launch: ServedBase) -> bool:
+    """Whether a server reports the weights the trainer launched with, matched on what identifies them: the model id
+    its requests name, then the repo and commit both paths take in the hub cache, or else the same real path. A path
+    that is neither is no match, and nor is a revision the server reports that the trainer's does not equal."""
+    if served.model_id != launch.model_id or served.path is None or launch.path is None:
+        return False
+    served_snapshot, launch_snapshot = _snapshot_of(served.path), _snapshot_of(launch.path)
+    if served_snapshot is not None and launch_snapshot is not None:
+        same = served_snapshot == launch_snapshot
+    else:
+        same = os.path.realpath(served.path) == os.path.realpath(launch.path)
+    return same and served.revision in (None, launch.revision)
 
 
 def resolve_live_versions(async_config: AsyncRolloutConfig) -> int:
@@ -382,7 +416,7 @@ class AdapterSync:
             served = self._bound_servers().served_base(url)
         except requests.exceptions.RequestException:
             return False
-        return served == self.launch_base
+        return serves_launch_base(served, self.launch_base)
 
     def _bound_servers(self) -> AdapterServers:
         if self.servers is None:

@@ -11,13 +11,14 @@ from types import SimpleNamespace
 import pytest
 import requests
 import torch
+from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.environments.engine_wire import build_payload
 from halo.environments.episode import RolloutResult
 from halo.environments.messages import Trajectory
-from halo.environments.ray_actors import RolloutManager
+from halo.environments.ray_actors import EnvironmentActor, RolloutManager
 from halo.environments.rollout_config import RolloutConfig
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
@@ -36,8 +37,8 @@ from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from tests.common.adapter_sync import build_adapter_sync
 from tests.common.fake_engines import FakeSGLangServer
-from tests.gpu.trainers.grpo.test_adapter_sync_e2e import build_adapter_sync
 
 _LORA = {
     "max_lora_rank": 16,
@@ -337,6 +338,35 @@ def test_a_server_that_answers_not_loaded_is_excluded_and_the_episode_replayed(
     assert len(kept.completion_models) == 4
 
 
+class _EnvironmentActorPlaying:
+    """The real actor's episode loop and chat request, off-cluster, standing in for the Ray actor a manager calls."""
+
+    def __init__(self):
+        cls = EnvironmentActor.__ray_metadata__.modified_class
+        self.actor = cls.__new__(cls)
+        self.actor.__init__(actor_id=0, env_type="native_math", env_config={"max_turns": 1})
+        self.run_episode = SimpleNamespace(remote=self.actor.run_episode)
+
+
+def test_the_engines_unloaded_adapter_answer_reaches_the_routing_through_the_actors_request(
+    sync_of, servers, base_pushes, client_pool
+):
+    """The fake's 400 body is SGLang's own; it goes out through the actor's chat request and error row, not a
+    hand-built message, and the routing excludes the server from it."""
+    (sync, trainer), (_, [kept, restarted]) = sync_of, servers
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+    manager = _manager_over(sync, [restarted, kept], _EnvironmentActorPlaying())
+    manager.rollout_config = RolloutConfig(backend="sglang", model_name=_BASE_MODEL, max_retries=0)
+
+    results = _play(manager, 1)
+
+    assert restarted.completion_models == [f"{_BASE_MODEL}:{sync.versions.current}"], "the request named the adapter"
+    assert sync.routes.eligible([kept.url, restarted.url], sync.versions.current) == [kept.url]
+    assert len(kept.completion_models) == 1, "and the episode ran again on the server that holds it"
+    assert len(results) == 1
+
+
 def test_an_error_that_is_not_a_missing_adapter_is_not_routed_around(sync_of, servers, base_pushes, client_pool):
     (sync, trainer), (_, fakes) = sync_of, servers
     sync.sync(trainer, client_pool)
@@ -424,19 +454,101 @@ def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_o
     assert restarted.adapters == {}
 
 
-def test_the_launch_base_is_the_weights_the_trainer_read(monkeypatch):
+def test_the_launch_base_is_the_weights_the_trainer_read(monkeypatch, tmp_path):
     model = _peft_model()
     model.config._commit_hash = "abc123"
-    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: "/models/policy/")
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: f"{tmp_path}/")
     config = SimpleNamespace(model_name=_BASE_MODEL)
 
-    assert adapter_sync.resolve_launch_base(model, config) == ServedBase(_BASE_MODEL, "/models/policy", "abc123")
+    assert adapter_sync.resolve_launch_base(model, config) == ServedBase(_BASE_MODEL, str(tmp_path), "abc123")
 
     monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: None)
     assert adapter_sync.resolve_launch_base(model, config) is None
-    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: "/models/policy")
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: str(tmp_path))
     monkeypatch.setattr(adapter_sync, "vocabulary_grown", lambda _: True)
     assert adapter_sync.resolve_launch_base(model, config) is None
+
+
+_COMMIT = "c0ffee" * 6 + "abcd"
+_HUB_ID = "org/policy"
+
+
+def _hub_cache(root, commit=_COMMIT):
+    snapshot = root / "models--org--policy" / "snapshots" / commit
+    snapshot.mkdir(parents=True)
+    (root / "models--org--policy" / "refs").mkdir()
+    (root / "models--org--policy" / "refs" / "main").write_text(commit)
+    return snapshot
+
+
+@pytest.fixture
+def hub_cache(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    return _hub_cache(tmp_path)
+
+
+def test_a_hub_id_resolves_to_its_cached_snapshot_and_commit(hub_cache, monkeypatch):
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: _HUB_ID)
+
+    launch = adapter_sync.resolve_launch_base(_peft_model(), SimpleNamespace(model_name=_HUB_ID))
+
+    assert launch == ServedBase(_HUB_ID, str(hub_cache), _COMMIT)
+
+
+def test_a_hub_id_the_cache_lacks_has_no_launch_base(tmp_path, monkeypatch):
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: _HUB_ID)
+
+    assert adapter_sync.resolve_launch_base(_peft_model(), SimpleNamespace(model_name=_HUB_ID)) is None
+
+
+def _sglang_reports(path, revision=None) -> ServedBase:
+    return ServedBase(_HUB_ID, path, revision)
+
+
+def test_a_server_that_loaded_the_snapshot_serves_the_hub_id_the_trainer_launched_with(hub_cache, tmp_path):
+    """SGLang reports the snapshot path and no revision for a base it loaded by hub id."""
+    launch = ServedBase(_HUB_ID, str(hub_cache), _COMMIT)
+    elsewhere = f"/mnt/other/hf/hub/models--org--policy/snapshots/{_COMMIT}"
+
+    assert adapter_sync.serves_launch_base(_sglang_reports(str(hub_cache)), launch)
+    assert adapter_sync.serves_launch_base(_sglang_reports(elsewhere), launch), "another mount of the same cache"
+    assert not adapter_sync.serves_launch_base(_sglang_reports(elsewhere.replace(_COMMIT, "f" * 40)), launch)
+    assert not adapter_sync.serves_launch_base(_sglang_reports(elsewhere.replace("--policy", "--other")), launch)
+    assert not adapter_sync.serves_launch_base(_sglang_reports(elsewhere, revision="f" * 40), launch)
+    assert not adapter_sync.serves_launch_base(_sglang_reports(None), launch)
+    assert not adapter_sync.serves_launch_base(_sglang_reports("/models/policy"), launch), "a path naming no commit"
+
+
+def test_two_spellings_of_one_local_directory_are_one_base(tmp_path):
+    real = tmp_path / "policy"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+    launch = ServedBase(_HUB_ID, str(real), None)
+
+    assert adapter_sync.serves_launch_base(_sglang_reports(f"{link}"), launch)
+    assert not adapter_sync.serves_launch_base(_sglang_reports(str(tmp_path / "other")), launch)
+
+
+def test_a_restarted_server_that_loaded_the_launch_snapshot_gets_the_adapter_at_once(
+    hub_cache, servers, base_pushes, events, client_pool, monkeypatch
+):
+    """The trainer launched by hub id and the server reports the snapshot path: the pair the GPU run saw differ."""
+    pool, [kept, restarted] = servers
+    model = _peft_model()
+    monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: _HUB_ID)
+    launch = adapter_sync.resolve_launch_base(model, SimpleNamespace(model_name=_BASE_MODEL))
+    sync = _adapter_sync(model, pool, launch_base=launch)
+    for fake in (kept, restarted):
+        fake.model_path, fake.revision = str(hub_cache), None
+    sync.sync(SimpleNamespace(model=model), client_pool)
+    events.clear()
+    restarted.restart()
+
+    sync.recover()
+
+    assert sync.versions.current in restarted.adapters and events == []
 
 
 def test_a_down_server_is_reported_within_seconds(sync_of, servers, base_pushes, client_pool, caplog):
@@ -688,10 +800,6 @@ def test_the_all_modules_launch_covers_every_adapted_projection():
         fake.close()
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 # SGLang 0.5.22 tokenizer_manager: the 400 body's message for an adapter it never loaded.
 _SGLANG_UNLOADED_ADAPTER_BODY = (
     '{"object":"error","message":"Got LoRA adapter that has never been loaded: halo-adapter-bogus\\n'
@@ -712,3 +820,7 @@ def test_the_gpu_e2e_builds_its_sync_with_the_class_signature():
     sync = build_adapter_sync(resolve_adapter_serving(_peft_model()), AdapterVersions())
 
     assert isinstance(sync, AdapterSync)
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

@@ -14,17 +14,16 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,
-    AdapterSync,
     build_adapter_requirements,
     reject_unadaptable_model,
     resolve_adapter_serving,
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
-from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from tests.common.adapter_sync import build_adapter_sync
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
@@ -68,11 +67,6 @@ def _engine_logprobs(client: SGLangWeightSyncClient, ids: list[int], adapter: st
 
 def _gap(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a - b).abs().mean())
-
-
-def build_adapter_sync(serving, versions: AdapterVersions) -> AdapterSync:
-    routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
-    return AdapterSync(serving, versions, routes, None)
 
 
 def run(ctx) -> dict:
