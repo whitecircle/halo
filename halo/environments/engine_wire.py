@@ -274,7 +274,7 @@ def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
             fields["return_meta_info"] = True
             fields["return_prompt_token_ids"] = True
     if config.capture_routed_experts and not is_vllm:
-        # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as assemble_rollout_masks expects.
+        # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as build_rollout_routing expects.
         fields["return_routed_experts"] = True
     return fields
 
