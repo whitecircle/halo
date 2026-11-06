@@ -5,8 +5,10 @@ varlen forward score and train as each row alone. Held per family, per emission 
 
 The ``markers`` and ``mrope_plane`` emissions must score and train as each row alone. ``position_ids`` and
 ``flash_varlen`` alone leave a GatedDeltaNet family's conv and delta rule without a document boundary: they are
-negative controls that must leak across documents, which proves the isolation check can fail. A CUDA fault poisons the
-process, hence one launch per family and emission.
+negative controls that must leak across documents, which proves the isolation check can fail. Gradients compare per
+parameter group against the largest noise reference: the per-row forward's distance from fp32 and from itself with the
+documents reordered and with one backward per document. A CUDA fault poisons the process, hence one launch per family
+and emission.
 """
 
 import argparse
@@ -31,6 +33,7 @@ from tests.common.packed_rows import (
     group_grad_errors,
     row_step,
     set_attention,
+    split_row_step,
 )
 from tests.common.rank_log import log
 from tests.common.tiny_models import (
@@ -89,7 +92,7 @@ def _check_attention(family_name, attn, emission, lengths, label, models, checks
         packed_logits, packed_grads = row_step(model, documents, emission)
     _, reordered_grads = row_step(model, documents[::-1], None)
     floor = max(max_abs_rel_err(per_row_logits, reference_logits), ERROR_FLOOR)
-    grad_floors = grad_noise_floor(per_row_grads, reordered_grads, reference_grads)
+    grad_floors = grad_noise_floor(per_row_grads, reference_grads, reordered_grads, split_row_step(model, documents))
     packed = max_abs_rel_err(packed_logits, reference_logits)
     packed_grads_error = group_grad_errors(packed_grads, reference_grads)
     worst_group = max(packed_grads_error, key=lambda group: packed_grads_error[group] / grad_floors[group])

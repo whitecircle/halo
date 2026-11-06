@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.common import packed_rows as gate
-from tests.common.tiny_models import TINY_DENSE_ATTENTION_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_DENSE_ATTENTION_FAMILIES, TINY_DENSE_FAMILIES, tiny_family_model
 
 
 @pytest.fixture(scope="module")
@@ -42,8 +42,35 @@ def test_a_group_scalar_that_flips_does_not_stand_for_its_group():
 def test_a_leak_into_a_projection_exceeds_the_noise_floor():
     reference = {"layers.0.self_attn.q_proj.weight": torch.ones(64)}
     leaked = {"layers.0.self_attn.q_proj.weight": torch.ones(64) * 1.5}
-    floors = gate.grad_noise_floor(reference, reference, reference)
+    floors = gate.grad_noise_floor(reference, reference, reference, reference)
     assert gate.group_grad_errors(leaked, reference)["projections"] > 2 * floors["projections"]
+
+
+def test_a_doubled_gdn_scalar_gradient_is_past_the_floor_of_a_bf16_model_in_another_order():
+    """The floor comes from a bf16 model's own reruns; a packed backward that doubled a head's A_log gradient stays
+    past the gate's ratio while the reruns themselves stay under it."""
+    torch.manual_seed(0)
+    gdn = tiny_family_model(
+        TINY_DENSE_FAMILIES["qwen3_5"],
+        overrides={"num_hidden_layers": 2, "layer_types": ["linear_attention", "full_attention"]},
+    ).to(torch.bfloat16)
+    documents = gate.build_documents((12, 9, 7), gdn.config.get_text_config().vocab_size, "cpu")
+    _, per_row = gate.row_step(gdn, documents, None)
+    _, reordered = gate.row_step(gdn, documents[::-1], None)
+    split = gate.split_row_step(gdn, documents)
+    floors = gate.grad_noise_floor(per_row, per_row, reordered, split)
+    assert any("A_log" in name for name in per_row)
+    doubled = {name: grad * 2 if "A_log" in name else grad for name, grad in per_row.items()}
+    assert gate.group_grad_errors(doubled, per_row)["gdn_scalars"] > 2.0 * floors["gdn_scalars"]
+    assert gate.group_grad_errors(split, per_row)["gdn_scalars"] <= floors["gdn_scalars"]
+
+
+def test_the_split_step_sums_to_the_joint_step(model):
+    documents = gate.build_documents((12, 9), model.config.vocab_size, "cpu")
+    _, joint = gate.row_step(model, documents, None)
+    split = gate.split_row_step(model, documents)
+    assert split.keys() == joint.keys()
+    assert all(torch.allclose(split[n], joint[n], rtol=1e-3, atol=1e-5) for n in joint)
 
 
 def test_step_returns_gradients_and_logits_carry_the_graph(model):

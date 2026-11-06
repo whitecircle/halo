@@ -66,13 +66,26 @@ def row_logits(model, documents: list[torch.Tensor], emission: str | None) -> to
     return model(input_ids=ids, use_cache=False, **emission_kwargs(emission, positions, model.config)).logits[0]
 
 
+def _collect_grads(model) -> dict[str, torch.Tensor]:
+    return {name: p.grad.detach().float() for name, p in model.named_parameters() if p.grad is not None}
+
+
 def row_step(model, documents: list[torch.Tensor], emission: str | None):
     """The logits of ``row_logits`` and the parameter gradients of their summed cross entropy."""
     model.zero_grad(set_to_none=True)
     logits = row_logits(model, documents, emission)
     F.cross_entropy(logits.float(), next_token_targets(documents), ignore_index=-100, reduction="sum").backward()
-    grads = {name: p.grad.detach().float() for name, p in model.named_parameters() if p.grad is not None}
-    return logits.detach().float(), grads
+    return logits.detach().float(), _collect_grads(model)
+
+
+def split_row_step(model, documents: list[torch.Tensor]) -> dict[str, torch.Tensor]:
+    """The gradients of ``row_step`` accumulated one document's backward at a time: the same sum in the order of
+    micro-batches, which is a noise reference for packing's change of accumulation order."""
+    model.zero_grad(set_to_none=True)
+    for document in documents:
+        logits = row_logits(model, [document], None)
+        F.cross_entropy(logits.float(), next_token_targets([document]), ignore_index=-100, reduction="sum").backward()
+    return _collect_grads(model)
 
 
 def grad_group(name: str) -> str:
@@ -97,13 +110,14 @@ def group_grad_errors(grads: dict[str, torch.Tensor], reference: dict[str, torch
 
 
 def grad_noise_floor(
-    per_row: dict[str, torch.Tensor], reordered: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]
+    per_row: dict[str, torch.Tensor], reference: dict[str, torch.Tensor], *reruns: dict[str, torch.Tensor]
 ) -> dict[str, float]:
-    """Per group, the larger of the per-row forward's distance from the fp32 reference and its distance from itself on
-    the documents in another order: the same sum accumulated differently, which is all a packed row may differ by."""
-    from_reference = group_grad_errors(per_row, reference)
-    from_reorder = group_grad_errors(reordered, per_row)
-    return {group: max(from_reference[group], from_reorder[group], ERROR_FLOOR) for group in from_reference}
+    """Per group, the largest distance of any noise reference: the per-row forward from the fp32 reference, and from
+    itself in each rerun (documents in another order, one backward per document), the same sum accumulated
+    differently, which is all a packed row may differ by. A group of per-head scalars sums cancelling terms, so its
+    rerun distances, not a ratio of the per-row error, set its floor."""
+    distances = [group_grad_errors(per_row, reference)] + [group_grad_errors(rerun, per_row) for rerun in reruns]
+    return {group: max(ERROR_FLOOR, *(distance[group] for distance in distances)) for group in distances[0]}
 
 
 def documents_are_isolated(model, attn: str, emission: str, lengths) -> bool:
