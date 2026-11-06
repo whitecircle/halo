@@ -376,19 +376,19 @@ class WeightSyncClientBase(UpdateStream, ABC):
     @classmethod
     def adapter_request_model(cls, base_model: str, adapter: str) -> str:
         """The ``model`` a request names to be served through ``adapter``."""
-        raise NotImplementedError(f"{cls.BACKEND_NAME} serves no adapter: {cls.ADAPTER_SYNC_REFUSAL}")
+        cls._reject_adapter_serving()
 
     def load_adapter(self, name: str, config: dict, payload: str) -> None:
         """Register the serialized adapter ``payload`` as ``name``; raises where the engine refuses."""
-        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+        self._reject_adapter_serving()
 
     def unload_adapter(self, name: str) -> None:
         """Drop the adapter ``name`` once the requests running under it finished."""
-        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+        self._reject_adapter_serving()
 
     def loaded_adapters(self) -> list[str]:
         """The adapters registered on the engine."""
-        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+        self._reject_adapter_serving()
 
     def served_model_id(self) -> str:
         if self._served_model_id is None:
@@ -400,7 +400,11 @@ class WeightSyncClientBase(UpdateStream, ABC):
 
     def served_base(self) -> ServedBase:
         """The base this engine launched with, which a restart serves again."""
-        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+        self._reject_adapter_serving()
+
+    @classmethod
+    def _reject_adapter_serving(cls) -> NoReturn:
+        raise NotImplementedError(f"{cls.BACKEND_NAME} serves no adapter: {cls.ADAPTER_SYNC_REFUSAL}")
 
     @classmethod
     def is_adapter_missing(cls, error: str, adapter: str) -> bool:
