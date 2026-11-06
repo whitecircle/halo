@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 import torch
 import torch.distributed as dist
+from peft import LoraConfig, get_peft_model
 from torch.utils.checkpoint import checkpoint
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
@@ -16,7 +17,7 @@ from halo.distributed.context_parallel.config import CPConfig, CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP, Qwen3_5UlyssesGatedDelta
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.models.unwrapping import strip_cp_attention_level
+from halo.models.unwrapping import find_peft_model, strip_cp_attention_level
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
@@ -193,6 +194,7 @@ def test_whole_hybrid_cp_model_with_cpu_reference_attention_and_native_reload():
         ({}, 4, "CP2"),
         ({"linear_num_key_heads": 3, "linear_num_value_heads": 6}, 2, "key heads"),
         ({"linear_num_value_heads": 7}, 2, "value heads"),
+        ({"linear_num_key_heads": 4, "linear_num_value_heads": 6}, 2, "complete groups of key heads"),
     ),
 )
 def test_gated_delta_geometry_refusals_before_group_lookup(overrides, cp_size, match):
@@ -234,28 +236,96 @@ def test_hybrid_training_gate_rejects_other_trainers_adapters_and_packing(suppor
         )
 
 
-def test_adoption_gate_executes_for_a_cp_capable_non_sft_trainer():
+@pytest.mark.parametrize(
+    "layer_metadata",
+    (
+        pytest.param("missing", id="missing"),
+        pytest.param(None, id="null"),
+        pytest.param([], id="empty"),
+        pytest.param(["full_attention", "full_attention"], id="misleading"),
+    ),
+)
+def test_hybrid_training_gate_reads_live_layers_without_linear_attention_metadata(layer_metadata):
     model = build_hybrid_model()
+    if layer_metadata == "missing":
+        del model.config.layer_types
+    else:
+        model.config.layer_types = layer_metadata
+    assert any(type(module).__name__ in ULYSSES_GATED_DELTA_MAP for module in model.modules())
+    with pytest.raises(CPConfigError, match="SFT only"):
+        reject_hybrid_cp_training(
+            model,
+            SimpleNamespace(),
+            SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+            supported=False,
+        )
+
+
+def test_hybrid_training_gate_refuses_peft_tuner_layers_injected_in_place():
+    model = get_peft_model(build_hybrid_model(), LoraConfig(r=2, target_modules=["in_proj_qkv"])).get_base_model()
+    assert find_peft_model(model) is None
+    assert any("lora_A" in name for name, _ in model.named_parameters())
+    with pytest.raises(CPConfigError, match="full fine-tuning"):
+        reject_hybrid_cp_training(
+            model,
+            SimpleNamespace(),
+            SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+            supported=True,
+        )
+
+
+@pytest.mark.parametrize("is_cp_mode", [False, True])
+def test_hybrid_training_gate_leaves_non_cp_and_attention_only_cp_unchanged(is_cp_mode):
+    model = build_hybrid_model(**({"layer_types": ["full_attention", "full_attention"]} if is_cp_mode else {}))
+    reject_hybrid_cp_training(
+        model,
+        SimpleNamespace(),
+        SimpleNamespace(is_cp_mode=is_cp_mode, cp_size=2, expert_lora=False),
+        supported=False,
+        peft_config=object(),
+    )
+
+
+@pytest.mark.parametrize("model", [None, "tiny/checkpoint"])
+def test_hybrid_training_gate_leaves_unmaterialized_models_for_hf_setup(model):
+    reject_hybrid_cp_training(
+        model,
+        SimpleNamespace(),
+        SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+        supported=False,
+    )
+
+
+@pytest.mark.parametrize("missing_layer_metadata", [False, True])
+def test_adoption_gate_executes_for_a_cp_capable_non_sft_trainer(missing_layer_metadata):
+    model = build_hybrid_model()
+    if missing_layer_metadata:
+        del model.config.layer_types
     trainer = SimpleNamespace(
         args=SimpleNamespace(),
         parallelism_config=SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
         SUPPORTS_HYBRID_CP=False,
         _top_level_model=lambda: model,
     )
-    with pytest.raises(CPConfigError, match="SFT only"):
-        ModeSetupMixin._adopt_cp_wrapper(trainer)
+    with patch("halo.trainers.parallelism.mode_setup.require_ulysses_model") as wrapper_lookup:
+        with pytest.raises(CPConfigError, match="SFT only"):
+            ModeSetupMixin._adopt_cp_wrapper(trainer)
+        wrapper_lookup.assert_not_called()
 
 
+@pytest.mark.parametrize("missing_layer_metadata", [False, True])
 @pytest.mark.parametrize(
     "trainer_class,peft,match",
     ((SMPOTrainer, None, "SFT only"), (DistributedSFTTrainer, object(), "full fine-tuning")),
 )
-def test_hybrid_trainer_initialization_refuses_before_hf_setup(trainer_class, peft, match):
+def test_hybrid_trainer_initialization_refuses_before_hf_setup(trainer_class, peft, match, missing_layer_metadata):
     kwargs = {
         "model": build_hybrid_model(),
         "args": SimpleNamespace(),
         "parallelism_config": SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
     }
+    if missing_layer_metadata:
+        del kwargs["model"].config.layer_types
     if peft is not None:
         kwargs["peft_config"] = peft
     with pytest.raises(CPConfigError, match=match):
