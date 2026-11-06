@@ -248,7 +248,10 @@ def test_the_per_rank_worker_count_key_fails_with_its_remedy(via):
     parser = HaloArgumentParser((AsyncRolloutConfig,))
     path = _write_yaml("num_rollout_workers: 16\n" if via == "yaml" else "rollout_actor_budget: 128\n")
     try:
-        with pytest.raises(ValueError, match=r"num_rollout_workers.*retired.*rollout_actor_budget.*times the node's"):
+        with pytest.raises(
+            ValueError,
+            match=r"num_rollout_workers.*retired.*rollout_actor_budget.*times the node's.*ray_address.*keep it",
+        ):
             parser.parse_dict(parser.load_values([path] + (["--num_rollout_workers=16"] if via == "cli" else [])))
     finally:
         os.unlink(path)

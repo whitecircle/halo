@@ -36,7 +36,8 @@ _TOOLKIT_KEY_DEFAULTS = {
 _RETIRED_KEYS = {
     "num_rollout_workers": (
         "it was a per-rank actor count (default 64) and is now rollout_actor_budget, a per-node budget (default 256; "
-        "cluster-wide with ray_address). Set rollout_actor_budget to the old value times the node's rollout ranks."
+        "cluster-wide with ray_address). Without ray_address set rollout_actor_budget to the old value times the "
+        "node's rollout ranks; with ray_address the old value was already the cluster-wide total, so keep it."
     ),
 }
 
