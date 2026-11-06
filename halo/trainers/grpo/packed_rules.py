@@ -14,16 +14,10 @@ from halo.models.attention.selection import is_flash_attn_implementation
 from halo.models.config_access import text_config
 from halo.models.moe.config_fields import resolve_dispatch_width, resolve_router_topk
 from halo.models.moe.family_specs import attention_reads_row_positions
-from halo.trainers.grpo.row_order import MICROBATCH_INVARIANT_LOSS_TYPES
+from halo.trainers.grpo.row_order import reject_microbatch_dependent_objective
 from halo.trainers.training_args_overrides import uses_evaluation
 
 PACKED_KNOB = "packed_microbatch_tokens"
-
-
-def reject_unpackable_trainer(trainer: type, refusal: str | None) -> None:
-    """Refuse a trainer class that declared why its rows cannot be packed (``PACKED_ROWS_REFUSAL``)."""
-    if refusal is not None:
-        raise ValueError(f"{PACKED_KNOB} is not supported by {trainer.__name__}: {refusal}. Unset {PACKED_KNOB}.")
 
 
 def reject_unpackable_options(
@@ -43,18 +37,7 @@ def reject_unpackable_options(
             f"{knob} needs per_device_train_batch_size: 1, got {args.per_device_train_batch_size}: the plan, not a "
             f"batch size, picks the rows of a micro-batch. Raise gradient_accumulation_steps or {knob} instead."
         )
-    if args.loss_type not in MICROBATCH_INVARIANT_LOSS_TYPES:
-        raise ValueError(
-            f"{knob} is refused with loss_type={args.loss_type!r}: only the losses in "
-            f"{list(MICROBATCH_INVARIANT_LOSS_TYPES)} are the same however rows share a bin (bnpo normalizes each "
-            f"micro-batch by its own token count, so its objective would depend on which rows share one). Use grpo "
-            f"or dapo."
-        )
-    if args.top_entropy_quantile < 1.0:
-        raise ValueError(
-            f"{knob} is refused with top_entropy_quantile={args.top_entropy_quantile}: the entropy threshold is taken "
-            f"over each micro-batch's tokens, which a packed bin would widen from one row to several. Set it to 1.0."
-        )
+    reject_microbatch_dependent_objective(args, knob)
     if length_ordered:
         raise ValueError(
             f"{knob} replaces the length-ordered deal (length_ordered_microbatches: true): the plan already orders "

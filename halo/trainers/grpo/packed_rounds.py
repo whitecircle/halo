@@ -17,6 +17,7 @@ from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan, build_slot_layout, plan_round_microbatches
 from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY
 from halo.trainers.grpo.packed_rules import (
+    PACKED_KNOB,
     reject_undispatchable_budget,
     reject_unpackable_model,
     reject_unpackable_options,
@@ -42,7 +43,7 @@ class PackedRoundMixin:
     build in :meth:`_lay_out_packed_round`."""
 
     # Why this trainer cannot pack its rows; None admits it. A trainer with a budget reads it before building TRL's
-    # state, through :func:`reject_unpackable_trainer`.
+    # state, through :func:`reject_trainer_refusal`.
     PACKED_ROWS_REFUSAL: ClassVar[str | None] = None
     # What a filler row holds per round key when it is not zero: one attended prompt token (no NaN) and a fully masked
     # completion, as the rows that pad a round across ranks.
@@ -264,9 +265,14 @@ class PackedRoundMixin:
         round_rows = store["advantages"].size(0)
         view: dict = {"num_items_in_batch": slot["num_items_in_batch"], SLOT_IS_ACTIVE_KEY: True}
         for key, value in store.items():
-            if value is None or value.ndim == 0:
+            if value is None or (isinstance(value, torch.Tensor) and value.ndim == 0):
                 view[key] = value
                 continue
+            if not isinstance(value, torch.Tensor):
+                raise ValueError(
+                    f"The round's {key!r} is a {type(value).__name__}, which packed micro-batches cannot slot by row. "
+                    f"Unset {PACKED_KNOB}."
+                )
             filler = (
                 self.pad_token_id if key in ("prompt_ids", "completion_ids") else self.PACKED_FILLER_VALUES.get(key, 0)
             )

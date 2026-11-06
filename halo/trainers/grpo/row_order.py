@@ -17,6 +17,33 @@ TOKEN_GLOBAL_LOSS_TYPES = ("dapo", "cispo")
 MICROBATCH_INVARIANT_LOSS_TYPES = ROW_MEAN_LOSS_TYPES + TOKEN_GLOBAL_LOSS_TYPES
 
 
+def reject_trainer_refusal(trainer: type, refusal: str | None, knob: str) -> None:
+    """Refuse a trainer class that declared why ``knob`` cannot apply to its rows."""
+    if refusal is not None:
+        raise ValueError(f"{knob} is not supported by {trainer.__name__}: {refusal}. Unset {knob}.")
+
+
+def reject_microbatch_dependent_objective(args, knob: str) -> None:
+    """Refuse the options whose value depends on which rows share a micro-batch, which ``knob`` changes: bnpo's
+    per-micro-batch token count, the top-entropy threshold and the entropy bonus, each taken within one micro-batch."""
+    if args.loss_type not in MICROBATCH_INVARIANT_LOSS_TYPES:
+        raise ValueError(
+            f"{knob} is refused with loss_type={args.loss_type!r}: only {list(MICROBATCH_INVARIANT_LOSS_TYPES)} are "
+            f"the same however rows fall into micro-batches, and bnpo divides each by its own token count. Use grpo "
+            f"or dapo, or unset {knob}."
+        )
+    if args.top_entropy_quantile < 1.0:
+        raise ValueError(
+            f"{knob} is refused with top_entropy_quantile={args.top_entropy_quantile}: the entropy threshold is "
+            f"taken within each micro-batch, whose rows {knob} changes. Set it to 1.0."
+        )
+    if args.entropy_coef != 0.0:
+        raise ValueError(
+            f"{knob} is refused with entropy_coef={args.entropy_coef}: the entropy bonus is a mean over each "
+            f"micro-batch's tokens, whose rows {knob} changes. Set entropy_coef: 0.0."
+        )
+
+
 def length_deal_order(lengths: torch.Tensor, chunks: int) -> torch.Tensor:
     """Rows ranked longest first (ties by index), the ``i``-th to micro-batch ``i % chunks`` at slot ``i // chunks``.
     Returns the CPU index tensor whose ``p``-th entry is the row at position ``p``."""

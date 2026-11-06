@@ -13,10 +13,11 @@ import torch.distributed as dist
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.consensus import agree_across_ranks, rank_max, reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.row_order import MICROBATCH_INVARIANT_LOSS_TYPES, permute_rows
+from halo.trainers.grpo.row_order import permute_rows, reject_microbatch_dependent_objective
 
 logger = logging.getLogger(__name__)
 
+RANK_BALANCE_KNOB = "balance_rank_tokens"
 SPREAD_BEFORE_KEY = "rank_balance/tokens_max_over_mean_before"
 SPREAD_AFTER_KEY = "rank_balance/tokens_max_over_mean_after"
 
@@ -69,28 +70,12 @@ def max_over_mean(tokens: Sequence[int], order: Sequence[int], ranks: int) -> fl
     return max(loads) / mean if mean else 1.0
 
 
-def reject_unbalanceable_trainer(trainer: type, refusal: str | None, *, knob: str = "balance_rank_tokens") -> None:
-    """Refuse a trainer class that declared why its rows cannot be dealt (``RANK_BALANCE_REFUSAL``)."""
-    if refusal is not None:
-        raise ValueError(f"{knob} is not supported by {trainer.__name__}: {refusal}. Unset {knob}.")
-
-
 def reject_unbalanceable_rank_tokens(
-    args, parallelism_config, *, ranks: int, misaligned_accumulation: bool, knob: str = "balance_rank_tokens"
+    args, parallelism_config, *, ranks: int, misaligned_accumulation: bool, knob: str = RANK_BALANCE_KNOB
 ) -> None:
     """Refuse a setup where moving rows between ranks would change the objective, split rows that must stay on one
     rank, or balance nothing."""
-    if args.loss_type not in MICROBATCH_INVARIANT_LOSS_TYPES:
-        raise ValueError(
-            f"{knob} is refused with loss_type={args.loss_type!r}: only {list(MICROBATCH_INVARIANT_LOSS_TYPES)} are "
-            f"the same however rows fall into micro-batches, and bnpo divides each by its own token count. Use grpo "
-            f"or dapo, or unset {knob}."
-        )
-    if args.top_entropy_quantile < 1.0:
-        raise ValueError(
-            f"{knob} is refused with top_entropy_quantile={args.top_entropy_quantile}: the entropy threshold is "
-            f"taken within each micro-batch, whose rows the deal changes. Set it to 1.0."
-        )
+    reject_microbatch_dependent_objective(args, knob)
     if misaligned_accumulation:
         raise ValueError(
             f"{knob} is refused when gradient_accumulation_steps ({args.gradient_accumulation_steps}) straddles a "
@@ -134,12 +119,17 @@ def deal_rows_across_ranks(batch: dict, *, pad_token_id: int) -> tuple[dict, Ran
     """COLLECTIVE over the world. ``batch``'s rows dealt by :func:`deal_order` over every rank's attended tokens, each
     rank keeping its row count and receiving the rows the deal gives it, with the round's scalars unchanged. A round
     the deal would not make lighter at its heaviest rank comes back as it is. Raises on every rank when a rank's round
-    carries a tensor beyond the text-row keys (images), or the ranks' key sets differ."""
+    carries a per-row value beyond the text-row keys (images, lists), or the ranks' key sets differ."""
     row_keys = sorted(key for key in _ROW_KEYS if batch.get(key) is not None)
+    rows = batch["completion_mask"].size(0)
     foreign = sorted(
         key
         for key, value in batch.items()
-        if key not in _ROW_KEYS and isinstance(value, torch.Tensor) and value.ndim > 0
+        if key not in _ROW_KEYS
+        and (
+            (isinstance(value, torch.Tensor) and value.ndim > 0)
+            or (isinstance(value, (list, tuple)) and len(value) == rows)
+        )
     )
     reject_across_ranks(
         f"the round carries {foreign}, which rank balancing does not move (text rows only)" if foreign else None,
@@ -150,7 +140,6 @@ def deal_rows_across_ranks(batch: dict, *, pad_token_id: int) -> tuple[dict, Ran
         raise ValueError("The ranks' rounds carry different row tensors, so their rows cannot be dealt across ranks.")
 
     ranks = dist.get_world_size()
-    rows = batch["completion_mask"].size(0)
     local_tokens = (batch["prompt_mask"].sum(dim=1) + batch["completion_mask"].sum(dim=1)).long()
     tokens = all_gather_cat(local_tokens, 0, None, ranks).tolist()
     order = deal_order(tokens, ranks)
@@ -179,7 +168,7 @@ class RankBalancedRoundMixin:
     rows and before any stage that arranges them."""
 
     # Why this trainer cannot have its rows dealt; None admits it. A trainer with the knob on reads it before building
-    # TRL's state, through :func:`reject_unbalanceable_trainer`.
+    # TRL's state, through :func:`reject_trainer_refusal`.
     RANK_BALANCE_REFUSAL: ClassVar[str | None] = None
 
     _balances_rank_tokens = False

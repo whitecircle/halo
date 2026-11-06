@@ -21,6 +21,7 @@ from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rank_balance import (
+    RANK_BALANCE_KNOB,
     SPREAD_AFTER_KEY,
     SPREAD_BEFORE_KEY,
     RankSpread,
@@ -28,8 +29,8 @@ from halo.trainers.grpo.rank_balance import (
     deal_rows_across_ranks,
     max_over_mean,
     reject_unbalanceable_rank_tokens,
-    reject_unbalanceable_trainer,
 )
+from halo.trainers.grpo.row_order import reject_trainer_refusal
 from tests.common.gloo import run_gloo_ranks
 from tests.common.length_deal import single_process_accelerator, tiny_llama, with_world_normalizer, world_accelerator
 from tests.common.online_rounds import online_host
@@ -95,6 +96,40 @@ def _foreign_worker(rank: int) -> None:
 
 def test_a_round_with_image_tensors_on_any_rank_raises_on_every_rank():
     run_gloo_ranks(_foreign_worker, 2)
+
+
+def _list_worker(rank: int) -> None:
+    batch = skewed_round(rank, 2)
+    if rank == 0:
+        batch["images"] = [None] * ROWS_PER_RANK
+    with pytest.raises(ValueError, match="images"):
+        deal_rows_across_ranks(batch, pad_token_id=0)
+
+
+def test_a_round_with_a_per_row_list_on_any_rank_raises_on_every_rank():
+    run_gloo_ranks(_list_worker, 2)
+
+
+def _fill_worker(rank: int, nprocs: int) -> None:
+    pad = 7
+    batch = skewed_round(rank, nprocs)
+    widths = _gathered(batch["completion_ids"].size(1))
+    dealt, _ = deal_rows_across_ranks(batch, pad_token_id=pad)
+    width = dealt["completion_ids"].size(1)
+    checked = 0
+    for row, advantage in enumerate(dealt["advantages"].tolist()):
+        source = widths[int(advantage // 10)]
+        if source < width:
+            checked += 1
+            assert (dealt["completion_ids"][row, source:] == pad).all()
+            assert (dealt["importance_sampling_ratio"][row, source:] == 1).all()
+            assert (dealt["completion_mask"][row, source:] == 0).all()
+    _gathered(checked)
+    assert sum(_gathered(checked)) > 0, "no row came from a narrower rank, so no fill was compared"
+
+
+def test_columns_a_row_gains_from_a_wider_rank_hold_the_pad_token_and_a_unit_ratio():
+    run_gloo_ranks(_fill_worker, 2, 2)
 
 
 def _window(batch: dict, loss_type: str) -> tuple[float, list[torch.Tensor]]:
@@ -166,6 +201,7 @@ def _args(**overrides):
     values = {
         "loss_type": "dapo",
         "top_entropy_quantile": 1.0,
+        "entropy_coef": 0.0,
         "gradient_accumulation_steps": 4,
     }
     return types.SimpleNamespace(**(values | overrides))
@@ -191,6 +227,7 @@ def test_a_setup_where_the_deal_is_sound_is_admitted():
     [
         ({"args": _args(loss_type="bnpo")}, "loss_type='bnpo'"),
         ({"args": _args(top_entropy_quantile=0.5)}, "top_entropy_quantile"),
+        ({"args": _args(entropy_coef=0.01)}, "entropy_coef=0.01"),
         ({"misaligned_accumulation": True}, "straddles a generation round"),
         ({"parallel": types.SimpleNamespace(is_tp_mode=True, is_expert_tp_mode=False)}, "TP/ETP"),
         ({"parallel": types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=True)}, "TP/ETP"),
@@ -205,15 +242,15 @@ def test_a_setup_the_deal_would_change_or_could_not_use_is_refused(kwargs, match
 def test_sdpg_declares_the_refusal_and_the_trainer_reads_it_before_trls_constructor():
     assert DistributedSDPGTrainer.RANK_BALANCE_REFUSAL and DistributedOnlineGRPOTrainer.RANK_BALANCE_REFUSAL is None
     with pytest.raises(ValueError, match="DistributedSDPGTrainer"):
-        reject_unbalanceable_trainer(DistributedSDPGTrainer, DistributedSDPGTrainer.RANK_BALANCE_REFUSAL)
-    reject_unbalanceable_trainer(DistributedOnlineGRPOTrainer, None)
+        reject_trainer_refusal(DistributedSDPGTrainer, DistributedSDPGTrainer.RANK_BALANCE_REFUSAL, RANK_BALANCE_KNOB)
+    reject_trainer_refusal(DistributedOnlineGRPOTrainer, None, RANK_BALANCE_KNOB)
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedOnlineGRPOTrainer.__init__)))
     line = {
         (n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id): n.lineno
         for n in ast.walk(init)
         if isinstance(n, ast.Call) and isinstance(n.func, (ast.Attribute, ast.Name))
     }
-    assert line["reject_unbalanceable_trainer"] < line["__init__"], "the refusal must precede TRL's constructor"
+    assert line["reject_trainer_refusal"] < line["__init__"], "the refusal must precede TRL's constructor"
     assert line["_configure_rank_balance"] > line["_finish_on_policy_init"]
 
 
@@ -311,7 +348,7 @@ def test_the_deal_precedes_the_layout_the_row_spans_and_the_tp_broadcast_in_the_
         n.func.attr: n.lineno for n in ast.walk(body) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
     assert line["_clamp_kl_reference"] < line["_deal_round_across_ranks"] < line["_lay_out_packed_round"]
-    assert line["_lay_out_packed_round"] < line["_broadcast_tensors_from_tp_leader"] == line["_apply_row_spans"]
+    assert line["_lay_out_packed_round"] < line["_broadcast_tensors_from_tp_leader"] == line["_with_row_spans"]
 
 
 def test_only_the_online_config_takes_the_knob_from_its_bundle_and_the_script_hands_it_on():

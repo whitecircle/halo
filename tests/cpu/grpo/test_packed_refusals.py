@@ -11,12 +11,13 @@ from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.packed_rules import (
+    PACKED_KNOB,
     reject_undispatchable_budget,
     reject_unpackable_model,
     reject_unpackable_options,
-    reject_unpackable_trainer,
     resolve_dispatch_ceiling,
 )
+from halo.trainers.grpo.row_order import reject_trainer_refusal
 from tests.common.tiny_models import (
     TINY_BAILING_RING_FAMILY,
     TINY_DENSE_ATTENTION_FAMILIES,
@@ -33,6 +34,7 @@ def _args(**overrides) -> types.SimpleNamespace:
             "per_device_eval_batch_size": 1,
             "loss_type": "dapo",
             "top_entropy_quantile": 1.0,
+            "entropy_coef": 0.0,
             "steps_per_generation": 8,
             "num_iterations": 1,
             "gradient_accumulation_steps": 8,
@@ -55,9 +57,10 @@ def test_the_admitted_options_pass():
 _OPTION_REFUSALS = {
     "full logits": (_args(), {"use_chunked_logprobs": False}, "use_chunked_grpo_logprobs: true"),
     "batch size": (_args(per_device_train_batch_size=2), {}, "per_device_train_batch_size: 1"),
-    "bnpo": (_args(loss_type="bnpo"), {}, "depend on which rows share one"),
+    "bnpo": (_args(loss_type="bnpo"), {}, "bnpo divides each by its own token count"),
     "vespo": (_args(loss_type="vespo"), {}, "loss_type='vespo'"),
     "entropy quantile": (_args(top_entropy_quantile=0.2), {}, "top_entropy_quantile"),
+    "entropy bonus": (_args(entropy_coef=0.01), {}, "entropy_coef=0.01"),
     "length deal": (_args(), {"length_ordered": True}, "Unset length_ordered_microbatches"),
     "misaligned": (_args(gradient_accumulation_steps=12), {"misaligned_accumulation": True}, "Align them"),
     "eval batch": (
@@ -86,9 +89,9 @@ def test_an_eval_batch_other_than_one_is_ignored_when_the_run_never_evaluates():
 
 def test_a_trainer_declaring_a_refusal_is_refused_with_it_and_the_others_pass():
     assert DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL is None
-    reject_unpackable_trainer(DistributedOnlineGRPOTrainer, DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL)
+    reject_trainer_refusal(DistributedOnlineGRPOTrainer, DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL, PACKED_KNOB)
     with pytest.raises(ValueError, match=r"DistributedSDPGTrainer.*teacher pass.*Unset packed_microbatch_tokens"):
-        reject_unpackable_trainer(DistributedSDPGTrainer, DistributedSDPGTrainer.PACKED_ROWS_REFUSAL)
+        reject_trainer_refusal(DistributedSDPGTrainer, DistributedSDPGTrainer.PACKED_ROWS_REFUSAL, PACKED_KNOB)
 
 
 @pytest.fixture

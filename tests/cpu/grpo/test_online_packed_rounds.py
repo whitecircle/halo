@@ -194,6 +194,7 @@ def _configured(trainer_cls, **overrides):
         per_device_eval_batch_size=1,
         loss_type="dapo",
         top_entropy_quantile=1.0,
+        entropy_coef=0.0,
         steps_per_generation=4,
         num_iterations=1,
         gradient_accumulation_steps=4,
