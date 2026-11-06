@@ -208,8 +208,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
     own begin.
 
     ``num_input_tokens_seen`` counts attended tokens (padding excluded), summed across ranks. A rank's own tokens
-    divide it by ``world_size`` and ``cp_size``, since CP splits the sequence inside ``forward()``; TP, expert-TP and pipeline ranks each run every token through
-    their parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``. ``max_seq_len`` is
+    divide it by ``world_size`` and ``cp_size``, since CP splits the sequence inside ``forward()``; TP, expert-TP and
+    pipeline ranks each run every token through their parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``. ``max_seq_len`` is
     for runs whose real bound is not the declared length fields (a multi-turn RL trajectory)."""
 
     def __init__(

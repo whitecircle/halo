@@ -105,6 +105,12 @@ def test_flattened_packed_row_counts_all_its_tokens():
     assert int(count_attended_tokens(batch)) == 9
 
 
+def test_a_mask_of_another_shape_falls_back_to_the_element_count():
+    ids = torch.ones(2, 6, dtype=torch.long)
+    batch = {"input_ids": ids, "attention_mask": torch.ones(2, 4, dtype=torch.long)}
+    assert int(count_attended_tokens(batch)) == ids.numel()
+
+
 def test_a_batch_with_no_token_group_counts_zero():
     assert count_attended_tokens({"prompt": ["a", "b"]}) == 0
 

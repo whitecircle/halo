@@ -77,7 +77,7 @@ class TokenMetricsMixin:
     # ``(model, non-embedding parameter count)`` for :meth:`floating_point_ops`, set on its first call.
     _flops_parameter_count: tuple | None = None
     # This rank's input tokens not yet summed into ``state.num_input_tokens_seen`` (HF's ``"all"`` mode).
-    _unsummed_input_tokens: int = 0
+    _unsummed_input_tokens: int | torch.Tensor = 0
     # Seconds this rank blocked fetching batches since the last :meth:`drain_step_work`.
     _data_wait_seconds: float = 0.0
 

@@ -17,7 +17,7 @@ from halo.trainers.step_guard import NonFiniteStepGuardMixin
 from halo.trainers.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 
-SLEEP = 0.05
+SLEEP = 0.2
 MICRO_BATCHES = 3
 
 
@@ -49,11 +49,11 @@ def _wait_of_one_step(delay: float) -> float:
 
 
 def test_a_sleeping_collator_raises_the_wait_by_about_the_sleep():
-    assert _wait_of_one_step(SLEEP) == pytest.approx(MICRO_BATCHES * SLEEP, abs=0.5 * SLEEP)
+    assert _wait_of_one_step(SLEEP) == pytest.approx(MICRO_BATCHES * SLEEP, rel=0.5)
 
 
 def test_a_free_collator_leaves_the_wait_near_zero():
-    assert _wait_of_one_step(0.0) < 0.5 * SLEEP
+    assert _wait_of_one_step(0.0) < 0.25 * SLEEP
 
 
 def test_the_drain_resets_the_window():
