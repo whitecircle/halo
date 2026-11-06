@@ -4,6 +4,7 @@ import base64
 import io
 
 import numpy as np
+import torch
 from torch import nn
 
 from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
@@ -35,6 +36,49 @@ class BareEPLayer(EPGroupLimitedMoELayerBase):
 
     def forward(self, hidden_states, **kwargs):  # pragma: no cover — never called
         raise NotImplementedError
+
+
+# A selection whose k-th and (k+1)-th router probabilities sit within this gap is a near-tie: bf16 hidden states that
+# differ between packed and per-row forwards can tip it. About twice the widest margin of any flip seen on the tiny
+# EP2 MoE (2.4e-3); the median selection has 1.3e-2.
+NEAR_TIE_MARGIN_MAX = 5e-3
+# Near-ties are a few tenths of the selections, so 2% still refuses a wholesale reroute of them; seen flip rates are 3e-3.
+FLIP_RATE_MAX = 2e-2
+
+
+def router_margins(logits: torch.Tensor, top_k: int) -> torch.Tensor:
+    """Softmax probability of the k-th selected expert minus the (k+1)-th, per token, for ``[..., experts]`` logits."""
+    top = torch.topk(torch.softmax(logits.float(), dim=-1), top_k + 1, dim=-1).values
+    return top[..., top_k - 1] - top[..., top_k]
+
+
+def check_flips_are_near_ties(
+    captured: torch.Tensor,
+    reference: torch.Tensor,
+    margins: torch.Tensor,
+    *,
+    near_tie_max: float = NEAR_TIE_MARGIN_MAX,
+    flip_rate_max: float = FLIP_RATE_MAX,
+) -> dict[str, float]:
+    """Compare two ``[rows, seq, layers, top_k]`` routing captures (expert id sets per selection, ``-1`` where the
+    position is not real) against the reference run's ``[rows, seq, layers]`` selection margins. Raises AssertionError
+    when a selection that differs has a reference margin above ``near_tie_max`` or the flip rate exceeds
+    ``flip_rate_max``; returns the flip rate, the flips' widest margin and the near-tie share of all selections."""
+    real = reference[..., 0] >= 0
+    assert torch.equal(captured[..., 0] >= 0, real), "the two captures cover different positions"
+    flipped = (captured.sort(-1).values != reference.sort(-1).values).any(-1) & real
+    total = int(real.sum())
+    rate = int(flipped.sum()) / total
+    widest = float(margins[flipped].max()) if flipped.any() else 0.0
+    stats = {
+        "flip_rate": rate,
+        "widest_flip_margin": widest,
+        "near_tie_share": float((margins[real] <= near_tie_max).float().mean()),
+    }
+    wide = int((flipped & (margins > near_tie_max)).sum())
+    assert wide == 0, f"{wide} wide-margin selections differ (widest flipped margin {widest:.2e} > {near_tie_max:.1e})"
+    assert rate <= flip_rate_max, f"{rate:.2e} of the selections differ (cap {flip_rate_max:.1e})"
+    return stats
 
 
 def npy_routing_payload(array) -> str:

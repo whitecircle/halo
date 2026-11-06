@@ -14,8 +14,9 @@ On the trainer's real scoring path, plan and TRL's real buffer and loss (Qwen3-0
 ``--moe`` runs a tiny Qwen3-MoE at ``ep_size = 2`` (DeepEP dispatch, one dispatch per bin), where the bins must run
 on every rank in equal number, under R2 capture and R3 replay:
 
-5. the packed recompute captures each row's routing into its own batch slot, up to the near-tie flips a different
-   dispatch composition rounds apart;
+5. the packed recompute captures each row's routing into its own batch slot: a selection that differs from the
+   per-row run's has a near-tie margin there (packed bf16 hidden states differ slightly), wide-margin selections
+   match exactly, and a packed forward over tokens shifted one position is caught;
 6. the packed recompute replays each row its own engine routing, and the window's gradient forwards consume each armed
    mask whole.
 
@@ -53,6 +54,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.rank_log import log, log_all
+from tests.common.routing import check_flips_are_near_ties, router_margins
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -65,7 +67,6 @@ GRAD_COSINE_MIN = 0.999
 LOGP_MEAN_ABS_MAX = 1e-2
 MOE_FAMILY, MOE_WORDS, MOE_SEED = "qwen3_moe", 500, 0
 MOE_ROW_TOKENS, MOE_BUDGET = PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET
-R2_FLIP_MAX = 1e-3
 
 _PARSER = argparse.ArgumentParser(description=__doc__)
 _PARSER.add_argument("--moe", action="store_true", help="the EP-2 MoE arm under routing replay")
@@ -187,14 +188,38 @@ def run_moe(ctx) -> dict:
     def r2_capture_follows_each_row():
         per_row, packed = host(), host()
         per_row._packs_microbatches = False
+        gate_logits = [[] for _ in range(injector.num_ep_layers)]
+        hooks = [
+            layer.gate.register_forward_hook(
+                lambda _gate, _args, out, chunks=chunks: chunks.append(
+                    (out[0] if isinstance(out, tuple) else out).detach()
+                )
+            )
+            for chunks, (_, layer) in zip(gate_logits, named_ep_layers(model), strict=True)
+        ]
         with torch.no_grad():
-            _, plain = per_row._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
+            try:
+                _, plain = per_row._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
+            finally:
+                for hook in hooks:
+                    hook.remove()
             _, captured = packed._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order, plan)
-        real = captured[..., 0] >= 0
-        assert torch.equal(real, plain[..., 0] >= 0), "a captured row's real positions landed in another row's slot"
-        flips = ((captured.sort(-1).values != plain.sort(-1).values).any(-1) & real).sum().item() / real.sum().item()
-        metrics["r2_flips"] = flips
-        assert flips <= R2_FLIP_MAX, f"packed capture flips {flips:.2e} of the selections"
+            shifted = ids.roll(1, dims=1)
+            _, misrouted = packed._recompute_logps_and_routing_masks(shifted, mask, keep, None, "train", order, plan)
+        real = plain[..., 0] >= 0
+        margins = torch.zeros(plain.shape[:3], device=plain.device)
+        for layer_index, chunks in enumerate(gate_logits):
+            margins[..., layer_index][real[..., layer_index]] = router_margins(torch.cat(chunks), injector.top_k).to(
+                plain.device
+            )
+        stats = check_flips_are_near_ties(captured, plain, margins)
+        metrics.update({f"r2_{key}": value for key, value in stats.items()})
+        try:
+            check_flips_are_near_ties(misrouted, plain, margins)
+        except AssertionError as err:
+            metrics["r2_negative_control"] = str(err)
+        else:
+            raise AssertionError("the check passed a packed forward over tokens shifted one position")
 
     def r3_recompute_and_loss_forwards_consume_the_armed_masks():
         engine = torch.randint(0, injector.num_experts, (ROWS, ids.size(1), injector.num_ep_layers, injector.top_k))
