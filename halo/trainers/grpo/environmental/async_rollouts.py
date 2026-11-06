@@ -76,6 +76,9 @@ class AsyncRolloutMixin:
     # Whether the weight-sync group is formed, held alike on every rank (the client itself is the main
     # process's alone): set by the fenced formation, cleared first thing by the cleanup.
     _weight_sync_group_formed: bool = False
+    # Whether the rollout components are up, held alike on every rank (a TP/ETP follower builds no manager, so the
+    # manager cannot say): set by the init, cleared by the cleanup.
+    _async_components_started: bool = False
 
     def _init_async_state(self):
         self._rollout_manager = None
@@ -116,13 +119,14 @@ class AsyncRolloutMixin:
     def _init_async_components(self):
         """COLLECTIVE. Each failure is deferred to a verdict all ranks join, so none is raised on one rank while its
         peers wait."""
-        if self._rollout_manager is not None:
+        if self._async_components_started:
             return
 
         guard = DeferredRankFailure("Rollout component start")
         guard.run(self._start_rank_rollout_components)
         guard.reject()
         self._form_weight_sync_group()
+        self._async_components_started = True
 
         # Registered once; a second train() re-arms it through _cleanup_async_components.
         if self._rollout_start_callback is None:
@@ -561,6 +565,7 @@ class AsyncRolloutMixin:
         # First, on every rank: the client below is the main process's alone, and a teardown step that
         # raises must not leave the ranks disagreeing on whether the next push forms the group.
         self._weight_sync_group_formed = False
+        self._async_components_started = False
         self._stop_prefetch_thread()
 
         if self._rollout_manager and self._loop:

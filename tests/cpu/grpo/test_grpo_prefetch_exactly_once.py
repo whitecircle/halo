@@ -229,6 +229,7 @@ class _LifecycleHost:
     _init_async_components = _T._init_async_components
     _form_weight_sync_group = _T._form_weight_sync_group
     _weight_sync_group_formed = False
+    _async_components_started = False
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _start_rollout_pool = _T._start_rollout_pool
     _resolve_rollout_pool = _T._resolve_rollout_pool
@@ -455,6 +456,21 @@ def test_a_tp_follower_starts_no_ray_and_no_pool(monkeypatch):
     assert ray_calls == [] and host._rollout_manager is None and host._loop is None
     assert host.prefetch_starts == 0, "a follower started a prefetch worker"
     assert host.pushed == [0.0], "a follower must still join the weight push"
+
+
+def test_a_second_component_init_without_a_cleanup_joins_no_collective_on_any_rank(monkeypatch):
+    """A follower holds no manager, so the manager cannot tell it the components are up: the leader returning early
+    while the follower re-formed the weight-sync group would hang the group."""
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, init=lambda **kw: None))
+    monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
+    for follower in (False, True):
+        host = _LifecycleHost(torch.zeros(1))
+        host.follower = follower
+        formed = []
+        host._form_weight_sync_group = lambda formed=formed: formed.append(1)
+        host._init_async_components()
+        host._init_async_components()
+        assert formed == [1], f"a second init re-formed the group (follower={follower})"
 
 
 def test_a_tp_follower_still_builds_the_score_only_clients(monkeypatch):
