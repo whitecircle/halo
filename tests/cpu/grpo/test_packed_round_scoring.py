@@ -23,7 +23,7 @@ from halo.trainers.grpo.on_policy import GenerationRoundMixin
 from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_IS_ACTIVE_KEY, SLOT_ROWS_KEY, PackedRoundMixin
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
-from tests.common.routing import BareEPLayer
+from tests.common.routing import bare_replay_injector
 
 _VOCAB = 64
 _LENGTHS = (5, 1, 7, 2, 6, 3, 4, 8)
@@ -142,11 +142,7 @@ _SPANS = [(0, 6), (2, 6), (1, 4), (3, 6), (0, 3), (1, 6)]
 
 
 def _injector() -> RoutingReplayInjector:
-    return RoutingReplayInjector(
-        [BareEPLayer(top_k=_TOP_K, num_experts=8) for _ in range(_LAYERS)],
-        engine_layers=_LAYERS,
-        layer_indices=list(range(_LAYERS)),
-    )
+    return bare_replay_injector(layers=_LAYERS, top_k=_TOP_K)
 
 
 def _mask(rows: int) -> torch.Tensor:
@@ -342,6 +338,36 @@ def test_the_mixin_sits_ahead_of_the_deal_and_the_tp_resync_and_is_configured_at
     called = [n.func.attr for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
     assert called.index("_configure_packed_microbatches") > called.index("_resolve_length_ordered_rows")
     assert DistributedAsyncEnvironmentalGRPOTrainer._packs_microbatches is False
+
+
+class _RecordingScorer:
+    """The scorer TRL's trainer would be, under the mixin."""
+
+    def __init__(self) -> None:
+        self.scored: list[int] = []
+
+    def _get_per_token_logps_and_entropies(self, model, input_ids, attention_mask, logits_to_keep, *args, **kwargs):
+        self.scored.append(input_ids.size(0))
+        return torch.zeros(input_ids.size(0), logits_to_keep), None, None
+
+
+class _BinningHost(PackedRoundMixin, _RecordingScorer):
+    _packs_microbatches = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = types.SimpleNamespace(training=True)
+
+
+def test_a_probe_forward_mid_build_is_scored_plain_and_leaves_the_round_unplanned():
+    host = _BinningHost()
+    probe = torch.zeros(1, 4, dtype=torch.long)
+    with host._scoring_round_in_bins():
+        with host.unbinned_scoring():
+            host._get_per_token_logps_and_entropies(host.model, probe, torch.ones_like(probe), 2)
+        assert host._round_plan is None and host.scored == [1]
+        assert host._bins_round_scoring, "the round's own scoring passes must stay binned after the probe"
+    assert not host._bins_round_scoring
 
 
 if __name__ == "__main__":

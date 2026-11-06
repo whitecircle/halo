@@ -9,6 +9,7 @@ from torch import nn
 
 from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):
@@ -79,6 +80,15 @@ def check_flips_are_near_ties(
     assert wide == 0, f"{wide} wide-margin selections differ (widest flipped margin {widest:.2e} > {near_tie_max:.1e})"
     assert rate <= flip_rate_max, f"{rate:.2e} of the selections differ (cap {flip_rate_max:.1e})"
     return stats
+
+
+def bare_replay_injector(*, layers: int, top_k: int, num_experts: int = 8) -> RoutingReplayInjector:
+    """An injector over ``layers`` :class:`BareEPLayer` engine layers, each held by the injector in order."""
+    return RoutingReplayInjector(
+        [BareEPLayer(top_k=top_k, num_experts=num_experts) for _ in range(layers)],
+        engine_layers=layers,
+        layer_indices=list(range(layers)),
+    )
 
 
 def npy_routing_payload(array) -> str:

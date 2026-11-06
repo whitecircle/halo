@@ -30,7 +30,7 @@ from tests.common.length_deal import (
     tiny_llama,
     train_round,
 )
-from tests.common.routing import BareEPLayer
+from tests.common.routing import bare_replay_injector
 
 _VOCAB = 64
 # Losses TRL's real loss below shows to be the same in any deal of a round's rows; bnpo differs and vespo is
@@ -263,11 +263,7 @@ _DEALT = torch.tensor([2, 0, 3, 1])
 
 
 def _injector() -> RoutingReplayInjector:
-    return RoutingReplayInjector(
-        [BareEPLayer(top_k=_TOP_K, num_experts=8) for _ in range(_LAYERS)],
-        engine_layers=_LAYERS,
-        layer_indices=list(range(_LAYERS)),
-    )
+    return bare_replay_injector(layers=_LAYERS, top_k=_TOP_K)
 
 
 def _routed_mask(rows: int = len(_SPANS), seq: int = _SEQ) -> torch.Tensor:

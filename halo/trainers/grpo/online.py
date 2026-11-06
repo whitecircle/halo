@@ -189,7 +189,7 @@ class DistributedOnlineGRPOTrainer(
     def _distributed_sync_weights(self) -> None:
         """COLLECTIVE. The client TRL holds on ``vllm_generation`` forwards from the main process."""
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
-        with self._phase_timers.span(Phase.SYNC, "host"):
+        with self._phase_timers.span(Phase.SYNC, "host"), self.unbinned_scoring():
             sync_trainer_weights(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):

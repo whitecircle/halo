@@ -128,6 +128,16 @@ class PackedRoundMixin:
         finally:
             self._bins_round_scoring = False
 
+    @contextlib.contextmanager
+    def unbinned_scoring(self) -> Iterator[None]:
+        """A scoring call inside this scope is no part of the round being built (a weight-sync probe forward, which
+        TRL's generate step runs mid-build): it runs as one plain call and leaves the round's plan alone."""
+        binned, self._bins_round_scoring = self._bins_round_scoring, False
+        try:
+            yield
+        finally:
+            self._bins_round_scoring = binned
+
     def _take_round_plan(self, batch: dict) -> MicrobatchPlan:
         """COLLECTIVE when no scoring call planned the round (no pass ran). The round's plan, consumed: the next round
         plans its own."""
