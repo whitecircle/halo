@@ -10,13 +10,20 @@ from transformers import (
     DeepseekV4ForCausalLM,
     Glm5NextConfig,
     Glm5NextForConditionalGeneration,
+    Qwen3MoeConfig,
 )
 
 from halo.distributed.pipeline_parallel.families import DEEPSEEK_V4_PP, PP_SPEC_MAP, build_pp_spec_map
 from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from halo.distributed.pipeline_parallel.partition import validate_partition
 from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
-from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
+from tests.common.models import (
+    TINY_DSV4_CONFIG,
+    TINY_GLM5_CONFIG,
+    TINY_GLM5_VISION_CONFIG,
+    TINY_QWEN3_MOE_CONFIG,
+)
+from tests.common.pp_equivalence import carries_hyper_connections
 
 # Keeps the metadata-only ``num_nextn_predict_layers: 1`` hub checkpoints declare: the MTP gate must accept the
 # never-built tail.
@@ -200,6 +207,22 @@ def test_specs_declare_support_and_the_tail_module():
         assert spec.layer_types_rebase_safe, backbone_name
     reject_unsupported_pp_model(_dsv4_model(), "none")
     reject_unsupported_pp_model(_glm5_model(), "none")
+
+
+@pytest.mark.parametrize(
+    ("config", "carries"),
+    [
+        pytest.param(DeepseekV4Config(**_DSV4_CONFIG), True, id="deepseek_v4"),
+        pytest.param(
+            Glm5NextConfig(text_config=dict(_GLM5_TEXT_CONFIG), vision_config=dict(TINY_GLM5_VISION_CONFIG)),
+            True,
+            id="glm5_next",
+        ),
+        pytest.param(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG), False, id="qwen3_moe"),
+    ],
+)
+def test_the_pp_equivalence_run_detects_hyper_connections_from_the_config(config, carries):
+    assert carries_hyper_connections(config) is carries
 
 
 if __name__ == "__main__":

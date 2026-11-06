@@ -2,6 +2,8 @@
 """A pipeline-registered tiny family split into two stages, against the unsplit model with the same ep1 wrappers.
 
 Expert TP reorders each expert's sum, which in bf16 flips near-tied picks with no sync bug, so ETP rows run fp32.
+A hyper-connection family (``hc_mult``) runs fp32 too: its base and scale gradients sit 4 to 5 orders under their
+layer's largest, so bf16 accumulation order alone (one batched pass against accumulated micro-batches) decides them.
 Gradients score by direction and norm ratio, since a flipped pick moves mass. A gradient under
 ``TOL.grad_negligible_layer_fraction`` of its layer's largest (Qwen3.5's ``A_log`` / ``dt_bias``) is held to that floor
 as absolute error, Nemotron-H's Mamba layers to their own. ``--text-only`` reads a composite release from disk through
@@ -89,36 +91,37 @@ if ARGS.etp_size > 1 and ARGS.ep_size > 1:
     parser.error("PP+EP+ETP is refused at config time: --etp-size 2 runs at --ep-size 1")
 if ARGS.text_only != (ARGS.family in TEXT_ONLY_FAMILIES):
     parser.error(f"--text-only runs exactly {sorted(TEXT_ONLY_FAMILIES)}")
-# fp32 under expert TP (the module docstring says why).
-FP32 = ARGS.etp_size > 1
-DTYPE = torch.float32 if FP32 else torch.bfloat16
+
+
+def _run_dtype(config) -> torch.dtype:
+    """fp32 under expert TP or hyper-connections (the module docstring says why)."""
+    fp32 = ARGS.etp_size > 1 or ppeq.carries_hyper_connections(config)
+    return torch.float32 if fp32 else torch.bfloat16
 
 
 def _load_from_composite_checkpoint(ctx, config: ParallelismConfig, overrides: dict):
-    """This rank's stage through the real loader, and the whole text class the checkpoint loads as. The family patches
-    the stage's load applies stamp the config the whole model must be built from too."""
+    """This rank's stage through the real loader, the whole text class the checkpoint loads as, and the run's dtype.
+    The family patches the stage's load applies stamp the config the whole model must be built from too."""
     path = shared_tiny_family_checkpoint(
         ctx, TINY_MOE_VLM_FAMILIES[ARGS.family], f"pp_text_only_{ARGS.family}", None, SEED, overrides=overrides
     )
     if ctx.rank == 0:
         word_level_tokenizer().save_pretrained(path)
     ctx.barrier()
+    text_config = resolve_text_only_config(stamped_config(path))
+    dtype = _run_dtype(text_config)
     stage, _ = load_distributed_model(
-        path, config, DTYPE, trust_remote_code=False, text_only_model=True, attn_implementation="sdpa"
+        path, config, dtype, trust_remote_code=False, text_only_model=True, attn_implementation="sdpa"
     )
-    whole = AutoModelForCausalLM.from_pretrained(
-        path, config=resolve_text_only_config(stamped_config(path)), dtype=DTYPE, attn_implementation="sdpa"
-    )
+    whole = AutoModelForCausalLM.from_pretrained(path, config=text_config, dtype=dtype, attn_implementation="sdpa")
     finalize_loaded_model(whole)
-    return stage, whole
+    return stage, whole, dtype
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_family_vs_reference")
 def run(ctx):
     checks, metrics = {}, {}
     overrides, pp_split = TEXT_ONLY_FAMILIES[ARGS.family] if ARGS.text_only else FAMILIES[ARGS.family]
-    if FP32:
-        torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     config = ParallelismConfig(
         world_size=ctx.world_size,
         gpus_per_node=2,
@@ -132,16 +135,21 @@ def run(ctx):
 
     torch.manual_seed(SEED)
     if ARGS.text_only:
-        model, base = _load_from_composite_checkpoint(ctx, config, overrides)
+        model, base, dtype = _load_from_composite_checkpoint(ctx, config, overrides)
     else:
         model = None
-        base = tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides=overrides).to(DTYPE)
+        base = tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides=overrides)
+        dtype = _run_dtype(base.config)
+        base = base.to(dtype)
+    fp32 = dtype == torch.float32
+    if fp32:
+        torch.set_float32_matmul_precision("highest")  # Keeps the fp32 reference an actual fp32 reference.
     rows, labels = ppeq.build_ragged_batch(dp_size * PER_DEVICE_BATCH)
 
     # Both runs sum each token's two weighted expert outputs alike on the same fla configs, so they route alike.
     ppeq.pin_unfused_expert_sum(ctx)
     pin_fla_autotune_first_fit(ctx)
-    twin = ppeq.apply_single_process_ep1(copy.deepcopy(base), ctx.rank, use_grouped_gemm=not FP32).to(ctx.device)
+    twin = ppeq.apply_single_process_ep1(copy.deepcopy(base), ctx.rank, use_grouped_gemm=not fp32).to(ctx.device)
     reference = ppeq.run_unsplit_reference(twin, rows, labels, ctx.device, dp_size)
     del twin
 
@@ -159,7 +167,7 @@ def run(ctx):
         per_device_batch=PER_DEVICE_BATCH,
         n_microbatches=N_MICROBATCHES,
         moe_balancing="none",
-        bf16=not FP32,
+        bf16=not fp32,
     )
     ctx.on_teardown(trainer.cleanup_ep)
     stage = trainer._top_level_model()

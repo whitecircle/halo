@@ -231,7 +231,8 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
   both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
   sum once), and every other registered MoE family against its unsplit ep1 twin through the real
-  trainer at `ep2` (`test_pp_family_vs_reference.py`). One released checkpoint has run the split as a correctness
+  trainer at `ep2` (`test_pp_family_vs_reference.py`; fp32 under ETP and for a hyper-connection family, whose
+  base and scale gradients sit 4 to 5 orders under their layer's largest, so bf16 accumulation order decides them). One released checkpoint has run the split as a correctness
   smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
   relative loss gap 3.4e-4, largest 1.16e-3), as two `torchrun` agents on one host.
 

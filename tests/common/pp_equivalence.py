@@ -283,6 +283,11 @@ def hub_layout_expert_grads(layer: EPMoELayerBase, device="cpu") -> dict[str, to
     return to_hub_expert_tensors(layer.FAMILY.expert_layout, layer.gather_expert_tensors(grads), device=device)
 
 
+def carries_hyper_connections(config) -> bool:
+    """Whether ``config``'s text tower widens its residual stream into ``hc_mult`` hyper-connection streams."""
+    return getattr(config.get_text_config(), "hc_mult", None) is not None
+
+
 def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
     denom = ref.float().norm().clamp_min(1e-12)
     return float((test.float() - ref.float()).norm() / denom)

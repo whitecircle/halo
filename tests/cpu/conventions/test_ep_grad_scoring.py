@@ -800,5 +800,31 @@ def test_picks_that_do_not_tile_the_forwards_raise(ep_models, extra, error):
     assert all(layer._forced_topk_indices is None and layer._forced_cursor == 0 for layer in ep_layers(bf16))
 
 
+# fp32 hyper-connection gradients as the PP row scores them: base and scale 5e-4 and 3e-5 of their layer's largest, over
+# the floor, so the direction and norm bars take them.
+HC_LAYER_BASE, HC_LAYER_SCALE = "model.layers.2.attn_hc.base", "model.layers.2.attn_hc.scale"
+HC_LAYER_PROJ = "model.layers.2.mlp.down_proj.weight"
+HC_LAYERED = {
+    HC_LAYER_PROJ: _vector((8, 16), 1.0, 10),
+    HC_LAYER_BASE: _vector((24,), 5e-4, 11),
+    HC_LAYER_SCALE: _vector((3,), 3e-5, 12),
+}
+
+
+def test_an_fp32_hyper_connection_gradient_inside_rounding_passes():
+    got = {name: ref * (1 + 1e-4) for name, ref in HC_LAYERED.items()}
+    checks, _, floors = _score_layered(got, HC_LAYERED)
+    assert all(checks[f"{name}_matches"] for name in HC_LAYERED), checks
+    assert floors[HC_LAYER_SCALE] < HC_LAYERED[HC_LAYER_SCALE].norm()
+
+
+@pytest.mark.parametrize("name", [HC_LAYER_BASE, HC_LAYER_SCALE])
+@pytest.mark.parametrize("scale", [2.0, 0.5], ids=["doubled", "dropped_dp_average"])
+def test_a_mis_reduced_hyper_connection_gradient_fails(name, scale):
+    checks, _, _ = _score_layered({name: HC_LAYERED[name] * scale}, HC_LAYERED)
+    assert not checks[f"{name}_matches"]
+    assert all(checks[f"{other}_matches"] for other in HC_LAYERED if other != name)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
