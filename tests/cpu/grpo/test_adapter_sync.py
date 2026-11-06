@@ -37,6 +37,7 @@ from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer
+from tests.gpu.trainers.grpo.test_adapter_sync_e2e import build_adapter_sync
 
 _LORA = {
     "max_lora_rank": 16,
@@ -355,7 +356,7 @@ def test_every_server_lacking_the_version_errors_the_episode(sync_of, servers, b
 
     [result] = _play(_manager_over(sync, fakes), 1)
 
-    assert result.error is not None and "not loaded" in result.error
+    assert result.error is not None and "never been loaded" in result.error
 
 
 def test_a_restarted_server_that_serves_the_trainers_base_gets_the_adapter_at_once(
@@ -689,3 +690,25 @@ def test_the_all_modules_launch_covers_every_adapted_projection():
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+# SGLang 0.5.22 tokenizer_manager: the 400 body's message for an adapter it never loaded.
+_SGLANG_UNLOADED_ADAPTER_BODY = (
+    '{"object":"error","message":"Got LoRA adapter that has never been loaded: halo-adapter-bogus\\n'
+    "All loaded adapters: dict_keys(['halo-adapter-4b3e0f84-0', 'halo-adapter-4b3e0f84-1']).\","
+    '"type":"BadRequestError","param":null,"code":400}'
+)
+
+
+def test_sglang_matches_the_engines_unloaded_adapter_error_on_the_adapter_name():
+    is_missing = SGLangWeightSyncClient.is_adapter_missing
+
+    assert is_missing(_SGLANG_UNLOADED_ADAPTER_BODY, "halo-adapter-bogus")
+    assert not is_missing(_SGLANG_UNLOADED_ADAPTER_BODY, "halo-adapter-4b3e0f84-0")
+    assert not is_missing(_SGLANG_UNLOADED_ADAPTER_BODY, "halo-adapter-bog")
+
+
+def test_the_gpu_e2e_builds_its_sync_with_the_class_signature():
+    sync = build_adapter_sync(resolve_adapter_serving(_peft_model()), AdapterVersions())
+
+    assert isinstance(sync, AdapterSync)

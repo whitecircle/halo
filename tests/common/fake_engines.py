@@ -434,8 +434,12 @@ class FakeSGLangServer(FakeEngineServer):
             _, _, adapter = (body.get("model") or "").partition(":")
             if adapter and adapter not in self.adapters:
                 return 400, {
-                    "error": f"The following requested LoRA adapters are not loaded: {adapter}\nLoaded adapters: "
-                    f"{sorted(self.adapters)}."
+                    "object": "error",
+                    "message": f"Got LoRA adapter that has never been loaded: {adapter}\n"
+                    f"All loaded adapters: dict_keys({sorted(self.adapters)}).",
+                    "type": "BadRequestError",
+                    "param": None,
+                    "code": 400,
                 }
             return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
         if path == "/generate" and body.get("return_logprob"):

@@ -2,6 +2,7 @@
 needs ``NCCL_CUMEM_ENABLE=1``; SGLang otherwise turns cuMem off and the first cross-container import fails."""
 
 import logging
+import re
 from collections import deque
 from collections.abc import Callable
 from functools import partial
@@ -432,8 +433,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     @classmethod
     def is_adapter_missing(cls, error: str, adapter: str) -> bool:
-        lowered = error.lower()
-        return adapter in error and ("not loaded" in lowered or "not found" in lowered)
+        """Matches the engine's "Got LoRA adapter that has never been loaded: <name>" 400, whose body is raw JSON."""
+        return re.search(rf"never been loaded: {re.escape(adapter)}(?:\\n|\n|$)", error) is not None
 
     def served_base(self) -> ServedBase:
         info = self._server_info()

@@ -21,6 +21,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
+from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
@@ -69,6 +70,11 @@ def _gap(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a - b).abs().mean())
 
 
+def build_adapter_sync(serving, versions: AdapterVersions) -> AdapterSync:
+    routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
+    return AdapterSync(serving, versions, routes, None)
+
+
 def run(ctx) -> dict:
     ids = AutoTokenizer.from_pretrained(QWEN3_0_6B)(TEXT)["input_ids"]
     input_ids = torch.tensor([ids], device=ctx.device)
@@ -104,7 +110,7 @@ def run(ctx) -> dict:
     servers = AdapterServers([SGLANG_SERVER_URL], client_cls=SGLangWeightSyncClient, connection_timeout=120)
     client = SGLangWeightSyncClient(base_url=SGLANG_SERVER_URL, connection_timeout=120)
     versions = AdapterVersions()
-    sync = AdapterSync(serving, versions)
+    sync = build_adapter_sync(serving, versions)
     sync.servers = servers
     base_pushes = []
     real_push = adapter_sync.sync_trainer_weights
