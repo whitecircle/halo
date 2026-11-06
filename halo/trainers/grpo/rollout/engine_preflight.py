@@ -164,7 +164,10 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
         refusals.append(f"its base is quantized ({flags.quantization}), not the trainer's.")
     if int(facts.get("dp_size") or 1) != 1:
         refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
-    remedy = " Serve with the adapter flags (SGLANG_LORA_MAX_RANK in docker-compose.sglang.yml), or set rollout_adapter_sync: false."
+    remedy = (
+        " Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service), or "
+        "set rollout_adapter_sync: false."
+    )
     return [refusal + remedy for refusal in refusals]
 
 
