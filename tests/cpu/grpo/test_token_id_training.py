@@ -112,6 +112,34 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
     assert rows[0][1].tolist() == comp
 
 
+class _EffortRecorder:
+    """Records the ``reasoning_effort`` every render receives; one id per character."""
+
+    model_max_length = 100_000
+
+    def __init__(self):
+        self.efforts = []
+
+    def apply_chat_template(self, messages, tools=None, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.efforts.append(kwargs.get("reasoning_effort", "<<unset>>"))
+        return "".join(f"<{m['role']}>{m.get('content', '')}" for m in messages)
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [ord(c) for c in text]}
+
+
+def test_a_turn_without_engine_prompt_ids_renders_its_prompt_at_the_episodes_level():
+    """The fallback render stands in for the engine's: it must state the level the episode was sampled at, or the
+    row trains under a prompt the model never saw."""
+    traj = Trajectory(reasoning_effort="high")
+    traj.add_message(Message.user("solve it"))
+    traj.add_message(Message.assistant("done", token_ids=[7, 8, 9]))
+    recorder = _EffortRecorder()
+    rows = _make_trainer_stub(recorder)._tokenize_trajectory_turns(RolloutResult(prompt="solve it", trajectory=traj))
+    assert rows[0][1].tolist() == [7, 8, 9]
+    assert recorder.efforts and set(recorder.efforts) == {"high"}, recorder.efforts
+
+
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
     tok = load_cached_tokenizer(GPT_OSS_20B)
 

@@ -137,5 +137,5 @@ The Qwen3.6 code-contests async GRPO recipes pin `jinja-templates/qwen3/qwen3.6-
 (`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
 thinking always on, carried reasoning always rendered, the vision branch and the
 `enable_thinking`/`preserve_thinking` switches dropped — plus a system-block line stating the episode's
-`reasoning_effort` and `reasoning_budget`, which the hub template has no variable for
-([Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)).
+`reasoning_effort`, which the hub template has no variable for
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).

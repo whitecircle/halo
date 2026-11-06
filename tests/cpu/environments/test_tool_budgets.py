@@ -1,7 +1,9 @@
 #!/usr/bin/env python
 """Per-tool episode budgets and effort profiles at the protocol and base level. A call is admitted (arguments bound,
 cap checked, counted) before the handler runs, so a refused one spends nothing and a one-call cap cannot be
-double-spent. A refusal states the fact, never the cap."""
+double-spent. A refusal states the fact, never the cap. Every env binds an effort profile at reset: the reasoning
+budget and price are the base's keys, which the trainer's reasoning terms read and the model is never told; a task
+adds its own through ``EFFORT_PROFILE_KEY_MINIMA`` and ``_apply_effort_profile``."""
 
 import asyncio
 import json
@@ -256,63 +258,61 @@ def test_a_react_action_on_a_disabled_tool_is_an_error_and_not_flagged():
     assert step.reward == pytest.approx(env.thought_reward - 0.1)
 
 
-def test_base_profiles_bind_the_thinking_budget_per_level():
-    env = NativeToolUseEnvironment(
-        tool_registry=_registry(),
-        reasoning_effort="high",
-        reasoning_effort_profiles={"high": {"thinking_tokens": 2048}},
+def _profiled(profiles):
+    return NativeToolUseEnvironment(tool_registry=_registry(), reasoning_effort_profiles=profiles)
+
+
+def test_base_profiles_bind_the_reasoning_terms_per_level():
+    """Each level reads its own budget and price; a budget of 0 prices every reasoning token, a budget
+    alone prices none, and a level the profiles leave out, or an episode with no level, reads neither."""
+    env = _profiled(
+        {
+            "high": {"reasoning_budget": 2048, "reasoning_price": 0.004},
+            "medium": {"reasoning_budget": 0, "reasoning_price": 1},
+            "low": {"reasoning_budget": 1024},
+        }
     )
-    assert env.thinking_budget_for_effort("high") == 2048
-    assert env.thinking_budget_for_effort("low") is None, "the base binds no budget to an unprofiled level"
+    assert env.reasoning_terms_for_effort("high") == (2048, 0.004)
+    assert env.reasoning_terms_for_effort("medium") == (0, 1.0)
+    assert env.reasoning_terms_for_effort("low") == (1024, 0.0)
+    assert _profiled(None).reasoning_terms_for_effort("high") == (None, 0.0), "the base binds no level's terms"
+    assert env.reasoning_terms_for_effort(None) == (None, 0.0)
 
 
 def test_base_rejects_non_finite_and_non_numeric_profile_values():
-    """NaN passes a plain minimum check and would reach the engine as a thinking budget."""
-    for bad in (float("nan"), float("inf"), True, "0.05", None):
+    """NaN passes a plain minimum check and would poison every reward it enters."""
+    for key, requirement in (("reasoning_budget", "an integer >= 0"), ("reasoning_price", "a finite number")):
+        for bad in (float("nan"), float("inf"), True, "0.05", None):
+            with pytest.raises(ValueError, match=f"{key} must be {requirement}"):
+                _profiled({"low": {"reasoning_budget": 1000, key: bad}})
+
+
+def test_a_profile_prices_reasoning_only_past_a_budget_it_sets():
+    """The price charges what an episode reasons past the level's budget, so a price without one is refused
+    rather than read as pricing nothing or everything; both take a minimum of 0. The retired per-turn keys are
+    unknown, the refusal naming what a profile may carry."""
+    with pytest.raises(ValueError, match=r"\['high'\] sets reasoning_price without reasoning_budget"):
+        _profiled({"high": {"reasoning_price": 0.004}})
+    with pytest.raises(ValueError, match="reasoning_budget must be an integer >= 0"):
+        _profiled({"low": {"reasoning_budget": -1}})
+    with pytest.raises(ValueError, match="reasoning_price must be >= 0.0"):
+        _profiled({"low": {"reasoning_budget": 1000, "reasoning_price": -0.001}})
+    for retired in ("thinking_tokens", "enforce_thinking_cap"):
         with pytest.raises(
-            ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got"
+            ValueError, match=rf"unknown keys \['{retired}'\]; allowed: \['reasoning_budget', 'reasoning_price'\]"
         ):
-            NativeToolUseEnvironment(
-                tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": bad}}
-            )
+            _profiled({"high": {"reasoning_budget": 1000, retired: 2048}})
 
 
-def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
-    """``enforce_thinking_cap`` is a true-or-false profile key: false leaves the budget stated and priced but
-    unenforced, unset leaves it enforced; a soft flag on a level with no budget has nothing to state."""
-    env = NativeToolUseEnvironment(
-        tool_registry=_registry(),
-        reasoning_effort_profiles={
-            "high": {"thinking_tokens": 2048, "enforce_thinking_cap": False},
-            "medium": {"thinking_tokens": 1024},
-        },
+def test_base_rejects_a_fractional_token_budget_and_admits_a_fractional_price():
+    """The registry's int minimum marks the budget a count of tokens; the price's float minimum admits any
+    finite number."""
+    with pytest.raises(ValueError, match="reasoning_budget must be an integer >= 0, got 1.5"):
+        _profiled({"low": {"reasoning_budget": 1.5}})
+    assert _profiled({"low": {"reasoning_budget": 2, "reasoning_price": 0.5}}).reasoning_terms_for_effort("low") == (
+        2,
+        0.5,
     )
-    assert (env.thinking_budget_for_effort("high"), env.thinking_budget_enforced("high")) == (2048, False)
-    assert env.thinking_budget_enforced("medium") is True, "a budget is enforced unless its profile says otherwise"
-    for bad in (0, 1, "false", None):
-        with pytest.raises(
-            ValueError, match=r"reasoning_effort_profiles\['high'\]: enforce_thinking_cap must be true or false"
-        ):
-            NativeToolUseEnvironment(
-                tool_registry=_registry(),
-                reasoning_effort_profiles={"high": {"thinking_tokens": 2048, "enforce_thinking_cap": bad}},
-            )
-    with pytest.raises(ValueError, match="enforce_thinking_cap: false without thinking_tokens"):
-        NativeToolUseEnvironment(
-            tool_registry=_registry(), reasoning_effort_profiles={"high": {"enforce_thinking_cap": False}}
-        )
-    with pytest.raises(ValueError, match=r"allowed: \[.*'enforce_thinking_cap'"):
-        NativeToolUseEnvironment(tool_registry=_registry(), reasoning_effort_profiles={"high": {"enforce_cap": False}})
-
-
-def test_base_rejects_a_fractional_count_budget():
-    """A cap of 1.5 calls admits two; the registry's int minimum marks the key a count."""
-    with pytest.raises(
-        ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got 1.5"
-    ):
-        NativeToolUseEnvironment(
-            tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": 1.5}}
-        )
 
 
 async def test_async_admission_binds_against_the_async_handler():
@@ -358,8 +358,7 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
         def _apply_effort_profile(self, trajectory, profile):
             trajectory.info["seen"] = dict(profile)
 
-    with pytest.raises(ValueError, match=r"allowed: \['enforce_thinking_cap', 'max_probes', 'thinking_tokens'\]"):
-        _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_submissions": 1}})
+    assert _Task.effort_profile_key_minima() == {"reasoning_budget": 0, "reasoning_price": 0.0, "max_probes": 0}
     env = _Task(
         tool_registry=_registry(), reasoning_effort="medium", reasoning_effort_profiles={"medium": {"max_probes": 2}}
     )

@@ -322,16 +322,7 @@ class EnvironmentActor:
     ) -> TurnGeneration:
         """A genuine client 4xx or a shutdown error is terminal; any other transport or engine fault retries."""
         return await generate_turn(
-            partial(
-                self._generate,
-                client,
-                server_url,
-                messages,
-                config,
-                effort.level,
-                effort.thinking_budget,
-                effort.budget_soft,
-            ),
+            partial(self._generate, client, server_url, messages, config, effort.level),
             config,
             retry_on=(TimeoutError, aiohttp.ClientError, RuntimeError),
             giveup=_should_giveup,
@@ -346,13 +337,11 @@ class EnvironmentActor:
         messages: list[dict[str, str]],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
-        reasoning_budget: int | None = None,
-        budget_soft: bool = False,
     ) -> TurnGeneration:
         """One chat-completions request, and a ``/detokenize`` for a call cut at the cap, each under
         ``config.request_timeout`` of engine-serving time. Raw aiohttp, since the server URL is chosen per call."""
         url = _http_url(server_url.rstrip("/"))
-        payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget, budget_soft)
+        payload = self._build_payload(messages, config, reasoning_effort)
 
         async def _exchange() -> dict:
             async with client.post(f"{url}/v1/chat/completions", json=payload) as resp:
@@ -381,10 +370,8 @@ class EnvironmentActor:
         messages: list[dict],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
-        reasoning_budget: int | None = None,
-        budget_soft: bool = False,
     ) -> dict[str, Any]:
-        return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget, budget_soft)
+        return build_payload(messages, config, reasoning_effort, self._tools_schema)
 
     async def shutdown(self):
         """Idempotent; called by RolloutManager.shutdown."""

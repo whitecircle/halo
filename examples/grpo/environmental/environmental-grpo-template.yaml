@@ -29,6 +29,7 @@ rewards:
 #   timeout_per_test: 5          # code_contests / codeforces, seconds per test case
 #   search_backend: duckduckgo   # qa_search, open-book exam_qa
 #   reasoning_effort: null       # every environment: low / medium / high, or random (drawn once per generation group)
+#   reasoning_effort_profiles:   # per level: reasoning_budget and reasoning_price (the length terms below), plus a task's own keys
 # Shared kwargs: agent-docs/training-methods/async-grpo/environments/README.md; native-tool shaping: .../environments/protocols/native-tool-use.md
 
 # --- Ray Workers (AsyncRolloutConfig fields) ---
@@ -63,7 +64,7 @@ rollout_temperature: 0.7
 # rollout_min_p: 0.0                  # 0 = off
 # rollout_repetition_penalty: 1.0     # 1 = off
 rollout_max_tokens: 8192
-# rollout_max_thinking_tokens: null   # per-turn reasoning-token cap; vLLM only. A level's enforced thinking_tokens below it caps the turn instead; under a soft one it is the ceiling (else rollout_max_tokens less rollout_max_answer_tokens)
+# rollout_max_thinking_tokens: null   # per-turn reasoning-token cap for every level; vLLM only (else rollout_max_tokens less rollout_max_answer_tokens)
 # rollout_max_episode_tokens: null    # the most an episode may sample over all its turns, reasoning and visible output together
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
@@ -71,10 +72,10 @@ rollout_max_tokens: 8192
 # max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
 
 # --- Reasoning length economy (agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ---
-# reasoning_price: null              # per level, reward units per 1k reasoning tokens, e.g. {low: 0.0037, medium: 0.0013, high: 0.00018} (null = off)
-# reasoning_price_past_budget: false # price only what each turn reasons past its level's soft budget (a profile with enforce_thinking_cap: false)
+# The per-level budget and price live in environment_kwargs.reasoning_effort_profiles, e.g.
+#   high: {reasoning_budget: 60000, reasoning_price: 0.004}  # episode reasoning tokens free; reward units per 1k past them
 # reasoning_price_cap: 0.1           # that price's cap per episode, in reward units
-# reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
+# reasoning_floor: 0.0               # weight of the under-use floor: a failed episode reasoning under its level's reasoning_budget pays up to it (0 = off)
 # reasoning_terms_in_failed_groups: false # also charge both terms in a training group no episode of which earned the objective
 
 # --- Prefetch (AsyncRolloutConfig fields) ---

@@ -469,11 +469,9 @@ def test_template_render_failure_is_reported_not_raised(caplog):
     _assert_dropped_not_guessed(stub, result, row, caplog, "cannot render this trajectory")
 
 
-@pytest.mark.parametrize("soft", [True, False])
-def test_every_render_path_restates_the_budget_the_episode_ran_under(soft):
-    """A soft flag dropped at either render states the budget as a cut where the engine rendered a target, so every
-    later log-prob is scored against a prompt the policy never saw. A flag added to an enforced budget does the
-    reverse."""
+def test_every_render_path_restates_the_level_the_episode_ran_under():
+    """A render that drops the level states a prompt the policy never saw, so every later log-prob is scored against
+    it; the level is all the template states."""
     stub, messages, _ = _case(QWEN3_0_6B, "chat")
     render, seen = stub._render_messages_to_ids, []
 
@@ -482,16 +480,15 @@ def test_every_render_path_restates_the_budget_the_episode_ran_under(soft):
         return render(msgs, add_generation_prompt, template_kwargs, include_thinking)
 
     stub._render_messages_to_ids = _recording
-    expected = rollout_template_kwargs({}, "high", 16384, soft)
-    assert ("reasoning_budget_soft" in expected) is soft
+    expected = rollout_template_kwargs({}, "high")
+    assert expected == {"reasoning_effort": "high"}
     # The per-turn path re-renders a turn's prompt only where the engine returned sampled ids without it.
     for tokenize, sampled in ((stub._tokenize_trajectory, False), (stub._tokenize_trajectory_turns, True)):
         seen.clear()
         trajectory = _trajectory(
             [replace(m, token_ids=[1, 2, 3]) if sampled and m.role == "assistant" else m for m in messages]
         )
-        trajectory.reasoning_effort, trajectory.reasoning_budget = "high", 16384
-        trajectory.reasoning_budget_soft = soft
+        trajectory.reasoning_effort = "high"
         tokenize(RolloutResult(prompt="task", trajectory=trajectory))
         assert seen and all(kwargs == expected for kwargs in seen), (tokenize.__name__, seen)
 

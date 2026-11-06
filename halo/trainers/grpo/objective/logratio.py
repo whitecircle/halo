@@ -22,7 +22,7 @@ the round's update."""
 
 SAMPLER_CERTAIN_LOGPROB = 0.0
 """A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
-forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""
+forced it (vLLM's reasoning cap closing ``</think>``) or the nucleus collapsed onto it."""
 
 
 def sampled_token_mask(completion_mask: torch.Tensor, row_has_sampling: torch.Tensor) -> torch.Tensor:

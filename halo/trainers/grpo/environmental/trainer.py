@@ -11,7 +11,7 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.diagnostics.phase_timers import Phase
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.messages import task_prompt
-from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.context_window import is_bounded_length
@@ -146,12 +146,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             "non-prompt columns, which pruning would strip); forcing it off. Set it explicitly in your GRPOConfig.",
         )
         reject_answerless_datasets(self._rollout_env, self.train_dataset, self.eval_dataset)
-        reject_inert_reasoning_terms(
-            self.async_config,
-            self._rollout_env,
-            budgeted=has_thinking_budget(self._efforts_by_level()),
-            every_budget_soft=self._every_budget_soft,
-        )
+        reject_inert_reasoning_terms(self.async_config, self._rollout_env, self._level_reasoning_terms)
         self._configure_rollout_state()
         self._configure_importance_sampling()
         reject_unread_grpo_knobs(self.args)

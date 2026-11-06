@@ -105,8 +105,8 @@ The async GRPO recipes pin `jinja-templates/gemma4/gemma4-reasoning-effort.jinja
 and the servers run the same file (`VLLM_CHAT_TEMPLATE` / `SGLANG_CHAT_TEMPLATE` in the compose files). It
 is the hub template reduced to text-only tool use — the `<|think|>` marker opens every system turn, an
 assistant turn renders whatever reasoning it carries, the media placeholders and the Gemma-native
-`tool_responses` branch dropped — plus a system-turn line stating the episode's `reasoning_effort` and
-`reasoning_budget`, which the hub template has no variable for. The hub template keys thinking on an
+`tool_responses` branch dropped — plus a system-turn line stating the episode's `reasoning_effort`, which the
+hub template has no variable for. The hub template keys thinking on an
 `enable_thinking` variable that the vLLM server sets from `reasoning_effort` and the trainer's renders do
 not, so the pinned template is also what keeps the two prompts identical
-([Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)).
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).

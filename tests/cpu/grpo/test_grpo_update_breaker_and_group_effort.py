@@ -485,7 +485,7 @@ def test_an_eval_scores_each_problem_at_one_level_whatever_the_draw_order():
 
 def test_bind_episode_effort_prefers_the_context_level():
     def level(context, effort):
-        env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=lambda level: None)
+        env = types.SimpleNamespace(reasoning_effort=effort)
         return bind_episode_effort(context, env, max_tokens=1000).level
 
     assert level({"reasoning_effort": "high"}, "random") == "high"

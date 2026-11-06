@@ -126,7 +126,7 @@ def _server_flag_refusals(
     if needs.reasoning_consumers and flags.reasoning_parser == "":
         refusals.append(
             f"it has no reasoning parser and the run reads reasoning ({', '.join(needs.reasoning_consumers)}): a "
-            f"thinking budget would answer 400 on every rollout, the price charge nothing and the floor score every "
+            f"reasoning cap would answer 400 on every rollout, the price charge nothing and the floor score every "
             f"episode as maximal under-use. Serve with {client_cls.REASONING_PARSER_FLAG}, or turn them off."
         )
     return refusals
@@ -186,16 +186,10 @@ def _verify_adapter_servers_on_rank0(
 def _engine_prompt_ids(
     client: WeightSyncClientBase, rollout: RolloutConfig, messages: list[dict], efforts: list
 ) -> list[list[int] | None]:
-    """The prompt ids the server renders for ``messages`` under each effort's level and budget, one 1-token turn each."""
+    """The prompt ids the server renders for ``messages`` under each effort's level, one 1-token turn each."""
     prompts = []
     for effort in efforts:
-        payload = build_payload(
-            messages,
-            rollout,
-            effort.level if effort else None,
-            reasoning_budget=effort.thinking_budget if effort else None,
-            budget_soft=effort.budget_soft if effort else False,
-        )
+        payload = build_payload(messages, rollout, effort.level if effort else None)
         reply = client.request(
             "POST", "/v1/chat/completions", retry=True, timeout=_PROBE_TIMEOUT_S, json=payload
         ).json()

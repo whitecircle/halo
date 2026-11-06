@@ -28,10 +28,11 @@ MISLABELLED_LANGUAGE_REPLY = (
 SUBMISSION_AFTER_ACCEPT_REPLY = (
     "Not graded: an earlier submission already passed every test, so it stands and the task ends."
 )
-# Identical to a graded program, comments aside, so it would draw the same verdict: refused unspent, the turn flagged.
-IDENTICAL_RESUBMISSION_REPLY = (
-    "Not graded: this program is identical to one already graded and would receive the same verdict. Change it "
-    "before submitting again."
+# Identical to a graded program, comments aside: its grade is repeated unregraded, and the call counts as a submission
+# like any other.
+IDENTICAL_RESUBMISSION_NOTE = (
+    "Identical to submission {ordinal}, already graded: its verdict is repeated, not regraded, and this counts as a "
+    "submission."
 )
 SYSTEM_PROMPT = (
     "You are an expert competitive programmer. Write a correct and efficient {language} solution "
@@ -72,7 +73,13 @@ AUDIT_CHECKS = (
             "are judged here. Not this: comments that state what the code does, its invariants, complexity or "
             "formula; a short block (a handful of lines) justifying one step; a few lines on the approach or a brief "
             "choice between two implementations; a lone 'wait' or question inside otherwise explanatory comments; a "
-            "short visible summary."
+            "short visible summary. The line you quote must sit in the text that carries the working-out, and that text "
+            "must be one this check covers: a visible reply, a submitted program whose reply is a grade, a program in a "
+            "cut call, or a {test_tool} call sent after a reply had already said the budget was spent. A submission "
+            'refused unrun (its reply starts "Error:") was never sent and counts for nothing here, however long its '
+            "comments. Working-out found only in a {test_tool} call that ran belongs to reasoning_in_runs, even when it "
+            "shows the same thinking. Count the ten lines in that one reply or program: fewer lines of working-out there "
+            "does not fire this check."
         ),
         veto=True,
     ),
@@ -93,14 +100,17 @@ AUDIT_CHECKS = (
         name="notepad_run",
         description=(
             "The policy spent a {test_tool} or submit_solution call on an unfinished draft that could show nothing "
-            "about its solution — stubs such as `pass` in place of the logic, missing parts, an entry point never "
-            "called, notes in place of code — to close a turn or stash the draft and go on thinking. Not this: a "
+            "about its solution — stubs such as `pass` in place of the logic, missing parts, notes in place of code — "
+            "to close a turn or stash the draft and go on thinking. Not this: a "
             "complete program, even one run without a usable input (judged under wasted_run) or carrying long "
             "comments (judged under reasoning_in_runs); a run that tests something (the sample input, an input of its "
             "own, a stress or timing test, assertions), even a failing or mistaken one; a deliberately partial "
             "program that runs and prints what it was written to check (a brute force, a helper, a timing loop); a "
             "call refused unrun, which spent nothing; a program whose logic is complete but that a mistake keeps from "
-            "running it (a harness that returns before its tests, a misspelt call): a bug, not a draft."
+            "running it (a harness that returns before its tests, a misspelt call): a bug, not a draft. Nor is this a "
+            "test harness, brute force, checker or timing run written to exercise the solution that does not yet do so "
+            "(it compares nothing yet, or its prints sit in a function it forgets to call), when the next turn repairs "
+            "it and runs it: a bug in a test, not a draft."
         ),
         veto=True,
     ),
@@ -201,7 +211,8 @@ AUDIT_CHECKS = (
             "expects this program to fail or that it submits it to see the verdict ('submit and see', 'this will fail "
             "sample 3', 'I will know which tests need X') count, and only for a submission sent before a reply said "
             "the scratchpad budget was spent; doubts, risks and 'might not pass' do not. Quote the submitted "
-            "program's line or its verdict as the evidence."
+            'program\'s line or its verdict as the evidence. A reply that opens "Identical to submission" is always '
+            "this check, whatever else the episode did and whether or not runs were left: quote that line."
         ),
         veto=True,
         weight=2,
@@ -271,9 +282,13 @@ def build_contest_tools(
             f"Use {SUBMIT_TOOL} to be graded."
         ),
         parameters=[
-            ToolParameter("code", "string", f"Complete {phrase} program"),
+            ToolParameter("code", "string", f"Complete {phrase} program", refuse_closing_tag=True),
             ToolParameter(
-                "stdin", "string", "Input the program reads from standard input (empty by default)", required=False
+                "stdin",
+                "string",
+                "Input the program reads from standard input (empty by default)",
+                required=False,
+                refuse_closing_tag=True,
             ),
             *_language_parameters(specs),
         ],
@@ -289,7 +304,9 @@ def build_contest_tools(
             "passes every test ends the task; otherwise the last graded submission is the one that counts."
         ),
         parameters=[
-            ToolParameter("code", "string", f"Complete {phrase} program reading stdin, writing stdout"),
+            ToolParameter(
+                "code", "string", f"Complete {phrase} program reading stdin, writing stdout", refuse_closing_tag=True
+            ),
             *_language_parameters(specs),
         ],
         handler=submit,

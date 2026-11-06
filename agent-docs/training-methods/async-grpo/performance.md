@@ -41,7 +41,7 @@ Keep the trained trajectory under the served context. Reasoning survives only on
 
 `prompt + last-turn(reasoning + answer) + Σ other-turns(answer + tool output)`
 
-The per-turn reasoning budget counts once, not `max_turns` times (twice under `carry_reasoning`). `prompt + max_turns × rollout_max_tokens` is a loose bound that over-restricts `max_turns`; `rollout_max_episode_tokens` bounds the generated share directly ([Trajectory length](episodes.md#trajectory-length)).
+One turn's reasoning counts once, not `max_turns` times (twice under `carry_reasoning`). `prompt + max_turns × rollout_max_tokens` is a loose bound that over-restricts `max_turns`; `rollout_max_episode_tokens` bounds the generated share directly ([Trajectory length](episodes.md#trajectory-length)).
 
 - Cap the longest training row with [`max_train_row_tokens`](episodes.md#training-row-cap) (unset by default; `64000` in the Qwen3.6 curriculum stages).
 - Bound tool output with `max_observation_chars` (default `16384`, in `environment_kwargs`), which every tool-use environment applies ([Common knobs](environments/README.md#common-knobs)).
@@ -127,7 +127,7 @@ For a new model, environment or GPU, size in order:
 
 - **Rollouts in flight per server** = `rollout ranks × min(max_concurrent_rollouts, per_device_train_batch_size × steps_per_generation) ÷ num_servers` per round, peaking at a round's start, with up to `prefetch_depth` rounds in flight at once; an eval round opens with `rollout ranks × eval_rollout_batch_size ÷ num_servers` ([eval rounds](evaluation.md#during-training)). Rollout ranks are every rank, or under TP/ETP each group's leader alone, as its followers take the leader's rollouts ([Ray — Pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - **Decode speed at that concurrency.** Engine step latency ≈ `a + b × n` (one CPU thread). Measure two concurrencies against a live server with the run's own prompts ([Throughput](../../infrastructure/rollout-servers.md#throughput)).
-- **Timeouts from the per-turn cap**, the turn's total ([Enforced and soft budgets](reasoning.md#enforced-and-soft-budgets)): `rollout_max_tokens`, or the engine's reasoning cap plus `rollout_max_answer_tokens` where that is smaller.
+- **Timeouts from the per-turn cap**, the turn's total ([Reasoning cap](reasoning.md#reasoning-cap)): `rollout_max_tokens`, or the engine's reasoning cap plus `rollout_max_answer_tokens` where that is smaller.
     - `request_timeout ≥ 2 × cap ÷ speed(n_peak)` (default `120`).
     - `episode_timeout ≥ min(max_turns × cap, rollout_max_episode_tokens) ÷ speed(n_peak) + tool time` (default `1200`); over the NCCL watchdog it raises at startup.
 - **KV capacity.** bf16 KV per token = `2 × full-attention layers × kv_heads × head_dim × 2 B`, 20 KB on Qwen3.6-35B-A3B. Check `n_peak × mean context × that` against the pool the server reports at startup.
@@ -139,6 +139,6 @@ Worked shape, the 4-rank code-contests recipe (Qwen3.6-35B-A3B, 2 servers, `grad
 | Quantity | Value |
 |---|---|
 | Episodes per step | 96 (12 prompts), 48 per server; an eval round (`eval_rollout_batch_size: 50`) opens with 100 per server |
-| Per-turn cap | The 30,000-token `rollout_max_tokens`. The levels' `thinking_tokens` (8,192–16,384) are soft; the engine closes a normal turn's reasoning only at 21,808, leaving the 8,192-token answer room |
+| Per-turn cap | The 30,000-token `rollout_max_tokens`. The engine closes a normal turn's reasoning at 21,808 at every level, leaving the 8,192-token answer room |
 | Timeouts | `request_timeout: 1200`, `episode_timeout: 2700` |
 | KV | 48 × 13k × 20 KB ≈ 12 GB at a 13k mean context; 48 × 30k × 20 KB ≈ 29 GB once every request holds a whole turn; about twice both in an eval round |

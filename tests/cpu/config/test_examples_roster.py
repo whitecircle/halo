@@ -4,6 +4,7 @@ timeouts against the documented watchdog, the allocator setting, and against the
 export, context-window and shape contracts. Checks run through the production seam."""
 
 import ast
+import json
 import math
 import re
 from pathlib import Path
@@ -300,10 +301,13 @@ def test_example_parallelism_shape_is_accepted(config):
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_thinking_budget_has_a_server_side_parser(config):
-    """``rollout_max_thinking_tokens`` rides on vLLM's ``thinking_token_budget``, which needs a reasoning parser
-    loaded, so the launch instructions must name its flag. Without it every episode errors with a 400 and nothing
-    raises at config time."""
-    if raw_config(config).get("rollout_max_thinking_tokens") is None:
+    """A turn's reasoning cap (``rollout_max_thinking_tokens``, or on vLLM the turn less its
+    ``rollout_max_answer_tokens``) rides on vLLM's ``thinking_token_budget``, which needs a reasoning parser loaded,
+    so the launch instructions must name its flag. Without it every episode errors with a 400 and nothing raises at
+    config time."""
+    raw = raw_config(config)
+    answer_room_cap = raw.get("rollout_max_answer_tokens") is not None and raw.get("rollout_backend") != "sglang"
+    if raw.get("rollout_max_thinking_tokens") is None and not answer_room_cap:
         return
     assert "--reasoning-parser" in comment_block(config), (
         "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
@@ -320,6 +324,26 @@ def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
         return
     tokenizer = load_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
     resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
+
+
+# Run-wide spellings of what each level's effort profile carries (``reasoning_budget``, ``reasoning_price``).
+_RETIRED_REASONING_KNOBS = {
+    "reasoning_price": {"low": 0.008, "medium": 0.006, "high": 0.004},
+    "reasoning_price_past_budget": True,
+}
+
+
+@pytest.mark.parametrize("knob", sorted(_RETIRED_REASONING_KNOBS))
+def test_a_run_wide_reasoning_price_knob_is_refused_at_parse(knob, tmp_path):
+    """The per-level price and budget live in ``environment_kwargs.reasoning_effort_profiles``; no run-wide
+    spelling is migrated, so a recipe still carrying one fails at parse instead of training unpriced."""
+    recipe = next(config for config in ENV_GRPO_EXAMPLES if "code-contests" in config.name)
+    parser = parser_for(script_for(recipe))
+    parser.parse_yaml_file(str(recipe))
+    stale = tmp_path / recipe.name
+    stale.write_text(f"{recipe.read_text(encoding='utf-8')}\n{knob}: {json.dumps(_RETIRED_REASONING_KNOBS[knob])}\n")
+    with pytest.raises(ValueError, match=rf"\['{knob}'\]"):
+        parser.parse_yaml_file(str(stale))
 
 
 def test_a_weight_sync_example_exists():

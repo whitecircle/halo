@@ -75,6 +75,8 @@ def batch_host(
         balance_token_mass=balance_token_mass,
         scale_rewards_std_floor=std_floor,
     )
+    # An environment that draws no effort level: no level prices reasoning, so the reward build charges no term.
+    host._level_reasoning_terms = {None: (None, 0.0)}
     host._carry_reasoning = False
     host._is_correction = is_correction
     host._forced_close_ids = forced_close_ids

@@ -44,8 +44,7 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     trainer.use_vllm = False
     trainer._rollout_env = SimpleNamespace(
         reasoning_effort=None,
-        thinking_budget_for_effort=lambda level: None,
-        thinking_budget_enforced=lambda level: True,
+        reasoning_terms_for_effort=lambda level: (None, 0.0),
         get_tools_schema=lambda: None,
         TOOLS_ARRIVE_ON_RESET=False,
     )

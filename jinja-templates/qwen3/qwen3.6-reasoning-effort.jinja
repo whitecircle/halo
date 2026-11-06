@@ -1,10 +1,9 @@
 {#- Qwen3.6 for text-only tool-use RL: the hub template cut to what the rollouts use, plus the episode's
     reasoning effort stated in the system block. Thinking is always on; an assistant turn renders whatever
     reasoning_content it carries (the hub's preserve_thinking=true branch); tool calls and tool responses
-    keep the hub spellings the server's qwen3_xml parser reads. Variables: reasoning_effort (the request's
-    top-level field, merged in by the server), reasoning_budget (the level's per-turn thinking budget, from
-    chat_template_kwargs) and reasoning_budget_soft (true when the engine does not enforce that budget, so
-    the line states a target, not a cut); the line depends on reasoning_effort alone. -#}
+    keep the hub spellings the server's qwen3_xml parser reads. Variable: reasoning_effort (the request's
+    top-level field, merged in by the server). The line names the level and what it asks for, never a
+    token count. -#}
 {%- macro render_content(content) %}
     {%- if content is string %}
         {{- content }}
@@ -25,14 +24,16 @@
 {%- if not messages %}
     {{- raise_exception('No messages provided.') }}
 {%- endif %}
+{%- set effort_meaning = {
+    'low': 'Keep your reasoning short: take the most direct approach and act on it.',
+    'medium': 'Reason as far as the problem needs, without exhaustive exploration.',
+    'high': 'Reason thoroughly: weigh alternatives and check your work before you act.'
+} %}
 {%- set effort = namespace(line='') %}
 {%- if reasoning_effort is defined and reasoning_effort %}
-    {%- if reasoning_budget is defined and reasoning_budget and reasoning_budget_soft is defined and reasoning_budget_soft %}
-        {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '. Aim to think for at most ' ~ reasoning_budget ~ ' tokens per turn.' %}
-    {%- elif reasoning_budget is defined and reasoning_budget %}
-        {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '. Think for at most ' ~ reasoning_budget ~ ' tokens per turn; reasoning past that budget is cut off, so finish the turn within it.' %}
-    {%- else %}
-        {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '.' %}
+    {%- set effort.line = 'Reasoning effort: ' ~ reasoning_effort ~ '.' %}
+    {%- if reasoning_effort in effort_meaning %}
+        {%- set effort.line = effort.line ~ ' ' ~ effort_meaning[reasoning_effort] %}
     {%- endif %}
 {%- endif %}
 {%- set system_text = '' %}

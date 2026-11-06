@@ -567,15 +567,14 @@ def test_async_config_range_guards_survive_a_cli_override(tmp_path):
 
 
 def test_async_config_template_variables_are_the_yamls_own_kwargs():
-    """No run-wide variable is injected beside the YAML's kwargs (the per-episode level and budget travel per
-    request), and the rollout config gets its own copy."""
+    """No run-wide variable is injected beside the YAML's kwargs (the per-episode level travels per request), and the rollout config gets its own copy."""
     run_kwargs = {"preserve_thinking": True}
     config = AsyncRolloutConfig(rollout_chat_template_kwargs=run_kwargs)
     mirrored = config.get_rollout_config().chat_template_kwargs
     assert mirrored == run_kwargs and mirrored is not config.rollout_chat_template_kwargs
     assert AsyncRolloutConfig().get_rollout_config().chat_template_kwargs == {}
-    with pytest.raises(ValueError, match="must not carry"):
-        AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_budget": 8192})
+    with pytest.raises(ValueError, match="must not carry 'reasoning_effort'"):
+        AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_effort": "high"})
 
 
 if __name__ == "__main__":

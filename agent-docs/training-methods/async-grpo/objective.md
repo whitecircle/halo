@@ -47,10 +47,10 @@ Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near
 
 ### Forced reasoning closes
 
-A reasoning close the engine forced at a turn's reasoning cap ([Reasoning budget](reasoning.md#reasoning-budget)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
+A reasoning close the engine forced at a turn's reasoning cap ([Reasoning cap](reasoning.md#reasoning-cap)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
 
 - **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, six for gpt-oss's `<|end|><|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
-- **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, a soft one only through its ceiling, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
+- **Required correction.** A run whose vLLM reasoning cap can bind (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
 - **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) is refused at construction where a cap can bind, since the forced closes could not leave the loss; a soft-only run only warns.
 
 ## Trust region masks

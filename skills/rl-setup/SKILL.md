@@ -66,9 +66,11 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
    `0.0` disables the ref model), `epsilon` (clip), `scale_rewards`, `temperature`, `loss_type`. Env GRPO
    adds rollout sampling (`rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` /
    `rollout_chat_template_kwargs`), Ray pool sizing (`rollout_actor_budget`, `max_concurrent_rollouts`),
-   prefetch and `sync_weights_every_n_steps`, and the reasoning budgets: `rollout_max_thinking_tokens` is
-   enforced engine-side on vLLM only (it needs a server reasoning parser) and refused under
-   `rollout_backend: sglang`, as is `carry_reasoning`
+   prefetch and `sync_weights_every_n_steps`, and the reasoning cap: `rollout_max_thinking_tokens` (unset,
+   `rollout_max_tokens` less `rollout_max_answer_tokens`) is the same at every effort level and enforced engine-side
+   on vLLM only (it needs a server reasoning parser); it is refused under `rollout_backend: sglang`, as is
+   `carry_reasoning`. Each level's `reasoning_budget` and `reasoning_price` sit in
+   `environment_kwargs.reasoning_effort_profiles`, read by the reasoning terms alone
    (`agent-docs/training-methods/async-grpo/reasoning.md`).
 
 ## Parallelism note

@@ -63,6 +63,7 @@ Every call is checked against the tool's schema before it runs or spends budget 
 - `Error: <tool>: unknown argument '<name>'; its arguments are …`
 - `Error: <tool>: missing a required argument: '<name>'`
 - `Error: <tool>: code must be a string, got list` — a list or object for a `string` parameter. A number or boolean there reads as its Python string (`5` as `5`, `true` as `True`), and a null as the argument left out.
+- ``Error: <tool>: not run — the stdin argument ends with a stray `</stdin>` tag, …`` — a `string` value ending, past trailing whitespace, in its own parameter's closing tag, on a parameter declared with `refuse_closing_tag` (code contests' `code` and `stdin`): markup of the call leaked into the value. The tag elsewhere in a value, another parameter's tag, or any value of a parameter that does not opt in (an MCP tool's) binds.
 
 Unparseable `arguments` (neither JSON nor a Python literal) bind as none. An MCP property with no top-level `type` takes any value. A call to a tool that does not exist gets an observation listing the real tools.
 

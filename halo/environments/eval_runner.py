@@ -73,8 +73,6 @@ def serialize_trajectory(traj: Trajectory) -> dict[str, Any]:
         "truncated": traj.truncated,
         # Per episode: a ``random`` setting draws per episode, so the meta line cannot say which level ran.
         "reasoning_effort": traj.reasoning_effort,
-        "reasoning_budget": traj.reasoning_budget,
-        "reasoning_budget_soft": traj.reasoning_budget_soft,
         "info": info,
     }
 
@@ -158,7 +156,7 @@ async def _chat_turn(
         "top_p": rollout.top_p,
         "extra_body": {
             **capture_request_fields(rollout),
-            **generation_control_fields(rollout, effort.level, effort.thinking_budget, effort.budget_soft),
+            **generation_control_fields(rollout, effort.level),
         },
     }
     if tools is not None:

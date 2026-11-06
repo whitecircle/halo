@@ -365,6 +365,21 @@ def test_a_direct_call_outside_an_episode_gets_the_plain_note():
     assert env._run_test(_READS_INPUT) == f"{REPL_NO_OUTPUT_MESSAGE}\n{NO_STDIN_NOTE}"
 
 
+def test_a_stdin_ending_in_a_stray_closing_tag_is_refused_unspent_and_its_turn_untrainable():
+    """A ``run_code`` stdin ending ``</stdin>`` is refused at admission, naming the tag: no run is spent, the
+    tool-error price applies, and a turn of nothing else is flagged untrainable."""
+    env = _env(language="python", tool_error_penalty=0.05)
+    ids = _reset(env)
+    step = _turn(env, ids, (env.test_tool_name, {"code": "print(int(input()) + 1)", "stdin": "1\n</stdin>\n"}))
+    traj = step.trajectory
+    assert traj.messages[-1].content == (
+        f"Error: {env.test_tool_name}: not run — the stdin argument ends with a stray `</stdin>` tag, which is no "
+        "part of its value; send it again without the tag"
+    )
+    assert step.reward == pytest.approx(-0.05) and env._test_calls(traj) == 0
+    assert _last_turn_flagged(traj) and _last_turn(traj).untrainable
+
+
 def test_a_garbled_argument_name_is_refused_unspent_and_named():
     """A doubled ``parameter=`` prefix arrives as an undeclared argument: refused before it runs, and the reply
     names the bad key and the real ones."""

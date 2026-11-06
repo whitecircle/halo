@@ -22,9 +22,7 @@ async def _run(turns: list) -> ray_actors.RolloutResult:
     actor.__init__(actor_id=0, env_type=(_PlainEnv, {}), env_config={})
     served = iter(turns)
 
-    async def fake_generate(
-        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
-    ):
+    async def fake_generate(client, url, messages, config, reasoning_effort=None):
         turn = next(served)
         if isinstance(turn, Exception):
             raise turn

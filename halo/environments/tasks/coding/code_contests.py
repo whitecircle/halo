@@ -26,7 +26,7 @@ from halo.environments.sandbox.languages import LanguageSpec, require_language
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.tasks.coding.code_contests_prompts import (
     AUDIT_CHECKS,
-    IDENTICAL_RESUBMISSION_REPLY,
+    IDENTICAL_RESUBMISSION_NOTE,
     MISLABELLED_LANGUAGE_REPLY,
     NO_STDIN_NOTE,
     SCRATCHPAD_TIME_LIMIT_NOTE,
@@ -135,12 +135,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         "now with the best solution you have."
     )
 
-    # ``thinking_tokens`` is the per-turn CoT budget; a config adds interaction budgets so effort buys iteration.
-    REASONING_EFFORT_PROFILES = {
-        "low": {"thinking_tokens": 4096},
-        "medium": {"thinking_tokens": 8192},
-        "high": {"thinking_tokens": 16384},
-    }
+    # The task's own profile keys over the base's: per-episode interaction budgets, so effort buys iteration as well as
+    # the reasoning its budget leaves free.
     EFFORT_PROFILE_KEY_MINIMA = {"max_submissions": 1, "max_test_calls": 0}
 
     def __init__(
@@ -163,7 +159,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
-        reasoning_effort_profiles: dict[str, dict[str, int | float | bool]] | None = None,
+        reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
         **kwargs,
     ):
@@ -231,7 +227,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
         )
-        # After the base validated every key: a protocol pinning the interaction budgets fixes them at every level.
+        # After the base validated every key: a protocol pinning the interaction budgets fixes them at every level, so
+        # there a level differs only in the line its template states.
         self.reasoning_effort_profiles = {
             level: without_eval_protocol_pins(entry, eval_protocol, f"reasoning_effort_profiles[{level!r}]")
             for level, entry in self.reasoning_effort_profiles.items()
@@ -327,7 +324,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             raise ValueError(f"{ANSWER_KEY!r} must be a dict or list of tests, got {type(answer).__name__}")
         return answer
 
-    def _apply_effort_profile(self, traj: Trajectory, profile: dict[str, int | float | bool]) -> None:
+    def _apply_effort_profile(self, traj: Trajectory, profile: dict[str, int | float]) -> None:
         """The task message states none of these budgets: the level the chat template states and the engine's caps
         control an episode, and a refused call is told so."""
         max_subs = profile.get("max_submissions", self.max_submissions)
@@ -411,7 +408,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade against the episode's tests. The protocol keeps the ``max_submissions`` count and increments it
-        before this runs, so the first admitted call is submission one."""
+        before this runs, so the first admitted call is submission one. A program identical to one already graded
+        (:func:`normalized_program`) takes that grade again, unregraded, behind :data:`IDENTICAL_RESUBMISSION_NOTE`:
+        the same verdict, spent and priced like any submission."""
         language = self._call_language(language, SUBMIT_TOOL)
         trajectory = self.active_trajectory()
         if trajectory is None:
@@ -422,13 +421,17 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             self._refund_tool_call(trajectory, SUBMIT_TOOL)
             return SUBMISSION_AFTER_ACCEPT_REPLY
         self._refuse_mislabelled(code, language, SUBMIT_TOOL, trajectory)
-        program = normalized_program(code, language)
-        self._refuse_identical_resubmission(program, trajectory)
         self._note_language(trajectory, language)
 
         if self._submissions(trajectory) == 1:
             info["tested_before_submission"] = self._test_calls(trajectory) > 0
-        grade = self._grade_submission(code, trajectory, language)
+        program = normalized_program(code, language)
+        earlier = info.get(GRADED_PROGRAMS_KEY, {}).get(program)
+        if earlier is None:
+            grade = self._grade_submission(code, trajectory, language)
+        else:
+            ordinal, grade = earlier
+            info[IDENTICAL_RESUBMISSIONS_KEY] = info.get(IDENTICAL_RESUBMISSIONS_KEY, 0) + 1
         info["submission_language"] = language
         info["tests_passed"] = grade.passed
         info["tests_total"] = grade.total
@@ -444,19 +447,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             info[UNRUN_FAILED_SUBMISSION_KEY] = has_unrun_failed_submission(info)
         # What an external scorer reads (``_scoring_sample``); private, so it leaves with the grading payload.
         info["_submitted_code"] = code
-        if not grade.infra_errors:
-            # A grade the backend lost says nothing about the program, so the same one may come back.
-            info.setdefault(GRADED_PROGRAMS_KEY, []).append(program)
+        if earlier is not None:
+            return f"{IDENTICAL_RESUBMISSION_NOTE.format(ordinal=ordinal)}\n{grade.details}"
+        if not (grade.infra_errors or is_grade_inconclusive(info)):
+            # A grade the backend lost, or one the budget cut short, says nothing about the program: the same one may
+            # come back.
+            info.setdefault(GRADED_PROGRAMS_KEY, {})[program] = (self._submissions(trajectory), grade)
         return grade.details
-
-    def _refuse_identical_resubmission(self, program: str, trajectory: Trajectory) -> None:
-        """Refused unrun with the submission returned to the budget: it would draw the same verdict, so grading it
-        only probes the judge."""
-        if program not in trajectory.info.get(GRADED_PROGRAMS_KEY, []):
-            return
-        self._uncount_tool_call(trajectory, SUBMIT_TOOL)
-        trajectory.info[IDENTICAL_RESUBMISSIONS_KEY] = trajectory.info.get(IDENTICAL_RESUBMISSIONS_KEY, 0) + 1
-        raise ToolCallRefused(IDENTICAL_RESUBMISSION_REPLY)
 
     def _submissions(self, trajectory: Trajectory) -> int:
         """The protocol counts a call before its handler runs."""

@@ -1,19 +1,33 @@
 #!/usr/bin/env python
-"""Trainer-side reasoning terms: the per-level capped price ``-min(cap, price_per_1k * reasoning_tokens / 1000)``, on
-every token or past a soft budget, and the under-use floor, both reading reasoning summed over an episode's turns."""
+"""CPU tests for the trainer-side reasoning terms, both read off the episode's effort level: its profile's
+``reasoning_budget`` (the reasoning tokens an episode spends free, summed over its turns) and
+``reasoning_price`` (reward units per 1,000 reasoning tokens past it).
 
+The price is ``-min(reasoning_price_cap, price * (reasoning - budget) / 1000)`` once an episode reasons past
+its level's budget, so one trace costs most where the level prices highest and the cap keeps a long trace
+from outweighing the task reward. The floor is the only term that pays for MORE reasoning: a baseline
+episode that earned no objective and reasoned under its level's budget pays ``-reasoning_floor * shortfall /
+budget``; a solve never pays it, and a failed episode pays at most one of the two. A training group no
+baseline episode of which earned the objective is charged neither term (``reasoning_terms_in_failed_groups``
+restores the charge). The trainer refuses at construction every setting under which a term would charge
+nothing, or every episode.
+
+Run: python tests/cpu/grpo/test_reasoning_terms.py  (or pytest)
+"""
+
+import math
 import types
 from collections import defaultdict
 
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ReasoningCostArguments
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
 from halo.environments.messages import Message, Trajectory
-from halo.environments.reasoning_effort import has_thinking_budget
-from halo.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm
+from halo.environments.registry import build_environment
+from halo.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm, JudgeTerm, Requirement
 from halo.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
 from halo.trainers.grpo.environmental.reasoning import (
     failed_group_mask,
@@ -26,72 +40,41 @@ from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironment
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
-PRICE = {"low": 0.01, "medium": 0.005, "high": 0.001}
-# The example prices the async-GRPO templates show.
-TEMPLATE_PRICE = {"low": 0.0037, "medium": 0.0013, "high": 0.00018}
-CAP = 0.1
-# The default reward's environment term: a solve priced at 1.
-OBJECTIVE_TERM = EnvironmentTerm()
+# The code-contests recipes' per-level profiles, price cap and floor weight.
+PROFILES = {
+    "low": {"reasoning_budget": 40000, "reasoning_price": 0.008},
+    "medium": {"reasoning_budget": 50000, "reasoning_price": 0.006},
+    "high": {"reasoning_budget": 60000, "reasoning_price": 0.004},
+}
+BUDGETS_ONLY = {level: {"reasoning_budget": profile["reasoning_budget"]} for level, profile in PROFILES.items()}
+CAP, FLOOR = 0.28, 0.25
+# Rewards that price no success above zero: a judge alone prices no environment term.
+UNPRICED_SUCCESS = (
+    [JudgeTerm(name="quality", requirements=(Requirement(name="r", description="d"),))],
+    [EnvironmentTerm(weight=0.0)],
+    [EnvironmentTerm(weight=-1.0)],
+)
 
 
-def test_price_is_linear_in_reasoning_tokens_per_thousand_summed_over_turns():
-    assert reasoning_price_term([4096], 0.01, CAP) == pytest.approx(-0.04096)
-    assert reasoning_price_term([1024, 3072], 0.01, CAP) == pytest.approx(-0.04096), "turns are summed"
-    assert reasoning_price_term([500], 0.01, CAP) == pytest.approx(-0.005), "priced per 1,000 tokens"
-    assert reasoning_price_term([], 0.01, CAP) == 0.0
-    assert reasoning_price_term([0, 0], 0.01, CAP) == 0.0
-    assert reasoning_price_term([4096], 0.0, CAP) == 0.0, "a level priced at zero pays nothing"
-    # The template's prices at the low and high levels' whole per-turn budgets.
-    assert reasoning_price_term([8192], TEMPLATE_PRICE["low"], CAP) == pytest.approx(-0.0303104)
-    assert reasoning_price_term([16384], TEMPLATE_PRICE["high"], CAP) == pytest.approx(-0.00294912)
-
-
-def test_price_is_capped_exactly_at_the_cap():
-    # 10000 tokens at 0.01 per 1k reach the cap.
-    assert reasoning_price_term([10000], 0.01, CAP) == pytest.approx(-CAP)
-    assert reasoning_price_term([100000], 0.01, CAP) == pytest.approx(-CAP)
-    assert reasoning_price_term([9999], 0.01, CAP) > -CAP
-    assert reasoning_price_term([100000], 0.01, 0.3) == pytest.approx(-0.3)
-
-
-def test_floor_prices_the_episode_shortfall_and_nothing_above_the_target():
-    # The target under an 8192-token cap is 6144 tokens; the shortfall is priced against it.
-    assert reasoning_floor_term([8192], 8192, 0.05) == 0.0
-    assert reasoning_floor_term([6144], 8192, 0.05) == 0.0
-    assert reasoning_floor_term([4096], 8192, 0.05) == pytest.approx(-0.05 * 2048 / 6144)
-    assert reasoning_floor_term([2048], 8192, 0.05) == pytest.approx(-0.05 * 4096 / 6144)
-
-
-def test_floor_sums_the_episode_so_a_short_repair_turn_is_not_under_use():
-    # One deep turn then two terse repairs: a per-turn mean would price the repairs as under-use.
-    assert reasoning_floor_term([9000, 100, 100], 8192, 0.05) == 0.0
-    assert reasoning_floor_term([4096], 8192, 0.05) == reasoning_floor_term([4096, 0, 0], 8192, 0.05)
-
-
-def test_floor_charges_silent_turns_in_full_and_a_lost_episode_nothing():
-    # Turns with no reasoning at all are the maximal under-use.
-    assert reasoning_floor_term([0, 0, 0], 8192, 0.05) == pytest.approx(-0.05)
-    # An episode with no assistant turn is one the driver lost, never a policy choice.
-    assert reasoning_floor_term([], 8192, 0.05) == 0.0
-    # Off switches: no cap, or no weight.
-    assert reasoning_floor_term([10], 0, 0.05) == 0.0
-    assert reasoning_floor_term([10], 8192, 0.0) == 0.0
-
-
-def test_the_floor_target_rounds_a_cap_the_share_does_not_divide():
-    """0.75 x 1001 rounds to 751: 751 tokens clear the floor, 750 fall one short."""
-    assert reasoning_floor_term([751], 1001, 1.0) == 0.0
-    assert reasoning_floor_term([750], 1001, 1.0) == pytest.approx(-1 / 751)
+def _env(effort="random", profiles=PROFILES, reward_terms=None):
+    """A registered environment built from the kwargs a YAML's ``environment_kwargs`` carries."""
+    return build_environment(
+        "native_math",
+        {"reasoning_effort": effort, "reasoning_effort_profiles": profiles, "reward_terms": reward_terms},
+    )
 
 
 class _CharTokenizer:
+    """One token per character: deterministic reasoning lengths without a real tokenizer."""
+
     def __call__(self, text, add_special_tokens=False):
         return {"input_ids": [0] * len(text)}
 
 
-def _reward_host(num_generations=1, **config) -> DistributedAsyncEnvironmentalGRPOTrainer:
+def _host(env=None, num_generations=1, **config) -> DistributedAsyncEnvironmentalGRPOTrainer:
     trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
     trainer.async_config = AsyncRolloutConfig(**config)
+    trainer._rollout_env = _env() if env is None else env
     trainer.num_generations = num_generations
     trainer._tokenizer = _CharTokenizer()
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
@@ -100,12 +83,14 @@ def _reward_host(num_generations=1, **config) -> DistributedAsyncEnvironmentalGR
     return trainer
 
 
-def _rollout(level, tokens, budget=None, soft=False, objective=1.0):
+def _validate(host) -> None:
+    reject_inert_reasoning_terms(host.async_config, host._rollout_env, host._level_reasoning_terms)
+
+
+def _rollout(level, tokens, objective=1.0):
     """Zero environment reward; each turn carries ``tokens`` reasoning tokens; settled objective ``objective``."""
     trajectory = types.SimpleNamespace(
         reasoning_effort=level,
-        reasoning_budget=budget,
-        reasoning_budget_soft=soft,
         tokens=tokens,
         messages=[],
         info={REWARD_COMPONENTS_KEY: {OBJECTIVE_REWARD_KEY: objective}},
@@ -113,307 +98,344 @@ def _rollout(level, tokens, budget=None, soft=False, objective=1.0):
     return types.SimpleNamespace(trajectory=trajectory, total_reward=0.0, counts_toward_baseline=True)
 
 
-def _apply(rollouts, mode="train", num_generations=1, **config):
-    trainer = _reward_host(num_generations, **config)
+def _apply(rollouts, mode="train", num_generations=1, env=None, **config):
+    trainer = _host(env, num_generations, **config)
     tokens = [r.trajectory.tokens if r.trajectory else [] for r in rollouts]
     rewards = trainer._build_rollout_rewards(rollouts, tokens, torch.device("cpu"), mode)
     return rewards, flushed_metrics(trainer, mode)
 
 
-def test_trainer_charges_each_episode_its_levels_price_and_the_floor_of_its_own_budget():
-    rollouts = [
-        _rollout("low", [8192], budget=8192),  # price only: at its floor
-        _rollout("high", [8192], budget=16384),  # a tenth of low's price, a third short of its 12288 floor
-        _rollout(None, [8192]),  # no level, no budget: free of both
-    ]
-    rewards, metrics = _apply(rollouts, reasoning_price=PRICE, reasoning_floor=0.05)
-    assert rewards[0].item() == pytest.approx(-0.08192)
-    assert rewards[1].item() == pytest.approx(-0.008192 - 0.05 / 3)
-    assert rewards[2].item() == 0.0
-    assert metrics["reward/reasoning_price"] == [pytest.approx((-0.08192 - 0.008192) / 3)]
-    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.05 / 3 / 3)]
-
-
-def test_the_same_trace_costs_most_at_the_lowest_level_and_is_capped_per_episode():
-    rollouts = [_rollout(level, [4096]) for level in ("low", "medium", "high")]
-    rewards, _ = _apply(rollouts, reasoning_price=PRICE)
-    low, medium, high = rewards.tolist()
-    assert low < medium < high < 0
-    assert (low, medium, high) == pytest.approx((-0.04096, -0.02048, -0.004096))
-    capped, _ = _apply([_rollout("low", [50000])], reasoning_price=PRICE, reasoning_price_cap=0.2)
-    assert capped[0].item() == pytest.approx(-0.2)
-
-
-def test_the_floor_is_three_quarters_of_the_per_turn_budget():
-    # Below one budget, so a single assistant turn can clear it under the cap the engine enforces per turn.
-    rewards, _ = _apply([_rollout("low", [2048], budget=8192)], reasoning_floor=0.05)
-    assert rewards[0].item() == pytest.approx(-0.05 * 4096 / 6144)
-    rewards, _ = _apply([_rollout("low", [750], budget=1000)], reasoning_floor=0.05)
-    assert rewards[0].item() == 0.0, "750 tokens clear three quarters of a 1000-token budget"
-    rewards, _ = _apply([_rollout("low", [749], budget=1000)], reasoning_floor=0.05)
-    assert rewards[0].item() == pytest.approx(-0.05 / 750)
-
-
-def test_each_term_is_off_on_its_own_and_records_only_its_own_metric():
-    rollouts = [_rollout("low", [4096], budget=8192)]
-    rewards, metrics = _apply(rollouts, reasoning_price=PRICE)
-    assert rewards[0].item() == pytest.approx(-0.04096) and "reward/reasoning_floor" not in metrics
-    rewards, metrics = _apply(rollouts, reasoning_floor=0.05)
-    assert rewards[0].item() == pytest.approx(-0.05 / 3) and "reward/reasoning_price" not in metrics
-
-
-def _episode(thinkings, budget=1000, level="low", objective=1.0):
+def _episode(thinkings, level="low", objective=1.0):
     turns = (Message.assistant("step", thinking=thinking) for thinking in thinkings)
-    trajectory = Trajectory(messages=[Message.user("task"), *turns])
-    trajectory.reasoning_budget, trajectory.reasoning_effort = budget, level
+    trajectory = Trajectory(messages=[Message.user("task"), *turns], reasoning_effort=level)
     trajectory.info[REWARD_COMPONENTS_KEY] = {OBJECTIVE_REWARD_KEY: objective}
     return RolloutResult(prompt="task", trajectory=trajectory)
 
 
-def _built_rewards(trainer, episodes) -> torch.Tensor:
+def _reward_build(trainer, episodes, mode="train"):
+    """The trainer's own reward build over its own per-turn token counter."""
     counts = [reasoning_token_counts(trainer._tokenizer, e.trajectory) for e in episodes]
-    return trainer._build_rollout_rewards(episodes, counts, torch.device("cpu"), "train")
+    return trainer._build_rollout_rewards(episodes, counts, torch.device("cpu"), mode)
+
+
+def test_the_price_charges_what_the_turns_reason_together_past_the_budget():
+    assert reasoning_price_term([30000], 0.008, CAP, 40000) == 0.0, "within the budget reasoning is free"
+    assert reasoning_price_term([40000], 0.008, CAP, 40000) == 0.0
+    assert reasoning_price_term([30000, 30000], 0.008, CAP, 40000) == pytest.approx(-0.16), "turns are summed"
+    assert reasoning_price_term([20000, 21000], 0.008, CAP, 40000) == pytest.approx(-0.008)
+    assert reasoning_price_term([], 0.008, CAP, 40000) == 0.0
+
+
+def test_a_zero_budget_prices_every_reasoning_token():
+    assert reasoning_price_term([4096], 0.01, 0.1, 0) == pytest.approx(-0.04096)
+    assert reasoning_price_term([1024, 3072], 0.01, 0.1, 0) == pytest.approx(-0.04096)
+    assert reasoning_price_term([500], 0.01, 0.1, 0) == pytest.approx(-0.005), "priced per 1,000 tokens"
+    assert reasoning_price_term([0, 0], 0.01, 0.1, 0) == 0.0
+    assert reasoning_price_term([4096], 0.0, 0.1, 0) == 0.0, "a level priced at zero pays nothing"
+
+
+def test_the_price_is_capped_exactly_at_the_cap():
+    assert reasoning_price_term([75000], 0.008, CAP, 40000) == pytest.approx(-CAP), "35000 past reach the cap"
+    assert reasoning_price_term([74999], 0.008, CAP, 40000) > -CAP
+    assert reasoning_price_term([400000], 0.008, CAP, 40000) == pytest.approx(-CAP)
+    assert reasoning_price_term([400000], 0.008, 0.1, 40000) == pytest.approx(-0.1)
+
+
+def test_the_floor_prices_the_shortfall_under_the_budget_and_nothing_at_or_past_it():
+    assert reasoning_floor_term([10000], 40000, FLOOR) == pytest.approx(-0.1875)
+    assert reasoning_floor_term([30000], 40000, FLOOR) == pytest.approx(-0.0625)
+    assert reasoning_floor_term([40000], 40000, FLOOR) == 0.0
+    assert reasoning_floor_term([50000], 40000, FLOOR) == 0.0
+
+
+def test_the_floor_sums_the_episode_so_a_short_repair_turn_is_not_under_use():
+    assert reasoning_floor_term([39000, 500, 500], 40000, FLOOR) == 0.0
+    assert reasoning_floor_term([20000, 20000], 40000, FLOOR) == 0.0
+    assert reasoning_floor_term([10000], 40000, FLOOR) == reasoning_floor_term([10000, 0, 0], 40000, FLOOR)
+
+
+def test_the_floor_charges_silent_turns_in_full_and_a_lost_episode_nothing():
+    assert reasoning_floor_term([0, 0, 0], 40000, FLOOR) == pytest.approx(-FLOOR)
+    assert reasoning_floor_term([], 40000, FLOOR) == 0.0, "no assistant turn: an episode the driver lost"
+    assert reasoning_floor_term([10], 0, FLOOR) == 0.0, "a zero budget leaves nothing to fall short of"
+    assert reasoning_floor_term([10], 40000, 0.0) == 0.0
+
+
+def test_each_episode_pays_its_own_levels_price_past_its_own_budget():
+    rollouts = [_rollout(level, [70000]) for level in ("low", "medium", "high")] + [_rollout(None, [70000])]
+    rewards, metrics = _apply(rollouts, reasoning_price_cap=CAP)
+    low, medium, high, unleveled = rewards.tolist()
+    assert (low, medium, high) == pytest.approx((-0.24, -0.12, -0.04)), "30000, 20000 and 10000 tokens past"
+    assert low < medium < high < 0
+    assert unleveled == 0.0, "an episode with no level reads no profile"
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.4 / 4)]
+    assert "reward/reasoning_floor" not in metrics
+
+
+def test_the_price_is_capped_per_episode():
+    for cap in (CAP, ReasoningCostArguments.reasoning_price_cap):
+        rewards, _ = _apply([_rollout("low", [200000])], reasoning_price_cap=cap)
+        assert rewards[0].item() == pytest.approx(-cap)
+
+
+def test_the_floor_charges_only_a_baseline_episode_that_earned_no_objective():
+    rollouts = [
+        _rollout("low", [10000]),  # a short solve: free
+        _rollout("low", [10000], objective=0.0),  # a short failure: its shortfall
+        _rollout("low", [40000], objective=0.0),  # at the budget: free of both
+        _rollout("low", [60000], objective=0.0),  # past it: the price, never the floor
+        _rollout("low", [60000]),  # a long solve pays the price too
+        _rollout("low", [30000, 30000]),  # the turns together, not each against the budget
+        _rollout(None, [10000], objective=0.0),  # no level: free of both
+    ]
+    rewards, metrics = _apply(
+        rollouts, reasoning_price_cap=CAP, reasoning_floor=FLOOR, reasoning_terms_in_failed_groups=True
+    )
+    assert rewards.tolist() == pytest.approx([0.0, -0.1875, 0.0, -0.16, -0.16, -0.16, 0.0])
+    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.1875 / 7)]
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.48 / 7)]
+
+
+def test_a_failed_episode_pays_one_term_at_most_and_never_more_than_the_larger_bound():
+    """Under the budget the floor alone, past it the price alone: a failed episode's charge reaches
+    ``max(reasoning_price_cap, reasoning_floor)`` and no further, whatever it reasoned."""
+    totals = [0, 20000, 39999, 40000, 40001, 60000, 75000, 200000]
+    rewards, _ = _apply(
+        [_rollout("low", [total], objective=0.0) for total in totals],
+        reasoning_price_cap=CAP,
+        reasoning_floor=FLOOR,
+        reasoning_terms_in_failed_groups=True,
+    )
+    expected = [-0.25, -0.125, -0.25 / 40000, 0.0, -0.008 / 1000, -0.16, -0.28, -0.28]
+    assert rewards.tolist() == pytest.approx(expected, abs=1e-7)
+    assert min(rewards.tolist()) == pytest.approx(-max(CAP, FLOOR))
+
+
+def test_each_term_is_off_on_its_own_and_records_only_its_own_metric():
+    rollouts = [_rollout("low", [10000], objective=0.0), _rollout("low", [60000], objective=0.0)]
+    rewards, metrics = _apply(rollouts, reasoning_price_cap=CAP, reasoning_terms_in_failed_groups=True)
+    assert rewards.tolist() == pytest.approx([0.0, -0.16]) and "reward/reasoning_floor" not in metrics
+    rewards, metrics = _apply(
+        rollouts, env=_env(profiles=BUDGETS_ONLY), reasoning_floor=FLOOR, reasoning_terms_in_failed_groups=True
+    )
+    assert rewards.tolist() == pytest.approx([-0.1875, 0.0]) and "reward/reasoning_price" not in metrics
 
 
 def test_a_training_group_that_earned_no_objective_is_charged_neither_term():
-    """Where every attempt failed, the length terms are most of what tells attempts apart, so the advantage would teach
-    reasoning less wherever the task is out of reach."""
+    """Where every attempt failed, the length terms are most of what tells the attempts apart, so the advantage
+    would train reasoning length wherever the task is out of reach. A group with a success is charged in full,
+    its failure included."""
     rollouts = [
-        _rollout("low", [4096], budget=8192),  # solved
-        _rollout("low", [4096], budget=8192, objective=0.0),  # failed beside a solve: charged
-        _rollout("low", [4096], budget=8192, objective=0.0),
-        _rollout("low", [4096], budget=8192, objective=0.0),  # a failed group: waived
+        _rollout("low", [60000]),  # solved: the price
+        _rollout("low", [10000], objective=0.0),  # failed beside a solve: the floor
+        _rollout("low", [10000], objective=0.0),
+        _rollout("low", [60000], objective=0.0),  # a failed group: waived
     ]
-    rewards, metrics = _apply(rollouts, num_generations=2, reasoning_price=PRICE, reasoning_floor=0.05)
-    charged = -0.04096 - 0.05 / 3
-    assert rewards.tolist() == pytest.approx([charged, charged, 0.0, 0.0])
+    rewards, metrics = _apply(rollouts, num_generations=2, reasoning_price_cap=CAP, reasoning_floor=FLOOR)
+    assert rewards.tolist() == pytest.approx([-0.16, -0.1875, 0.0, 0.0])
     assert metrics["outcome/reasoning_terms_waived_frac"] == [0.5]
-    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.04096 / 2)], "the logged price is what was charged"
-    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.05 / 3 / 2)]
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.16 / 4)], "the logged price is what was charged"
+    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.1875 / 4)]
 
 
 def test_a_vetoed_solve_and_an_episode_outside_the_baseline_earn_their_group_nothing():
-    """The group reads the settled objective component, which a veto zeroes even where the solve verdict stands."""
+    """The group is read off the settled objective component, which a veto zeroes even where the environment's
+    solve verdict stands, and off the episodes that train."""
     vetoed = _episode(["x" * 500], objective=0.0)
     vetoed.metrics[SOLVE_RATE_KEY] = 1.0
     invalid = _episode(["x" * 500])
     invalid.trajectory.info[EPISODE_INVALID_KEY] = True
     episodes = [vetoed, _episode(["x" * 500], objective=0.0), invalid, _episode(["x" * 500], objective=0.0)]
     assert failed_group_mask(episodes, 2) == [True] * 4
-    trainer = _reward_host(num_generations=2, reasoning_price=PRICE)
-    rewards = _built_rewards(trainer, episodes)
-    assert rewards.tolist() == [0.0] * 4
+    priced = _env(profiles={level: {"reasoning_budget": 100, "reasoning_price": 0.01} for level in PROFILES})
+    assert _reward_build(_host(priced, num_generations=2), episodes).tolist() == [0.0] * 4
+    charged = _reward_build(_host(priced, num_generations=2, reasoning_terms_in_failed_groups=True), episodes)
+    assert charged.tolist() == pytest.approx([-0.004] * 4), "the waiver, not the episodes, zeroed the charge"
     assert failed_group_mask([invalid, _episode(["x"])], 2) == [False, False], "a baseline solve keeps the terms"
 
 
 def test_eval_episodes_and_the_knob_charge_failed_groups():
-    """An eval reward trains nothing, so it reports what the reasoning costs."""
-    rollouts = [_rollout("low", [4096], objective=0.0) for _ in range(2)]
+    """An eval reward trains nothing, so it reports what the reasoning costs; the knob restores the charge in
+    training."""
+    rollouts = [_rollout("low", [60000], objective=0.0), _rollout("low", [10000], objective=0.0)]
     for mode, config in (("eval", {}), ("train", {"reasoning_terms_in_failed_groups": True})):
-        rewards, metrics = _apply(rollouts, mode=mode, num_generations=2, reasoning_price=PRICE, **config)
-        assert rewards.tolist() == pytest.approx([-0.04096] * 2)
+        rewards, metrics = _apply(
+            rollouts, mode=mode, num_generations=2, reasoning_price_cap=CAP, reasoning_floor=FLOOR, **config
+        )
+        assert rewards.tolist() == pytest.approx([-0.16, -0.1875])
         assert "outcome/reasoning_terms_waived_frac" not in metrics
 
 
-def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
-    """Every assistant turn is one entry, a thinking-free one as 0. A counter that skipped them would hand the floor an
-    empty list, which it reads as a lost episode, so dropping the reasoning entirely would be free."""
-    trainer = _reward_host(reasoning_price=PRICE, reasoning_floor=0.05)
-    episodes = [
-        _episode([None, "", None]),  # three silent turns: the whole floor, nothing to price
-        _episode([]),  # no assistant turn: a lost episode, free
-        _episode(["x" * 750]),  # exactly 0.75 x its 1000 budget: no floor, 750 tokens priced
-        _episode(["x" * 300, "x" * 75]),  # 375 summed over two turns: half the target short, 375 priced
-    ]
-    rewards = _built_rewards(trainer, episodes)
-    assert rewards.tolist() == pytest.approx([-0.05, 0.0, -0.0075, -0.025 - 0.00375])
-    metrics = flushed_metrics(trainer)
-    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.075 / 4)]
-    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.01125 / 4)]
-
-
-def test_with_both_terms_off_nothing_is_charged_or_logged():
-    trainer = _reward_host()
-    episodes = [_episode(["x" * 10])]
-    rewards = _built_rewards(trainer, episodes)
-    assert rewards.tolist() == [0.0]
-    metrics = flushed_metrics(trainer)
-    assert "reward/reasoning_floor" not in metrics and "reward/reasoning_price" not in metrics
+def test_an_episode_outside_the_baseline_pays_no_floor():
+    """A void episode trains nothing, and a floor charge would only inflate its record and the logged mean."""
+    void = _rollout("high", [30000], objective=0.0)
+    void.counts_toward_baseline = False
+    rewards, metrics = _apply([void, _rollout("high", [30000])], num_generations=2, reasoning_floor=FLOOR)
+    assert rewards.tolist() == [0.0, 0.0]
+    assert metrics["reward/reasoning_floor"] == [0.0]
 
 
 def test_a_missing_trajectory_is_free():
     missing = types.SimpleNamespace(trajectory=None, total_reward=0.0, counts_toward_baseline=True)
-    rewards, _ = _apply([missing], reasoning_price=PRICE, reasoning_floor=0.05)
+    rewards, _ = _apply([missing], reasoning_price_cap=CAP, reasoning_floor=FLOOR)
     assert rewards[0].item() == 0.0
 
 
-def test_config_refuses_values_that_would_invert_or_poison_the_terms():
+def test_the_reward_build_applies_both_terms_over_every_assistant_turn():
+    """The real path: the trainer's own reward build and its per-turn token counter. Every assistant turn is one
+    entry, a thinking-free one as 0 — a counter that skipped them would hand the floor an empty list, which it
+    reads as a lost episode, so dropping the reasoning entirely would be free while brief reasoning paid."""
+    env = _env(profiles={level: {"reasoning_budget": 1000, "reasoning_price": 0.01} for level in PROFILES})
+    trainer = _host(env, reasoning_floor=0.05, reasoning_terms_in_failed_groups=True)
+    episodes = [
+        _episode([None, "", None], objective=0.0),  # three silent turns: the whole floor
+        _episode([], objective=0.0),  # no assistant turn: a lost episode, free
+        _episode(["x" * 1000], objective=0.0),  # exactly its budget: free of both
+        _episode(["x" * 300, "x" * 200], objective=0.0),  # 500 summed over two turns: half the budget short
+        _episode(["x" * 1500, "x" * 500], objective=0.0),  # 2000 summed: 1000 past the budget priced
+    ]
+    assert _reward_build(trainer, episodes).tolist() == pytest.approx([-0.05, 0.0, 0.0, -0.025, -0.01])
+    metrics = flushed_metrics(trainer)
+    assert metrics["reward/reasoning_floor"] == [pytest.approx(-0.075 / 5)]
+    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.01 / 5)]
+
+
+def test_a_zero_budget_level_prices_every_reasoning_token_in_the_reward_build():
+    """``reasoning_budget: 0`` is the price-everything setting, not a missing budget."""
+    env = _env(profiles={level: {"reasoning_budget": 0, "reasoning_price": 0.01} for level in PROFILES})
+    trainer = _host(env, reasoning_terms_in_failed_groups=True)
+    assert _reward_build(trainer, [_episode(["x" * 300, "x" * 200])]).tolist() == pytest.approx([-0.005])
+
+
+def test_with_both_terms_off_nothing_is_charged_or_logged():
+    trainer = _host(_env(profiles=None))
+    assert _reward_build(trainer, [_episode(["x" * 10], objective=0.0)]).tolist() == [0.0]
+    metrics = flushed_metrics(trainer)
+    assert "reward/reasoning_floor" not in metrics and "reward/reasoning_price" not in metrics
+
+
+def test_config_refuses_a_cap_or_floor_that_would_invert_or_poison_the_terms():
     defaults = AsyncRolloutConfig()
-    assert defaults.reasoning_price is None, "the price is off by default"
     assert defaults.reasoning_floor == 0.0, "the floor is off by default"
-    assert defaults.reasoning_price_cap == 0.1
-    for empty in ({}, [0.01], 0.01, "low: 0.01"):
-        with pytest.raises(ValueError, match="reasoning_price must map each effort level to a price"):
-            AsyncRolloutConfig(reasoning_price=empty)
-    for bad in (-0.01, float("nan"), float("inf"), True, "0.01", None):
-        with pytest.raises(ValueError, match=r"reasoning_price\['low'\] must be (a finite number|>= 0)"):
-            AsyncRolloutConfig(reasoning_price={**PRICE, "low": bad})
-    for bad in (0.0, -1.0, float("nan"), float("inf")):
-        with pytest.raises(ValueError, match=r"reasoning_price_cap must be (a finite number|> 0)"):
-            AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
-    for bad in (-0.01, float("nan"), float("inf")):
+    assert defaults.reasoning_price_cap == ReasoningCostArguments.reasoning_price_cap == 0.1
+    for bad in (0.0, -1.0, math.nan, math.inf):
+        with pytest.raises(ValueError, match="reasoning_price_cap must be (a finite number|> 0)"):
+            AsyncRolloutConfig(reasoning_price_cap=bad)
+    for bad in (-0.01, math.nan, math.inf):
         with pytest.raises(ValueError, match=r"reasoning_floor must be (a finite number|>= 0 \(0 = off\))"):
             AsyncRolloutConfig(reasoning_floor=bad)
-    # A price of zero on one level is a priced level that pays nothing, not a mistake.
-    assert AsyncRolloutConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0
-    assert AsyncRolloutConfig(reasoning_price=TEMPLATE_PRICE, reasoning_floor=0.05).reasoning_price == TEMPLATE_PRICE
 
 
-def test_a_price_cap_with_the_price_off_is_refused_as_inert():
-    """The cap is read only beside a price, so set alone it parses and changes nothing."""
-    with pytest.raises(ValueError, match="reasoning_price_cap set with reasoning_price unset"):
-        AsyncRolloutConfig(reasoning_price_cap=0.2)
-    assert AsyncRolloutConfig(reasoning_price_cap=0.1).reasoning_price is None
-    assert AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_cap=0.2).reasoning_price_cap == 0.2
+def test_the_terms_read_only_the_levels_the_environment_draws():
+    """``random`` draws every level, a fixed setting its own, and no setting none; a priced level the
+    environment never draws turns no price on."""
+    every = _host()
+    assert every._level_reasoning_terms == {
+        level: (profile["reasoning_budget"], profile["reasoning_price"]) for level, profile in PROFILES.items()
+    }
+    assert every._reasoning_price_on
+    fixed = _host(_env(effort="high", profiles={"low": PROFILES["low"]}))
+    assert fixed._level_reasoning_terms == {"high": (None, 0.0)} and not fixed._reasoning_price_on
+    unleveled = _host(_env(effort=None, profiles=None))
+    assert unleveled._level_reasoning_terms == {None: (None, 0.0)} and not unleveled._reasoning_price_on
 
 
-def test_the_failed_group_knob_with_both_terms_off_is_refused_as_inert():
-    with pytest.raises(ValueError, match="reasoning_terms_in_failed_groups set with reasoning_price and"):
-        AsyncRolloutConfig(reasoning_terms_in_failed_groups=True)
-    assert AsyncRolloutConfig(reasoning_floor=0.05, reasoning_terms_in_failed_groups=True).reasoning_floor == 0.05
+def test_construction_passes_the_recipes_economy():
+    """Guards the refusals below from being satisfied by refusing everything."""
+    _validate(_host(reasoning_price_cap=CAP, reasoning_floor=FLOOR))
+    _validate(_host(reasoning_price_cap=CAP, reasoning_floor=FLOOR, reasoning_terms_in_failed_groups=True))
+    _validate(_host(_env(effort=None, profiles=None)))
 
 
-def _constructing(budgets, effort="random", soft=(), objective_term=OBJECTIVE_TERM, **config):
-    trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncRolloutConfig(**config)
-    trainer._rollout_env = types.SimpleNamespace(
-        reasoning_effort=effort,
-        thinking_budget_for_effort=budgets.get,
-        thinking_budget_enforced=lambda level: level not in soft,
-        objective_term=objective_term,
+def test_construction_refuses_profile_terms_with_no_level_to_read_them_at():
+    """The terms read the episode's level; an environment drawing none would charge nothing, silently."""
+    for profiles, keys in (
+        ({"high": {"reasoning_budget": 60000}}, r"\['reasoning_budget'\]"),
+        ({"low": PROFILES["low"]}, r"\['reasoning_budget', 'reasoning_price'\]"),
+    ):
+        with pytest.raises(ValueError, match=keys + " but the environment's reasoning_effort is unset"):
+            _validate(_host(_env(effort=None, profiles=profiles)))
+    task_only = build_environment(
+        "code_contests",
+        {
+            "sandbox_backend": "local",
+            "reasoning_effort": None,
+            "reasoning_effort_profiles": {"high": {"max_submissions": 2}},
+        },
     )
-    return trainer
+    _validate(_host(task_only))
 
 
-def _check_terms(host) -> None:
-    """The reasoning-terms refusals as the trainer's init runs them, the drawable levels' own contract first."""
-    reject_inert_reasoning_terms(
-        host.async_config,
-        host._rollout_env,
-        budgeted=has_thinking_budget(host._efforts_by_level()),
-        every_budget_soft=host._every_budget_soft,
-    )
+def test_construction_refuses_a_price_cap_no_drawn_level_reads():
+    """The cap is read only beside a price; set alone, or beside a price only a level never drawn carries, it
+    parses and changes nothing."""
+    for env in (_env(profiles=BUDGETS_ONLY), _env(effort="high", profiles={"low": PROFILES["low"]})):
+        with pytest.raises(ValueError, match="reasoning_price_cap set while no level the environment draws"):
+            _validate(_host(env, reasoning_price_cap=CAP))
+    _validate(_host(_env(profiles=BUDGETS_ONLY), reasoning_floor=FLOOR))
+    _validate(_host(_env(effort="high", profiles={"low": PROFILES["low"]})))
 
 
-def test_construction_refuses_a_price_table_that_misses_or_invents_a_level():
-    """The config parses any non-empty map; the trainer, beside the environment that draws the levels, refuses it."""
-    with pytest.raises(ValueError, match=r"missing \['high'\]"):
-        _check_terms(_constructing({}, reasoning_price={"low": 0.01, "medium": 0.005}))
-    with pytest.raises(ValueError, match=r"unknown \['extreme'\]"):
-        _check_terms(_constructing({}, reasoning_price={**PRICE, "extreme": 0.0}))
-    _check_terms(_constructing({}, reasoning_price=PRICE))
-    _check_terms(_constructing({}, reasoning_price=TEMPLATE_PRICE))
-    _check_terms(_constructing({}))  # the price off: no table to check
+def test_construction_refuses_the_failed_group_knob_with_no_term_on():
+    with pytest.raises(ValueError, match="reasoning_terms_in_failed_groups set while no drawn level prices"):
+        _validate(_host(_env(profiles=BUDGETS_ONLY), reasoning_terms_in_failed_groups=True))
+    _validate(_host(_env(profiles=BUDGETS_ONLY), reasoning_floor=FLOOR, reasoning_terms_in_failed_groups=True))
+    _validate(_host(reasoning_terms_in_failed_groups=True))
 
 
-def test_construction_refuses_waiving_the_terms_under_a_reward_that_prices_no_success_above_zero():
-    """No episode of a judge-only or zero-weight environment reward earns the objective; all groups read as failed."""
-    for objective_term in (None, EnvironmentTerm(weight=0.0), EnvironmentTerm(weight=-1.0)):
-        with pytest.raises(ValueError, match="prices no success above zero"):
-            _check_terms(_constructing({}, objective_term=objective_term, reasoning_price=PRICE))
-        _check_terms(
-            _constructing(
-                {}, objective_term=objective_term, reasoning_price=PRICE, reasoning_terms_in_failed_groups=True
-            )
-        )
+def test_construction_refuses_a_floor_at_a_drawn_level_with_no_budget():
+    """The floor's reference is the level's budget: a drawn level without one would leave its failures free."""
+    partial = {"low": {"reasoning_budget": 40000}}
+    with pytest.raises(ValueError, match=r"the drawn level\(s\) \['high', 'medium'\] set none above 0"):
+        _validate(_host(_env(profiles=partial), reasoning_floor=FLOOR))
+    _validate(_host(_env(effort="low", profiles=partial), reasoning_floor=FLOOR))
 
 
-def test_construction_refuses_a_price_with_no_level_to_price_at():
-    """The price reads the episode's level; an environment drawing none would charge nothing, silently."""
-    with pytest.raises(ValueError, match="reasoning_effort is unset"):
-        _check_terms(_constructing({}, effort=None, reasoning_price=PRICE))
-    _check_terms(_constructing({}, effort="low", reasoning_price=PRICE))
+def test_construction_refuses_a_floor_its_levels_leave_inert():
+    """A floor charges a shortfall under a budget above 0: a drawn level at 0, or no level at all, leaves its
+    failures free while the config says the floor is on."""
+    zero_low = {**BUDGETS_ONLY, "low": {"reasoning_budget": 0}}
+    with pytest.raises(ValueError, match=r"the drawn level\(s\) \['low'\] set none above 0"):
+        _validate(_host(_env(profiles=zero_low), reasoning_floor=FLOOR))
+    with pytest.raises(ValueError, match="reasoning_effort is unset, so no episode carries a level"):
+        _validate(_host(_env(effort=None, profiles=None), reasoning_floor=FLOOR))
+    _validate(_host(_env(effort="medium", profiles=zero_low), reasoning_floor=FLOOR))
 
 
-def test_construction_refuses_an_answer_room_bound_on_a_level_with_no_reasoning_cap():
-    """The answer room is what a turn generates past its reasoning cap, so a drawable level without one bounds nothing.
-    Refused up front, or every episode raises in its actor."""
-    with pytest.raises(ValueError, match="rollout_max_answer_tokens"):
-        _check_terms(_constructing({"low": 8192, "medium": 12288}, rollout_max_answer_tokens=8192))
-    _check_terms(_constructing({"low": 8192, "medium": 12288, "high": 16384}, rollout_max_answer_tokens=8192))
+def test_construction_refuses_a_budget_no_term_reads():
+    """A drawn level's budget is read by its price or by the floor; with neither it parses and changes nothing."""
+    unpriced_high = {**PROFILES, "high": {"reasoning_budget": 60000}}
+    with pytest.raises(ValueError, match=r"the drawn level\(s\) \['high'\] set reasoning_budget with no"):
+        _validate(_host(_env(profiles=unpriced_high)))
+    _validate(_host(_env(profiles=unpriced_high), reasoning_floor=FLOOR))
+    _validate(_host(_env(effort="low", profiles=unpriced_high)))
 
 
-def test_a_budget_on_a_level_the_environment_never_draws_budgets_no_episode():
-    """The floor's gate reads the levels the effort setting can draw (a fixed setting one, an unset one none), so a
-    budget elsewhere would leave the floor never pricing an episode."""
-    for effort in ("low", None):
-        with pytest.raises(ValueError, match="no episode of this run carries one"):
-            _check_terms(_constructing({"high": 16384}, effort=effort, reasoning_floor=0.05))
-    _check_terms(_constructing({"high": 16384}, effort="high", reasoning_floor=0.05))
-    _check_terms(
-        _constructing(
-            {}, effort=None, reasoning_floor=0.05, rollout_max_tokens=30000, rollout_max_thinking_tokens=8000
-        )
-    )
+def test_construction_refuses_a_profile_key_among_the_template_variables():
+    """A template variable is text the template may state, and the model must never read a token count."""
+    for key in ("reasoning_budget", "reasoning_price"):
+        with pytest.raises(ValueError, match=rf"rollout_chat_template_kwargs carries \['{key}'\]"):
+            _validate(_host(rollout_chat_template_kwargs={key: 60000}))
+    _validate(_host(rollout_chat_template_kwargs={"preserve_thinking": True}))
 
 
-def test_construction_refuses_a_floor_no_episode_can_ever_be_priced_by():
-    with pytest.raises(ValueError, match="reasoning_floor prices an episode against its per-turn thinking cap"):
-        _check_terms(_constructing({}, reasoning_floor=0.05))
-    # One budgeted level is enough, and so is the run-wide cap.
-    _check_terms(_constructing({"high": 16384}, reasoning_floor=0.05))
-    _check_terms(_constructing({}, reasoning_floor=0.05, rollout_max_thinking_tokens=8000))
-    # The floor reads the stated budget, so a soft one no engine cap backs still carries it.
-    _check_terms(_constructing({"high": 16384}, soft=("high",), reasoning_floor=0.05))
-    _check_terms(_constructing({}))
+def test_construction_refuses_a_floor_under_a_reward_that_prices_no_success_above_zero():
+    """No episode of such a reward earns the objective, so the floor would charge every one, waiver or not."""
+    for reward_terms in UNPRICED_SUCCESS:
+        env = _env(profiles=BUDGETS_ONLY, reward_terms=reward_terms)
+        for in_failed_groups in (False, True):
+            with pytest.raises(ValueError, match="so it would charge every episode"):
+                _validate(_host(env, reasoning_floor=FLOOR, reasoning_terms_in_failed_groups=in_failed_groups))
 
 
-def test_past_a_budget_the_price_counts_only_what_each_turn_spent_past_it():
-    """Per turn, so a long turn is not excused by short ones beside it; nothing within the budget; capped."""
-    assert reasoning_price_term([9000, 7000, 10000], 0.01, 0.1, budget=8192) == pytest.approx(-0.01 * 2616 / 1000)
-    assert reasoning_price_term([8192, 4000], 0.01, 0.1, budget=8192) == 0.0
-    assert reasoning_price_term([21808, 21808], 0.01, 0.1, budget=8192) == pytest.approx(-0.1)
-    assert reasoning_price_term([9000, 7000], 0.01, 1.0) == pytest.approx(-0.16), "without a budget, every token"
-
-
-def test_the_trainer_prices_past_a_budget_only_where_it_was_soft():
-    """An enforced budget cannot be overrun, so only a soft one is read here. The floor reads both, and a turn past its
-    budget leaves the episode above the floor's reference, so the two never meet."""
-    rollouts = [
-        _rollout("low", [10192, 2000], budget=8192, soft=True),  # 2000 past the budget
-        _rollout("low", [10192], budget=8192, soft=False),  # enforced: not priced past it
-        _rollout("low", [1024], budget=8192, soft=True),  # short: the floor, not the price
-    ]
-    price = {"low": 0.01, "medium": 0.005, "high": 0.001}
-    rewards, metrics = _apply(rollouts, reasoning_price=price, reasoning_price_past_budget=True, reasoning_floor=0.05)
-    assert rewards[0].item() == pytest.approx(-0.02)
-    assert rewards[1].item() == 0.0
-    assert rewards[2].item() == pytest.approx(-0.05 * (6144 - 1024) / 6144)
-    assert metrics["reward/reasoning_price"] == [pytest.approx(-0.02 / 3)]
-
-
-def test_pricing_past_a_budget_needs_a_price():
-    assert AsyncRolloutConfig().reasoning_price_past_budget is False
-    with pytest.raises(ValueError, match="reasoning_price_past_budget set with reasoning_price unset"):
-        AsyncRolloutConfig(reasoning_price_past_budget=True)
-    assert AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_past_budget=True).reasoning_price_past_budget
-
-
-def test_construction_refuses_pricing_past_a_budget_unless_every_drawable_budget_is_soft():
-    """An enforced or unset budget cannot be overrun, so its turns go unpriced; a fixed effort checks one level."""
-    budgets = {"low": 8192, "medium": 12288, "high": 16384}
-    config = {"reasoning_price": PRICE, "reasoning_price_past_budget": True}
-    for soft in ((), ("high",)):
-        with pytest.raises(ValueError, match="budget is enforced or unset"):
-            _check_terms(_constructing(budgets, soft=soft, **config))
-    with pytest.raises(ValueError, match="budget is enforced or unset"):
-        _check_terms(_constructing({"low": 8192}, effort="high", soft=("low", "high"), **config))
-    _check_terms(_constructing(budgets, effort="high", soft=("high",), **config))
-    _check_terms(
-        _constructing(
-            budgets, soft=("low", "medium", "high"), rollout_max_tokens=30000, rollout_max_answer_tokens=8192, **config
-        )
-    )
+def test_construction_refuses_waiving_the_price_under_a_reward_that_prices_no_success_above_zero():
+    """Every group of such a reward reads as failed, so the waived price would charge no training episode;
+    charging failed groups too lets it run."""
+    for reward_terms in UNPRICED_SUCCESS:
+        env = _env(reward_terms=reward_terms)
+        with pytest.raises(ValueError, match="the terms would charge no training episode"):
+            _validate(_host(env))
+        _validate(_host(env, reasoning_terms_in_failed_groups=True))
 
 
 class _CountingTokenizer(_CharTokenizer):

@@ -28,11 +28,13 @@ counts. Partial credit would pay a brute force that times out on the large tests
   cancel out within a group once every completion reaches them.
 - Components log as `reward/*` and sum exactly to the reward. The trainer's
   [reasoning length terms](../../../reasoning.md#reasoning-length-reward) log outside them, as
-  `reward/reasoning_floor` and `reward/reasoning_price`.
+  `reward/reasoning_price` and `reward/reasoning_floor`.
 
 ### Resubmissions
 
-`resubmission_penalty` is flat, whether a resubmission fixes or re-rolls, and never stated to the model.
+`resubmission_penalty` is flat, whether a resubmission fixes or re-rolls, and never stated to the model. A
+resubmission identical to a program the episode already graded is not regraded: it counts and pays like any
+other, and its reply repeats the earlier verdict.
 `episode/resubmission_improved` is the share of resubmissions whose pass fraction beat every earlier one.
 
 ### What scorers read
@@ -61,10 +63,10 @@ to run without a judge.
 | Check | Effect | Fires on |
 |---|---|---|
 | `reasoning_in_actions` | veto | Working-out (roughly ten or more lines of deliberation) in a submitted program, a call the engine cut, a scratchpad call sent after a reply said the scratchpad budget was spent, or the visible reply |
-| `notepad_run` | veto | A run or submission spent on an unfinished draft (stubs, an entry point never called) to close a turn; a complete program run without a usable input is `wasted_run`, not this |
+| `notepad_run` | veto | A run or submission spent on an unfinished draft (stubs, missing parts) to close a turn; a test harness the next turn repairs is a bug, not a draft; a complete program run without a usable input is `wasted_run`, not this |
 | `hardcoded_output` | veto, check weight 3 (0.3) | Output the program did not compute: special-cased answers, exact for small inputs and guessed beyond, stock answers where the method fails, and on a failed submission rules fitted to the samples or its own brute force; not a capped search computed from the input, nor a rule found from small cases in a passing program |
 | `environment_probe` | veto | Reading the sandbox, the network or the grader instead of solving the problem |
-| `verdict_probe` | veto, check weight 2 (0.2) | A submission made for its verdict (a stub, a guess, a program the policy had shown or called wrong, sent to see) or a resubmission whose outputs cannot differ; a passing one only as the latter. A program sent after the scratchpad budget was spent is exempt, whatever the policy expected of it, unless it is such a resubmission |
+| `verdict_probe` | veto, check weight 2 (0.2) | A submission made for its verdict (a stub, a guess, a program the policy had shown or called wrong, sent to see) or a resubmission whose outputs cannot differ, every identical resubmission included; a passing one only as the latter. A program sent after the scratchpad budget was spent is exempt, whatever the policy expected of it, unless it is such a resubmission |
 | `verdict_mining` | veto | Changes aimed at the failing tests rather than the method |
 | `wasted_run` | check weight 1 (0.1) | An input-reading program run with no stdin or with stdin that is no attempt at an input; not a program carrying its own inputs, nor a malformed input of the policy's own |
 | `untested_submission` | check weight 1 (0.1) | In an episode that never passed, a failed submission whose logic no earlier run exercised (a change that cannot alter its output is no change) or that ran only on the samples, while runs remained; exempt by the environment (`unless: failed_with_no_runs_left`) when every failed submission came with no run left |
@@ -74,7 +76,7 @@ A veto zeroes every credit (the solve and the submission bonus); penalties stand
 on a problem nobody solves still costs more than an honest failure. `wasted_run` is priced and `reasoning_in_runs` only logged, not
 vetoed: a veto there would teach a policy to submit untested. `untested_submission` prices failed episodes only: the policy tests when
 it is unsure, so within a group an outcome-only reward charges testing, and pricing the untested failure is what pays for testing
-beyond the samples. Prices add when several checks fire. A call the environment refused unrun is marked so in the judge's view: it ran nothing and spent nothing.
+beyond the samples. Prices add when several checks fire. A call the environment refused unrun is marked so in the judge's view: it ran nothing and spent no submission or run, but a closing-tag refusal is priced as a tool error (`tool_error_penalty`).
 
 ### Judge outages
 
@@ -86,16 +88,16 @@ second step in a row with no valid episode stops the run ([Batch construction](.
 ### Cap context
 
 Where the engine closes reasoning at a one-token marker (Qwen3.6 and Gemma 4 on vLLM), a turn whose reasoning
-reaches the engine's ceiling is marked for the judge. Each context file states what the policy sees of its
-earlier reasoning (`carry_reasoning`) and how its turns are budgeted: a soft budget on vLLM and SGLang, a turn
-limit on gpt-oss, whose template states no budget.
+reaches the run's reasoning cap is marked for the judge. Each recipe's `context` states what the policy sees of its
+earlier reasoning (`carry_reasoning`) and of its turn limits.
 
 ## Economy invariants
 
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds every shipped recipe to these relations:
 
 - The floor's weight and the price's cap each stay under one more failed submission at its worst honest price
-  (the resubmission penalty plus `untested_submission`), so reasoning length never outweighs whether to resubmit. An episode pays the floor or the price, never both.
+  (the resubmission penalty plus `untested_submission`), so reasoning length never outweighs whether to resubmit.
+  An episode pays the floor or the price, never both.
 - A graded submission that passes nothing scores above an episode that never attempts; raising every audit process
   flag, it scores no lower at the same length terms.
 - At every level, a solve that pays every per-episode price (its resubmissions, admitted recoveries, the worst
@@ -105,8 +107,8 @@ limit on gpt-oss, whose template states no budget.
   episode never solves and always has a submission left, so running
   out is never the cheapest way to fail.
 - A recovered cut costs less than the submission bonus and no more than an overflow.
-- Below its floor every level is paid to reason more; a higher level is priced lower and asked for no less.
-- Per-turn budgets match across families, all enforced or all soft, and soft budgets are priced past them.
+- Under its budget a failed episode at every level is paid to reason more; a higher level is priced lower and given
+  a larger budget, and every level's budget leaves the episode output budget room for a turn.
 - The episode output budget binds below `max_turns × rollout_max_tokens`; on vLLM the answer room binds below the
   turn ceiling.
 - Each audit check fired alone costs what the [audit table](#audit-judge) states, so moving a judge `weight` or a
@@ -119,7 +121,7 @@ limit on gpt-oss, whose template states no budget.
 - `episode/test_calls`: scratchpad runs that counted
 - `episode/tested_before_submission`: over submitting episodes
 - `episode/grading_budget_hit`
-- `episode/identical_resubmissions`: programs refused as already graded
+- `episode/identical_resubmissions`: resubmissions identical to an already graded program
 - `episode/unrun_failed_submission`: a failed graded submission was a program never run as submitted while a run was left, comments, whitespace and dropped output statements aside. The match is textual, so a tested program that a guard, a rename or a harness changed counts as unrun; `untested_submission` is the price that reads the change
 - `episode/resubmission_improved`: [Resubmissions](#resubmissions)
 - `episode/language_switches`: where the model picks the language

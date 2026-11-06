@@ -26,8 +26,6 @@ from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSampli
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, nccl_timeout
 from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
     SGLANG_BACKEND,
     RolloutBackend,
     RolloutConfig,
@@ -161,46 +159,36 @@ class ISCorrectionArguments(ValidatedConfig):
 
 @dataclass
 class ReasoningCostArguments(ValidatedConfig):
-    """What an episode pays for its reasoning length: the per-level price and the under-use floor."""
+    """What an episode pays for its reasoning length: the cap on the per-level price (each level's profile sets the
+    price) and the under-use floor."""
 
-    reasoning_price: dict[str, float] | None = field(
-        default=None,
-        metadata={
-            "help": "Per effort level (exactly low, medium and high), the reward units an episode pays per 1,000 "
-            "reasoning tokens, capped by reasoning_price_cap; unset = off. Price the lowest level highest, so the "
-            "same trace costs most where little reasoning was asked. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#price."
-        },
-    )
-    reasoning_price_past_budget: bool = field(
-        default=False,
-        metadata={
-            "help": "Price only the reasoning tokens each turn spends past its level's soft budget instead of every "
-            "reasoning token. Needs reasoning_price and a soft budget on every drawable level. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#price-past-the-budget."
-        },
-    )
     reasoning_price_cap: float = field(
         default=0.1,
         metadata={
-            "help": "Cap of reasoning_price per episode, in reward units, so a long trace cannot outweigh the task "
-            "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it prices. "
+            "help": "Cap of the reasoning price per episode, in reward units, so a long trace cannot outweigh the task "
+            "reward. The price itself is per effort level: a level's profile (environment_kwargs."
+            "reasoning_effort_profiles) charges reasoning_price per 1,000 reasoning tokens an episode spends past its "
+            "reasoning_budget, summed over turns. Keep it below what the environment charges for the decisions it "
+            "prices: an episode pays it or reasoning_floor, never both. Set while no drawable level prices reasoning, "
+            "it is refused at trainer construction. Logged as reward/reasoning_price. "
             "See agent-docs/training-methods/async-grpo/reasoning.md#price."
         },
     )
     reasoning_floor: float = field(
         default=0.0,
         metadata={
-            "help": "Weight of the reasoning under-use floor (0 = off): an episode reasoning less than three "
-            "quarters of its per-turn thinking budget pays -weight × shortfall / that three-quarter target. Keep it, plus "
-            "reasoning_price_cap, below what the environment charges for the decisions it prices. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#floor."
+            "help": "Weight of the reasoning under-use floor (0 = off): a baseline episode that earned no objective and "
+            "reasoned, summed over its turns, under its level's reasoning_budget pays -weight × shortfall / budget; a "
+            "solve pays nothing. The one term that pays for more reasoning. Keep it below what the environment "
+            "charges for the decisions it prices: an episode pays it or the price, never both. Every level the "
+            "environment draws needs a reasoning_budget above 0 (refused at trainer construction otherwise). Logged "
+            "as reward/reasoning_floor. See agent-docs/training-methods/async-grpo/reasoning.md#floor."
         },
     )
     reasoning_terms_in_failed_groups: bool = field(
         default=False,
         metadata={
-            "help": "Charge reasoning_price and reasoning_floor in a training group none of whose baseline episodes "
+            "help": "Charge the reasoning price and reasoning_floor in a training group none of whose baseline episodes "
             "earned the objective (its reward/objective component, zeroed by a veto). Off by default: there the "
             "length terms are most of what tells the attempts apart, so the advantage would train reasoning length "
             "rather than the task. A group with a success is charged either way, and eval episodes always are. Off, "
@@ -211,34 +199,10 @@ class ReasoningCostArguments(ValidatedConfig):
     )
 
     def _validate_fields(self) -> None:
-        """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a cap with
-        the price off, or the failed-group switch with both terms off, changes nothing. Price levels and the objective
-        a waiver reads are checked at trainer construction."""
+        """A NaN passes every ordered comparison. Whether some level prices reasoning, which the cap and the
+        failed-group switch need, is checked at trainer construction, beside the environment's profiles."""
         super()._validate_fields()
         owner = type(self).__name__
-        if self.reasoning_price is None and self.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
-            raise ValueError(
-                "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
-                "it, or set reasoning_price."
-            )
-        if self.reasoning_price is None and self.reasoning_floor == 0 and self.reasoning_terms_in_failed_groups:
-            raise ValueError(
-                "reasoning_terms_in_failed_groups set with reasoning_price and reasoning_floor both off: it chooses "
-                "where the reasoning terms charge. Set one of them, or remove it."
-            )
-        if self.reasoning_price is None and self.reasoning_price_past_budget:
-            raise ValueError(
-                "reasoning_price_past_budget set with reasoning_price unset: it chooses what the price counts. Set "
-                "reasoning_price, or remove it."
-            )
-        if self.reasoning_price is not None:
-            if not isinstance(self.reasoning_price, Mapping) or not self.reasoning_price:
-                raise ValueError(
-                    f"reasoning_price must map each effort level to a price, got {self.reasoning_price!r}"
-                )
-            require_finite(
-                owner, ge=0, **{f"reasoning_price[{level!r}]": price for level, price in self.reasoning_price.items()}
-            )
         require_finite(owner, gt=0, reasoning_price_cap=self.reasoning_price_cap)
         # A NaN or negative weight would parse and leave the floor off without a word.
         require_finite(owner, ge=0, why=" (0 = off)", reasoning_floor=self.reasoning_floor)
@@ -463,8 +427,8 @@ class AsyncRolloutConfig(
         default_factory=dict,
         metadata={
             "help": "Chat-template variables sent with every rollout request (chat_template_kwargs) and applied to "
-            "the trainer's own renders, so both sides see one template state. reasoning_effort, reasoning_budget "
-            "and reasoning_budget_soft are refused here, being per episode. "
+            "the trainer's own renders, so both sides see one template state. reasoning_effort is refused here: "
+            "it is per episode and travels as the request's top-level field. "
             "See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
         },
     )
@@ -586,18 +550,12 @@ class AsyncRolloutConfig(
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "
                 f"{type(self.rollout_chat_template_kwargs).__name__}"
             )
-        per_episode = {
-            "reasoning_effort",
-            REASONING_BUDGET_TEMPLATE_VAR,
-            REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-        } & set(self.rollout_chat_template_kwargs)
-        if per_episode:
+        if "reasoning_effort" in self.rollout_chat_template_kwargs:
             raise ValueError(
-                f"rollout_chat_template_kwargs must not carry {sorted(per_episode)}: the level and its thinking "
-                "budget are per episode; the level travels as the request's top-level field and the budget is "
-                "added to the nested form per request."
+                "rollout_chat_template_kwargs must not carry 'reasoning_effort': the level is per episode and "
+                "travels as the request's top-level field."
             )
-        # SGLang drops the field silently. A level's thinking budget still steers through the template; this only caps.
+        # SGLang drops the field silently. The level still steers through the template; this only caps.
         if self.rollout_backend == SGLANG_BACKEND and self.rollout_max_thinking_tokens is not None:
             raise ValueError(
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "

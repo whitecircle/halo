@@ -96,9 +96,7 @@ def _args(**overrides):
 
 
 def test_the_yaml_rollout_contract_reaches_the_eval(contract):
-    rollout = rollout_config_from_args(
-        _args(), contract, _env(contract), default_temperature=0.2, default_max_tokens=99
-    )
+    rollout = rollout_config_from_args(_args(), contract, _env(contract), default_temperature=0.2)
     assert rollout.chat_template_kwargs == {"preserve_thinking": True}
     assert rollout.stop_token_ids == [_CALL_TOKEN_ID]
     assert rollout.max_thinking_tokens == 2048
@@ -113,11 +111,7 @@ def test_the_yaml_rollout_contract_reaches_the_eval(contract):
 
 def test_an_explicit_sampling_flag_overrides_the_yaml_alone(contract):
     rollout = rollout_config_from_args(
-        _args(temperature=0.3, max_tokens=512),
-        contract,
-        _env(contract),
-        default_temperature=0.2,
-        default_max_tokens=99,
+        _args(temperature=0.3, max_tokens=512), contract, _env(contract), default_temperature=0.2
     )
     assert (rollout.temperature, rollout.max_tokens) == (0.3, 512)
     assert (rollout.top_p, rollout.request_timeout) == (1.0, 300.0)
@@ -126,11 +120,11 @@ def test_an_explicit_sampling_flag_overrides_the_yaml_alone(contract):
 
 def test_without_the_flag_the_script_defaults_stand():
     assert load_training_contract(None) is None
-    rollout = rollout_config_from_args(_args(), None, None, default_temperature=0.2, default_max_tokens=99)
+    rollout = rollout_config_from_args(_args(), None, None, default_temperature=0.2)
     assert (rollout.temperature, rollout.top_p, rollout.max_tokens, rollout.request_timeout) == (
         0.2,
         RolloutConfig.top_p,
-        99,
+        RolloutConfig.max_tokens,
         REQUEST_TIMEOUT_SECONDS,
     )
     assert rollout.stop_token_ids is None and rollout.chat_template_kwargs == {}
@@ -199,36 +193,33 @@ def test_a_thinking_budget_vllm_cannot_enforce_is_refused(tmp_path, monkeypatch)
         contract.rollout_config(_env(contract))
 
 
-_LEVEL_BUDGET_YAML = """\
+_RUN_CAP_YAML = """\
 model_name_or_path: dummy/model
 output_dir: /tmp/contract-eval
 learning_rate: 1.0e-6
 environment_type: native_math
 environment_kwargs:
   reasoning_effort: low
-  reasoning_effort_profiles:
-    low: {thinking_tokens: 1024}
 rollout_backend: vllm
 rollout_max_tokens: 4096
+rollout_max_answer_tokens: 1024
 """
 
 
-def test_a_level_budget_vllm_cannot_enforce_is_refused_without_a_run_wide_one(tmp_path, monkeypatch):
-    """A level's ``thinking_tokens`` reaches vLLM as the turn's budget, so a Mistral 4 run budgeted per level alone
-    is refused too."""
+def test_an_answer_room_cap_vllm_cannot_enforce_is_refused_without_a_run_wide_one(tmp_path, monkeypatch):
+    """The turn less its answer room reaches vLLM as the turn's reasoning cap, so a Mistral 4 run capped by its answer
+    room alone is refused too."""
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
     monkeypatch.setattr(eval_contract.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
-    budgeted = tmp_path / "budgeted.yaml"
-    budgeted.write_text(_LEVEL_BUDGET_YAML)
-    contract = TrainingContract.load(str(budgeted))
+    capped = tmp_path / "capped.yaml"
+    capped.write_text(_RUN_CAP_YAML)
+    contract = TrainingContract.load(str(capped))
     assert contract.async_config.rollout_max_thinking_tokens is None
     with pytest.raises(ValueError, match="cannot enforce a thinking budget"):
         contract.rollout_config(_env(contract))
-    unbudgeted = tmp_path / "unbudgeted.yaml"
-    unbudgeted.write_text(
-        _LEVEL_BUDGET_YAML.replace("  reasoning_effort_profiles:\n    low: {thinking_tokens: 1024}\n", "")
-    )
-    contract = TrainingContract.load(str(unbudgeted))
+    uncapped = tmp_path / "uncapped.yaml"
+    uncapped.write_text(_RUN_CAP_YAML.replace("rollout_max_answer_tokens: 1024\n", ""))
+    contract = TrainingContract.load(str(uncapped))
     assert contract.rollout_config(_env(contract)).max_thinking_tokens is None
 
 
@@ -247,9 +238,7 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
 
     monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", never)
     plain = tmp_path / "plain.yaml"
-    plain.write_text(
-        _LEVEL_BUDGET_YAML.replace("  reasoning_effort_profiles:\n    low: {thinking_tokens: 1024}\n", "")
-    )
+    plain.write_text(_RUN_CAP_YAML.replace("rollout_max_answer_tokens: 1024\n", ""))
     unbudgeted = TrainingContract.load(str(plain))
     rollout = unbudgeted.rollout_config(_env(unbudgeted))
     assert rollout.reasoning_end_token_id is None and not rollout.capture_token_ids
@@ -279,9 +268,7 @@ def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_pat
 
 
 def test_the_meta_line_records_the_whole_generation_contract(contract, tmp_path):
-    rollout = rollout_config_from_args(
-        _args(), contract, _env(contract), default_temperature=0.2, default_max_tokens=99
-    )
+    rollout = rollout_config_from_args(_args(), contract, _env(contract), default_temperature=0.2)
     traj_path = tmp_path / "trajectories.jsonl"
     args = _args(output_path=None, dataset="d", config=None, training_config=contract.path)
     env = SimpleNamespace(max_turns=7, system_prompt="sp", get_tools_schema=lambda: None)

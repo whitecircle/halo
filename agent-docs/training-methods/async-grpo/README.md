@@ -113,7 +113,7 @@ python scripts/environments/inference/eval_env.py \
 
 - [Servers and Launch](setup.md): GPU split, backends, weight sync, multi-node
 - [Episodes](episodes.md): sampling, turn and episode budgets, tool calls, unproductive turns
-- [Reasoning Budgets](reasoning.md): effort levels, reasoning budgets, the reasoning length reward
+- [Reasoning Budgets](reasoning.md): effort levels, the engine's reasoning cap, the per-level budget and price
 - [Objective and Stability](objective.md): training rows, importance sampling, advantages, KL
 - [Memory and Throughput](performance.md): the logits wall, chunked log-probs, sizing
 - [Monitoring](monitoring.md): logged metrics, saved trajectories, early stop

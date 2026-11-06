@@ -67,7 +67,7 @@ from halo.entrypoints.script import (
     with_distributed_teardown,
 )
 from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_budget
+from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_cap
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import (
@@ -123,8 +123,8 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
 
 
 def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict:
-    """The kwargs a rollout request carries: the run's template variables plus the level and thinking budget an episode
-    binds under the run's bounds (a ``'random'`` setting draws one level), as an episode's requests state them."""
+    """The kwargs a rollout request carries: the run's template variables plus the level an episode binds under the
+    run's bounds (a ``'random'`` setting draws one level), as an episode's requests state it."""
     effort = bind_episode_effort(
         None,
         environment,
@@ -133,9 +133,7 @@ def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict
         max_episode_tokens=async_config.rollout_max_episode_tokens,
         max_answer_tokens=async_config.rollout_max_answer_tokens,
     )
-    return rollout_template_kwargs(
-        async_config.rollout_chat_template_kwargs, effort.level, effort.thinking_budget, effort.budget_soft
-    )
+    return rollout_template_kwargs(async_config.rollout_chat_template_kwargs, effort.level)
 
 
 def server_requirements(async_config: AsyncRolloutConfig, environment, model) -> ServerRequirements:
@@ -147,12 +145,13 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         max_answer_tokens=async_config.rollout_max_answer_tokens,
         max_episode_tokens=async_config.rollout_max_episode_tokens,
     )
-    budgeted = async_config.rollout_backend == VLLM_BACKEND and has_thinking_budget(efforts)
+    capped = async_config.rollout_backend == VLLM_BACKEND and has_thinking_cap(efforts)
+    prices_reasoning = any(environment.reasoning_terms_for_effort(level)[1] > 0 for level in efforts)
     consumers = (
-        ("reasoning_price", async_config.reasoning_price is not None),
+        ("reasoning_price", prices_reasoning),
         ("reasoning_floor", async_config.reasoning_floor > 0),
         ("carry_reasoning", environment.carry_reasoning),
-        ("a thinking budget", budgeted),
+        ("a thinking cap", capped),
     )
     return ServerRequirements(
         is_moe=has_routed_experts(model.config),
@@ -179,12 +178,7 @@ def verify_served_template(async_config: AsyncRolloutConfig, environment, tokeni
     messages = [*system, {"role": "user", "content": "Probe."}]
 
     def trainer_prompt_ids(effort) -> list[int]:
-        kwargs = rollout_template_kwargs(
-            async_config.rollout_chat_template_kwargs,
-            effort.level if effort else None,
-            effort.thinking_budget if effort else None,
-            effort.budget_soft if effort else False,
-        )
+        kwargs = rollout_template_kwargs(async_config.rollout_chat_template_kwargs, effort.level if effort else None)
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kwargs)
         return tokenizer(text, add_special_tokens=False)["input_ids"]
 

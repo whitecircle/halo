@@ -21,15 +21,13 @@ from halo.entrypoints.code_contests_eval import (
     DEFAULT_ENV_TYPE,
     DEFAULT_TEMPERATURE,
     NO_REASONING_EFFORT,
-    SOLUTION_HEADROOM_TOKENS,
     run_code_contests_eval,
 )
 from halo.entrypoints.eval_contract import DEFAULT_SPLIT
-from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS, RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,
     EVAL_PROTOCOLS,
-    CodeContestsEnvironment,
 )
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 from halo.log import configure_cli_logging
@@ -121,28 +119,21 @@ def _add_generation_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--reasoning_effort",
         default=None,
-        choices=[*sorted(CodeContestsEnvironment.REASONING_EFFORT_PROFILES), NO_REASONING_EFFORT],
+        choices=[*VALID_REASONING_EFFORTS, NO_REASONING_EFFORT],
         help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high), or "
-        f"{NO_REASONING_EFFORT}: no level and no thinking budget, for a non-thinking model. "
+        f"{NO_REASONING_EFFORT}: no level, for a non-thinking model. "
         f"{NO_REASONING_EFFORT} sends no reasoning_effort, so a thinking template keeps its default: "
         f"Qwen3/3.5/3.6 still think unless enable_thinking=false reaches the template (vLLM "
         f"--default-chat-template-kwargs). Default: the "
         f"training config's under --training_config (a null there is {NO_REASONING_EFFORT}), else "
-        f"{DEFAULT_REASONING_EFFORT}. Sets the default --max_tokens unless --max_tokens or "
-        f"--training_config is given.",
+        f"{DEFAULT_REASONING_EFFORT}.",
     )
     p.add_argument(
         "--max_tokens",
         type=int,
         default=None,
         help="Max tokens per generation. Default: the training config's rollout_max_tokens under "
-        "--training_config, else the effort profile's thinking budget ("
-        + ", ".join(
-            f"{level}={p['thinking_tokens']}" for level, p in CodeContestsEnvironment.REASONING_EFFORT_PROFILES.items()
-        )
-        + ", or a reasoning_effort_profiles override in --env_kwargs)"
-        + f" plus {SOLUTION_HEADROOM_TOKENS} solution headroom; under --reasoning_effort {NO_REASONING_EFFORT}, "
-        f"the training rollout's default {RolloutConfig.max_tokens}, and under a soft budget the larger of the two.",
+        f"--training_config, else the training rollout's default {RolloutConfig.max_tokens}.",
     )
     p.add_argument("--max_workers", type=int, default=16, help="Concurrent episodes.")
     p.add_argument(

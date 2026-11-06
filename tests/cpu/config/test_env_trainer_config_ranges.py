@@ -24,7 +24,6 @@ _REQUIRED = {"TeacherDistillScriptArguments": {"teacher_model": "org/teacher"}}
 _COMPANIONS = {
     "isr_geo_band_min": {"isr_geo_band_max": 1.5},
     "isr_geo_band_max": {"isr_geo_band_min": 0.5},
-    "reasoning_price_cap": {"reasoning_price": {"low": 0.1, "medium": 0.1, "high": 0.1}},
 }
 _BAD_NUMBERS = {"true": True, "false": False, "nan": math.nan, "inf": math.inf}
 

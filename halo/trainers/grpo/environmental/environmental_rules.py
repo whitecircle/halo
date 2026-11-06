@@ -3,13 +3,15 @@
 import dataclasses
 import logging
 import math
+from collections.abc import Mapping
 
+from halo.configs.grpo_environmental import ReasoningCostArguments
 from halo.environments.episode_keys import ANSWER_KEY
+from halo.environments.reasoning_effort import REASONING_BUDGET_KEY, REASONING_PRICE_KEY
 from halo.environments.rollout_config import (
     IDENTITY_SAMPLER,
     REASONING_END_TOKEN_EXAMPLES,
     SGLANG_BACKEND,
-    VALID_REASONING_EFFORTS,
     VLLM_BACKEND,
 )
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
@@ -106,41 +108,76 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
             )
 
 
-def reject_inert_reasoning_terms(async_config, env, *, budgeted: bool, every_budget_soft: bool) -> None:
-    """A price with no level to read charges nothing, a floor where no episode carries a thinking cap never fires, and
-    a price past a budget prices nothing unless every drawable budget is soft. A term waived in groups that earned no
-    objective needs a reward that prices success above zero, or it charges no training episode."""
-    terms_on = async_config.reasoning_price is not None or async_config.reasoning_floor > 0
-    objective = env.objective_term if terms_on else None
-    if terms_on and not async_config.reasoning_terms_in_failed_groups and (objective is None or objective.weight <= 0):
-        raise ValueError(
-            "reasoning_price and reasoning_floor are waived in a training group no episode of which earned the "
-            "objective, but the reward prices no success above zero (no environment term, or one of weight <= 0), "
-            "so every group would read as failed and the terms would charge no training episode: give the "
-            "environment term a positive weight, or set reasoning_terms_in_failed_groups: true."
+def reject_inert_reasoning_terms(
+    async_config, env, level_terms: Mapping[str | None, tuple[int | None, float]]
+) -> None:
+    """Profile budgets or prices with no level drawn charge nothing, and so do a cap or the failed-group switch while
+    no drawn level prices and no floor is on, or a level's budget that neither its price nor the floor reads. A floor
+    needs a budget above 0 at every drawn level, and both it and the failed-group waiver need a reward that prices
+    success above zero: without one every episode reads as failed, so the floor would charge every episode and the
+    waiver none. A profile key among the run's template variables would reach the template, which the model reads."""
+    price_on = any(price > 0 for _, price in level_terms.values())
+    floor_on = async_config.reasoning_floor > 0
+    if env.reasoning_effort is None:
+        set_keys = sorted(
+            {key for profile in env.reasoning_effort_profiles.values() for key in profile}
+            & {REASONING_BUDGET_KEY, REASONING_PRICE_KEY}
         )
-    if async_config.reasoning_price is not None:
-        if env.reasoning_effort is None:
+        if set_keys:
             raise ValueError(
-                "reasoning_price is set but the environment's reasoning_effort is unset, so no episode carries a "
-                "level to be priced at."
+                f"reasoning_effort_profiles set {set_keys} but the environment's reasoning_effort is unset, so no "
+                "episode carries a level to read them at."
             )
-        if set(async_config.reasoning_price) != set(VALID_REASONING_EFFORTS):
-            levels, admitted = set(async_config.reasoning_price), set(VALID_REASONING_EFFORTS)
-            raise ValueError(
-                f"reasoning_price must map exactly the effort levels {sorted(admitted)}; "
-                f"unknown {sorted(levels - admitted)}, missing {sorted(admitted - levels)}"
-            )
-    if async_config.reasoning_floor > 0 and not budgeted:
+    if not price_on and async_config.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
         raise ValueError(
-            "reasoning_floor prices an episode against its per-turn thinking cap, but no episode of this run "
-            "carries one: no drawable effort level sets thinking_tokens and rollout_max_thinking_tokens is unset."
+            f"reasoning_price_cap set while no level the environment draws sets {REASONING_PRICE_KEY} in its effort "
+            "profile: nothing reads it. Remove it, or price a level."
         )
-    if async_config.reasoning_price_past_budget and not every_budget_soft:
+    if not (price_on or floor_on) and async_config.reasoning_terms_in_failed_groups:
         raise ValueError(
-            "reasoning_price_past_budget prices reasoning past a soft per-turn budget, but a drawable effort level's "
-            "budget is enforced or unset, so its turns would go unpriced: set thinking_tokens and "
-            "enforce_thinking_cap: false on every level the environment draws, or price every reasoning token."
+            "reasoning_terms_in_failed_groups set while no drawn level prices reasoning and reasoning_floor is off: it "
+            "chooses where the reasoning terms charge. Turn one on, or remove it."
+        )
+    if floor_on and env.reasoning_effort is None:
+        raise ValueError(
+            f"reasoning_floor charges a failed episode its shortfall under its level's {REASONING_BUDGET_KEY}, but "
+            "the environment's reasoning_effort is unset, so no episode carries a level."
+        )
+    if floor_on:
+        unbudgeted = sorted(level for level, (budget, _) in level_terms.items() if not budget)
+        if unbudgeted:
+            raise ValueError(
+                f"reasoning_floor charges a failed episode its shortfall under its level's {REASONING_BUDGET_KEY}, but "
+                f"the drawn level(s) {unbudgeted} set none above 0 in reasoning_effort_profiles."
+            )
+    unread = sorted(
+        level for level, (budget, price) in level_terms.items() if budget is not None and price == 0 and not floor_on
+    )
+    if unread:
+        raise ValueError(
+            f"the drawn level(s) {unread} set {REASONING_BUDGET_KEY} with no {REASONING_PRICE_KEY} while "
+            "reasoning_floor is off: nothing reads it. Price the level, turn the floor on, or remove it."
+        )
+    misplaced = sorted({REASONING_BUDGET_KEY, REASONING_PRICE_KEY} & set(async_config.rollout_chat_template_kwargs))
+    if misplaced:
+        raise ValueError(
+            f"rollout_chat_template_kwargs carries {misplaced}: they are effort-profile keys "
+            "(environment_kwargs.reasoning_effort_profiles), and a template variable is text the model may read."
+        )
+    objective = env.objective_term if price_on or floor_on else None
+    unpriced_success = objective is None or objective.weight <= 0
+    if floor_on and unpriced_success:
+        raise ValueError(
+            "reasoning_floor charges an episode that earned no objective, but the reward prices no success above zero "
+            "(no environment term, or one of weight <= 0), so it would charge every episode: give the environment "
+            "term a positive weight, or turn the floor off."
+        )
+    if price_on and not async_config.reasoning_terms_in_failed_groups and unpriced_success:
+        raise ValueError(
+            "the reasoning terms are waived in a training group no episode of which earned the objective, but the "
+            "reward prices no success above zero (no environment term, or one of weight <= 0), so every group would "
+            "read as failed and the terms would charge no training episode: give the environment term a positive "
+            "weight, or set reasoning_terms_in_failed_groups: true."
         )
 
 
@@ -173,9 +210,9 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
     """Forced closes would train with the episode's advantage and teach the model to stop closing its reasoning."""
     if forced_close_ids is not None and not is_correction:
         raise ValueError(
-            "a vLLM thinking budget can be enforced but the importance-sampling correction is off "
+            "a vLLM reasoning cap can be enforced but the importance-sampling correction is off "
             "(train_on_sampled_tokens + vllm_importance_sampling_correction): the reasoning closes the "
-            "engine forces at the budget would train with the episode's advantage."
+            "engine forces at the cap would train with the episode's advantage."
         )
 
 
@@ -189,8 +226,7 @@ def reject_unresolved_forced_closes(
             f"rollout_reasoning_end_token {marker!r} is not a marker this tokenizer writes, and a vLLM thinking cap can "
             f"bind: the closes the engine forces would stay in the policy loss and teach the model to stop closing "
             f"its reasoning. Name the end string the server's reasoning parser forces ({REASONING_END_TOKEN_EXAMPLES}), "
-            f"or run with no cap: unset rollout_max_thinking_tokens and rollout_max_answer_tokens, and every level's "
-            f"enforced thinking_tokens."
+            f"or run with no cap: unset rollout_max_thinking_tokens and rollout_max_answer_tokens."
         )
 
 

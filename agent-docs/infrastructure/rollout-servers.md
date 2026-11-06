@@ -30,7 +30,7 @@ trainer-side mechanics (prefetch and its staleness, sync cadence, trajectory len
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
-| Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side by Model Runner V2 with a reasoning parser; refused for Mistral 4 ([Reasoning budgets](../training-methods/async-grpo/reasoning.md#reasoning-budget)) | refused at config time |
+| Reasoning cap (`rollout_max_thinking_tokens`) | enforced engine-side by Model Runner V2 with a reasoning parser; refused for Mistral 4 ([Reasoning cap](../training-methods/async-grpo/reasoning.md#reasoning-cap)) | refused at config time |
 | Expert layout on sync | the layout the family's `ExpertLayout` writes, per-expert or fused, under its hub keys | the same, read by 0.5.22's per-family loaders |
 | Trainer expert distribution (EP/ETP) | supported | supported |
 
@@ -483,7 +483,7 @@ server that does not answer is logged as unread.
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
-| No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM thinking budget | A budget answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
+| No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM reasoning cap | A cap answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
 | `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
 | A server that, timed on a 64-token completion (the better of two, one idle sequence), would need over twice `request_timeout` to decode a full `rollout_max_tokens` turn (`verify_turn_deadline`); over half of it only warns, since a loaded server decodes slower per sequence | A timed-out episode trains as a masked row, so the batch keeps only the episodes that finished fast ([Monitoring](../training-methods/async-grpo/monitoring.md#halts)) |
 | A server whose prompt does not move with the reasoning level, where the trainer's does (`verify_server_chat_template`) | Its template ignores the level, and the reasoning terms charge for a contract the model never read ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)) |
@@ -621,7 +621,7 @@ docker run --gpus all --network=host --ipc=host \
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do |
 | `VLLM_TOOL_PARSER_PLUGIN` / `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | Parser plugin paths (gpt-oss: the baked `/opt/gpt_oss_text_tool_parser.py`, `/opt/gpt_oss_reasoning_parser.py`) |
-| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a thinking cap: without one vLLM answers every request carrying `thinking_token_budget` with a 400 |
+| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`): without one vLLM answers every request carrying `thinking_token_budget` with a 400 |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer's `chat_template:` uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `VLLM_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) and Step-3.7 repos need |
 | `VLLM_EXTRA_ARGS` | *(unset)* | Further flags, appended last, such as `--served-model-name` when the server's path differs from the trainer's model id |
@@ -671,7 +671,7 @@ their recipes serve without a parser.
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4.7-Flash | `glm47` |
-| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a thinking cap also `VLLM_REASONING_PARSER=gemma4` |
+| Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) also `VLLM_REASONING_PARSER=gemma4` |
 | LFM-2 | `lfm2` (pythonic calls between `<\|tool_call_start\|>` and `<\|tool_call_end\|>`) |
 | Laguna | `poolside_v1` (`<tool_call>` with `<arg_key>`/`<arg_value>` pairs) |
 | Step-3.7 Flash | `step3p5` (`<tool_call>` around `<function=…>`/`<parameter=…>` XML) |
@@ -746,7 +746,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
   With no replay, on 0.5.22, a server under the flag does not start on Qwen3-30B-A3B and takes about 10 minutes to
   start on gpt-oss-20b.
 - **`rollout_max_thinking_tokens` is refused** for every model (SGLang ignores unknown request fields).
-  Steer with `reasoning_effort`, which reaches the chat template only; a per-level `thinking_tokens`
+  Steer with `reasoning_effort`, which reaches the chat template only; a cap from `rollout_max_answer_tokens`
   reaches no request field and is warned once.
 - **Plain data-parallel replicas (`--dp-size > 1`) take no update**: the engine asserts `dp_size == 1`
   on the update routes and the client refuses at group formation (replicas restart `tp_rank` at 0 and
@@ -915,8 +915,9 @@ and the prefill chunk).
 
 **Generation volume is the step-time lever** once prefetch overlaps collection with training
 (`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a
-turn; on vLLM the turn's reasoning cap caps CoT engine-side, while a soft budget, and every budget on
-SGLang, is held only by the reasoning terms.
+turn; on vLLM the run's reasoning cap (`rollout_max_thinking_tokens`, else `rollout_max_tokens` less
+`rollout_max_answer_tokens`) caps CoT engine-side. Below it, and on SGLang throughout, only the reasoning price holds
+an episode's reasoning to its level's budget, and by default a training group with no success is not charged it.
 
 **fp32 heads.** Both engines serve bf16 logits by default, while the trainer's chunked scoring is fp32. Each has a switch: `--enable-fp32-lm-head` on SGLang and `--hf-overrides '{"head_dtype":"float32"}'` on vLLM, both through `*_EXTRA_ARGS` under compose, with vLLM's single quotes kept in the value. The served weight stays bf16, so the sync is unaffected. Use them only with `use_chunked_grpo_logprobs: true`, as the full path scores bf16 and would then mismatch the other way ([size of the gap](../training-methods/async-grpo/performance.md#chunked-log-probs)).
 
@@ -999,7 +1000,7 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 | A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises after about 4 minutes on either engine, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 → let it raise or stop the run, then restart the server |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
-| 400 on every rollout (vLLM) | A thinking budget without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |
+| 400 on every rollout (vLLM) | A reasoning cap without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |
 | `… hold '<marker>' … and the server parsed no call` at the second round | Wrong tool parser, or vLLM `--tool-call-parser` without `--enable-auto-tool-choice` ([parsers](#running-it)) |
 | Log-ratio drifts on SGLang while the server log stays clean | The MoE loaders skip unmapped expert names without a warning → a clean log proves nothing; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild (`make build-vllm`) |
