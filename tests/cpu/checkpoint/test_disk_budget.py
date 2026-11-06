@@ -17,6 +17,7 @@ from halo.checkpoint.parallel.disk_budget import (
     estimate_model_bytes,
     verify_checkpoint_disk_space,
 )
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
@@ -172,14 +173,23 @@ def test_a_rank_that_is_no_filesystems_writer_checks_nothing(tmp_path, monkeypat
     _verify(_model(), tmp_path, monkeypatch, free=0, limit=5, is_save_rank=False)
 
 
-def test_an_unsizable_model_warns_instead_of_failing_the_run(tmp_path, monkeypatch, caplog):
-    def broken(*_args, **_kwargs):
-        raise RuntimeError("no shell")
+def test_a_model_the_shell_cannot_build_warns_instead_of_failing_the_run(tmp_path, monkeypatch, caplog):
+    def unbuildable(*_args, **_kwargs):
+        raise MetaShellBuildError("no shell")
 
-    monkeypatch.setattr(disk_budget, "estimate_checkpoint_bytes", broken)
+    monkeypatch.setattr(disk_budget, "estimate_checkpoint_bytes", unbuildable)
     with caplog.at_level(logging.WARNING):
         _verify(_model(), tmp_path, monkeypatch, free=0, limit=5)
     assert any("Could not size" in record.getMessage() for record in caplog.records)
+
+
+def test_a_bug_in_the_estimate_fails_the_run_instead_of_hiding_behind_a_warning(tmp_path, monkeypatch):
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("bug")
+
+    monkeypatch.setattr(disk_budget, "estimate_checkpoint_bytes", broken)
+    with pytest.raises(RuntimeError, match="bug"):
+        _verify(_model(), tmp_path, monkeypatch, free=0, limit=5)
 
 
 def _trainer(tmp_path, **config):

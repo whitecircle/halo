@@ -18,7 +18,7 @@ from halo.hardware import available_host_ram_bytes, current_device
 from halo.log import warn_once
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from halo.model_loading.finalization import finalize_loaded_model
-from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.lazy_safetensors.meta_shell import config_only_parameter_bytes
 from halo.model_loading.model_preparation import (
     apply_family_patches,
     apply_run_model_policies,
@@ -101,16 +101,13 @@ def estimate_reference_bytes(model_config: ModelArguments, training_config) -> i
     name = model_config.model_name_or_path
     revision = getattr(model_config, "model_revision", None)
     config = resolve_build_config(name, revision=revision, trust_remote_code=model_config.trust_remote_code)
-    shell = instantiate_on_meta(
-        name,
+    return config_only_parameter_bytes(
         resolve_auto_model_class(config),
         config,
         dtype,
         trust_remote_code=model_config.trust_remote_code,
-        config_only=True,
         revision=revision,
     )
-    return sum(p.numel() for p in shell.parameters()) * torch.empty((), dtype=dtype).element_size()
 
 
 def resolve_reference_misfit(
@@ -319,6 +316,7 @@ def load_reference_model_for_on_policy_grpo(
     if not on_policy_grpo_holds_reference(training_config.beta, peft_config):
         return None
     reject_unfit_reference(model_config, training_config, parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
+    warn_unparallelized_reference(parallelism_config, ON_POLICY_GRPO_REFERENCE_ALTERNATIVES)
     return load_frozen_reference_model(
         args,
         model_config,

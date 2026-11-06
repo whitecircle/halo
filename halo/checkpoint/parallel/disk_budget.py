@@ -4,13 +4,13 @@ import copy
 import logging
 
 import torch
-from accelerate import init_empty_weights
 from transformers import PreTrainedModel
 from transformers.trainer_utils import sort_checkpoints
 
 from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.save import saves_adapters_only
 from halo.hardware import free_disk_bytes
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, config_only_parameter_bytes
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.dtensor import local_numel
@@ -27,15 +27,12 @@ _OPTIMIZER_STATE_ELEMENTS = 2
 
 def estimate_model_bytes(model: torch.nn.Module, dtype: torch.dtype) -> int:
     """Bytes of the whole model at ``dtype``. A transformers model is sized from a config-only meta shell, since the
-    live parameters are shards (FSDP2, EP, PP stages) no rank can sum alone; any other model is held whole."""
+    live parameters are shards (FSDP2, EP, PP stages) no rank can sum alone; any other model is held whole. Raises
+    :class:`MetaShellBuildError` for a model the shell cannot build."""
     base = base_transformers_model(model)
     if isinstance(base, PreTrainedModel):
-        with init_empty_weights(include_buffers=False):
-            shell = type(base)._from_config(copy.deepcopy(base.config), dtype=dtype)
-        numel = sum(p.numel() for p in shell.parameters())
-    else:
-        numel = sum(p.numel() for p in model.parameters())
-    return numel * torch.empty((), dtype=dtype).element_size()
+        return config_only_parameter_bytes(type(base), copy.deepcopy(base.config), dtype, trust_remote_code=False)
+    return sum(p.numel() for p in model.parameters()) * torch.empty((), dtype=dtype).element_size()
 
 
 def estimate_checkpoint_bytes(
@@ -80,7 +77,7 @@ def verify_checkpoint_disk_space(
             per_checkpoint = estimate_checkpoint_bytes(
                 ctx, dtype, save_optimizer=save_optimizer, writes_optimizer_shards=writes_optimizer_shards
             )
-        except Exception as exc:  # an estimate must not take down a run whose model it cannot size
+        except MetaShellBuildError as exc:  # an estimate must not take down a run whose model it cannot size
             logger.warning(f"Could not size a checkpoint to check the free disk space of {output_dir}: {exc!r}")
             per_checkpoint = None
         if per_checkpoint is not None:
