@@ -117,7 +117,7 @@ rollout_server_configs:
 ```
 
 - `rollout_sync_topology: single_group` forms one weight-sync group over every server and broadcasts each chunk once,
-  where `per_server` sends each chunk to each server over its own group; the default `auto` picks `single_group` for
+  where the default `per_server` sends each chunk to each server over its own group; `auto` picks `single_group` for
   two or more servers that report one model and one set of weight-loading flags
   ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)). `single_group` takes one
   `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.

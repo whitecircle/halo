@@ -198,6 +198,40 @@ def test_a_failed_declare_after_a_peer_accepted_its_own_is_global_and_prompt(rig
 
 
 @pytest.mark.parametrize("engine", _ENGINES)
+@pytest.mark.parametrize(
+    ("reply", "names_remedy"),
+    [
+        (
+            "Failed to receive weights: NCCL error in: ProcessGroupNCCL.cpp:3888, unhandled cuda error (run with "
+            "NCCL_DEBUG=INFO for details), NCCL version 2.31.2\nncclUnhandledCudaError: Call to CUDA function "
+            "failed.\nLast error:\nCuda failure 101 'invalid device ordinal'",
+            True,
+        ),
+        ("Failed to receive weights: NCCL error: unhandled system error", False),
+    ],
+    ids=["hidden-peer-gpu", "other-nccl-error"],
+)
+def test_a_declare_that_cannot_see_a_peer_gpu_names_the_visibility_remedy(rig, engine, reply, names_remedy):
+    pool, servers, _ = rig(engine, [1, 1], ring=FakeRing(ready=False))
+    pool.init_communicator("cpu")
+    answer = servers[1].answer
+
+    def failing(method, path, body):
+        if path == _DECLARE[engine] and not (engine == "sglang" and not body["names"]):
+            return 500, {"message": reply}
+        return answer(method, path, body)
+
+    servers[1].answer = failing
+    pool.update_named_param("w", torch.zeros(8, dtype=torch.float32))
+
+    with pytest.raises(RuntimeError, match="failed mid-stream") as failure:
+        pool.finish_weight_update()
+
+    message = str(failure.value)
+    assert ("CUDA_VISIBLE_DEVICES" in message and "rollout_sync_topology: per_server" in message) is names_remedy
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
 def test_a_pause_that_fails_on_one_server_resumes_the_rest_and_leaves_the_sync_replayable(rig, engine):
     pool, servers, ring = rig(engine, [1, 1, 1])
     pool.init_communicator("cpu")

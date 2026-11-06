@@ -121,7 +121,7 @@ With several servers (`rollout_server_configs`) one snapshot per parameter is sh
 server has it. Under `per_server` each chunk goes to every server on concurrent threads over a group of its own; the
 threads share the forwarding rank's GPU, NICs and process, so that fan-out costs the sum, not the max: two servers
 each push at half of one server's rate. `rollout_sync_topology: single_group` sends each chunk once
-([below](#one-group-over-every-server)), and the default `auto` picks it for a homogeneous fleet.
+([below](#one-group-over-every-server)), and `auto` picks it for a homogeneous fleet.
 
 **The quiesce spans the streaming.** It opens with the first full chunk and closes when the last
 lands, so a server stops serving for as long as the gather runs (minutes at 397B), and every push
@@ -177,15 +177,19 @@ brackets each sync with a per-rank `[mem rankNN] weight-sync pre/post` line, and
 
 `rollout_sync_topology: single_group` forms one NCCL group of the trainer (rank 0) and every server's workers, so
 each chunk is broadcast once. It belongs to environmental GRPO, which drives several servers; online GRPO talks to
-one server and has no such field. Both engines take the join's `rank_offset` and
+one server and has no such field. The default `per_server` is unchanged. Both engines take the join's `rank_offset` and
 `world_size` as given, so no engine patch is involved: SGLang ranks a worker `rank_offset + tp_rank`, vLLM
 `rank_offset + dp_index * (TP * PP) + rank_in_dp`, and each server takes the next block after the one before it.
 
+- **GPU visibility.** Servers on one host talk over NCCL peer-to-peer, which needs every peer's GPU visible to each
+  server process: mount all GPUs per server and select with `CUDA_VISIBLE_DEVICES`, as the compose files do. Servers that
+  each see only their own GPU (one GPU per container or pod) fail the first push with `invalid device ordinal`; keep them
+  on `per_server`.
 - **Layout.** Servers sort by their entry's `node` label (default: the URL host; config order kept within a node), so one
   node's servers are one contiguous rank block and a ring over the group crosses each node's links once. Two labels
   resolving to one address raise; an IP and a DNS name of one node are such labels, so give them one `node`. Neither
   engine reports its host, and a server whose TP spans nodes cannot be placed: the label is a requirement.
-- **The default resolves.** `rollout_sync_topology: auto` is `single_group` for two or more servers whose
+- **`auto` resolves.** `rollout_sync_topology: auto` (opt-in; the default is `per_server`) is `single_group` for two or more servers whose
   `/server_info` report one served model and one value of every flag `verify_group_servers` compares, and `per_server`
   for one server and for any fleet that does not qualify: a mixed fleet, a server that does not answer, a
   pipeline-parallel server, local servers beside remote ones with no `group_host`, a node split across labels, a
@@ -233,8 +237,7 @@ one server and has no such field. Both engines take the join's `rank_offset` and
   server.
 - **Not covered.** An engine-side bounded receive, a dedicated SGLang membership route and the engines' reporting of
   host and NCCL environment need image changes. SGLang `single_group` rests on the probe: the GPU row
-  `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` and the
-  `auto` default wait on the GPU rows of `test_single_group_sync.py` and `test_sync_topology_auto.py` (1, 2, 4 and 8
+  `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` waits on the GPU rows of `test_single_group_sync.py` and `test_sync_topology_auto.py` (1, 2, 4 and 8
   servers per engine, cross-node and colocated containers). The `single_group` row bounds the second push of a group,
   which follows process and communicator warm-up, and reports the first beside it.
 

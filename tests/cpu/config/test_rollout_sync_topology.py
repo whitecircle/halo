@@ -16,9 +16,9 @@ def _config(servers, **overrides) -> AsyncRolloutConfig:
     return AsyncRolloutConfig(rollout_server_configs=servers, **overrides)
 
 
-def test_the_field_takes_exactly_the_topologies_the_pool_builds_and_defaults_to_auto():
+def test_the_field_takes_exactly_the_topologies_the_pool_builds_and_defaults_to_per_server():
     assert get_args(AsyncRolloutConfig.__annotations__["rollout_sync_topology"]) == get_args(SyncTopologySetting)
-    assert AsyncRolloutConfig().rollout_sync_topology == "auto"
+    assert AsyncRolloutConfig().rollout_sync_topology == "per_server"
 
 
 @pytest.mark.parametrize(
@@ -57,7 +57,7 @@ def test_a_node_label_means_nothing_to_per_server_groups(setting):
 
 def test_auto_takes_what_a_per_server_group_takes():
     servers = [{"url": "http://s0:8000", "group_port": 51216}, {"url": "http://s1:8000", "group_host": "10.0.0.2"}]
-    assert _config(servers).rollout_sync_topology == "auto"
+    assert _config(servers, rollout_sync_topology="auto").rollout_sync_topology == "auto"
 
 
 if __name__ == "__main__":

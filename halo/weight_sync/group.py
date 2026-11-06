@@ -37,6 +37,9 @@ logger = logging.getLogger(__name__)
 # c10d registers group names process-globally, and an engine refuses a second join under a live name.
 _generations = itertools.count(1)
 
+# CUDA's error text for a device index the process cannot see, which NCCL surfaces when a peer GPU is hidden from it.
+_HIDDEN_PEER_GPU = "invalid device ordinal"
+
 
 class WeightSyncGroup(UpdateStream):
     """The weight-sync clients of several servers behind one update stream. Until the first chunk is declared an update
@@ -347,11 +350,20 @@ class WeightSyncGroup(UpdateStream):
         rest = [url for url in self._urls if url not in failed]
         self._chunks_sent += 1
         self._mark_unusable(f"a chunk failed: {type(cause).__name__}: {cause}")
+        remedy = ""
+        if any(_HIDDEN_PEER_GPU in str(call.error) for call in declared if call.error is not None):
+            remedy = (
+                " A server reported an invalid device ordinal: servers that each see only their own GPU cannot share "
+                "one weight-update group, because NCCL peer-to-peer needs every peer's GPU visible. Mount all GPUs "
+                "in each server and select with CUDA_VISIBLE_DEVICES, as the compose files do, or set "
+                "rollout_sync_topology: per_server."
+            )
         raise RuntimeError(
             f"{self.BACKEND_NAME} weight sync to {len(self._members)} servers failed mid-stream "
             f"({type(cause).__name__}: {cause}). One broken group leaves every server holding "
             f"{self.leader.INTERRUPTED_UPDATE_STATE}, so all are left PAUSED and refuse further syncs. RESTART the "
             f"{self.BACKEND_NAME} servers: {', '.join([*failed, *rest])}."
+            f"{remedy}"
         ) from error
 
     def _mark_unusable(self, why: str = "a sync failed after its first chunk") -> None:

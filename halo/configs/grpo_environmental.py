@@ -325,14 +325,15 @@ class AsyncRolloutConfig(
         },
     )
     rollout_sync_topology: SyncTopologySetting = field(
-        default="auto",
+        default="per_server",
         metadata={
-            "help": "How the trainer's weight-sync groups span the rollout servers: per_server forms one NCCL group per "
-            "server, single_group one group over all of them that broadcasts each chunk once, and auto picks "
-            "single_group for two or more servers that report the same served model and weight-loading flags (and "
-            "that one group can rank) and per_server otherwise. single_group takes one rollout_group_port, one "
-            "group_host, and an optional 'node' label per rollout_server_configs entry that orders the servers by "
-            "node; auto refuses 'node'. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
+            "help": "How the trainer's weight-sync groups span the rollout servers: per_server (default) forms one "
+            "NCCL group per server, single_group one group over all of them that broadcasts each chunk once, and auto "
+            "picks single_group for two or more servers that report the same served model and weight-loading flags "
+            "(and that one group can rank) and per_server otherwise. single_group and auto need every server to see "
+            "every server's GPU (NCCL peer-to-peer), so servers that each see only their own GPU stay on per_server. "
+            "single_group takes one rollout_group_port, one group_host, and an optional 'node' label per "
+            "rollout_server_configs entry that orders the servers by node; auto refuses 'node'. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
         },
     )
     sync_weights_every_n_steps: int = field(
