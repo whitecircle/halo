@@ -113,7 +113,7 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
-| GLM-5 Next | Yes | Yes | Not run | Admitted; no live-server row has run yet (tiny checkpoint rows are written) |
+| GLM-5 Next | Yes | Yes | Not run | A tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
 | Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
