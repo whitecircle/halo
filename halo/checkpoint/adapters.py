@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from collections.abc import Mapping
+from typing import Literal
 
 import torch
 from safetensors import safe_open
@@ -27,6 +28,8 @@ from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
 logger = logging.getLogger(__name__)
+
+ExpertAdapterShape = Literal["expert", "mixed"]
 
 # ``peft_type`` markers kept out of PEFT's config mapping, because stock PEFT drops unknown state-dict keys silently:
 # a ``LORA`` label would load the attention half and discard every expert delta, an unknown type makes the load raise.
@@ -238,7 +241,7 @@ def adapter_layout_mismatch(saved: Mapping[str, torch.Tensor], expected: Mapping
     )
 
 
-def find_expert_lora_adapter_shape(adapter_dir: str) -> str | None:
+def find_expert_lora_adapter_shape(adapter_dir: str) -> ExpertAdapterShape | None:
     """``"expert"`` for an expert-only native adapter, ``"mixed"`` for one that also carries attention tensors, ``None``
     for neither. An absent or unmarked config falls back to a tensor-key scan."""
     peft_type = (read_adapter_config(adapter_dir, missing_ok=True) or {}).get("peft_type")
