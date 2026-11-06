@@ -104,7 +104,7 @@ changes.
 | `halo/runtime/` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md`, `agent-docs/reference/debugging.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/distributed/nvlink.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |
 | `halo/diagnostics/profiling.py`, `halo/diagnostics/py_spy.py` | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
-| `halo/diagnostics/phase_timers.py`, `halo/callbacks/phase_timers.py`, `halo/trainers/grpo/phase_timing.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/trainer-architecture.md` |
+| `halo/diagnostics/phase_timers.py`, `halo/callbacks/phase_timer_callback.py`, `halo/trainers/grpo/phase_timing.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/grpo/row_span_stash.py`, `halo/trainers/grpo/logprob_scoring.py` (the row spans) | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/weight_sync/transport_check.py`, `scripts/profiling/weight_sync_transport.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/debugging.md` |
 

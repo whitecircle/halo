@@ -7,7 +7,7 @@ import torch
 
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.logprob_scoring import reject_malformed_rows, row_spans_on_device
+from halo.trainers.grpo.logprob_scoring import row_spans_on_device, validate_row_spans
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,7 @@ class RowSpanStashMixin:
         completion_width = batch["completion_mask"].size(1)
         attended = torch.cat([batch["prompt_mask"], batch["completion_mask"]], dim=1)
         spans = row_spans_on_device(attended, completion_width).cpu()
-        reject_malformed_rows(spans)
+        validate_row_spans(spans)
         batch[ROW_SPANS_KEY] = spans[:, :3].contiguous()
         return batch
 

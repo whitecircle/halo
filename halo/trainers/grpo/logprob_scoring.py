@@ -100,7 +100,7 @@ def row_spans_on_device(attention_mask: torch.Tensor, completion_width: int = 0)
     )
 
 
-def reject_malformed_rows(spans: torch.Tensor) -> None:
+def validate_row_spans(spans: torch.Tensor) -> None:
     """Raise on the first malformed row of a host-side :func:`row_spans_on_device` table. A hole in the mask shifts
     every log-prob after it, as the dense path tail-aligns."""
     malformed = spans[:, 3].nonzero()
@@ -118,7 +118,7 @@ def dense_row_spans(
     # One D2H for the whole mask: a per-row read serializes CPU and GPU on every row, which defeats
     # CPU launch-ahead on a path that runs repeatedly per gradient microbatch.
     table = row_spans_on_device(attention_mask, completion_width).cpu()
-    reject_malformed_rows(table)
+    validate_row_spans(table)
     return [(lo, hi) for lo, hi in table[:, :2].tolist()], table[:, 2].tolist()
 
 

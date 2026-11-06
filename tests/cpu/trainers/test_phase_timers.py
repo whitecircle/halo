@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from halo.callbacks import efficiency
-from halo.callbacks.phase_timers import MICRO_STEP_END, PhaseTimerCallback
+from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics import phase_timers
 from halo.diagnostics.phase_timers import UNACCOUNTED, PhaseTimers
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
