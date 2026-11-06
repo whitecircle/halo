@@ -717,6 +717,16 @@ does not fire; the shards its peers wrote stay behind without the `optimizer_met
 optimizer whose `state_dict` refuses the live sharding (FlashAdamW on unevenly-sharded DTensors).
 `save_only_model: true` is the explicit opt-in for weights-only checkpoints.
 
+**Disk check.** Rotation runs after the new save, so `save_total_limit` + 1 checkpoints coexist at the peak (one
+more save when no limit is set, since nothing is then deleted). At trainer construction each filesystem's save rank
+(`verify_checkpoint_disk_space`, `halo/checkpoint/parallel/disk_budget.py`) estimates one checkpoint (the model at
+the run dtype, sized from a config-only meta shell so sharded layouts need no gather; the adapters alone where a PEFT
+or native expert-LoRA save writes only those; plus two moments per trainable parameter unless `save_only_model`) and
+compares the peak with the free space of `output_dir`'s nearest existing parent. Below 1.1x it warns, below 1.0x it
+raises on every rank. Per-rank optimizer shards divide over the nodes of a node-local filesystem; a sharded EP
+save there is counted whole, an upper bound. `save_strategy: "no"` skips the check, and a model the shell cannot
+build warns that it went unsized.
+
 #### Interrupted saves
 
 `trainer_state.json` is what resume detection takes a checkpoint by, so it is published last:

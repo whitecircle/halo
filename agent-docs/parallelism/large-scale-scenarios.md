@@ -471,7 +471,8 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
     Rotation deletes the previous checkpoint only after the new one completes, so
     `save_total_limit: 1` still transiently holds **both**: budget ~1.6 TB free per save, ~4.8 TB with
-    optimizer shards. Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
+    optimizer shards. The trainer checks the peak against `output_dir`'s volume at construction
+    ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
     `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` at it.
 
     On the `save_sharded_ep` cells budget for the merge too: `merge_ep_shards.py` streams (peak host

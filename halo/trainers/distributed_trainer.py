@@ -405,6 +405,7 @@ class DistributedTrainerMixin(
         self._warn_on_zeroed_lora_dropout()
         self._configure_wrapped_model()
 
+        self._verify_save_disk_space()
         # Setup varies per rank (TP materialization, EP patching), so ranks re-align before the first step.
         barrier()
 

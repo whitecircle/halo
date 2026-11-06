@@ -46,6 +46,11 @@ def save_checkpoint(ctx: CheckpointContext, output_dir: str) -> bool:
     return True
 
 
+def saves_adapters_only(ctx: CheckpointContext) -> bool:
+    """Whether the model save writes the adapters alone, never the base weights."""
+    return select_checkpoint_saver(ctx) in (save_peft_adapters, save_expert_lora_adapters)
+
+
 def save_tokenizer(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: write the tokenizer on the save rank, before the weights, since a save stopped once its index names
     the weight files already loads and must carry its tokenizer. A failure raises on every rank."""

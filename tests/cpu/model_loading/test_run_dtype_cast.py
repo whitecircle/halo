@@ -68,10 +68,11 @@ UNCAST_LOADERS = frozenset({("halo/model_loading/parallel/tp.py", "load_tp_model
 
 ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_preloaded_pipeline")})
 
-# The PEFT adapter load applies to a conversion tool's base, and the head-transform probe's fp32 meta shell holds no
-# weights.
+# The PEFT adapter load applies to a conversion tool's base, and the head-transform probe's and the checkpoint disk
+# estimate's meta shells hold no weights.
 NON_TRAINING_BUILDS = frozenset(
     {
+        ("halo/checkpoint/parallel/disk_budget.py", "estimate_model_bytes"),
         ("halo/checkpoint/tools/adapter_merge.py", "apply_adapter"),
         ("halo/models/head_transform.py", "_probe_logits"),
     }

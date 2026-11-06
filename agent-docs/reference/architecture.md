@@ -67,6 +67,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load and the mirrored control-file reads |
 | `halo/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor gather of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed — a leg every gathered writer runs symmetrically or hangs |
 | `halo/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) |
+| `halo/checkpoint/parallel/disk_budget.py` | the training save's disk bill (the rotation peak of checkpoints, estimated from the config) against the free space of the output volume, refused on every rank at trainer construction |
 | `halo/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from |
 | `halo/data/preprocessed/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use |
 | `halo/data/conversation.py` | conversation shaping the text and VLM renders share: JSON columns, the image-part spelling, system-prompt folding and the template kwargs |
