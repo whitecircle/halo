@@ -87,9 +87,16 @@ def servers():
 class _RecordingPool:
     def __init__(self, events: list):
         self.events = events
+        self.marked: set[str] = set()
 
-    def reconnect_servers(self, urls) -> None:
-        self.events.append(("reconnect", sorted(urls)))
+    def mark_servers_restarted(self, urls) -> None:
+        self.marked.update(urls)
+
+    def reconnect_servers(self, urls=()) -> None:
+        urls = self.marked | set(urls)
+        self.marked.clear()
+        if urls:
+            self.events.append(("reconnect", sorted(urls)))
 
 
 @pytest.fixture
@@ -315,7 +322,7 @@ def test_a_restarted_server_is_left_out_of_routing_once_a_probe_finds_it(sync_of
     sync.sync(trainer, client_pool)
     restarted.restart()
 
-    sync.recover()
+    sync.recover(client_pool)
     results = _play(_manager_over(sync, [kept, restarted]), 4)
 
     assert all(result.error is None for result in results)
@@ -398,7 +405,7 @@ def test_a_restarted_server_that_serves_the_trainers_base_gets_the_adapter_at_on
     events.clear()
     restarted.restart()
 
-    sync.recover()
+    sync.recover(client_pool)
 
     assert version in restarted.adapters and events == [], "loaded again, with no base push and no reconnect"
     assert restarted.adapters[version][1].keys() == kept.adapters[version][1].keys()
@@ -431,7 +438,7 @@ def test_a_restarted_server_that_serves_another_base_gets_the_full_push(
     for field, value in restart_as.items():
         setattr(restarted, field, value)
 
-    sync.recover()
+    sync.recover(client_pool)
 
     assert version not in restarted.adapters and events == [], "no adapter on a base that is not the trainer's"
     [result] = _play(_manager_over(sync, [restarted, kept]), 1)
@@ -449,7 +456,7 @@ def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_o
     sync.sync(trainer, client_pool)
     restarted.restart()
 
-    sync.recover()
+    sync.recover(client_pool)
 
     assert restarted.adapters == {}
 
@@ -546,7 +553,7 @@ def test_a_restarted_server_that_loaded_the_launch_snapshot_gets_the_adapter_at_
     events.clear()
     restarted.restart()
 
-    sync.recover()
+    sync.recover(client_pool)
 
     assert sync.versions.current in restarted.adapters and events == []
 
@@ -578,7 +585,7 @@ def test_recovery_skips_a_server_that_is_down_and_keeps_routing_to_the_rest(
     sync.sync(trainer, client_pool)
     down.close()
 
-    sync.recover()
+    sync.recover(client_pool)
     results = _play(_manager_over(sync, [kept, down]), 3)
 
     assert all(result.error is None for result in results) and len(kept.completion_models) == 3
@@ -591,7 +598,7 @@ def test_recovery_survives_a_server_answering_5xx_while_it_warms_up(
     sync.sync(trainer, client_pool)
     warming.refuse.update({"/v1/models", "/server_info"})
 
-    sync.recover()
+    sync.recover(client_pool)
     results = _play(_manager_over(sync, [kept, warming]), 3)
 
     assert all(result.error is None for result in results) and len(kept.completion_models) == 3

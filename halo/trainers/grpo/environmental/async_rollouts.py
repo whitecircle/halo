@@ -337,7 +337,7 @@ class AsyncRolloutMixin:
         # Evaluated alike on every rank: the push it gates is a collective gather.
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
             if self._adapter_sync is not None:
-                self._adapter_sync.recover()
+                self._adapter_sync.recover(self._weight_sync_client)
             return False
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):

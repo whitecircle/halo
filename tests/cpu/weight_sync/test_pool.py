@@ -4,6 +4,7 @@ param, failure isolation, and which failures reconnect."""
 
 from __future__ import annotations
 
+import time
 import weakref
 
 import pytest
@@ -486,6 +487,70 @@ def test_a_failure_triggered_reconnect_still_closes_the_old_client_gracefully():
     pool._reconnect(0)
 
     assert closed == ["graceful"]
+
+
+def _blocking_pool(*, marked: bool):
+    """One server whose client's graceful close and abort would block; the restart release records instead."""
+    calls: list[str] = []
+
+    class Client:
+        def close_communicator(self):
+            calls.append("graceful")
+            time.sleep(0 if not marked else 5)
+
+        def abort_weight_update(self):
+            calls.append("abort")
+            time.sleep(0 if not marked else 5)
+
+        def close_communicator_of_restarted_server(self):
+            calls.append("local")
+
+    pool = WeightSyncPool(
+        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
+        connection_timeout=0.0,
+        client_cls=ServerlessSGLangClient,
+        base_group_port=51216,
+    )
+    pool._clients = [Client()]
+    if marked:
+        pool.mark_servers_restarted(["http://server0:8000"])
+    return pool, calls
+
+
+def test_closing_the_pool_releases_a_client_marked_restarted_without_its_peer():
+    pool, calls = _blocking_pool(marked=True)
+
+    started = time.monotonic()
+    pool.close_communicator()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["local"]
+
+
+def test_aborting_an_update_releases_a_client_marked_restarted_without_its_peer():
+    pool, calls = _blocking_pool(marked=True)
+
+    started = time.monotonic()
+    pool.abort_weight_update()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["local"]
+
+
+def test_closing_the_pool_still_closes_an_unmarked_client_gracefully():
+    pool, calls = _blocking_pool(marked=False)
+    pool.close_communicator()
+
+    assert calls == ["graceful"]
+
+
+def test_a_reconnect_clears_the_restart_mark():
+    pool, closed = _reconnect_probe()
+    pool.mark_servers_restarted(["http://server0:8000"])
+
+    pool.reconnect_servers()
+
+    assert closed == ["local"] and not pool._restarted_urls
 
 
 if __name__ == "__main__":

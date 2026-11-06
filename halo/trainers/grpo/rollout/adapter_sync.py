@@ -315,8 +315,6 @@ class AdapterSync:
         self._loaded: list[str] = []
         # The newest version's load, kept on rank 0 to put it on a server that restarted before the next sync.
         self._newest_load: tuple[str, dict, str] | None = None
-        # Servers whose weight-sync client lost its peer to a restart that took no base push.
-        self._unreconnected: set[str] = set()
 
     def reset(self) -> None:
         """A second ``train()`` pushes the base again."""
@@ -345,13 +343,15 @@ class AdapterSync:
         self._retire_unheld(name)
         self.routes.forget_except(self._tracked_versions())
 
-    def recover(self) -> None:
+    def recover(self, pool) -> None:
         """COLLECTIVE, between syncs. A server found restarted gets the newest version at once when it serves the
         trainer's base; one that does not stays out of routing until the next sync pushes the base. Never raises on a
         server that is down or refuses the load: the next call tries again."""
         if self.versions.current is None:
             return
-        holdings = rank0_verdict(self._restore_restarted, "Adapter recovery of restarted rollout servers")
+        holdings = rank0_verdict(
+            partial(self._restore_restarted, pool), "Adapter recovery of restarted rollout servers"
+        )
         self._learn(holdings)
 
     def _tracked_versions(self) -> set[str]:
@@ -365,9 +365,7 @@ class AdapterSync:
         """Whether the base must be pushed; reconnects the clients of servers that lost the newest adapter first."""
         current = self.versions.current
         if not self._base_pushed or current is None:
-            if self._unreconnected:
-                pool.reconnect_servers(self._unreconnected)
-                self._unreconnected.clear()
+            pool.reconnect_servers()
             return BasePlan(True, {})
         holdings = self._bound_servers().probe()
         silent = sorted(url for url, names in holdings.items() if names is None)
@@ -378,14 +376,13 @@ class AdapterSync:
             )
         restarted = [url for url, names in holdings.items() if current not in names]
         if restarted and all(self._serves_trainers_base(url) for url in restarted):
-            self._unreconnected.update(restarted)
+            pool.mark_servers_restarted(restarted)
             return BasePlan(False, holdings)
         if restarted:
-            pool.reconnect_servers(set(restarted) | self._unreconnected)
-            self._unreconnected.clear()
+            pool.reconnect_servers(restarted)
         return BasePlan(bool(restarted), holdings)
 
-    def _restore_restarted(self) -> dict[str, list[str] | None]:
+    def _restore_restarted(self, pool) -> dict[str, list[str] | None]:
         servers = self._bound_servers()
         holdings = servers.probe()
         current = self.versions.current
@@ -401,7 +398,7 @@ class AdapterSync:
         except RuntimeError as error:
             logger.warning(f"Adapter {name} could not be put back on restarted server(s) {restorable}: {error}")
             return holdings
-        self._unreconnected.update(restorable)
+        pool.mark_servers_restarted(restorable)
         for url in restorable:
             holdings[url] = [*holdings[url], name]
         logger.info(f"Loaded adapter {name} on restarted rollout server(s) {restorable}; their base is the trainer's.")

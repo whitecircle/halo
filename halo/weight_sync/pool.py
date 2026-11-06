@@ -60,6 +60,8 @@ class WeightSyncPool:
         self._stager: ChunkStager = client_cls.CHUNK_STAGER()
         # NCCL groups cannot form concurrently, so reconnects from parallel flush threads take turns.
         self._reconnect_lock = threading.Lock()
+        # Servers known to have restarted whose client still holds the old peer's communicator.
+        self._restarted_urls: set[str] = set()
         self._client_cls = client_cls
         validate_sync_topology(topology, server_configs)
         self._group_host = resolve_group_host(server_configs) if topology == "single_group" else None
@@ -122,14 +124,21 @@ class WeightSyncPool:
         for client in self._clients:
             client.scope_co_load_groups(self._co_load_module_names)
 
-    def reconnect_servers(self, urls: Iterable[str]) -> None:
-        """Replace the client of each server in ``urls`` with one on a fresh group, for servers known to have
-        restarted; the replacements serve base weights until a full push. A single group re-forms itself at its next
-        update, so it is left alone."""
+    def mark_servers_restarted(self, urls: Iterable[str]) -> None:
+        """Record servers known to have restarted whose clients are not replaced yet: :meth:`reconnect_servers`
+        replaces them, and a close releases them without contacting the old peer. A single group re-forms itself at
+        its next update, so it records nothing."""
+        if self._topology != "single_group":
+            self._restarted_urls.update(urls)
+
+    def reconnect_servers(self, urls: Iterable[str] = ()) -> None:
+        """Replace the client of each server in ``urls`` and of each one marked restarted with one on a fresh group;
+        the replacements serve base weights until a full push."""
         if self._topology == "single_group":
             return
-        restarted = set(urls)
         with self._reconnect_lock:
+            restarted = self._restarted_urls | set(urls)
+            self._restarted_urls.clear()
             for index, config in enumerate(self.server_configs):
                 if config["url"] in restarted:
                     self._reconnect(index, peer_gone=True)
@@ -166,22 +175,33 @@ class WeightSyncPool:
 
     def abort_weight_update(self) -> None:
         """Close the open update on every server after a failed sync; never raises."""
-        for client in self._clients:
-            client.abort_weight_update()
+        for index, client in enumerate(self._clients):
+            if self._is_marked_restarted(index):
+                client.close_communicator_of_restarted_server()
+            else:
+                client.abort_weight_update()
         self._stager.release()
         self._buffered_bytes = 0
 
     def close_communicator(self) -> None:
-        for client in self._clients:
+        """Close every client; one marked restarted is released without contacting its old peer, which is gone."""
+        for index, client in enumerate(self._clients):
             try:
-                client.close_communicator()
+                if self._is_marked_restarted(index):
+                    client.close_communicator_of_restarted_server()
+                else:
+                    client.close_communicator()
             except Exception as e:
                 logger.warning(f"Error closing client: {e}")
 
+        self._restarted_urls.clear()
         self._stager.release()
         self._clients = []
         self._initialized = False
         logger.info("WeightSyncPool closed all connections")
+
+    def _is_marked_restarted(self, index: int) -> bool:
+        return self._topology != "single_group" and self.server_configs[index]["url"] in self._restarted_urls
 
     @property
     def group(self) -> WeightSyncGroup | None:
