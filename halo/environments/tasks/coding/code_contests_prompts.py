@@ -18,7 +18,9 @@ SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at
 SCRATCHPAD_BUDGET_SPENT_REPLY = (
     f"Not run: this task's scratchpad budget is spent. Submit your solution with {SUBMIT_TOOL}."
 )
-SUBMISSION_BUDGET_SPENT_REPLY = "Not graded: this task's submission budget is spent."
+# Leads a reply to a submission that was not graded and spent no slot.
+NOT_GRADED_PREFIX = "Not graded:"
+SUBMISSION_BUDGET_SPENT_REPLY = f"{NOT_GRADED_PREFIX} this task's submission budget is spent."
 # Appended when the payload carries no time limit (``limits``: ``5 s``, or per language).
 UNSTATED_TIME_LIMIT_NOTE = "\n\nEach test of this problem runs under {limits}."
 MISLABELLED_LANGUAGE_REPLY = (
@@ -26,7 +28,7 @@ MISLABELLED_LANGUAGE_REPLY = (
     '"{evident}". No {spent} was spent.'
 )
 SUBMISSION_AFTER_ACCEPT_REPLY = (
-    "Not graded: an earlier submission already passed every test, so it stands and the task ends."
+    f"{NOT_GRADED_PREFIX} an earlier submission already passed every test, so it stands and the task ends."
 )
 # Identical to a graded program, comments aside: its grade is repeated unregraded, and the call counts as a submission
 # like any other.

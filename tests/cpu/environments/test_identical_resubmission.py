@@ -4,11 +4,13 @@ any submission; a changed program grades; a grade the backend lost records no pr
 one turn takes the free post-accept reply; the offline re-grader gives the repeat its slot."""
 
 import json
+import pickle
 from unittest import mock
 
 import pytest
 
 from halo.entrypoints.code_contests_regrade import submitted_solutions
+from halo.environments.episode_scoring import EpisodeScoringMixin
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding import grading as grading_module
@@ -16,8 +18,10 @@ from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import (
     IDENTICAL_RESUBMISSION_NOTE,
     SUBMISSION_AFTER_ACCEPT_REPLY,
+    SUBMISSION_BUDGET_SPENT_REPLY,
 )
 from halo.environments.tasks.coding.program_source import normalized_program, strip_comments
+from halo.environments.tasks.coding.submission_record import GRADED_PROGRAMS_KEY
 from halo.rewards.samples import REFUSED_CALL_IDS_KEY
 from tests.common.code_contests import SINGLE_TEST_ANSWER
 
@@ -252,6 +256,39 @@ def test_the_regrader_pairs_each_turn_with_its_own_replies_when_an_engine_reuses
             {"role": "tool", "tool_call_id": "call_0", "content": "Error: Not graded: submission budget spent."},
             {"role": "assistant", "tool_calls": [submit(RIGHT)]},
             {"role": "tool", "tool_call_id": "call_0", "content": "Passed 1/1 tests."},
+        ]
+    }
+    assert submitted_solutions(episode, env) == [(RIGHT, None)]
+
+
+def test_a_cached_grade_survives_a_pickle_and_leaves_with_the_grading_payload():
+    """The cache holds the grade object, not text: it rides the trajectory between turns and must not reach the record."""
+    sandbox = _ScriptedSandbox(SandboxResult(stdout="X\n", returncode=0))
+    env = _env(sandbox, max_submissions=4)
+    ids, _ = env.reset(["solve it"], [{"answer": {"tests": [{"input": "", "output": "Y"}]}}])
+    traj = env.step(ids, [""], [{"tool_calls": [_call("submit_solution", code=WRONG)]}])[0].trajectory
+
+    cached = traj.info[GRADED_PROGRAMS_KEY]
+    assert pickle.loads(pickle.dumps(cached)) == cached
+
+    EpisodeScoringMixin._drop_grading_payload(traj)
+    assert GRADED_PROGRAMS_KEY not in traj.info
+
+
+@pytest.mark.parametrize("reply", [SUBMISSION_AFTER_ACCEPT_REPLY, SUBMISSION_BUDGET_SPENT_REPLY])
+def test_a_submission_the_run_passed_over_takes_no_slot_in_the_regrade(reply):
+    """A call answered ``Not graded:`` ran nothing: counting it would regrade a slot the run never spent."""
+
+    def submit(code, call_id):
+        return {"id": call_id, "function": {"name": "submit_solution", "arguments": json.dumps({"code": code})}}
+
+    env = _env(_ScriptedSandbox(SandboxResult()), max_submissions=3)
+    episode = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [submit(RIGHT, "call_0")]},
+            {"role": "tool", "tool_call_id": "call_0", "content": "Passed 1/1 tests."},
+            {"role": "assistant", "tool_calls": [submit(WRONG, "call_1")]},
+            {"role": "tool", "tool_call_id": "call_1", "content": reply},
         ]
     }
     assert submitted_solutions(episode, env) == [(RIGHT, None)]

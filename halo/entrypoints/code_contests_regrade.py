@@ -14,7 +14,7 @@ from halo.environments.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,
     CodeContestsEnvironment,
 )
-from halo.environments.tasks.coding.code_contests_prompts import SUBMIT_TOOL
+from halo.environments.tasks.coding.code_contests_prompts import NOT_GRADED_PREFIX, SUBMIT_TOOL
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
 from halo.environments.tasks.coding.grading import grade_solution
 from halo.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
@@ -144,8 +144,9 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
     """The ``submit_solution`` payloads the run admitted, as ``(code, language)`` in order (``None`` where the run
     fixed the language), read the way the environment read them.
 
-    A call's recorded reply says whether the run admitted it: one starting ``Error:`` was refused unrun and spent no
-    slot, any other was graded and keeps its slot, so a record re-grades under the rules it ran under, whatever ``env``
+    A call's recorded reply says whether the run admitted it: one starting ``Error:`` was refused unrun and one starting
+    :data:`NOT_GRADED_PREFIX` was passed over (after an accept, or past the budget); both spent no slot. Any other was
+    graded and keeps its slot, so a record re-grades under the rules it ran under, whatever ``env``
     refuses today. A call with no recorded reply is judged by ``env``: one the tool refuses to bind, or code it refuses
     as another language (:meth:`CodeContestsEnvironment.find_mislabel`), takes no slot; a program identical to one
     already graded took the earlier grade again and keeps its slot."""
@@ -160,7 +161,7 @@ def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -
                 continue
             reply = replies.get(call.id) if call.id else None
             if reply is not None:
-                if not reply.startswith("Error:"):
+                if not reply.startswith(("Error:", NOT_GRADED_PREFIX)):
                     solutions.append((str(call.arguments.get("code", "")), call.arguments.get("language")))
                 continue
             try:
