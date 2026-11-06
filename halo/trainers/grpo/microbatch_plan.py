@@ -52,12 +52,14 @@ def first_fit_decreasing(lengths: Sequence[int], budget: int) -> list[list[int]]
     return bins
 
 
-def balanced_partition(lengths: Sequence[int], num_bins: int) -> list[list[int]]:
-    """Exactly ``num_bins`` bins: longest first into the lightest (longest-processing-time), ties to the lowest bin."""
+def balanced_partition(lengths: Sequence[int], num_bins: int, capacity: int | None = None) -> list[list[int]]:
+    """Exactly ``num_bins`` bins: longest first into the lightest (longest-processing-time), ties to the lowest bin.
+    ``capacity`` caps the rows a bin takes; the rows must fit ``num_bins`` bins of it."""
     loads = [0] * num_bins
     bins: list[list[int]] = [[] for _ in range(num_bins)]
     for row in sorted(range(len(lengths)), key=lambda i: (-lengths[i], i)):
-        target = loads.index(min(loads))
+        open_bins = [i for i in range(num_bins) if capacity is None or len(bins[i]) < capacity]
+        target = min(open_bins, key=lambda i: (loads[i], i))
         loads[target] += lengths[row]
         bins[target].append(row)
     return bins

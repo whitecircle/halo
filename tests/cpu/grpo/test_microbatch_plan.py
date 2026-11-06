@@ -172,6 +172,14 @@ def test_the_layout_survives_trls_own_split():
     assert [c["slot_active"].tolist() for c in chunks] == [[0, 0], [0, 0], [1, 1], [1, 1]]
 
 
+def test_a_capacity_deals_equal_shares_with_the_uncapped_tie_break():
+    lengths = [9, 1, 1, 1, 1, 1]
+    capped = balanced_partition(lengths, 3, capacity=2)
+    assert [len(rows) for rows in capped] == [2, 2, 2]
+    assert capped[0] == [0, 5]
+    assert balanced_partition(lengths, 3)[0] == [0]
+
+
 @pytest.mark.parametrize(
     ("row_tokens", "budget"),
     [(PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET), (PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET)],

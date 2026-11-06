@@ -13,6 +13,7 @@ import torch.distributed as dist
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.consensus import agree_across_ranks, rank_max, reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.grpo.microbatch_plan import balanced_partition
 from halo.trainers.grpo.row_order import permute_rows, reject_microbatch_dependent_objective
 
 logger = logging.getLogger(__name__)
@@ -52,13 +53,7 @@ def deal_order(tokens: Sequence[int], ranks: int) -> list[int]:
     Raises when the rows do not divide over the ranks."""
     if ranks < 1 or len(tokens) % ranks:
         raise ValueError(f"Cannot deal {len(tokens)} rows over {ranks} ranks in equal shares.")
-    share = len(tokens) // ranks
-    loads = [0] * ranks
-    owned: list[list[int]] = [[] for _ in range(ranks)]
-    for row in sorted(range(len(tokens)), key=lambda i: (-tokens[i], i)):
-        target = min((r for r in range(ranks) if len(owned[r]) < share), key=lambda r: (loads[r], r))
-        loads[target] += tokens[row]
-        owned[target].append(row)
+    owned = balanced_partition(tokens, ranks, capacity=len(tokens) // ranks)
     return [row for rows in owned for row in sorted(rows)]
 
 
