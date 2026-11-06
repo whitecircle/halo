@@ -11,7 +11,7 @@ import re
 import uuid
 from collections.abc import Callable
 from functools import partial
-from typing import TYPE_CHECKING, NamedTuple
+from typing import NamedTuple
 
 import requests
 import torch
@@ -23,8 +23,10 @@ from transformers.core_model_loading import rename_source_key
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms
 from halo.checkpoint.parallel.adapters import gather_adapter_state
 from halo.checkpoint.weights_source import weights_read_from
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.peft_adapters import tuner_adapter_param_ids
@@ -50,10 +52,6 @@ from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.registry import resolve_weight_sync_client
-
-if TYPE_CHECKING:
-    from halo.configs.grpo_environmental import AsyncRolloutConfig
-    from halo.distributed.parallelism_config import ParallelismConfig
 
 logger = logging.getLogger(__name__)
 
