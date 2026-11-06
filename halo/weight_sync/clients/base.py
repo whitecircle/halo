@@ -7,6 +7,7 @@ import socket
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
+from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
 from urllib.parse import urlparse
 
@@ -78,7 +79,7 @@ class ServerFlags(NamedTuple):
     # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
     pipeline_stages: int | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
-    extras: Mapping[str, object] = {}
+    extras: Mapping[str, object] = MappingProxyType({})
 
 
 def pick_launch_facts(source: Mapping[str, Any], facts: Mapping[str, tuple[str, ...]]) -> dict[str, object]:
