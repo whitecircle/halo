@@ -65,7 +65,7 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 5. **Key GRPO hyperparameters** (both flavors): `num_generations` (group size), `beta` (KL to ref;
    `0.0` disables the ref model), `epsilon` (clip), `scale_rewards`, `temperature`, `loss_type`. Env GRPO
    adds rollout sampling (`rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` /
-   `rollout_chat_template_kwargs`), Ray pool sizing (`num_rollout_workers`, `max_concurrent_rollouts`),
+   `rollout_chat_template_kwargs`), Ray pool sizing (`rollout_actor_budget`, `max_concurrent_rollouts`),
    prefetch and `sync_weights_every_n_steps`, and the reasoning budgets: `rollout_max_thinking_tokens` is
    enforced engine-side on vLLM only (it needs a server reasoning parser) and refused under
    `rollout_backend: sglang`, as is `carry_reasoning`

@@ -76,7 +76,7 @@ rewards:
     checks: environment        # the environment's audit rubric (CodeContestsEnvironment.JUDGE_CHECKS)
 
 # --- Ray Workers ---
-num_rollout_workers: 128
+rollout_actor_budget: 128
 max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave
 
 # --- vLLM Servers ---

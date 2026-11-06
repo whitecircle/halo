@@ -243,7 +243,7 @@ def run_env_grpo_training(
             rollout_server_url=VLLM_SERVER_URL,
             rollout_group_port=GROUP_PORT,
             rollout_connection_timeout=120.0,
-            num_rollout_workers=num_workers,
+            rollout_actor_budget=num_workers,
             max_concurrent_rollouts=max_concurrent,
             rollout_temperature=0.7,
             rollout_top_p=0.95,

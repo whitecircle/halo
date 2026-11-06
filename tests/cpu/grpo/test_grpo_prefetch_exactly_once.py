@@ -239,7 +239,7 @@ class _LifecycleHost:
         self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: 0)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=2,
+            rollout_actor_budget=2,
             max_concurrent_rollouts=2,
             eval_rollout_batch_size=None,
             isr_engine_reference=False,
@@ -466,11 +466,11 @@ def test_a_tp_follower_still_builds_the_score_only_clients(monkeypatch):
 @pytest.mark.parametrize(("group_size", "actors"), [(1, 8), (2, 16), (8, 64)])
 def test_a_shared_ray_cluster_splits_its_actor_budget_among_the_leaders(monkeypatch, group_size, actors):
     """Followers run no pool, so the budget a shared cluster divides is over the groups, else the cluster-wide pool
-    would fall to ``group_size`` times less than ``num_rollout_workers``."""
+    would fall to ``group_size`` times less than ``rollout_actor_budget``."""
     host = _LifecycleHost(torch.zeros(1))
     host.tp_group_size = group_size
     host.async_config.ray_address = "auto"
-    host.async_config.num_rollout_workers = 64
+    host.async_config.rollout_actor_budget = 64
     built = {}
 
     def manager(**kwargs):

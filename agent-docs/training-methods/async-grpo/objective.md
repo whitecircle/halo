@@ -193,7 +193,7 @@ Rows carry two masks, and the loss and the DAPO normalizer use their intersectio
 |---|---|---|
 | `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and exam-QA. Trades unique prompts for samples each. |
 | `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to the larger of a train and an eval round's rows, one wave; above the round's count it never binds. |
-| `num_rollout_workers` | Ray actor budget per node (cluster-wide with `ray_address`), split over the rollout ranks | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
+| `rollout_actor_budget` | Ray actor budget per node (cluster-wide with `ray_address`), split over the rollout ranks | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
 
 ## Learning rate
 

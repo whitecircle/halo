@@ -23,7 +23,7 @@ max_turns: 5
 #   search_backend: duckduckgo
 
 # --- Ray Workers ---
-num_rollout_workers: 64
+rollout_actor_budget: 64
 
 # --- Rollout Generation ---
 rollout_temperature: 0.7

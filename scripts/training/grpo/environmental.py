@@ -214,7 +214,7 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
     return [
         *(f"{key}: {value}" for key, value in env_settings.items()),
         f"rollout_backend: {async_config.rollout_backend}",
-        f"rollout_workers: {async_config.num_rollout_workers}",
+        f"rollout_actor_budget: {async_config.rollout_actor_budget}",
         f"max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}",
         *servers,
         f"weight_sync: every {async_config.sync_weights_every_n_steps} steps",

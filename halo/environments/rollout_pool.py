@@ -35,7 +35,7 @@ def resolve_rollout_pool(
     actors = max(1, num_workers // divisor)
     if actors < min(MIN_ACTORS_PER_RANK, rows_per_round):
         warnings.append(
-            f"num_rollout_workers ({num_workers}) over {divisor} rollout ranks of {scope} leaves {actors} actor(s) "
+            f"rollout_actor_budget ({num_workers}) over {divisor} rollout ranks of {scope} leaves {actors} actor(s) "
             f"per rank, below {MIN_ACTORS_PER_RANK}; raise it to at least {MIN_ACTORS_PER_RANK * divisor}."
         )
 

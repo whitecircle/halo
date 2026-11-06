@@ -141,6 +141,10 @@ class AsyncRolloutMixin:
 
         plan = self._resolve_rollout_pool()
         if is_global_main_process():
+            logger.info(
+                f"Rollout pool: {plan.actors_per_rank} actors per rank from rollout_actor_budget "
+                f"{self.async_config.rollout_actor_budget}, {plan.max_concurrent} rollouts in flight per rank."
+            )
             for warning in plan.warnings:
                 logger.warning(warning)
         self._rollout_manager = RolloutManager(
@@ -166,7 +170,7 @@ class AsyncRolloutMixin:
         """Rollout ranks are one per TP/ETP group, its leader."""
         group_size = self._get_tp_or_etp_group_size()
         return resolve_rollout_pool(
-            num_workers=self.async_config.num_rollout_workers,
+            num_workers=self.async_config.rollout_actor_budget,
             shared_cluster=self.async_config.ray_address is not None,
             rollout_ranks=get_global_world_size() // group_size,
             rollout_ranks_per_node=max(1, get_local_world_size() // group_size),

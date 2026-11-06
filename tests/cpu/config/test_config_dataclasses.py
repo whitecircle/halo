@@ -343,7 +343,7 @@ def test_rlvr_args_refuse_a_veto_judge():
 
 def test_async_config_defaults():
     cfg = AsyncRolloutConfig()
-    assert cfg.num_rollout_workers == 256
+    assert cfg.rollout_actor_budget == 256
     assert cfg.max_concurrent_rollouts is None
     assert cfg.rollout_server_url == "http://localhost:8000"
     assert cfg.rollout_temperature == 0.7

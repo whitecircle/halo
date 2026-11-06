@@ -64,7 +64,7 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
     host = types.SimpleNamespace(
         async_config=types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=1,
+            rollout_actor_budget=1,
             max_concurrent_rollouts=1,
             get_server_urls=lambda: ["http://10.0.0.1:8000"],
             get_rollout_config=lambda **kwargs: None,
@@ -95,7 +95,7 @@ def test_a_local_pool_is_split_over_the_leaders_of_the_node_alone(
     host = types.SimpleNamespace(
         async_config=types.SimpleNamespace(
             ray_address=ray_address,
-            num_rollout_workers=workers,
+            rollout_actor_budget=workers,
             eval_rollout_batch_size=None,
             max_concurrent_rollouts=None,
         ),

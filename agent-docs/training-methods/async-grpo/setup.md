@@ -139,11 +139,11 @@ rollout_server_configs:
   construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
   `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with
   `(1 + max_retries) × request_timeout` still within `episode_timeout`.
-- `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
+- `rollout_actor_budget` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
   `1` is refused where prefetch is off, naming `enable_prefetch: false` or the opt-in a one-server run left unset.
 
 `async/prefetch_hit_rate` shows which phase bounds the step, not server health. On a short single-turn environment it
-should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `num_rollout_workers`. On a multi-turn
+should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `rollout_actor_budget`. On a multi-turn
 one the round outlasts the update, so it sits near 0 at `prefetch_depth: 1`; a deeper pipeline raises it.
 
 ### Prefetch across a resume
@@ -176,7 +176,7 @@ address differs per server.
 - Use resolvable host names. A loopback URL in a run spanning several nodes is refused at startup: it reaches a
   different engine, or none, per node, and only the forwarding rank's node takes weight pushes. A launch on one node
   with a `ray_address` head on it keeps its loopback URL.
-- `num_rollout_workers` is a per-node budget on a local Ray, split over the node's rollout ranks, and the cluster-wide
+- `rollout_actor_budget` is a per-node budget on a local Ray, split over the node's rollout ranks, and the cluster-wide
   total on a shared one, split over every rollout rank; actors are soft-pinned to the rank's node ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route
   to each server; set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST` where the server cannot dial that back (NAT, asymmetric

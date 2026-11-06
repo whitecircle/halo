@@ -20,7 +20,7 @@ environment_type: react_math
 max_turns: 10
 
 # --- Ray Workers ---
-num_rollout_workers: 64
+rollout_actor_budget: 64
 
 # --- Rollout Generation ---
 rollout_temperature: 0.7

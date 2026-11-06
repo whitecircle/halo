@@ -259,7 +259,7 @@ class AsyncRolloutConfig(
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""
 
-    num_rollout_workers: int = field(
+    rollout_actor_budget: int = field(
         default=256,
         metadata={
             "help": "Ray environment actors per node, split across that node's rollout ranks; with ray_address set, "
@@ -512,7 +512,7 @@ class AsyncRolloutConfig(
             owner,
             ge=1,
             sync_weights_every_n_steps=self.sync_weights_every_n_steps,
-            num_rollout_workers=self.num_rollout_workers,
+            rollout_actor_budget=self.rollout_actor_budget,
             prefetch_depth=self.prefetch_depth,
             **present(
                 max_concurrent_rollouts=self.max_concurrent_rollouts,

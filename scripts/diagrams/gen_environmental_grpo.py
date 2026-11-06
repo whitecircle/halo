@@ -107,7 +107,7 @@ def _draw_topology(ax, multi, n_trainer):
         LW,
         card_height(2),
         "Ray environment actors",
-        ["num_rollout_workers per node", "round-robin over the server URLs"],
+        ["rollout_actor_budget per node", "round-robin over the server URLs"],
         color=TEAL,
     )
     target = _draw_servers(ax, multi)

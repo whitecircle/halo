@@ -42,7 +42,7 @@ router-balancing mode exports.
 | Logging | `report_to`, `project_name`, `run_name`, `logging_steps` |
 | Online RL (both trainers) | `num_generations`, `rewards` |
 | Online GRPO | `vllm_server_host`, `vllm_server_port` |
-| Async GRPO with environments | `rollout_server_url`, `environment_type`, `num_rollout_workers` |
+| Async GRPO with environments | `rollout_server_url`, `environment_type`, `rollout_actor_budget` |
 
 Notes on the ones that cause trouble:
 

@@ -69,7 +69,7 @@ class _Host(AsyncRolloutMixin):
         self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: rank)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=1,
+            rollout_actor_budget=1,
             max_concurrent_rollouts=4,
             eval_rollout_batch_size=None,
             isr_engine_reference=True,

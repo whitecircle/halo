@@ -235,7 +235,7 @@ def _async_config(
         ),
         rollout_group_port=group_port,
         rollout_connection_timeout=180.0,
-        num_rollout_workers=2,
+        rollout_actor_budget=2,
         max_concurrent_rollouts=2,
         rollout_max_tokens=128,
         rollout_stop_tokens=stop_tokens,

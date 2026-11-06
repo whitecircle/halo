@@ -99,7 +99,7 @@ row; the in-flight episode is lost, not retried.
 
 ## Pool sizing
 
-`num_rollout_workers` (default 256) is an actor **budget**, split over the **rollout ranks**: every rank, or under
+`rollout_actor_budget` (default 256) is an actor **budget**, split over the **rollout ranks**: every rank, or under
 TP/ETP only each group's leader (`data_parallel_size` of them). A rank gets `budget // divisor` actors, at least 1:
 
 - `ray_address: null`: the budget is **per node**. Each node's ranks start a local Ray, and the divisor is the rollout
@@ -219,7 +219,7 @@ PIDs show as `ray::EnvironmentActor` in `ps`).
 
 | Symptom | Cause → fix |
 |---|---|
-| Actors `PENDING`, rollouts never start | No free CPU anywhere in the cluster (a saturated local node spills, it does not pin) → free cores or lower `num_rollout_workers` |
+| Actors `PENDING`, rollouts never start | No free CPU anywhere in the cluster (a saturated local node spills, it does not pin) → free cores or lower `rollout_actor_budget` |
 | `ray.exceptions.RayActorError` in logs | Actor process died (OOM, native crash); the episode is masked and the actor restarts — check `ray logs`, reduce per-node concurrency if OOM |
 | Rollouts fail with connection refused on some ranks only | Loopback/unresolvable server URL from an actor node → use routable hostnames in `rollout_server_configs` |
 | Search/MCP env scores all zero on a shared cluster | Backend key or `npx`/`uvx` missing from the actor node's env → export before `ray start` |
