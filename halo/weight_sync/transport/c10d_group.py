@@ -85,12 +85,13 @@ def release_weight_update_group(group: dist.ProcessGroup | None, *, destroy: boo
     c10d._world.pg_group_ranks.pop(group, None)
 
 
-def abort_weight_update_group(group: dist.ProcessGroup | None, *, timeout_s: float) -> None:
+def abort_weight_update_group(group: dist.ProcessGroup | None, *, timeout_s: float) -> bool:
     """Abort ``group``, ending kernels spinning on a silent peer; no destroy may follow. Never raises, and returns after
     ``timeout_s`` even when the abort does not: torch's abort waits on a communicator another thread may be tearing
-    down, which leaves the group parked on its own thread."""
+    down, which leaves the group parked on its own thread. Returns False for a group left parked, which the caller must
+    not release."""
     if group is None:
-        return
+        return True
 
     def abort() -> None:
         try:
@@ -105,3 +106,4 @@ def abort_weight_update_group(group: dist.ProcessGroup | None, *, timeout_s: flo
         logger.error(
             f"Aborting the SGLang weight-update group did not return within {timeout_s:.0f}s; it is left parked."
         )
+    return not aborting.is_alive()

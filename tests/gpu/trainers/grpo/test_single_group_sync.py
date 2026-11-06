@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """``rollout_sync_topology: single_group`` against live servers: one group over every server lands the same bytes on
-all of them, in the one rank block each, and costs about what one server does. A group's first push also brings up its
-NCCL communicator, lazily on SGLang and growing with the ranks, so the bar is on the second push and the first is
-reported beside it.
+all of them, in the one rank block each, and costs about what one server does. A group's first push also carries
+process and communicator warm-up, so the bar is on the second push and the first is reported beside it; run it with
+``NCCL_DEBUG=INFO`` to see where a first push's time goes.
 
 ``--backend`` picks the engine, ``--servers`` how many of its servers (``HALO_TEST_VLLM_SERVER_URLS`` or
 ``HALO_TEST_SGLANG_SERVER_URLS``, each serving the same checkpoint on its own GPUs; mix TP sizes in the list for the

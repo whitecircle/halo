@@ -28,6 +28,8 @@ from tests.common.weight_sync_reinit import VLLM_REINIT_MODEL
 
 # The dead server's declare is refused at once; a trainer that waits a broadcast's deadline has lost the bound.
 MAX_FAILURE_S = 120.0
+# A re-form aborts the trainer's half, then each server's destroy, join and formation run under their own bounds.
+MAX_REFORM_S = 300.0
 _CHUNKS_BEFORE_THE_KILL = 1
 
 
@@ -52,7 +54,7 @@ def run(ctx) -> dict:
         timed_push(pool, everything)
         baseline = [probe_top_logprobs(url, VLLM_REINIT_MODEL) for url in urls]
         _control("restart", str(last))
-        timed_push(pool, everything)
+        reform_s = timed_push(pool, everything)
         recovered = [probe_top_logprobs(url, VLLM_REINIT_MODEL) for url in urls]
         checks["a_restart_between_syncs_re_forms_and_the_sync_completes"] = all(
             probe == baseline[0] for probe in recovered
@@ -75,6 +77,7 @@ def run(ctx) -> dict:
             except RuntimeError as e:
                 failure = e
         seconds = time.monotonic() - started
+        checks["the_re_form_returned_within_the_bound"] = reform_s < MAX_REFORM_S
         checks["the_trainer_returned_within_the_bound"] = failure is not None and seconds < MAX_FAILURE_S
         checks["the_error_names_the_dead_server_first"] = (
             failure is not None
@@ -93,7 +96,7 @@ def run(ctx) -> dict:
         checks["after_restarting_all_the_next_sync_lands_one_policy"] = all(probe == landed[0] for probe in landed)
     finally:
         after.close_communicator()
-    return {"checks": ctx.broadcast_checks(checks), "metrics": {"failure_s": seconds}}
+    return {"checks": ctx.broadcast_checks(checks), "metrics": {"reform_s": reform_s, "failure_s": seconds}}
 
 
 main = gpu_test_main(exact_world_size=1, prefix="single_group_failure", partial_state=False)(run)

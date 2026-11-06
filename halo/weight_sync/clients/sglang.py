@@ -208,7 +208,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         )
 
     def _release_transport(self, *, at_exit: bool) -> None:
-        group = None if self._transport is None else self._transport[0]
+        # A group whose abort is still running on its thread is left to it: releasing would race that thread.
+        group = None if self._transport is None or self._abort_parked else self._transport[0]
         # Interpreter exit skips the local NCCL destroy, and an aborted group is already gone from torch.
         destroy = not at_exit and not self._aborted
         # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
@@ -235,6 +236,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def _reset_transport_state(self) -> None:
         # Set once a drain deadline aborted the group, on which a destroy raises and a broadcast hangs.
         self._aborted = False
+        self._abort_parked = False
         self._arena: torch.Tensor | None = None
         # Events recorded after the latest chunks' broadcasts, settled _INFLIGHT_CHUNKS later.
         self._inflight: deque[torch.cuda.Event] = deque()
@@ -427,7 +429,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def abort_transport(self) -> None:
         self._aborted = True
-        abort_weight_update_group(self._transport[0], timeout_s=CLEANUP_TIMEOUT_S)
+        if not abort_weight_update_group(self._transport[0], timeout_s=CLEANUP_TIMEOUT_S):
+            self._abort_parked = True
 
     def release_send_buffers(self) -> None:
         """Held across syncs, the arena would pin the sync GPU."""

@@ -193,7 +193,9 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 
 def _aborts(monkeypatch) -> list[object]:
     aborted: list[object] = []
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: aborted.append(group))
+    monkeypatch.setattr(
+        sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: aborted.append(group) or True
+    )
     return aborted
 
 
@@ -234,6 +236,20 @@ def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
     finally:
         released.set()
     assert aborted == [group]
+
+
+def test_a_group_whose_abort_is_still_parked_is_not_released(monkeypatch):
+    """Releasing pops torch's rank map for the group while the abort thread still runs inside it."""
+    client = offline_client(SGLangWeightSyncClient)
+    group = object()
+    client._transport = (group, None)
+    calls = _teardown_probe(client, monkeypatch)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: False)
+
+    client.abort_transport()
+    client.close_communicator()
+
+    assert all(target is not group for _, target in calls), "the release touched a group whose abort is parked"
 
 
 def test_a_join_to_a_scheduler_parked_in_a_destroy_fails_within_the_cleanup_bound(monkeypatch):
@@ -393,9 +409,10 @@ def test_an_abort_that_never_returns_ends_at_its_deadline(monkeypatch, caplog):
     started = time.monotonic()
     try:
         with caplog.at_level(logging.ERROR, logger=c10d_group.logger.name):
-            c10d_group.abort_weight_update_group(object(), timeout_s=0.2)
+            returned = c10d_group.abort_weight_update_group(object(), timeout_s=0.2)
         assert time.monotonic() - started < 5.0, "the abort held its caller past the deadline"
         assert any("did not return" in record.getMessage() for record in caplog.records)
+        assert returned is False
     finally:
         parked.set()
 

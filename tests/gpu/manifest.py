@@ -1748,7 +1748,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--backend vllm --servers 2",
             Row("--backend sglang --servers 2", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
         ),
-        timeout=3600,
+        # Two server restarts and a kill dominate; a wedged teardown runs past this instead of parking the harness.
+        timeout=1800,
     ),
     "trainers/grpo/test_weight_sync_pool_reconnect.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
