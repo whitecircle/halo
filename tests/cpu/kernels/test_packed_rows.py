@@ -85,6 +85,23 @@ def test_a_noise_dominated_scalar_group_is_judged_by_its_norm():
     assert verdict(wrong)[0]["projections"] is False
 
 
+def test_a_wrong_direction_gradient_of_equal_norm_fails_outside_the_norm_judged_group():
+    """A router or projection gradient permuted to the same norm fails the direction rule; the norm-judged group is
+    the only one that tolerates it."""
+    values = torch.tensor([1.0, -2.0, 3.0, 0.5])
+    reference = {"l.mlp.gate.weight": values, "l.self_attn.q_proj.weight": values}
+    floors = gate.grad_noise_floor(reference, reference)
+    packed = {name: values.flip(0) for name in reference}
+    verdicts, by_norm = gate.judge_grad_groups(packed, reference, reference, floors, 2.0)
+    assert by_norm == [] and verdicts == {"router": False, "projections": False}
+
+
+def test_the_norm_judged_group_is_the_per_head_scalars():
+    assert {
+        gate.grad_group(name) for name in ("l.linear_attn.A_log", "l.linear_attn.dt_bias")
+    } == gate.NORM_JUDGED_GROUPS
+
+
 def test_the_split_step_sums_to_the_joint_step(model):
     documents = gate.build_documents((12, 9), model.config.vocab_size, "cpu")
     _, joint = gate.row_step(model, documents, None)

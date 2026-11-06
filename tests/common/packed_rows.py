@@ -11,11 +11,7 @@ from tests.common.numerics import max_abs_rel_err
 SEED = 0
 # Of the reference's peak, where the per-row error is below what a ratio can resolve.
 ERROR_FLOOR = 2e-3
-# A group whose per-row bf16 gradient is this far (L2, relative) from fp32 is noise-dominated: bf16 cannot resolve its
-# direction (a few bf16 steps of 2^-8 already, and below the 0.016 floor of the smallest scalar group that failed
-# a direction gate while passing under FA4), so it is judged on its norm.
-UNRESOLVABLE_ERROR = 0.01
-# Packed over per-row gradient norm of such a group: bf16 noise moves it by about the group's error (<= 0.12), a
+# Packed over per-row gradient norm of a norm-judged group: bf16 noise moves it by about the group's error (<= 0.12), a
 # doubled or halved gradient lands outside.
 NORM_BAND = (0.8, 1.25)
 # Name markers of the gradient groups, checked in order; every other parameter is a projection.
@@ -26,6 +22,10 @@ _GRAD_GROUPS = (
     ("norms", ("norm",)),
     ("embeddings", ("embed", "lm_head")),
 )
+# Groups judged by norm ratio, not direction: GatedDeltaNet's per-head A_log and dt_bias gradients are token sums of
+# cancelling terms, 0.10-0.11 from fp32 per row on GPU against 0.012-0.016 for every other group, with packed/per-row
+# norm ratios of 0.954-1.029 (others 0.9996-1.0003); no single error cut separates the two.
+NORM_JUDGED_GROUPS = frozenset({"gdn_scalars"})
 
 
 def emission_kwargs(emission: str, position_ids: torch.Tensor, config) -> dict:
@@ -145,14 +145,12 @@ def judge_grad_groups(
     floors: dict[str, float],
     ratio: float,
 ) -> tuple[dict[str, bool], list[str]]:
-    """Per group, whether the packed gradients hold, and the groups judged by norm. A group whose per-row bf16
-    gradient is ``UNRESOLVABLE_ERROR`` or more from fp32 cannot be resolved in bf16: its packed/per-row norm ratio must
-    sit in ``NORM_BAND`` and its direction error is not gated. Every other group's error must stay within ``ratio``
-    times its floor."""
+    """Per group, whether the packed gradients hold, and the groups judged by norm. A group in
+    ``NORM_JUDGED_GROUPS`` passes when its packed/per-row norm ratio sits in ``NORM_BAND``, its direction error not
+    gated; every other group's error must stay within ``ratio`` times its floor."""
     errors = group_grad_errors(packed, reference)
-    per_row_errors = group_grad_errors(per_row, reference)
     norm_ratios = group_norm_ratios(packed, per_row)
-    by_norm = [group for group in errors if per_row_errors[group] >= UNRESOLVABLE_ERROR]
+    by_norm = [group for group in errors if group in NORM_JUDGED_GROUPS]
     verdicts = {
         group: NORM_BAND[0] <= norm_ratios[group] <= NORM_BAND[1]
         if group in by_norm

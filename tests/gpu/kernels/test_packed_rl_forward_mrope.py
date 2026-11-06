@@ -7,9 +7,8 @@ The ``markers`` and ``mrope_plane`` emissions must score and train as each row a
 ``flash_varlen`` alone leave a GatedDeltaNet family's conv and delta rule without a document boundary: they are
 negative controls that must leak across documents, which proves the isolation check can fail. Gradients compare per
 parameter group against the largest noise reference: the per-row forward's distance from fp32 and from itself with the
-documents reordered and with one backward per document. A group whose per-row bf16 gradient is itself far from fp32
-(per-head scalar sums of cancelling terms) is judged on its packed/per-row norm ratio instead, its direction error only
-logged. A CUDA fault poisons the process, hence one launch per family
+documents reordered and with one backward per document. The per-head scalar group (GatedDeltaNet ``A_log``, ``dt_bias``: token sums bf16 cannot
+resolve in direction) is judged on its packed/per-row norm ratio instead, its direction error only logged. A CUDA fault poisons the process, hence one launch per family
 and emission.
 """
 
