@@ -98,8 +98,16 @@ pinned host memory instead crosses PCIe twice before the NIC sees it: 19–24 GB
 staged on the device (8× B300 nodes over EFA; the vLLM rate measured on vLLM 0.26.0, the SGLang rate
 measured on SGLang 0.5.17).
 
+The sync's expert gather delivers each layer to the forwarding rank alone, over the EP group's ring
+(`gather_cat_to_rank`: SUM-reduced byte windows, bit exact, one window on every other rank), so no other rank
+assembles a layer. Under deferred DP the EP groups that do not hold the forwarding rank join no expert collective, and
+expert-TP shards still gather across their group. Layer k+1's gather is issued on a side stream before layer k is
+forwarded (`HALO_WEIGHT_SYNC_GATHER_AHEAD`, 1 by default, 0 for strictly in turn), in the same collective order on
+every rank; each layer ahead keeps one more assembled layer on the forwarding GPU. Gathered checkpoint saves keep the
+all-rank gather.
+
 The forwarding rank's peak during a sync is the assembled EP layer being sent (~13 GB for one 397B
-layer), plus the snapshot of the chunk being sent and the engine path's staged copy of it, each the size of that
+layer, and the same again for the layer issued ahead), plus the snapshot of the chunk being sent and the engine path's staged copy of it, each the size of that
 chunk: SGLang's arena, grown to the largest chunk, or vLLM's packed buffers, so 12.9 + 8.6 + 8.6 GB at 397B
 (calculated from the fused bank's 8.6 GB). The staging is made once per chunk and every server's client broadcasts
 from that one read-only buffer, in `per_server` and `single_group` alike, so the figure does not grow with the number

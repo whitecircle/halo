@@ -95,13 +95,11 @@ def _engine_scores_of_the_trainer(model, rows, device) -> list[float]:
 @pytest.fixture
 def run_row(monkeypatch):
     """Drive one row against ``engine_args`` with ``as_served`` on the server. Single rank, on the host."""
-    gather = EPGatherMixin.gather_expert_state_dict
+    start = EPGatherMixin.start_gather_expert_state_dict
     monkeypatch.setattr(
         EPGatherMixin,
-        "gather_expert_state_dict",
-        lambda self, *, device="cpu", merge_lora=False, retain=True: gather(
-            self, device="cpu", merge_lora=merge_lora, retain=retain
-        ),
+        "start_gather_expert_state_dict",
+        lambda self, *, device="cpu", **kwargs: start(self, device="cpu", **kwargs),
     )
     model = _tiny_ep_ling()
     recorder = RecordingSender(keep_values=True)

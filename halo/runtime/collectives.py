@@ -1,5 +1,6 @@
 """Hand-built collectives over the default group."""
 
+import functools
 import itertools
 import pickle
 from collections.abc import Callable
@@ -26,6 +27,18 @@ def collective_device(group: dist.ProcessGroup | None = None) -> torch.device:
     if backend is not None and backend.lower() == dist.Backend.NCCL and torch.cuda.is_available():
         return current_device()
     return torch.device("cpu")
+
+
+@functools.cache
+def _side_stream(device_index: int) -> torch.cuda.Stream:
+    """One stream per device for the process, since the caching allocator keeps a pool per stream."""
+    return torch.cuda.Stream(device=device_index)
+
+
+def collective_side_stream() -> torch.cuda.Stream | None:
+    """The stream a collective runs on beside the caller's, so later work on the caller's stream does not wait for
+    it; None without CUDA."""
+    return _side_stream(torch.cuda.current_device()) if torch.cuda.is_available() else None
 
 
 def barrier(group: dist.ProcessGroup | None = None):
@@ -107,6 +120,11 @@ def gather_on_rank0(payload: Any) -> list[Any] | None:
     return [pickle.loads(received[offsets[peer] : offsets[peer + 1]]) for peer in range(world)]
 
 
+def group_holds_rank(group: dist.ProcessGroup | None, rank: int) -> bool:
+    """Whether global ``rank`` is a member of ``group`` (``None`` is the world)."""
+    return group is None or rank in dist.get_process_group_ranks(group)
+
+
 def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined], *, what: str) -> _Combined:
     """COLLECTIVE: ``combine`` every rank's ``payload`` on rank 0 and return the result on every rank; its failure
     raises on every rank. An all-gather would leave every rank holding one payload per rank."""
@@ -153,3 +171,37 @@ def all_gather_cat(tensor: torch.Tensor, dim: int, group, world_size: int) -> to
     else:
         dist.all_gather(list(gathered.split(tensor.shape[dim], dim=dim)), tensor, group=group)
     return gathered
+
+
+def gather_cat_to_rank(
+    tensor: torch.Tensor, group: dist.ProcessGroup | None, world_size: int, *, dst: int, receive: bool = True
+) -> torch.Tensor | None:
+    """COLLECTIVE over ``group``, which must hold global rank ``dst``: every rank's equal-shaped ``tensor`` concatenated
+    along dim 0 in group-rank order, on ``dst`` only (None elsewhere, and on ``dst`` without ``receive``). Like
+    :func:`gather_on_rank0` it SUM-reduces windows of the bytes over the communicator's existing ring, each rank
+    contributing zeros outside its own span, so the result is bit exact and no rank but ``dst`` holds more than a window.
+    ``dst`` allocates its result before the collective, so a raise out of it means it never entered and a caller can
+    free memory and call again with ``receive=False`` in step with its peers, which discards the result."""
+    if world_size <= 1:
+        return tensor
+    tensor = tensor.contiguous()
+    position = dist.get_rank(group)
+    sends = tensor.view(-1).view(torch.uint8)
+    total = sends.numel() * world_size
+    begin, end = position * sends.numel(), (position + 1) * sends.numel()
+    result = None
+    if receive and dist.get_rank() == dst:
+        result = torch.empty(
+            (tensor.shape[0] * world_size, *tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device
+        )
+        wire = result.view(-1).view(torch.uint8)
+    else:
+        scratch = torch.empty(min(total, _GATHER_WINDOW_BYTES), dtype=torch.uint8, device=tensor.device)
+    for start in range(0, total, _GATHER_WINDOW_BYTES):
+        stop = min(start + _GATHER_WINDOW_BYTES, total)
+        window = (wire[start:stop] if result is not None else scratch[: stop - start]).zero_()
+        low, high = max(begin, start), min(end, stop)
+        if low < high:
+            window[low - start : high - start].copy_(sends[low - begin : high - begin])
+        dist.reduce(window, dst=dst, group=group)
+    return result

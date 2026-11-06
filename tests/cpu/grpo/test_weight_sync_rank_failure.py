@@ -20,6 +20,7 @@ from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout.weight_push import _send_ep_expert_weights, sync_weights_to_client
+from tests.common.ep_stubs import ReadyGatherMixin
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -139,7 +140,7 @@ def test_a_failing_flush_raises_on_every_rank(tmp_path):
     assert counters[0][2] == 1, "the failing flush left the engine's update open — no abort followed it"
 
 
-class _FakeEPLayer:
+class _FakeEPLayer(ReadyGatherMixin):
     """A gather that assembles only when it retains. Every rank runs the collectives; only the forwarding rank builds
     the per-expert copies, which doubles a layer's peak there."""
 
@@ -219,10 +220,10 @@ _LAYOUTS = {"separate": _SEPARATE, "fused": _FUSED}
 class _GatherLayer(EPGatherMixin, nn.Module):
     has_expert_lora = False
 
-    def __init__(self, spec, ep_group, ep_size, etp_group, etp_size, fill):
+    def __init__(self, spec, world_group, ep_group, ep_size, etp_group, etp_size, fill):
         nn.Module.__init__(self)
         self.FAMILY = spec
-        self.ep_config = types.SimpleNamespace(dispatch_ep_group=ep_group, ep_size=ep_size)
+        self.ep_config = types.SimpleNamespace(process_group=world_group, dispatch_ep_group=ep_group, ep_size=ep_size)
         self.expert_tp_group, self.expert_tp_size = etp_group, etp_size
         self.expert_lora_scaling, self._expert_lora_attrs = 1.0, frozenset()
         self.gate_proj = nn.Parameter(torch.full((2, 6, 8), float(fill)))
@@ -236,17 +237,26 @@ class _GatherLayer(EPGatherMixin, nn.Module):
 
 
 def _gather_worker(rank: int, out: str, ep_size: int, etp_size: int, fail_at: int | None, layout: str) -> None:
-    real_gather, real_hub = gather_module.all_gather_cat, gather_module.to_hub_expert_tensors
+    real_gather, real_to_rank = gather_module.all_gather_cat, gather_module.gather_cat_to_rank
+    real_hub = gather_module.to_hub_expert_tensors
     receives = {"count": 0}
 
-    def failing_gather(tensor, dim, group, world_size):
+    def count_receive(world_size: int) -> None:
         if world_size > 1 and rank == 0:
             receives["count"] += 1
             if receives["count"] == fail_at:
                 raise torch.cuda.OutOfMemoryError(f"CUDA out of memory: injected at receive {fail_at}")
+
+    def failing_gather(tensor, dim, group, world_size):
+        count_receive(world_size)
         return real_gather(tensor, dim, group, world_size)
 
+    def failing_gather_to_rank(tensor, group, world_size, *, dst, receive=True):
+        count_receive(world_size)
+        return real_to_rank(tensor, group, world_size, dst=dst, receive=receive)
+
     gather_module.all_gather_cat = failing_gather
+    gather_module.gather_cat_to_rank = failing_gather_to_rank
     # The sync's destination device; this host has none.
     gather_module.to_hub_expert_tensors = lambda spec, tensors, *, device: real_hub(spec, tensors, device="cpu")
     world = ep_size * etp_size
@@ -254,8 +264,9 @@ def _gather_worker(rank: int, out: str, ep_size: int, etp_size: int, fail_at: in
     ep_ranks = [[r for r in range(world) if r % etp_size == i] for i in range(etp_size)]
     etp_group = new_groups(rank, etp_ranks, PG_TIMEOUT) if etp_size > 1 else None
     ep_group = new_groups(rank, ep_ranks, PG_TIMEOUT)
+    world_group = new_groups(rank, [list(range(world))], PG_TIMEOUT)
     layers = {
-        f"layers.{i}": _GatherLayer(_LAYOUTS[layout], ep_group, ep_size, etp_group, etp_size, rank + 1)
+        f"layers.{i}": _GatherLayer(_LAYOUTS[layout], world_group, ep_group, ep_size, etp_group, etp_size, rank + 1)
         for i in range(3)
     }
     guard = DeferredRankFailure("weight-sync push to the rollout engine")

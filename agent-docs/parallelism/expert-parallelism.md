@@ -516,7 +516,7 @@ next collective.
 | **Gathered** (default) | one rank, streaming | HF-standard, auto-sharded | `from_pretrained()` |
 | **Sharded** (`save_sharded_ep`) | every rank, in parallel | Per-rank files | `merge_ep_shards.py` first |
 
-**Gathered:** experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
+**Gathered:** (the RL weight sync instead delivers each layer to the forwarding rank alone, [Rollout Servers](../infrastructure/rollout-servers.md#streaming-and-quiesce)) experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
 the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
 
 `retain` reaches inside the expert gather, so a non-writing rank joins every collective and returns

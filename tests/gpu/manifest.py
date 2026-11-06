@@ -703,6 +703,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep1_weight_sync_names.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),
+    "parallelism/ep/test_ep_expert_gather_to_forwarder.py": TestSpec(
+        nproc=4, markers=("gpu", "core", "4gpu", "ep", "moe"), timeout=600
+    ),
     "parallelism/ep/test_ep_buffer_backends.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),

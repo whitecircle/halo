@@ -51,12 +51,12 @@ _LEFT_OUT_OF_THE_PUSH = {
 @pytest.fixture(autouse=True)
 def _gather_on_the_host(monkeypatch):
     """The push asks for its experts on the GPU, which the CPU tier does not have."""
-    gather = EPGatherMixin.gather_expert_state_dict
+    start = EPGatherMixin.start_gather_expert_state_dict
 
-    def on_host(self, *, device="cpu", merge_lora=False, retain=True):
-        return gather(self, device="cpu", merge_lora=merge_lora, retain=retain)
+    def on_host(self, *, device="cpu", **kwargs):
+        return start(self, device="cpu", **kwargs)
 
-    monkeypatch.setattr(EPGatherMixin, "gather_expert_state_dict", on_host)
+    monkeypatch.setattr(EPGatherMixin, "start_gather_expert_state_dict", on_host)
 
 
 def _ep_model(family: str, overrides: dict | None = None):

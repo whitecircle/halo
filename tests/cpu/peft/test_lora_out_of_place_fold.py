@@ -10,7 +10,7 @@ from torch import nn
 from halo.models.peft_adapters import lora_fold_targets, lora_folded
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
 from tests.common.adapters import adapter_param_items, randomize_adapters
-from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.ep_stubs import ReadyGatherMixin, StubEPLayerBase
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
 
 _DIM = 16
@@ -53,7 +53,7 @@ class _MoeNet(nn.Module):
         return x
 
 
-class _EPExperts(StubEPLayerBase):
+class _EPExperts(ReadyGatherMixin, StubEPLayerBase):
     """The same bank on an EP layer, which the expert gather sends as it is and the dense push skips."""
 
     def __init__(self):

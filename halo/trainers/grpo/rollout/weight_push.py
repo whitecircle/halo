@@ -4,6 +4,7 @@ and the dense shards, and the forwarding rank streams them under hub names, PEFT
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Iterable, Iterator
 from functools import partial
 from typing import Protocol
@@ -18,7 +19,7 @@ from halo.distributed.expert_parallel.families.roster import ep_layer_classes_fo
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
-from halo.env import env_flag
+from halo.env import env_flag, env_non_negative_int
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from halo.models.config_access import config_model_types, get_config_field
@@ -31,6 +32,7 @@ from halo.models.moe.balancing import (
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
+from halo.runtime.collectives import collective_side_stream
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
@@ -38,6 +40,9 @@ from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
+
+# The rank the push sends from: accelerate's main process, which `sync_weights_to_client` takes as the forwarding rank.
+FORWARDING_RANK = 0
 
 
 class WeightSyncSender(Protocol):
@@ -340,18 +345,43 @@ def _send_ep_expert_weights(
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
     guard: DeferredRankFailure,
+    *,
+    forwarding_rank: int = FORWARDING_RANK,
 ) -> None:
-    """COLLECTIVE. The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and
-    retaining stops after a failure. The gather stays in step through a failed retained receive
+    """COLLECTIVE. Each layer is delivered to ``forwarding_rank`` alone, and layer k+1's gather is issued before layer k
+    is forwarded (``HALO_WEIGHT_SYNC_GATHER_AHEAD`` layers ahead, 0 for strictly in turn), in one order on every rank.
+    The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and retaining stops
+    after a failure. The gather stays in step through a failed retained receive
     (:meth:`~halo.distributed.expert_parallel.moe_layer.gather.EPGatherMixin.gather_expert_tensors`)."""
-    for layer_name, module in ep_layers.items():
+    ahead = env_non_negative_int("HALO_WEIGHT_SYNC_GATHER_AHEAD", 1)
+    layers = list(ep_layers.items())
+    stream = collective_side_stream() if ahead else None
+    issued: deque = deque()
+
+    def issue(index: int) -> None:
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
         # The native expert LoRA is folded here; the PEFT adapters, never on experts, fold in the dense push.
-        gather = partial(module.gather_expert_state_dict, device="cuda", merge_lora=True, retain=retain)
+        gather = partial(
+            layers[index][1].start_gather_expert_state_dict,
+            device="cuda",
+            merge_lora=True,
+            retain=retain,
+            dst=forwarding_rank,
+            stream=stream,
+        )
         # Guarded only where it retains: elsewhere a raise is a group-wide failure, not this rank's own.
-        gathered = guard.run(gather) if retain else gather()
-        if forwarder is not None and gathered:
+        issued.append(guard.run(gather) if retain else gather())
+
+    for index in range(min(ahead, len(layers))):
+        issue(index)
+    for index, (layer_name, _) in enumerate(layers):
+        if index + ahead < len(layers):
+            issue(index + ahead)
+        pending = issued.popleft()
+        gathered = guard.run(pending.finish) if forwarder is not None and pending is not None else None
+        del pending
+        if gathered:
             for param_name, param_data in gathered.items():
                 # Alive in ``gathered`` until the flush below, so a hub split's hold costs nothing here; Step-3.7's
                 # fused bank alone is 5.6 GiB per layer at its release shape.
@@ -359,7 +389,7 @@ def _send_ep_expert_weights(
             # Per layer, so a hub split of these experts never outlives the next gather.
             forwarder.flush()
             del param_data  # the loop's last binding would hold one tensor through the next gather
-        # Released before the next layer's gather, so two assemblies are never alive at once.
+        # Released before the next layer's gather finishes, so only the issued-ahead assemblies are alive beside it.
         del gathered
 
 
