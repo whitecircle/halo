@@ -34,7 +34,10 @@ from halo.entrypoints.script import (
 )
 from halo.environments.reasoning_effort import resolve_reasoning_effort
 from halo.environments.rollout_config import VLLM_BACKEND
-from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.frozen_models import (
+    load_reference_model_for_on_policy_grpo,
+    reject_unfit_on_policy_reference,
+)
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.moe.config_fields import has_routed_experts
@@ -149,6 +152,7 @@ def main():
         sinks_reset=args.reset_sinks,
         checkpoint_config=checkpoint_config,
     )
+    reject_unfit_on_policy_reference(model_config, grpo_config, parallelism_config)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # max_completion_length is the generation budget here (TRL passes it to vLLM), so it is an explicit

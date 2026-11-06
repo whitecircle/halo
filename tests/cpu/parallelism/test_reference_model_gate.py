@@ -27,7 +27,7 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
-from tests.common.repo import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 
 @pytest.fixture(autouse=True)
@@ -360,6 +360,36 @@ def test_a_refused_reference_never_reaches_the_loader():
                     attn_default=None,
                 )
     load.assert_not_called()
+
+
+def _early_reference_check(beta, *, reference_bytes=HUGE_REFERENCE_BYTES):
+    with (
+        mock.patch.object(frozen_models, "estimate_reference_bytes", return_value=reference_bytes),
+        mock.patch.object(frozen_models.torch.cuda, "is_available", return_value=True),
+        mock.patch.object(frozen_models, "current_device", return_value=0),
+        mock.patch.object(frozen_models.torch.cuda, "mem_get_info", return_value=(GPU_FREE_BYTES,) * 2),
+        mock.patch.object(frozen_models, "available_host_ram_bytes", return_value=HOST_AVAILABLE_BYTES),
+        mock.patch.object(frozen_models, "get_local_world_size", return_value=8),
+    ):
+        frozen_models.reject_unfit_on_policy_reference(
+            ModelArguments(model_name_or_path="org/policy"), types.SimpleNamespace(beta=beta), _config()
+        )
+
+
+def test_the_reference_refusal_runs_from_the_config_before_the_policy_loads():
+    with pytest.raises(ValueError, match=r"800 GB on every GPU.*before the policy loads"):
+        _early_reference_check(0.1)
+
+
+def test_the_early_reference_check_leaves_a_run_without_a_reference_alone():
+    _early_reference_check(0.0)
+    _early_reference_check(0.1, reference_bytes=8 * 10**9)
+
+
+@pytest.mark.parametrize("script", ["environmental", "online"])
+def test_the_grpo_scripts_check_the_reference_before_loading_the_policy(script):
+    source = (REPO_ROOT / "scripts" / "training" / "grpo" / f"{script}.py").read_text()
+    assert source.index("reject_unfit_on_policy_reference(") < source.index("load_model_and_tokenizer(context")
 
 
 def test_a_reference_the_gpus_hold_but_the_node_host_cannot_stage_is_refused():

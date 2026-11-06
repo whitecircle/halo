@@ -70,7 +70,10 @@ from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_budget
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
-from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.frozen_models import (
+    load_reference_model_for_on_policy_grpo,
+    reject_unfit_on_policy_reference,
+)
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.context_window import resolve_model_context_window
@@ -359,6 +362,7 @@ def main():
         sinks_reset=args.reset_sinks,
         checkpoint_config=checkpoint_config,
     )
+    reject_unfit_on_policy_reference(model_config, grpo_config, parallelism_config)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # A trajectory is bounded by the context window, not max_completion_length: TRL reads it as the dr_grpo

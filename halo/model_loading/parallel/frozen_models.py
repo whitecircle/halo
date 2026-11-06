@@ -119,14 +119,16 @@ def resolve_reference_misfit(
     free_device_bytes: int | None,
     available_host_bytes: int | None,
     ranks_per_node: int,
+    policy_loaded: bool = True,
 ) -> str | None:
     """Why a whole frozen reference per rank does not fit, or ``None`` where it does. A side that is ``None`` could not
-    be read and is skipped."""
+    be read and is skipped; ``policy_loaded`` says whether the free device bytes already exclude the policy."""
     gb = 1e9
     if free_device_bytes is not None and reference_bytes > _REFERENCE_DEVICE_FRACTION * free_device_bytes:
         return (
             f"it is ~{reference_bytes / gb:.0f} GB on every GPU, over {_REFERENCE_DEVICE_FRACTION:.0%} of the "
-            f"~{free_device_bytes / gb:.0f} GB free beside the loaded policy"
+            f"~{free_device_bytes / gb:.0f} GB free"
+            f"{' beside the loaded policy' if policy_loaded else ' before the policy loads'}"
         )
     node_bytes = ranks_per_node * reference_bytes
     if available_host_bytes is not None and node_bytes > _REFERENCE_HOST_FRACTION * available_host_bytes:
@@ -143,9 +145,12 @@ def reject_unfit_reference(
     training_config,
     parallelism_config: ParallelismConfig,
     avoid: ReferenceAlternatives,
+    *,
+    policy_loaded: bool = True,
 ) -> None:
     """COLLECTIVE. Refuse, before it loads, a frozen reference too large to hold whole on every rank: it is never
-    sharded, so it costs the full model per GPU and per host slot at any parallelism."""
+    sharded, so it costs the full model per GPU and per host slot at any parallelism. Before the policy loads the free
+    device bytes only overstate those after it, so that call refuses nothing the later one would admit."""
     what = "Sizing the frozen reference"
     guard = DeferredRankFailure(what, ValueError)
     reference_bytes = guard.run(lambda: estimate_reference_bytes(model_config, training_config))
@@ -156,6 +161,7 @@ def reject_unfit_reference(
             free_device_bytes=torch.cuda.mem_get_info(current_device())[0] if torch.cuda.is_available() else None,
             available_host_bytes=available_host_ram_bytes(),
             ranks_per_node=get_local_world_size(),
+            policy_loaded=policy_loaded,
         )
         if misfit is not None:
             reason = (
@@ -277,6 +283,23 @@ def load_frozen_reference_model(
     )
     configure_run_tokenizer(args, model_ref, tokenizer, embeddings_sharded=is_input_embedding_tp_sharded)
     return model_ref
+
+
+def reject_unfit_on_policy_reference(
+    model_config: ModelArguments, training_config, parallelism_config: ParallelismConfig
+) -> None:
+    """COLLECTIVE. The on-policy GRPO reference refusal ahead of the policy load, from the config alone: a run that
+    cannot hold its reference fails before it spends the load. No adapter wrap is known yet, so an attention-adapter
+    run, which holds none, is skipped as :func:`on_policy_grpo_holds_reference` skips it."""
+    if training_config.beta == 0.0 or wraps_in_peft_model(model_config):
+        return
+    reject_unfit_reference(
+        model_config,
+        training_config,
+        parallelism_config,
+        ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
+        policy_loaded=False,
+    )
 
 
 def load_reference_model_for_on_policy_grpo(
