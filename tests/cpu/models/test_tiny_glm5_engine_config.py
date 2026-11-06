@@ -7,8 +7,6 @@ from transformers import Glm5NextConfig, Glm5NextTextConfig
 
 from tests.common.models import GLM5_ENGINE_GATED_DIMS, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 
-pytestmark = pytest.mark.cpu
-
 # Read by vLLM's glm5next and SGLang's glm5_next without a default, and not declared by transformers' class.
 ENGINE_READ_RELEASE_KEYS = (
     "mhc",
@@ -70,3 +68,7 @@ def test_the_kernel_gated_dims_meet_the_engine_limits():
     # FlashInfer's TRT-LLM sparse MLA kernel and FlashMLA take 16, 32, 64 or 128 heads.
     assert dims["num_attention_heads"] in (16, 32, 64, 128)
     assert dims["hidden_size"] % 256 == 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

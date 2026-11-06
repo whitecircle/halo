@@ -5,8 +5,6 @@ from torch import nn
 
 from tests.common.adapters import mixer_linear_leaves
 
-pytestmark = pytest.mark.cpu
-
 
 class _Attention(nn.Module):
     def __init__(self, proj: nn.Module):
@@ -33,3 +31,7 @@ def test_a_linear_leaf_no_convolution_shares_is_kept():
         {"vision": _Tower(nn.Linear(4, 4)), "patch_embed": nn.ModuleDict({"embed": nn.Conv3d(3, 4, 2)})}
     )
     assert mixer_linear_leaves(model) == ["proj", "q_proj"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
