@@ -530,8 +530,8 @@ factor (the preflight budgets 3x), which at 397B scale is tens of GB per layer. 
 rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
 merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
 arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
-the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype`, `--device_map`, `--fp32_norms` and
-`--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
+the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` is ignored (logged) and `--device_map`,
+`--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
 first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
 a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
 grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge

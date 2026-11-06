@@ -84,8 +84,8 @@ Examples:
         "--streaming",
         action="store_true",
         help="Fold the adapter into the base shard by shard without loading a model: memory stays at a tensor plus "
-        "the writer's parts, tensors keep the base's stored dtype and key spelling, and --dtype, --device_map, "
-        "--fp32_norms and --task classification are refused. Automatic for an adapter holding native expert LoRA, "
+        "the writer's parts, tensors keep the base's stored dtype and key spelling (--dtype is ignored), and "
+        "--device_map, --fp32_norms and --task classification are refused. Automatic for an adapter holding native expert LoRA, "
         "which no in-memory merge folds.",
     )
     parser.add_argument(

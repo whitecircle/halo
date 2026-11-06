@@ -304,10 +304,13 @@ def merge_peft_adapter(
     """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32, and an
     unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`). ``streaming``, and any adapter holding
     native expert LoRA, folds shard by shard with no model loaded (:func:`merge_adapter_streaming`), which keeps the
-    base's stored dtypes and so takes none of ``dtype``, ``device_map`` or ``fp32_norms``, and no classification head."""
+    base's stored dtypes and so ignores ``dtype`` and refuses ``device_map``, ``fp32_norms`` and a classification
+    head."""
     trust_remote_code = adapter_base_trust(adapter_dir, trust_remote_code)
     if streaming or find_expert_lora_adapter_shape(adapter_dir) is not None:
         reject_in_memory_options(task=task, device_map=device_map, fp32_norms=fp32_norms)
+        if verbose:
+            logger.info("Streaming merge: tensors keep the base's stored dtype, so --dtype is not applied")
         merge_adapter_streaming(
             adapter_dir,
             output_dir,
