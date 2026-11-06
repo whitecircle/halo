@@ -252,8 +252,8 @@ _KERNEL_CLASSES = {
 
 
 def _expected_backend(kernel_class: str, rows: str, deterministic: bool, pinned: str | None) -> str:
-    """The backend a B300 run loads: multi-document rows take FA2 off a deterministic run's FA4 demotion, pinned or not, and off an unpinned FA4 on a
-    GatedDeltaNet family; rows of one document keep the demotion to SDPA."""
+    """The backend a B300 run loads: multi-document rows take FA2 off a deterministic run's FA4 demotion, pinned or
+    not, and off an unpinned FA4 on a GatedDeltaNet family; rows of one document keep the demotion to SDPA."""
     if kernel_class == "general":
         return "flash_attention_4"
     if kernel_class == "hd256_refused":

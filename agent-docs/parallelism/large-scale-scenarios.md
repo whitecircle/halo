@@ -158,7 +158,8 @@ reserves 268–283 GB, 99.4% of the device on its top rank. These plans count al
 **The DeepEP arena is a separate term**, paid once for the model rather than once per layer. It is
 receive-side and linear in the dispatch-group width: at this model's `hidden=4096`, `top_k=10` an
 `ep64` group at 8192 tokens per rank costs **4.06 GiB** on top of the columns below. Formula and
-growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing).
+growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing). A build or grow takes
+1.5x the capacity needed, so the arena can sit up to 1.5x above that figure.
 
 It does not shape the choice of `ep_size` at any cell here; a wide dispatch group keeps its
 expert-memory saving instead of spending it back. The one exception is `HALO_EP_CAPACITY_DEDUP=0`,

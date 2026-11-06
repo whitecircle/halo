@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 from halo.distributed.expert_parallel.deepep.backends import _ElasticArena, deep_ep, free_all_ep_buffers
 from halo.distributed.expert_parallel.deepep.capacity import arena_capacity, ep_dispatch_capacity, padded_wire_hidden
+from halo.distributed.expert_parallel.deepep.settings import DEEPEP_NUM_QPS
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.rank_log import log
 
@@ -31,7 +32,7 @@ def time_dispatch_combine(shape: str, tokens: int, headroom: bool) -> tuple[floa
     capacity = (
         arena_capacity(needed, num_topk=top_k, padded_hidden=padded, spans_domains=False) if headroom else needed
     )
-    arena = _ElasticArena.acquire(dist.group.WORLD, padded, top_k, 0, False)
+    arena = _ElasticArena.acquire(dist.group.WORLD, padded, top_k, DEEPEP_NUM_QPS, False)
     arena.ensure(capacity)
     buffer = arena.buffer
     x = torch.randn(tokens, padded, device="cuda", dtype=torch.bfloat16)

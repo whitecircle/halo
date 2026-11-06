@@ -183,14 +183,13 @@ def test_tensor_parallelism_is_refused_on_the_unplanned_attention():
 
 
 def test_a_flash_request_falls_back_to_sdpa_and_padding_free_is_refused():
-    """The class supports no flash kernel. No backend serves a padding-free row on the M-RoPE decoder (SDPA reads no
-    ``cu_seqlens``)."""
+    """The class supports no flash kernel, and SDPA reads no ``cu_seqlens``, so a padding-free row has no backend."""
     config = _config()
     config._attn_implementation = resolve_attn_implementation(
         config, "flash_attention_2", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
     )
     assert config._attn_implementation == "sdpa"
-    with pytest.raises(ValueError, match="rotates by M-RoPE.*the dense backends take no cu_seqlens"):
+    with pytest.raises(ValueError, match="padding_free requires a varlen"):
         reject_unsupported_collator_options(
             None,
             padding_free=True,
