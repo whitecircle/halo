@@ -88,7 +88,9 @@ class TokenMetricsMixin:
         if self.args.include_num_input_tokens_seen != "all":
             super()._track_num_input_tokens(inputs)
             return
-        self._unsummed_input_tokens = self._unsummed_input_tokens + count_attended_tokens(inputs)
+        # Environmental GRPO's epoch hands rollout rows, not a tensor batch: they hold no token group to count yet.
+        if isinstance(inputs, Mapping):
+            self._unsummed_input_tokens = self._unsummed_input_tokens + count_attended_tokens(inputs)
 
     def time_batch_fetches(self, epoch_iterator: Iterator) -> Iterator:
         """``epoch_iterator`` with each ``next`` timed into the step's data wait. Host clock only: a device sync would

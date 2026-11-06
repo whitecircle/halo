@@ -127,5 +127,15 @@ def test_all_mode_accumulates_attended_tokens_on_the_device():
     assert int(trainer._unsummed_input_tokens) == 16
 
 
+def test_all_mode_counts_nothing_for_a_batch_of_rollout_rows():
+    """Environmental GRPO's epoch iterator yields a list of rollout rows; the ``"all"`` mode skips it rather than
+    reading it as a tensor batch."""
+    trainer = types.SimpleNamespace(
+        args=types.SimpleNamespace(include_num_input_tokens_seen="all"), _unsummed_input_tokens=0
+    )
+    TokenMetricsMixin._track_num_input_tokens(trainer, [{"prompt": "a"}, {"prompt": "b"}])
+    assert trainer._unsummed_input_tokens == 0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
