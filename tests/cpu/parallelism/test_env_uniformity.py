@@ -101,6 +101,15 @@ def test_the_parity_probe_mode_is_in_the_compared_set(monkeypatch):
     assert rank_uniform_env.rank_uniform_settings()["HALO_WEIGHT_SYNC_PARITY_PROBE"] == "off"
 
 
+def test_ranks_holding_different_parity_probe_modes_are_refused(monkeypatch):
+    """The probe forward is collective: 'off' on one rank and 'warn' on another must be named, not passed."""
+    per_rank = []
+    for mode in ("off", "warn"):
+        monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", mode)
+        per_rank.append(rank_uniform_env.rank_uniform_settings())
+    assert divergent_settings(per_rank) == {"HALO_WEIGHT_SYNC_PARITY_PROBE": ["off", "warn"]}
+
+
 def _count_joins(monkeypatch) -> list:
     calls: list = []
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)
