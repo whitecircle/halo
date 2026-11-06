@@ -826,5 +826,12 @@ def test_a_mis_reduced_hyper_connection_gradient_fails(name, scale):
     assert all(checks[f"{other}_matches"] for other in HC_LAYERED if other != name)
 
 
+def test_a_mis_reduced_hyper_connection_projection_still_fails_beside_its_unscored_roles():
+    fn = "model.layers.2.attn_hc.fn"
+    refs = {**HC_LAYERED, fn: _vector((24, 16), 0.2, 13)}
+    checks, _, _ = _score_layered({fn: refs[fn] * 0.5}, refs)
+    assert not checks[f"{fn}_matches"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

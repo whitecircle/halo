@@ -2,8 +2,9 @@
 """A pipeline-registered tiny family split into two stages, against the unsplit model with the same ep1 wrappers.
 
 Expert TP reorders each expert's sum, which in bf16 flips near-tied picks with no sync bug, so ETP rows run fp32.
-A hyper-connection family (``hc_mult``) runs fp32 too: its base and scale gradients sit 4 to 5 orders under their
-layer's largest, so bf16 accumulation order alone (one batched pass against accumulated micro-batches) decides them.
+A hyper-connection family (``hc_mult``) runs fp32 where no DeepEP dispatch does (DeepEP takes bf16 only): its base and
+scale gradients sit 4 to 5 orders under their layer's largest, so bf16 accumulation order alone decides them. A bf16 EP
+row leaves those parameters unscored and the fp32 ETP row covers them.
 Gradients score by direction and norm ratio, since a flipped pick moves mass. A gradient under
 ``TOL.grad_negligible_layer_fraction`` of its layer's largest (Qwen3.5's ``A_log`` / ``dt_bias``) is held to that floor
 as absolute error, Nemotron-H's Mamba layers to their own. ``--text-only`` reads a composite release from disk through
@@ -27,6 +28,7 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.qwen4_exp import stamped_config
+from tests.common.rank_log import log
 from tests.common.tiny_models import (
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
@@ -94,8 +96,8 @@ if ARGS.text_only != (ARGS.family in TEXT_ONLY_FAMILIES):
 
 
 def _run_dtype(config) -> torch.dtype:
-    """fp32 under expert TP or hyper-connections (the module docstring says why)."""
-    fp32 = ARGS.etp_size > 1 or ppeq.carries_hyper_connections(config)
+    """fp32 under expert TP, or for hyper-connections where no DeepEP dispatch runs (the module docstring says why)."""
+    fp32 = ARGS.etp_size > 1 or (ARGS.ep_size == 1 and ppeq.carries_hyper_connections(config))
     return torch.float32 if fp32 else torch.bfloat16
 
 
@@ -189,7 +191,13 @@ def run(ctx):
     metrics.update(m)
 
     fraction = NEGLIGIBLE_FRACTIONS.get(ARGS.family, TOL.grad_negligible_layer_fraction)
-    ppeq.score_stage_grads_vs_reference(ctx, stage, reference, checks, metrics, negligible_fraction=fraction)
+    unscored = frozenset()
+    if not fp32 and ppeq.carries_hyper_connections(base.config):
+        unscored = frozenset(ppeq.hyper_connection_role_params(stage))
+        log(f"[rank {ctx.rank}] bf16 EP row leaves hyper-connection base/scale unscored: {sorted(unscored)}")
+    ppeq.score_stage_grads_vs_reference(
+        ctx, stage, reference, checks, metrics, negligible_fraction=fraction, unscored=unscored
+    )
     return {"checks": checks, "metrics": metrics}
 
 

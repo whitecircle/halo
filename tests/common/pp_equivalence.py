@@ -288,6 +288,18 @@ def carries_hyper_connections(config) -> bool:
     return getattr(config.get_text_config(), "hc_mult", None) is not None
 
 
+def hyper_connection_role_params(model: torch.nn.Module) -> set[str]:
+    """Names of the base and scale parameters of every hyper-connection module (a module with ``hc_mult``), the
+    layers' and the head's; its projection ``fn`` is not one."""
+    return {
+        f"{prefix}.{name}" if prefix else name
+        for prefix, module in model.named_modules()
+        if hasattr(module, "hc_mult")
+        for name, _ in module.named_parameters(recurse=False)
+        if name.endswith(("base", "scale"))
+    }
+
+
 def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
     denom = ref.float().norm().clamp_min(1e-12)
     return float((test.float() - ref.float()).norm() / denom)
@@ -481,10 +493,11 @@ def score_stage_grads_vs_reference(
     metrics: dict,
     *,
     negligible_fraction: float = TOL.grad_negligible_layer_fraction,
+    unscored: frozenset[str] = frozenset(),
 ) -> None:
     """COLLECTIVE (world all-gather). Score every gradient ``stage`` holds against ``reference`` by its unsplit name.
-    Direction and norm ratio; under ``negligible_fraction``, absolute error. The stages together must cover the
-    reference."""
+    Direction and norm ratio; under ``negligible_fraction``, absolute error. ``unscored`` names stage parameters still
+    required to exist in the reference but held to no bar. The stages together must cover the reference."""
     ep_modules = named_ep_layers(stage)
     expert_ids = {id(param) for _, module in ep_modules for _, param in module.expert_named_params()}
     pairs, compared = {}, set()
@@ -494,8 +507,9 @@ def score_stage_grads_vs_reference(
         name = stage.global_parameter_name(local)
         grad = None if param.grad is None else materialize_dtensor(param.grad).float()
         if name in reference.grads:
-            pairs[name] = (grad, reference.grads[name].float())
             compared.add(name)
+            if local not in unscored:
+                pairs[name] = (grad, reference.grads[name].float())
     for local, module in ep_modules:
         name = stage.global_parameter_name(local)
         for key, grad in hub_layout_expert_grads(module, device=ctx.device).items():
