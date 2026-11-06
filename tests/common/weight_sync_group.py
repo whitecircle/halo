@@ -9,6 +9,7 @@ from halo.env import env_str
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.group_layout import SyncTopologySetting
 from halo.weight_sync.pool import WeightSyncPool
 from tests.common.weight_sync import SGLANG_SERVER_URL, VLLM_DENSE_SERVER_URL
 from tests.common.weight_sync_reinit import CONNECTION_TIMEOUT_S
@@ -35,13 +36,19 @@ def parse_server_args(*, default_servers: int | None = None) -> tuple[argparse.N
     return args, [url.strip() for url in (env_str(knob) or fallback).split(",") if url.strip()]
 
 
-def form_group(client_cls: type[WeightSyncClientBase], urls: list[str], port: int, device) -> WeightSyncPool:
+def form_group(
+    client_cls: type[WeightSyncClientBase],
+    urls: list[str],
+    port: int,
+    device,
+    topology: SyncTopologySetting = "single_group",
+) -> WeightSyncPool:
     pool = WeightSyncPool(
         [{"url": url} for url in urls],
         connection_timeout=CONNECTION_TIMEOUT_S,
         client_cls=client_cls,
         base_group_port=port,
-        topology="single_group",
+        topology=topology,
     )
     pool.init_communicator(device)
     return pool

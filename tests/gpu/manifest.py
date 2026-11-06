@@ -1729,7 +1729,7 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_sglang_membership_probe.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=300
     ),
-    # One group over 1, 2 and 4 servers per engine (the URL lists are HALO_TEST_{VLLM,SGLANG}_SERVER_URLS); the time
+    # One group over 1, 2, 4 and 8 servers per engine (the URL lists are HALO_TEST_{VLLM,SGLANG}_SERVER_URLS); the time
     # bar compares the N-server push with a one-server group.
     "trainers/grpo/test_single_group_sync.py": TestSpec(
         nproc=1,
@@ -1738,9 +1738,27 @@ MANIFEST: dict[str, TestSpec] = {
             "--backend vllm --servers 1",
             "--backend vllm --servers 2",
             "--backend vllm --servers 4",
+            "--backend vllm --servers 8",
             Row("--backend sglang --servers 1", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
             Row("--backend sglang --servers 2", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
             Row("--backend sglang --servers 4", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 8", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+        ),
+        timeout=1800,
+    ),
+    # auto resolves to one group for two or more identical servers and to per-server groups for one.
+    "trainers/grpo/test_sync_topology_auto.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"),
+        args_matrix=(
+            "--backend vllm --servers 1",
+            "--backend vllm --servers 2",
+            "--backend vllm --servers 4",
+            "--backend vllm --servers 8",
+            Row("--backend sglang --servers 1", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 2", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 4", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
+            Row("--backend sglang --servers 8", markers=("gpu", "full", "1gpu", "qwen3", "sglang_server")),
         ),
         timeout=1800,
     ),

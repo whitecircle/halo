@@ -6,6 +6,8 @@ from typing import Any, Literal, NamedTuple, get_args
 from urllib.parse import urlparse
 
 SyncTopology = Literal["per_server", "single_group"]
+# ``auto`` resolves to one of them once the servers have been read.
+SyncTopologySetting = Literal["auto", SyncTopology]
 
 
 class GroupLayout(NamedTuple):
@@ -73,9 +75,11 @@ def reject_mixed_localities(urls: Sequence[str], is_local: Sequence[bool], group
 def validate_sync_topology(topology: str, servers: Sequence[Mapping[str, Any]]) -> None:
     """Raise on a topology, or on server entries, that the sync cannot honour. One group has one rendezvous, so a
     per-server port or a second address has nothing to bind, and a node label orders only the servers of one group."""
-    if topology not in get_args(SyncTopology):
-        raise ValueError(f"Unknown rollout_sync_topology {topology!r}; supported: {list(get_args(SyncTopology))}")
-    if topology == "per_server":
+    if topology not in get_args(SyncTopologySetting):
+        raise ValueError(
+            f"Unknown rollout_sync_topology {topology!r}; supported: {list(get_args(SyncTopologySetting))}"
+        )
+    if topology != "single_group":
         if any("node" in server for server in servers):
             raise ValueError(
                 "rollout_server_configs entries set node, which only orders the servers of one group. Remove it, or "

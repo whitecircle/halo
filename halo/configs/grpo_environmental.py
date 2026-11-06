@@ -35,7 +35,7 @@ from halo.environments.rollout_config import (
 from halo.inference.endpoints import DEFAULT_LOCAL_SERVER_URL
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from halo.runtime.ranks import is_global_main_process
-from halo.weight_sync.group_layout import SyncTopology, validate_sync_topology
+from halo.weight_sync.group_layout import SyncTopologySetting, validate_sync_topology
 
 logger = logging.getLogger(__name__)
 
@@ -324,13 +324,15 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/setup.md#weight-synchronization."
         },
     )
-    rollout_sync_topology: SyncTopology = field(
-        default="per_server",
+    rollout_sync_topology: SyncTopologySetting = field(
+        default="auto",
         metadata={
             "help": "How the trainer's weight-sync groups span the rollout servers: per_server forms one NCCL group per "
-            "server, single_group one group over all of them that broadcasts each chunk once. single_group takes one "
-            "rollout_group_port, one group_host, and an optional 'node' label per rollout_server_configs entry that "
-            "orders the servers by node. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
+            "server, single_group one group over all of them that broadcasts each chunk once, and auto picks "
+            "single_group for two or more servers that report the same served model and weight-loading flags (and "
+            "that one group can rank) and per_server otherwise. single_group takes one rollout_group_port, one "
+            "group_host, and an optional 'node' label per rollout_server_configs entry that orders the servers by "
+            "node; auto refuses 'node'. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
         },
     )
     sync_weights_every_n_steps: int = field(

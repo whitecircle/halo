@@ -21,6 +21,7 @@ from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
 from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
+from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -39,11 +40,6 @@ _PROBE_TIMEOUT_S = 60.0
 # Servers probed at once: a thread per server is HTTP only, but 64 simultaneous /server_info reads are a herd.
 _PREFLIGHT_PARALLELISM = env_positive_int("HALO_PREFLIGHT_PARALLELISM", 16)
 _T = TypeVar("_T")
-# A launch flag the servers of one group must agree on: every one but the image check, the id each launch has alone,
-# the pipeline stages, which the group's layout read refuses, and the engine facts that only get logged.
-_GROUP_UNIFORM_FLAGS = tuple(
-    name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id", "pipeline_stages", "extras")
-)
 
 # The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
 # model is sure of the token but reaches several nats at low-probability ones (Gemma 4 on vLLM, SGLang and the
@@ -198,27 +194,21 @@ def _verify_group_servers_on_rank0(client_cls: type[WeightSyncClientBase], urls:
     """One group broadcasts one set of tensors to every server, so servers that disagree on the model or on a launch
     flag (dtype, quantization, MoE backend, parsers) would each load or serve it differently behind a 200. A flag a
     server does not report is not compared."""
-    readings: dict[str, dict[str, object]] = {"served model": {}}
     models = _probe_servers(client_cls, urls, client_cls.served_model_id, None, "read the served model of")
     launch_flags = _probe_servers(client_cls, urls, client_cls.read_server_flags, None, "read the launch flags of")
-    for url, model, flags in zip(urls, models, launch_flags, strict=True):
-        if model is None or flags is None:
-            raise ValueError(
-                f"Rollout server {url} did not answer for its served model and launch flags, and "
-                f"rollout_sync_topology: single_group cannot tell whether it loads what the group broadcasts. "
-                f"Start every server before the trainer, or set rollout_sync_topology: per_server."
-            )
-        readings["served model"][url] = model
-        for name in _GROUP_UNIFORM_FLAGS:
-            if (value := getattr(flags, name)) is not None:
-                readings.setdefault(name, {})[url] = value
-    for what, found in readings.items():
-        if len(set(found.values())) > 1:
-            raise ValueError(
-                f"Rollout servers disagree on their {what} ({found}), but rollout_sync_topology: single_group "
-                f"broadcasts one set of tensors to all of them. Serve one {what}, or set "
-                f"rollout_sync_topology: per_server."
-            )
+    if (unread := find_unread_server(urls, models, launch_flags)) is not None:
+        raise ValueError(
+            f"Rollout server {unread} did not answer for its served model and launch flags, and "
+            f"rollout_sync_topology: single_group cannot tell whether it loads what the group broadcasts. "
+            f"Start every server before the trainer, or set rollout_sync_topology: per_server."
+        )
+    if (disagreement := find_fleet_disagreement(urls, models, launch_flags)) is not None:
+        what, found = disagreement
+        raise ValueError(
+            f"Rollout servers disagree on their {what} ({found}), but rollout_sync_topology: single_group "
+            f"broadcasts one set of tensors to all of them. Serve one {what}, or set "
+            f"rollout_sync_topology: per_server."
+        )
 
 
 def _probe_top_logprobs(

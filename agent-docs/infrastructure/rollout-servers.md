@@ -118,10 +118,10 @@ of servers (`halo/weight_sync/staging.py`). A family whose hub split is a revers
 split copies beside the layer.
 
 With several servers (`rollout_server_configs`) one snapshot per parameter is shared and released once every
-server has it. By default each chunk goes to every server on concurrent threads over a group of its own; the
+server has it. Under `per_server` each chunk goes to every server on concurrent threads over a group of its own; the
 threads share the forwarding rank's GPU, NICs and process, so that fan-out costs the sum, not the max: two servers
 each push at half of one server's rate. `rollout_sync_topology: single_group` sends each chunk once
-([below](#one-group-over-every-server)).
+([below](#one-group-over-every-server)), and the default `auto` picks it for a homogeneous fleet.
 
 **The quiesce spans the streaming.** It opens with the first full chunk and closes when the last
 lands, so a server stops serving for as long as the gather runs (minutes at 397B), and every push
@@ -177,7 +177,7 @@ brackets each sync with a per-rank `[mem rankNN] weight-sync pre/post` line, and
 
 `rollout_sync_topology: single_group` forms one NCCL group of the trainer (rank 0) and every server's workers, so
 each chunk is broadcast once. It belongs to environmental GRPO, which drives several servers; online GRPO talks to
-one server and has no such field. The default `per_server` is unchanged. Both engines take the join's `rank_offset` and
+one server and has no such field. Both engines take the join's `rank_offset` and
 `world_size` as given, so no engine patch is involved: SGLang ranks a worker `rank_offset + tp_rank`, vLLM
 `rank_offset + dp_index * (TP * PP) + rank_in_dp`, and each server takes the next block after the one before it.
 
@@ -185,6 +185,14 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   node's servers are one contiguous rank block and a ring over the group crosses each node's links once. Two labels
   resolving to one address raise; an IP and a DNS name of one node are such labels, so give them one `node`. Neither
   engine reports its host, and a server whose TP spans nodes cannot be placed: the label is a requirement.
+- **The default resolves.** `rollout_sync_topology: auto` is `single_group` for two or more servers whose
+  `/server_info` report one served model and one value of every flag `verify_group_servers` compares, and `per_server`
+  for one server and for any fleet that does not qualify: a mixed fleet, a server that does not answer, a
+  pipeline-parallel server, local servers beside remote ones with no `group_host`, a node split across labels, a
+  per-entry `group_port` or differing `group_host` values. The pool reads the servers when it forms the groups
+  (`resolve_sync_topology`, `halo/weight_sync/group_eligibility.py`), logs `Weight-sync topology <name>: <why>` once, and
+  an explicit `single_group` or `per_server` is never overridden. `auto` refuses a `node` label, which only orders
+  one group. A restart re-forms the topology it resolved; it is not read again.
 - **Config.** One rendezvous on `rollout_group_port`, one `group_host`. A per-entry `group_port`, differing
   `group_host` values and a `node` label under `per_server` raise where the config is built, and again where the pool
   is built, from one validator (`validate_sync_topology`). Servers on this host beside servers on others advertise one
@@ -224,9 +232,9 @@ one server and has no such field. The default `per_server` is unchanged. Both en
 - **Not covered.** An engine-side bounded receive, a dedicated SGLang membership route and the engines' reporting of
   host and NCCL environment need image changes. SGLang `single_group` rests on the probe: the GPU row
   `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` and the
-  default flip wait on the GPU rows of `test_single_group_sync.py` (1, 2 and 4 servers per engine, cross-node and
-  colocated containers). The row bounds the second push of a group, which follows process and communicator warm-up,
-  and reports the first beside it.
+  `auto` default wait on the GPU rows of `test_single_group_sync.py` and `test_sync_topology_auto.py` (1, 2, 4 and 8
+  servers per engine, cross-node and colocated containers). The `single_group` row bounds the second push of a group,
+  which follows process and communicator warm-up, and reports the first beside it.
 
 ### Served weights stay in checkpoint layout
 

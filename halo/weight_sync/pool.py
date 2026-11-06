@@ -14,8 +14,15 @@ import torch
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.group import WeightSyncGroup
-from halo.weight_sync.group_layout import SyncTopology, resolve_group_host, resolve_node_label, validate_sync_topology
+from halo.weight_sync.group_eligibility import ServerReading, resolve_sync_topology
+from halo.weight_sync.group_layout import (
+    SyncTopologySetting,
+    resolve_group_host,
+    resolve_node_label,
+    validate_sync_topology,
+)
 from halo.weight_sync.staging import ChunkStager
+from halo.weight_sync.transport.rendezvous import is_local_address
 from halo.weight_sync.update_stream import UpdateStream
 
 logger = logging.getLogger(__name__)
@@ -33,11 +40,12 @@ class WeightSyncPool:
         connection_timeout: float,
         client_cls: type[WeightSyncClientBase],
         base_group_port: int,
-        topology: SyncTopology = "per_server",
+        topology: SyncTopologySetting = "per_server",
     ):
         """``server_configs``: one ``{"url", "group_port", "group_host", "node"}`` dict per server, ``url`` required. A
         server without its own ``group_port`` takes ``base_group_port + index``, or a kernel-assigned port at base 0.
-        Under ``single_group`` the one group binds ``base_group_port`` and ``group_port`` is refused."""
+        Under ``single_group`` the one group binds ``base_group_port`` and ``group_port`` is refused. ``auto``
+        settles at :meth:`init_communicator`, once the servers have been read."""
         self.server_configs = server_configs
         self.connection_timeout = connection_timeout
         self.base_group_port = base_group_port
@@ -55,18 +63,11 @@ class WeightSyncPool:
         self._client_cls = client_cls
         validate_sync_topology(topology, server_configs)
         self._group_host = resolve_group_host(server_configs) if topology == "single_group" else None
-        self._topology = topology
+        self._topology: SyncTopologySetting = topology
 
         # Kernel-assigned ports never collide.
-        effective_ports = [self._group_port(i) for i in range(len(server_configs))]
-        fixed_ports = [port for port in effective_ports if port]
-        if topology == "per_server" and len(set(fixed_ports)) != len(fixed_ports):
-            raise ValueError(
-                f"Duplicate weight-sync group_port across servers: {effective_ports}. Each server "
-                f"needs a UNIQUE group_port — it is bound on the trainer host (one listener "
-                f"per server), so distinct {client_cls.BACKEND_NAME} hosts do NOT make a shared "
-                f"port safe. URLs: {[c['url'] for c in server_configs]}"
-            )
+        if topology == "per_server":
+            self._reject_duplicate_group_ports()
 
         logger.info(f"WeightSyncPool created for {len(server_configs)} servers: {[c['url'] for c in server_configs]}")
 
@@ -78,8 +79,9 @@ class WeightSyncPool:
             return
 
         device = resolve_sync_device(device)
+        probed = self._settle_auto_topology() if self._topology == "auto" else None
         if self._topology == "single_group":
-            self._init_group(device)
+            self._init_group(device, probed)
             return
 
         for i, config in enumerate(self.server_configs):
@@ -92,7 +94,7 @@ class WeightSyncPool:
             started = time.monotonic()
             try:
                 client = self._connect_client(i, device)
-            except Exception as e:
+            except Exception as e:  # any failure to answer keeps the verdict per server
                 # Else the already-initialized clients hold their TCPStore listeners until atexit.
                 self.close_communicator()
                 raise RuntimeError(
@@ -153,7 +155,7 @@ class WeightSyncPool:
         for client in self._clients:
             try:
                 client.close_communicator()
-            except Exception as e:
+            except Exception as e:  # any failure to answer keeps the verdict per server
                 logger.warning(f"Error closing client: {e}")
 
         self._stager.release()
@@ -166,17 +168,78 @@ class WeightSyncPool:
         """The one group over every server, ``None`` under ``per_server`` or before formation."""
         return next((client for client in self._clients if isinstance(client, WeightSyncGroup)), None)
 
-    def _init_group(self, device: torch.device) -> None:
-        """Build every server's client and form the one group; a failed formation leaves nothing held and raises with
-        the cause."""
-        clients = [
+    def _build_group_clients(self) -> list[WeightSyncClientBase]:
+        return [
             self._client_cls(
-                base_url=config["url"],
-                connection_timeout=self.connection_timeout,
-                group_host=self._group_host,
+                base_url=config["url"], connection_timeout=self.connection_timeout, group_host=self._group_host
             )
             for config in self.server_configs
         ]
+
+    def _settle_auto_topology(self) -> list[WeightSyncClientBase] | None:
+        """Resolve ``auto`` once, from what the servers report, and log the verdict. Returns the clients built to read
+        them when the answer is ``single_group``, for the group to adopt."""
+        servers = self.server_configs
+        clients: list[WeightSyncClientBase] = []
+        try:
+            validate_sync_topology("single_group", servers)
+        except ValueError as refusal:
+            topology, why = "per_server", str(refusal)
+        else:
+            if len(servers) > 1:
+                self._group_host = resolve_group_host(servers)
+                clients = self._build_group_clients()
+            topology, why = resolve_sync_topology("auto", self._read_servers(clients), self._group_host)
+        logger.info(f"Weight-sync topology {topology}: {why}")
+        self._topology = topology
+        if topology == "single_group":
+            return clients
+        for client in clients:
+            client.close_http_session()
+        self._group_host = None
+        self._reject_duplicate_group_ports()
+        return None
+
+    def _read_servers(self, clients: list[WeightSyncClientBase]) -> list[ServerReading]:
+        """Every client's answers for the group, concurrently and in server order; a server that fails to answer reads
+        as unread, which keeps ``auto`` per server and leaves the refusal to the connect."""
+        if not clients:
+            return []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(clients)) as executor:
+            return list(executor.map(self._read_server, clients, self.server_configs))
+
+    @staticmethod
+    def _read_server(client: WeightSyncClientBase, config: dict[str, Any]) -> ServerReading:
+        try:
+            model, flags = client.served_model_id(), client.read_server_flags()
+        except Exception as e:  # any failure to answer keeps the verdict per server
+            logger.warning(f"Could not read {client.base_url} for the sync topology: {type(e).__name__}: {e}")
+            model, flags = None, None
+        return ServerReading(
+            url=client.base_url,
+            node=resolve_node_label(config),
+            host=client.host,
+            is_local=is_local_address(client.host),
+            model=model,
+            flags=flags,
+            pipeline_stages=(flags.pipeline_stages if flags else None) or 1,
+        )
+
+    def _reject_duplicate_group_ports(self) -> None:
+        effective_ports = [self._group_port(i) for i in range(len(self.server_configs))]
+        fixed_ports = [port for port in effective_ports if port]
+        if len(set(fixed_ports)) != len(fixed_ports):
+            raise ValueError(
+                f"Duplicate weight-sync group_port across servers: {effective_ports}. Each server "
+                f"needs a UNIQUE group_port — it is bound on the trainer host (one listener "
+                f"per server), so distinct {self._client_cls.BACKEND_NAME} hosts do NOT make a shared "
+                f"port safe. URLs: {[c['url'] for c in self.server_configs]}"
+            )
+
+    def _init_group(self, device: torch.device, clients: list[WeightSyncClientBase] | None = None) -> None:
+        """Form the one group over ``clients`` (built here unless read already); a failed formation leaves nothing held
+        and raises with the cause."""
+        clients = clients or self._build_group_clients()
         group = WeightSyncGroup(
             clients,
             nodes=[resolve_node_label(config) for config in self.server_configs],
@@ -185,7 +248,7 @@ class WeightSyncPool:
         )
         try:
             group.init_communicator(device)
-        except Exception as e:
+        except Exception as e:  # any failure to answer keeps the verdict per server
             raise RuntimeError(
                 f"{self._client_cls.BACKEND_NAME} weight-sync group over {len(clients)} servers failed to form "
                 f"(group port {self.base_group_port}): {type(e).__name__}: {e}"
@@ -254,7 +317,7 @@ class WeightSyncPool:
         try:
             operation(index)
             return None
-        except Exception as e:
+        except Exception as e:  # any failure to answer keeps the verdict per server
             first_error = e
         if not client.can_replay_sync:
             client.drain_param_buffer()
