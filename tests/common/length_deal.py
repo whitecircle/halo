@@ -15,6 +15,14 @@ from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 
 MAX_COMPLETION_LENGTH = 64
 
+# The packed-microbatch suites' rounds: 16 rows over 4 slots, budgets at which first-fit-decreasing needs 3 bins, so
+# the window keeps one no-op slot and the rows-per-bin rescale is not 1.
+PACKED_ROWS, PACKED_SLOTS = 16, 4
+PACKED_DENSE_ROW_TOKENS = [128 + 128 * i for i in range(PACKED_ROWS)]
+PACKED_DENSE_BUDGET = 6144
+PACKED_MOE_ROW_TOKENS = [64 + 24 * i for i in range(PACKED_ROWS)]
+PACKED_MOE_BUDGET = 1536
+
 
 def tiny_llama(vocab: int, seed: int) -> LlamaForCausalLM:
     """A seeded two-layer SDPA Llama, small enough to forward on the host."""

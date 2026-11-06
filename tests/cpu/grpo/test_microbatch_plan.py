@@ -16,6 +16,13 @@ from halo.trainers.grpo.microbatch_plan import (
     local_bin_count,
     partition_rows,
 )
+from tests.common.length_deal import (
+    PACKED_DENSE_BUDGET,
+    PACKED_DENSE_ROW_TOKENS,
+    PACKED_MOE_BUDGET,
+    PACKED_MOE_ROW_TOKENS,
+    PACKED_SLOTS,
+)
 
 SLOTS = 8
 
@@ -163,6 +170,19 @@ def test_the_layout_survives_trls_own_split():
     )
     assert [c["slot_rows"].tolist() for c in chunks] == [[-1, -1], [-1, -1], [0, 1], [2, -1]]
     assert [c["slot_active"].tolist() for c in chunks] == [[0, 0], [0, 0], [1, 1], [1, 1]]
+
+
+@pytest.mark.parametrize(
+    ("row_tokens", "budget"),
+    [(PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET), (PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET)],
+    ids=["dense", "moe"],
+)
+def test_the_gpu_suites_rounds_fit_between_two_bins_and_the_slots_without_relaxing(row_tokens, budget):
+    """The packed suites assert ``1 < num_bins < slots`` to keep a no-op slot and a rows-per-bin rescale off 1; a
+    budget whose first-fit needs more bins than slots is relaxed to ``slots`` and would leave neither."""
+    fitted = len(first_fit_decreasing(row_tokens, budget))
+    assert 1 < fitted < PACKED_SLOTS
+    assert local_bin_count(row_tokens, budget, PACKED_SLOTS, None) == fitted
 
 
 if __name__ == "__main__":

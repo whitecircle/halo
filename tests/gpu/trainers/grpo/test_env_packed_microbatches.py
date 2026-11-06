@@ -37,6 +37,12 @@ from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
 from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.length_deal import (
+    PACKED_DENSE_BUDGET,
+    PACKED_DENSE_ROW_TOKENS,
+    PACKED_MOE_BUDGET,
+    PACKED_MOE_ROW_TOKENS,
+    PACKED_ROWS,
+    PACKED_SLOTS,
     packed_host,
     ragged_round,
     stacked,
@@ -50,17 +56,15 @@ from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
-ROWS, SLOTS = 16, 4
-ROW_TOKENS = [256 + 192 * i for i in range(ROWS)]
-BUDGET = 6144
+ROWS, SLOTS = PACKED_ROWS, PACKED_SLOTS
+ROW_TOKENS, BUDGET = PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET
 DENSE_VOCAB = 32_000
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
 GRAD_FLOOR_FACTOR = 2.0
 GRAD_COSINE_MIN = 0.999
 LOGP_MEAN_ABS_MAX = 1e-2
 MOE_FAMILY, MOE_WORDS, MOE_SEED = "qwen3_moe", 500, 0
-MOE_ROW_TOKENS = [64 + 24 * i for i in range(ROWS)]
-MOE_BUDGET = 1024
+MOE_ROW_TOKENS, MOE_BUDGET = PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET
 R2_FLIP_MAX = 1e-3
 
 _PARSER = argparse.ArgumentParser(description=__doc__)
