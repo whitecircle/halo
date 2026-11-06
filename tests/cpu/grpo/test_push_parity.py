@@ -55,9 +55,22 @@ def test_an_engine_at_the_trainers_log_probs_passes_once():
 
 
 @pytest.mark.parametrize("offset", [3.0, float("nan"), float("inf")])
-def test_an_engine_that_serves_other_weights_is_refused(offset):
-    with pytest.raises(ValueError, match="did not take the pushed weights"):
+def test_an_engine_that_serves_other_weights_is_refused_when_the_probe_raises(offset, monkeypatch):
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "raise")
+    with pytest.raises(ValueError, match="may not have taken the pushed weights"):
         verify_first_push_parity(_trainer(), _Engine(offset=offset))
+
+
+def test_the_default_probe_warns_and_lets_the_run_go_on(caplog):
+    with caplog.at_level("WARNING"):
+        verify_first_push_parity(_trainer(), _Engine(offset=3.0))
+    assert "may not have taken the pushed weights" in caplog.text
+
+
+def test_an_unknown_probe_mode_is_refused(monkeypatch):
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "1")
+    with pytest.raises(ValueError, match="HALO_WEIGHT_SYNC_PARITY_PROBE"):
+        verify_first_push_parity(_trainer(), _Engine())
 
 
 def test_the_served_window_bounds_the_row():
@@ -67,7 +80,7 @@ def test_the_served_window_bounds_the_row():
 
 
 def test_the_probe_turns_off(monkeypatch):
-    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "0")
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "off")
     engine = _Engine(offset=9.0)
     verify_first_push_parity(_trainer(), engine)
     assert not engine.scored

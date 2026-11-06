@@ -359,19 +359,21 @@ change that fails to reach the model shows it.
 
 ### First-push parity probe
 
-An engine answers `200` for a tensor its loader does not map and keeps the launch value, and one it stacks or
-reshapes wrongly serves another model. After a trainer's first push (online GRPO's, the environmental trainer's
-forced start push) every rank scores one fixed 1,100-token counting row with the trainer's own log-prob path
-(`_get_per_token_logps_and_entropies`), rank 0 scores it through the client's `score_completion_logprobs`, and a mean
-gap above 1 nat per position (`PARITY_MAX_MEAN_GAP_NATS`, above the 0.65 floor of the worst family) raises on every
-rank. The row is cut to the served window; a pool scores on its first server. Later pushes pay nothing.
+The probe detects a scrambled or mis-shaped load. It does not check that the engine consumed every pushed name: an
+engine answers `200` for a tensor its loader does not map and keeps the launch value, and one it stacks or reshapes
+wrongly serves another model. After a trainer's first push (online GRPO's, the environmental trainer's forced start
+push) every rank scores one fixed 1,100-token counting row with the trainer's own log-prob path
+(`_get_per_token_logps_and_entropies`), and rank 0 scores it through the client's `score_completion_logprobs` (a pool
+scores on its first server; the row is cut to the served window). A mean gap above 1 nat per position
+(`PARITY_MAX_MEAN_GAP_NATS`) is logged as a warning. The bound sits above the 0.65 floor measured on Laguna; no other
+family, QLoRA trainer or composite has been measured, so the default warns instead of stopping a run that may work.
+`HALO_WEIGHT_SYNC_PARITY_PROBE=raise` stops every rank on a gap, `off` skips the probe; context parallelism skips it,
+as its batches shard the row. Later pushes pay nothing.
 
-The probe sees a skipped name only where the trainer's value differs from the engine's launch value (a resumed run, a
-server launched from another revision), and a scrambled load wherever it happens. On a fresh run both hold the same
-weights, so a dropped name reads exact until training moves it: `test_weight_push_exact.py --reach` is the per-name
-check on a live server, and the recorded loader names ([GLM-5 Next](../models/glm5-next.md#rl-weight-sync)) pin the
-names on the CPU tier. `HALO_WEIGHT_SYNC_PARITY_PROBE=0` turns it off; context parallelism skips it, as its batches
-shard the row.
+On a fresh run the trainer and the engine hold the same weights, so a dropped name reads exact until training moves
+it; the probe sees one only on a resumed run or a server launched from another revision.
+`test_weight_push_exact.py --reach` is the per-name check on a live server, and the recorded loader names
+([GLM-5 Next](../models/glm5-next.md#rl-weight-sync)) pin the names per engine on the CPU tier.
 
 ### Construction gates
 
