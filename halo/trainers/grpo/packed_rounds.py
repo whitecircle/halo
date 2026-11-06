@@ -4,7 +4,7 @@ round-wide scoring passes run bin by bin."""
 
 import contextlib
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager
 from typing import ClassVar
 
@@ -183,9 +183,11 @@ class PackedRoundMixin:
         attention_mask: torch.Tensor,
         logits_to_keep: int,
         plan: MicrobatchPlan,
+        bin_context: Callable[[slice, torch.Tensor], AbstractContextManager[None]] | None = None,
     ) -> torch.Tensor:
         """``model``'s per-token log-probs of rows already taken in ``plan.order``, one scoring call per bin (an empty
-        bin an inert row), put back in batch order; the rows no bin holds score 0."""
+        bin an inert row), put back in batch order; the rows no bin holds score 0. ``bin_context`` wraps a bin's call,
+        given its rows and their attention mask."""
         scored, start = [], 0
         for size in plan.bin_sizes:
             if size == 0:
@@ -193,9 +195,13 @@ class PackedRoundMixin:
                 continue
             bin_rows = slice(start, start + size)
             start += size
-            logps, _, _ = self._get_per_token_logps_and_entropies(
-                model, input_ids[bin_rows], attention_mask[bin_rows], logits_to_keep, compute_entropy=False
+            context = (
+                contextlib.nullcontext() if bin_context is None else bin_context(bin_rows, attention_mask[bin_rows])
             )
+            with context:
+                logps, _, _ = self._get_per_token_logps_and_entropies(
+                    model, input_ids[bin_rows], attention_mask[bin_rows], logits_to_keep, compute_entropy=False
+                )
             scored.append(logps)
         in_batch_order = torch.zeros(
             plan.round_rows,
