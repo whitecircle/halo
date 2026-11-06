@@ -179,7 +179,7 @@ for TP).
 `rank_tokens`, the tokens this rank computes over, = `num_input_tokens_seen / world_size`, further divided by
 `cp_size` (each CP rank receives the full `input_ids`; the wrapper splits inside forward). It equals tok/s/GPU ×
 step time only where no batch is shared: a TP, expert-TP or pipeline group runs one batch on every member. Under PP
-it also [counts padding](../parallelism/pipeline-parallelism.md#measured-throughput).
+the count is of attended tokens, padding excluded ([PP](../parallelism/pipeline-parallelism.md#measured-throughput)).
 
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
 forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,

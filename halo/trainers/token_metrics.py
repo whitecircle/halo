@@ -27,6 +27,30 @@ def effective_loss_mask(masks: Mapping[str, torch.Tensor | Any]) -> torch.Tensor
     return completion_mask if tool_mask is None else completion_mask * tool_mask
 
 
+def count_attended_tokens(inputs: Mapping[str, torch.Tensor | Any]) -> torch.Tensor | int:
+    """Real tokens of a batch, summed over its token groups (``input_ids`` and every ``<group>_input_ids``): the
+    group's ``attention_mask`` sum, else its ``row_lengths`` (rows a collator padded after packing), else its last
+    ``cu_seq_lens_q`` offset (a flattened row), else its element count, which only an unpadded batch can mean.
+    A device tensor, never read on the host; ``0`` for a batch with no group."""
+    total = 0
+    for key, ids in inputs.items():
+        if not key.endswith("input_ids") or not isinstance(ids, torch.Tensor):
+            continue
+        prefix = key[: -len("input_ids")]
+        mask = inputs.get(f"{prefix}attention_mask")
+        row_lengths = inputs.get(f"{prefix}row_lengths")
+        offsets = inputs.get(f"{prefix}cu_seq_lens_q")
+        if mask is not None and mask.shape == ids.shape:
+            total = total + mask.sum()
+        elif row_lengths is not None:
+            total = total + row_lengths.sum()
+        elif offsets is not None and offsets.dim() == 1:
+            total = total + offsets[-1]
+        else:
+            total = total + ids.numel()
+    return total
+
+
 class TokenMetricsMixin:
     # Set by the first ``training_step``: the efficiency callback binds here and hands over the layout.
     _attention_work_bound: bool = False
@@ -37,14 +61,13 @@ class TokenMetricsMixin:
     _unsummed_input_tokens: int = 0
 
     def _track_num_input_tokens(self, inputs) -> None:
-        """In HF's ``"all"`` mode the count is a shape, so each micro-batch adds it on the host and its world sum lands
-        where it is read (each log, save and measured step); HF would gather and read it on every micro-batch."""
+        """In HF's ``"all"`` mode each micro-batch adds its attended tokens (:func:`count_attended_tokens`), padding
+        excluded, on the device, and the world sum lands where it is read (each log, save and measured step); HF
+        would gather and read the padded shape on every micro-batch."""
         if self.args.include_num_input_tokens_seen != "all":
             super()._track_num_input_tokens(inputs)
             return
-        main_input = getattr(self.model, "main_input_name", "input_ids")
-        if main_input in inputs:
-            self._unsummed_input_tokens += inputs[main_input].numel()
+        self._unsummed_input_tokens = self._unsummed_input_tokens + count_attended_tokens(inputs)
 
     def _sum_input_tokens(self) -> None:
         """COLLECTIVE in HF's ``"all"`` mode."""

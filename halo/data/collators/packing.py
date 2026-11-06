@@ -153,8 +153,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             # by every other route.
             batch["labels"][batch["position_ids"] == 0] = LABEL_IGNORE_INDEX
             batch = self._mask_packed_labels(batch, examples)
+            row_lengths = self._real_row_lengths(batch, examples)
             if self.flatten_to_single_row:
-                batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
+                batch = flatten_packed_batch(batch, row_lengths)
+            else:
+                # Rows keep their padding and carry no mask, so the real tokens count off the lengths.
+                batch["row_lengths"] = torch.tensor(row_lengths, dtype=torch.long)
             # The varlen set is only defined on the flattened [1, total] row; PP keeps its rows.
             varlen = self.emit_varlen_always or (
                 self.emit_varlen_on_flash_restart and positions_restart(batch["position_ids"])

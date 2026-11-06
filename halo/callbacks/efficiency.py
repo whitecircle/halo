@@ -190,8 +190,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
     the steps sum to the wall clock. An epoch turnover, evaluation or save is not a step: the next step starts at its
     own begin.
 
-    ``num_input_tokens_seen`` is summed across ranks. A rank's own tokens divide it by ``world_size`` and ``cp_size``,
-    since CP splits the sequence inside ``forward()``; TP, expert-TP and pipeline ranks each run every token through
+    ``num_input_tokens_seen`` counts attended tokens (padding excluded), summed across ranks. A rank's own tokens
+    divide it by ``world_size`` and ``cp_size``, since CP splits the sequence inside ``forward()``; TP, expert-TP and pipeline ranks each run every token through
     their parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``. ``max_seq_len`` is
     for runs whose real bound is not the declared length fields (a multi-turn RL trajectory)."""
 
@@ -465,8 +465,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         return int(args.per_device_train_batch_size * args.gradient_accumulation_steps * self._max_seq_len)
 
     def _fallback_step_tokens(self, world_size: int, measured_cluster: int | None) -> int:
-        """The padded-length estimate for an unusable token delta, warned once. A collator with no ``input_ids`` key
-        (SMPO, embedding) lands here every step, so its throughput is a config-derived constant."""
+        """The padded-length estimate for an unusable token delta, warned once. A batch holding no ``*input_ids`` tensor
+        (online GRPO's loader yields prompts) lands here every step, so its throughput is a config-derived constant."""
         if not self._warned_token_estimate:
             self._warned_token_estimate = True
             cause = (
@@ -478,7 +478,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 f"EfficiencyCallback: {cause}, so token throughput and MFU fall back to a "
                 "padded-length ESTIMATE (per_device_train_batch_size x gradient_accumulation_steps x "
                 f"max_seq x {_ESTIMATE_FILL_FRACTION}), not a measurement. If this repeats every step "
-                "the trainer's collator emits no 'input_ids' key (SMPO and embedding do not), so "
+                "the trainer's batches carry no '*input_ids' tensor to count, so "
                 "tokens/s is a constant rescaling of step time — treat it as an estimate."
             )
         return int(self._nominal_step_tokens() * _ESTIMATE_FILL_FRACTION) * world_size
@@ -504,7 +504,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.info(
                 "EfficiencyCallback: no measured attention work reached this step, so the "
                 "attention-score term is the config model at the declared length bound (every "
-                "token in a max_seq_len document). Trainers whose collator emits no 'input_ids' "
+                "token in a max_seq_len document). Trainers whose batches carry no 'input_ids' "
                 "stay on that model."
             )
         total_flops += step_flops

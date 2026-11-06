@@ -49,7 +49,7 @@ On a B300 MoE run it should be at least ~8k; below that throughput is still
 climbing fast. Read it on a warm Triton cache too: on a fresh one, a recipe's first
 ~20 steps run about 40% of the steady rate while kernels compile. Set
 `enable_efficiency_metrics: true` to log tokens/s/GPU in your own run; it counts a
-batch that TP, ETP, CP or PP ranks share once, and a PP rate also counts padding.
+batch that TP, ETP, CP or PP ranks share once.
 
 ## Levers that help
 

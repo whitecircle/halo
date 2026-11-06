@@ -96,11 +96,11 @@ def _count_reads(windows: _StepWindows) -> None:
 
 
 def _record_batch_tokens(seen: list[int]) -> None:
-    """This rank's input tokens per micro-batch, off the batches: the reference the trainer's world sums must match."""
+    """This rank's attended tokens per micro-batch, off the batches: the reference the trainer's world sums must match."""
     track = TokenMetricsMixin._track_num_input_tokens
 
     def recording(self, inputs):
-        seen.append(inputs["input_ids"].numel())
+        seen.append(int(inputs["attention_mask"].sum()))
         return track(self, inputs)
 
     TokenMetricsMixin._track_num_input_tokens = recording
