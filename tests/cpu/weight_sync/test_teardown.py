@@ -587,10 +587,6 @@ def test_a_formed_group_keeps_its_port_past_the_formation_block():
         del store
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 def _blocking_peer_probe(client, monkeypatch):
     """Every release step that needs the old peer blocks for 30 s; the calls list shows which ones were entered."""
     calls: list[str] = []
@@ -638,3 +634,24 @@ def test_a_live_peers_close_still_destroys_and_releases_the_remote_half(monkeypa
     client.close_communicator()
 
     assert "drop:True" in calls and "remote" in calls, calls
+
+
+def test_a_blocking_abort_does_not_hold_the_known_restart_release(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(client, "abort_transport", lambda: release.wait(30))
+
+    started = time.monotonic()
+    client.close_communicator_of_restarted_server()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 5.0
+    assert calls == ["drop:False"], calls
+    assert client._transport is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

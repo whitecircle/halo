@@ -436,10 +436,6 @@ def test_a_reconnected_client_is_built_like_the_first_connect():
     assert replacement._co_load_groups == scoped, "the replacement lost the scope the push gave the pool"
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 def _reconnect_probe():
     closed: list[str] = []
 
@@ -490,3 +486,7 @@ def test_a_failure_triggered_reconnect_still_closes_the_old_client_gracefully():
     pool._reconnect(0)
 
     assert closed == ["graceful"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

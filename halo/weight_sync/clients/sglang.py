@@ -267,7 +267,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         if peer_gone:
             # No destroy, health probe or remote release: each waits out a bound on a peer that will never answer.
             if group is not None:
-                self.abort_transport()
+                # An abort that dials the dead peer is bounded; the group is dropped either way.
+                aborting = AsyncCall(self.abort_transport, name="weight-update abort")
+                if aborting.join(CLEANUP_TIMEOUT_S).is_alive():
+                    logger.error(f"Aborting the weight-update group of {self.base_url} is still blocked; dropping it.")
                 release_weight_update_group(group, destroy=False)
             self._free_transport_leftovers()
             return

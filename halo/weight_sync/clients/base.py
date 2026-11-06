@@ -586,7 +586,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
 
     def close_communicator_of_restarted_server(self) -> None:
         """Drop the communicator of a server known to have restarted, with no request to the server and no handshake
-        with the old peer, which is gone. The new server holds no pause, update or group of this client's."""
+        with the old peer, which is gone. The new server holds no pause, update or group of this client's. Open updates
+        are not closed, so the client must be discarded afterwards."""
         self._paused = False
         if self._transport is not None:
             self._release_transport(at_exit=False, peer_gone=True)

@@ -274,7 +274,8 @@ adapter served ran over 5% slower than merged weights on the model measured.
   the `model_name` its requests name and the config's commit hash; no grown vocabulary), the newest version loads on it
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
-  would wait out the broadcast deadline, so the old client is dropped without a destroy, probe or request to the vanished peer); under `single_group` the group re-forms itself. A server that is down at a sync
+  would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished
+  peer. Under `single_group` the group re-forms itself. A server that is down at a sync
   fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
   it takes the full push.
 - **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). The startup preflight refuses a server whose rank, module list or loaded
