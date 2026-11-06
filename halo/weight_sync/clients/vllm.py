@@ -66,6 +66,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
     TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
     CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
+    ADAPTER_SYNC_REFUSAL = (
+        f"{ENGINE_RELEASE} loads an adapter only from a directory both containers mount, and its decode with an "
+        f"adapter served ran over 5% slower than the merged weights on the model measured"
+    )
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (

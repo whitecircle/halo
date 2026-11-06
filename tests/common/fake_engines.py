@@ -1,7 +1,10 @@
 """HTTP stand-ins for the rollout engines' control planes; each acts on a request before replying, so a scripted
 failure keeps its state change."""
 
+import base64
+import io
 import json
+import pickle
 import re
 import threading
 import time
@@ -282,6 +285,25 @@ class FakeVLLMServer(FakeEngineServer):
         self.joined_stores.clear()
 
 
+class _TensorUnpickler(pickle.Unpickler):
+    """SGLang's SafeUnpickler narrowed to what a tensor dict needs; storage arrives as torch's own serialized bytes."""
+
+    _ALLOWED = {
+        ("builtins", "dict"),
+        ("collections", "OrderedDict"),
+        ("torch._utils", "_rebuild_tensor_v2"),
+        ("torch", "BFloat16Storage"),
+        ("torch", "bfloat16"),
+    }
+
+    def find_class(self, module, name):
+        if (module, name) == ("torch.storage", "_load_from_bytes"):
+            return lambda data: torch.load(io.BytesIO(data), weights_only=True)
+        if (module, name) not in self._ALLOWED:
+            raise RuntimeError(f"Blocked unsafe global ({module}.{name}) during pickle deserialization")
+        return super().find_class(module, name)
+
+
 class FakeSGLangServer(FakeEngineServer):
     """SGLang's weight-update routes: tracks pause state, group names and the open session. Refuses a duplicate group
     name, an update outside a session, a second begin, an end with no begin, and a parsed route with no JSON body, as
@@ -310,8 +332,47 @@ class FakeSGLangServer(FakeEngineServer):
         self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
+        # Set to launch the server with --enable-lora; the facts /server_info then reports.
+        self.lora: dict | None = None
+        # Adapters loaded, by name: the config and the tensors each load carried.
+        self.adapters: dict[str, tuple[dict, dict[str, torch.Tensor]]] = {}
+        # The ``model`` of every chat completion, in arrival order.
+        self.completion_models: list[str] = []
+        self.generate_lora_paths: list[str | None] = []
+
+    def restart(self) -> None:
+        """A process restart: the registry and the weight-update groups are gone."""
+        self.adapters.clear()
+        self.groups.clear()
+        self.session_open = False
+        self.paused = False
+
+    def _load_adapter(self, body: dict) -> tuple[int, dict]:
+        if self.lora is None:
+            return 400, {"success": False, "error_message": "LoRA is not enabled. Please set `--enable-lora`."}
+        if body["lora_name"] in self.adapters:
+            return 400, {"success": False, "error_message": f"{body['lora_name']} is already loaded"}
+        if len(body["serialized_named_tensors"]) < self.tp_size:
+            return 500, {"success": False, "error_message": "one serialized copy per tensor-parallel rank is needed"}
+        raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
+        tensors = _TensorUnpickler(io.BytesIO(raw)).load()
+        if body["config_dict"]["r"] > self.lora["max_lora_rank"]:
+            return 400, {"success": False, "error_message": "incompatible with the current LoRA memory pool"}
+        self.adapters[body["lora_name"]] = (body["config_dict"], tensors)
+        return 200, {"success": True}
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
+        if (method, path) == ("GET", "/v1/models"):
+            _, reply = super().answer(method, path, body)
+            reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
+            return 200, reply
+        if (method, path) == ("POST", "/load_lora_adapter_from_tensors"):
+            return self._load_adapter(body)
+        if (method, path) == ("POST", "/unload_lora_adapter"):
+            if body["lora_name"] not in self.adapters:
+                return 400, {"success": False, "error_message": f"{body['lora_name']} was never loaded"}
+            del self.adapters[body["lora_name"]]
+            return 200, {"success": True}
         if (method, path) == ("GET", "/server_info"):
             info = {
                 "tp_size": self.tp_size,
@@ -330,6 +391,8 @@ class FakeSGLangServer(FakeEngineServer):
             }
             if self.toolkit_image:
                 info["halo_patches"] = True
+            if self.lora is not None:
+                info.update(enable_lora=True, **self.lora)
             return 200, info
         if method != "POST":
             return super().answer(method, path, body)
@@ -360,8 +423,10 @@ class FakeSGLangServer(FakeEngineServer):
         if path == "/flush_cache":
             return 200, {}
         if path == "/v1/chat/completions":
+            self.completion_models.append(body.get("model"))
             return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
         if path == "/generate" and body.get("return_logprob"):
+            self.generate_lora_paths.append(body.get("lora_path"))
             # [logprob, token_id, text] per input token from logprob_start_len; the window's first entry is its anchor
             # and carries None.
             shift = self.prefill_shift(len(body["input_ids"]))

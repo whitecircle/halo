@@ -138,6 +138,10 @@ class WeightSyncClientBase(UpdateStream, ABC):
     # ``model_type`` → why the engine accepts a thinking budget for the family that it can never enforce.
     UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES: Mapping[str, str] = {}
     SUPPORTS_ENGINE_RESCORE = True
+    # Why this engine cannot serve the policy as an adapter beside the frozen base, ``None`` where it can.
+    ADAPTER_SYNC_REFUSAL: str | None
+    # The adapted module names the engine validates and serves.
+    ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
@@ -359,6 +363,23 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def _still_starting(self) -> bool:
         """Whether a server answering the liveness route has yet to finish starting, for a route that answers early."""
         return False
+
+    @classmethod
+    def adapter_request_model(cls, base_model: str, adapter: str) -> str:
+        """The ``model`` a request names to be served through ``adapter``."""
+        raise NotImplementedError(f"{cls.BACKEND_NAME} serves no adapter: {cls.ADAPTER_SYNC_REFUSAL}")
+
+    def load_adapter(self, name: str, config: dict, payload: str) -> None:
+        """Register the serialized adapter ``payload`` as ``name``; raises where the engine refuses."""
+        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+
+    def unload_adapter(self, name: str) -> None:
+        """Drop the adapter ``name`` once the requests running under it finished."""
+        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
+
+    def loaded_adapters(self) -> list[str]:
+        """The adapters registered on the engine."""
+        raise NotImplementedError(f"{self.BACKEND_NAME} serves no adapter: {self.ADAPTER_SYNC_REFUSAL}")
 
     def served_model_id(self) -> str:
         if self._served_model_id is None:
