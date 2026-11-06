@@ -16,13 +16,15 @@ from safetensors.torch import load_file, save_file
 from transformers import Qwen3_5Config, Qwen3_5ForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
 from halo.checkpoint.adapters import write_mixed_adapter_config
-from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, MERGED_ADAPTER_CONFIG_DIR
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, MERGED_ADAPTER_CONFIG_DIR, TRAINING_PROVENANCE_FILE
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
 from halo.checkpoint.tools.adapter_stream_merge import _FUSED_GATE_UP_KINDS, _required_attrs
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
@@ -230,6 +232,29 @@ def test_a_merge_it_cannot_make_is_refused_before_anything_is_written(tmp_path, 
     with pytest.raises(ValueError, match=match):
         merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
     assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def _adapter_recording_sinks(tmp_path: Path, policy: SinksPolicy) -> tuple[Path, Path]:
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    (adapter / TRAINING_PROVENANCE_FILE).write_text(json.dumps({PROVENANCE_GPT_OSS_SINKS: str(policy)}))
+    return adapter, tmp_path / "out"
+
+
+def test_neutralized_sinks_in_the_provenance_refuse_the_merge_before_any_output(tmp_path):
+    adapter, out = _adapter_recording_sinks(tmp_path, SinksPolicy.NEUTRALIZED)
+
+    with pytest.raises(ValueError, match="neutralized GptOss attention sinks"):
+        merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_live_sinks_in_the_provenance_do_not_refuse_the_merge(tmp_path):
+    adapter, out = _adapter_recording_sinks(tmp_path, SinksPolicy.LIVE)
+
+    merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert out.is_dir()
 
 
 @pytest.mark.parametrize("option", [{"task": "classification"}, {"device_map": "cpu"}, {"fp32_norms": True}])
