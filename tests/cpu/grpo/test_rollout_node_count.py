@@ -62,6 +62,7 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
     monkeypatch.setattr(async_rollouts, "RolloutManager", build)
     monkeypatch.setattr(async_rollouts, "ray", types.SimpleNamespace(is_initialized=lambda: True))
     host = types.SimpleNamespace(
+        _adapter_versions=None,
         async_config=types.SimpleNamespace(
             ray_address=None,
             rollout_actor_budget=1,

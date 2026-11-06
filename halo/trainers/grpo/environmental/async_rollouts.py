@@ -37,9 +37,19 @@ from halo.runtime.ranks import (
     is_global_main_process,
 )
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
+from halo.trainers.grpo.rollout.adapter_sync import (
+    AdapterSync,
+    build_adapter_requirements,
+    reject_unadaptable_config,
+    reject_unadaptable_model,
+    resolve_adapter_serving,
+)
+from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
+from halo.weight_sync.adapter_servers import AdapterServers
+from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.pool import WeightSyncPool
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -82,6 +92,9 @@ class AsyncRolloutMixin:
     _async_components_started: bool = False
     # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
     first_push_verified: bool = False
+    # Set by _install_adapter_sync when the policy is served as an adapter beside the frozen base.
+    _adapter_versions: AdapterVersions | None = None
+    _adapter_sync: AdapterSync | None = None
 
     def _init_async_state(self):
         self._rollout_manager = None
@@ -89,7 +102,6 @@ class AsyncRolloutMixin:
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
         self._engine_rescore_clients: list[WeightSyncClientBase] | None = None
         self._loop = None
-
         self._prefetch_enabled = self.async_config.prefetch_active()
         if self.async_config.enable_prefetch is None and not self._prefetch_enabled and is_global_main_process():
             logger.info(
@@ -118,6 +130,25 @@ class AsyncRolloutMixin:
         self._last_pushed_step = -1
         self._rollout_start_callback = None
         self._rollout_generation_started = False
+
+    def _install_adapter_sync(self) -> None:
+        """Refuses on every rank a config or model whose adapters the engine cannot serve, else arms the adapter sync."""
+        config = self.async_config
+        if not config.rollout_adapter_sync:
+            return
+        reject_unadaptable_config(config)
+        reject_unadaptable_model(
+            self.model, self.parallelism_config, resolve_weight_sync_client(config.rollout_backend)
+        )
+        serving = resolve_adapter_serving(self.model)
+        verify_adapter_servers(
+            config.get_server_urls(),
+            build_adapter_requirements(serving, config),
+            backend=config.rollout_backend,
+            connection_timeout=config.rollout_connection_timeout,
+        )
+        self._adapter_versions = AdapterVersions()
+        self._adapter_sync = AdapterSync(serving, self._adapter_versions)
 
     def _init_async_components(self):
         """COLLECTIVE. Each failure is deferred to a verdict all ranks join, so none is raised on one rank while its
@@ -156,6 +187,10 @@ class AsyncRolloutMixin:
             )
             for warning in plan.warnings:
                 logger.warning(warning)
+        adapter_model_name = None
+        if self._adapter_versions is not None:
+            client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
+            adapter_model_name = partial(client_cls.adapter_request_model, self.async_config.model_name)
         self._rollout_manager = RolloutManager(
             num_workers=plan.actors_per_rank,
             env_type=self._environment_spec,
@@ -167,6 +202,8 @@ class AsyncRolloutMixin:
             ),
             max_concurrent_rollouts=plan.max_concurrent,
             first_server=self.parallelism_config.get_data_parallel_rank(),
+            adapter_versions=self._adapter_versions,
+            adapter_model_name=adapter_model_name,
         )
         self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
 
@@ -210,10 +247,14 @@ class AsyncRolloutMixin:
         """One per server a round's trajectories reach (trajectory ``t`` on server ``t mod N``); HTTP only, no
         communicator."""
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
-        return [
+        clients = [
             client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
             for url in self.async_config.get_server_urls()[: self._train_loader_batch_size()]
         ]
+        if self._adapter_versions is not None:
+            for client in clients:
+                client.adapter_source = lambda versions=self._adapter_versions: versions.current
+        return clients
 
     def _form_weight_sync_group(self) -> None:
         """COLLECTIVE while it forms, over the c10d store: rank 0 waits on each server in turn for longer than the
@@ -242,6 +283,12 @@ class AsyncRolloutMixin:
             topology=config.rollout_sync_topology,
         )
         self._weight_sync_client.init_communicator(device=self.accelerator.device)
+        if self._adapter_sync is not None:
+            self._adapter_sync.servers = AdapterServers(
+                config.get_server_urls(),
+                client_cls=resolve_weight_sync_client(config.rollout_backend),
+                connection_timeout=config.rollout_connection_timeout,
+            )
 
     def _start_rollout_generation(self):
         """COLLECTIVE. Push the trainer's weights to the engines, then start the prefetch thread; idempotent."""
@@ -285,8 +332,12 @@ class AsyncRolloutMixin:
             return False
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):
-            sync_trainer_weights(self, self._weight_sync_client)
-        verify_first_push_parity(self, self._weight_sync_client)
+            if self._adapter_sync is None:
+                sync_trainer_weights(self, self._weight_sync_client)
+            else:
+                self._adapter_sync.sync(self, self._weight_sync_client)
+        if self._adapter_sync is None:
+            verify_first_push_parity(self, self._weight_sync_client)
         self._last_pushed_step = self.state.global_step
         return True
 
@@ -587,6 +638,9 @@ class AsyncRolloutMixin:
             for client in self._engine_rescore_clients:
                 client.close_http_session()
             self._engine_rescore_clients = None
+
+        if self._adapter_sync is not None:
+            self._adapter_sync.reset()
 
         self._loop = None
         # Re-arm: a second train() rebuilds the components above and needs a fresh push to the

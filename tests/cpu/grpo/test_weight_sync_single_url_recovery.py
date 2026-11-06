@@ -47,6 +47,7 @@ def host(monkeypatch):
     )
     host = SimpleNamespace(
         _weight_sync_client=None,
+        _adapter_sync=None,
         accelerator=SimpleNamespace(is_main_process=True, device=torch.device("cpu")),
         async_config=SimpleNamespace(
             rollout_backend="vllm",

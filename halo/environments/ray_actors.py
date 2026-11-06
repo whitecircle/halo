@@ -2,6 +2,7 @@
 and :class:`RolloutManager` fans prompts across actors and server URLs under a bounded semaphore."""
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import logging
@@ -9,8 +10,8 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +36,7 @@ from halo.environments.reasoning_effort import EpisodeEffort, bind_episode_effor
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.endpoints import is_loopback
+from halo.weight_sync.adapter_versions import AdapterVersions
 
 logger = logging.getLogger(__name__)
 
@@ -408,17 +410,22 @@ class RolloutManager:
         rollout_config: RolloutConfig,
         max_concurrent_rollouts: int,
         first_server: int = 0,
+        adapter_versions: AdapterVersions | None = None,
+        adapter_model_name: Callable[[str], str] | None = None,
     ):
         """``num_workers`` is this rank's actor count and ``max_concurrent_rollouts`` its in-flight cap, both resolved
         by :func:`~halo.environments.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
         round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
-        ones."""
+        ones. With ``adapter_versions`` every episode leases the newest adapter and its requests name it through
+        ``adapter_model_name``, for the episode's whole length."""
         self.num_workers = num_workers
         self.env_type = env_type
         self.env_config = env_config
         self.server_urls = server_urls
         self.rollout_config = rollout_config
         self.max_concurrent = max_concurrent_rollouts
+        self._adapter_versions = adapter_versions
+        self._adapter_model_name = adapter_model_name
 
         self._actors: list = []
         self._started = False
@@ -498,6 +505,16 @@ class RolloutManager:
         self._started = False
         logger.info("RolloutManager shutdown complete")
 
+    @contextlib.contextmanager
+    def _episode_config(self) -> Iterator[RolloutConfig]:
+        """The config an episode plays under: the manager's, or with an adapter served, the newest version's, leased
+        until the episode ends so a retired version never serves a later turn of it."""
+        if self._adapter_versions is None:
+            yield self.rollout_config
+            return
+        with self._adapter_versions.lease() as adapter:
+            yield replace(self.rollout_config, model_name=self._adapter_model_name(adapter))
+
     def _next_actor(self):
         actor = self._actors[self._actor_idx % len(self._actors)]
         self._actor_idx += 1
@@ -526,15 +543,13 @@ class RolloutManager:
             async with sem:
                 ref = None
                 try:
-                    ref = self._next_actor().run_episode.remote(
-                        prompt=prompt,
-                        context=ctx,
-                        server_url=self._next_url(),
-                        config=self.rollout_config,
-                    )
-                    results[idx] = await _await_with_deadline(
-                        ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
-                    )
+                    with self._episode_config() as config:
+                        ref = self._next_actor().run_episode.remote(
+                            prompt=prompt, context=ctx, server_url=self._next_url(), config=config
+                        )
+                        results[idx] = await _await_with_deadline(
+                            ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
+                        )
                 except Exception as e:
                     if isinstance(e, TimeoutError):
                         # Ray forbids force=True on an async-actor task, so it would never cancel.

@@ -432,10 +432,12 @@ def _send_dense_weights(
         forwarder.flush()
 
 
-def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | None) -> None:
+def gather_and_send_weights(
+    model: torch.nn.Module, sender: WeightSyncSender | None, *, fold_adapters: bool = True
+) -> None:
     """COLLECTIVE. A send can fail on the forwarding rank alone, so each runs under a deferred failure: a rank raising
     mid-loop would leave every peer blocked in the next gather until the watchdog fires. The caller closes the
-    update."""
+    update. ``fold_adapters=False`` sends the frozen base alone, for an engine that serves the adapters apart."""
     # Read the shards the optimizer steps, not the unsharded copies a forward can leave registered.
     reshard_fsdp2_modules(model)
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
@@ -448,7 +450,7 @@ def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | N
         else None
     )
     # Out of place, not PEFT's merge/unmerge, whose bf16 unmerge misses the frozen base by a rounding step.
-    folds = lora_fold_targets(model)
+    folds = lora_fold_targets(model) if fold_adapters else {}
     _send_ep_expert_weights(ep_layers, forwarder, guard)
     _send_engine_loaded_buffers(ep_layers, forwarder, getattr(base_transformers_model(model), "config", None))
     _send_dense_weights(model, ep_layers, forwarder, folds)
@@ -473,7 +475,12 @@ def _reject_missing_client() -> None:
 
 
 def sync_weights_to_client(
-    model: torch.nn.Module, client: WeightSyncSender | None, is_main: bool, is_tp_main: bool
+    model: torch.nn.Module,
+    client: WeightSyncSender | None,
+    is_main: bool,
+    is_tp_main: bool,
+    *,
+    fold_adapters: bool = True,
 ) -> None:
     """COLLECTIVE. Only the forwarding rank (global main, TP rank 0) sends; its missing ``client`` is refused on every
     rank at the close's verdict."""
@@ -485,7 +492,7 @@ def sync_weights_to_client(
     if sender is not None:
         sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
-        gather_and_send_weights(model, sender)
+        gather_and_send_weights(model, sender, fold_adapters=fold_adapters)
     except BaseException:
         # The push opened an update mid-gather, which only the forwarding rank can close.
         if sender is not None:
@@ -497,7 +504,7 @@ def sync_weights_to_client(
     flush.reject()
 
 
-def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
+def sync_trainer_weights(trainer, client: WeightSyncSender | None, *, fold_adapters: bool = True) -> None:
     """COLLECTIVE. ``client`` is the caller's handle on the main process."""
     model = unwrap_framework_wrappers(trainer.model)
     config = trainer.parallelism_config
@@ -510,7 +517,7 @@ def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
 
     # Every rank waits for the push to land, and a raise must not skip the barrier the peers block in.
     with barrier_on_exit(f"Weight sync at step {trainer.state.global_step}"):
-        sync_weights_to_client(model, client, is_main, is_tp_main)
+        sync_weights_to_client(model, client, is_main, is_tp_main, fold_adapters=fold_adapters)
 
     if log_memory:
         log_cuda_memory("weight-sync post")

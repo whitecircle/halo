@@ -67,6 +67,15 @@ _PER_TOKEN_RATIO_REMEDY = (
 )
 
 
+class AdapterRequirements(NamedTuple):
+    """What serving the policy as an adapter asks of a server: the largest rank and the module names its adapters hold,
+    and how many versions it keeps loaded at once."""
+
+    rank: int
+    modules: tuple[str, ...]
+    live_versions: int
+
+
 class ServerRequirements(NamedTuple):
     """What a run needs of its servers' launch flags. ``reasoning_consumers`` names the knobs reading a reasoning
     parser."""
@@ -121,6 +130,54 @@ def _server_flag_refusals(
             f"episode as maximal under-use. Serve with {client_cls.REASONING_PARSER_FLAG}, or turn them off."
         )
     return refusals
+
+
+def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[str]:
+    """Each launch fact that would make a server serve the adapter wrong or not at all; an unreported one reads as
+    unread."""
+    facts = flags.extras
+    refusals = []
+    if not facts.get("enable_lora"):
+        refusals.append("it was launched without --enable-lora, so it can load no adapter.")
+    if (rank := facts.get("max_lora_rank")) is not None and int(rank) < needs.rank:
+        refusals.append(f"its --max-lora-rank is {rank}, below the run's lora_r {needs.rank}.")
+    served = facts.get("lora_target_modules")
+    if served is not None and "all" not in served and (missing := sorted(set(needs.modules) - set(served))):
+        refusals.append(
+            f"its --lora-target-modules {sorted(served)} omit {missing}, which the engine would drop from the adapter "
+            f"without a trace."
+        )
+    loaded = facts.get("max_loaded_loras")
+    if loaded is not None and int(loaded) < needs.live_versions:
+        refusals.append(
+            f"its --max-loaded-loras is {loaded}, below the {needs.live_versions} versions the run keeps live, so a "
+            f"load would evict one a round still runs under."
+        )
+    per_batch = facts.get("max_loras_per_batch")
+    if per_batch is not None and int(per_batch) < 2:
+        refusals.append(
+            f"its --max-loras-per-batch is {per_batch}, so rounds on two versions could not share a batch."
+        )
+    if facts.get("speculative_algorithm"):
+        refusals.append("it serves with speculative decoding, whose draft runs without the adapter.")
+    if flags.quantization:
+        refusals.append(f"its base is quantized ({flags.quantization}), not the trainer's.")
+    if int(facts.get("dp_size") or 1) != 1:
+        refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
+    remedy = " Serve with the adapter flags (SGLANG_LORA_MAX_RANK in docker-compose.sglang.yml), or set rollout_adapter_sync: false."
+    return [refusal + remedy for refusal in refusals]
+
+
+def _verify_adapter_servers_on_rank0(
+    client_cls: type[WeightSyncClientBase], urls: list[str], needs: AdapterRequirements
+) -> None:
+    readings = _probe_servers(client_cls, urls, client_cls.read_server_flags, None, "read the launch flags of")
+    for url, flags in zip(urls, readings, strict=True):
+        if flags is None:
+            continue
+        if refusals := _adapter_refusals(flags, needs):
+            raise ValueError(f"Rollout server {url} cannot serve the policy as an adapter: " + " ".join(refusals))
+        logger.info(f"Rollout server {url} serves adapters: {dict(flags.extras)}")
 
 
 def _engine_prompt_ids(
@@ -580,6 +637,13 @@ def verify_turn_deadline(
     """COLLECTIVE. Times a short generation on each server and refuses a ``max_tokens`` turn that could not finish
     inside ``request_timeout`` even at that idle rate; warns where a loaded server would miss it."""
     _on_rank0(_verify_turn_deadline_on_rank0, backend, urls, connection_timeout, max_tokens, request_timeout)
+
+
+def verify_adapter_servers(
+    urls: list[str], needs: AdapterRequirements, *, backend: str, connection_timeout: float
+) -> None:
+    """COLLECTIVE. Refuses a server whose launch flags cannot hold the adapters the run loads."""
+    _on_rank0(_verify_adapter_servers_on_rank0, backend, urls, connection_timeout, needs)
 
 
 def verify_server_flags(

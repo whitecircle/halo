@@ -337,6 +337,16 @@ class AsyncRolloutConfig(
             "rollout_server_configs entry that orders the servers by node; auto refuses 'node'. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
         },
     )
+    rollout_adapter_sync: bool = field(
+        default=False,
+        metadata={
+            "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
+            "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
+            "name that new episodes select. SGLang only, launched with --enable-lora; attention and dense-MLP "
+            "projections only. A model it cannot serve is refused at startup with the reason. "
+            "See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+        },
+    )
     sync_weights_every_n_steps: int = field(
         default=1, metadata={"help": "Sync weights to the rollout servers every N training steps, N >= 1."}
     )
