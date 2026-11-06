@@ -10,13 +10,13 @@ import torch
 from transformers import DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 
-from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.context_parallel.families import Qwen3_5UlyssesGatedDelta
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common import resume_export
 from tests.common.checkpoint_io import save_schedule
+from tests.common.efficiency_observation import ObservedEfficiencyCallback
 from tests.common.repo import REPO_ROOT
 from tests.common.resume_export import ResumeExportRoute, run_resume_export, save_base_checkpoint
 
@@ -38,7 +38,7 @@ CALLABLES = MappingProxyType(
             save_base_checkpoint,
             finalize_loaded_model,
             Qwen3_5UlyssesGatedDelta,
-            EfficiencyCallback,
+            ObservedEfficiencyCallback,
         )
     }
 )

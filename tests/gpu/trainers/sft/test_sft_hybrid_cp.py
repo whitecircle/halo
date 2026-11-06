@@ -10,11 +10,11 @@ from datasets import Dataset
 from transformers import DataCollatorForSeq2Seq, Qwen3_5ForCausalLM, TrainerCallback
 from trl import SFTConfig
 
-from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_schedule
 from tests.common.distributed import shared_output_dir
+from tests.common.efficiency_observation import ObservedEfficiencyCallback
 from tests.common.harness import gpu_test_main
 from tests.common.hybrid_cp import build_hybrid_model
 from tests.common.offline_grpo import make_offline_tokenizer
@@ -66,14 +66,14 @@ def run(ctx):
     )
     training, evaluation = _dataset(len(tokenizer), 18), _dataset(len(tokenizer), 6)
     observed = []
-    efficiency = None
+    efficiencies = []
 
     def build_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint):
-        nonlocal efficiency
         recorder = EvaluationRecorder()
         observed.append(recorder)
         # The resumed arm has two steps; one warms the restored token-count baseline.
-        efficiency = EfficiencyCallback(parallelism, n_warmup_steps=1)
+        efficiency = ObservedEfficiencyCallback(parallelism, n_warmup_steps=1)
+        efficiencies.append(efficiency)
         return DistributedSFTTrainer(
             model=model,
             args=SFTConfig(
@@ -118,14 +118,24 @@ def run(ctx):
         recorder.losses and all(math.isfinite(loss) for loss in recorder.losses) for recorder in observed
     )
     checks["unbroken_and_resumed_eval_steps"] = [recorder.steps for recorder in observed] == [[1, 2, 3, 4], [3, 4]]
-    assert efficiency is not None
-    metrics |= ctx.metrics(efficiency)
-    checks["efficiency_metrics_recorded"] = (
-        math.isfinite(metrics["tokens_per_second"])
-        and metrics["tokens_per_second"] > 0
-        and math.isfinite(metrics["peak_allocated_gb"])
-        and metrics["peak_allocated_gb"] >= 0
-    )
+    checks["efficiency_phases_recorded"] = len(efficiencies) == 2
+    for phase, efficiency, expected_steps in zip(("unbroken", "resumed"), efficiencies, (3, 1), strict=False):
+        checks |= {f"{phase}/{name}": passed for name, passed in efficiency.measurement_checks(expected_steps).items()}
+        snapshot = ctx.metrics(efficiency)
+        checks[f"{phase}/efficiency_metrics_recorded"] = (
+            math.isfinite(snapshot["tokens_per_second"])
+            and snapshot["tokens_per_second"] > 0
+            and math.isfinite(snapshot["peak_allocated_gb"])
+            and snapshot["peak_allocated_gb"] >= 0
+        )
+        metrics |= {f"{phase}_{name}": value for name, value in snapshot.items()}
+        metrics |= {
+            f"{phase}_measured_steps": len(efficiency.measured_step_times),
+            f"{phase}_token_estimate_calls": efficiency.token_estimate_calls,
+            f"{phase}_memory_readings": len(efficiency.memory_readings),
+        }
+        if phase == "resumed":
+            metrics |= snapshot
     return {"checks": checks, "metrics": metrics}
 
 
