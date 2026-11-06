@@ -88,15 +88,14 @@ On a six-GPU async GRPO test row (1.2.0) the deal takes the update phase from 48
 
 On an aligned one-step round every micro-batch's loss forward runs on the weights the round was built on, so the loss forward's own detached log-probs are the log-probs the no-grad pass would return. With `loss_forward_importance_weights` the pass does not run: the build hands the loss the sampling log-probs, the tokens the ratio corrects and the forced closes it zeroes, and the scoring call of each loss forward builds `clamp(exp(logπ − logπ_sampling), max=vllm_importance_sampling_clip_max)` from `logπ.detach()` (a weight with a graph would add `A·logπ·∂w/∂θ` to the gradient) and clamps the reference log-probs of a `beta` run against them. The loss and its gradient equal the pass's for every admitted loss type, per-row or [packed](#packed-micro-batches); they differ only by the numerics between the pass's forward and the loss forward (the entropy-free head graph, no-grad kernel selection, EP's run-to-run dispatch tolerance), a relative change of about the forward's log-prob noise per token.
 
-Unset, the weight comes from the loss forward wherever nothing needs the round's log-probs before its first backward, and the pass stays where something does:
+The knob defaults to `false`. `true` raises at construction naming the first consumer that needs the round's log-probs before its first backward:
 
 - `balance_token_mass`, which needs the round's global importance-weighted token mass;
 - the `isr_*` stages, `isr_engine_reference` and `skip_update_masked_frac`, which pool a trajectory's log-ratio over rows that run in different micro-batches or decide before the first optimizer step;
 - `routing_replay: recompute`, which pins the update to the pass's routing (`rollout` fuses: the loss forward replays the engine's masks);
-- `num_iterations > 1` and accumulation that straddles a generation round, where later micro-batches run on moved weights and the PPO ratio needs the round-start log-probs;
-- `early_stop_logratio_gap`, because the logged log-ratio then reads loss tokens only (below); `true` accepts that.
+- `num_iterations > 1` and accumulation that straddles a generation round, where later micro-batches run on moved weights and the PPO ratio needs the round-start log-probs.
 
-`true` raises at construction naming the first of these; `false` keeps the pass. Eval rounds keep it. With neither the IS correction nor `beta` there is no pass to remove. `sampling/is_weights_from_loss_forward` reports the path of each round.
+With `early_stop_logratio_gap` set, the logged log-ratio reads loss tokens only (below), a different estimator than a threshold set on the pass's reading. Eval rounds keep the pass. With neither the IS correction nor `beta` there is no pass to remove. `sampling/is_weights_from_loss_forward` reports the path of each round.
 
 The loss forward must score exactly once with entropy, and TRL must read the weight and the clamped reference after that call; a forward that bypasses the hook, or a TRL that moves its reads, raises at the micro-batch naming `loss_forward_importance_weights: false` as the way back. The metrics the pass fed (`logratio_mean`, `is_ratio_*`, `is_ess_frac`, `logps/advantage_cov`, the token masses, `kl_clamp_frac`) accumulate on the device over the round's micro-batches and fold in one collective at its last one, before the optimizer step. They read loss tokens only, where the pass read every corrected token, rows the round drops (degenerate groups, invalid or truncated episodes) included. The zero-gradient tracker counts a token as trained unless a forced close zeroed it; a ratio underflowing to 0 (a log-ratio below about −87) is the only difference.
 

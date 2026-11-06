@@ -163,7 +163,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # After the model is placed: the deal reads its attention implementation.
         self._resolve_length_ordered_rows()
         self._configure_packed_microbatches()
-        self._resolve_loss_forward_weights()
+        self._configure_loss_forward_weights()
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config

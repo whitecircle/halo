@@ -27,6 +27,8 @@ from halo.trainers.grpo.objective.logratio import (
 )
 from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
+    IMPORTANCE_RATIO_KEY,
+    REF_LOGPS_KEY,
     expand_traj_to_rows,
     gathered_num_items,
     narrow_loss_masks,
@@ -211,8 +213,8 @@ class StepBatchMixin:
             "tool_mask": tool_mask,
             "advantages": local_advantages,
             "old_per_token_logps": scores.old_logps,
-            "ref_per_token_logps": scores.ref_logps,
-            "importance_sampling_ratio": scores.ratio,
+            REF_LOGPS_KEY: scores.ref_logps,
+            IMPORTANCE_RATIO_KEY: scores.ratio,
             "num_items_in_batch": num_items_in_batch,
         }
         if scores.fused:
@@ -303,7 +305,7 @@ class StepBatchMixin:
         """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
         the policy's. Both forwards run in the deal's order, or one scoring call per bin of a packed round; scores
         come back in batch order. A fused round runs no recompute: the loss forward weighs and clamps."""
-        fused = self._fuses_weights(mode)
+        fused = self._uses_loss_forward_weights(mode)
         order = (
             self._no_grad_row_order(step.attention_mask, mode)
             if plan is None
@@ -363,7 +365,7 @@ class StepBatchMixin:
         # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
         routing_masks = rollout_routing_masks
-        if self._runs_logprob_recompute and not self._fuses_weights(mode):
+        if self._runs_logprob_recompute and not self._uses_loss_forward_weights(mode):
             ids, mask = prompt_completion_ids, attention_mask
             if order is not None:
                 ids, mask = ids[order], mask[order]

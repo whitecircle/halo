@@ -24,6 +24,7 @@ from halo.trainers.grpo.microbatch_plan import (
     agree_microbatch_geometry,
     build_slot_layout,
 )
+from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ SLOT_IS_ACTIVE_KEY = "packed_slot_active"
 LOSS_SCALE_KEY = "packed_loss_scale"
 # What a filler row holds per round key when it is not zero: one attended prompt token (no NaN) and a fully masked
 # completion, as the rows that pad a round across ranks.
-_FILLER_VALUES = {"importance_sampling_ratio": 1, ROUTING_MASKS_KEY: -1}
+_FILLER_VALUES = {IMPORTANCE_RATIO_KEY: 1, ROUTING_MASKS_KEY: -1}
 
 
 class PackedMicrobatchMixin:

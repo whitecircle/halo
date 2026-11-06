@@ -14,6 +14,8 @@ NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"
 # Batch keys of the importance weight's inputs when the loss forward builds the weight: the engine's log-probs, the
 # tokens it corrects, the forced closes it zeroes, the untrainable-turn rows, and the reference log-probs before the
 # loss forward clamps them against the policy's.
+IMPORTANCE_RATIO_KEY = "importance_sampling_ratio"
+REF_LOGPS_KEY = "ref_per_token_logps"
 IS_SAMPLING_LOGPS_KEY = "is_sampling_logps"
 IS_CORRECTED_MASK_KEY = "is_corrected_mask"
 IS_FORCED_ZERO_KEY = "is_forced_zero_mask"

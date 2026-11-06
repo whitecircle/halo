@@ -4,13 +4,13 @@ log-probs (``loss_forward_importance_weights``): the same loss and gradient as t
 type, packed or not; the pass kept wherever a consumer needs the round's log-probs earlier; the seam into TRL's loss
 that raises when it moves."""
 
-import logging
 import types
 from collections import defaultdict
 from typing import get_args
 
 import pytest
 import torch
+from trl import GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.trainers.grpo.environmental import loss_forward_weights as lfw
@@ -62,8 +62,6 @@ _PASS_FACTS = {
     "skip_update_masked_frac": None,
     "balance_token_mass": False,
     "routing_replay": "none",
-    "early_stop_logratio_gap": None,
-    "accepts_loss_mask_estimator": False,
 }
 _BLOCKERS = [
     ("runs_pass", False, "nothing to fuse"),
@@ -76,7 +74,6 @@ _BLOCKERS = [
     ("skip_update_masked_frac", 0.5, "skip_update_masked_frac"),
     ("balance_token_mass", True, "balance_token_mass"),
     ("routing_replay", "recompute", "routing_replay: recompute"),
-    ("early_stop_logratio_gap", 0.1, "early_stop_logratio_gap"),
 ]
 
 
@@ -96,15 +93,7 @@ def test_every_routing_replay_mode_is_judged():
     assert {mode for mode, blocker in verdicts.items() if blocker is not None} == {"recompute"}
 
 
-def test_the_early_stop_reading_is_the_one_blocker_true_accepts():
-    facts = {**_PASS_FACTS, "early_stop_logratio_gap": 0.1}
-    assert loss_forward_weight_blocker(**facts) is not None
-    assert loss_forward_weight_blocker(**{**facts, "accepts_loss_mask_estimator": True}) is None
-    hard = {**facts, "balance_token_mass": True, "accepts_loss_mask_estimator": True}
-    assert "balance_token_mass" in loss_forward_weight_blocker(**hard)
-
-
-def _resolving_host(*, requested, is_correction=True, beta=0.0, iterations=1, accumulation=4, **config):
+def _resolving_host(*, requested=True, is_correction=True, beta=0.0, iterations=1, accumulation=4, **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncRolloutConfig(loss_forward_importance_weights=requested, **config)
     host.args = types.SimpleNamespace(steps_per_generation=4, gradient_accumulation_steps=accumulation)
@@ -113,47 +102,51 @@ def _resolving_host(*, requested, is_correction=True, beta=0.0, iterations=1, ac
     return host
 
 
-@pytest.mark.parametrize(("requested", "fuses"), [(None, True), (True, True), (False, False)])
-def test_the_knob_picks_the_path_where_nothing_blocks(requested, fuses):
-    host = _resolving_host(requested=requested)
-    host._resolve_loss_forward_weights()
-    assert host._skips_logprob_pass is fuses
-    assert (host._loss_forward_metrics is not None) is fuses
+def test_the_knob_defaults_off_and_opts_in():
+    assert AsyncRolloutConfig().loss_forward_importance_weights is False
+    for requested, fuses in ((False, False), (True, True)):
+        host = _resolving_host(requested=requested)
+        host._configure_loss_forward_weights()
+        assert host._skips_logprob_pass is fuses
+        assert (host._loss_forward_metrics is not None) is fuses
 
 
-def test_unset_keeps_the_pass_where_a_consumer_needs_it_and_true_raises_naming_it():
-    kept = _resolving_host(requested=None, balance_token_mass=True)
-    kept._resolve_loss_forward_weights()
+def test_true_raises_where_a_consumer_needs_the_pass_naming_it_and_false_never_does():
+    with pytest.raises(
+        ValueError, match=r"loss_forward_importance_weights: true, but balance_token_mass .* Set it to false"
+    ):
+        _resolving_host(balance_token_mass=True)._configure_loss_forward_weights()
+    kept = _resolving_host(requested=False, balance_token_mass=True)
+    kept._configure_loss_forward_weights()
     assert kept._skips_logprob_pass is False
-    with pytest.raises(ValueError, match=r"loss_forward_importance_weights: true, but balance_token_mass .* Unset it"):
-        _resolving_host(requested=True, balance_token_mass=True)._resolve_loss_forward_weights()
 
 
-def test_nothing_to_fuse_is_refused_under_true_and_silent_unset(caplog):
+def test_nothing_to_fuse_is_refused():
     with pytest.raises(ValueError, match="nothing to fuse"):
-        _resolving_host(requested=True, is_correction=False)._resolve_loss_forward_weights()
-    with caplog.at_level(logging.INFO):
-        silent = _resolving_host(requested=None, is_correction=False)
-        silent._resolve_loss_forward_weights()
-    assert silent._skips_logprob_pass is False and not caplog.records
+        _resolving_host(is_correction=False)._configure_loss_forward_weights()
 
 
-@pytest.mark.parametrize("requested", [None, True, False])
+def test_an_early_stop_threshold_is_accepted_under_true():
+    host = _resolving_host(early_stop_logratio_gap=0.1)
+    host._configure_loss_forward_weights()
+    assert host._skips_logprob_pass is True
+
+
+@pytest.mark.parametrize("requested", [True, False])
 def test_routing_replay_recompute_never_loses_its_pass_to_the_knob(requested):
     """R2's construction gate reads ``_runs_logprob_recompute`` ahead of the knob and must not follow it."""
     host = _resolving_host(requested=requested, routing_replay="recompute")
     if requested:
         with pytest.raises(ValueError, match="routing_replay: recompute"):
-            host._resolve_loss_forward_weights()
+            host._configure_loss_forward_weights()
     else:
-        host._resolve_loss_forward_weights()
+        host._configure_loss_forward_weights()
     assert host._skips_logprob_pass is False and host._runs_logprob_recompute is True
 
 
-def test_a_misaligned_window_keeps_the_pass():
-    host = _resolving_host(requested=None, accumulation=6)
-    host._resolve_loss_forward_weights()
-    assert host._skips_logprob_pass is False
+def test_a_misaligned_window_is_refused_under_true():
+    with pytest.raises(ValueError, match="straddles a generation round"):
+        _resolving_host(accumulation=6)._configure_loss_forward_weights()
 
 
 # ---- the loss: fused equals the pass -------------------------------------------------------------------------------
@@ -558,6 +551,70 @@ def test_the_log_ratio_formula_has_one_home():
     from_pass, diff, corrected = compute_is_ratio(recompute, sampling, mask, has, _CLIP)
     from_hook, hook_diff = lfw.compute_token_is_ratio(recompute, sampling, corrected, _CLIP)
     assert torch.equal(from_pass, from_hook) and torch.equal(diff, hook_diff)
+
+
+# ---- the round-end flush's cadence ---------------------------------------------------------------------------------
+
+
+class _TrlStep:
+    """TRL's ``training_step``: it advances ``_step`` after the micro-step, before the caller reads it."""
+
+    def __init__(self, advance: int = 1):
+        self._advance = advance
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        self._step += self._advance
+        return torch.tensor(0.0)
+
+
+class _Cadence(LossForwardImportanceMixin, _TrlStep):
+    def __init__(self, spg: int, advance: int = 1):
+        super().__init__(advance)
+        self.args = types.SimpleNamespace(steps_per_generation=spg)
+        self._step, self.flushes, self._skips_logprob_pass = 0, [], True
+
+    def _flush_loss_forward_metrics(self):
+        self.flushes.append(self._step)
+
+
+@pytest.mark.parametrize("spg", [1, 2, 4])
+def test_the_round_flush_fires_once_per_round_on_its_last_micro_step(spg):
+    host = _Cadence(spg)
+    for _ in range(3 * spg):  # a packed window's no-op slots are micro-steps like any other
+        _Cadence.training_step(host, None, {})
+    assert host.flushes == [spg, 2 * spg, 3 * spg]
+
+
+def test_the_round_flush_follows_trls_step_not_the_micro_step_count():
+    """Negative control: a step counter that runs one ahead moves every flush off the round's last micro-step."""
+    host = _Cadence(4, advance=2)
+    for _ in range(4):
+        _Cadence.training_step(host, None, {})
+    assert host.flushes != [4]
+
+
+def test_an_unfused_host_never_flushes():
+    host = _Cadence(2)
+    host._skips_logprob_pass = False
+    for _ in range(4):
+        _Cadence.training_step(host, None, {})
+    assert host.flushes == []
+
+
+def test_the_mixin_runs_after_trls_step_increment_in_the_real_trainer():
+    mro = DistributedAsyncEnvironmentalGRPOTrainer.__mro__
+    assert mro.index(LossForwardImportanceMixin) < mro.index(GRPOTrainer)
+
+
+def test_a_micro_batch_without_loss_tokens_leaves_the_round_maximum_to_the_others():
+    host = types.SimpleNamespace(vllm_importance_sampling_clip_max=_CLIP, _loss_forward_metrics=WorldMetrics())
+    ratio = torch.tensor([[0.5, 2.0]])
+    seam = {"advantages": torch.tensor([1.0]), NEGATIVE_ONLY_ROWS_KEY: torch.tensor([False])}
+    for loss_mask in (torch.ones(1, 2, dtype=torch.bool), torch.zeros(1, 2, dtype=torch.bool)):
+        LossForwardImportanceMixin._record_loss_forward_metrics(
+            host, seam, torch.zeros(1, 2), loss_mask, ratio, torch.zeros(1, 2), loss_mask
+        )
+    assert host._loss_forward_metrics.flush()["sampling/is_ratio_max"] == 2.0
 
 
 if __name__ == "__main__":

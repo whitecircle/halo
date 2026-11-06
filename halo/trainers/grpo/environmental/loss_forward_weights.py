@@ -18,10 +18,12 @@ from halo.trainers.grpo.objective.logratio import (
     kl_clamp_counts,
 )
 from halo.trainers.grpo.objective.loss_inputs import (
+    IMPORTANCE_RATIO_KEY,
     IS_CORRECTED_MASK_KEY,
     IS_FORCED_ZERO_KEY,
     IS_SAMPLING_LOGPS_KEY,
     NEGATIVE_ONLY_ROWS_KEY,
+    REF_LOGPS_KEY,
     TOKEN_MASS_SUM_KEYS,
     UNCLAMPED_REF_LOGPS_KEY,
     record_world_token_mass,
@@ -32,8 +34,6 @@ from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 
-IMPORTANCE_RATIO_KEY = "importance_sampling_ratio"
-REF_LOGPS_KEY = "ref_per_token_logps"
 _KNOB = "loss_forward_importance_weights"
 
 
@@ -47,11 +47,9 @@ def loss_forward_weight_blocker(
     skip_update_masked_frac: float | None,
     balance_token_mass: bool,
     routing_replay: str,
-    early_stop_logratio_gap: float | None,
-    accepts_loss_mask_estimator: bool,
 ) -> str | None:
     """Why the round's weight cannot come from the loss forward, or ``None``: every consumer of the trainer's
-    log-probs before the first backward is named. ``accepts_loss_mask_estimator`` lifts the early-stop reading alone."""
+    log-probs before the first backward is named."""
     if not runs_pass:
         return "no log-prob pass runs on this config (the IS correction and the KL term are both off), so there is nothing to fuse"
     if num_iterations > 1:
@@ -78,11 +76,6 @@ def loss_forward_weight_blocker(
         return (
             "routing_replay: recompute pins the update to the no-grad pass's routing, and with one forward there is "
             "nothing to pin to (use none or rollout)"
-        )
-    if early_stop_logratio_gap is not None and not accepts_loss_mask_estimator:
-        return (
-            f"early_stop_logratio_gap reads {LOGRATIO_MEAN_KEY}, which the loss forward reports over loss-mask tokens "
-            f"only, a different estimator than the threshold was set on (set {_KNOB}: true to accept it)"
         )
     return None
 
@@ -127,21 +120,21 @@ class _WeightSeam(dict):
 
 class LossForwardImportanceMixin:
     """Mixed in ahead of ``ProtectedTokenEntropyMixin``, whose scorer override returns through ``super()``, and of
-    ``RowSpanStashMixin``. The host calls :meth:`_resolve_loss_forward_weights` once its config and routing replay are
+    ``RowSpanStashMixin``. The host calls :meth:`_configure_loss_forward_weights` once its config and routing replay are
     resolved, and :meth:`_with_loss_forward_inputs` on the last statement of a fused train round's batch build."""
 
     _skips_logprob_pass = False
     _loss_forward_seam: _WeightSeam | None = None
     _loss_forward_metrics: WorldMetrics | None = None
 
-    def _resolve_loss_forward_weights(self) -> None:
-        """Take the weight from the loss forward where nothing needs the round's log-probs earlier (unset) or must
-        (``true``), refusing ``true`` where something does."""
+    def _configure_loss_forward_weights(self) -> None:
+        """Take the weight from the loss forward when the knob is set, refusing it where something needs the round's
+        log-probs earlier."""
         cfg = self.async_config
-        requested = getattr(cfg, _KNOB)
-        runs_pass = self._runs_logprob_recompute
+        if not getattr(cfg, _KNOB):
+            return
         blocker = loss_forward_weight_blocker(
-            runs_pass=runs_pass,
+            runs_pass=self._runs_logprob_recompute,
             num_iterations=self.num_iterations,
             misaligned_accumulation=self._misaligned_accumulation,
             isr_masks=self._isr_mask_config,
@@ -149,22 +142,15 @@ class LossForwardImportanceMixin:
             skip_update_masked_frac=cfg.skip_update_masked_frac,
             balance_token_mass=cfg.balance_token_mass,
             routing_replay=cfg.routing_replay,
-            early_stop_logratio_gap=cfg.build_early_stop_config().logratio_gap,
-            accepts_loss_mask_estimator=requested is True,
         )
-        if requested and blocker is not None:
-            raise ValueError(f"{_KNOB}: true, but {blocker}. Unset it or set it to false.")
-        self._skips_logprob_pass = requested is not False and blocker is None
-        if self._skips_logprob_pass:
-            self._loss_forward_metrics = WorldMetrics()
-        if requested is None and runs_pass and is_global_main_process():
-            logger.info(
-                "Importance weights come from the loss forward; no separate log-prob pass runs."
-                if self._skips_logprob_pass
-                else f"A no-grad log-prob pass builds the importance weights: {blocker}."
-            )
+        if blocker is not None:
+            raise ValueError(f"{_KNOB}: true, but {blocker}. Set it to false.")
+        self._skips_logprob_pass = True
+        self._loss_forward_metrics = WorldMetrics()
+        if is_global_main_process():
+            logger.info("Importance weights come from the loss forward; no separate log-prob pass runs.")
 
-    def _fuses_weights(self, mode: str) -> bool:
+    def _uses_loss_forward_weights(self, mode: str) -> bool:
         """Whether this mode's rounds take the weight from the loss forward. Eval keeps the pass."""
         return self._skips_logprob_pass and mode == "train"
 

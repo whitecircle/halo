@@ -368,16 +368,16 @@ class AsyncRolloutConfig(
             "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
         },
     )
-    loss_forward_importance_weights: bool | None = field(
-        default=None,
+    loss_forward_importance_weights: bool = field(
+        default=False,
         metadata={
             "help": "Take the importance weight (and the KL tail clamp) from the loss forward's own detached "
             "log-probs in place of a separate no-grad pass over the round's rows. The weight is the same function of "
-            "the same weights on an aligned one-step round. Unset = on wherever that holds; true raises at "
-            "construction where a consumer needs the round's log-probs before its first backward (token-mass "
-            "balance, trajectory-level isr_* stages, the update breaker, routing_replay: recompute, num_iterations "
-            "above 1, misaligned accumulation); false keeps the pass. With early_stop_logratio_gap set, unset keeps "
-            "the pass because the logged log-ratio then reads loss-mask tokens only; true accepts that. "
+            "the same weights on an aligned one-step round, built from a different forward program, so values differ "
+            "by the forward's log-prob noise. Raises at construction where a consumer needs the round's log-probs "
+            "before its first backward (token-mass balance, trajectory-level isr_* stages, the update breaker, "
+            "routing_replay: recompute, num_iterations above 1, misaligned accumulation) or no pass would run. With "
+            "early_stop_logratio_gap set, the logged log-ratio reads loss-mask tokens only. "
             "See agent-docs/training-methods/async-grpo/performance.md#weight-from-the-loss-forward."
         },
     )
