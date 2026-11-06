@@ -111,11 +111,9 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
 def reject_inert_reasoning_terms(
     async_config, env, level_terms: Mapping[str | None, tuple[int | None, float]]
 ) -> None:
-    """Profile budgets or prices with no level drawn charge nothing, and so do a cap or the failed-group switch while
-    no drawn level prices and no floor is on, or a level's budget that neither its price nor the floor reads. A floor
-    needs a budget above 0 at every drawn level, and both it and the failed-group waiver need a reward that prices
-    success above zero: without one every episode reads as failed, so the floor would charge every episode and the
-    waiver none. A profile key among the run's template variables would reach the template, which the model reads."""
+    """Refuse reasoning options that would charge nothing or charge every episode: a profile key, cap or failed-group
+    switch that no drawn level reads, a floor without a budget or a priced success, a profile key among the template
+    variables the model reads. Each error names its case."""
     price_on = any(price > 0 for _, price in level_terms.values())
     floor_on = async_config.reasoning_floor > 0
     if env.reasoning_effort is None:
