@@ -220,8 +220,9 @@ one server and has no such field. Both engines take the join's `rank_offset` and
   whose session close gets no answer in 30 s raises naming the server, which then needs a restart. Every bounded wait of
   a re-form or teardown (a layout read, a group destroy, an abort, a session close) logs its server, purpose and bound
   once when it starts, and once more when the bound expires. A wait expires when its call is still running after the
-  join or ended in a request timeout. A survivor's destroy during a re-form is waited out to its bound (about 30 s, the main
-  cost of a re-form), since SGLang has no route to abort a server's half and the join that follows needs its scheduler free. An SGLang release stops the
+  join or ended in a request timeout. A survivor's destroy during a re-form is waited out to its bound, since SGLang has no route
+  to abort a server's half. Its scheduler runs `destroy_process_group` on the old group inline and serves no other
+  request until it returns, about 60 s after a peer died, so an SGLang re-form after a server restart takes about 60 s. An SGLang release stops the
   rendezvous socket listening itself, so a destroy or abort left parked, which keeps the store alive through its group, does not hold the group
   port. Each chunk is declared on every server and sent once, paced by the slowest server; new weights go live per
   server at its own close.
