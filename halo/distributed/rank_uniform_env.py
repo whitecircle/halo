@@ -23,6 +23,7 @@ from halo.models.attention.sdpa_flex_sliding import flex_sliding_enabled
 from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV, flash_attention_deterministic
 from halo.runtime.consensus import reject_divergent_settings
 from halo.runtime.ranks import has_process_group
+from halo.weight_sync.parity_probe import resolve_parity_probe_mode
 
 # Fixed by the launch or written identically on every rank (``full_determinism``), so one join per process is enough.
 _env_uniformity_verified = False
@@ -50,6 +51,7 @@ def rank_uniform_settings() -> dict[str, object]:
         "HALO_FLEX_SLIDING": flex_sliding_enabled(),
         "HALO_FP32_MATMUL_PRECISION": resolved_float32_matmul_precision(),
         "HALO_WEIGHT_SYNC_GATHER_AHEAD": weight_sync_gather_ahead(),
+        "HALO_WEIGHT_SYNC_PARITY_PROBE": resolve_parity_probe_mode(),
     }
 
 
@@ -74,8 +76,9 @@ def agree_rank_uniform_env() -> None:
         "FLASH_ATTENTION_DETERMINISTIC which attention backend a head_dim-256 model loads (FA4 or its "
         "fallback), HALO_FLEX_SLIDING which one an SDPA run of a sliding-window model loads, "
         "HALO_FP32_MATMUL_PRECISION whether a rank's fp32 matmuls round through TF32, "
-        "HALO_WEIGHT_SYNC_GATHER_AHEAD the order in which the RL weight sync issues its expert gathers, and the "
-        "rest are wire parameters shared by both ends of the all-to-all.",
+        "HALO_WEIGHT_SYNC_GATHER_AHEAD the order in which the RL weight sync issues its expert gathers, "
+        "HALO_WEIGHT_SYNC_PARITY_PROBE whether a rank runs the first push's probe forward, and the rest are wire "
+        "parameters shared by both ends of the all-to-all.",
     )
     # Agreed by now, so a refused count raises on every rank before a save's first gather.
     validate_checkpoint_write_threads(resolve_checkpoint_write_threads())

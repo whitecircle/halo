@@ -95,6 +95,12 @@ def test_the_weight_sync_gather_order_is_compared_across_ranks(value, expected):
     assert settings["HALO_WEIGHT_SYNC_GATHER_AHEAD"] == expected
 
 
+def test_the_parity_probe_mode_is_in_the_compared_set(monkeypatch):
+    """'off' skips a collective forward, so a rank holding it alone would hang its peers."""
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "off")
+    assert rank_uniform_env.rank_uniform_settings()["HALO_WEIGHT_SYNC_PARITY_PROBE"] == "off"
+
+
 def _count_joins(monkeypatch) -> list:
     calls: list = []
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)

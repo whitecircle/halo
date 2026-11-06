@@ -8,11 +8,11 @@ import math
 
 import torch
 
-from halo.env import env_str
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import refusal_text, run_on_rank0_raising_everywhere
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.engine_preflight import counting_probe_token_ids
+from halo.weight_sync.parity_probe import resolve_parity_probe_mode
 from halo.weight_sync.pool import WeightSyncPool
 
 logger = logging.getLogger(__name__)
@@ -20,7 +20,6 @@ logger = logging.getLogger(__name__)
 # Mean absolute log-prob gap per position. The floor on identical weights reaches 0.65 on Laguna; a load that drops or
 # scrambles a tensor reads in nats.
 PARITY_MAX_MEAN_GAP_NATS = 1.0
-PARITY_PROBE_MODES = ("warn", "raise", "off")
 
 
 def _scoring_client(client):
@@ -36,13 +35,6 @@ def _trainer_logps(trainer, token_ids: list[int]) -> list[float]:
             trainer.model, ids, torch.ones_like(ids), len(token_ids) - 1
         )
     return logps[0].float().cpu().tolist()
-
-
-def _resolve_probe_mode() -> str:
-    mode = env_str("HALO_WEIGHT_SYNC_PARITY_PROBE", "warn").strip().lower()
-    if mode not in PARITY_PROBE_MODES:
-        raise ValueError(f"HALO_WEIGHT_SYNC_PARITY_PROBE={mode!r} is not one of {PARITY_PROBE_MODES}.")
-    return mode
 
 
 def _compare_on_rank0(client, token_ids: list[int], trainer_logps: list[float], mode: str) -> None:
@@ -76,7 +68,7 @@ def verify_first_push_parity(trainer, client) -> None:
     if trainer.first_push_verified:
         return
     trainer.first_push_verified = True
-    mode = _resolve_probe_mode()
+    mode = resolve_parity_probe_mode()
     if mode == "off":
         return
     config = trainer.parallelism_config
