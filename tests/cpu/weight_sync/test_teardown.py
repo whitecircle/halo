@@ -195,9 +195,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 
 def _aborts(monkeypatch) -> list[object]:
     aborted: list[object] = []
-    monkeypatch.setattr(
-        sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: aborted.append(group) or True
-    )
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: aborted.append(group))
     return aborted
 
 
@@ -246,10 +244,15 @@ def test_a_group_whose_abort_is_still_parked_is_not_released(monkeypatch):
     group = object()
     client._transport = (group, None)
     calls = _teardown_probe(client, monkeypatch)
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: False)
+    parked = threading.Event()
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: parked.wait(30))
 
-    client.abort_transport()
-    client.close_communicator()
+    try:
+        client.abort_transport()
+        client.close_communicator()
+    finally:
+        parked.set()
 
     assert all(target is not group for _, target in calls), "the release touched a group whose abort is parked"
 
@@ -396,7 +399,7 @@ def test_a_failing_abort_warns_instead_of_raising(monkeypatch, caplog):
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", failing_abort)
 
     with caplog.at_level(logging.WARNING, logger=c10d_group.logger.name):
-        c10d_group.abort_weight_update_group(object(), timeout_s=5.0)
+        c10d_group.abort_weight_update_group(object())
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any("abort refused by NCCL" in message for message in warnings), (
@@ -404,17 +407,21 @@ def test_a_failing_abort_warns_instead_of_raising(monkeypatch, caplog):
     )
 
 
-def test_an_abort_that_never_returns_ends_at_its_deadline(monkeypatch, caplog):
+def test_an_abort_that_never_returns_ends_at_its_deadline_and_says_so(monkeypatch, caplog):
     """Torch's abort waits on a communicator another thread may be destroying, and then parks for good."""
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
     parked = threading.Event()
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: parked.wait(30))
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
     started = time.monotonic()
     try:
-        with caplog.at_level(logging.ERROR, logger=c10d_group.logger.name):
-            returned = c10d_group.abort_weight_update_group(object(), timeout_s=0.2)
+        with caplog.at_level(logging.INFO):
+            client.abort_transport()
         assert time.monotonic() - started < 5.0, "the abort held its caller past the deadline"
-        assert any("did not return" in record.getMessage() for record in caplog.records)
-        assert returned is False
+        gave_up = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Gave up waiting")]
+        assert len(gave_up) == 1 and "to abort" in gave_up[0], gave_up
+        assert client._abort_parked
     finally:
         parked.set()
 
@@ -423,7 +430,7 @@ def test_aborting_a_group_that_never_formed_does_not_enter_torch(monkeypatch):
     entered: list[object] = []
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", entered.append)
 
-    c10d_group.abort_weight_update_group(None, timeout_s=5.0)
+    c10d_group.abort_weight_update_group(None)
 
     assert entered == [], "abort_weight_update_group(None) called torch's abort"
 
@@ -481,7 +488,7 @@ def test_a_release_that_asks_for_nothing_announces_no_wait(monkeypatch, caplog):
 def test_an_abort_and_a_remote_destroy_name_their_server_and_bound(monkeypatch, caplog):
     client = offline_client(SGLangWeightSyncClient)
     client._transport = (object(), None)
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group, *, timeout_s: True)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: None)
     monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
 
     with caplog.at_level(logging.INFO):
@@ -505,10 +512,6 @@ def test_closing_an_interrupted_session_names_its_server_and_bound(monkeypatch, 
     waits = _waits(caplog)
     assert len(waits) == 1, "a session already closed waits on nothing, so it announces nothing"
     assert client.base_url in waits[0] and waits[0].endswith("at most 30s"), waits
-
-
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
 
 
 class _StoreHoldingGroup:
@@ -563,3 +566,28 @@ def test_a_released_group_frees_its_port_too(monkeypatch):
         assert _binds(port)
     finally:
         parked.set()
+
+
+def test_a_failed_formation_frees_the_port_a_store_took_over():
+    port = free_port()
+    with pytest.raises(RuntimeError, match="formation failed"):
+        with RendezvousListener("127.0.0.1", port) as listener:
+            listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+            raise RuntimeError("formation failed")
+    assert _binds(port)
+
+
+def test_a_formed_group_keeps_its_port_past_the_formation_block():
+    port = free_port()
+    with RendezvousListener("127.0.0.1", port) as listener:
+        store = listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+    try:
+        with pytest.raises(OSError):
+            _binds(port)
+    finally:
+        listener.free_port()
+        del store
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

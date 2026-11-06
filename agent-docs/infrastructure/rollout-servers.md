@@ -188,15 +188,17 @@ one server and has no such field. The default `per_server` is unchanged. Both en
 - **A sync.** Each server is probed (vLLM's `instance_id`), then all are paused with their sessions opened together; the
   log names each server's pause and how long the first chunk waited on the slowest. SGLang then takes a membership
   probe, an empty declare that a server holding the group answers as a no-op. A server found restarted by either check
-  re-forms the group once, with every server paused, reading the layout and launch of the servers that lost the group again
-  (one that kept it is still the engine it formed with, and a scheduler parked behind the lost member's destroy would
-  stall the read), and the sync replays; a second miss closes the sessions, resumes every server and raises. A re-form aborts the trainer's half before any server destroys its own, as a lost member
-  never enters a graceful destroy; the wait is bounded, and a survivor that stays parked is not freed by it. An SGLang
-  join whose session close gets no answer in 30 s raises naming the server, which then needs a restart. Every bounded
-  wait of a re-form or teardown (a layout read, a group destroy, an abort, a session close) logs its server, purpose and
-  bound once when it starts, and once more when the bound expires. An SGLang release stops the rendezvous socket listening itself, so a destroy or abort left parked, which keeps the store alive through its group, does not hold the group port. Each chunk is
-  declared on every server and sent once, paced by the slowest server; new weights go live per server at its own
-  close.
+  re-forms the group once, with every server paused, reading the layout and launch of the servers that lost the group
+  again (one that kept it is still the engine it formed with, and a scheduler parked behind the lost member's destroy
+  would stall the read), and the sync replays; a second miss closes the sessions, resumes every server and raises. A
+  re-form aborts the trainer's half before any server destroys its own, as a lost member never enters a graceful
+  destroy; the wait is bounded, logs its expiry, and a survivor that stays parked is not freed by it. An SGLang join
+  whose session close gets no answer in 30 s raises naming the server, which then needs a restart. Every bounded wait of
+  a re-form or teardown (a layout read, a group destroy, an abort, a session close) logs its server, purpose and bound
+  once when it starts, and once more when the bound expires. An SGLang release stops the rendezvous socket listening
+  itself, so a destroy or abort left parked, which keeps the store alive through its group, does not hold the group
+  port. Each chunk is declared on every server and sent once, paced by the slowest server; new weights go live per
+  server at its own close.
 - **A failure after the first declare is global.** A server that refuses its declare after peers accepted theirs
   leaves them parked in a receive no trainer-side call frees, so the group aborts the trainer's half, marks **every**
   server unusable and leaves it paused, and raises `RESTART the … servers:` with the failed one first. The pause stays

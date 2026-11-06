@@ -197,6 +197,7 @@ class FakeVLLMServer(FakeEngineServer):
         self.version = self.VERSION
         self.update_open = False
         self.world_size = 1
+        self.pp_size = 1
         # The launch id a restart changes; reported only when set, as an engine whose id the client never read.
         self.instance_id: str | None = None
         self.strict_tool_calling = False
@@ -219,6 +220,7 @@ class FakeVLLMServer(FakeEngineServer):
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
                 "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
+                "parallel_config": {"pipeline_parallel_size": self.pp_size},
             }
             return 200, {"vllm_env": env, "vllm_config": config}
         if (method, path) == ("POST", "/v1/chat/completions"):

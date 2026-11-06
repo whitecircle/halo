@@ -23,7 +23,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_announced
+from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_announced
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,
@@ -120,6 +120,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             torch_compile=info.get("enable_torch_compile"),
             dtype=info.get("dtype"),
             quantization=(info["quantization"] or "") if "quantization" in info else None,
+            pipeline_stages=int(info.get("pp_size") or 1),
         )
 
     @property
@@ -152,17 +153,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             )
         return tp_size
 
-    def require_engine_world_size(self) -> int:
+    def read_engine_layout(self, *, require: bool) -> tuple[int, int]:
         info = self._server_info()
-        self._require_toolkit_image(self._flags_in(info))
-        self.probe_generation()
-        return self._world_size_in(info)
-
-    def get_engine_world_size(self) -> int:
-        return self._world_size_in(self._server_info())
-
-    def get_pipeline_size(self) -> int:
-        return int(self._server_info().get("pp_size", 1) or 1)
+        flags = self._flags_in(info)
+        if require:
+            self._require_toolkit_image(flags)
+            self.probe_generation()
+        return self._world_size_in(info), flags.pipeline_stages
 
     def request_engine_join(
         self, master_address: str, port: int, world_size: int, rank_offset: int, group_name: str | None
@@ -174,7 +171,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Unchecked, as with no session open the close answers 400.
         for name in dict.fromkeys((self._own_group_name, self.group_name)):
             self._destroy_group_named(name)
-        announce_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S)
+        log_wait(self.base_url, "its session close before it joins a group", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST",
@@ -225,7 +222,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # Ahead of the remote destroy: /health generates through the scheduler that destroy occupies, so asked during
         # it a healthy engine reads as dead, and aborting here strands its half of the destroy.
         if destroy and group is not None:
-            announce_wait(self.base_url, "/health before the group's destroy", _ENGINE_ANSWER_TIMEOUT_S)
+            log_wait(self.base_url, "/health before the group's destroy", _ENGINE_ANSWER_TIMEOUT_S)
         answers = not (destroy and group is not None) or self._engine_answers()
         # Runs during the local destroy, since under cuMem each side's finalize waits for the other, and even with
         # no local group, or the server refuses every later join. A group that runs it for every server does so itself.
@@ -401,7 +398,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def _destroy_group_named(self, group_name: str) -> None:
         """Best-effort; never masks the caller's failure."""
-        announce_wait(self.base_url, f"weight-update group {group_name!r} to be destroyed", CLEANUP_TIMEOUT_S)
+        log_wait(self.base_url, f"weight-update group {group_name!r} to be destroyed", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST",
@@ -451,8 +448,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
 
     def abort_transport(self) -> None:
         self._aborted = True
-        announce_wait(self.base_url, "the trainer's half of its weight-update group to abort", CLEANUP_TIMEOUT_S)
-        if not abort_weight_update_group(self._transport[0], timeout_s=CLEANUP_TIMEOUT_S):
+        aborting = AsyncCall(partial(abort_weight_update_group, self._transport[0]), name="weight-update abort")
+        wait_announced(
+            aborting, self.base_url, "the trainer's half of its weight-update group to abort", CLEANUP_TIMEOUT_S
+        )
+        if aborting.is_alive():
             self._abort_parked = True
 
     def release_send_buffers(self) -> None:

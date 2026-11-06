@@ -21,7 +21,7 @@ from halo.weight_sync.clients.base import (
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait
+from halo.weight_sync.clients.server_calls import AsyncCall, log_wait
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.packed_broadcast import (
     PACKED_BUFFER_BYTES,
@@ -116,6 +116,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             dtype=model.get("dtype"),
             quantization=(model["quantization"] or "") if "quantization" in model else None,
             instance_id=config.get("instance_id"),
+            pipeline_stages=config.get("parallel_config", {}).get("pipeline_parallel_size"),
         )
 
     def reports_sampled_token_ids(self) -> bool | None:
@@ -161,22 +162,24 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         )
         return not (reply.status_code == 400 and "--tool-call-parser" in reply.text)
 
-    def require_engine_world_size(self) -> int:
+    def read_engine_layout(self, *, require: bool) -> tuple[int, int]:
         # An engine off this wire, off this image, paused or generation-wedged is reported before the group forms.
-        self._check_server_version()
+        if require:
+            self._check_server_version()
         try:
             flags = self.read_server_flags()
         except (requests.exceptions.RequestException, ValueError) as e:
             # As in the preflights, a report that cannot be read refuses nothing; a group needs the launch id, though.
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
+            flags = None
         else:
-            self._require_toolkit_image(flags)
-            self._group_instance = flags.instance_id
-        self.probe_generation()
-        return self.get_engine_world_size()
-
-    def get_engine_world_size(self) -> int:
-        return self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()["world_size"]
+            if require:
+                self._require_toolkit_image(flags)
+                self._group_instance = flags.instance_id
+        if require:
+            self.probe_generation()
+        reply = self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()
+        return reply["world_size"], (flags.pipeline_stages if flags else None) or 1
 
     def request_engine_join(
         self, master_address: str, port: int, world_size: int, rank_offset: int, group_name: str | None
@@ -226,7 +229,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._require_communicator()
 
     def destroy_remote_group(self) -> None:
-        announce_wait(self.base_url, "its weight-transfer engine to shut down", CLEANUP_TIMEOUT_S)
+        log_wait(self.base_url, "its weight-transfer engine to shut down", CLEANUP_TIMEOUT_S)
         try:
             self.request("POST", "/shutdown_weight_transfer_engine", retry=False, timeout=CLEANUP_TIMEOUT_S)
         except Exception as e:

@@ -352,14 +352,24 @@ def test_a_group_refuses_a_per_server_port_and_an_unknown_topology_at_constructi
         )
 
 
-def test_a_pipeline_parallel_sglang_server_is_refused_in_a_group_and_not_per_server(rig):
-    pool, servers, _ = rig("sglang", [1, 1])
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_a_pipeline_parallel_server_is_refused_in_a_group_and_not_per_server(rig, engine):
+    pool, servers, _ = rig(engine, [1, 1])
     servers[1].pp_size = 2
 
     with pytest.raises(RuntimeError, match=r"--pp-size 2.*rollout_sync_topology: per_server"):
         pool.init_communicator("cpu")
 
-    assert SGLangWeightSyncClient(base_url=servers[1].url).require_engine_world_size() == 1
+    assert servers[1].CLIENT_CLASS(base_url=servers[1].url).require_engine_world_size() == 1
+
+
+def test_a_layout_read_asks_each_server_for_its_info_once():
+    server = FakeSGLangServer()
+    try:
+        SGLangWeightSyncClient(base_url=server.url).read_engine_layout(require=False)
+        assert server.count("GET /server_info") == 1
+    finally:
+        server.close()
 
 
 def test_the_group_leader_is_the_first_server_of_the_lowest_node(rig, monkeypatch):
@@ -534,7 +544,10 @@ def test_a_re_form_reads_no_layout_or_launch_from_a_server_that_kept_the_group(r
 
     # vLLM's per-sync identity check is the one read the healthy server still answers; SGLang reports no launch.
     assert _layout_reads(engine, servers[0]) - healthy_before == (1 if engine == "vllm" else 0)
-    assert _layout_reads(engine, servers[1]) - restarted_before >= 2, "the restarted server's layout was not read"
+    # SGLang's one /server_info read carries the world size and the pipeline stages; vLLM adds its flags and world size.
+    restarted_reads = _layout_reads(engine, servers[1]) - restarted_before
+    assert restarted_reads >= (2 if engine == "vllm" else 1), "the restarted server's layout was not read"
+    assert engine == "vllm" or restarted_reads == 1, "SGLang read /server_info more than once for its layout"
     assert pool.group.rank_blocks == [(1, 1), (2, 1)]
 
 

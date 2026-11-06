@@ -16,7 +16,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
-from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_for_calls
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 from halo.weight_sync.update_stream import UpdateStream
@@ -71,6 +71,8 @@ class ServerFlags(NamedTuple):
     # Empty when the server runs unquantized.
     quantization: str | None = None
     instance_id: str | None = None
+    # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
+    pipeline_stages: int | None = None
 
 
 def unservable_bailing_model_types(release: str) -> dict[str, str]:
@@ -180,12 +182,12 @@ class WeightSyncClientBase(UpdateStream, ABC):
         self.check_server(connection_timeout)
 
     @abstractmethod
-    def require_engine_world_size(self) -> int:
-        """Number of engine ranks that will join the group; refuses an engine, image or state no update could reach."""
+    def read_engine_layout(self, *, require: bool) -> tuple[int, int]:
+        """``(engine ranks that will join the group, pipeline stages)`` from one read of the server; refuses a layout no
+        rank can address. ``require`` also refuses an engine, image or state no update could reach."""
 
-    @abstractmethod
-    def get_engine_world_size(self) -> int:
-        """Number of engine ranks that will join the group, read from the server; refuses a layout no rank can address."""
+    def require_engine_world_size(self) -> int:
+        return self.read_engine_layout(require=True)[0]
 
     @abstractmethod
     def request_engine_join(
@@ -246,10 +248,6 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def layout_read_bound_s(self) -> float:
         """The longest a read of the engine's layout can take."""
         return HTTP_PROBE_TIMEOUT_S
-
-    def get_pipeline_size(self) -> int:
-        """Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages collide."""
-        return 1
 
     @property
     def has_transport(self) -> bool:
@@ -599,7 +597,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Close a session left open; never raises, as the caller is already failing."""
         if not self._update_session_open:
             return
-        announce_wait(self.base_url, "the interrupted update session to close", CLEANUP_TIMEOUT_S)
+        log_wait(self.base_url, "the interrupted update session to close", CLEANUP_TIMEOUT_S)
         try:
             self.request(
                 "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=CLEANUP_TIMEOUT_S, **self.SESSION_REQUEST

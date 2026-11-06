@@ -98,8 +98,12 @@ class RendezvousListener:
     def __enter__(self) -> "RendezvousListener":
         return self
 
-    def __exit__(self, *exc_info) -> None:
-        self.close()
+    def __exit__(self, exc_type, *exc_info) -> None:
+        """Free the port unless a store took it over; a failed block frees it even then, its group being released."""
+        if exc_type is None:
+            self.close()
+        else:
+            self.free_port()
 
 
 def _route_source_ip(host: str) -> str:

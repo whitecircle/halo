@@ -32,8 +32,11 @@ _PROBE_RETRY = Retry(
     allowed_methods=["POST", "GET"],
 )
 _PROBE_TIMEOUT_S = 60.0
-# A launch flag the servers of one group must agree on: every one but the image check, and the id each launch has alone.
-_GROUP_UNIFORM_FLAGS = tuple(name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id"))
+# A launch flag the servers of one group must agree on: every one but the image check, the id each launch has alone and
+# the pipeline stages, which the group's layout read refuses.
+_GROUP_UNIFORM_FLAGS = tuple(
+    name for name in ServerFlags._fields if name not in ("toolkit_image", "instance_id", "pipeline_stages")
+)
 
 # The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
 # model is sure of the token but reaches several nats at low-probability ones (Gemma 4 on vLLM, SGLang and the

@@ -10,14 +10,14 @@ logger = logging.getLogger(__name__)
 _POLL_PERIOD_S = 0.005
 
 
-def announce_wait(server: str, what: str, bound_s: float) -> None:
+def log_wait(server: str, what: str, bound_s: float) -> None:
     """Say which server a bounded wait is on, for what, and how long it can last, once at its start."""
     logger.info(f"Waiting on {server} for {what}, for at most {bound_s:.0f}s")
 
 
 def wait_announced(call: "AsyncCall", server: str, what: str, bound_s: float) -> None:
     """Announce a bounded wait on ``call``, join it, and say once if the bound expired with the call still running."""
-    announce_wait(server, what, bound_s)
+    log_wait(server, what, bound_s)
     if call.join(bound_s).is_alive():
         logger.warning(f"Gave up waiting on {server} for {what} after {bound_s:.0f}s; the call is left running")
 

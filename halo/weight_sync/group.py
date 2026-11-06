@@ -9,7 +9,6 @@ import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from operator import methodcaller
 from typing import NoReturn
 
 import torch
@@ -22,7 +21,7 @@ from halo.weight_sync.clients.base import (
     GroupMembershipLost,
     WeightSyncClientBase,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, announce_wait, wait_for_calls
+from halo.weight_sync.clients.server_calls import AsyncCall, log_wait, wait_for_calls
 from halo.weight_sync.group_layout import (
     reject_mixed_localities,
     reject_pipeline_stages,
@@ -91,7 +90,7 @@ class WeightSyncGroup(UpdateStream):
     def init_communicator(self, device: torch.device | str | int = 0) -> None:
         """Form one group over every server, the trainer's half on ``device``; any failure leaves nothing held."""
         sync_device = resolve_sync_device(device)
-        self._resolve_layout(methodcaller("require_engine_world_size"))
+        self._resolve_layout(require=True)
         self.leader.sync_device = sync_device
         self._form()
         atexit.register(self.close_communicator, at_exit=True)
@@ -130,9 +129,7 @@ class WeightSyncGroup(UpdateStream):
     def _urls(self) -> list[str]:
         return [member.base_url for member in self._members]
 
-    def _resolve_layout(
-        self, read_world: Callable[[WeightSyncClientBase], int], read: Sequence[WeightSyncClientBase] | None = None
-    ) -> None:
+    def _resolve_layout(self, *, require: bool, read: Sequence[WeightSyncClientBase] | None = None) -> None:
         """Read the layout of ``read`` (default every server) and give each server a block of ranks, node by node. A
         re-form reads only the servers that lost the group, as a restarted one may come back with another layout while
         one that kept the group is still the engine it formed with."""
@@ -141,8 +138,8 @@ class WeightSyncGroup(UpdateStream):
         def read_layout(member: WeightSyncClientBase) -> tuple[int, int]:
             if read is not None and member not in read:
                 return known[member.base_url]
-            announce_wait(member.base_url, "its parallel layout", member.layout_read_bound_s)
-            return read_world(member), member.get_pipeline_size()
+            log_wait(member.base_url, "its parallel layout", member.layout_read_bound_s)
+            return member.read_engine_layout(require=require)
 
         readings = self._require_all(self._run_on_members(read_layout), "read its layout")
         worlds = [world for world, _ in readings]
@@ -307,7 +304,7 @@ class WeightSyncGroup(UpdateStream):
         halves = self._destroy_remote_halves()
         self.leader.discard_transport(None)
         self._join_all(halves)
-        self._resolve_layout(methodcaller("get_engine_world_size"), lost)
+        self._resolve_layout(require=False, read=lost)
         self._form(lost)
         self._require_all(self._run_on_members(lambda member: member.open_update_session()), "reopen its session")
         return lost
