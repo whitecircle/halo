@@ -110,10 +110,11 @@ class WeightSyncPool:
 
     @property
     def scoring_client(self) -> WeightSyncClientBase:
-        """The first server's client: replicas of one policy answer a probe alike."""
+        """The first server's client (a group's leader): replicas of one policy answer a probe alike."""
         if not self._clients:
             raise RuntimeError("WeightSyncPool has no connected client to score on. Call init_communicator() first.")
-        return self._clients[0]
+        group = self.group
+        return self._clients[0] if group is None else group.leader
 
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None:
         """Narrow every client's co-load groups to the pushed model, rebuilt clients included."""

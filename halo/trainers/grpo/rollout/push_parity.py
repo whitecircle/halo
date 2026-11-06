@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 
 import torch
 
@@ -41,15 +42,14 @@ def _compare_on_rank0(client, token_ids: list[int], trainer_logps: list[float], 
     engine_logps = _scoring_client(client).score_completion_logprobs(token_ids[:1], token_ids[1:])
     gaps = [abs(a - b) for a, b in zip(trainer_logps, engine_logps, strict=True)]
     mean_gap = sum(gaps) / len(gaps) if all(map(math.isfinite, gaps)) else math.inf
-    # Negated so a NaN mean, for which every comparison is False, is flagged too.
-    if not mean_gap <= PARITY_MAX_MEAN_GAP_NATS:
+    if mean_gap > PARITY_MAX_MEAN_GAP_NATS:
         message = (
             f"After the first weight push the rollout engine's log-probs on a {len(token_ids)}-token probe row "
             f"differ from the trainer's by {mean_gap:.2f} nats per position (bound {PARITY_MAX_MEAN_GAP_NATS}): the "
             f"engine may not have taken the pushed weights as sent. It answers 200 for a tensor its loader does "
             f"not map and keeps the launch value, and a mis-stacked or mis-shaped one serves a different model. "
-            f"Compare the pushed names with the engine loader's (tests/gpu/trainers/grpo/test_weight_push_exact.py "
-            f"--reach scales each forwarded name in turn), or serve the checkpoint the trainer started from. A "
+            f"Compare the pushed names with the engine loader's (the exact-push GPU test's reach mode scales each "
+            f"forwarded name in turn), or serve the checkpoint the trainer started from. A "
             f"bf16 trainer-versus-engine floor above the bound (quantized trainers, composites) also reads here: "
             f"HALO_WEIGHT_SYNC_PARITY_PROBE=off silences the probe."
         )
@@ -60,11 +60,26 @@ def _compare_on_rank0(client, token_ids: list[int], trainer_logps: list[float], 
     logger.info(f"Weight-sync parity probe: the engine's log-probs sit {mean_gap:.3f} nats from the trainer's")
 
 
+def _run_on_rank0_or_warn(step: Callable[[], None], mode: str) -> bool:
+    """COLLECTIVE. ``step`` on rank 0 with its failure raised on every rank; under ``warn`` that failure is logged on
+    rank 0 instead and the probe stops, alike on every rank. Returns whether ``step`` ran."""
+    try:
+        run_on_rank0_raising_everywhere(step, refusal_text, ValueError)
+    except ValueError as error:
+        if mode == "raise":
+            raise
+        if is_global_main_process():
+            logger.warning(f"Weight-sync parity probe could not run: {error}")
+        return False
+    return True
+
+
 def verify_first_push_parity(trainer, client) -> None:
     """COLLECTIVE, after each push; acts on the trainer's first only. ``client`` is the main process's sender, ``None``
     elsewhere. Warns on rank 0 when the engine's log-probs on a fixed row differ from the trainer's by more than the
-    bound, and raises on every rank instead under ``HALO_WEIGHT_SYNC_PARITY_PROBE=raise``. Skipped, with a line on rank 0, under context
-    parallelism, whose batches shard the row."""
+    bound, or when the engine cannot be probed, and raises on every rank instead under
+    ``HALO_WEIGHT_SYNC_PARITY_PROBE=raise``. Skipped, with a line on rank 0, under context parallelism, whose batches
+    shard the row."""
     if trainer.first_push_verified:
         return
     trainer.first_push_verified = True
@@ -78,12 +93,9 @@ def verify_first_push_parity(trainer, client) -> None:
         return
     token_ids = counting_probe_token_ids(trainer.processing_class)
     windows: list[int | None] = []
-    run_on_rank0_raising_everywhere(
-        lambda: windows.append(_scoring_client(client).served_max_model_len()), refusal_text, ValueError
-    )
+    if not _run_on_rank0_or_warn(lambda: windows.append(_scoring_client(client).served_max_model_len()), mode):
+        return
     if window := broadcast_from_rank0(windows[0] if windows else None):
         token_ids = token_ids[: window - 1]
     trainer_logps = _trainer_logps(trainer, token_ids)
-    run_on_rank0_raising_everywhere(
-        lambda: _compare_on_rank0(client, token_ids, trainer_logps, mode), refusal_text, ValueError
-    )
+    _run_on_rank0_or_warn(lambda: _compare_on_rank0(client, token_ids, trainer_logps, mode), mode)

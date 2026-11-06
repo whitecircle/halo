@@ -13,6 +13,7 @@ from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironment
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.push_parity import PARITY_MAX_MEAN_GAP_NATS, verify_first_push_parity
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.pool import WeightSyncPool
 
 _ROW = 1100
@@ -28,6 +29,11 @@ class _Engine:
     def score_completion_logprobs(self, prompt_ids, completion_ids):
         self.scored.append((prompt_ids, completion_ids))
         return [-2.0 + self.offset] * len(completion_ids)
+
+
+class _Member(_Engine):
+    BACKEND_NAME = "stub"
+    CO_LOADED_PARAM_GROUPS = ()
 
 
 def _trainer(*, cp: bool = False):
@@ -65,6 +71,35 @@ def test_the_default_probe_warns_and_lets_the_run_go_on(caplog):
     with caplog.at_level("WARNING"):
         verify_first_push_parity(_trainer(), _Engine(offset=3.0))
     assert "may not have taken the pushed weights" in caplog.text
+
+
+class _BrokenEngine(_Engine):
+    def __init__(self, *, fails_at: str):
+        super().__init__()
+        self.fails_at = fails_at
+
+    def served_max_model_len(self):
+        if self.fails_at == "window":
+            raise ConnectionError("engine unreachable")
+        return None
+
+    def score_completion_logprobs(self, prompt_ids, completion_ids):
+        if self.fails_at == "score":
+            raise ConnectionError("engine unreachable")
+        return [-2.0] * (len(completion_ids) - 1)
+
+
+@pytest.mark.parametrize("fails_at", ["window", "score"])
+def test_an_engine_that_cannot_be_probed_is_a_warning_by_default_and_a_refusal_under_raise(
+    fails_at, caplog, monkeypatch
+):
+    with caplog.at_level("WARNING"):
+        verify_first_push_parity(_trainer(), _BrokenEngine(fails_at=fails_at))
+    assert "could not run" in caplog.text
+
+    monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "raise")
+    with pytest.raises(ValueError, match="engine unreachable|zip"):
+        verify_first_push_parity(_trainer(), _BrokenEngine(fails_at=fails_at))
 
 
 def test_an_unknown_probe_mode_is_refused(monkeypatch):
@@ -105,6 +140,19 @@ def test_a_pool_scores_on_its_first_server():
     pool._clients = [first, second]
     verify_first_push_parity(_trainer(), pool)
     assert first.scored and not second.scored
+
+
+def test_a_single_group_pool_scores_on_its_leader():
+    pool = WeightSyncPool(
+        [{"url": "http://a"}, {"url": "http://b"}],
+        connection_timeout=1,
+        client_cls=VLLMWeightSyncClient,
+        base_group_port=0,
+    )
+    leader, follower = _Member(), _Member()
+    pool._clients = [WeightSyncGroup([leader, follower], nodes=["a", "b"], group_port=0, group_host=None)]
+    verify_first_push_parity(_trainer(), pool)
+    assert leader.scored and not follower.scored
 
 
 def test_the_environmental_trainer_probes_after_each_push_it_makes(monkeypatch):
