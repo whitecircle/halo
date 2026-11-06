@@ -13,9 +13,6 @@ logger = logging.getLogger(__name__)
 # A group's chunk waits on its declares and its send, so the poll's period is added to every chunk of every sync.
 _POLL_PERIOD_S = 0.005
 
-# A call whose own deadline equals its wait's bound ends within this share of the bound before the join does.
-_EXPIRY_SLACK = 0.05
-
 
 _TIMEOUTS = (TimeoutError, requests.exceptions.Timeout)
 
@@ -33,16 +30,16 @@ def announced_wait(server: str, what: str, bound_s: float) -> Iterator[None]:
 
 
 def wait_announced(call: "AsyncCall", server: str, what: str, bound_s: float) -> None:
-    """Join ``call`` for at most ``bound_s`` under :func:`announced_wait`. A call still running, ending in a timeout
-    or ending only as the bound ran out (its own deadline matches the bound) has expired; it is left running."""
-    started = time.monotonic()
+    """Join ``call`` for at most ``bound_s`` under :func:`announced_wait`. A call still running after the join or
+    ended in a timeout has expired and is logged once; it is left running, and no error is raised."""
     try:
         with announced_wait(server, what, bound_s):
             call.join(bound_s)
-            ran_out = time.monotonic() - started >= bound_s * (1 - _EXPIRY_SLACK)
-            if call.is_alive() or isinstance(call.error, _TIMEOUTS) or ran_out:
+            if call.is_alive():
                 raise TimeoutError(what)
-    except TimeoutError:
+            if isinstance(call.error, _TIMEOUTS):
+                raise call.error
+    except _TIMEOUTS:
         pass
 
 

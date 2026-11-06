@@ -70,12 +70,40 @@ def test_a_local_release_that_never_returns_says_it_gave_up(monkeypatch, caplog,
     _expect_one_expiry(caplog, client, "trainer's half", "released")
 
 
-def test_a_release_that_ends_on_its_own_deadline_says_it_gave_up(caplog):
-    """A call whose deadline equals the wait's bound returns just as the join does, still dead to ``is_alive``."""
-    call = AsyncCall(lambda: time.sleep(_BOUND_S * 0.99))
+def test_a_call_still_running_after_the_join_is_logged_as_expired(caplog, parked):
+    call = AsyncCall(lambda: parked.wait(30))
     with caplog.at_level(logging.INFO):
         wait_announced(call, "http://s", "its release", _BOUND_S)
     assert len(_gave_up(caplog)) == 1, _gave_up(caplog)
+    assert call.is_alive()
+
+
+@pytest.mark.parametrize("error", [requests.exceptions.ReadTimeout("no answer"), TimeoutError("blocked")])
+def test_a_call_that_ended_in_a_timeout_is_logged_as_expired(caplog, error):
+    def fail():
+        raise error
+
+    call = AsyncCall(fail)
+    with caplog.at_level(logging.INFO):
+        wait_announced(call, "http://s", "its release", 30.0)
+    assert len(_gave_up(caplog)) == 1, _gave_up(caplog)
+
+
+def test_a_call_that_finishes_just_inside_its_bound_is_not_logged_as_expired(caplog):
+    call = AsyncCall(lambda: time.sleep(_BOUND_S * 0.99))
+    with caplog.at_level(logging.INFO):
+        wait_announced(call, "http://s", "its release", _BOUND_S)
+    assert _gave_up(caplog) == [] and call.error is None
+
+
+def test_a_call_that_failed_otherwise_is_not_logged_as_expired(caplog):
+    def refuse():
+        raise ValueError("refused")
+
+    call = AsyncCall(refuse)
+    with caplog.at_level(logging.INFO):
+        wait_announced(call, "http://s", "its release", 30.0)
+    assert _gave_up(caplog) == [] and isinstance(call.error, ValueError)
 
 
 def test_an_abort_that_never_returns_says_it_gave_up(monkeypatch, caplog, parked, short_bounds):

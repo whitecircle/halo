@@ -226,6 +226,7 @@ class WeightSyncGroup(UpdateStream):
 
     @staticmethod
     def _join_all(calls: list[AsyncCall]) -> None:
+        """Each call is a server's destroy request, which announces its own expiry."""
         for call in calls:
             call.join(CLEANUP_TIMEOUT_S)
 

@@ -637,7 +637,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
 
     def _raise_if_server_failed(self, error: Exception, server_call: AsyncCall, hint: str = "") -> None:
         """Raise ``error`` naming the server's own failure, which sits on an unjoined thread, when it recorded one."""
-        server_error = server_call.join(SERVER_ERROR_GRACE_S).error
+        wait_announced(server_call, self.base_url, f"its {server_call.name} call to report", SERVER_ERROR_GRACE_S)
+        server_error = server_call.error
         if server_error is not None and server_error is not error:
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "

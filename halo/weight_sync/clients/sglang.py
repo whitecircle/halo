@@ -236,7 +236,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         )
         if local.is_alive():
             self.abort_transport()
-        if remote is not None:
+        if remote is not None:  # the destroy request announces its own expiry
             remote.join(CLEANUP_TIMEOUT_S)
         # A destroy or abort left running holds the group, and through it the store, so the port is stopped directly.
         if self._rendezvous is not None:
