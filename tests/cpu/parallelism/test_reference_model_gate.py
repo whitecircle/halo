@@ -294,10 +294,6 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
     assert received["ref_model"] is loaded
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 # Sizes of the unsharded reference of a model that fits no GPU, and one that fits any.
 HUGE_REFERENCE_BYTES = 800 * 10**9
 GPU_FREE_BYTES = 270 * 10**9
@@ -411,3 +407,7 @@ def test_the_estimate_is_the_run_dtype_parameter_bytes_of_a_config_only_shell(tm
     assert frozen_models.estimate_reference_bytes(model_config, types.SimpleNamespace(bf16=False, fp16=False)) == (
         4 * expected
     )
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
