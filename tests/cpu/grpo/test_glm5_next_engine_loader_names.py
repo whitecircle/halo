@@ -24,20 +24,25 @@ def pushed_names() -> set[str]:
         return {_INDEX.sub(".N", name) for name in pushed_values(ep_model("glm5_next"))}
 
 
+def _accepted(engine: str) -> set[str]:
+    return set(_RECORD["accepted"]["both"]) | set(_RECORD["accepted"][f"{engine}_only"])
+
+
 def test_the_record_spells_the_experts_the_layout_emits():
-    experts = {name for name in _RECORD["accepted"] if ".mlp.experts." in name}
+    experts = {name for name in _RECORD["accepted"]["both"] if ".mlp.experts." in name}
     gate, up, down = GLM5_NEXT.expert_layout.per_expert_keys
     assert experts == {f"model.language_model.layers.N.mlp.experts.N.{key}.weight" for key in (gate, up, down)}
 
 
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
 def test_every_pushed_name_is_one_the_engine_maps(engine, pushed_names):
-    assert pushed_names <= set(_RECORD["accepted"]), sorted(pushed_names - set(_RECORD["accepted"]))
+    assert pushed_names <= _accepted(engine), sorted(pushed_names - _accepted(engine))
     assert not pushed_names & set(_RECORD["rejected"][engine])
 
 
 def test_the_push_leaves_out_only_the_recorded_names(pushed_names):
-    assert set(_RECORD["accepted"]) - pushed_names == set(_RECORD["left_out"])
+    accepted = _accepted("vllm") | _accepted("sglang")
+    assert accepted - pushed_names == set(_RECORD["left_out"])
 
 
 @pytest.mark.parametrize("backend", rollout_backends())
