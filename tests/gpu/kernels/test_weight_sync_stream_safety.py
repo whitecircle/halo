@@ -13,7 +13,7 @@ import halo.weight_sync.clients.sglang as sglang_module
 import halo.weight_sync.transport.packed_broadcast as packed_broadcast
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.group import WeightSyncGroup
-from halo.weight_sync.staging import PackedChunkStager
+from halo.weight_sync.staging import ArenaChunkStager, PackedChunkStager
 from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, broadcast_packed
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client
@@ -116,6 +116,31 @@ def test_the_group_holds_its_sources_for_the_send_stream_it_sends_on_from_a_work
     _assert_sglang_holds_its_sources(through_group=True)
 
 
+def test_the_arena_waits_for_the_previous_chunks_readers_before_it_overwrites_them():
+    device = torch.device("cuda", torch.cuda.current_device())
+    stager = ArenaChunkStager()
+    first = _sources(device)
+    expected = [source.clone() for source in first]
+    staged = stager.stage([(f"p{i}", s) for i, s in enumerate(first)])
+    reader_stream = torch.cuda.Stream(device=device)
+    reader_stream.wait_event(staged.ready)
+    with torch.cuda.stream(reader_stream):
+        torch.cuda._sleep(_SLEEP_CYCLES)
+        read = [view.clone() for view in staged.wire]
+        done = torch.cuda.Event()
+        done.record(reader_stream)
+    staged.add_reader(done)
+    second = [torch.full((_ELEMENTS,), -2.0, device=device) for _ in range(_TENSORS)]
+    stager.stage([(f"q{i}", s) for i, s in enumerate(second)])
+    torch.cuda.synchronize()
+    stager.release()
+
+    corrupted = [
+        index for index, (got, want) in enumerate(zip(read, expected, strict=True)) if not torch.equal(got, want)
+    ]
+    assert not corrupted, f"the next chunk overwrote the arena before the previous chunk's senders read {corrupted}"
+
+
 @gpu_test_main(exact_world_size=1, prefix="weight_sync_stream_safety", partial_state=False)
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
@@ -131,6 +156,11 @@ def run(ctx) -> dict:
         checks,
         "sglang_group_holds_its_sources",
         test_the_group_holds_its_sources_for_the_send_stream_it_sends_on_from_a_worker_thread,
+    )
+    record_check(
+        checks,
+        "arena_waits_for_readers",
+        test_the_arena_waits_for_the_previous_chunks_readers_before_it_overwrites_them,
     )
     return {"checks": checks}
 
