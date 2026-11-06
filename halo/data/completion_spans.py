@@ -323,9 +323,9 @@ def reject_untrainable_completions(
     span_policy: dict[str, bool],
     subject: str,
 ) -> None:
-    """Refuse completion-only labels that would train no token of any of ``probe_conversations``: a marker the template never
-    emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another family until
-    ``eos_token`` names its closing token."""
+    """Refuse completion-only labels that would train no token of any of ``probe_conversations``: a marker the
+    template never emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another
+    family until ``eos_token`` names its closing token."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
     for text in verify_marker_renders(render, probe_conversations, response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
