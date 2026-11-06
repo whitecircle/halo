@@ -18,6 +18,7 @@ from halo.diagnostics.profiling import log_cuda_memory
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.lora_fold import lora_folded_data
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
 from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
@@ -30,7 +31,7 @@ from halo.models.moe.balancing import (
     resolve_balancing_slot,
 )
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
+from halo.models.peft_adapters import LoraFolds, lora_fold_targets
 from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from halo.runtime.collectives import collective_side_stream
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit

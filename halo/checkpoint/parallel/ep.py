@@ -31,11 +31,12 @@ from halo.checkpoint.writing import (
 from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.lora_fold import lora_folded_data
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from halo.models.external_tables import named_external_tables
 from halo.models.moe.family_specs import find_moe_family_spec, moe_model_types
 from halo.models.param_roles import persistent_buffers
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
+from halo.models.peft_adapters import LoraFolds, lora_fold_targets
 from halo.models.unwrapping import (
     base_transformers_model,
     plain_peft_param_name,

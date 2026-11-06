@@ -344,8 +344,10 @@ Each NCCL weight sync forwards every base weight with its adapter folded in, und
 un-adapted base.
 
 The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
-`halo/models/peft_adapters.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
-for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A fold
+`halo/models/peft_adapters.py`, `lora_folded_data` in `halo/distributed/lora_fold.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
+for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A Conv
+adapter on an FSDP2 shard folds on whole tensors (a DTensor convolution would run on each rank's slice of the
+adapter rank) and reshards the result. A fold
 on FSDP2 shards can differ from a single-device merge by rounding, since the delta's contraction is
 summed across shards. The frozen base is never written: PEFT's in-place merge followed by its unmerge
 would not give it back, since in bf16 `(w + d) - d` misses `w` by a rounding step wherever the two

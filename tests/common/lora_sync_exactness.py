@@ -156,11 +156,11 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
     grows along the walk."""
     fold = peft_adapters.lora_folded
 
-    def recorded(param, layers):
+    def recorded(param, layers, **kwargs):
         torch.cuda.synchronize()
         start = _requested_bytes("current")
         torch.cuda.reset_peak_memory_stats()
-        folded = fold(param, layers)
+        folded = fold(param, layers, **kwargs)
         torch.cuda.synchronize()
         record.append((start, _requested_bytes("peak") - start))
         return folded
