@@ -16,7 +16,9 @@ on every rank in equal number, under R2 capture and R3 replay:
 
 5. the packed recompute captures each row's routing into its own batch slot: a selection that differs from the
    per-row run's has a near-tie margin there (packed bf16 hidden states differ slightly), wide-margin selections
-   match exactly, and a packed forward over tokens shifted one position is caught;
+   match exactly, and a packed forward over tokens shifted one position is caught. The flip count does not depend on
+   the bin plan: varlen attention and the router read each row alone, so a row's gate input is the same in any bin
+   and only the varlen-versus-dense numerics per row can flip a selection;
 6. the packed recompute replays each row its own engine routing, and the window's gradient forwards consume each armed
    mask whole.
 
