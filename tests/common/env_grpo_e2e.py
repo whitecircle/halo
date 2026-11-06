@@ -467,7 +467,7 @@ def record_phase_times(trainer, checks: dict[str, bool], metrics: dict[str, floa
     for phase in SOME_STEP_PHASES:
         checks[f"phase_time_{phase}_logged"] = any(f"phase_time/{phase}_s" in e for e in logged)
     checks["phase_time_slowest_rank_at_least_the_mean"] = bool(logged) and all(
-        entry[key.replace("_s", "_max_s")] >= entry[key] - PHASE_TIME_TOLERANCE_S
+        entry[key.removesuffix("_s") + "_max_s"] >= entry[key] - PHASE_TIME_TOLERANCE_S
         for entry in logged
         for key in entry
         if _is_phase_seconds(key)
