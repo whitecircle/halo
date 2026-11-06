@@ -185,8 +185,9 @@ on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
 ### Dense hybrid SFT
 
 Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. Both linear-attention
-key and value head counts must divide CP2. MoE, adapters, quantized weights, packed rows,
-multimodal models, cache use and other trainers remain refused for this hybrid path.
+key and value head counts must be divisible by CP2, and value heads must be a multiple of key heads.
+MoE, adapters, quantized weights, packed rows, multimodal models, cache use and other trainers
+remain refused for this hybrid path.
 
 `ULYSSES_GATED_DELTA_MAP` installs `Qwen3_5UlyssesGatedDelta` separately from the softmax-attention
 wrappers. One existing fused all-to-all redistributes Q/K/V and decay/beta inputs from sequence

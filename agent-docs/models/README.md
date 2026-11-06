@@ -13,7 +13,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Qwen3 (dense)](qwen3.md) | `qwen3` | — | — | Yes | Yes | Yes ¹ | `examples/sft/qwen3/*` |
 | [Qwen3 MoE](qwen3.md#qwen3-moe) | `qwen3_moe` | Yes | Yes | Yes | Yes | Yes ¹³ | — |
 | [Qwen3-VL (text)](qwen3.md#qwen3-vl) | `qwen3_vl_text` | — | — | Yes ² | No | No | — |
-| [Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | CP2 SFT ¹⁶ | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
+| [Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | Yes (CP2 SFT) ¹⁶ | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | `qwen3_5_moe` | Yes | Yes | No | Yes ³ | Yes ⁴ | `examples/sft/qwen3_5/*-a*b-*` |
 | [Qwen3-Next](qwen3-next.md) | `qwen3_next` | Yes ¹¹ | Yes ¹¹ | No | No | No | `examples/sft/qwen3_next/*` |
 | [Qwen3.8-Flash-Next](qwen4_exp.md) | `qwen4_exp` | Yes ¹² | Yes ¹² | No | No | Yes ¹⁰ ¹³ ¹⁴ | `examples/sft/qwen4_exp/*` |
@@ -65,7 +65,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
 
-¹⁶ [Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) restrictions apply. Native CPU Gloo coverage only; CUDA training lifecycle qualification is pending.
+¹⁶ [Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) restrictions apply.
 
 ## MoE knobs
 
