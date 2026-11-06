@@ -14,8 +14,10 @@ import trl.trainer.grpo_trainer as trl_grpo_trainer
 from trl import GRPOTrainer
 
 import halo.trainers.grpo.environmental.row_order as env_row_order
+import halo.trainers.grpo.online as online_module
 import halo.trainers.grpo.packed_rounds as packed_rounds
 import halo.trainers.grpo.row_order as shared_row_order
+from halo.diagnostics.phase_timers import PhaseTimers
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
@@ -313,6 +315,27 @@ def test_the_round_layout_leads_the_tp_resync_and_the_scorer_in_both_on_policy_t
     assert mro.index(PackedRoundMixin) < mro.index(GRPOTrainer)
     assert DistributedOnlineGRPOTrainer._packs_microbatches is False
     assert DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL is None
+
+
+def test_the_online_weight_push_runs_outside_the_round_being_binned_and_restores_it(monkeypatch):
+    seen = []
+    monkeypatch.setattr(
+        online_module,
+        "sync_trainer_weights",
+        lambda trainer, client: seen.append((trainer._bins_round_scoring, client)),
+    )
+    trainer = types.SimpleNamespace(
+        _bins_round_scoring=True,
+        _phase_timers=PhaseTimers(enabled=False),
+        accelerator=types.SimpleNamespace(is_main_process=True),
+        vllm_generation=types.SimpleNamespace(vllm_client="client"),
+        unbinned_scoring=lambda: PackedRoundMixin.unbinned_scoring(trainer),
+    )
+
+    DistributedOnlineGRPOTrainer._distributed_sync_weights(trainer)
+
+    assert seen == [(False, "client")], "the push's probe forward ran inside the binned round"
+    assert trainer._bins_round_scoring, "the round's own scoring passes must stay binned after the push"
 
 
 if __name__ == "__main__":
