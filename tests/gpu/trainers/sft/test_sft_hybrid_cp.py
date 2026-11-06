@@ -10,6 +10,7 @@ from datasets import Dataset
 from transformers import DataCollatorForSeq2Seq, Qwen3_5ForCausalLM, TrainerCallback
 from trl import SFTConfig
 
+from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_schedule
@@ -23,9 +24,11 @@ from tests.common.resume_export import ResumeExportRoute, run_resume_export, sav
 class EvaluationRecorder(TrainerCallback):
     def __init__(self):
         self.losses = []
+        self.steps = []
 
     def on_evaluate(self, args, state, control, metrics=None, **kwargs):
         self.losses.append(metrics["eval_loss"])
+        self.steps.append(state.global_step)
 
 
 def _dataset(vocab_size, rows):
@@ -63,10 +66,14 @@ def run(ctx):
     )
     training, evaluation = _dataset(len(tokenizer), 18), _dataset(len(tokenizer), 6)
     observed = []
+    efficiency = None
 
     def build_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint):
+        nonlocal efficiency
         recorder = EvaluationRecorder()
         observed.append(recorder)
+        # The resumed arm has two steps; one warms the restored token-count baseline.
+        efficiency = EfficiencyCallback(parallelism, n_warmup_steps=1)
         return DistributedSFTTrainer(
             model=model,
             args=SFTConfig(
@@ -80,6 +87,7 @@ def run(ctx):
                 gradient_checkpointing=args.gc,
                 gradient_checkpointing_kwargs={"use_reentrant": True},
                 logging_steps=1,
+                include_num_input_tokens_seen="all",
                 logging_nan_inf_filter=False,
                 report_to=[],
                 eval_strategy="steps",
@@ -99,7 +107,7 @@ def run(ctx):
             processing_class=tokenizer,
             data_collator=DataCollatorForSeq2Seq(tokenizer, pad_to_multiple_of=2),
             parallelism_config=parallelism,
-            callbacks=[recorder],
+            callbacks=[recorder, efficiency],
         )
 
     route = ResumeExportRoute(
@@ -108,6 +116,15 @@ def run(ctx):
     checks, metrics = run_resume_export(ctx, route, parallelism, base=base, root=root, save_step=2, total_steps=4)
     checks["unbroken_and_resumed_eval_finite"] = len(observed) == 2 and all(
         recorder.losses and all(math.isfinite(loss) for loss in recorder.losses) for recorder in observed
+    )
+    checks["unbroken_and_resumed_eval_steps"] = [recorder.steps for recorder in observed] == [[1, 2, 3, 4], [3, 4]]
+    assert efficiency is not None
+    metrics |= ctx.metrics(efficiency)
+    checks["efficiency_metrics_recorded"] = (
+        math.isfinite(metrics["tokens_per_second"])
+        and metrics["tokens_per_second"] > 0
+        and math.isfinite(metrics["peak_allocated_gb"])
+        and metrics["peak_allocated_gb"] >= 0
     )
     return {"checks": checks, "metrics": metrics}
 

@@ -274,8 +274,12 @@ def _whole_model(ctx, source, tokenizer, batch, checkpointing, attention):
             checks[f"{prefix}/updates/{name}"] = passed
             metrics.update({f"{prefix}/updates/{name}/{key}": value for key, value in values.items()})
         checks[f"{prefix}/clip_active"] = actual["clip_norm"] > MAX_NORM and expected["clip_norm"] > MAX_NORM
-        clipped_norm = sum(value.double().square().sum() for value in actual["clipped"].values()).sqrt()
-        checks[f"{prefix}/clip_achieved"] = float(clipped_norm) <= MAX_NORM * (1 + TOL.clip_achieved_norm_rel)
+        for arm, snapshot in (("cp1", expected), ("cp2", actual)):
+            clipped_norm = float(sum(value.double().square().sum() for value in snapshot["clipped"].values()).sqrt())
+            checks[f"{prefix}/{arm}_clip_achieved"] = (
+                abs(clipped_norm - MAX_NORM) <= MAX_NORM * TOL.clip_achieved_norm_rel
+            )
+            metrics[f"{prefix}/{arm}_clipped_norm"] = clipped_norm
         checks[f"{prefix}/native_gdn_executed"] = actual["convolution_calls"] > 0 and actual["delta_rule_calls"] > 0
         checks[f"{prefix}/optimizer_moved_head"] = bool(actual["updates"]["lm_head.weight"].any())
     # Boundary-only supervision vanishes if the production last-target pairing is removed.

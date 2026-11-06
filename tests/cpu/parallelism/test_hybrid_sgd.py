@@ -76,5 +76,18 @@ def test_sgd_snapshot_and_pair_refuse_invalid_captures(fault):
         hybrid_sgd_step(before, changed, before, 0.1)
 
 
+@pytest.mark.parametrize("arm", ("actual", "expected"))
+@pytest.mark.parametrize("fault", ("nonfinite_ideal", "broadcastable_delta"))
+def test_sgd_pair_refuses_malformed_proof_fields(arm, fault):
+    reference = _native_step(torch.ones(4), torch.full((4,), 0.01))
+    changed = (
+        replace(reference, ideal=torch.full_like(reference.ideal, float("inf")))
+        if fault == "nonfinite_ideal"
+        else replace(reference, delta=reference.delta[:1])
+    )
+    actual, expected = (changed, reference) if arm == "actual" else (reference, changed)
+    assert hybrid_sgd_agreement(actual, expected) == (False, {"finite_and_same_shape": False})
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
