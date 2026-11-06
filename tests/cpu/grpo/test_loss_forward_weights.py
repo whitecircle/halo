@@ -474,6 +474,7 @@ def test_a_round_without_loss_tokens_logs_no_ratio_as_the_pass_does():
     want = _pass_metrics(in_pass, fused)
     assert "sampling/is_ratio_mean" not in want
     assert "sampling/is_ratio_mean" not in got
+    # The two-pass path still logs a logratio_mean on an empty round; the fused path logs none.
     assert LOGRATIO_MEAN_KEY not in got
 
 
