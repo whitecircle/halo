@@ -133,7 +133,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self.pad_token_id = self._tokenizer.pad_token_id
         self.eos_token_id = self._tokenizer.eos_token_id
         self._batch_errors = BatchBuildFence()
-        self._empty_rollout_steps: int = 0
         # Fail at construction, not mid-training: the tokenize-time overflow check needs a real limit.
         self._context_limit()
         reject_straddling_train_groups(

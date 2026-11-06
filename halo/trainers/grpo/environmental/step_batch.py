@@ -146,8 +146,10 @@ def batch_reward_std(rewards: torch.Tensor) -> float:
 
 
 class StepBatchMixin:
+    # The halting streaks; a checkpoint's sidecar carries them across a resume.
     _zero_gradient_rounds = 0
     _policy_gradient_seen = False
+    _empty_rollout_steps = 0
 
     def _build_training_tensors(
         self,

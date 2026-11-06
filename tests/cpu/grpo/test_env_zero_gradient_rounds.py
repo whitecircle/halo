@@ -101,5 +101,18 @@ def test_the_ratio_masks_count_as_no_gradient():
     assert _logged(host) == [1.0, 0.0]
 
 
+def test_a_resumed_streak_spends_the_budget_the_run_had_left():
+    """Persisted with the checkpoint, so two rounds before the restart leave one round of the three after it."""
+    first = _host()
+    for _ in range(2):
+        build(first, list(_TIED))
+    resumed = _host()
+    resumed._restore_halting_counters(first._halting_counters())
+    with pytest.raises(RuntimeError, match="zero_gradient_round_limit=3"):
+        build(resumed, list(_TIED))
+    fresh = _host()
+    build(fresh, list(_TIED))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

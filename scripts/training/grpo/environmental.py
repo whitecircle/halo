@@ -88,6 +88,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_sampler_logprob_reference,
     verify_server_chat_template,
     verify_server_flags,
+    verify_turn_deadline,
 )
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -389,6 +390,13 @@ def main():
         async_config.get_server_urls(),
         single_turn_tokens=prompt_budget + async_config.rollout_max_tokens,
         full_trajectory_tokens=full_trajectory_tokens,
+        backend=async_config.rollout_backend,
+        connection_timeout=async_config.rollout_connection_timeout,
+    )
+    verify_turn_deadline(
+        async_config.get_server_urls(),
+        async_config.rollout_max_tokens,
+        async_config.request_timeout,
         backend=async_config.rollout_backend,
         connection_timeout=async_config.rollout_connection_timeout,
     )

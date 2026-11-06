@@ -6,6 +6,7 @@ watchdog."""
 
 import logging
 import math
+import time
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
@@ -40,6 +41,15 @@ _PROBE_TIMEOUT_S = 60.0
 # Servers probed at once: a thread per server is HTTP only, but 64 simultaneous /server_info reads are a herd.
 _PREFLIGHT_PARALLELISM = env_positive_int("HALO_PREFLIGHT_PARALLELISM", 16)
 _T = TypeVar("_T")
+
+# A timed generation long enough that prefill and the HTTP round trip stay a small share of it, and the fewest tokens
+# a reply may carry for its rate to count.
+_RATE_PROBE_TOKENS = 64
+_RATE_PROBE_MIN_TOKENS = 32
+# One idle sequence decodes faster than the same sequence amid a rollout round, so a turn needing over this share of
+# its deadline at the idle rate is warned about, and one needing over this multiple of it is refused outright.
+_DEADLINE_WARN_SHARE = 0.5
+_DEADLINE_REFUSE_MULTIPLE = 2.0
 
 # The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
 # model is sure of the token but reaches several nats at low-probability ones (Gemma 4 on vLLM, SGLang and the
@@ -346,6 +356,52 @@ def _verify_context_window_on_rank0(
             )
 
 
+def probe_generation_rate(client: WeightSyncClientBase) -> float | None:
+    """Tokens per second of one idle sequence, the better of two timed completions (the first may warm a kernel);
+    ``None`` when neither returned enough tokens to time."""
+    body = {
+        "model": client.served_model_id(),
+        "prompt": "1 2 3 4 5 6 7 8 9 10 11 12",
+        "max_tokens": _RATE_PROBE_TOKENS,
+        "temperature": 0.0,
+        "ignore_eos": True,
+    }
+    rates = []
+    for _ in range(2):
+        start = time.perf_counter()
+        reply = client.request("POST", "/v1/completions", retry=False, timeout=_PROBE_TIMEOUT_S, json=body).json()
+        elapsed = time.perf_counter() - start
+        tokens = reply["usage"]["completion_tokens"]
+        if tokens >= _RATE_PROBE_MIN_TOKENS:
+            rates.append(tokens / elapsed)
+    return max(rates, default=None)
+
+
+def _verify_turn_deadline_on_rank0(
+    client_cls: type[WeightSyncClientBase], urls: list[str], max_tokens: int, request_timeout: float
+) -> None:
+    for url in urls:
+        rate = _probe_server(client_cls, url, probe_generation_rate, None, "time a generation on")
+        if rate is None:
+            continue
+        needed = max_tokens / rate
+        logger.info(
+            f"Rollout server {url}: {rate:.0f} tokens/s on one idle sequence, so a {max_tokens}-token turn takes "
+            f"~{needed:.0f}s of the {request_timeout:g}s request_timeout"
+        )
+        advice = (
+            f"A turn that runs to rollout_max_tokens={max_tokens} needs ~{needed:.0f}s at the {rate:.0f} tokens/s "
+            f"one idle sequence decodes on {url}, against request_timeout={request_timeout:g}s, and a sequence amid a "
+            f"rollout round decodes slower. A timed-out episode trains as a masked row, so the batch keeps only the "
+            f"episodes that finished fast. Set request_timeout to at least {math.ceil(2 * needed)} (and episode_timeout "
+            f"to hold (1 + max_retries) of them), or lower rollout_max_tokens."
+        )
+        if needed > _DEADLINE_REFUSE_MULTIPLE * request_timeout:
+            raise ValueError(f"Even an idle rollout server cannot finish a full turn inside its deadline. {advice}")
+        if needed > _DEADLINE_WARN_SHARE * request_timeout:
+            logger.warning(advice)
+
+
 def _verify_probed_sampler(
     url: str, temperature: float, cuts: list[str], temperature_applied: bool | None, nucleus_renormalized: bool | None
 ) -> None:
@@ -512,6 +568,14 @@ def verify_context_window(
     _on_rank0(
         _verify_context_window_on_rank0, backend, urls, connection_timeout, single_turn_tokens, full_trajectory_tokens
     )
+
+
+def verify_turn_deadline(
+    urls: list[str], max_tokens: int, request_timeout: float, *, backend: str, connection_timeout: float
+) -> None:
+    """COLLECTIVE. Times a short generation on each server and refuses a ``max_tokens`` turn that could not finish
+    inside ``request_timeout`` even at that idle rate; warns where a loaded server would miss it."""
+    _on_rank0(_verify_turn_deadline_on_rank0, backend, urls, connection_timeout, max_tokens, request_timeout)
 
 
 def verify_server_flags(

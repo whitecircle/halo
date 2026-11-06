@@ -169,7 +169,7 @@ def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction()
 class _RoundHost(rm.RolloutMetricsMixin):
     def __init__(self, alarm_rate, *, mask_truncated: bool = False):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        self.async_config = types.SimpleNamespace(truncation_alarm_rate=alarm_rate)
+        self.async_config = types.SimpleNamespace(truncation_alarm_rate=alarm_rate, episode_error_rate_limit=None)
         self.args = types.SimpleNamespace(mask_truncated_completions=mask_truncated)
 
 

@@ -19,11 +19,14 @@ import halo.runtime.consensus as consensus_mod
 import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
 import halo.trainers.parallelism.tp_leader as tp_leader_mod
+from halo.configs.grpo import EarlyStopConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
-from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.repo import load_script_module
@@ -38,7 +41,7 @@ env_grpo_script = load_script_module("scripts/training/grpo/environmental.py")
 _TWO_ENGINES = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
 
 
-class _Host(AsyncRolloutMixin, CheckpointingMixin):
+class _Host(AsyncRolloutMixin, StepBatchMixin, RolloutMetricsMixin, CheckpointingMixin):
     """The real prefetch decision flow with mocked rollout collection, over the real ``_init_async_state`` for a
     two-server run at ``depth``."""
 
@@ -60,6 +63,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         )
         self._init_async_state()
         self.model = types.SimpleNamespace(training=True)
+        self.callback_handler = types.SimpleNamespace(callbacks=[])
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
         self.parallelism_config = types.SimpleNamespace(data_parallel_size=1, get_data_parallel_rank=lambda: 0)
         # profiling_context reads these on the acquire path; report_to=[] makes it a no-op.
@@ -888,7 +892,8 @@ def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
     host._prefetch_enabled = False
     host._prefetch_pending = _pending("b2")
     host._persist_trainer_sidecars(str(tmp_path))
-    assert list(tmp_path.iterdir()) == []
+    host._restore_trainer_sidecars(str(tmp_path))
+    assert host._resumed_prefetch_rounds == []
 
     saved = _Host()
     saved._prefetch_pending = _pending("b2")
@@ -992,6 +997,7 @@ class _SteppingHost(_T):
         self.events: list[tuple] = []
         self._prefetch_queue = _PopLog(self._prefetch_queue.maxsize, self.events)
         self._prefetch_input_queue = _SubmitLog(self._prefetch_input_queue.maxsize, self.events)
+        self.callback_handler = types.SimpleNamespace(callbacks=[])
         self.model = types.SimpleNamespace(training=True)
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
         self.parallelism_config = types.SimpleNamespace(
@@ -1120,6 +1126,45 @@ def test_one_server_that_opts_in_resumes_the_rounds_it_had_in_flight(monkeypatch
     resumed = _SteppingHost(_SERVERS[servers], enable_prefetch=True, depth=depth)
     resumed._restore_trainer_sidecars(str(tmp_path))
     assert [prompts for prompts, _contexts in resumed._resumed_prefetch_rounds] == pending
+
+
+def _early_stop(streak: int = 0) -> GRPOEarlyStopCallback:
+    callback = GRPOEarlyStopCallback(EarlyStopConfig(entropy_band=(0.1, 1.0), patience=3), "gap")
+    callback.streaks = {"entropy": streak} if streak else {}
+    return callback
+
+
+def test_a_resume_keeps_the_halting_patience_it_had_left(tmp_path):
+    """Else a supervisor that resumes a dying run from its newest checkpoint grants it a full budget each cycle."""
+    before = _Host()
+    stop = _early_stop(streak=2)
+    before.callback_handler.callbacks.append(stop)
+    before._zero_gradient_rounds, before._policy_gradient_seen = 30, True
+    before._empty_rollout_steps, before._episode_error_rounds = 1, 2
+    before._persist_trainer_sidecars(str(tmp_path))
+
+    resumed = _Host()
+    resumed_stop = _early_stop()
+    resumed.callback_handler.callbacks.append(resumed_stop)
+    resumed._restore_trainer_sidecars(str(tmp_path))
+
+    assert (resumed._zero_gradient_rounds, resumed._policy_gradient_seen) == (30, True)
+    assert (resumed._empty_rollout_steps, resumed._episode_error_rounds) == (1, 2)
+    assert resumed_stop.streaks == {"entropy": 2}
+    # The restored streak is what makes the next breaching reading the third.
+    resumed_stop.on_log(None, types.SimpleNamespace(global_step=7), types.SimpleNamespace(), logs={"entropy": 5.0})
+    assert resumed_stop.stopped
+
+
+def test_the_counters_are_saved_and_restored_whether_or_not_the_run_prefetches(tmp_path):
+    host = _Host()
+    host._prefetch_enabled = False
+    host._empty_rollout_steps = 1
+    host._persist_trainer_sidecars(str(tmp_path))
+    resumed = _Host()
+    resumed._prefetch_enabled = False
+    resumed._restore_trainer_sidecars(str(tmp_path))
+    assert resumed._empty_rollout_steps == 1
 
 
 if __name__ == "__main__":

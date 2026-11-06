@@ -80,7 +80,7 @@ def batch_host(
     host._forced_close_ids = forced_close_ids
     host._isr_mask_config = isr_mask_config or ISRMaskConfig()
     host._breaker_tripped_this_step = False
-    host._empty_rollout_steps = 0
+    host.callback_handler = types.SimpleNamespace(callbacks=[])
     host._routing_injector = None
     host._batch_errors = BatchBuildFence()
     host.vllm_importance_sampling_clip_max = 2.0

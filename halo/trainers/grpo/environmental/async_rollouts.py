@@ -12,6 +12,7 @@ import time
 import weakref
 from collections import deque
 from functools import partial
+from typing import Any
 
 import ray
 import torch
@@ -35,6 +36,7 @@ from halo.runtime.ranks import (
     get_num_nodes,
     is_global_main_process,
 )
+from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -459,17 +461,40 @@ class AsyncRolloutMixin:
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
         """Write this rank's pending rounds, oldest first, which a resume submits again first: they left the dataloader
         untrained, and the resumed one starts past them. A TP/ETP follower holds none and writes an empty list, so
-        every rank has its file."""
+        every rank has its file. The halting counters ride beside them, so a resumed run keeps the patience it had
+        left."""
         super()._persist_trainer_sidecars(checkpoint_dir)
-        if not self._prefetch_enabled:
-            return
         path = os.path.join(checkpoint_dir, prefetch_pending_filename(get_global_rank(), get_global_world_size()))
-        payload = {"layout": self._prefetch_round_layout(), "rounds": list(self._prefetch_pending)}
+        payload = {
+            "layout": self._prefetch_round_layout(),
+            "rounds": list(self._prefetch_pending) if self._prefetch_enabled else [],
+            "halting": self._halting_counters(),
+        }
         guard = DeferredRankFailure(f"pending prefetch rounds write to {checkpoint_dir}")
         # Ray's pickler, which ships the same contexts: a row's may carry a callable (an answer
         # ``validator``) that the stdlib pickler refuses.
         guard.run(partial(atomic_torch_save, path, lambda: payload, pickle_module=ray.cloudpickle))
         guard.reject()
+
+    def _halting_counters(self) -> dict[str, Any]:
+        """The streaks the run's halting rules count, which a restart would otherwise reset to a full patience budget."""
+        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        return {
+            "zero_gradient_rounds": self._zero_gradient_rounds,
+            "policy_gradient_seen": self._policy_gradient_seen,
+            "empty_rollout_steps": self._empty_rollout_steps,
+            "episode_error_rounds": self._episode_error_rounds,
+            "early_stop_streaks": {} if stop is None else dict(stop.streaks),
+        }
+
+    def _restore_halting_counters(self, counters: dict[str, Any]) -> None:
+        self._zero_gradient_rounds = counters["zero_gradient_rounds"]
+        self._policy_gradient_seen = counters["policy_gradient_seen"]
+        self._empty_rollout_steps = counters["empty_rollout_steps"]
+        self._episode_error_rounds = counters["episode_error_rounds"]
+        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        if stop is not None:
+            stop.streaks = dict(counters["early_stop_streaks"])
 
     def _prefetch_round_layout(self) -> dict[str, int]:
         """What a round's prompts were drawn and grouped under; a resume under another layout drops them."""
@@ -501,6 +526,8 @@ class AsyncRolloutMixin:
                     "skipped and the next ones trained twice."
                 )
             return
+        if "halting" in payload:
+            self._restore_halting_counters(payload["halting"])
         if not self._prefetch_enabled:
             if payload["rounds"] and is_global_main_process():
                 logger.warning(

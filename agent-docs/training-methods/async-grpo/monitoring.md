@@ -142,6 +142,20 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 
 Every rank writes its own part into its node's `output_dir`, so no rank gathers another's trajectories and a node's directory holds its own ranks' parts on per-node storage; only the tables' sample reaches global rank 0. A failed write (a full disk, a wandb outage) fails the step on every rank.
 
+## Halts
+
+Three rules end a run whose rounds train on nothing or on a biased sample, each raising on every rank:
+
+| Rule | Halts when |
+|---|---|
+| Empty steps | two steps in a row hold no valid episode anywhere in the world |
+| [`zero_gradient_round_limit`](../../reference/configuration-reference.md#asyncrolloutconfig) | that many train rounds in a row carry no policy gradient, in a launch that has not trained yet |
+| `episode_error_rate_limit` | the world-wide `episode/error_rate` of a train round stays over it (0.5) for `episode_error_round_limit` rounds (3) in a row |
+
+An episode that errored or outran `request_timeout` trains as a masked row and stays out of the baseline, so a run whose slow episodes time out learns from the fast ones alone, toward short answers; half the episodes failing three rounds running is far past a grader blip. The error rate is logged as `episode/error_rate` every round, and the startup preflight times a short generation per server and warns when a full `rollout_max_tokens` turn could not finish inside `request_timeout` ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
+
+The counters of all three, and the early-stop streaks below, are written beside the pending prefetch rounds in each checkpoint and read back on a resume, so a restart continues the patience budget instead of granting a full one.
+
 ## Early stop
 
 Off unless a condition is set. A KL-free run drifts in either direction, toward entropy collapse or explosion, and both start slowly enough to stop on. Each condition counts its consecutive breaching readings; when one reaches `early_stop_patience` (default 3), training ends on a verdict taken across ranks.

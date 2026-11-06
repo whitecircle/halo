@@ -409,6 +409,19 @@ class AsyncRolloutConfig(
             "sampling/zero_gradient_round. Positive; null = off."
         },
     )
+    episode_error_rate_limit: float | None = field(
+        default=0.5,
+        metadata={
+            "help": "Raise once a train round's world-wide episode/error_rate (episodes that errored or timed out, "
+            "which train as masked rows) is over this for episode_error_round_limit rounds in a row: the batch is "
+            "then mostly the episodes that finished fast, a bias toward short answers, or the rollout path is down. "
+            "In [0, 1); null = off. See agent-docs/training-methods/async-grpo/monitoring.md."
+        },
+    )
+    episode_error_round_limit: int = field(
+        default=3,
+        metadata={"help": "Consecutive train rounds over episode_error_rate_limit that raise. Positive."},
+    )
     tool_parser_watch_rounds: int | None = field(
         default=2,
         metadata={
@@ -549,6 +562,8 @@ class AsyncRolloutConfig(
         # A rate is never above 1, so a threshold at 1 would never fire.
         require_finite(owner, ge=0, lt=1, **present(truncation_alarm_rate=self.truncation_alarm_rate))
         require_int(owner, ge=1, **present(zero_gradient_round_limit=self.zero_gradient_round_limit))
+        require_finite(owner, ge=0, lt=1, **present(episode_error_rate_limit=self.episode_error_rate_limit))
+        require_int(owner, ge=1, episode_error_round_limit=self.episode_error_round_limit)
         require_int(owner, ge=1, **present(tool_parser_watch_rounds=self.tool_parser_watch_rounds))
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
