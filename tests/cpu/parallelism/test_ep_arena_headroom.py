@@ -12,6 +12,7 @@ from halo.distributed.expert_parallel.deepep.backends import _ElasticBackend
 from halo.distributed.expert_parallel.deepep.capacity import (
     ARENA_HEADROOM,
     EP_CAPACITY_ALIGN,
+    aligned_dispatch_ceiling,
     arena_capacity,
     capacity_scope,
     max_dispatch_capacity,
@@ -71,6 +72,15 @@ def test_headroom_never_exceeds_what_the_dispatch_check_allows(needed, spans_dom
             reject_oversized_dispatch(needed, **wire)
         return
     reject_oversized_dispatch(arena_capacity(needed, **wire), **wire)
+
+
+@pytest.mark.parametrize("spans_domains", [False, True])
+def test_the_aligned_ceiling_is_the_limit_rounded_down_to_the_block(spans_domains):
+    wire = {"num_topk": 8, "padded_hidden": 2048, "spans_domains": spans_domains}
+    limit = max_dispatch_capacity(**wire)
+    ceiling = aligned_dispatch_ceiling(**wire)
+    assert ceiling % EP_CAPACITY_ALIGN == 0 and limit - EP_CAPACITY_ALIGN < ceiling <= limit
+    reject_oversized_dispatch(ceiling, **wire)
 
 
 def test_every_rank_of_a_group_builds_the_same_size():

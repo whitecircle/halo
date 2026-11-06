@@ -119,13 +119,20 @@ def max_dispatch_capacity(*, num_topk: int, padded_hidden: int, spans_domains: b
     return limit
 
 
+def aligned_dispatch_ceiling(*, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
+    """:func:`max_dispatch_capacity` rounded down to :data:`EP_CAPACITY_ALIGN`, the largest capacity an arena or a
+    token budget can take."""
+    limit = max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
+    return limit // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN
+
+
 def arena_capacity(needed: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
     """The tokens/rank to build or grow an elastic arena to: ``needed`` times :data:`ARENA_HEADROOM` rounded up to
-    :data:`EP_CAPACITY_ALIGN`, held to the largest aligned capacity :func:`max_dispatch_capacity` allows and never
-    below ``needed``. A function of group-uniform inputs, so every rank of the group builds the same size."""
-    ceiling = max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
+    :data:`EP_CAPACITY_ALIGN`, held to :func:`aligned_dispatch_ceiling` and never below ``needed``. A function of
+    group-uniform inputs, so every rank of the group builds the same size."""
+    ceiling = aligned_dispatch_ceiling(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
     headroom = ep_dispatch_capacity(math.ceil(needed * ARENA_HEADROOM))
-    return max(needed, min(headroom, ceiling // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN))
+    return max(needed, min(headroom, ceiling))
 
 
 def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> None:
