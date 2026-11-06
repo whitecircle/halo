@@ -638,5 +638,36 @@ def test_a_re_form_announces_the_layout_read_of_each_server_it_reads_and_only_th
     assert reads[0].endswith(f"for at most {bound}s"), reads
 
 
+_STEP_DELAY_S = 0.3
+_SESSION = {
+    "sglang": ("/begin_weight_update", "/end_weight_update"),
+    "vllm": ("/start_weight_update", "/finish_weight_update"),
+}
+
+
+@pytest.mark.parametrize("engine", _ENGINES)
+def test_four_servers_cost_one_servers_wait_at_every_step_of_a_push(rig, engine):
+    """Each per-server call of a push (pause, session, declare, close, resume) delays its reply; the calls overlap
+    across servers, so four servers wait about one server's time, not four times it."""
+
+    def timed_push(worlds: list[int]) -> float:
+        pool, servers, _ = rig(engine, worlds)
+        pool.init_communicator("cpu")
+        for server in servers:
+            for path in (_PAUSE[engine], _RESUME[engine], _DECLARE[engine], *_SESSION[engine]):
+                server.delay_s[path] = _STEP_DELAY_S
+        started = time.monotonic()
+        _push(pool, 2)
+        return time.monotonic() - started
+
+    one = timed_push([1])
+    four = timed_push([1, 1, 1, 1])
+
+    assert one > 3 * _STEP_DELAY_S, f"the delays never reached the push ({one:.2f}s), so the test would be vacuous"
+    assert four < 1.5 * one, (
+        f"four servers took {four:.2f}s against {one:.2f}s for one: the per-server calls ran in turn"
+    )
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

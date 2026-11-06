@@ -4,6 +4,7 @@ failure keeps its state change."""
 import json
 import re
 import threading
+import time
 from collections import deque
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,7 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
 class FakeEngineServer:
     """One engine's routes on a loopback port, with failures scripted per path. ``status[path]`` answers every request;
     ``replies[path]`` answers the next ones first. ``refuse`` answers 503 before the engine acts; ``hold`` keeps the
-    reply until :meth:`release`."""
+    reply until :meth:`release`; ``delay_s[path]`` delays each reply."""
 
     CLIENT_CLASS: type[WeightSyncClientBase]
     # vLLM's raw default, its processed mode (temperature and nucleus renormalization), or SGLang's (temperature only).
@@ -75,6 +76,7 @@ class FakeEngineServer:
         self.replies: dict[str, deque[int]] = {}
         self.refuse: set[str] = set()
         self.hold: set[str] = set()
+        self.delay_s: dict[str, float] = {}
         self._released = threading.Event()
         self._lock = threading.Condition()
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -108,6 +110,8 @@ class FakeEngineServer:
                 scripted = self.replies.get(path)
                 code = scripted.popleft() if scripted else self.status.get(path, code)
             self._lock.notify_all()
+        if path in self.delay_s:
+            time.sleep(self.delay_s[path])
         if path in self.hold:
             self._released.wait()
         payload = json.dumps(reply).encode()
