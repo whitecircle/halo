@@ -79,8 +79,19 @@ class NativeTool:
     async_handler: Callable[..., Any] | None = None
     # Observation for a call over the episode budget; ``None`` takes the generic wording.
     budget_message: str | None = None
+    # A JSON-schema object shown to the engine as ``parameters`` in place of one built from ``parameters`` (an
+    # MCP server's ``inputSchema``), which keeps what a ToolParameter has no field for: array ``items``, nested
+    # objects, ``anyOf``, ``$defs``. Admission still checks ``parameters``.
+    input_schema: dict[str, Any] | None = None
 
     def to_openai_schema(self) -> dict[str, Any]:
+        """The function declaration the engine reads. ``input_schema`` wins when set, so a server-authored schema
+        reaches the model with its array items, nested objects and references intact."""
+        if self.input_schema is not None:
+            return {
+                "type": "function",
+                "function": {"name": self.name, "description": self.description, "parameters": self.input_schema},
+            }
         properties = {}
         required = []
 

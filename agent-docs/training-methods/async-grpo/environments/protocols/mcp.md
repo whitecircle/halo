@@ -26,7 +26,12 @@ environment_kwargs:
 
 ## Tools
 
-Whatever the server advertises, discovered on the first episode. A call that hangs returns a tool error after 120 s.
+Whatever the server advertises, discovered on the first reset and shown to the model as the server wrote the schema:
+array `items`, nested objects and `anyOf` survive, and only the `$schema` draft URL is dropped. The block is
+therefore longer than a flattened one, and because the tools do not exist before that reset, the startup
+context-window check leaves them out of its prompt overhead and logs a warning. Admission still checks the declared
+properties, so a schema that explicitly permits extra keys through `additionalProperties` or `patternProperties`
+will have those calls refused before the server. A call that hangs returns a tool error after 120 s.
 
 The `filesystem` server's allowlist is a fresh directory under `TMPDIR`. Under `episode_scratch` an
 episode's first tool call starts its own server over its own directory, so concurrent episodes (a GRPO
