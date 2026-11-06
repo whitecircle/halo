@@ -13,6 +13,7 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
+from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_int, env_str
@@ -225,6 +226,18 @@ def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, t
     if guard.reason is not None:
         raise RuntimeError(f"the sync's forwarder refused the expected tensors: {guard.reason}")
     return {param.name: param.value for param in recorder.params}
+
+
+@contextmanager
+def gathering_on_the_host() -> Iterator[None]:
+    """The push asks for its experts on the GPU, which the CPU tier does not have."""
+    start = EPGatherMixin.start_gather_expert_state_dict
+
+    def on_host(self, *, device="cpu", **kwargs):
+        return start(self, device="cpu", **kwargs)
+
+    with patch.object(EPGatherMixin, "start_gather_expert_state_dict", on_host):
+        yield
 
 
 @contextmanager

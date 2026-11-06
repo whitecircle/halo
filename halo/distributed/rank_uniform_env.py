@@ -17,7 +17,7 @@ from halo.distributed.expert_parallel.deepep.settings import (
     EP_CAPACITY_DEDUP,
 )
 from halo.distributed.grad_reduce import GRAD_BUCKET_MB
-from halo.env import fs_probe_timeout, nccl_timeout, store_timeout
+from halo.env import fs_probe_timeout, nccl_timeout, store_timeout, weight_sync_gather_ahead
 from halo.model_loading.dtype import resolved_float32_matmul_precision
 from halo.models.attention.sdpa_flex_sliding import flex_sliding_enabled
 from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV, flash_attention_deterministic
@@ -49,6 +49,7 @@ def rank_uniform_settings() -> dict[str, object]:
         FLASH_ATTENTION_DETERMINISTIC_ENV: flash_attention_deterministic(),
         "HALO_FLEX_SLIDING": flex_sliding_enabled(),
         "HALO_FP32_MATMUL_PRECISION": resolved_float32_matmul_precision(),
+        "HALO_WEIGHT_SYNC_GATHER_AHEAD": weight_sync_gather_ahead(),
     }
 
 
@@ -72,8 +73,9 @@ def agree_rank_uniform_env() -> None:
         "first, DIST_FS_PROBE_TIMEOUT_SECONDS how long every rank looks for the filesystem probe's file, "
         "FLASH_ATTENTION_DETERMINISTIC which attention backend a head_dim-256 model loads (FA4 or its "
         "fallback), HALO_FLEX_SLIDING which one an SDPA run of a sliding-window model loads, "
-        "HALO_FP32_MATMUL_PRECISION whether a rank's fp32 matmuls round through TF32, and the rest are wire "
-        "parameters shared by both ends of the all-to-all.",
+        "HALO_FP32_MATMUL_PRECISION whether a rank's fp32 matmuls round through TF32, "
+        "HALO_WEIGHT_SYNC_GATHER_AHEAD the order in which the RL weight sync issues its expert gathers, and the "
+        "rest are wire parameters shared by both ends of the all-to-all.",
     )
     # Agreed by now, so a refused count raises on every rank before a save's first gather.
     validate_checkpoint_write_threads(resolve_checkpoint_write_threads())

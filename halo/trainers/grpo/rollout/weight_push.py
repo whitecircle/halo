@@ -19,7 +19,7 @@ from halo.distributed.expert_parallel.families.roster import ep_layer_classes_fo
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
-from halo.env import env_flag, env_non_negative_int
+from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from halo.models.config_access import config_model_types, get_config_field
@@ -353,7 +353,7 @@ def _send_ep_expert_weights(
     The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and retaining stops
     after a failure. The gather stays in step through a failed retained receive
     (:meth:`~halo.distributed.expert_parallel.moe_layer.gather.EPGatherMixin.gather_expert_tensors`)."""
-    ahead = env_non_negative_int("HALO_WEIGHT_SYNC_GATHER_AHEAD", 1)
+    ahead = weight_sync_gather_ahead()
     layers = list(ep_layers.items())
     stream = collective_side_stream() if ahead else None
     issued: deque = deque()

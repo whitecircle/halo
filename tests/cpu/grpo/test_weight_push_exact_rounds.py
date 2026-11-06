@@ -12,14 +12,13 @@ import pytest
 import torch
 
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.moe.family_specs import BAILING
 from tests.common import weight_push_exact
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.weight_sync import RecordingSender
+from tests.common.weight_sync import RecordingSender, gathering_on_the_host
 
 _ROWS = [[1, 2, 3, 4], [5, 6, 7], [8, 9, 10], [11, 12, 13]]
 _GATE_WEIGHT = "gate.weight"
@@ -95,12 +94,11 @@ def _engine_scores_of_the_trainer(model, rows, device) -> list[float]:
 @pytest.fixture
 def run_row(monkeypatch):
     """Drive one row against ``engine_args`` with ``as_served`` on the server. Single rank, on the host."""
-    start = EPGatherMixin.start_gather_expert_state_dict
-    monkeypatch.setattr(
-        EPGatherMixin,
-        "start_gather_expert_state_dict",
-        lambda self, *, device="cpu", **kwargs: start(self, device="cpu", **kwargs),
-    )
+    with gathering_on_the_host():
+        yield _row_runner(monkeypatch)
+
+
+def _row_runner(monkeypatch):
     model = _tiny_ep_ling()
     recorder = RecordingSender(keep_values=True)
     weight_push_exact.sync_weights_to_client(model, recorder, True, True)

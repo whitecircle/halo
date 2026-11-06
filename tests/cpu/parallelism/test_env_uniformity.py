@@ -86,6 +86,15 @@ def test_the_grad_bucket_knob_is_in_the_compared_set():
     assert "HALO_GRAD_BUCKET_MB" in rank_uniform_env.rank_uniform_settings()
 
 
+@pytest.mark.parametrize(("value", "expected"), [(None, 1), ("0", 0), ("3", 3)])
+def test_the_weight_sync_gather_order_is_compared_across_ranks(value, expected):
+    """Ranks issuing their expert gathers in different orders run different collective sequences."""
+    env = {} if value is None else {"HALO_WEIGHT_SYNC_GATHER_AHEAD": value}
+    with patch.dict(os.environ, env):
+        settings = rank_uniform_env.rank_uniform_settings()
+    assert settings["HALO_WEIGHT_SYNC_GATHER_AHEAD"] == expected
+
+
 def _count_joins(monkeypatch) -> list:
     calls: list = []
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)

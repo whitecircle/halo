@@ -14,7 +14,6 @@ import torch
 from peft import LoraConfig, get_peft_model
 
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS
@@ -30,7 +29,7 @@ from tests.common.lora_sync_exactness import syncable_moe_families
 from tests.common.parallelism import single_process_ep_config
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.weight_sync import RecordingSender, Wire, offline_client
+from tests.common.weight_sync import RecordingSender, Wire, gathering_on_the_host, offline_client
 
 _BIAS = "gate.expert_bias"
 _PARITY_FIXTURES = os.path.join(REPO_ROOT, "docker", "vllm", "parity", "fixtures")
@@ -49,14 +48,9 @@ _LEFT_OUT_OF_THE_PUSH = {
 
 
 @pytest.fixture(autouse=True)
-def _gather_on_the_host(monkeypatch):
-    """The push asks for its experts on the GPU, which the CPU tier does not have."""
-    start = EPGatherMixin.start_gather_expert_state_dict
-
-    def on_host(self, *, device="cpu", **kwargs):
-        return start(self, device="cpu", **kwargs)
-
-    monkeypatch.setattr(EPGatherMixin, "start_gather_expert_state_dict", on_host)
+def _gather_on_the_host():
+    with gathering_on_the_host():
+        yield
 
 
 def _ep_model(family: str, overrides: dict | None = None):
