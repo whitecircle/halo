@@ -124,8 +124,8 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 ## Export and serve
 
 Smoke-test a text-only export with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
-transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so it scores 0.05–0.09 nats
-worse on real text than the run did. To serve the export, rebuild the composite, which also streams back the
+transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so its loss on real text reads
+0.05–0.09 nats higher than under the run's limit. To serve the export, rebuild the composite, which also streams back the
 vision tower and, unless the run trained one with `mtp_loss_weight`, the `mtp.*` head at the release's weights:
 
 ```bash

@@ -17,11 +17,13 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
     Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
 - **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110), the
-  [EP phase split](#where-the-ep-steps-time-goes), [recipes and real text](#recipes-and-real-text) and the NUMA A/B ran on 1.2.0 code; every other table ran on Halo
+  [EP phase split](#where-the-ep-steps-time-goes), [recipes and real text](#recipes-and-real-text), the NUMA A/B and the
+  [framework comparison on Halo 1.2.0 against TRL, NeMo AutoModel and Megatron Bridge](#long-context-against-trl-nemo-automodel-and-megatron-bridge) ran on 1.2.0 code; every other table ran on Halo
   1.1.0 code or earlier. Those older rows predate 1.2.0's
   MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
   ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
   tok/s than the clock these rows used. Their per-GPU rates count a shared batch once ([Metrics](#metrics)).
+- **cuBLAS pin**: the image's pinned cuBLAS ([Docker](../infrastructure/docker.md)) leaves SFT throughput unchanged: 38,939 against 39,183 tok/s/GPU on one GPU (steps 3–20) and 17,279 against 17,286 at EP8 (steps 3–10), so the 1.2.0 SFT rates below stand for this release.
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
 - **Cold compiles**: on a fresh `TRITON_CACHE_DIR` a recipe's first ~20 steps run about 40% of its steady rate while one-off kernels compile, once per kernel shape: Qwen3.5-35B-A3B's recipe reads about 7,100 tok/s/GPU cold against 17,225 warm. Read a rate on a warm cache.
@@ -76,8 +78,220 @@ Nemotron-H's on [its page](../models/nemotron-h.md#memory).
 
 ## Full-parameter SFT framework comparison
 
+### Long context against TRL, NeMo AutoModel and Megatron Bridge
+
+Full-parameter SFT on 8× B300, bf16, gradient checkpointing except where a layout note says otherwise. The data is
+UltraChat 200k rendered with each model's chat template and packed from whole documents into rows of exactly 64k or
+128k tokens (about 55 and 109 documents per row; the longest document is 4,579 tokens, so long means long packed
+rows). Every framework reads the same rows with documents isolated, and rates count attended tokens. Cells are
+tok/s/GPU (peak GiB); † marks an nvidia-smi peak.
+
+| Model, tokens per row | Halo 1.2.0 | Megatron Bridge | TRL 1.17.1 | NeMo AutoModel 0.7.0 |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B, 64k | 17,206 (54.3) | **19,431** (245.5†) | 14,735 (56.0) | 10,360 (99.3) |
+| Qwen3.5-9B, 128k | 17,093 (82.1) | **17,348** (241.1†) | 14,601 (86.8) | 9,451 (166.4) |
+| Qwen3.6-35B-A3B, 64k | **23,637** (139.1) | 21,559 (224.6†) | 16,126 (138.8) | 12,340 (99.1) |
+| Qwen3.6-35B-A3B, 128k | **23,647** (139.1) | 21,109 (244.2†) | 16,112 (138.8) | 12,026 (139.3) |
+| Qwen3.5-122B-A10B, 64k | **8,933** (188.7) | 4,781 (254.0†) | 5,936 (194.5) | 5,397 (219.3) |
+| Qwen3.5-122B-A10B, 128k | **8,943** (188.7) | does not fit | 5,951 (194.5) | 4,683 (227.1) |
+
+Versions: Halo 1.2.0 (image `blackwell-1.2.0`); TRL 1.17.1 with Transformers 5.20.2, Liger 0.8.2 and FA4 4.0.0b37 on that
+image; NeMo AutoModel 0.7.0 (container 26.10.00, Transformers 5.18.0); Megatron Bridge from the NeMo 26.10 container, a
+0.7.0 release-candidate commit with Megatron Core 0.20.0.
+
+Layouts, each framework's best found:
+
+- **Halo.** Dense 9B on DP8 ZeRO-2. MoE on EP1 with FSDP-sharded experts, ZeRO-2 for the 35B and ZeRO-3 with
+  expandable segments for the 122B. FA4, fused linear cross-entropy, full checkpointing. Batch 2 at 64k for the MoE
+  models, batch 1 elsewhere.
+- **Megatron.** 9B on TP2 (64k) and TP4 (128k) with sequence parallelism and no recompute. 35B on EP2 with two micro-batches per step (64k, the tokens per
+  step of Halo's batch 2; 20,273 at one) and EP4 (128k). 122B on TP8 with an fp16 master copy and bf16 moments. At 128k the 122B runs only with the optimizer
+  offloaded to the CPU (1,935 tok/s/GPU), a different regime that the table leaves out.
+- **TRL.** ZeRO-2 for the 9B and 35B, ZeRO-3 for the 122B, pure bf16, Liger, FA4. Batch 2 at 64k for the 35B and 122B.
+- **NeMo.** 9B on DP8 with TE attention and, at 64k, per-layer compile. 35B on EP2. 122B on EP4 (64k) and EP8 (128k).
+  Activation checkpointing.
+
+Halo leads on both MoE models: 1.10–1.12× Megatron on the 35B, 1.47× TRL and 1.9–2.0× NeMo, and 1.50× TRL and 1.7–1.9× NeMo on the 122B. On the dense 9B it
+leads TRL by 1.17× and NeMo by 1.7–1.8×, trails Megatron by 11.5% at 64k and is level at 128k (−1.5%). Halo's tensor
+parallel path forces the fused loss head off, so the full `[tokens, vocab]` logits materialize: no layout without
+checkpointing fits (258–265 GiB peaks) and its TP rows run far below DP8 ([by layout](#results-by-parallelism-layout)); Megatron's vocab-parallel loss lets its TP2 row skip recompute. No
+Halo layout beating DP8 with full checkpointing was found; partial checkpointing at a fixed interval, chunked loss under
+TP and activation offload were not tried.
+
+Conditions that decide how to read the table:
+
+- **Optimizer regimes differ.** Halo trains bf16 parameters with stochastic rounding (6 bytes per parameter). TRL's rows
+  are pure bf16 parameters and Adam moments with no stochastic rounding; its fp32-master runs are within 3% on the 9B
+  and 35B and do not fit on the 122B. NeMo logs bf16 parameters with bf16 Adam updates and state. Megatron keeps fp32
+  main parameters in a distributed optimizer, except the 122B rows (fp16 master, bf16 moments).
+- **Two machines.** Halo and TRL ran on one 8× B300 node, NeMo and Megatron on another of the same type. The difference
+  between the two nodes was not measured, so read small gaps between those groups with care.
+- **Measured steps differ.** After warm-up, Halo averages 9 steps, TRL 7, NeMo and Megatron 6. TRL runs with Halo's FLA
+  launch options, because stock FLA 0.4.2 is not deterministic on packed rows.
+- **Peak memory has different sources.** Halo, TRL and NeMo report torch's allocated peak. Megatron's come from
+  nvidia-smi, which includes allocator cache and reads 10–20% higher, so do not compare them directly. NeMo's 122B 64k row
+  holds 266.1 of 267.7 GiB by nvidia-smi.
+- **Selection is asymmetric.** Each Halo row is the median of 3 runs of a chosen setup (spread 0.01–0.27%). The other
+  frameworks' rows are single runs of their best layouts, up to five tried for NeMo. Halo's trainer shuffles rows; on file
+  order, as the others read them, throughput moves at most 0.2% and the first-step loss agrees with the other
+  frameworks within 0.3%.
+- **NeMo's search was limited and is not its ceiling.** Its EP1 layout is refused by an FSDP uniform-dtype assertion, and
+  the 9B tried no TP and no layout without activation checkpointing. The 122B EP4 gain over EP8 (3.9%) is confounded with
+  expandable segments and is a single run. NeMo's 35B EP2 uses 99.1 GiB against Halo's 139.1.
+- **Halo EP above 1 is refused at 128k.** DeepEP's 32-bit dispatch wire index cannot address the tokens
+  ([limit](../infrastructure/deepep.md#dispatch-wire-index-limit)), so 128k runs on EP1.
+- **Isolation was checked on slices, not on full rows in the training step.** An edit-one-document test with a negative
+  control (the same forward without document boundaries moves the other documents) passed for Halo 35B and 122B on
+  slices of about 5k tokens, forward only, on EP1 with FA4. The same kind of test covers Halo 9B, TRL 9B, 35B and 122B,
+  NeMo 9B and 35B (its 64k best rows compare edited and unedited runs without a control run of their own) and
+  Megatron 9B and 35B. NeMo's 122B and 128k 35B rows and
+  Megatron's 122B rows have no such check.
+
+<!-- MILES: pending fresh release-candidate runs -->
+
+### Levers on packed 64k and 128k rows
+
+Halo 1.2.0, same rows and optimizer as the table.
+
+- **[Fused linear cross-entropy](liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy).** On Qwen3.5-9B at 64k the
+  first-step loss is identical with and without it. Without checkpointing the 64k row still runs out of memory with it (DP8, 264–265 GiB at the failure), and under TP, where it is forced off, the checkpointed row
+  peaks at 215–217 GiB.
+- **EP1 over EP8 with checkpointing.** Qwen3.6-35B-A3B at 64k, batch 1: EP1 22,301 (115.8 GiB), EP2 21,869 (154.5),
+  EP8 19,326 (122.1), all on FA2. EP2 with FA4 reads 22,522 against EP1's 22,937, and varying `HALO_DEEPEP_NUM_SMS`
+  changes nothing. The order can reverse without checkpointing at 16k ([by layout](#results-by-parallelism-layout)).
+- **Batch 2 at 64k equals batch 1 at 128k.** They carry the same tokens per GPU per step and give the same rate and
+  peak: 23,637 and 23,647 tok/s/GPU on the 35B (139.1 GiB both), 8,933 and 8,943 on the 122B (188.7 GiB both), 16,782 and
+  16,793 on the 9B (FA2, 82.1 GiB both). On the 9B, rate falls with batch at 64k: 17,017, 16,782 and 16,457 at batches 1, 2
+  and 4.
+- **Gradient accumulation** gains nothing on the 35B at 64k: 2 micro-batches with `fsdp_defer_grad_sync` read 23,083
+  against 22,937 for batch 1 (+0.6%) at 177.9 GiB.
+- **EP4 with ETP2** is accepted and runs at half the EP1 rate on the 35B (11,228), because only 4 of 8 ranks hold data.
+
+### Short context: 16k and 4k
+
+Full-parameter SFT on 8× B300, bf16, 131,072 tokens per step in every row (batch 1 at 16k, batch 4 at 4k). The rows are
+UltraChat text concatenated to exactly 16,384 or 4,096 tokens and attended as one causal sequence, the same rows for
+every framework. Cells are tok/s/GPU (peak GiB); `—` marks a row left out (see below).
+
+| Model, tokens per row | Halo 1.2.0 | TRL 1.17.1 | NeMo AutoModel 0.7.0 | Megatron Bridge |
+|---|---:|---:|---:|---:|
+| Qwen3-8B, 16k, no checkpointing | **18,097** (98.9) | 16,394 (117.9) | 13,474 (153.8) | 16,043 (179.3) |
+| Qwen3-8B, 4k | **22,415** (98.9) | 19,810 (117.9) | 15,284 (153.8) | 19,163 (178.8) |
+| gpt-oss-20b, 16k, no checkpointing | **26,612** (116.3) | 9,595 (163.5) | 21,816 (121.5) | 16,445 (177.0) |
+| gpt-oss-20b, 16k, checkpointing | **21,559** (62.1) | 8,741 (76.6) | 16,549 (44.4) | 13,140 (108.0) |
+| gpt-oss-20b, 4k | **30,348** (116.3) | 9,908 (163.5) | 24,094 (121.5) | 19,183 (176.1) |
+| Qwen3.5-35B-A3B, 16k | **20,251** (168.5) | 14,357 (208.4)¹ | — | 15,561 (210.9) |
+| Qwen3-30B-A3B, 16k | 17,482 (202.3) | 13,726 (166.9) | 14,976 (121.4) | **18,354** (165.8) |
+| Qwen3.6-35B-A3B, 16k | **20,067** (169.3) | 12,591 (209.7)² | — | 16,015 (212.1) |
+
+¹ FA4, steady state from a 5-step check; a 10-step run with two slow steps reads 13,137. ² SDPA attention; the FA4 run was not made.
+
+Layouts, bold being the best cell of a row:
+
+- **Halo.** Median of 3 runs of the 1.2.0 release with opt-in settings on. Qwen3-8B on DP8 ZeRO-2, gpt-oss-20b and
+  Qwen3-30B-A3B on EP1, all with [fused linear cross-entropy](liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy),
+  gpt-oss attention sinks kept live. Qwen3.5-35B-A3B and Qwen3.6-35B-A3B on EP8 with `HALO_EP_SHARED_OVERLAP=1` and
+  `--numa-binding node`.
+- **TRL.** ZeRO-2, Liger, `--aux_coef 0` on gpt-oss (its default adds 0.9× the router auxiliary loss to the loss). The
+  Qwen3.5-35B-A3B row runs FA4, the Qwen3.6-35B-A3B row SDPA.
+- **NeMo.** Qwen3-8B on the Hugging Face path with FA4 (the recipe's own attention reads 9,503 tok/s/GPU at 153.8 GiB at
+  16k). gpt-oss on EP1; Qwen3-30B-A3B on EP1 with FA4. NeMo's rows for Qwen3.5-35B-A3B and Qwen3.6-35B-A3B are left out:
+  those runs built the checkpoint's MTP head.
+- **Megatron.** Qwen3-8B on TP1; gpt-oss on EP4; the Qwen3.5/3.6 rows on EP8 with HybridEP and CUDA graphs off after the
+  recipe default ran out of memory; Qwen3-30B-A3B on EP8 with the B300 performance recipe and CUDA graphs. The Qwen3-8B
+  and gpt-oss rows use generic H100 recipes, and the three Qwen MoE rows keep the router auxiliary loss on (0.001). Peaks are Megatron's own
+  allocated maximum on rank 0.
+
+Conditions: the optimizer regimes and the two machines are as in the long-context table. NeMo's peaks are rank 0's, which can understate a
+MoE rank by up to 9 GiB. Halo and TRL measure 7 steps after warm-up, NeMo and Megatron 20. Halo is 4.8% behind Megatron on
+Qwen3-30B-A3B. TRL has no expert-parallel option of its own
+([Halo vs stock TRL](halo-vs-stock-trl.md#trl-expert-parallelism)).
+
+### Results by parallelism layout
+
+Every layout each framework ran on these rows, in tok/s/GPU. Bold is the framework's best on that line, `OOM` ran out of
+memory, `refused` was rejected at startup and `—` was not run. TRL's plain FSDP2 sits in the EP1 column because
+EP1 also keeps experts FSDP-sharded. Pipeline and context parallelism are not compared here; Halo's PP rates are on
+[its page](../parallelism/pipeline-parallelism.md#measured-throughput).
+
+**Qwen3.6-35B-A3B, packed rows, checkpointing:**
+
+| Framework, tokens per row | EP1 / plain FSDP2 | EP2 | EP4 | EP8 |
+|---|---:|---:|---:|---:|
+| Halo 1.2.0, 64k | **23,637** | 22,522 | refused | 19,326 |
+| Halo 1.2.0, 128k | **23,647** | refused | refused | — |
+| Megatron Bridge, 64k | OOM | **21,559** | 19,965 | 18,638 |
+| Megatron Bridge, 128k | — | 10,567 | **21,109** | 18,873 |
+| NeMo AutoModel 0.7.0, 64k | refused | **12,340** | 11,977 | 11,360 |
+| NeMo AutoModel 0.7.0, 128k | refused | **12,026** | 11,589 | 10,949 |
+| TRL 1.17.1, 64k | 16,126 | — | — | — |
+| TRL 1.17.1, 128k | 16,112 | — | — | — |
+
+Each cell is that layout's best row. At 64k Halo's EP1 and TRL are batch 2 (Halo batch 1: 22,937), and Megatron's EP2 and
+EP8 use two micro-batches per step, the same tokens per step (one micro-batch: 20,273 and 18,143). Halo's EP8 ran on FA2,
+its other cells on FA4. Halo refuses EP4 alone on one NVLink domain
+([mechanism](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)) and EP2 at 128k by its
+[wire index](../infrastructure/deepep.md#dispatch-wire-index-limit); its EP8 at 128k was not run on the 35B, and the same
+limit refuses it on the 122B. Megatron's EP2 at 128k ran at the memory limit
+(267.7 GiB by nvidia-smi), so its rate reflects memory pressure, not the layout.
+
+**Qwen3.5-122B-A10B, packed rows, checkpointing:**
+
+| Framework | 64k | 128k |
+|---|---|---|
+| Halo 1.2.0 | **EP1 ZeRO-3 8,933** (batch 2; batch 1: 8,395); EP8 OOM; EP8 with activation offload 7,061 | **EP1 ZeRO-3 8,943**; EP8 refused |
+| Megatron Bridge, fp16 master | EP8 OOM; EP8+TP2 OOM; EP8+TP4 4,454; **EP8+TP8 4,781** | EP8+TP8 OOM, and 1,935 with the optimizer on the CPU |
+| NeMo AutoModel 0.7.0 | EP2 OOM; **EP4 5,397** (expandable segments, 266.1 of 267.7 GiB by nvidia-smi); EP8 5,193 | EP8 4,683 |
+| TRL 1.17.1 | ZeRO-3 5,936 (batch 2; batch 1: 5,690) | ZeRO-3 5,951 |
+
+**Qwen3.5-9B, packed rows:**
+
+| Framework, tokens per row, recompute | DP8 | TP2 | TP4 | TP8 |
+|---|---:|---:|---:|---:|
+| Halo 1.2.0, 64k, full | **17,206** | 11,086 | 7,106 | — |
+| Halo 1.2.0, 128k, full | **17,093** | OOM | OOM | — |
+| Megatron Bridge, 64k, full | 16,614 | — | — | — |
+| Megatron Bridge, 128k, full | 16,389 | — | — | — |
+| Megatron Bridge, 64k, off | OOM | **19,431** | 17,145 | — |
+| Megatron Bridge, 128k, off | — | — | **17,348** | 12,346 |
+
+Halo's TP2 row needs expandable segments to fit. TRL (14,735 and 14,601) and NeMo (10,360 and 9,451) ran DP8 only.
+Megatron's lead comes from dropping recompute, which TP2 makes fit: with selective recompute its TP2 reads 16,563 at
+64k. Halo's TP2 sits 36% below its own DP8, with the fused loss head forced off.
+
+**16k, no checkpointing:**
+
+| Model, framework | EP1 / plain FSDP2 | EP2 | EP4 | EP8 |
+|---|---:|---:|---:|---:|
+| gpt-oss-20b, Halo 1.2.0 | **25,872** | 24,582 | refused | 19,817 |
+| gpt-oss-20b, Megatron Bridge | 14,523 | 16,044 | **16,445** | 14,631 |
+| gpt-oss-20b, NeMo AutoModel 0.7.0 | **21,816** | 9,314 | — | 6,948 |
+| gpt-oss-20b, TRL 1.17.1 | 9,595 | — | — | — |
+| Qwen3-30B-A3B, Halo 1.2.0 | **17,497** | 17,478 | refused | 16,813 |
+| Qwen3-30B-A3B, Megatron Bridge | — | 16,451 | 18,058 | **18,354** |
+| Qwen3-30B-A3B, NeMo AutoModel 0.7.0 | **14,976** | 14,359 | — | 10,543 |
+| Qwen3-30B-A3B, TRL 1.17.1 | 13,726 | — | — | — |
+| Qwen3.5-35B-A3B, Halo 1.2.0 | 19,118 | 19,679 | refused | **19,788** |
+| Qwen3.5-35B-A3B, Megatron Bridge | — | — | 15,168 | **15,561** |
+| Qwen3.5-35B-A3B, TRL 1.17.1 | 14,357 | — | — | — |
+| Qwen3.6-35B-A3B, Halo 1.2.0 | 18,910 | **19,634** | refused | 19,395 |
+| Qwen3.6-35B-A3B, Megatron Bridge | — | — | — | 16,015 |
+| Qwen3.6-35B-A3B, TRL 1.17.1 | 12,591 | — | — | — |
+
+Halo's cells here are single runs on default settings, which differ from re-runs by up to 0.3%; the 16k table above adds
+fused linear cross-entropy or shared overlap to the best of them. On dense Qwen3-8B, Megatron reads 16,043, 14,896 and
+12,328 at TP1, TP2 and TP4. TRL's Qwen3.5-35B-A3B cell is its FA4 steady state and its Qwen3.6-35B-A3B cell SDPA, as above.
+
+More expert parallelism is not automatically faster. With checkpointing at long context Halo is fastest on EP1, which
+does not fit under Megatron on the 35B at 64k and which NeMo refuses. Without checkpointing at 16k, Halo's layouts on the
+Qwen3.5/3.6 models sit within 4% of each other, while NeMo falls 57% from EP1 to EP2 on gpt-oss-20b.
+
+### Gemma 4 26B-A4B and Mistral Small 4 119B (older framework releases)
+
+These tables ran on older releases than the ones above, and each names its own.
+
 **Gemma 4 26B-A4B**, 2× B300, BF16, micro-batch 1 per GPU, Halo at its main branch of 2026-09-24. Every framework trains the same tokens, labels and row
-order with the same optimizer hyperparameters, each at its newest release (2026-09-24) in its fastest configuration of
+order with the same optimizer hyperparameters, each at its newest release (2026-09-24; NeMo AutoModel container 26.08.00, Megatron Bridge 0.6.1) in its fastest configuration of
 those tried. Tokens/s are measured over steps 6–25 at 2,048 tokens per row (25 steps) and over steps 6–50 at 16,384
 tokens per row (8 rows packed into one causal sequence, 50 steps); peak memory is `max_memory_allocated`, max over
 ranks. Each rate is the mean of its configuration's valid runs: a run whose token-weighted step-1 loss is more than 2%
@@ -134,7 +348,7 @@ of all 20 post-warmup steps, Halo 1.1.0 or earlier:
 | Mistral Small 4 119B | Halo | DP2, EP2, ETP2 | **7,587** | **207.1** |
 | Mistral Small 4 119B | Axolotl 0.18.0 | FSDP2, eager experts | 380 | 251.0 |
 
-In this run set NeMo AutoModel and TRL ran out of memory near 268 GiB, and Megatron Bridge, MS-SWIFT and Unsloth did not
+In this run set NeMo AutoModel and TRL (version not recorded) ran out of memory near 268 GiB, and Megatron Bridge, MS-SWIFT and Unsloth did not
 support the architecture.
 
 Halo's trace runs synthetic tokens (its run JSON records `"dataset_group": "halo_synthetic"`), so its loss and gradient-norm curves
@@ -143,26 +357,19 @@ are numerical-health evidence, not a convergence comparison. The raw 20-step tra
 
 ### Published numbers in similar setups
 
-Vendor-reported figures beside Halo's, with the setup stated; Halo's are from 1.1.0 or earlier. The NeMo AutoModel and transformers
-figures ran on H100; the Megatron-LM figures and the last bullet ran on the same B300s as Halo. B300 has
-2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the gap, not the gap.
+Figures from outside the comparison above, with the setup stated; Halo's are from 1.1.0 or earlier. The
+transformers figure ran on H100, the others on the same B300s as Halo. B300 has 2.3× the bf16 peak of H100, so read a
+cross-GPU row as a ceiling on the gap, not the gap.
 
-- **gpt-oss-20b, seq 4096, bf16.** Halo: 28,700 tok/s/GPU at EP1 (8× B300,
-  batch 4, GC off; 23,590 GC on) and 13,239 at EP8 (batch 4, GC on, 48 GiB). NeMo AutoModel reports 13,058 on 8× H100 (FSDP
-  without EP, mock data, forced-balanced routing). Megatron-LM on the same 8× B300 in a separate batch-2, GC-off
-  sweep: OOM at EP1, where Halo runs 27,707 at 158 GiB peak; 13,932 vs Halo 21,642 at EP2 (246 GB vs
-  104 GiB); 14,734 vs Halo 15,945 at EP8 (104 GB vs 52 GiB; Halo measured in its own run). Halo's
-  peaks are `max_memory_allocated` in GiB; Megatron's are its reported GB.
 - **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
   (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at
-  batch 1 / 2 / 4. NeMo AutoModel reports 12,040 on 8× H100 at EP8, seq 4096 (mock data,
-  forced-balanced routing).
+  batch 1 / 2 / 4.
 - **Same hardware.** Gemma 4 26B-A4B against NeMo AutoModel, Axolotl, Megatron Bridge, MS-SWIFT and
   Unsloth on 2× B300, and Mistral Small 4 119B against Axolotl on 4× B300: [above](#full-parameter-sft-framework-comparison).
   Laguna-S 2.1 on 4× B300: Halo 11,298 vs Axolotl 5,617 tok/s/GPU at 15% less memory. LFM2.5-8B-A1B:
   Halo 31,262 vs Axolotl 28,330 at seq 8192, 35,517 vs 29,520 at seq 16384.
 
-The Megatron-LM, Laguna and LFM2.5 rows are from the Halo research page (whitecircle.com/research/halo).
+The Laguna and LFM2.5 rows are from the Halo research page (whitecircle.com/research/halo).
 
 ## Metrics
 
@@ -234,19 +441,16 @@ PP, `1/cp_size` of it under CP).
 
 ### EP-only (batch scaling)
 
-EP distributes experts; DP = world_size = 8. Raising batch fills the expert GEMMs, and the dispatch grows slower than the tokens ([where the time goes](#where-the-ep-steps-time-goes)):
+Halo 1.1.0. EP distributes experts; DP = world_size = 8. Raising batch fills the expert GEMMs, and the dispatch grows slower than the tokens ([where the time goes](#where-the-ep-steps-time-goes)):
 
 | EP | batch | tok/s/GPU | TFLOPS | peak mem | step |
 |----|-------|:---------:|--------|----------|------|
-| 1 | 1 | 11,041 | 1,413 | 148.3 GiB | 0.37s |
-| 2 | 1 | 12,432 | 878 | 78.9 GiB | 0.33s |
 | 2 | 4 | 20,554 | 1,452 | 85.2 GiB | 0.80s |
-| 8 | 1 | 10,905 | 301 | 25.5 GiB | 0.38s |
 | 8 | 4 | 13,239 | 366 | 48.2 GiB | 1.24s |
 
-Rows are the grouped-GEMM path (default); the ep1 row holds experts replicated per rank (`fsdp_shard_ep1_experts: false`). `make bench` measures the b1 shapes at ep1 (sharded experts, the default), ep2 and ep8 and holds them to committed baselines ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
+Rows are the grouped-GEMM path (default). Batch 1 on Halo 1.2.0 is 14,304 (ep1, 61.83 GiB), 14,107 (ep2, 77.32) and 11,896 (ep8, 26.47) tok/s/GPU ([1.2.0 against 1.1.0](#120-against-110)). `make bench` measures the b1 shapes at ep1 (sharded experts, the default), ep2 and ep8 and holds them to committed baselines ([Golden performance baselines](../contributing/README.md#golden-performance-baselines)).
 
-`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group. It is faster and leaner than the replicated row at both measured batches: ep1 b1 runs **11,236 tok/s/GPU · 60.3 GiB** (+1.8% throughput, −59% memory), and b4 runs 23,590 · 75.8 GiB against replicated 22,386 · 149.4 GiB (+5.4%, −49%). It is the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
+`fsdp_shard_ep1_experts` (the ep1 default) shards the replicated experts across the DP group. On Halo 1.1.0 it was faster and leaner than the replicated row (`fsdp_shard_ep1_experts: false`) at both measured batches: b1 ran 11,236 tok/s/GPU · 60.3 GiB against 11,041 · 148.3 GiB (+1.8%, −59% memory), and b4 runs 23,590 · 75.8 GiB against 22,386 · 149.4 GiB (+5.4%, −49%). It is the dense-EP1 config in the [achieved-TFLOPS table](#maximizing-achieved-tflops).
 
 Grouped beats the per-expert loop (`use_grouped_gemm: false`) in every measured gpt-oss-20b cell; the margin shrinks as local experts per rank fall and batch grows. The A/B is in [grouped-gemm](grouped-gemm.md#grouped-vs-the-loop-path).
 
@@ -279,7 +483,7 @@ On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all val
 | 16,384 | 1,638 | 301 | 68.5 GiB | 1.25s |
 | 32,768 | 1,780 | 345 | 118.7 GiB | 2.30s |
 
-Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 5,006, `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU; at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
+Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 6,013 (Halo 1.2.0), `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU (1.1.0 or earlier); at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
 
 ### Why MoE utilization reads low
 
@@ -320,7 +524,7 @@ for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 3
 
 Throughput is dominated by the effective per-GPU token count `M = per_device_train_batch_size × max_length` —
 bigger `M` amortizes fixed per-step costs (kernel launches, dispatch latency, optimizer step) until a
-memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b, 49% and 0.4% on Qwen3.5-35B-A3B.
+memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b, 49% and 0.4% on Qwen3.5-35B-A3B (Halo 1.1.0, SDPA).
 Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
 ([DeepEP → EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) — the floor of this range by
 construction.
@@ -364,8 +568,8 @@ changes the model, so it only sizes the wait. `moe_balancing` is the shipped lev
 factor on real text is not measured here.
 
 Raising batch or sequence fills the expert GEMMs, and at ep8 dispatch grows 2.3× for 4× the tokens. Throughput plateaus
-around b4 (b8 only adds memory). At b1 ep8 runs 3% below the default sharded ep1 (10,905 vs 11,236 tok/s/GPU) at
-~2.4× less memory (25.5 vs 60.3 GiB).
+around b4 (b8 only adds memory). At b1 ep8 runs 17% below ep1 (11,896 vs 14,304 tok/s/GPU, Halo 1.2.0) at
+2.3× less memory (26.5 vs 61.8 GiB).
 
 **Feature A/B at the optimal point (ep8 b4 s4096):**
 
@@ -414,10 +618,9 @@ GC-on for long context — pure ep8 GC-on streams to 64k (138 GiB) without Conte
 |----|-------|-----------|--------|----------|------|
 | 2 | 1 | 6,692 | 776 | 130.0 GiB | 0.61s |
 | 2 | 4 | **16,447** | 1,908 | 137.8 GiB | 1.00s |
-| 8 | 1 | 7,876 | 343 | 41.5 GiB | 0.52s |
 | 8 | 4 | 14,275 | 622 | 72.1 GiB | 1.15s |
 
-ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 41.5 GiB at batch 1 vs 130 GiB for ep2. Batch is the dominant lever (ep2 b1→b4 = 2.5×; ep8 b1→b4 = 1.8×): ep2 b1 holds 256 rows per expert, at the bf16 ridge, and b4 holds 1,024.
+ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 72.1 GiB at batch 4 vs 137.8 GiB for ep2. At batch 1 on 1.2.0 and FA4, ep8 runs 8,974 tok/s/GPU at 41.6 GiB. Batch is the dominant lever (ep2 b1→b4 = 2.5×): ep2 b1 holds 256 rows per expert, at the bf16 ridge, and b4 holds 1,024.
 
 At ep2 batch 4 on 1.2.0, expert compute takes 74.3% of the EP phases ([split](#where-the-ep-steps-time-goes)). Sequence 8192 runs **17,446 tok/s/GPU** (b4).
 
@@ -433,11 +636,11 @@ Halo 1.2.0, ep8, real conversations, FA2 as the recipes set it, GC on, warm Trit
 
 ### EP throughput vs sequence length (ep8, b1, GC on)
 
-| seq | tok/s/GPU | peak mem |
-|-----|-----------|----------|
-| 4,096 | 7,876 | 41.5 GiB |
-| 8,192 | 11,726 | 51.8 GiB |
-| 16,384 | 11,768 | 72.4 GiB |
+| seq | tok/s/GPU | peak mem | Halo |
+|-----|-----------|----------|------|
+| 4,096 | 8,974 | 41.6 GiB | 1.2.0, FA4 |
+| 8,192 | 11,726 | 51.8 GiB | 1.1.0, SDPA |
+| 16,384 | 14,275 | 75.0 GiB | 1.2.0, FA4 |
 
 Longer sequences raise throughput at modest memory growth — ep8 is the long-context / memory-efficient topology, ep2 batch 4 the throughput one.
 
@@ -473,7 +676,7 @@ The dense runs hold 13–14% less, so the dense SFT, DPO and SMPO examples launc
 
 On a multi-socket host, launch with `torchrun --numa-binding node` (or `halo launch <method> <config> -n 8 --numa-binding node`). Each local rank then runs on the CPUs of the NUMA node that holds `cuda:<local_rank>`, which torchrun reads from the host topology (the GPU's PCI `numa_node` in sysfs), so the flag needs no per-host mapping. torchrun intersects that set with the CPUs the process may use (a container `--cpuset-cpus`) and fails the launch when nothing is left.
 
-On 8× B300 with two NUMA nodes, against an unbound launch (a 1.2.0 development build, two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat.
+On 8× B300 with two NUMA nodes, against an unbound launch (a 1.2.0 development build, two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat, such as Qwen3.5-35B-A3B and Qwen3.6-35B-A3B EP8 at 16k (within ±0.1%).
 
 Only `torchrun` takes the flag. `halo launch --numa-binding <mode>` takes torchrun's modes and places the flag on its `torchrun` line, ahead of the script; with `--accelerate` or a single process it refuses the flag, since `accelerate launch` and `python` have no NUMA binding. `HALO_DATASET_NUM_PROC`'s default counts each rank's bound CPUs.
 

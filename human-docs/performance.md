@@ -67,8 +67,9 @@ Set these per run:
   GLM-5 Next), `tree_packing: true` stores each prefix once, at some extra
   step time on full-attention layers
   ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗).
-- **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
-  tokens, which trades a little speed for a lot of logits memory.
+- **`liger_kernel_config: {fused_linear_cross_entropy: true}`** on large-vocab
+  models and long rows: it never materializes the logits, which cuts peak memory at equal or better speed
+  ([measured](../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy) ↗).
 - **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** in front of a dense
   launch: 13–14% less peak reserved memory at the same speed. Under EP it costs
   throughput, so set it there only to fit
@@ -104,13 +105,15 @@ rows against GPT-OSS's 16 MB expert weight, the tensor cores idle while HBM
 streams the weight, and fine-grained MoEs put even fewer tokens on each expert.
 A bigger `M` helps here, and a faster kernel does not.
 
-## Compared with stock TRL
+## Compared with other frameworks
 
-Halo 1.1.0 trained GPT-OSS 20B at 2.6–3.5× stock TRL (`ep1` and `ep2`) on the
-same 8 B300s, with the same kernels on both sides, and both reach the same
-loss. Expert parallelism, no per-micro-step parameter re-gather and 6-byte
-optimizer state make up most of the gap
-([full comparison](../agent-docs/optimization/halo-vs-stock-trl.md) ↗).
+On packed 64k and 128k rows on 8 B300s, Halo 1.2.0 trains Qwen3.6-35B-A3B at 1.10–1.12× Megatron Bridge, 1.47× TRL 1.17.1
+and 1.9–2.0× NeMo AutoModel 0.7.0, and trails a tuned Megatron by 11.5% on dense Qwen3.5-9B at 64k. Rates, layouts and the
+conditions that decide how to read them are in the
+[framework comparison](../agent-docs/optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison) ↗; the
+TRL side is in [Halo vs stock TRL](../agent-docs/optimization/halo-vs-stock-trl.md) ↗.
+
+<!-- MILES: pending fresh release-candidate runs -->
 
 For memory rather than speed, start at [Parallelism](parallelism.md). For a run
 slower than these numbers with no obvious cause, turn on the profiler

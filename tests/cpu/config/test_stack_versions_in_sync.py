@@ -100,6 +100,9 @@ HISTORICAL_FORMS: dict[str, str] = {
 ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("nccl", "2.28.9"): "torch's own wheel-metadata pin — the value the uv override exists to replace",
     ("cutlass_dsl", "4.4.2"): "gram-newton-schulz's own hard pin — the value the force-reinstall exists to replace",
+    ("trl", "1.17.1"): "the TRL release the framework comparison benchmarked as a competitor",
+    ("liger", "0.8.2"): "the Liger release the TRL arm of the framework comparison ran",
+    ("transformers", "5.18.0"): "the transformers release NeMo AutoModel ran in the framework comparison",
 }
 
 
