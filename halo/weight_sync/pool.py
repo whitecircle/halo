@@ -94,7 +94,7 @@ class WeightSyncPool:
             started = time.monotonic()
             try:
                 client = self._connect_client(i, device)
-            except Exception as e:  # any failure to answer keeps the verdict per server
+            except Exception as e:
                 # Else the already-initialized clients hold their TCPStore listeners until atexit.
                 self.close_communicator()
                 raise RuntimeError(
@@ -155,7 +155,7 @@ class WeightSyncPool:
         for client in self._clients:
             try:
                 client.close_communicator()
-            except Exception as e:  # any failure to answer keeps the verdict per server
+            except Exception as e:
                 logger.warning(f"Error closing client: {e}")
 
         self._stager.release()
@@ -248,7 +248,7 @@ class WeightSyncPool:
         )
         try:
             group.init_communicator(device)
-        except Exception as e:  # any failure to answer keeps the verdict per server
+        except Exception as e:
             raise RuntimeError(
                 f"{self._client_cls.BACKEND_NAME} weight-sync group over {len(clients)} servers failed to form "
                 f"(group port {self.base_group_port}): {type(e).__name__}: {e}"
@@ -317,7 +317,7 @@ class WeightSyncPool:
         try:
             operation(index)
             return None
-        except Exception as e:  # any failure to answer keeps the verdict per server
+        except Exception as e:
             first_error = e
         if not client.can_replay_sync:
             client.drain_param_buffer()
