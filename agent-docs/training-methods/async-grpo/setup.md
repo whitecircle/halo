@@ -122,6 +122,9 @@ rollout_server_configs:
   two or more servers that report one model and one set of weight-loading flags
   ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)). `single_group` takes one
   `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.
+- `rollout_adapter_sync: true` (SGLang, LoRA) sends the adapter alone after one base push and pauses nothing: a round
+  in flight finishes on the adapter version it started with, and rounds drawn later name the newest
+  ([Adapter sync](../../infrastructure/rollout-servers.md#adapter-sync)).
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
   rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
   and the actors re-issue them, losing the decode they had done.

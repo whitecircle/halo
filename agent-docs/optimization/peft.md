@@ -337,9 +337,10 @@ model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 ## Online RL — rollout-server weight sync
 
 Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
-([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter**.
+([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter** unless
+`rollout_adapter_sync` serves the policy as one on SGLang ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
 
-Each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
+Otherwise each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
 (PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
 un-adapted base.
 

@@ -174,6 +174,12 @@ engine over NCCL: no restart, no checkpoint on disk. Every server pauses for the
 push. vLLM freezes in-flight requests and resumes them; SGLang drops them and the
 rollout actor re-issues the turn.
 
+A LoRA run on SGLang can send only the adapter instead: `rollout_adapter_sync: true`
+pushes the frozen base once, then loads the small adapter after each step without
+pausing the server. Launch the server with `SGLANG_LORA_MAX_RANK` set to at least
+`lora_r`; the trainer refuses a model or server it cannot serve this way and names
+the reason ([Adapter sync](../agent-docs/infrastructure/rollout-servers.md#adapter-sync)).
+
 MoE models must be served with `--moe-backend triton` (`--moe-runner-backend
 triton` on SGLang), the compose default. The backends the engine picks on its
 own repack expert weights after loading, so an update would write into the wrong

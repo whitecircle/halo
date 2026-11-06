@@ -1750,6 +1750,11 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=1800,
     ),
+    # rollout_adapter_sync: the base once, the adapter alone after training, engine log-probs against the trainer's and a
+    # merged push's. The server runs Qwen3-0.6B with SGLANG_LORA_MAX_RANK=16.
+    "trainers/grpo/test_adapter_sync_e2e.py": TestSpec(
+        nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
+    ),
     # auto resolves to one group for two or more identical servers and to per-server groups for one.
     "trainers/grpo/test_sync_topology_auto.py": TestSpec(
         nproc=1,

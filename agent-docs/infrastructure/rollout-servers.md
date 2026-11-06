@@ -45,7 +45,8 @@ Use vLLM unless a run needs SGLang specifically.
 ## Weight sync
 
 Both engines receive the **full model** every sync: merged LoRA touches ~95% of bytes, so there is no
-delta path (~42 GB at 20B). Re-assembling the sharded weights is a collective every rank joins.
+delta path (~42 GB at 20B), unless a LoRA run serves its adapter apart ([Adapter sync](#adapter-sync)).
+Re-assembling the sharded weights is a collective every rank joins.
 
 One rank owns the clients and sends: the **forwarding rank** (global main; TP rank 0 under TP). A
 failure there (an engine 500, a refused tensor, a host OOM on the snapshot, a failed receive while it holds earlier
@@ -242,6 +243,45 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   which follows process and communicator warm-up, and reports the first beside it. It bounds the transfer (the push
   less a one-tensor push's fixed cost) at 1.5× one server's, and the fixed cost, the pause, begin and end calls and
   chunk declares each server answers concurrently, at 20 ms per extra server.
+
+### Adapter sync
+
+`rollout_adapter_sync: true` serves a LoRA policy as an adapter beside the frozen base instead of pushing it folded
+into the weights. SGLang only: vLLM loads an adapter from a directory both containers mount, and its decode with an
+adapter served ran over 5% slower than merged weights on the model measured.
+
+- **First sync.** The base goes out as above, adapters left out (`fold_adapters=False`), then the adapter loads. A
+  restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines.
+- **Each later sync.** The adapter is gathered whole on the forwarding rank, B is multiplied by `lora_alpha / r` (or
+  `/ sqrt(r)` under rsLoRA) in fp32 and rounded to bf16 once, and the adapter loads under a new name with
+  `lora_alpha = r`, so the engine's own scaling is exactly 1. No pause and no session: rounds in flight keep running.
+- **Transport.** `/load_lora_adapter_from_tensors` with a plain pickle inline in the JSON body, one copy per tensor
+  parallel rank. The route's own `ForkingPickler` form hands CPU tensors over by file descriptor and CUDA tensors by
+  IPC handle, which works on one host only. A per-version directory needs the same mount in the trainer and every
+  engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
+  0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row.
+- **Selection.** Every episode leases the newest version for its whole length and its requests send
+  `model: <model_name>:<version>`, so a multi-turn episode and a prefetched round keep the version they started on.
+  A request with no version published raises, since the engine would serve the base. The `isr_engine_reference`
+  re-score sends `lora_path` with the newest version.
+- **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
+  others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
+- **Restart.** A server whose `/v1/models` lacks the newest version (it restarted) gets the base and the adapter
+  again at the next sync; the episodes that were running under the lost version fail and are counted as errored.
+- **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). The startup preflight refuses a server whose rank, module list or loaded
+  limit is too small for the run (`prefetch_depth` + 2 versions are live at once), one with speculative decoding
+  (its draft runs without the adapter), a quantized base or data-parallel replicas. A module outside
+  `--lora-target-modules` is dropped by the engine without a trace, hence the module check.
+- **Cost.** On Qwen3.5-35B-A3B, SGLang 0.5.22 decoded 2.6% slower with `--enable-lora` and no adapter against a warm
+  base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar.
+
+Refused at construction, with the reason in the message: a backend other than SGLang, `routing_replay: rollout`, a
+`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA, DoRA, `lora_bias`,
+`modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
+adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
+(`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
+already refused by every weight sync. Run it with the GPU rows in
+`tests/gpu/trainers/grpo/test_adapter_sync_e2e.py`, which decide whether it stays.
 
 ### Served weights stay in checkpoint layout
 
@@ -667,6 +707,8 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`; `auto` reads the parser off the chat template and **disables it** on a template it cannot detect ([below](#tool-parsers-on-sglang)); `qwen25` for the Qwen3 2507 releases, `hermes` for Ling-mini-2.0 |
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
+| `SGLANG_LORA_MAX_RANK` | *(unset)* | At least the run's `lora_r`; adds `--enable-lora --max-lora-rank` and the three rows below for `rollout_adapter_sync` ([Adapter sync](#adapter-sync)) |
+| `SGLANG_LORA_TARGET_MODULES` / `SGLANG_MAX_LOADED_LORAS` / `SGLANG_MAX_LORAS_PER_BATCH` | `q_proj k_proj v_proj o_proj` / `8` / `3` | `--lora-target-modules` (every adapted projection), `--max-loaded-loras` (`prefetch_depth` + 2 or more), `--max-loras-per-batch` (2 or more) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `SGLANG_ATTENTION_BACKEND` | *(unset)* | `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the default backend (`Unsupported head dimensions`) |
