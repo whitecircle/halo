@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from tests.common.env_grpo_batch import batch_host, build, episode
@@ -32,12 +32,14 @@ _LOSS_PATHS = pytest.mark.parametrize("dense", [False, True], ids=["padded", "de
 
 
 class _LossForward(NamedTuple):
-    """One gradient forward: flip rate, forced (token, layer) selections, trained batch, routed selections."""
+    """One gradient forward: flip rate, forced (token, layer) selections, trained batch, routed selections, and the
+    ``[rows, seq, layers, top_k]`` routing the batch records (R2's captured mask, R3's rows padded from the host)."""
 
     rate: float | None
     forced: int
     batch: dict
     routed: list[torch.Tensor]
+    masks: torch.Tensor
 
 
 def _attended_pick(tokens: torch.Tensor, positions: torch.Tensor, layer: int) -> torch.Tensor:
@@ -142,12 +144,18 @@ def _loss_forward(*, replay: str, dense: bool, corrupt: tuple[int, int] | None =
     host.compute_loss(host.model, batch)
     injector.disarm()
     forced = sum(int(layer._replay_flip_counts[1]) for layer in injector._layers)
-    return _LossForward(injector.drain_flip_rate(), forced, batch, routed)
+    if ROUTING_ROWS_KEY in batch:
+        assert ROUTING_MASKS_KEY not in batch, "R3 carries row ids, not a dense mask"
+        masks = host._rollout_routing.pad_rows(batch[ROUTING_ROWS_KEY].tolist(), torch.device("cpu"))
+    else:
+        masks = batch[ROUTING_MASKS_KEY]
+    return _LossForward(injector.drain_flip_rate(), forced, batch, routed, masks)
 
 
-def _recorded_positions(batch: dict) -> tuple[int, int]:
+def _recorded_positions(forward: _LossForward) -> tuple[int, int]:
     """``(every position the batch's routing mask records, those on attention padding)``, per layer."""
-    recorded = batch[ROUTING_MASKS_KEY][:, :, 0, 0] >= 0
+    batch = forward.batch
+    recorded = forward.masks[:, :, 0, 0] >= 0
     attended = torch.cat([batch["prompt_mask"], batch["completion_mask"]], dim=1).bool()
     return int(recorded.sum()), int((recorded & ~attended).sum())
 
@@ -155,19 +163,30 @@ def _recorded_positions(batch: dict) -> tuple[int, int]:
 @_REPLAY_MODES
 @_LOSS_PATHS
 def test_the_step_drops_its_tied_group_into_attention_padding(replay, dense):
-    batch = _loss_forward(replay=replay, dense=dense).batch
+    forward = _loss_forward(replay=replay, dense=dense)
+    batch = forward.batch
     dropped = list(_DROPPED_ROWS)
     assert not batch["completion_mask"][dropped].any(), "the tied group's completions should be attention padding"
     assert batch["completion_mask"][[0, 1]].any(dim=1).all(), "the spread group should keep its completions"
-    _, on_padding = _recorded_positions(batch)
+    _, on_padding = _recorded_positions(forward)
     assert on_padding > 0, "the dropped completions were routed when recorded, so the batch carries that routing"
 
 
 def test_the_padded_recompute_capture_records_ordinary_padding():
     """The padded no-grad pass also records padding no forward attends; arming it whole would force those positions."""
-    batch = _loss_forward(replay="recompute", dense=False).batch
-    assert not batch["prompt_mask"].all(), "the prompts should differ in length, so the batch left-pads some"
-    assert (batch[ROUTING_MASKS_KEY] >= 0).all()
+    forward = _loss_forward(replay="recompute", dense=False)
+    assert not forward.batch["prompt_mask"].all(), "the prompts should differ in length, so the batch left-pads some"
+    assert (forward.masks >= 0).all()
+
+
+@_LOSS_PATHS
+def test_a_rollout_round_carries_row_ids_in_place_of_a_dense_mask(dense):
+    """The batch holds one int64 id per row, and no tensor spans the round's width in the routing's layers."""
+    batch = _loss_forward(replay="rollout", dense=dense).batch
+    assert ROUTING_MASKS_KEY not in batch
+    ids = batch[ROUTING_ROWS_KEY]
+    assert ids.dtype == torch.long and ids.tolist() == list(range(len(_REWARDS)))
+    assert not any(isinstance(v, torch.Tensor) and v.dtype == torch.int16 for v in batch.values())
 
 
 @_REPLAY_MODES
@@ -175,7 +194,7 @@ def test_the_padded_recompute_capture_records_ordinary_padding():
 def test_a_dropped_rows_completion_is_not_replayed_or_counted(replay, dense):
     """A router that agrees with the recorded routing wherever it reads context flips nothing."""
     forward = _loss_forward(replay=replay, dense=dense)
-    recorded, on_padding = _recorded_positions(forward.batch)
+    recorded, on_padding = _recorded_positions(forward)
     assert forward.rate == 0.0
     assert forward.forced == _LAYERS * (recorded - on_padding)
 
@@ -185,7 +204,7 @@ def test_a_genuine_flip_on_an_attended_position_is_still_counted(dense):
     """Negative control: one engine pick off the router's on a kept row's completion token counts once per layer."""
     corrupt_row, corrupt_position = 0, len(_PROMPTS[0]) + 1
     forward = _loss_forward(replay="rollout", dense=dense, corrupt=(corrupt_row, corrupt_position))
-    recorded, on_padding = _recorded_positions(forward.batch)
+    recorded, on_padding = _recorded_positions(forward)
     assert forward.rate == pytest.approx(1 / (recorded - on_padding))
 
 
@@ -194,7 +213,7 @@ def test_the_padded_forward_routes_a_dropped_completion_by_its_own_pick(replay):
     forward = _loss_forward(replay=replay, dense=False)
     prompt_width = forward.batch["prompt_ids"].size(1)
     first_layer = forward.routed[0].view(len(_REWARDS), -1, _TOP_K)[:, prompt_width:]
-    recorded = forward.batch[ROUTING_MASKS_KEY][:, prompt_width:, 0]
+    recorded = forward.masks[:, prompt_width:, 0]
     for r in _DROPPED_ROWS:
         replayed = recorded[r, :, 0] >= 0
         assert replayed.any()

@@ -45,7 +45,7 @@ from halo.distributed.fsdp import apply_fsdp2_for_dp
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector, build_routing_replay_injector
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.grpo.row_order import length_deal_order
 from tests.common.harness import gpu_test_main, record_check
@@ -62,7 +62,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2, worst_relative_l2
 from tests.common.rank_log import log, log_all
-from tests.common.routing import distinct_expert_picks
+from tests.common.routing import distinct_expert_picks, ragged_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 # The stage recipes' attention. No gradient checkpointing: what the deal changes is the row order alone.
@@ -133,7 +133,7 @@ def _selection_flips(captured: torch.Tensor, expected: torch.Tensor) -> tuple[bo
 
 
 def _engine_masks(mask: torch.Tensor, injector: RoutingReplayInjector, seed: int) -> torch.Tensor:
-    """An engine's routing as ``assemble_rollout_masks`` places a fully covered one: distinct random experts, ``-1`` on
+    """An engine's routing as ``build_rollout_routing`` places a fully covered one: distinct random experts, ``-1`` on
     padding."""
     rows, seq = mask.shape
     generator = torch.Generator().manual_seed(seed)
@@ -248,6 +248,7 @@ def run_moe(ctx) -> dict:
     batch = _rank_round(ctx, MOE_ROW_TOKENS, vocab)
     ids, mask, keep = stacked(batch)
     engine = _engine_masks(mask, injector, MOE_SEED + ctx.rank)
+    routing = ragged_routing(engine, batch["prompt_ids"].size(1))
     host = loss_host(model, chunks=CHUNKS, accelerator=world_accelerator())
     host._routing_injector = injector
     host.use_liger_kernel = False
@@ -280,7 +281,7 @@ def run_moe(ctx) -> dict:
         host._rollout_routing_replay = True
         spans, _ = dense_row_spans(mask[order])
         with torch.no_grad(), injector.capture(ROWS, mask.size(1), row_spans=spans) as replayed:
-            logps, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order)
+            logps, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order)
         wrong = [p for p in range(ROWS) if not torch.equal(replayed[0][p], engine[order[p]])]
         assert bool(torch.isfinite(logps).all()), "the replayed recompute returned non-finite log-probs"
         assert not wrong, f"dealt positions {wrong} replayed routing other than their row's engine routing"
@@ -289,7 +290,10 @@ def run_moe(ctx) -> dict:
         host._rollout_routing_replay = True
         host._orders_rows_by_length = True
         host._step, host._buffered_inputs = 0, None
-        host._generate_and_score_completions = lambda _inputs: batch | {ROUTING_MASKS_KEY: engine}
+        host._rollout_routing = routing
+        host._generate_and_score_completions = lambda _inputs: batch | {
+            ROUTING_ROWS_KEY: torch.arange(ROWS, device=ctx.device)
+        }
         forwarded, wrong, losses = [], [], []
         model.zero_grad(set_to_none=True)
         for _ in range(CHUNKS):

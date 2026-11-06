@@ -5,7 +5,7 @@ import contextlib
 from contextlib import AbstractContextManager
 from typing import ClassVar
 
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin
 
 
@@ -14,7 +14,11 @@ class PackedMicrobatchMixin(PackedRoundMixin):
     calls :meth:`_configure_packed_microbatches` once the model is placed, plans the round with :meth:`_plan_round` and
     lays it out with :meth:`_lay_out_packed_round` from the train round's batch build."""
 
-    PACKED_FILLER_VALUES: ClassVar[dict[str, int]] = {**PackedRoundMixin.PACKED_FILLER_VALUES, ROUTING_MASKS_KEY: -1}
+    PACKED_FILLER_VALUES: ClassVar[dict[str, int]] = {
+        **PackedRoundMixin.PACKED_FILLER_VALUES,
+        ROUTING_MASKS_KEY: -1,
+        ROUTING_ROWS_KEY: -1,
+    }
 
     @property
     def _packed_microbatch_tokens(self) -> int | None:

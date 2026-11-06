@@ -30,7 +30,7 @@ from tests.common.length_deal import (
     tiny_llama,
     train_round,
 )
-from tests.common.routing import bare_replay_injector
+from tests.common.routing import bare_replay_injector, ragged_routing
 
 _VOCAB = 64
 # Losses TRL's real loss below shows to be the same in any deal of a round's rows; bnpo differs and vespo is
@@ -296,7 +296,8 @@ def test_a_capture_over_dealt_forwards_comes_back_in_batch_order():
 def test_an_armed_mask_feeds_each_dealt_forward_its_own_rows_routing():
     injector, mask = _injector(), _routed_mask()
     forwarded = _DEALT.tolist()
-    injector.arm(mask, row_spans=[_SPANS[r] for r in forwarded], row_order=_DEALT)
+    attended = torch.stack([torch.arange(_SEQ) >= _SPANS[r][0] for r in forwarded])
+    injector.arm_rows(ragged_routing(mask, 3), forwarded, attended, [_SPANS[r] for r in forwarded])
     for i, layer in enumerate(injector._layers):
         want = torch.cat([mask[r, _SPANS[r][0] : _SPANS[r][1], i] for r in forwarded])
         assert torch.equal(layer._forced_topk_indices, want.long()), f"layer {i}"
@@ -306,8 +307,6 @@ def test_a_row_order_without_per_row_spans_is_refused():
     injector = _injector()
     with pytest.raises(RuntimeError, match="row order without row spans"), injector.capture(4, _SEQ, row_order=_DEALT):
         pass
-    with pytest.raises(RuntimeError, match="row order without row spans"):
-        injector.arm(_routed_mask(), row_order=_DEALT)
 
 
 def _replaying_scorer(injector: RoutingReplayInjector, replayed: dict):
@@ -338,7 +337,7 @@ def _step_recompute(rollout_replay: bool, dealt: bool) -> tuple[torch.Tensor, to
     host._get_per_token_logps_and_entropies = _replaying_scorer(injector, replayed)
     order = host._no_grad_row_order(mask, "train") if dealt else None
     assert order is None or not torch.equal(order, torch.argsort(order)), "the deal should not be self-inverse"
-    engine = _routed_mask(ids.size(0), ids.size(1)) if rollout_replay else None
+    engine = ragged_routing(_routed_mask(ids.size(0), ids.size(1)), 3) if rollout_replay else None
     logps, routing = host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order)
     return logps, routing, replayed
 
@@ -350,10 +349,22 @@ def test_the_step_batch_routes_every_dealt_row_as_its_batch_order_run(mode):
     plain_logps, plain_routing, plain_replayed = _step_recompute(rollout, dealt=False)
     dealt_logps, dealt_routing, dealt_replayed = _step_recompute(rollout, dealt=True)
     assert torch.equal(dealt_logps, plain_logps)
-    assert torch.equal(dealt_routing, plain_routing), "a dealt row's routing landed in another batch row"
+    if rollout:
+        assert dealt_routing is None and plain_routing is None, "R3 captures nothing: its routing is the engine's"
+    else:
+        assert torch.equal(dealt_routing, plain_routing), "a dealt row's routing landed in another batch row"
     assert dealt_replayed.keys() == plain_replayed.keys() and len(plain_replayed) == (12 * _LAYERS if rollout else 0)
     for key, value in plain_replayed.items():
         assert torch.equal(dealt_replayed[key], value), f"row/layer {key[1]} replayed another row's routing"
+    if rollout:
+        ids, mask, _ = stacked(_round(12, seed=5))
+        engine, spans = _routed_mask(12, ids.size(1)), dense_row_spans(mask)[0]
+        for (tokens, layer), value in dealt_replayed.items():
+            row = next(r for r in range(12) if tuple(ids[r].tolist()) == tokens)
+            lo, hi = spans[row]
+            assert torch.equal(value, engine[row, lo:hi, layer].long()), (
+                f"row {row} layer {layer} replayed foreign ids"
+            )
 
 
 def test_the_dealt_recompute_and_reference_forwards_are_bitwise_the_batch_orders():

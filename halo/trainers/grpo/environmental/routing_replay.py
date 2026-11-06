@@ -7,7 +7,7 @@ import contextlib
 import io
 import logging
 import sys
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import get_args
 
 import numpy as np
@@ -22,17 +22,19 @@ from halo.models.module_tree import decoder_layer_index
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, StepRows
+from halo.trainers.grpo.environmental.rollout_routing import (
+    ROLLOUT_COVERAGE_SHAPES,
+    RolloutRouting,
+    RowsReplay,
+    build_rollout_routing,
+)
+from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY, StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans, host_row_spans
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY
 from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
-
-# The coverage conventions a routed row falls into, exactly one per row (``prompt_len_mismatch`` is
-# counted on top of them, so it stays out of any per-row denominator).
-ROLLOUT_COVERAGE_SHAPES = ("full", "engine_omits_last", "completion_only", "unresolved")
 
 
 def decoder_layer_indices(names: Iterable[str]) -> list[int]:
@@ -64,64 +66,6 @@ def decode_rollout_routing(payload: str, num_layers: int, top_k: int) -> torch.T
             )
         array = flat.reshape(-1, num_layers, top_k)
     return torch.from_numpy(np.ascontiguousarray(array.astype(np.int16, copy=False)))
-
-
-def assemble_rollout_masks(
-    turn_masks: list[tuple[torch.Tensor, int | None] | None],
-    prompt_lens: list[int],
-    completion_lens: list[int],
-    max_prompt_len: int,
-    max_completion_len: int,
-    num_layers: int,
-    top_k: int,
-    num_experts: int,
-) -> tuple[torch.Tensor, dict[str, int]]:
-    """``(masks, stats)``. Alignment anchors on the engine's prompt token count, since a re-render can drift by a
-    token. Positions without routing stay ``-1``; a row matching no convention is counted, so the caller can refuse
-    uniformly."""
-    full, engine_omits_last, completion_only, unresolved = ROLLOUT_COVERAGE_SHAPES
-    rows = len(turn_masks)
-    stats = {**dict.fromkeys(ROLLOUT_COVERAGE_SHAPES, 0), "prompt_len_mismatch": 0}
-    out = torch.full((rows, max_prompt_len + max_completion_len, num_layers, top_k), -1, dtype=torch.int16)
-    for i, turn in enumerate(turn_masks):
-        if turn is None:
-            continue
-        mask, engine_p = turn
-        if mask.shape[1] != num_layers or mask.shape[2] != top_k:
-            raise ValueError(
-                f"routed_experts mask row {i} has [layers, top_k] = {tuple(mask.shape[1:])}, the model "
-                f"has ({num_layers}, {top_k}) — engine and trainer disagree on the MoE shape."
-            )
-        if mask.min() < 0 or mask.max() >= num_experts:
-            # Out-of-range ids corrupt DeepEP dispatch device-side rather than raising cleanly.
-            raise ValueError(
-                f"routed_experts mask row {i} contains expert ids outside [0, {num_experts}) — the "
-                f"engine is serving a different expert layout than the trainer."
-            )
-        picks = mask.sort(dim=-1).values
-        if (picks[..., 1:] == picks[..., :-1]).any():
-            # A router never picks an expert twice for a token; DeepEP dispatch faults on a repeated id.
-            raise ValueError(
-                f"routed_experts mask row {i} names one expert twice in a token's top-{top_k} — the engine's "
-                f"routing is not a top-k selection."
-            )
-        p, c = prompt_lens[i], completion_lens[i]
-        ep = engine_p if engine_p is not None else p
-        tokens = mask.shape[0]
-        if tokens in (ep + c, ep + c - 1):
-            stats[full if tokens == ep + c else engine_omits_last] += 1
-            covered = min(tokens - ep, c)
-            out[i, max_prompt_len : max_prompt_len + covered] = mask[ep : ep + covered]
-            if ep == p:
-                out[i, max_prompt_len - p : max_prompt_len] = mask[:p]
-            else:
-                stats["prompt_len_mismatch"] += 1  # completion still replayed; prompt stays natural
-        elif tokens in (c, c - 1):
-            stats[completion_only] += 1
-            out[i, max_prompt_len : max_prompt_len + tokens] = mask
-        else:
-            stats[unresolved] += 1
-    return out, stats
 
 
 def _require_spans_with_order(row_spans: list[tuple[int, int]] | None, row_order: torch.Tensor | None) -> None:
@@ -250,40 +194,59 @@ class RoutingReplayInjector:
             for layer, (capturing, forced) in zip(self._layers, saved, strict=True):
                 layer._capture_routing, layer._forced_topk_indices = capturing, forced
 
-    def arm(
-        self,
-        masks: torch.Tensor,
-        row_spans: list[tuple[int, int]] | None = None,
-        row_order: torch.Tensor | None = None,
-        forwards_subset: bool = False,
-    ) -> None:
-        """One microbatch's mask, consumed cursor-wise across row-chunked forwards (a GC forward saves its slice for
-        the recompute) and armed through backward. ``row_spans`` trims each forwarded row and ``row_order[p]`` names
-        its mask row; ``forwards_subset`` admits an order shorter than the mask (a packed plan's rows)."""
-        _require_spans_with_order(row_spans, row_order)
+    def arm(self, masks: torch.Tensor, row_spans: list[tuple[int, int]] | None = None) -> None:
+        """One microbatch's ``[rows, seq, layers, top_k]`` mask, consumed cursor-wise across row-chunked forwards (a GC
+        forward saves its slice for the recompute) and armed through backward. ``row_spans`` trims each forwarded
+        row."""
         if masks.dim() != 4 or masks.size(2) != len(self._layers):
             raise RuntimeError(
                 f"routing mask shape {tuple(masks.shape)} does not match "
                 f"[rows, seq, {len(self._layers)} EP layers, top_k]"
             )
-        forwarded = masks.size(0) if row_order is None else row_order.numel()
-        if row_spans is not None and len(row_spans) != forwarded:
-            raise RuntimeError(f"row_spans has {len(row_spans)} entries for {forwarded} forwarded rows")
-        if forwarded > masks.size(0) or (forwarded != masks.size(0) and not forwards_subset):
-            raise RuntimeError(f"row_order has {forwarded} entries for {masks.size(0)} mask rows")
-        sources = list(range(masks.size(0))) if row_order is None else row_order.tolist()
+        if row_spans is not None and len(row_spans) != masks.size(0):
+            raise RuntimeError(f"row_spans has {len(row_spans)} entries for {masks.size(0)} forwarded rows")
         for i, layer in enumerate(self._layers):
             layer_masks = masks[:, :, i, :]
             if row_spans is None:
                 flat = layer_masks.reshape(-1, masks.size(3))
             else:
-                flat = torch.cat(
-                    [layer_masks[r, lo:hi] for r, (lo, hi) in zip(sources, row_spans, strict=True)], dim=0
-                )
+                flat = torch.cat([layer_masks[r, lo:hi] for r, (lo, hi) in enumerate(row_spans)], dim=0)
             layer._forced_topk_indices = flat.long()
             layer._forced_cursor = 0
             layer._forced_consumed_total = 0
         self._armed = True
+
+    def arm_rows(
+        self,
+        routing: RolloutRouting,
+        rows: Sequence[int],
+        attended: torch.Tensor,
+        row_spans: list[tuple[int, int]] | None = None,
+    ) -> None:
+        """:meth:`arm` over the named rows of a round's engine routing, in the order they forward. Only that padded
+        slice is built, on ``attended``'s device and outside the attended positions ``-1``; it is freed on return."""
+        if attended.shape != (len(rows), routing.width):
+            raise RuntimeError(
+                f"attention mask {tuple(attended.shape)} does not match {len(rows)} rows of routing width {routing.width}"
+            )
+        masks = routing.pad_rows(rows, attended.device)
+        masks.masked_fill_(~attended.bool()[:, :, None, None], -1)
+        self.arm(masks, row_spans)
+
+    @contextlib.contextmanager
+    def replaying(
+        self,
+        routing: RolloutRouting,
+        rows: Sequence[int],
+        attended: torch.Tensor,
+        row_spans: list[tuple[int, int]] | None = None,
+    ):
+        """:meth:`arm_rows` for the block's forwards, which must consume exactly what it armed."""
+        self.arm_rows(routing, rows, attended, row_spans)
+        try:
+            yield
+        finally:
+            self.disarm()
 
     def disarm(self) -> None:
         """Raises (unless an exception is propagating) when a layer's consumed total is not a positive multiple of its
@@ -330,6 +293,8 @@ def build_routing_replay_injector(model: nn.Module) -> RoutingReplayInjector:
 
 
 class RoutingReplayMixin:
+    _rollout_routing: RolloutRouting | None = None
+
     def _build_routing_replay_injector(self, mode: str) -> RoutingReplayInjector | None:
         """``None`` when off; refuses an unknown mode, a model without EP layers or whose family cannot re-derive gate
         weights, and an unsupported setup."""
@@ -355,15 +320,16 @@ class RoutingReplayMixin:
     def _runs_logprob_recompute(self) -> bool:
         return self.num_iterations > 1 or self._misaligned_accumulation or self._is_correction or self.beta != 0.0
 
-    def _assemble_rollout_routing(
-        self, rows: list[TurnRow], step: StepRows, device: torch.device, mode: str
-    ) -> torch.Tensor | None:
+    def _assemble_rollout_routing(self, rows: list[TurnRow], step: StepRows, mode: str) -> RolloutRouting | None:
         """``None`` off rollout replay. A batch with no engine routing fails only while its loss mask has a trainable
-        token: an all-masked step has nothing to replay and trains as a no-op."""
-        rollout_routing_masks = None
+        token: an all-masked step has nothing to replay and trains as a no-op. A train round's routing stays on the
+        host, ragged, for its forwards to pad."""
+        rollout_routing = None
         if self._rollout_routing_replay and mode == "train":
+            self._rollout_routing = None
             if any(row.turn_routing is not None for row in rows):
-                rollout_routing_masks = self._rollout_masks_with_coverage(rows, step, device)
+                rollout_routing = self._rollout_routing_with_coverage(rows, step)
+                self._rollout_routing = rollout_routing
             elif step.tool_mask.any():
                 self._batch_errors.record(
                     "routing_replay='rollout' but no rollout in this batch returned routed_experts "
@@ -378,14 +344,12 @@ class RoutingReplayMixin:
                     "no gradient."
                 )
             self._batch_errors.reject()
-        return rollout_routing_masks
+        return rollout_routing
 
-    def _rollout_masks_with_coverage(
-        self, rows: list[TurnRow], step: StepRows, device: torch.device
-    ) -> torch.Tensor | None:
+    def _rollout_routing_with_coverage(self, rows: list[TurnRow], step: StepRows) -> RolloutRouting | None:
         """Each row's coverage is recorded; a malformed or wholly unresolved batch is recorded on the fence."""
         try:
-            masks, coverage = assemble_rollout_masks(
+            routing, coverage = build_rollout_routing(
                 [row.turn_routing for row in rows],
                 [len(row.prompt_ids) for row in rows],
                 [len(row.completion_ids) for row in rows],
@@ -408,16 +372,25 @@ class RoutingReplayMixin:
                 f"would replay natural routing and R3 would be inert. The engine's "
                 f"routed_experts token count no longer lines up with the trainer's "
                 f"prompt + completion lengths — check the engine version against the "
-                f"conventions in assemble_rollout_masks."
+                f"conventions in build_rollout_routing."
             )
-        return masks.to(device)
+        return routing
+
+    def _replaying_forwards(self, replay: RowsReplay | None, group: slice, attended: torch.Tensor):
+        """Arms the rows of ``group`` among a no-grad call's forwarded rows for the block, none when ``replay`` is
+        ``None``. ``attended`` holds the group's attention masks."""
+        if replay is None:
+            return contextlib.nullcontext()
+        spans = None if replay.spans is None else replay.spans[group]
+        return self._routing_injector.replaying(replay.routing, replay.rows[group], attended, spans)
 
     def _arm_loss_forward_replay(self, inputs: dict) -> None:
         """Over the positions the gradient forward attends; the rest route naturally. That excludes padding and the
         completion of a row dropped from the loss, which this forward reads as attention padding, in a context other
-        than its mask's."""
+        than its mask's. A rollout round's micro-batch pads its own rows from the host."""
         masks = inputs.get(ROUTING_MASKS_KEY)
-        if masks is None:
+        round_rows = inputs.get(ROUTING_ROWS_KEY)
+        if masks is None and round_rows is None:
             return
         attended = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
         stashed = inputs.get(ROW_SPANS_KEY)
@@ -427,4 +400,9 @@ class RoutingReplayMixin:
             spans = host_row_spans(stashed)[0]
         else:
             spans = dense_row_spans(attended)[0]
-        self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), row_spans=spans)
+        if round_rows is not None:
+            if self._rollout_routing is None:
+                raise RuntimeError("the batch names rollout routing rows but the trainer holds none for this round")
+            self._routing_injector.arm_rows(self._rollout_routing, round_rows.tolist(), attended, spans)
+        else:
+            self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), spans)

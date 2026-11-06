@@ -10,7 +10,7 @@ from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjecto
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.packed_forward import build_packed_rows
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
-from tests.common.routing import BareEPLayer, distinct_expert_picks
+from tests.common.routing import BareEPLayer, distinct_expert_picks, ragged_routing
 
 _VOCAB = 64
 _TOL = {"rtol": 1e-4, "atol": 1e-5}
@@ -165,7 +165,7 @@ def test_replay_across_packed_bins_consumes_exactly_the_armed_routing():
     ids, mask, keep = _round()
     order = torch.tensor(_PLAN.order)
     host = _routing_host(True)
-    engine = distinct_expert_picks((len(_PROMPTS), ids.size(1)), _LAYERS, _TOP_K, 8)
+    engine = ragged_routing(distinct_expert_picks((len(_PROMPTS), ids.size(1)), _LAYERS, _TOP_K, 8), 3)
     with torch.no_grad():
         host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order, _PLAN)
     assert not host._routing_injector._armed, "the recompute must disarm the mask it armed"

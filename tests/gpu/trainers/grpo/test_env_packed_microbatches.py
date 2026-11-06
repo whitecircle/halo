@@ -35,7 +35,7 @@ from halo.distributed.fsdp import apply_fsdp2_for_dp
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.length_deal import (
@@ -55,7 +55,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.packed_grad_floor import build_fp32_reference, judge_packed_grads
 from tests.common.rank_log import log, log_all
-from tests.common.routing import check_flips_are_near_ties, distinct_expert_picks, router_margins
+from tests.common.routing import check_flips_are_near_ties, distinct_expert_picks, ragged_routing, router_margins
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -244,13 +244,15 @@ def run_moe(ctx) -> dict:
         engine = distinct_expert_picks(
             (ROWS, ids.size(1)), injector.num_ep_layers, injector.top_k, injector.num_experts
         )
-        engine = engine.masked_fill(~mask.bool().cpu()[:, :, None, None], -1).to(ctx.device)
+        engine = engine.masked_fill(~mask.bool().cpu()[:, :, None, None], -1)
+        routing = ragged_routing(engine, batch["prompt_ids"].size(1))
         built = host()
         built._rollout_routing_replay = True
+        built._rollout_routing = routing
         with torch.no_grad():
-            logps, _ = built._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order, plan)
+            logps, _ = built._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order, plan)
         assert bool(torch.isfinite(logps).all()), "the replayed packed recompute returned non-finite log-probs"
-        round_batch = batch | {ROUTING_MASKS_KEY: engine}
+        round_batch = batch | {ROUTING_ROWS_KEY: torch.arange(ROWS, device=ctx.device)}
         built._step, built._buffered_inputs = 0, None
         built._packs_microbatches = True
         built._generate_and_score_completions = lambda _inputs: built._lay_out_packed_round(dict(round_batch), plan)

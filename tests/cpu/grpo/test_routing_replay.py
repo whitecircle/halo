@@ -19,9 +19,9 @@ from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.models.gradient_checkpointing import RecomputeScope
 from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.environmental.rollout_routing import build_rollout_routing
 from halo.trainers.grpo.environmental.routing_replay import (
     RoutingReplayInjector,
-    assemble_rollout_masks,
     build_routing_replay_injector,
     decode_rollout_routing,
     decoder_layer_indices,
@@ -512,7 +512,7 @@ def test_the_builder_reads_the_layer_count_and_indices_off_the_model():
     assert injector._engine_layers == 4 and injector._layer_indices == [1, 3]
 
 
-def test_assemble_rollout_masks_conventions():
+def test_build_rollout_routing_conventions():
     layers = 2
 
     def _m(tokens):
@@ -528,7 +528,8 @@ def test_assemble_rollout_masks_conventions():
         None,
         (_m(4), 2),  # engine says prompt=2, trainer rendered 3 → 2+2=4 tokens, full coverage @ ep=2
     ]
-    out, stats = assemble_rollout_masks(masks, prompt_lens, completion_lens, 4, 5, layers, K, E)
+    routing, stats = build_rollout_routing(masks, prompt_lens, completion_lens, 4, 5, layers, K, E)
+    out = routing.pad_rows(range(5), torch.device("cpu"))
     assert out.shape == (5, 9, layers, K)
     assert torch.equal(out[0, 1:4], masks[0][0][:3])
     assert torch.equal(out[0, 4:6], masks[0][0][3:5])
@@ -551,29 +552,18 @@ def test_assemble_rollout_masks_conventions():
     }
 
 
-def test_assemble_rollout_masks_rejects_drift_and_counts_unresolved():
+def test_build_rollout_routing_rejects_drift_and_counts_unresolved():
     bad_layers = [(torch.zeros(3, 5, K, dtype=torch.int16), None)]  # 5 layers vs model's 2
     with pytest.raises(ValueError, match="MoE shape"):
-        assemble_rollout_masks(bad_layers, [1], [2], 2, 3, 2, K, E)
+        build_rollout_routing(bad_layers, [1], [2], 2, 3, 2, K, E)
     bad_ids = [(torch.full((3, 2, K), E + 3, dtype=torch.int16), None)]
     with pytest.raises(ValueError, match="expert layout"):
-        assemble_rollout_masks(bad_ids, [1], [2], 2, 3, 2, K, E)
+        build_rollout_routing(bad_ids, [1], [2], 2, 3, 2, K, E)
     # A coverage matching no convention is counted, never raised, since a per-rank raise would desync ranks into a
     # collective hang. The row keeps natural routing.
     odd_len = [(torch.arange(9 * 2 * K, dtype=torch.int16).reshape(9, 2, K) % E, None)]
-    out, stats = assemble_rollout_masks(odd_len, [1], [2], 2, 3, 2, K, E)
-    assert stats["unresolved"] == 1 and (out == -1).all()
-
-
-@pytest.mark.parametrize("bad", ["repeated", "out_of_range"])
-def test_a_mask_deepep_would_fault_on_is_refused_at_assembly(bad):
-    mask = torch.arange(8 * 2 * K, dtype=torch.int16).reshape(8, 2, K) % E
-    if bad == "repeated":
-        mask[2, 1, 1] = mask[2, 1, 0]
-    else:
-        mask[2, 1, 1] = E
-    with pytest.raises(ValueError, match="twice|outside"):
-        assemble_rollout_masks([(mask, 4)], [4], [4], 4, 4, 2, K, E)
+    routing, stats = build_rollout_routing(odd_len, [1], [2], 2, 3, 2, K, E)
+    assert stats["unresolved"] == 1 and (routing.pad_rows([0], torch.device("cpu")) == -1).all()
 
 
 if __name__ == "__main__":

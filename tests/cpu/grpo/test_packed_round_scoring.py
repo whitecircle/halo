@@ -17,13 +17,14 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
+from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
 from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_IS_ACTIVE_KEY, SLOT_ROWS_KEY, PackedRoundMixin
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
-from tests.common.routing import bare_replay_injector
+from tests.common.routing import bare_replay_injector, ragged_routing
 
 _VOCAB = 64
 _LENGTHS = (5, 1, 7, 2, 6, 3, 4, 8)
@@ -202,8 +203,8 @@ def test_an_inert_forward_inside_a_capture_miscounts_unless_it_is_paused():
 
 def test_pausing_hides_an_armed_mask_from_the_forward_and_restores_it_with_its_cursor():
     injector, mask = _injector(), _mask(len(_SPANS))
-    forwarded = torch.tensor([2, 0])
-    injector.arm(mask, row_spans=[_SPANS[r] for r in forwarded.tolist()], row_order=forwarded, forwards_subset=True)
+    forwarded = [2, 0]
+    injector.arm(mask[forwarded], row_spans=[_SPANS[r] for r in forwarded])
     armed = [layer._forced_topk_indices for layer in injector._layers]
     for layer in injector._layers:
         layer._forced_cursor = 2
@@ -215,19 +216,23 @@ def test_pausing_hides_an_armed_mask_from_the_forward_and_restores_it_with_its_c
     assert all(layer._forced_topk_indices.size(0) == expected for layer in injector._layers)
 
 
-def test_arming_checks_the_forwarded_rows_not_the_masks_rows():
+def test_arming_checks_the_spans_against_the_forwarded_rows():
     injector = _injector()
     with pytest.raises(RuntimeError, match="row_spans has 2 entries for 3 forwarded rows"):
-        injector.arm(_mask(6), row_spans=[_SPANS[0], _SPANS[1]], row_order=torch.tensor([0, 1, 2]))
+        injector.arm(_mask(3), row_spans=[_SPANS[0], _SPANS[1]])
 
 
-def test_a_row_order_shorter_than_the_mask_is_refused_unless_the_caller_declares_a_subset():
+def test_arming_named_rows_builds_only_those_rows_in_forward_order():
+    """A packed bin forwards a subset of the round's rows: only theirs are padded, spans trimmed, in forward order."""
     injector, mask = _injector(), _mask(len(_SPANS))
-    forwarded = torch.tensor([2, 0])
-    spans = [_SPANS[r] for r in forwarded.tolist()]
-    with pytest.raises(RuntimeError, match="row_order has 2 entries"):
-        injector.arm(mask, row_spans=spans, row_order=forwarded)
-    injector.arm(mask, row_spans=spans, row_order=forwarded, forwards_subset=True)
+    routing = ragged_routing(mask, prompt_width=2)
+    forwarded = [2, 0]
+    spans = [_SPANS[r] for r in forwarded]
+    attended = torch.stack([torch.arange(_SEQ) >= _SPANS[r][0] for r in forwarded])
+    injector.arm_rows(routing, forwarded, attended, spans)
+    for i, layer in enumerate(injector._layers):
+        want = torch.cat([mask[r, lo:hi, i] for r, (lo, hi) in zip(forwarded, spans, strict=True)])
+        assert torch.equal(layer._forced_topk_indices, want.long()), f"layer {i}"
 
 
 def _noop_host(*, injector=None):
@@ -328,6 +333,33 @@ def test_evaluation_rounds_never_take_the_packed_path():
     host = _refill_host({"advantages": torch.zeros(2)}, training=False)
     host._build_slot_view = lambda slot: pytest.fail("an eval round was gathered as a slot")
     assert host._prepare_inputs({})["advantages"].shape == (2,)
+
+
+def test_a_slots_filler_rows_are_inert_and_carry_no_routing_row():
+    host = object.__new__(PackedMicrobatchMixin)
+    host.pad_token_id = 9
+    host.args = types.SimpleNamespace(steps_per_generation=2)
+    host.loss_type = "grpo"
+    host._round_store = {
+        "advantages": torch.tensor([0.5, -0.5]),
+        "prompt_ids": torch.tensor([[1, 2], [3, 4]]),
+        "completion_ids": torch.tensor([[5], [6]]),
+        "prompt_mask": torch.zeros(2, 2, dtype=torch.bool),
+        "importance_sampling_ratio": torch.ones(2),
+        ROUTING_ROWS_KEY: torch.tensor([0, 1]),
+        ROUTING_MASKS_KEY: torch.tensor([[0, 1], [1, 0]]),
+    }
+    slot = {
+        SLOT_ROWS_KEY: torch.tensor([1, -1]),
+        SLOT_ACTIVE_KEY: torch.tensor([1, 1]),
+        "num_items_in_batch": torch.tensor(2),
+    }
+    view = host._build_slot_view(slot)
+    assert view[ROUTING_ROWS_KEY].tolist() == [1, -1]
+    assert view[ROUTING_MASKS_KEY].tolist() == [[1, 0], [-1, -1]]
+    assert view["prompt_ids"].tolist() == [[3, 4], [9, 9]]
+    assert view["prompt_mask"].tolist() == [[False, False], [False, True]]
+    assert view["importance_sampling_ratio"].tolist() == [1.0, 1.0]
 
 
 def test_the_mixin_sits_ahead_of_the_deal_and_the_tp_resync_and_is_configured_at_construction():

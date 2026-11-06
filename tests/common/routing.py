@@ -9,6 +9,7 @@ from torch import nn
 
 from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
+from halo.trainers.grpo.environmental.rollout_routing import RolloutRouting
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 
 
@@ -110,3 +111,12 @@ def distinct_expert_picks(
     top-k is (a repeated id faults DeepEP dispatch)."""
     scores = torch.rand(*prefix, layers, num_experts, generator=generator)
     return scores.topk(top_k, dim=-1).indices.to(torch.int16)
+
+
+def ragged_routing(masks: torch.Tensor, prompt_width: int) -> RolloutRouting:
+    """The round's routing of a dense ``[rows, prompt + completion, layers, top_k]`` mask: each row whole, so padding
+    rides as ``-1`` and ``pad_rows`` returns the dense rows back."""
+    rows, width, layers, top_k = masks.shape
+    return RolloutRouting(
+        list(masks.cpu().unbind()), [prompt_width] * rows, prompt_width, width - prompt_width, layers, top_k
+    )
