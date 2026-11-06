@@ -32,7 +32,7 @@ lora_alpha: 16
 output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
 ```
 
-`distill_alpha` weighs the distillation term and `1 − distill_alpha` the CLM term (`1.0` drops CLM; below it both terms share one chunked pass over the student logits, so backward builds one gradient plane of them, not one per term), and `distill_temperature` reaches only the four losses that declare it. `apply_hard_labels` scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; `slim`, which weights by its own gold-token rule, refuses it. `teacher_model_revision` pins the teacher repo, since the student's `model_revision` names a commit elsewhere. Over-length conversations are **dropped**, not truncated. Types and defaults: [TeacherDistillationConfig](../../reference/configuration-reference.md#teacherdistillationconfig) and [TeacherDistillScriptArguments](../../reference/configuration-reference.md#teacherdistillscriptarguments).
+`distill_alpha` weighs the distillation term and `1 − distill_alpha` the CLM term (`1.0` drops CLM; below it both terms share one chunked pass over the student logits, so backward builds one gradient plane of them, not one per term), and `distill_temperature` reaches only the five losses that declare it. `distill_jsd_beta` sets the β of `jensen_shannon` ([Generalized JSD](#generalized-jsd)) and `distill_topk` scores the loss on the teacher's top-k tokens plus a tail bin ([Top-k](#top-k)); each is refused off its default beside a loss that does not read it. `apply_hard_labels` scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; `slim`, which weights by its own gold-token rule, refuses it. `teacher_model_revision` pins the teacher repo, since the student's `model_revision` names a commit elsewhere. Over-length conversations are **dropped**, not truncated. Types and defaults: [TeacherDistillationConfig](../../reference/configuration-reference.md#teacherdistillationconfig) and [TeacherDistillScriptArguments](../../reference/configuration-reference.md#teacherdistillscriptarguments).
 
 The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teacher fits rounded targets) and under the run's `trust_remote_code`. Student and teacher load on one padded-workload attention request, decided on both checkpoints (on Blackwell FA2 for a softcapped student, and SDPA where either is remote code or only the teacher carries a softcap, which lands the teacher on FA2), so the two compared forwards take the same backend wherever both models accept it. Each model resolves that request against its own config, so the teacher's per-family kernel limits apply to the teacher (DeepSeek-V4 eager-only, Gemma 4 head_dim 512). `reset_sinks` applies to both models, and a GptOss teacher is refused under `reset_sinks: true` before any weight loads: a frozen teacher never trains back from neutralized sinks, and gpt-oss-20b without them predicts ~6 nats/token (KL) from its pretrained self. Set `reset_sinks: false` so both keep their sinks live and frozen ([GPT-OSS → Attention sinks](../../models/gpt-oss.md#attention-sinks)). The trainer refuses a teacher whose load stamped neutralized sinks too, for a teacher built outside the script. A pinned `flash_attention_4` the load keeps for a softcapped student (Gemma 2 27B) is refused before any weight loads at more than one row per batch, training or evaluation: those padded batches reach FA4's varlen kernels, which a softcap stays off ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
 
@@ -42,16 +42,31 @@ Each term is one mean over the micro-batch's supervised tokens, so a short row's
 
 | `distill_loss` | What it computes |
 |---|---|
-| `kl_divergence` | `KL(teacher ‖ student)` at `distill_temperature` |
+| `kl_divergence` | Forward `KL(teacher ‖ student)` at `distill_temperature`; mode-covering |
+| `reverse_kl` | Reverse `KL(student ‖ teacher)` at `distill_temperature`; mode-seeking |
 | `mse` | `MSE(teacher_logits, student_logits)` on raw logits |
 | `soft_cross_entropy` | `-sum(teacher_probs · log student_probs)` at `distill_temperature` |
 | `cosine_similarity` | `1 - cos(teacher_logits, student_logits)`; tolerant of logit-scale differences |
-| `jensen_shannon` | `0.5·KL(P‖M) + 0.5·KL(Q‖M)` with `M` the midpoint — symmetric |
+| `jensen_shannon` | Generalized JSD at `distill_jsd_beta` ([below](#generalized-jsd)); symmetric at the default `0.5` |
 | `slim` | `KL(teacher ‖ student)` weighted per token by `1 - exp(-teacher_prob[label] / student_prob[label])`, a detached weight |
 
 `slim` takes the weighting [SLIM](https://openreview.net/forum?id=2fc5GOPYip)'s text describes — larger where the teacher is more confident in the gold token than the student — not the paper's loss: its Eq. 4 prints the inverse ratio, `1 − exp(−s/t)`, and adds the weighted soft cross-entropy over a top-5% teacher to a unit-weight CE term, while here the full teacher distribution is used and CLM keeps its `1 − distill_alpha` weight.
 
-`distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; `mse` and `cosine_similarity` take no temperature, so setting it there raises. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
+`distill_temperature` reaches `kl_divergence`, `reverse_kl`, `soft_cross_entropy`, `jensen_shannon` and `slim`; `mse` and `cosine_similarity` take no temperature, so setting it there raises. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
+
+Both KL directions are per-token divergences at the dataset's prefixes. Sequence-level reverse KL is an expectation over prefixes the student samples itself, the on-policy objective [online SDPG](online-sdpg.md) trains; off-policy `reverse_kl` applies the mode-seeking pull per token only. Likewise, `kl_divergence` equals the sequence-level forward KL only when the dataset completions were sampled from the teacher.
+
+### Generalized JSD
+
+`JSD_β = β·KL(q ‖ M) + (1 − β)·KL(p ‖ M)` with `M = β·q + (1 − β)·p`, `q` the teacher and `p` the student ([GKD](https://arxiv.org/abs/2306.13649), Eq. 1; TRL's `beta` convention). `β = 0` is exactly `kl_divergence` and `β = 1` exactly `reverse_kl`. `distill_jsd_beta` must lie in `[0, 1]`; the SDPG arms take the same loss at `sdpg_jsd_beta`.
+
+The loss shrinks toward the endpoints, to about `β·KL(q ‖ p)` near 0 and `(1 − β)·KL(p ‖ q)` near 1, then jumps to the full KL at exactly 0 and 1. A β close to an endpoint trains with a proportionally weak pull. For forward or reverse KL, set `kl_divergence` / `reverse_kl` (or β exactly `0` / `1`) rather than a β near it.
+
+### Top-k
+
+`distill_topk: k` scores the loss on the teacher's top-k tokens plus one tail bin holding the rest of each distribution's mass. The config refuses it with any loss but `kl_divergence` and `soft_cross_entropy`, the two weighted by the teacher's probabilities alone. `k` must be below the compared vocabulary width: the script refuses one that covers it before any teacher weight loads, and the trainer again at construction, since `null` is the full-vocab loss.
+
+It approximates the full-vocab objective. Merging tokens into one bin never increases a divergence, so the top-k loss is a lower bound on the full-vocab loss. Both forwards still return full-vocab logits, so it saves no memory. The tail bin sums the off-support probabilities rather than taking one minus the support mass, which keeps its gradient where a student's support mass rounds to 1 in fp32. The sum builds an extra fp32 copy of each side's log-probs, one token chunk at a time.
 
 ## Launch
 

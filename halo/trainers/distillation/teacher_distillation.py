@@ -33,6 +33,7 @@ from halo.trainers.distillation.divergences import (
     logits_forward_inputs,
     place_frozen_scorer,
     pooled_token_mean,
+    reject_topk_covering_vocab,
     require_divergence,
     shifted_token_cross_entropy,
     token_divergence,
@@ -46,8 +47,9 @@ logger = logging.getLogger(__name__)
 
 
 def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
-    """The ``distill_loss`` divergence, refused under ``apply_hard_labels`` when it weighs the gold token itself."""
-    loss_fn = require_divergence(args.distill_loss)
+    """The ``distill_loss`` divergence at ``distill_jsd_beta`` and ``distill_topk``, refused under
+    ``apply_hard_labels`` when it weighs the gold token itself."""
+    loss_fn = require_divergence(args.distill_loss, jsd_beta=args.distill_jsd_beta, topk=args.distill_topk)
     if args.apply_hard_labels and uses_hard_labels(loss_fn):
         raise ValueError(
             f"apply_hard_labels cannot combine with distill_loss={args.distill_loss!r}, which applies its "
@@ -155,6 +157,7 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         self._vocab_width, device = place_frozen_scorer(
             self.teacher_model, self.model, resolve_tokenizer(self.processing_class), teacher_tokenizer
         )
+        reject_topk_covering_vocab(self.args.distill_topk, self._vocab_width, self.model)
         if is_global_main_process():
             logger.info(f"Teacher model moved to {device} and set to eval mode")
 

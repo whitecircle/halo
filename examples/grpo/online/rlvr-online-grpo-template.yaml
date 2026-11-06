@@ -62,7 +62,7 @@ loss_type: grpo
 # use_sdpg: false
 # opd_positive_advantage_only: true  # the OPD term on positive-advantage tokens only
 # sdpg_hint_template: "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"  # appended to the generation prompt for the TEACHER forward only; {answer} is its one placeholder
-# sdpg_loss: reverse_kl             # reverse_kl, forward_kl or unnormalized_kl; sdpg_temperature 1.0
+# sdpg_loss: reverse_kl             # reverse_kl, forward_kl, unnormalized_kl or jensen_shannon (at sdpg_jsd_beta 0.5); sdpg_temperature 1.0
 # The beta schedule (sdpg_beta_base, sdpg_beta_warmup_steps, sdpg_beta_decay_steps): agent-docs/training-methods/distillation/online-sdpg.md#configuration
 
 # --- Training ---

@@ -3,6 +3,7 @@
 Each stub scores tokens through its own table, so a dropped term or unshifted labels miss the independent oracle."""
 
 import contextlib
+import dataclasses
 import inspect
 import sys
 import types
@@ -19,12 +20,18 @@ from transformers import Trainer
 import halo.kernels.logprobs as logprob_kernels
 import halo.trainers.distillation.teacher_distillation as teacher_distillation
 import scripts.training.distillation.teacher_distill as teacher_distill_script
+from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.model_setup import PolicyLoad
 from halo.entrypoints.script import ScriptContext
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
-from halo.trainers.distillation.divergences import place_frozen_scorer, require_divergence
+from halo.trainers.distillation.divergences import (
+    forward_kl_loss,
+    generalized_jsd_loss,
+    place_frozen_scorer,
+    teacher_topk_loss,
+)
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -69,6 +76,13 @@ class _Tokenizer:
 
 
 TOKENS = {f"t{i}": i for i in range(VOCAB)}
+_LOSS_KNOBS = ("distill_loss", "apply_hard_labels", "distill_jsd_beta", "distill_topk")
+
+
+def _args(**overrides) -> types.SimpleNamespace:
+    """The ``TeacherDistillationConfig`` loss knobs the constructor reads, at their defaults unless overridden."""
+    defaults = {f.name: f.default for f in dataclasses.fields(TeacherDistillationConfig) if f.name in _LOSS_KNOBS}
+    return types.SimpleNamespace(**{**defaults, **overrides})
 
 
 def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALPHA, peft_casted=False):
@@ -82,7 +96,9 @@ def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALP
         distill_temperature=TEMPERATURE,
         apply_hard_labels=apply_hard_labels,
     )
-    trainer.distillation_loss_fn = require_divergence(distill_loss)
+    trainer.distillation_loss_fn = teacher_distillation.require_distill_loss(
+        _args(distill_loss=distill_loss, apply_hard_labels=apply_hard_labels)
+    )
     trainer._vocab_width = None
     trainer._peft_has_been_casted_to_bf16 = peft_casted
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
@@ -121,7 +137,10 @@ def _oracle(trainer, *, gate: bool = False, slim: bool = False):
     return ALPHA * distill + (1 - ALPHA) * clm, distill, clm
 
 
-def _construct(args, *, peft_config=None, teacher_model=None):
+def _construct(args, *, peft_config=None, teacher_model=None, compared_width=None, student_rows=VOCAB):
+    student = nn.Linear(2, 2)
+    student.config = types.SimpleNamespace(get_text_config=lambda: types.SimpleNamespace(vocab_size=student_rows))
+
     def init_config(self, kwargs, **explicit):
         self.parallelism_config = explicit["parallelism_config"]
         return {**kwargs, "model": explicit["model"]}
@@ -132,10 +151,12 @@ def _construct(args, *, peft_config=None, teacher_model=None):
         mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: vars(self).update(kwargs, model=model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
         mock.patch.object(DistributedTeacherDistillationTrainer, "_configure_distributed_modes"),
-        mock.patch.object(teacher_distillation, "place_frozen_scorer", return_value=(None, torch.device("cpu"))),
+        mock.patch.object(
+            teacher_distillation, "place_frozen_scorer", return_value=(compared_width, torch.device("cpu"))
+        ),
     ):
         return DistributedTeacherDistillationTrainer(
-            student_model=nn.Linear(2, 2),
+            student_model=student,
             teacher_model=teacher_model if teacher_model is not None else nn.Linear(2, 2),
             teacher_tokenizer=_Tokenizer(TOKENS),
             args=args,
@@ -218,7 +239,39 @@ def test_backward_holds_no_fp32_vocab_plane_beyond_the_two_logits(monkeypatch, d
 def test_the_hard_label_gate_is_refused_beside_a_loss_that_weights_gold_tokens_itself():
     """slim applies its own gold-token weight, so the gate on top would count it twice."""
     with pytest.raises(ValueError, match="apply_hard_labels cannot combine with distill_loss='slim'"):
-        _construct(types.SimpleNamespace(distill_loss="slim", apply_hard_labels=True))
+        _construct(_args(distill_loss="slim", apply_hard_labels=True))
+
+
+def test_the_trainer_scores_jensen_shannon_at_the_configured_beta():
+    student, teacher = torch.randn(2, 2, 3, VOCAB, generator=torch.Generator().manual_seed(2))
+    trainer = _construct(_args(distill_loss="jensen_shannon", distill_jsd_beta=0.3))
+    assert torch.equal(
+        trainer.distillation_loss_fn(student, teacher, TEMPERATURE),
+        generalized_jsd_loss(student, teacher, TEMPERATURE, jsd_beta=0.3),
+    )
+
+
+def test_the_trainer_scores_the_configured_teacher_topk():
+    student, teacher = torch.randn(2, 2, 3, VOCAB, generator=torch.Generator().manual_seed(3))
+    trainer = _construct(_args(distill_topk=3))
+    assert torch.equal(
+        trainer.distillation_loss_fn(student, teacher, TEMPERATURE),
+        teacher_topk_loss(student, teacher, TEMPERATURE, loss_fn=forward_kl_loss, topk=3),
+    )
+
+
+@pytest.mark.parametrize("topk", [VOCAB, VOCAB + 1])
+def test_a_directly_built_trainer_refuses_a_topk_covering_the_vocabulary(topk):
+    """``null`` is the full-vocab loss, and a k past the vocabulary would fail in ``torch.topk`` mid-step."""
+    with pytest.raises(ValueError, match=f"covers the whole compared vocabulary \\({VOCAB} tokens\\)"):
+        _construct(_args(distill_topk=topk))
+    assert _construct(_args(distill_topk=VOCAB - 1)).distillation_loss_fn.keywords["topk"] == VOCAB - 1
+
+
+def test_the_topk_bound_is_the_compared_width_not_the_padded_rows():
+    """Padded embedding rows are sliced to the tokenizer's ids, so k is bounded by those."""
+    with pytest.raises(ValueError, match=f"\\({VOCAB} tokens\\)"):
+        _construct(_args(distill_topk=VOCAB), compared_width=VOCAB, student_rows=VOCAB + 5)
 
 
 def test_a_casted_peft_student_forwards_under_bf16_autocast():
@@ -242,9 +295,7 @@ def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_
     dropout, since the config has no switch for it."""
     peft_config, wrapped = LoraConfig(), nn.Linear(2, 2)
     with mock.patch.object(teacher_distillation, "prepare_policy_model", return_value=(wrapped, True)) as prepare:
-        trainer = _construct(
-            types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False), peft_config=peft_config
-        )
+        trainer = _construct(_args(), peft_config=peft_config)
     assert prepare.call_args.args[1] is peft_config
     assert prepare.call_args.kwargs["disable_dropout"] is False
     assert trainer.model is wrapped
@@ -259,7 +310,7 @@ def test_a_teacher_loaded_with_neutralized_sinks_is_refused(policy):
     teacher = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"])
     if policy is not None:
         apply_sinks_policy(teacher, teacher.config, policy=policy)
-    args = types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False)
+    args = _args()
     if policy is SinksPolicy.NEUTRALIZED:
         with pytest.raises(ValueError, match="loaded with its attention sinks neutralized"):
             _construct(args, teacher_model=teacher)
@@ -315,7 +366,7 @@ class _TeacherWeightsLoaded(Exception):
     """Raised by the stubbed teacher weight load: the script got past every check before it."""
 
 
-def _run_teacher_script(tmp_path, teacher_tokens):
+def _run_teacher_script(tmp_path, teacher_tokens, extra_yaml=""):
     """Drive the script's ``main()`` with every load stubbed, the teacher's tokenizer and config included."""
     student = _TokenTableModel(seed=0)
     stubs = {
@@ -340,7 +391,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/student\nteacher_model: stub/teacher\ndataset:\n- dummy/dataset\n"
-        f"output_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n"
+        f"output_dir: {tmp_path / 'out'}\nbf16: false\nuse_cpu: true\n{extra_yaml}"
     )
     with (
         mock.patch("halo.entrypoints.script.install_log_tee"),
@@ -358,6 +409,13 @@ def test_the_script_refuses_a_teacher_tokenizer_before_any_teacher_weight_loads(
         _run_teacher_script(tmp_path, {**TOKENS, "t1": 2, "t2": 1})
     with pytest.raises(_TeacherWeightsLoaded):
         _run_teacher_script(tmp_path, TOKENS)
+
+
+def test_the_script_refuses_a_topk_covering_the_vocabulary_before_any_teacher_weight_loads(tmp_path):
+    with pytest.raises(ValueError, match="covers the whole compared vocabulary"):
+        _run_teacher_script(tmp_path, TOKENS, f"distill_topk: {VOCAB}\n")
+    with pytest.raises(_TeacherWeightsLoaded):
+        _run_teacher_script(tmp_path, TOKENS, f"distill_topk: {VOCAB - 1}\n")
 
 
 def test_the_text_collator_keeps_the_real_eos_label_when_pad_is_eos():

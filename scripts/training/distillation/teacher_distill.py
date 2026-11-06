@@ -49,7 +49,7 @@ from halo.models.attention.gpt_oss_sinks import (
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.distillation.divergences import resolve_shared_vocab_width
+from halo.trainers.distillation.divergences import reject_topk_covering_vocab, resolve_shared_vocab_width
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 
 logger = logging.getLogger(__name__)
@@ -179,7 +179,8 @@ def main():
     apply_vision_options(args, student_model, model_config, processing_class, is_vlm=is_vlm)
 
     # Before any teacher weight loads (the trainer checks again).
-    resolve_shared_vocab_width(student_model.config, teacher_config, tokenizer, teacher_tokenizer)
+    vocab_width = resolve_shared_vocab_width(student_model.config, teacher_config, tokenizer, teacher_tokenizer)
+    reject_topk_covering_vocab(training_config.distill_topk, vocab_width, student_model)
     teacher_model = _load_distill_teacher(
         args=args,
         model_config=model_config,

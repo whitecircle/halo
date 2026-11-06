@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
@@ -22,6 +23,7 @@ from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
 from halo.entrypoints.script import distributed_trainer_kwargs
+from halo.trainers.distillation.divergences import generalized_jsd_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -485,7 +487,8 @@ def test_rlrr_rejects_an_inverted_clip_band_from_the_script_args():
 # trainer would have used.
 _SDPG_TUNABLES = {
     "sdpg_hint_template": "the answer is {answer}",
-    "sdpg_loss": "forward_kl",
+    "sdpg_loss": "jensen_shannon",
+    "sdpg_jsd_beta": 0.3,
     "sdpg_temperature": 0.5,
     "sdpg_beta_base": 0.25,
     "sdpg_beta_warmup_steps": 7,
@@ -685,6 +688,18 @@ def test_self_distill_requires_the_solution_column_only_where_the_template_names
     # A slot the template does not name demands no column: a solution-only hint takes no answer column.
     solution_only = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "solution": ["6 * 7"]})
     module._require_privileged_columns(solution_only, _answer_column_args(sdpg_hint_template="worked: {solution}"))
+
+
+@pytest.mark.parametrize(
+    "construct", [_construct_sdpg_shell, _construct_self_distill_shell], ids=["sdpg", "self_distill"]
+)
+def test_sdpg_trainers_score_the_opd_term_at_the_configured_jsd_beta(construct):
+    """The β set in the config is the β the OPD loss runs at, not the dataclass default."""
+    student, teacher = torch.randn(2, 2, 3, 16, generator=torch.Generator().manual_seed(0))
+    trainer, _ = construct(sdpg_loss="jensen_shannon", sdpg_jsd_beta=0.3)
+    assert torch.equal(
+        trainer.sdpg_loss_fn(student, teacher, 1.0), generalized_jsd_loss(student, teacher, 1.0, jsd_beta=0.3)
+    )
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():

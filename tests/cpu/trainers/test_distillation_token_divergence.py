@@ -8,6 +8,7 @@ import pytest
 import torch
 
 import halo.kernels.logprobs as logprob_kernels
+from halo.configs.distillation import TOPK_DISTILL_LOSSES
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, selective_logprobs
 from halo.trainers.distillation.divergences import (
     DIVERGENCES,
@@ -15,6 +16,7 @@ from halo.trainers.distillation.divergences import (
     gold_token_probs,
     hard_labels_coefficient,
     pooled_token_mean,
+    require_divergence,
     shifted_token_cross_entropy,
     token_divergence,
     token_divergence_and_cross_entropy,
@@ -28,6 +30,12 @@ CHUNK_ROWS = 4
 # One bf16 [B, S, V] student plane is 128 MiB, so a whole gradient plane stands far above the allocator's noise.
 PEAK_SHAPE = (2, 1024, 32768)
 DISTILL_ALPHA = 0.5
+# Below VOCAB, so the tail bin holds tokens.
+TOPK = 5
+# Every registry entry as a trainer resolves it, plus each top-k-capable loss under the teacher top-k wrapper.
+RESOLVED = {name: require_divergence(name, jsd_beta=0.3) for name in DIVERGENCES} | {
+    f"{name}-top{TOPK}": require_divergence(name, topk=TOPK) for name in TOPK_DISTILL_LOSSES
+}
 
 
 @pytest.fixture(autouse=True)
@@ -68,10 +76,10 @@ def _saved_fp32_planes(fn, *inputs):
     return out, planes
 
 
-@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+@pytest.mark.parametrize("name", sorted(RESOLVED))
 def test_every_divergence_matches_the_whole_plane_on_the_shifted_view(name):
     """On the ``logits[:, :-1]`` view the teacher and SDPG trainers pass."""
-    loss_fn = DIVERGENCES[name]
+    loss_fn = RESOLVED[name]
     base, teacher, labels = _inputs()
     chunked_in = base.clone().requires_grad_(True)
     whole_in = base.clone().requires_grad_(True)
@@ -87,9 +95,9 @@ def test_every_divergence_matches_the_whole_plane_on_the_shifted_view(name):
     torch.testing.assert_close(chunked_in.grad, whole_in.grad)
 
 
-@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+@pytest.mark.parametrize("name", sorted(RESOLVED))
 def test_backward_holds_no_fp32_plane_of_any_divergence(name):
-    loss_fn = DIVERGENCES[name]
+    loss_fn = RESOLVED[name]
     base, teacher, labels = _inputs(torch.bfloat16)
     student = base.clone().requires_grad_(True)
 
@@ -103,10 +111,10 @@ def test_backward_holds_no_fp32_plane_of_any_divergence(name):
     assert whole_planes, "the oracle must hold the planes the chunking removes, or the check above proves nothing"
 
 
-@pytest.mark.parametrize("name", ["reverse_kl", "forward_kl", "unnormalized_kl"])
+@pytest.mark.parametrize("name", ["reverse_kl", "forward_kl", "unnormalized_kl", "jensen_shannon"])
 def test_gathered_response_rows_match_the_whole_plane(name):
     """Self-distillation scores ``[N, V]`` rows gathered by the response masks."""
-    loss_fn = DIVERGENCES[name]
+    loss_fn = RESOLVED[name]
     student, teacher, _ = _inputs(seed=1)
     rows = student.flatten(0, 1).clone().requires_grad_(True)
     reference = rows.detach().clone().requires_grad_(True)
@@ -164,9 +172,9 @@ def test_the_cross_entropy_scores_and_trains_what_the_log_prob_form_does():
     assert torch.equal(logits.grad, oracle_in.grad)
 
 
-@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+@pytest.mark.parametrize("name", sorted(RESOLVED))
 def test_one_pass_scores_and_trains_what_two_passes_do(name):
-    loss_fn = DIVERGENCES[name]
+    loss_fn = RESOLVED[name]
     base, teacher, labels = _inputs(torch.bfloat16, seed=7)
     joint_in, split_in = base.clone().requires_grad_(True), base.clone().requires_grad_(True)
     divergence, cross_entropy = token_divergence_and_cross_entropy(
