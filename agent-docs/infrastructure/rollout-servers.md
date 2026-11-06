@@ -468,7 +468,7 @@ Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused 
 family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
 GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server
-flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving).
+flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving), [GLM-5 Next](../models/glm5-next.md#rl-weight-sync).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that

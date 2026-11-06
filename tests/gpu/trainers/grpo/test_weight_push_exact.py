@@ -28,7 +28,9 @@ Then, for one family (``-k`` narrows ``pytest -m 'gpu and vllm_server' tests/gpu
 
 GLM-5 Next serves a tiny random checkpoint written first (the Hub supplies the tokenizer and processor files only):
     python tests/gpu/trainers/grpo/test_weight_push_exact.py --family glm5_next --write-checkpoint $DIR
-then vLLM with ``--max-model-len 1024 --enforce-eager --gpu-memory-utilization 0.2``, or SGLang with ``SGLANG_MODEL=$DIR``,
+then vLLM with ``--max-model-len 1024 --enforce-eager --gpu-memory-utilization 0.2
+--limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0``, or SGLang with ``SGLANG_MODEL=$DIR
+SGLANG_EXTRA_ARGS='--mamba-track-interval 1024'``,
 and ``HALO_TEST_GLM5_NEXT_MODEL=$DIR`` on the trainer. The name-for-name ``--reach`` rows leave GLM-5 Next out: scaling a
 DSA indexer weight cannot move the log-probs (the top-k ranking is scale-invariant).
 
