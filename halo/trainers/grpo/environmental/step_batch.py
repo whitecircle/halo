@@ -171,7 +171,11 @@ class StepBatchMixin:
         step = self._stack_rows(rows, device)
         rollout_routing_masks = self._assemble_rollout_routing(rows, step, device, mode)
         # Config- and mode-gated, so every rank agrees the bin count or none does.
-        plan = self._plan_packed_round(step, num_dummy_rows) if self._packs_microbatches and mode == "train" else None
+        plan = (
+            self._plan_round(step.attention_mask, num_dummy_rows)
+            if self._packs_microbatches and mode == "train"
+            else None
+        )
 
         with torch.no_grad():
             scores = self._score_step(step, batch_rows, rollout_routing_masks, engine_logps, mode, plan)
@@ -439,26 +443,7 @@ class StepBatchMixin:
                 model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
             )
             return logps if order is None else logps[torch.argsort(order)]
-        scored, start = [], 0
-        for size in plan.bin_sizes:
-            if size == 0:
-                self._score_inert_row(model, logits_to_keep, input_ids.device)
-                continue
-            bin_rows = slice(start, start + size)
-            start += size
-            logps, _, _ = self._get_per_token_logps_and_entropies(
-                model, input_ids[bin_rows], attention_mask[bin_rows], logits_to_keep, compute_entropy=False
-            )
-            scored.append(logps)
-        in_batch_order = torch.zeros(
-            plan.round_rows,
-            logits_to_keep,
-            dtype=scored[0].dtype if scored else torch.float32,
-            device=input_ids.device,
-        )
-        if scored:
-            in_batch_order[order] = torch.cat(scored)
-        return in_batch_order
+        return self._score_bins(model, input_ids, attention_mask, logits_to_keep, plan)
 
     def _step_advantages(
         self, rewards: torch.Tensor, rows: TrajectoryRowMap, num_padding: int, num_generations: int

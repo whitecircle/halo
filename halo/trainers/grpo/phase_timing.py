@@ -1,5 +1,7 @@
 """The on-policy GRPO trainers' phase timers: the spans around the step loop's phases and their report at each log."""
 
+import torch
+
 from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics.phase_timers import Phase, PhaseTimers
 from halo.trainers.world_metrics import WorldMetrics
@@ -8,8 +10,9 @@ PHASE_TIME_PREFIX = "phase_time/"
 
 
 class PhaseTimedMixin:
-    """Mixed in ahead of ``DistributedTrainerMixin`` and ``DecoupledCompletionsLogMixin``, so its ``training_step``
-    and ``log`` wrap theirs. The host provides ``_log_phase_times`` before :meth:`_configure_phase_timers` runs."""
+    """Mixed in ahead of ``ProtectedTokenEntropyMixin`` (the chunked scorer behind it never calls ``super()``) and of
+    ``DistributedTrainerMixin`` and ``DecoupledCompletionsLogMixin``, so its ``training_step`` and ``log`` wrap theirs.
+    The host provides ``_log_phase_times`` before :meth:`_configure_phase_timers` runs."""
 
     _log_phase_times = False
     # Shared while disabled: a disabled timer holds no state.
@@ -35,6 +38,14 @@ class PhaseTimedMixin:
         """COLLECTIVE. An eval round's spans are not the train step's: its wall time lands in ``unaccounted``."""
         with self._phase_timers.suspended():
             return super().evaluate(*args, **kwargs)
+
+    def _get_per_token_logps_and_entropies(self, *args, **kwargs):
+        """A no-grad scoring pass is timed as ``no_grad`` where nothing around it already times one: TRL's old and
+        reference passes run inside its round build, while the environmental trainer wraps its own."""
+        if torch.is_grad_enabled() or self._phase_timers.is_open(Phase.NO_GRAD, Phase.NO_GRAD_REF):
+            return super()._get_per_token_logps_and_entropies(*args, **kwargs)
+        with self._phase_timers.span(Phase.NO_GRAD):
+            return super()._get_per_token_logps_and_entropies(*args, **kwargs)
 
     def _compute_loss(self, model, inputs):
         with self._phase_timers.span(Phase.LOSS_FORWARD):

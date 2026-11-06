@@ -112,6 +112,7 @@ _EXPECTED = {
         "log_phase_times": "False",
         "max_prompt_length": "None",
         "opd_positive_advantage_only": "True",
+        "packed_microbatch_tokens": "None",
         "prompt_field": "'prompt'",
         "reasoning_effort": "None",
         "rewards": "factory:[{'source': 'accuracy'}]",

@@ -267,6 +267,22 @@ def plan_row_attention(
     return plan
 
 
+def grpo_row_attn_implementation(
+    model_config: ModelArguments, grpo_config, *, packed_microbatches: bool, sinks_reset: bool, checkpoint_config
+) -> str | None:
+    """Attention for an on-policy GRPO script whose trainer forwards padded rows. Packed micro-batches need a varlen
+    flash backend; live sinks keep the loader's pick, as FA2 carries none."""
+    if packed_microbatches and sinks_reset:
+        return plan_row_attention(
+            model_config,
+            grpo_config,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            packing=True,
+            checkpoint_config=checkpoint_config,
+        ).attn_default
+    return default_padded_attn_implementation(model_config, sinks_reset=sinks_reset)
+
+
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:
     """Refuse a multimodal checkpoint with no sequence-classification head before the load:
     ``AutoModelForSequenceClassification`` names neither the modality nor an alternative, and only after the

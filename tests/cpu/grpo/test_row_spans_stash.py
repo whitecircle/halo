@@ -13,7 +13,6 @@ from trl.trainer.utils import shuffle_sequence_dict, split_tensor_dict
 import halo.trainers.grpo.environmental.routing_replay as routing_replay
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
-from halo.trainers.grpo.environmental.row_order import permute_rows
 from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import (
@@ -24,6 +23,7 @@ from halo.trainers.grpo.logprob_scoring import (
     row_spans_on_device,
 )
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.grpo.row_order import permute_rows
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY, RowSpanStashMixin
 from tests.common.gloo import run_gloo_ranks
 

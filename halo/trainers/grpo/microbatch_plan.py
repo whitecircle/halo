@@ -5,6 +5,8 @@ import dataclasses
 import math
 from collections.abc import Sequence
 
+import torch
+
 from halo.runtime.consensus import rank_max
 
 # A bin holds at least this many tokens: the next-token shift leaves nothing in a one-token row.
@@ -104,6 +106,18 @@ def agree_microbatch_geometry(
     bins = partition_rows(lengths, max(bins_needed, 1), budget)
     (rows_per_bin,) = rank_max([max(len(rows) for rows in bins)])
     return MicrobatchPlan(tuple(tuple(rows) for rows in bins), max(rows_per_bin, 1), slots, round_rows)
+
+
+def plan_round_microbatches(
+    attention_mask: torch.Tensor, num_dummy_rows: int, *, budget: int, slots: int, ceiling: int | None
+) -> MicrobatchPlan:
+    """COLLECTIVE. :func:`agree_microbatch_geometry` over the round's rows, read off their ``[rows, width]`` attention
+    mask. The last ``num_dummy_rows`` rows pad the round across ranks and hold no bin."""
+    attended = attention_mask.sum(dim=1).clamp(min=MIN_ROW_TOKENS)
+    real_rows = attended.numel() - num_dummy_rows
+    return agree_microbatch_geometry(
+        attended[:real_rows].tolist(), budget, slots=slots, ceiling=ceiling, round_rows=attended.numel()
+    )
 
 
 def build_slot_layout(plan: MicrobatchPlan) -> tuple[list[int], list[int]]:

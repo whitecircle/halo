@@ -14,17 +14,13 @@ import trl.trainer.grpo_trainer as trl_grpo_trainer
 from trl import GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.grpo.environmental.packed_rounds import (
-    SLOT_ACTIVE_KEY,
-    SLOT_IS_ACTIVE_KEY,
-    SLOT_ROWS_KEY,
-    PackedMicrobatchMixin,
-)
+from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
+from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_IS_ACTIVE_KEY, SLOT_ROWS_KEY, PackedRoundMixin
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
 from tests.common.routing import BareEPLayer
@@ -284,7 +280,7 @@ def test_the_construction_warm_up_leaves_no_expert_load_for_the_first_bias_updat
     host._get_per_token_logps_and_entropies = score
     host._finish_fsdp2_backward = lambda _model: None
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr("halo.trainers.grpo.environmental.packed_rounds.barrier", lambda: None)
+    monkeypatch.setattr("halo.trainers.grpo.packed_rounds.barrier", lambda: None)
     host._warm_packed_row_kernels()
     assert router.expert_load_counter is None
 
@@ -340,7 +336,7 @@ def test_evaluation_rounds_never_take_the_packed_path():
 
 def test_the_mixin_sits_ahead_of_the_deal_and_the_tp_resync_and_is_configured_at_construction():
     mro = DistributedAsyncEnvironmentalGRPOTrainer.__mro__
-    assert DistributedAsyncEnvironmentalGRPOTrainer._prepare_inputs is PackedMicrobatchMixin._prepare_inputs
+    assert DistributedAsyncEnvironmentalGRPOTrainer._prepare_inputs is PackedRoundMixin._prepare_inputs
     assert mro.index(PackedMicrobatchMixin) < mro.index(LengthOrderedRowsMixin) < mro.index(GenerationRoundMixin)
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedAsyncEnvironmentalGRPOTrainer.__init__)))
     called = [n.func.attr for n in ast.walk(init) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]

@@ -43,6 +43,12 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         "the rollout batch and is not a blocker"
     )
 
+    PACKED_ROWS_REFUSAL = (
+        "the OPD term reads the student's completion logits off the loss forward and pairs them row for row with a "
+        "teacher pass over [teacher_prompt ⧺ completion] rows sized by the micro-batch, neither of which a packed "
+        "slot's flattened scorer and filler rows provide"
+    )
+
     def __init__(
         self,
         *args,

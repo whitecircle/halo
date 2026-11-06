@@ -35,6 +35,8 @@ from halo.trainers.grpo.objective.loss_inputs import (
 )
 from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
+from halo.trainers.grpo.packed_rounds import PackedRoundMixin
+from halo.trainers.grpo.packed_rules import reject_unpackable_trainer
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
@@ -48,10 +50,11 @@ logger = logging.getLogger(__name__)
 
 class DistributedOnlineGRPOTrainer(
     OnPolicyGRPOInitMixin,
+    PackedRoundMixin,
     GenerationRoundMixin,
+    PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
-    PhaseTimedMixin,
     RowSpanStashMixin,
     DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
@@ -72,7 +75,10 @@ class DistributedOnlineGRPOTrainer(
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
         self._log_phase_times = kwargs.pop("log_phase_times", False)
+        self._packed_microbatch_tokens = kwargs.pop("packed_microbatch_tokens", None)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
+        if self._packed_microbatch_tokens is not None:
+            reject_unpackable_trainer(type(self), self.PACKED_ROWS_REFUSAL)
         grpo_args = require_vllm_server_mode(training_args)
         reject_tool_calling_loop(args, kwargs)
         reject_unshared_rollout_func(self.parallelism_config, args, kwargs)
@@ -112,9 +118,11 @@ class DistributedOnlineGRPOTrainer(
                 self.beta,
             )
 
+        self.pad_token_id = self._tokenizer.pad_token_id
         self._finish_on_policy_init()
         self._configure_phase_timers()
         self._configure_row_span_stash()
+        self._configure_packed_microbatches()
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
@@ -206,7 +214,7 @@ class DistributedOnlineGRPOTrainer(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
         """Broadcast the scored tensors across the TP/ETP group, since CPU-side post-processing may diverge."""
-        with self._phase_timers.span(Phase.BUILD, "host"):
+        with self._phase_timers.span(Phase.BUILD, "host"), self._scoring_round_in_bins():
             result = super()._generate_and_score_completions(inputs)
 
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.
@@ -218,6 +226,8 @@ class DistributedOnlineGRPOTrainer(
         self._last_rewards_per_func = None
         # After the drop, so the clamp share reads the loss mask the KL term is averaged on.
         self._clamp_kl_reference(result)
+        if self._packs_microbatches and self.model.training:
+            result = self._lay_out_packed_round(result, self._take_round_plan(result))
 
         return self._with_row_spans(self._broadcast_tensors_from_tp_leader(result))
 

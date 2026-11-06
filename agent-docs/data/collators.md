@@ -168,7 +168,7 @@ drift is measured per family (0 = isolated) and the verdict is **not** universal
 correct `position_ids` everywhere, but a family's forward has to carry them into its mask, and a
 non-attention mixer carries state along the sequence regardless of any mask.
 
-Environmental GRPO's packed micro-batches (`packed_microbatch_tokens`) flatten several rows into one varlen call under these same rules, applied with no opt-in: a family whose rows cross documents (the rows below marked refused, and the families `allow_cross_document_linear_attention` would admit for SFT), compressed-KV layers, and attention that reads a token's row index are refused at construction, since a crossing RL step corrupts the policy gradient without a trace ([Packed micro-batches](../training-methods/async-grpo/performance.md#packed-micro-batches)).
+The on-policy GRPO trainers' packed micro-batches (`packed_microbatch_tokens`) flatten several rows into one varlen call under these same rules, applied with no opt-in: a family whose rows cross documents (the rows below marked refused, and the families `allow_cross_document_linear_attention` would admit for SFT), compressed-KV layers, and attention that reads a token's row index are refused at construction, since a crossing RL step corrupts the policy gradient without a trace ([Packed micro-batches](../training-methods/async-grpo/performance.md#packed-micro-batches)).
 
 | Family | Attention layers | Other layers |
 |---|---|---|

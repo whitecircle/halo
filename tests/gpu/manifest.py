@@ -1380,6 +1380,11 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("", Row("--moe", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"))),
         timeout=900,
     ),
+    # Online GRPO: TRL's whole-round old-policy pass planned and scored bin by bin, then the packed window against the
+    # per-row one on FA2.
+    "trainers/grpo/test_online_packed_microbatches.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
+    ),
     # The IS weight and KL clamp from the loss forward against the no-grad pass's window; --packed trains packed bins and
     # the --moe row adds DeepEP dispatch and R3 replay with no pass to arm the masks.
     "trainers/grpo/test_loss_forward_weights_modes.py": TestSpec(

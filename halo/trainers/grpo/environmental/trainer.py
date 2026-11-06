@@ -85,9 +85,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     TrajectoryTokenizeMixin,
     GenerationRoundMixin,
     LossForwardImportanceMixin,
+    PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
-    PhaseTimedMixin,
     RowSpanStashMixin,
     DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
@@ -316,10 +316,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             return self._noop_loss()
         if self._routing_injector is not None and model.training and isinstance(inputs, dict):
             self._arm_loss_forward_replay(inputs)
-        loss = super().compute_loss(
+        return super().compute_loss(
             model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
         )
-        return self._scale_packed_loss(loss, inputs)
 
     def log(self, logs: dict[str, float], start_time: float | None = None) -> None:
         mode = "eval" if not self.model.training else "train"

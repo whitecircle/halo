@@ -18,6 +18,7 @@ from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
+    PackedMicrobatchArguments,
     PhaseTimerArguments,
     PromptDatasetArguments,
 )
@@ -251,6 +252,7 @@ class AsyncRolloutConfig(
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     ChunkedLogprobsArguments,
+    PackedMicrobatchArguments,
     PhaseTimerArguments,
 ):
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
@@ -353,19 +355,6 @@ class AsyncRolloutConfig(
             "does not read micro-batch composition, rows forwarded one per call); true raises where it does not; "
             "false keeps TRL's shuffle. "
             "See agent-docs/training-methods/async-grpo/performance.md#length-ordered-micro-batches."
-        },
-    )
-    packed_microbatch_tokens: int | None = field(
-        default=None,
-        metadata={
-            "help": "Pack each training round's rows into micro-batches of up to this many attended tokens per rank, "
-            "one flattened varlen backbone call each, in place of one call per row. The round's rows are planned "
-            "into bins (a row over the budget keeps a bin of its own), every rank runs the world's bin count in the "
-            "last slots of the window and no-ops before them, and row-mean losses are rescaled so the objective is "
-            "the per-row one. Null keeps one backbone call per row. Needs use_chunked_grpo_logprobs, "
-            "per_device_train_batch_size 1, a varlen flash backend and a family whose rows isolate; refused at "
-            "construction otherwise. See "
-            "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
         },
     )
     loss_forward_importance_weights: bool = field(
@@ -547,7 +536,6 @@ class AsyncRolloutConfig(
         require_finite(owner, ge=0, lt=1, **present(truncation_alarm_rate=self.truncation_alarm_rate))
         require_int(owner, ge=1, **present(zero_gradient_round_limit=self.zero_gradient_round_limit))
         require_int(owner, ge=1, **present(tool_parser_watch_rounds=self.tool_parser_watch_rounds))
-        require_int(owner, ge=2, **present(packed_microbatch_tokens=self.packed_microbatch_tokens))
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
             raise ValueError(

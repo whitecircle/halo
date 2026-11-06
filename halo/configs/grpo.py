@@ -256,6 +256,30 @@ class ChunkedLogprobsArguments:
 
 
 @dataclass
+class PackedMicrobatchArguments(ValidatedConfig):
+    """The packed micro-batch budget of the on-policy GRPO trainers (online, environmental)."""
+
+    packed_microbatch_tokens: int | None = field(
+        default=None,
+        metadata={
+            "help": "Pack each training round's rows into micro-batches of up to this many attended tokens per rank, "
+            "one flattened varlen backbone call each, in place of one call per row. The round's rows are planned "
+            "into bins (a row over the budget keeps a bin of its own), every rank runs the world's bin count in the "
+            "last slots of the window and no-ops before them, and row-mean losses are rescaled so the objective is "
+            "the per-row one. Null keeps one backbone call per row. Needs use_chunked_grpo_logprobs, "
+            "per_device_train_batch_size 1, a varlen flash backend and a family whose rows isolate; refused at "
+            "construction otherwise. See "
+            "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        # A one-token bin leaves no next-token target.
+        require_int(type(self).__name__, ge=2, **present(packed_microbatch_tokens=self.packed_microbatch_tokens))
+
+
+@dataclass
 class PhaseTimerArguments:
     """The phase-timer flag of the on-policy GRPO trainers (online, environmental)."""
 

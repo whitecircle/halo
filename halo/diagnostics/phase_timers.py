@@ -80,6 +80,10 @@ class PhaseTimers:
         """Time the block under ``name``, nested inside the span open around it."""
         return self._timed(name, kind) if self.enabled and not self._suspended else _NO_SPAN
 
+    def is_open(self, *names: str) -> bool:
+        """Whether a span called any of ``names`` is open around the caller."""
+        return any(name in self._open for name in names)
+
     @contextmanager
     def suspended(self):
         """Record no span inside the block; the step's wall time still counts."""

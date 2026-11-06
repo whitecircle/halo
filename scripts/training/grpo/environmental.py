@@ -52,11 +52,10 @@ from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_tokenizer_window,
-    default_padded_attn_implementation,
+    grpo_row_attn_implementation,
     load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
-    plan_row_attention,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -74,7 +73,6 @@ from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
@@ -351,17 +349,13 @@ def main():
     reject_missing_carried_columns(args, ds)
 
     # Trajectories are collated into padded batches.
-    # Packed micro-batches need a varlen flash backend; live sinks keep the loader's pick, as FA2 carries none.
-    if async_config.packed_microbatch_tokens is not None and args.reset_sinks:
-        requested_attn = plan_row_attention(
-            model_config,
-            grpo_config,
-            sinks_policy=SinksPolicy.NEUTRALIZED,
-            packing=True,
-            checkpoint_config=checkpoint_config,
-        ).attn_default
-    else:
-        requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    requested_attn = grpo_row_attn_implementation(
+        model_config,
+        grpo_config,
+        packed_microbatches=async_config.packed_microbatch_tokens is not None,
+        sinks_reset=args.reset_sinks,
+        checkpoint_config=checkpoint_config,
+    )
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # A trajectory is bounded by the context window, not max_completion_length: TRL reads it as the dr_grpo

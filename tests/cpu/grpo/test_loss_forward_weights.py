@@ -18,7 +18,6 @@ from halo.trainers.grpo.environmental.loss_forward_weights import (
     LossForwardImportanceMixin,
     loss_forward_weight_blocker,
 )
-from halo.trainers.grpo.environmental.row_order import permute_rows
 from halo.trainers.grpo.environmental.step_batch import IS_WEIGHTS_FROM_LOSS_FORWARD_KEY, ZERO_GRADIENT_ROUND_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
@@ -39,6 +38,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     UNCLAMPED_REF_LOGPS_KEY,
     record_token_mass,
 )
+from halo.trainers.grpo.row_order import permute_rows
 from halo.trainers.token_metrics import effective_loss_mask
 from halo.trainers.world_metrics import WorldMetrics
 from tests.common.env_grpo_batch import batch_host, build, episode, row

@@ -81,8 +81,8 @@ Each episode's resolved effort level slices the metrics as `effort/<level>/*`, a
 |---|---|
 | `rollout` | the generation wait: the environmental trainer's round acquisition (near zero on a prefetch hit), online GRPO's engine generation |
 | `sync` | the engine weight push |
-| `build` | the rest of building a round's training tensors, the recompute forwards aside on the environmental trainer |
-| `no_grad`, `no_grad_ref` | the policy's and the KL reference's no-grad forwards (environmental trainer; online GRPO's sit in `build`) |
+| `build` | the rest of building a round's training tensors, the no-grad forwards aside |
+| `no_grad`, `no_grad_ref` | the policy's and the KL reference's no-grad forwards on the environmental trainer, which times each of its two passes. Online GRPO reports every no-grad scoring pass, TRL's old-policy and reference forwards, as `no_grad` |
 | `loss_forward` | `_compute_loss`, summed over micro-steps |
 | `post_backward_finish` | completing FSDP2's post-backward after each micro-step |
 | `micro_step` | the rest of each `training_step`: mostly the backward |

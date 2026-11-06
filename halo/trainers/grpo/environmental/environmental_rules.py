@@ -4,15 +4,6 @@ import dataclasses
 import logging
 import math
 
-from halo.data.collators.collator_rules import reject_multi_document_rows
-from halo.distributed.expert_parallel.deepep.capacity import (
-    DEEPEP_INDEX_LIMIT,
-    EP_CAPACITY_ALIGN,
-    GIN_MAX_TOKENS_PER_RANK,
-    ep_dispatch_capacity,
-    padded_wire_hidden,
-    reject_oversized_dispatch,
-)
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.rollout_config import (
     IDENTITY_SAMPLER,
@@ -21,13 +12,8 @@ from halo.environments.rollout_config import (
     VALID_REASONING_EFFORTS,
     VLLM_BACKEND,
 )
-from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
-from halo.models.attention.selection import is_flash_attn_implementation
-from halo.models.config_access import text_config
-from halo.models.moe.config_fields import resolve_dispatch_width, resolve_router_topk
-from halo.models.moe.family_specs import attention_reads_row_positions, find_moe_family_spec_for_config
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.environmental.row_order import MICROBATCH_INVARIANT_LOSS_TYPES
 from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
@@ -348,116 +334,3 @@ def reject_unsupported_routing_replay(
             "off, beta=0). Enable the IS correction (or beta/num_iterations>1) or set "
             "routing_replay='none'."
         )
-
-
-def reject_unpackable_options(args, async_config, *, misaligned_accumulation: bool) -> None:
-    """Refuse the options under which packed micro-batches would change the objective or leave their rows unscored by
-    the packed branch: every one is named with its remedy, none falls back to the per-row path."""
-    knob = "packed_microbatch_tokens"
-    if not async_config.use_chunked_grpo_logprobs:
-        raise ValueError(
-            f"{knob} needs use_chunked_grpo_logprobs: true: a packed micro-batch would otherwise materialize a "
-            f"[tokens, vocab] logits plane, and TRL's full-logits scorer does not take packed rows."
-        )
-    if args.per_device_train_batch_size != 1:
-        raise ValueError(
-            f"{knob} needs per_device_train_batch_size: 1, got {args.per_device_train_batch_size}: the plan, not a "
-            f"batch size, picks the rows of a micro-batch. Raise gradient_accumulation_steps or {knob} instead."
-        )
-    if args.loss_type not in MICROBATCH_INVARIANT_LOSS_TYPES:
-        raise ValueError(
-            f"{knob} is refused with loss_type={args.loss_type!r}: bnpo normalizes each micro-batch by its own token "
-            f"count, so the objective would depend on which rows share a bin, and vespo is refused by this trainer. "
-            f"Use one of {list(MICROBATCH_INVARIANT_LOSS_TYPES)} (grpo or dapo)."
-        )
-    if args.top_entropy_quantile < 1.0:
-        raise ValueError(
-            f"{knob} is refused with top_entropy_quantile={args.top_entropy_quantile}: the entropy threshold is taken "
-            f"over each micro-batch's tokens, which a packed bin would widen from one row to several. Set it to 1.0."
-        )
-    if async_config.length_ordered_microbatches:
-        raise ValueError(
-            f"{knob} replaces the length-ordered deal (length_ordered_microbatches: true): the plan already orders "
-            f"the round's rows. Unset length_ordered_microbatches."
-        )
-    if misaligned_accumulation:
-        raise ValueError(
-            f"{knob} maps a generation round onto the optimizer step's window, but gradient_accumulation_steps "
-            f"({args.gradient_accumulation_steps}) is not a multiple of steps_per_generation × num_iterations "
-            f"({args.steps_per_generation} × {args.num_iterations}). Align them."
-        )
-    if uses_evaluation(args) and args.per_device_eval_batch_size != 1:
-        raise ValueError(
-            f"{knob} keeps evaluation rounds on the per-row path, which needs per_device_eval_batch_size: 1, got "
-            f"{args.per_device_eval_batch_size}: a padded multi-row evaluation forward would run left-padded RoPE "
-            f"positions."
-        )
-
-
-def reject_unpackable_model(model, attn_impl: str | None) -> None:
-    """Refuse a model or backend whose packed row would cross documents silently, change the objective, or lose
-    attention sinks. No opt-in: an RL step that mixes documents corrupts the policy gradient without a trace."""
-    config = model.config
-    knob = "packed_microbatch_tokens"
-    if attention_reads_row_positions(config):
-        raise ValueError(
-            f"{knob} is refused for model_type={getattr(config, 'model_type', None)!r}: its attention reads a token's "
-            f"row index, which a flattened row changes. Unset {knob}."
-        )
-    if not is_flash_attn_implementation(attn_impl):
-        raise ValueError(
-            f"{knob} needs a varlen flash attention backend, but this model resolved to attn_implementation="
-            f"{attn_impl!r}: a dense kernel builds an [N, N] mask over the flattened micro-batch and, for several "
-            f"families, attends across its rows. Use flash_attention_2/3/4 or unset {knob}."
-        )
-    reject_multi_document_rows(
-        config,
-        "packing",
-        attn_impl=attn_impl,
-        allow_cross_document_linear_attention=False,
-        keeps_packed_rows=False,
-        varlen_rows=True,
-    )
-    if has_live_attention_sinks(model) and attn_impl != "flash_attention_4":
-        raise ValueError(
-            f"{knob} with live attention sinks needs flash_attention_4 (its varlen entry carries them), but the "
-            f"model resolved to {attn_impl!r}, which drops them. Unset full_determinism, or set reset_sinks: true, or "
-            f"unset {knob}."
-        )
-
-
-def _dispatch_shape(parallelism_config, model_config) -> tuple[int, int] | None:
-    """``(num_topk, padded wire hidden)`` of the run's EP dispatch, ``None`` without one."""
-    if parallelism_config.ep_size <= 1:
-        return None
-    text = text_config(model_config)
-    width, num_topk = resolve_dispatch_width(text), resolve_router_topk(text)
-    return (num_topk, padded_wire_hidden(width)) if width and num_topk else None
-
-
-def resolve_dispatch_ceiling(parallelism_config, model_config) -> int | None:
-    """Tokens one EP dispatch can carry per rank on this run (the 32-bit wire index, and the proxy-GIN ceiling on a
-    group spanning NVLink domains), rounded down to the arena's block; ``None`` where there is no dispatch."""
-    shape = _dispatch_shape(parallelism_config, model_config)
-    if shape is None:
-        return None
-    limits = [(DEEPEP_INDEX_LIMIT - 1) // (shape[0] * shape[1])]
-    if parallelism_config.requires_rdma and GIN_MAX_TOKENS_PER_RANK:
-        limits.append(GIN_MAX_TOKENS_PER_RANK)
-    return min(limits) // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN
-
-
-def reject_undispatchable_budget(parallelism_config, model_config, budget: int) -> None:
-    """Refuse a ``packed_microbatch_tokens`` whose arena the first dispatch would refuse, before the first rollout."""
-    shape = _dispatch_shape(parallelism_config, model_config)
-    if shape is None:
-        return
-    try:
-        reject_oversized_dispatch(
-            ep_dispatch_capacity(budget),
-            num_topk=shape[0],
-            padded_hidden=shape[1],
-            spans_domains=parallelism_config.requires_rdma,
-        )
-    except ValueError as exc:
-        raise ValueError(f"packed_microbatch_tokens={budget} cannot be dispatched: lower it. {exc}") from exc

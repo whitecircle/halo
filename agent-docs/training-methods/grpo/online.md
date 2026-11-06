@@ -143,6 +143,10 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 
 `use_chunked_grpo_logprobs: true` (default off) replaces the full `[B, T, vocab]` logits with a vocab-chunked softmax, for large vocabularies with long completions ([Offline GRPO](offline.md#memory-chunked-log-probs), [limits](../async-grpo/performance.md#chunked-log-probs)). Here a multimodal batch falls back to the full path, and a PEFT adapter on `lm_head` raises.
 
+## Packed micro-batches
+
+`packed_microbatch_tokens` (default off) groups each rank's rows into token-budget bins that run as one flattened varlen call each, in TRL's old-policy and reference passes and in the loss forward, instead of one call per row at `per_device_train_batch_size: 1`. It needs `use_chunked_grpo_logprobs: true` and is refused with SDPG; mechanism, objective and the other refusals are on [Packed micro-batches](../async-grpo/performance.md#packed-micro-batches).
+
 ## Server mode only
 
 `DistributedOnlineGRPOTrainer` rejects two generation paths:

@@ -18,7 +18,7 @@ from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
-    default_padded_attn_implementation,
+    grpo_row_attn_implementation,
     load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
@@ -141,7 +141,13 @@ def main():
         reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
 
     # Prompts and completions are collated into padded batches.
-    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    requested_attn = grpo_row_attn_implementation(
+        model_config,
+        grpo_config,
+        packed_microbatches=args.packed_microbatch_tokens is not None,
+        sinks_reset=args.reset_sinks,
+        checkpoint_config=checkpoint_config,
+    )
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # max_completion_length is the generation budget here (TRL passes it to vLLM), so it is an explicit
@@ -265,6 +271,7 @@ def main():
         early_stop=args.build_early_stop_config(),
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
         log_phase_times=args.log_phase_times,
+        packed_microbatch_tokens=args.packed_microbatch_tokens,
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )

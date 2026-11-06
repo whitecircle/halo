@@ -10,13 +10,13 @@ import pytest
 import torch
 from trl import GRPOConfig
 
-from halo.trainers.grpo.environmental.packed_rounds import LOSS_SCALE_KEY, SLOT_IS_ACTIVE_KEY
-from halo.trainers.grpo.environmental.row_order import (
+from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
+from halo.trainers.grpo.packed_rounds import LOSS_SCALE_KEY, SLOT_IS_ACTIVE_KEY
+from halo.trainers.grpo.row_order import (
     MICROBATCH_INVARIANT_LOSS_TYPES,
     ROW_MEAN_LOSS_TYPES,
     TOKEN_GLOBAL_LOSS_TYPES,
 )
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from tests.common.length_deal import (
     packed_host,
     ragged_round,

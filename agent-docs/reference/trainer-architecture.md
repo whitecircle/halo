@@ -570,7 +570,9 @@ packages, and these shared leaves at the top level: `on_policy.py`, the construc
 compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
 constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase spans and their report at each log) and
 `row_span_stash.py` (`RowSpanStashMixin`, the round's row spans), both composed by the on-policy trainers ahead of
-`DistributedTrainerMixin`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
+`DistributedTrainerMixin`; `packed_rounds.py` (`PackedRoundMixin`, the packed micro-batches' plan, slot layout and bin-by-bin
+scoring), `packed_rules.py` (their refusals), `microbatch_plan.py` and `row_order.py` (the row permutation and the loss types
+that admit a regrouping of rows), which both on-policy trainers share; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
 `halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`

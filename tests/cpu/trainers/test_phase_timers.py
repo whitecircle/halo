@@ -11,6 +11,9 @@ from halo.callbacks import efficiency
 from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics import phase_timers
 from halo.diagnostics.phase_timers import UNACCOUNTED, Phase, PhaseTimers
+from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from tests.common.gloo import run_gloo_ranks
 
@@ -155,6 +158,10 @@ class _Loop:
     def _finish_fsdp2_backward(self, model):
         self.calls.append("_finish_fsdp2_backward")
 
+    def _get_per_token_logps_and_entropies(self, *args, **kwargs):
+        self.calls.append("_get_per_token_logps_and_entropies")
+        return torch.zeros(1), None, None
+
     def log(self, logs, start_time=None):
         self.calls.append("log")
 
@@ -214,6 +221,58 @@ def test_the_flag_on_reports_each_wrapped_phase_at_the_next_log(clock):
     }
     assert logs["phase_time/loss_forward_s"] == logs["phase_time/loss_forward_max_s"]
     assert trainer.calls[-1] == "log"
+
+
+def _timed_run(trainer, clock, body) -> dict:
+    timers = trainer._phase_timers
+    timers.begin_run()
+    body()
+    clock[0] += 1.0
+    timers.finish_step()
+    return timers.drain()
+
+
+def test_a_no_grad_scoring_pass_is_timed_as_no_grad_and_a_grad_pass_is_not(clock):
+    trainer = _timed(True)
+
+    def body():
+        with torch.no_grad():
+            trainer._get_per_token_logps_and_entropies(None, None, None, 1)
+        trainer._get_per_token_logps_and_entropies(None, None, None, 1)
+
+    report = _timed_run(trainer, clock, body)
+    assert Phase.NO_GRAD in report and trainer.calls.count("_get_per_token_logps_and_entropies") == 2
+    assert set(report) == {Phase.NO_GRAD, UNACCOUNTED}, "the grad-enabled loss forward opens no scoring span"
+
+
+@pytest.mark.parametrize("outer", [Phase.NO_GRAD, Phase.NO_GRAD_REF])
+def test_a_scoring_pass_inside_a_caller_timed_no_grad_phase_adds_no_span(clock, outer):
+    """The environmental trainer wraps its recompute and reference passes in their own spans, which keep their names."""
+    trainer = _timed(True)
+
+    def body():
+        with torch.no_grad(), trainer._phase_timers.span(outer):
+            clock[0] += 2.0
+            trainer._get_per_token_logps_and_entropies(None, None, None, 1)
+
+    report = _timed_run(trainer, clock, body)
+    assert report[outer] == 2.0 and {Phase.NO_GRAD, Phase.NO_GRAD_REF} & set(report) == {outer}
+
+
+@pytest.mark.parametrize("trainer", [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
+def test_the_timed_scorer_sits_ahead_of_the_chunked_one_that_never_calls_super(trainer):
+    mro = trainer.__mro__
+    assert mro.index(PhaseTimedMixin) < mro.index(ProtectedTokenEntropyMixin) < mro.index(ChunkedGRPOLogprobsMixin)
+    assert (
+        trainer._get_per_token_logps_and_entropies is not ChunkedGRPOLogprobsMixin._get_per_token_logps_and_entropies
+    )
+
+
+def test_a_scoring_pass_is_untouched_with_the_timers_off(clock):
+    trainer = _timed(False)
+    with torch.no_grad():
+        trainer._get_per_token_logps_and_entropies(None, None, None, 1)
+    assert trainer._phase_timers.drain() == {} and trainer.calls == ["_get_per_token_logps_and_entropies"]
 
 
 def test_an_eval_log_reduces_nothing(clock):

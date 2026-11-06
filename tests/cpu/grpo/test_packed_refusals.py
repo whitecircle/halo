@@ -7,12 +7,14 @@ import types
 import pytest
 
 import halo.models.segment_markers as segment_markers
-from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
-from halo.trainers.grpo.environmental.environmental_rules import (
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.grpo.packed_rules import (
     reject_undispatchable_budget,
     reject_unpackable_model,
     reject_unpackable_options,
+    reject_unpackable_trainer,
     resolve_dispatch_ceiling,
 )
 from tests.common.tiny_models import (
@@ -41,33 +43,31 @@ def _args(**overrides) -> types.SimpleNamespace:
     )
 
 
-def _config(**overrides) -> AsyncRolloutConfig:
-    return AsyncRolloutConfig(**{"packed_microbatch_tokens": 8192, "use_chunked_grpo_logprobs": True} | overrides)
+def _options(**overrides) -> dict:
+    return {"use_chunked_logprobs": True, "length_ordered": None, "misaligned_accumulation": False} | overrides
 
 
 def test_the_admitted_options_pass():
-    reject_unpackable_options(_args(), _config(), misaligned_accumulation=False)
-    reject_unpackable_options(_args(loss_type="grpo", eval_strategy="steps"), _config(), misaligned_accumulation=False)
+    reject_unpackable_options(_args(), **_options())
+    reject_unpackable_options(_args(loss_type="grpo", eval_strategy="steps"), **_options())
 
 
 _OPTION_REFUSALS = {
-    "full logits": (_args(), {"use_chunked_grpo_logprobs": False}, False, "use_chunked_grpo_logprobs: true"),
-    "batch size": (_args(per_device_train_batch_size=2), {}, False, "per_device_train_batch_size: 1"),
-    "bnpo": (_args(loss_type="bnpo"), {}, False, "depend on which rows share a bin"),
-    "vespo": (_args(loss_type="vespo"), {}, False, "vespo is refused by this trainer"),
-    "entropy quantile": (_args(top_entropy_quantile=0.2), {}, False, "top_entropy_quantile"),
-    "length deal": (_args(), {"length_ordered_microbatches": True}, False, "Unset length_ordered_microbatches"),
-    "misaligned": (_args(gradient_accumulation_steps=12), {}, True, "Align them"),
+    "full logits": (_args(), {"use_chunked_logprobs": False}, "use_chunked_grpo_logprobs: true"),
+    "batch size": (_args(per_device_train_batch_size=2), {}, "per_device_train_batch_size: 1"),
+    "bnpo": (_args(loss_type="bnpo"), {}, "depend on which rows share one"),
+    "vespo": (_args(loss_type="vespo"), {}, "loss_type='vespo'"),
+    "entropy quantile": (_args(top_entropy_quantile=0.2), {}, "top_entropy_quantile"),
+    "length deal": (_args(), {"length_ordered": True}, "Unset length_ordered_microbatches"),
+    "misaligned": (_args(gradient_accumulation_steps=12), {"misaligned_accumulation": True}, "Align them"),
     "eval batch": (
         _args(eval_strategy="steps", per_device_eval_batch_size=4),
         {},
-        False,
         "per_device_eval_batch_size: 1",
     ),
     "eval on start": (
         _args(eval_on_start=True, per_device_eval_batch_size=2),
         {},
-        False,
         "per_device_eval_batch_size: 1",
     ),
 }
@@ -75,13 +75,20 @@ _OPTION_REFUSALS = {
 
 @pytest.mark.parametrize("case", _OPTION_REFUSALS, ids=list(_OPTION_REFUSALS))
 def test_each_option_refusal_names_its_mechanism_and_remedy(case):
-    args, config, misaligned, expected = _OPTION_REFUSALS[case]
+    args, options, expected = _OPTION_REFUSALS[case]
     with pytest.raises(ValueError, match=expected):
-        reject_unpackable_options(args, _config(**config), misaligned_accumulation=misaligned)
+        reject_unpackable_options(args, **_options(**options))
 
 
 def test_an_eval_batch_other_than_one_is_ignored_when_the_run_never_evaluates():
-    reject_unpackable_options(_args(per_device_eval_batch_size=8), _config(), misaligned_accumulation=False)
+    reject_unpackable_options(_args(per_device_eval_batch_size=8), **_options())
+
+
+def test_a_trainer_declaring_a_refusal_is_refused_with_it_and_the_others_pass():
+    assert DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL is None
+    reject_unpackable_trainer(DistributedOnlineGRPOTrainer, DistributedOnlineGRPOTrainer.PACKED_ROWS_REFUSAL)
+    with pytest.raises(ValueError, match=r"DistributedSDPGTrainer.*teacher pass.*Unset packed_microbatch_tokens"):
+        reject_unpackable_trainer(DistributedSDPGTrainer, DistributedSDPGTrainer.PACKED_ROWS_REFUSAL)
 
 
 @pytest.fixture
