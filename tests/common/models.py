@@ -591,6 +591,19 @@ TINY_GLM5_CONFIG = {
     "max_position_embeddings": 4096,
     "pad_token_id": None,
     "tie_word_embeddings": False,
+    # The release's keys the transformers class does not declare but both serving engines read off the config
+    # (vLLM and SGLang raise on a missing ``mhc`` or ``index_kpool_compress``). Values as the release spells them;
+    # no MTP head is built, and the dense prefix matches ``mlp_layer_types``.
+    "mhc": True,
+    "index_kpool_compress": True,
+    "mla_use_nope": True,
+    "indexer_rope_interleave": True,
+    "index_share_for_mtp_iteration": True,
+    "num_nextn_predict_layers": 0,
+    "first_k_dense_replace": 1,
+    "scoring_func": "sigmoid",
+    "topk_method": "noaux_tc",
+    "moe_router_dtype": "float32",
 }
 
 # The family ships no text-only CausalLM. out_hidden_size is the projector's output width, so it equals the text
