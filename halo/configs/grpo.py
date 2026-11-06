@@ -280,6 +280,23 @@ class PackedMicrobatchArguments(ValidatedConfig):
 
 
 @dataclass
+class RankBalanceArguments:
+    """The rank-balance switch of the online GRPO trainer."""
+
+    balance_rank_tokens: bool = field(
+        default=False,
+        metadata={
+            "help": "Deal each training round's rows across ranks so every rank trains the same row count with a "
+            "similar attended-token total, in place of the contiguous slice the rollout hands each one; a round the "
+            "deal would not lighten at its heaviest rank is left as it is. Refused under TP/ETP, with a loss_type "
+            "outside grpo, sapo, dr_grpo, luspo, dapo, cispo, top_entropy_quantile < 1, misaligned accumulation, or "
+            "one rank; a round carrying image tensors raises. See "
+            "agent-docs/training-methods/async-grpo/performance.md#rank-balance."
+        },
+    )
+
+
+@dataclass
 class PhaseTimerArguments:
     """The phase-timer flag of the on-policy GRPO trainers (online, environmental)."""
 

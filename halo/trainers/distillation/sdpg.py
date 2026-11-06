@@ -49,6 +49,11 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         "slot's flattened scorer and filler rows provide"
     )
 
+    RANK_BALANCE_REFUSAL = (
+        "the teacher prompts are built after the round, from the rollout's answers in the rows' original order, which "
+        "a deal across ranks would no longer match"
+    )
+
     def __init__(
         self,
         *args,

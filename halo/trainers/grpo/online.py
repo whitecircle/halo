@@ -38,6 +38,7 @@ from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitM
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin
 from halo.trainers.grpo.packed_rules import reject_unpackable_trainer
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
+from halo.trainers.grpo.rank_balance import RankBalancedRoundMixin, reject_unbalanceable_trainer
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
@@ -51,6 +52,7 @@ logger = logging.getLogger(__name__)
 class DistributedOnlineGRPOTrainer(
     OnPolicyGRPOInitMixin,
     PackedRoundMixin,
+    RankBalancedRoundMixin,
     GenerationRoundMixin,
     PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
@@ -76,9 +78,12 @@ class DistributedOnlineGRPOTrainer(
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
         self._log_phase_times = kwargs.pop("log_phase_times", False)
         self._packed_microbatch_tokens = kwargs.pop("packed_microbatch_tokens", None)
+        self._balances_rank_tokens = kwargs.pop("balance_rank_tokens", False)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
         if self._packed_microbatch_tokens is not None:
             reject_unpackable_trainer(type(self), self.PACKED_ROWS_REFUSAL)
+        if self._balances_rank_tokens:
+            reject_unbalanceable_trainer(type(self), self.RANK_BALANCE_REFUSAL)
         grpo_args = require_vllm_server_mode(training_args)
         reject_tool_calling_loop(args, kwargs)
         reject_unshared_rollout_func(self.parallelism_config, args, kwargs)
@@ -123,6 +128,7 @@ class DistributedOnlineGRPOTrainer(
         self._configure_phase_timers()
         self._configure_row_span_stash()
         self._configure_packed_microbatches()
+        self._configure_rank_balance()
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
@@ -226,6 +232,10 @@ class DistributedOnlineGRPOTrainer(
         self._last_rewards_per_func = None
         # After the drop, so the clamp share reads the loss mask the KL term is averaged on.
         self._clamp_kl_reference(result)
+        if self._balances_rank_tokens and self.model.training:
+            result = self._deal_round_across_ranks(result)
+            # The scoring passes binned the rows as TRL dealt them.
+            self._round_plan = None
         if self._packs_microbatches and self.model.training:
             result = self._lay_out_packed_round(result, self._take_round_plan(result))
 

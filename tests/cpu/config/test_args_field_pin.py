@@ -104,6 +104,7 @@ _EXPECTED = {
     },
     "OnlineGRPOScriptArguments": {
         "answer_field": "'answer'",
+        "balance_rank_tokens": "False",
         "balance_token_mass": "False",
         "drop_degenerate_groups": "False",
         "early_stop_entropy_band": "None",

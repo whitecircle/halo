@@ -9,6 +9,7 @@ from halo.configs.grpo import (
     PackedMicrobatchArguments,
     PhaseTimerArguments,
     PromptDatasetArguments,
+    RankBalanceArguments,
     RLRRArguments,
 )
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
@@ -22,6 +23,7 @@ class OnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
     PackedMicrobatchArguments,
+    RankBalanceArguments,
     PhaseTimerArguments,
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,

@@ -1385,6 +1385,11 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_online_packed_microbatches.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
     ),
+    # Online GRPO rank balance: the deal over NCCL evens the ranks' tokens and the dealt window trains as the undealt
+    # one does.
+    "trainers/grpo/test_online_rank_balance.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
+    ),
     # The IS weight and KL clamp from the loss forward against the no-grad pass's window; --packed trains packed bins and
     # the --moe row adds DeepEP dispatch and R3 replay with no pass to arm the masks.
     "trainers/grpo/test_loss_forward_weights_modes.py": TestSpec(
