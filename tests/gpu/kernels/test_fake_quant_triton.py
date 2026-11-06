@@ -5,15 +5,17 @@
   midpoints, an fp32 one-ulp scale edge, and a near-subnormal scale,
 - ``fake_quant`` routes CUDA / contiguous / last-axis / mxfp8 through it and everything else to eager,
   including GPUs older than SM 8.9,
+- a new token count never compiles a new kernel variant, which under EP would stall the other ranks,
 - the straight-through backward is unchanged.
 
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
 """
 
 import torch
+import triton
 
 import halo.kernels.lowp.quantization as q
-from halo.kernels.lowp.fake_quant_triton import fake_quant_mxfp8_triton
+from halo.kernels.lowp.fake_quant_triton import _mxfp8_fake_quant_kernel, fake_quant_mxfp8_triton
 from halo.kernels.lowp.quantization import _AMAX_FLOOR, E4M3_MAX, FORMAT_BLOCK_SIZE, _block_round_trip, fake_quant
 from tests.common.harness import gpu_test_main, record_check
 
@@ -130,6 +132,35 @@ def test_pre_sm89_falls_back():
     print("  pre-SM 8.9 eager fallback — OK")
 
 
+def test_no_recompile_across_token_counts():
+    """Under EP the token count changes every step. ``n_blocks`` is not specialized, so a new count never compiles
+    a new variant mid-run, where one rank compiling would stall the others at the next collective."""
+    if not _kernel_supported():
+        print("  below SM 8.9, the fp8 kernel cannot compile — skipped")
+        return
+    compiled = []
+
+    def hook(*, fn, **_):
+        if fn.jit_function is _mxfp8_fake_quant_kernel:
+            compiled.append(fn.name)
+        return False  # a truthy return would skip the compile
+
+    def quant(*shape):
+        t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
+        fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE["mxfp8"], E4M3_MAX, _AMAX_FLOOR)
+
+    quant(64, K)  # n_blocks 5760, divisible by 16
+    prev = triton.knobs.runtime.jit_cache_hook
+    triton.knobs.runtime.jit_cache_hook = hook
+    try:
+        quant(7, K)  # n_blocks 630, not divisible by 16
+        quant(1, 32)  # n_blocks 1
+    finally:
+        triton.knobs.runtime.jit_cache_hook = prev
+    assert not compiled, f"new token counts compiled {len(compiled)} new kernel variant(s)"
+    print("  no recompile across token counts — OK")
+
+
 def test_ste_backward():
     """Straight-through: the gradient passes unchanged through the fast path."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16, requires_grad=True)
@@ -145,6 +176,7 @@ def run(ctx) -> dict:
     record_check(checks, "bit_exact_against_eager", test_bit_exact_against_eager)
     record_check(checks, "routing", test_routing)
     record_check(checks, "pre_sm89_falls_back", test_pre_sm89_falls_back)
+    record_check(checks, "no_recompile_across_token_counts", test_no_recompile_across_token_counts)
     record_check(checks, "ste_backward", test_ste_backward)
     return {"checks": checks}
 

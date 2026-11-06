@@ -27,7 +27,7 @@ def _pow2(e):
     return bits.to(tl.float32, bitcast=True)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["n_blocks"])
 def _mxfp8_fake_quant_kernel(
     x_ptr, out_ptr, n_blocks, BPP: tl.constexpr, BLOCK: tl.constexpr, FMAX: tl.constexpr, TINY: tl.constexpr
 ):
