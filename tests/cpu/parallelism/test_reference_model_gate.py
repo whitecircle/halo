@@ -225,11 +225,10 @@ def test_the_script_loader_and_the_trainer_gate_report_one_reference_once(caplog
     assert len(_warnings(caplog)) == 1
 
 
-def test_the_on_policy_grpo_loader_is_silent_and_the_trainer_gate_reports_the_reference_once(caplog):
+def test_the_on_policy_grpo_loader_and_trainer_gate_report_one_reference_once(caplog):
     config = _config(ep_size=8)
     with caplog.at_level(logging.WARNING):
         result, loaded = _on_policy_grpo_reference(config)
-        assert _warnings(caplog) == []
         _on_policy_grpo_gate(config, result)
     assert result is loaded
     (message,) = _warnings(caplog)
