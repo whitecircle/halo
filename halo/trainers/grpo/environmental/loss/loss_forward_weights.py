@@ -33,7 +33,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     record_world_token_mass,
     token_mass_sums,
 )
-from halo.trainers.token_metrics import effective_loss_mask
+from halo.trainers.metrics.token_metrics import effective_loss_mask
 
 
 def loss_forward_weight_blocker(

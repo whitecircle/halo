@@ -20,12 +20,12 @@ from halo.models.mtp.head import frozen_trunk_params
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.parallelism.ep_layers import require_ep_config
-from halo.trainers.trainer_rules import (
+from halo.trainers.construction.trainer_rules import (
     reject_cp_trainer_args,
     reject_ep_layers_under_accelerate,
     reject_fsdp_knobs_under_qlora,
 )
+from halo.trainers.parallelism.ep_layers import require_ep_config
 
 logger = logging.getLogger(__name__)
 

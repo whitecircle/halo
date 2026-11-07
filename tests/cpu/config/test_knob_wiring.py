@@ -23,15 +23,15 @@ from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
 from halo.entrypoints.script import distributed_trainer_kwargs
+from halo.trainers.construction.optimizer_selection import resolve_bf16_optimizer
+from halo.trainers.construction.trainer_rules import reject_stock_adamw_on_mixed_params
 from halo.trainers.distillation.divergences import generalized_jsd_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.optimizer_selection import resolve_bf16_optimizer
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.repo import REPO_ROOT, load_script_module
 
 

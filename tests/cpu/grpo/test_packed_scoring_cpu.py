@@ -7,8 +7,8 @@ import torch
 
 from halo.models.segment_markers import SegmentMarkers
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.packed_forward import build_packed_rows
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
 from tests.common.routing import BareEPLayer, dense_rows, distinct_expert_picks, ragged_routing
 

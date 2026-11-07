@@ -18,8 +18,8 @@ from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
-from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_ROWS_KEY
-from halo.trainers.grpo.row_order import permute_rows
+from halo.trainers.grpo.rounds.packed_rounds import SLOT_ACTIVE_KEY, SLOT_ROWS_KEY
+from halo.trainers.grpo.rounds.row_order import permute_rows
 
 K = 3
 

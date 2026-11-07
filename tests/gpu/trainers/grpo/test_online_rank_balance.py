@@ -19,7 +19,7 @@ import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
 from halo.distributed.fsdp import apply_fsdp2_for_dp
-from halo.trainers.grpo.rank_balance import deal_rows_across_ranks
+from halo.trainers.grpo.rounds.rank_balance import deal_rows_across_ranks
 from tests.common.harness import gpu_test_main
 from tests.common.length_deal import ragged_round, with_world_normalizer, world_accelerator
 from tests.common.models import QWEN3_0_6B

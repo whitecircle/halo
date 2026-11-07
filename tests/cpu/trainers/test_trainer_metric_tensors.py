@@ -8,8 +8,8 @@ import pytest
 import torch
 
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 from halo.trainers.preference.smpo import SMPOTrainer
-from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.smpo_trainer import smpo_trainer
 
 

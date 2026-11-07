@@ -16,7 +16,7 @@ from transformers import PretrainedConfig, PreTrainedTokenizerFast, Qwen3Config,
 
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule
-from halo.trainers.ctor_slots import resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import resolve_ctor_positions
 from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options
 from halo.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_columns,

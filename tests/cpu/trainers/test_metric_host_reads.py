@@ -20,8 +20,8 @@ from trl import SFTConfig
 
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed import fsdp, mesh
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.token_metrics import TokenMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import OFFLINE_VOCAB, make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
@@ -39,9 +39,9 @@ SAVE_STEP = 5
 PLAIN_STEP, LOGGED_STEP = 3, 4
 # The metric path's modules and TRL's, never a dependency's read or the non-finite step guard's per-step verdict.
 METRIC_SOURCES = (
-    "halo/trainers/world_metrics.py",
-    "halo/trainers/token_metrics.py",
-    "halo/trainers/stored_metrics.py",
+    "halo/trainers/metrics/world_metrics.py",
+    "halo/trainers/metrics/token_metrics.py",
+    "halo/trainers/metrics/stored_metrics.py",
     "halo/trainers/sft.py",
     "halo/callbacks/efficiency.py",
     "halo/runtime/consensus.py",
@@ -195,8 +195,8 @@ def _metric_reads(counts: dict) -> dict:
 
 # The callback's step end: the input-token world sum and the step's attention work.
 _MEASURED_STEP_READS = {
-    ("tolist", "halo/trainers/world_metrics.py"): 1,
-    ("tolist", "halo/trainers/token_metrics.py"): 1,
+    ("tolist", "halo/trainers/metrics/world_metrics.py"): 1,
+    ("tolist", "halo/trainers/metrics/token_metrics.py"): 1,
 }
 
 
@@ -212,7 +212,7 @@ def test_a_plain_step_reads_its_metrics_back_only_for_the_efficiency_callback(ru
 def test_a_logged_step_reads_the_world_metrics_and_the_token_counts_once_each(runs):
     """The loss metrics' flush and the token counters' sum, beside a measured step's own."""
     efficiency, results = runs
-    logged = {("tolist", "halo/trainers/world_metrics.py"): 2}
+    logged = {("tolist", "halo/trainers/metrics/world_metrics.py"): 2}
     expected = Counter(logged) + Counter(_MEASURED_STEP_READS) if efficiency else logged
     for rank, result in enumerate(results):
         reads = result["reads"][LOGGED_STEP]

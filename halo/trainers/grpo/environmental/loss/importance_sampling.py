@@ -32,7 +32,7 @@ from halo.trainers.grpo.objective.logratio import (
     select_mask_logratio,
     zero_engine_forced_closes,
 )
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.metrics.world_metrics import world_sums
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)

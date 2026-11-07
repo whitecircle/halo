@@ -12,7 +12,7 @@ from halo.optimizers.registry import (
     register_custom_optimizers,
 )
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.trainer_rules import reject_conflicting_optimizer_choice
+from halo.trainers.construction.trainer_rules import reject_conflicting_optimizer_choice
 
 logger = logging.getLogger(__name__)
 

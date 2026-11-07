@@ -18,6 +18,7 @@ from trl import GRPOConfig, GRPOTrainer
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
+from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.grpo.environmental import reasoning
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
@@ -35,7 +36,6 @@ from halo.trainers.grpo.environmental.environmental_rules import (
 )
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
-from halo.trainers.training_args_overrides import keep_all_dataset_columns
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 

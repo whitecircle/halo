@@ -36,7 +36,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
 from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
+from halo.trainers.grpo.rounds.microbatch_plan import agree_microbatch_geometry
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.length_deal import (
     PACKED_DENSE_BUDGET,

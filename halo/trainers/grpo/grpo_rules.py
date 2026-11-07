@@ -6,7 +6,7 @@ import torch
 from trl import GRPOTrainer
 
 from halo.configs.grpo import RLRRConfig
-from halo.trainers.ctor_slots import get_ctor_arg, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_arg, resolve_ctor_positions
 from halo.trainers.grpo.objective.advantages import scales_rewards
 from halo.trainers.grpo.objective.loss_inputs import TOKEN_SUM_LOSS_TYPES
 

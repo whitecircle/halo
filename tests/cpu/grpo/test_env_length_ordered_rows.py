@@ -19,7 +19,7 @@ from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
-from halo.trainers.grpo.row_order import MICROBATCH_INVARIANT_LOSS_TYPES, length_deal_order, permute_rows
+from halo.trainers.grpo.rounds.row_order import MICROBATCH_INVARIANT_LOSS_TYPES, length_deal_order, permute_rows
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import (
     loss_host,

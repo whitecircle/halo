@@ -11,9 +11,9 @@ from halo.environments.episodes.episode_keys import EPISODE_SLICES_KEY
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
-from halo.trainers import world_metrics
 from halo.trainers.grpo.environmental import rollout_metrics
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.metrics import world_metrics
 from tests.common.world_metrics import pooled_states, rank_states
 
 

@@ -44,7 +44,7 @@ from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec, wraps_experts
-from halo.trainers.accelerator import accelerate_manages_ddp
+from halo.trainers.construction.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_MIXTRAL_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config

@@ -12,7 +12,7 @@ from transformers import LlamaConfig, LlamaForCausalLM
 from trl import GRPOTrainer
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan, agree_microbatch_geometry
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan, agree_microbatch_geometry
 
 MAX_COMPLETION_LENGTH = 64
 

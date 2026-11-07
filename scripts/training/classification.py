@@ -41,9 +41,9 @@ from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.reward.classification import ClassificationTrainer
 from halo.trainers.reward.classification_loss import reject_mismatched_class_weights
-from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 

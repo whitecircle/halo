@@ -14,7 +14,7 @@ from datasets import Dataset
 from transformers import Trainer
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 4

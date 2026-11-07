@@ -18,7 +18,7 @@ from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.world_metrics import attach_world_metrics, fake_world, flushed_metrics
 
 _Trainer = DistributedAsyncEnvironmentalGRPOTrainer

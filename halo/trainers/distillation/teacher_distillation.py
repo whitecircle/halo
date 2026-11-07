@@ -41,7 +41,7 @@ from halo.trainers.distillation.divergences import (
     uses_hard_labels,
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.stored_metrics import StoredMetricsMixin
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
 

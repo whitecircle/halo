@@ -11,8 +11,8 @@ from halo.distributed.expert_parallel.deepep.capacity import (
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import is_flash_attn_implementation
 from halo.models.moe.family_specs import attention_reads_row_positions
-from halo.trainers.grpo.row_order import reject_microbatch_dependent_objective
-from halo.trainers.training_args_overrides import uses_evaluation
+from halo.trainers.construction.training_args_overrides import uses_evaluation
+from halo.trainers.grpo.rounds.row_order import reject_microbatch_dependent_objective
 
 PACKED_KNOB = "packed_microbatch_tokens"
 

@@ -377,8 +377,8 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
         mock.patch.object(DistributedRewardTrainer, "_top_level_model", lambda self: model),
         mock.patch.object(DistributedRewardTrainer, "_get_tp_rank", lambda self: 0),
         mock.patch.object(DistributedRewardTrainer, "_find_cp_wrapper", lambda self: None),
-        mock.patch("halo.trainers.checkpointing.is_fs_save_rank", return_value=True),
-        mock.patch("halo.trainers.checkpointing.model_has_expert_lora", return_value=False),
+        mock.patch("halo.trainers.loop.checkpointing.is_fs_save_rank", return_value=True),
+        mock.patch("halo.trainers.loop.checkpointing.model_has_expert_lora", return_value=False),
     ):
         ctx = trainer._checkpoint_context()
 

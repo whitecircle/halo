@@ -16,12 +16,11 @@ import pytest
 import torch
 
 import halo.runtime.consensus as consensus_mod
-import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 import halo.trainers.parallelism.tp_leader as tp_leader_mod
 from halo.configs.grpo import EarlyStopConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
@@ -29,6 +28,7 @@ from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.repo import load_script_module
 
 

@@ -11,7 +11,7 @@ from halo.callbacks.model_flops import RankFlopsModel
 from halo.diagnostics import phase_timers
 from halo.models.attention.layout import AttentionLayout, LayerAttention
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
-from halo.trainers.token_metrics import TokenMetricsMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 
 _NO_PARALLELISM = make_parallelism_config(world_size=1, gpus_per_node=1)

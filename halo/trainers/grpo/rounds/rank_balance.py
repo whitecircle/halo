@@ -13,9 +13,9 @@ import torch.distributed as dist
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.consensus import agree_across_ranks, rank_max, reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.microbatch_plan import balanced_partition
 from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY, REF_LOGPS_KEY, SAMPLING_LOGPS_KEY
-from halo.trainers.grpo.row_order import permute_rows, reject_microbatch_dependent_objective
+from halo.trainers.grpo.rounds.microbatch_plan import balanced_partition
+from halo.trainers.grpo.rounds.row_order import permute_rows, reject_microbatch_dependent_objective
 
 logger = logging.getLogger(__name__)
 

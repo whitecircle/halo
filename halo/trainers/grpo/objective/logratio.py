@@ -8,7 +8,7 @@ import math
 import torch
 
 from halo.configs.grpo_environmental import ISRMaskConfig
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""

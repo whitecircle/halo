@@ -20,10 +20,10 @@ from halo.models.moe.balancing import expert_load_token_weights
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.mtp.acceptance import MTP_ACCEPTANCE_GREEDY, MTP_ACCEPTANCE_TV, MTP_SCORED_POSITIONS, MTP_TOP1
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.trainer_rules import reject_cp_packed_collator, reject_multi_document_collator
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.trainer_rules import reject_cp_packed_collator, reject_multi_document_collator
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 

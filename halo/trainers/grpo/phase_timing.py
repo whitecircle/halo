@@ -4,7 +4,7 @@ import torch
 
 from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics.phase_timers import Phase, PhaseTimers
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 PHASE_TIME_PREFIX = "phase_time/"
 

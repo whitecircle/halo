@@ -4,16 +4,16 @@ Both are silent when broken: a typo in the bases tuple drops a method, and a bas
 
 import pytest
 
-from halo.trainers.accelerator import AcceleratorMixin
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.construction.accelerator import AcceleratorMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
-from halo.trainers.token_metrics import TokenMetricsMixin
 
 # name -> the sub-mixin that must own it, so an owner change stays MRO-visible from the composed class.
 _OWNERSHIP = {

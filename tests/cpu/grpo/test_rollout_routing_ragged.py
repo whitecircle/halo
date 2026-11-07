@@ -13,7 +13,7 @@ from halo.trainers.grpo.environmental.rollout_routing import (
 )
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked
 from tests.common.routing import BareEPLayer, distinct_expert_picks
 

@@ -7,7 +7,7 @@ import inspect
 
 import pytest
 
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.rosters import distributed_trainer_classes
 
 _WRITER = "create_model_card"

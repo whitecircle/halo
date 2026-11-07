@@ -10,8 +10,8 @@ from collections import defaultdict
 import pytest
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
-from halo.trainers import world_metrics
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.metrics import world_metrics
 from tests.common.world_metrics import pooled_states, rank_states
 
 

@@ -13,7 +13,7 @@ from torch.distributed.tensor import DTensor, Replicate, distribute_tensor
 from transformers import Trainer, TrainingArguments
 
 from halo.optimizers.param_groups import build_tensor_type_grouped_optimizer
-from halo.trainers.optimizer_selection import build_optimizer
+from halo.trainers.construction.optimizer_selection import build_optimizer
 
 DECAYED = ["w_dtensor", "w_plain_fp32"]
 STEPS = 3

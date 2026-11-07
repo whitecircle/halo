@@ -24,9 +24,9 @@ from halo.trainers.distillation.divergences import (
     token_divergence,
 )
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
-from halo.trainers.evaluation import split_rows_head
+from halo.trainers.loop.evaluation import split_rows_head
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
 

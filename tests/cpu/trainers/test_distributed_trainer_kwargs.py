@@ -49,7 +49,7 @@ def test_the_binding_check_rejects_a_signature_missing_a_key():
 
 
 def test_the_checkpoint_knobs_reach_the_checkpoint_contexts(tmp_path, monkeypatch):
-    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.loop.checkpointing.is_fs_save_rank", lambda: True)
     model = nn.Linear(2, 2)
     trainer = object.__new__(DistributedSFTTrainer)
     remaining = trainer._init_distributed_config(

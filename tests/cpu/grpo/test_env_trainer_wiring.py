@@ -16,9 +16,10 @@ from trl import GRPOConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig, ISRMaskConfig
 from halo.environments.environment_base import EnvironmentBase
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
-from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
+from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental import trainer as env_trainer
-from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.loss import importance_sampling
+from halo.trainers.grpo.environmental.loss.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import (
     DistributedAsyncEnvironmentalGRPOTrainer,

@@ -16,7 +16,7 @@ from halo.environments.rollout_config import (
 )
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.training_args_overrides import uses_evaluation
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 

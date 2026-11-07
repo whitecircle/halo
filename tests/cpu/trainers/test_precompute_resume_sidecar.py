@@ -29,7 +29,7 @@ from halo.entrypoints.run_setup import resume_checkpoint_from_config
 from halo.entrypoints.script import ScriptContext
 from halo.runtime import filesystem
 from halo.runtime.consensus import RankConsensus
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.reference_logps import token_digest as _token_digest
 from tests.common.distributed import reset_shared_filesystem_consensus

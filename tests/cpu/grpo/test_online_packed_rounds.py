@@ -15,14 +15,14 @@ from trl import GRPOTrainer
 
 import halo.trainers.grpo.environmental.row_order as env_row_order
 import halo.trainers.grpo.online as online_module
-import halo.trainers.grpo.packed_rounds as packed_rounds
-import halo.trainers.grpo.row_order as shared_row_order
+import halo.trainers.grpo.rounds.packed_rounds as packed_rounds
+import halo.trainers.grpo.rounds.row_order as shared_row_order
 from halo.diagnostics.phase_timers import PhaseTimers
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.packed_rounds import PackedRoundMixin
+from halo.trainers.grpo.rounds.packed_rounds import PackedRoundMixin
 from tests.common.length_deal import random_ragged_round, single_process_accelerator, stacked, tiny_llama
 from tests.common.online_rounds import old_policy_pass, online_host, train_online_window
 

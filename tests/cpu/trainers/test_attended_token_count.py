@@ -12,7 +12,7 @@ from halo.data.collators.fixed_shape import FixedShapeCollator
 from halo.data.collators.packing import DataCollatorWithPacking
 from halo.data.collators.smpo import DataCollatorForSMPO
 from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
-from halo.trainers.token_metrics import TokenMetricsMixin, count_attended_tokens
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin, count_attended_tokens
 
 PAD = 0
 MAX_LENGTH = 32

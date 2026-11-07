@@ -10,7 +10,7 @@ from accelerate.utils import DataLoaderConfiguration
 from halo.config_validation import differs_from_default
 from halo.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
-from halo.trainers.trainer_rules import FSDP_SHAPING_KNOBS
+from halo.trainers.construction.trainer_rules import FSDP_SHAPING_KNOBS
 
 logger = logging.getLogger(__name__)
 

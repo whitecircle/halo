@@ -13,7 +13,7 @@ import torch
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 

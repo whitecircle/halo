@@ -11,11 +11,11 @@ import torch
 from trl import GRPOTrainer
 
 from halo.configs.grpo import ScoreCenteringConfig
-from halo.trainers.grpo.environmental.centered_scoring import ScoreCenteringMixin
+from halo.trainers.grpo.environmental.loss.centered_scoring import ScoreCenteringMixin
 from halo.trainers.grpo.objective.logratio import compute_token_is_ratio
 from halo.trainers.grpo.objective.loss_inputs import IS_SAMPLING_LOGPS_KEY
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY, centered_logps
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 VOCAB = 48
 CLIP, LOW, HIGH = 2.0, 0.5, 5.0

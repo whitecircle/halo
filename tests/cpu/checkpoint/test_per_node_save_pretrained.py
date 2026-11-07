@@ -14,8 +14,8 @@ from transformers.models.llama.modeling_llama import LlamaModel
 
 from halo.checkpoint.format import SAFETENSORS_FAMILY_GLOB
 from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
-from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -110,7 +110,7 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
 
 def _trainer_worker(rank: int, root: str) -> None:
     _be_a_node_of_one()
-    module = "halo.trainers.checkpointing"
+    module = "halo.trainers.loop.checkpointing"
     patches = pytest.MonkeyPatch()
     patches.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
     patches.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))

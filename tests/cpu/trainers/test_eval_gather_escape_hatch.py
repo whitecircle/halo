@@ -10,11 +10,11 @@ from unittest.mock import patch
 import pytest
 from datasets import Dataset
 
-import halo.trainers.evaluation as mixin_module
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+import halo.trainers.loop.evaluation as mixin_module
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.evaluation import EvaluationMixin
 from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate() returns.
 _MASKING_QUANTILE = 0.8

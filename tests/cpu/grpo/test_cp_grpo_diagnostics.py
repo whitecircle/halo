@@ -12,7 +12,7 @@ from torch import nn
 
 from halo.trainers.grpo.objective.offline_loss import offline_token_objective
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 

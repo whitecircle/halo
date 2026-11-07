@@ -14,8 +14,8 @@ import torch
 from trl import GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
-from halo.trainers.grpo.environmental import loss_forward_weights as lfw
-from halo.trainers.grpo.environmental.loss_forward_weights import (
+from halo.trainers.grpo.environmental.loss import loss_forward_weights as lfw
+from halo.trainers.grpo.environmental.loss.loss_forward_weights import (
     LossForwardImportanceMixin,
     loss_forward_weight_blocker,
 )
@@ -39,9 +39,9 @@ from halo.trainers.grpo.objective.loss_inputs import (
     UNCLAMPED_REF_LOGPS_KEY,
     record_token_mass,
 )
-from halo.trainers.grpo.row_order import permute_rows
-from halo.trainers.token_metrics import effective_loss_mask
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.grpo.rounds.row_order import permute_rows
+from halo.trainers.metrics.token_metrics import effective_loss_mask
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import (
     packed_host,

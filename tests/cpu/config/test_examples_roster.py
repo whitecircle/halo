@@ -38,7 +38,7 @@ from halo.models.introspection.context_window import bounded_row_length, is_boun
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
-from halo.trainers.dataloaders import uses_dp_sharded_loader
+from halo.trainers.loop.dataloaders import uses_dp_sharded_loader
 from halo.trainers.sft_rules import reject_unsupported_mtp_options
 from tests.common.hub_seed import is_hub_repo
 from tests.common.parallelism import make_parallelism_config

@@ -10,14 +10,14 @@ import halo.models.segment_markers as segment_markers
 from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.packed_rules import (
+from halo.trainers.grpo.rounds.packed_rules import (
     PACKED_KNOB,
     reject_undispatchable_budget,
     reject_unpackable_model,
     reject_unpackable_options,
     resolve_dispatch_ceiling,
 )
-from halo.trainers.grpo.row_order import reject_trainer_refusal
+from halo.trainers.grpo.rounds.row_order import reject_trainer_refusal
 from tests.common.tiny_models import (
     TINY_BAILING_RING_FAMILY,
     TINY_DENSE_ATTENTION_FAMILIES,

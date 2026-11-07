@@ -57,6 +57,7 @@ from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.embedding.embedding_rules import (
     reject_batch_sampler_on_toolkit_loader,
@@ -76,7 +77,6 @@ from halo.trainers.embedding.preloaded_transformer import (
     PreloadedTransformer,
     patch_sentence_transformer_gradient_checkpointing,
 )
-from halo.trainers.training_args_overrides import keep_all_dataset_columns
 
 logger = logging.getLogger(__name__)
 

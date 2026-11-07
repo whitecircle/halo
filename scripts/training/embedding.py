@@ -51,13 +51,13 @@ from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.dataloaders import uses_dp_sharded_loader
 from halo.trainers.embedding.embedding_rules import (
     reject_injected_lora_parallelism,
     reject_uneven_sentence_transformers_batches,
 )
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from halo.trainers.embedding.trainer import EmbeddingTrainer
+from halo.trainers.loop.dataloaders import uses_dp_sharded_loader
 
 logger = logging.getLogger(__name__)
 

@@ -15,14 +15,14 @@ import torch
 import torch.distributed as dist
 from trl import GRPOTrainer
 
-import halo.trainers.grpo.rank_balance as rank_balance
+import halo.trainers.grpo.rounds.rank_balance as rank_balance
 from halo.configs.distillation import SDPGArguments
 from halo.configs.grpo import RankBalanceArguments
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.rank_balance import (
+from halo.trainers.grpo.rounds.rank_balance import (
     PROMPT_ROWS,
     SPREAD_AFTER_KEY,
     SPREAD_BEFORE_KEY,

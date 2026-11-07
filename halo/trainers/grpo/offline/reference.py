@@ -32,7 +32,6 @@ from halo.runtime.consensus import (
 )
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import get_global_rank, is_global_main_process
-from halo.trainers.dataloaders import dp_representative_ranks
 from halo.trainers.grpo.offline.reference_cache import (
     REFERENCE_BUFFER_VALUES,
     MappedReferenceScores,
@@ -41,6 +40,7 @@ from halo.trainers.grpo.offline.reference_cache import (
     mapped_reference_scores,
     reference_payload_mismatch,
 )
+from halo.trainers.loop.dataloaders import dp_representative_ranks
 from halo.trainers.reference_logps import (
     LOGPROB_PRECISION_KEY,
     PREVIOUS_CHECKPOINT_RECOVERY,

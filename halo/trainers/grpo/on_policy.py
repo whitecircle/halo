@@ -19,10 +19,10 @@ from halo.model_loading.parallel.frozen_models import (
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.models.introspection.config_access import config_sources
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.training_args_overrides import disable_trl_liger
 from halo.trainers.grpo.grpo_rules import reject_unhonored_trl_options, reject_unread_reference
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
-from halo.trainers.training_args_overrides import disable_trl_liger
 
 logger = logging.getLogger(__name__)
 

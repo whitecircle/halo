@@ -15,7 +15,7 @@ from halo.trainers.grpo.loss_forward_seam import LossForwardSeamMixin
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps
 from halo.trainers.grpo.objective.loss_inputs import NET_TOKEN_MASS_KEY, record_token_mass
 from halo.trainers.grpo.online_loss_forward import online_loss_forward_blocker
-from halo.trainers.token_metrics import effective_loss_mask
+from halo.trainers.metrics.token_metrics import effective_loss_mask
 from tests.common.length_deal import (
     plan_for,
     recompute_logps,

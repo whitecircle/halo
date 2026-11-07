@@ -8,7 +8,7 @@ import logging
 import torch
 
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.row_order import (
+from halo.trainers.grpo.rounds.row_order import (
     MICROBATCH_INVARIANT_LOSS_TYPES,
     length_deal_order,
     permute_rows,

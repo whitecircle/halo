@@ -136,7 +136,7 @@ one EP group.
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
-a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/dataloaders.py`. Ranks
+a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/loop/dataloaders.py`. Ranks
 inside a TP, CP or ETP group, and the stages of one pipeline chain, see the **same** batch; they
 shard weights, the sequence or the layers, not the data.
 

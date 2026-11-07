@@ -10,8 +10,8 @@ from datasets import Dataset
 from torch import nn
 
 import halo.trainers.grpo.offline.reference as reference_module
-from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from halo.trainers.reference_logps import ReferenceLogpsMixin
 from tests.common.gloo import run_gloo_ranks
 

@@ -1,6 +1,6 @@
 # BF16 Master Weights with Stochastic Rounding
 
-`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `halo/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `halo/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `halo/trainers/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory §7](../reference/gpu-training-theory.md#bf16-numerics-what-stays-fp32).
+`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `halo/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `halo/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `halo/trainers/construction/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory §7](../reference/gpu-training-theory.md#bf16-numerics-what-stays-fp32).
 
 ## The problem: stale weights in bf16
 
@@ -105,7 +105,7 @@ Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype
 
 ## Compatibility
 
-Every distributed trainer supports `bf16_optimizer`; resolution lives in `resolve_bf16_optimizer` (`halo/trainers/optimizer_selection.py`), which every trainer's construction runs. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
+Every distributed trainer supports `bf16_optimizer`; resolution lives in `resolve_bf16_optimizer` (`halo/trainers/construction/optimizer_selection.py`), which every trainer's construction runs. It auto-enables under FSDP, EP, TP, CP and their combinations (rank-local experts and per-rank DTensor shards alike).
 
 The one exception is accelerate-managed replicated DDP, where the auto-enable is skipped as a conservative default outside the validated FSDP/EP/TP/HSDP matrix, not a correctness limit. SR is replica-safe (the step-and-name seed rounds shared params identically), so `bf16_optimizer: true` opts in.
 

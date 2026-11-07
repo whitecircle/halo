@@ -6,8 +6,8 @@ import pytest
 import torch
 import trl.trainer.grpo_trainer as trl_grpo_trainer
 
-import halo.trainers.grpo.microbatch_plan as plan_module
-from halo.trainers.grpo.microbatch_plan import (
+import halo.trainers.grpo.rounds.microbatch_plan as plan_module
+from halo.trainers.grpo.rounds.microbatch_plan import (
     MicrobatchPlan,
     agree_microbatch_geometry,
     balanced_partition,

@@ -12,16 +12,16 @@ import torch
 
 from halo.models.attention.selection import effective_attn_implementation
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan, build_slot_layout, plan_round_microbatches
 from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY
-from halo.trainers.grpo.packed_rules import (
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan, build_slot_layout, plan_round_microbatches
+from halo.trainers.grpo.rounds.packed_rules import (
     PACKED_KNOB,
     reject_undispatchable_budget,
     reject_unpackable_model,
     reject_unpackable_options,
     resolve_dispatch_ceiling,
 )
-from halo.trainers.grpo.row_order import ROW_MEAN_LOSS_TYPES, replacing_trl_shuffle
+from halo.trainers.grpo.rounds.row_order import ROW_MEAN_LOSS_TYPES, replacing_trl_shuffle
 
 logger = logging.getLogger(__name__)
 

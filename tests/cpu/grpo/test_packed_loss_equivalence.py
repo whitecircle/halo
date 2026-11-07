@@ -11,8 +11,8 @@ import pytest
 import torch
 from trl import GRPOConfig
 
-from halo.trainers.grpo.packed_rounds import LOSS_SCALE_KEY, SLOT_IS_ACTIVE_KEY
-from halo.trainers.grpo.row_order import (
+from halo.trainers.grpo.rounds.packed_rounds import LOSS_SCALE_KEY, SLOT_IS_ACTIVE_KEY
+from halo.trainers.grpo.rounds.row_order import (
     MICROBATCH_INVARIANT_LOSS_TYPES,
     ROW_MEAN_LOSS_TYPES,
     TOKEN_GLOBAL_LOSS_TYPES,

@@ -7,8 +7,8 @@ import torch
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.trainers.sft import _record_loss_metrics
-from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import fake_world
 
 CP_SIZE = 2

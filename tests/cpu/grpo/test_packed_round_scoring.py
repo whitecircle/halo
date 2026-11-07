@@ -19,9 +19,14 @@ from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjecto
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
-from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_IS_ACTIVE_KEY, SLOT_ROWS_KEY, PackedRoundMixin
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan
+from halo.trainers.grpo.rounds.packed_rounds import (
+    SLOT_ACTIVE_KEY,
+    SLOT_IS_ACTIVE_KEY,
+    SLOT_ROWS_KEY,
+    PackedRoundMixin,
+)
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
 from tests.common.routing import bare_replay_injector, dense_rows, ragged_routing

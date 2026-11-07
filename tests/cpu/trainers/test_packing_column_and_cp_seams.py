@@ -22,7 +22,7 @@ from halo.data.collators.packing import (
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.entrypoints.data_setup import disable_trl_dataset_prep
 from halo.models import segment_markers
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 from halo.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer

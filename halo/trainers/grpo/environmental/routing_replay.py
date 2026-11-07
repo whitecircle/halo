@@ -32,7 +32,7 @@ from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY, StepRo
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans, host_row_spans
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 

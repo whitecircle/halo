@@ -8,7 +8,7 @@ import torch
 
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY, REF_LOGPS_KEY
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 

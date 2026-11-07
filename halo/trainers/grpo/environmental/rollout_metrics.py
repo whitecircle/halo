@@ -19,7 +19,7 @@ from halo.rewards.samples import CUT_CALL_NOTE
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 

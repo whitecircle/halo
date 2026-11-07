@@ -12,8 +12,8 @@ from transformers import Trainer
 from trl import SFTConfig
 
 from halo.configs.parser import _TOOLKIT_KEY_DEFAULTS, HaloArgumentParser
-from halo.trainers.accelerator import build_plain_accelerator
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.construction.accelerator import build_plain_accelerator
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 
 _ROWS = [{"x": torch.zeros(2)} for _ in range(4)]
 

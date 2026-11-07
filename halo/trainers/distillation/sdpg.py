@@ -12,11 +12,11 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.distillation.divergences import pooled_token_mean, projected_token_divergence, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
-from halo.trainers.evaluation import split_rows_head
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.rank_balance import PROMPT_ROWS
-from halo.trainers.stored_metrics import StoredMetricsMixin
-from halo.trainers.token_metrics import effective_loss_mask
+from halo.trainers.grpo.rounds.rank_balance import PROMPT_ROWS
+from halo.trainers.loop.evaluation import split_rows_head
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
+from halo.trainers.metrics.token_metrics import effective_loss_mask
 
 logger = logging.getLogger(__name__)
 

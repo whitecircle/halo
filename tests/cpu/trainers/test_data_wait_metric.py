@@ -12,9 +12,9 @@ from torch.utils.data import DataLoader
 
 from halo.callbacks import efficiency
 from halo.callbacks.efficiency import EfficiencyCallback
-from halo.trainers import token_metrics
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
-from halo.trainers.token_metrics import TokenMetricsMixin
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics import token_metrics
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 
 SLEEP = 0.2

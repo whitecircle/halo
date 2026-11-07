@@ -7,7 +7,7 @@ import os.path
 
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 

@@ -48,7 +48,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.metrics.world_metrics import world_sums
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions

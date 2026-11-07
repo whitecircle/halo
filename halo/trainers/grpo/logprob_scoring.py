@@ -36,8 +36,8 @@ from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.grpo.packed_forward import build_packed_rows
-from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 

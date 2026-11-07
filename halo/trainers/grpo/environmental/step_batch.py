@@ -22,7 +22,6 @@ from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from halo.trainers.grpo.environmental.rollout_routing import RolloutRouting, RowsReplay
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages, valid_group_stats
 from halo.trainers.grpo.objective.logratio import (
     KL_CLAMP_FRAC_KEY,
@@ -41,8 +40,9 @@ from halo.trainers.grpo.objective.loss_inputs import (
     record_token_mass,
 )
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
-from halo.trainers.token_metrics import effective_loss_mask
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan
+from halo.trainers.metrics.token_metrics import effective_loss_mask
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 

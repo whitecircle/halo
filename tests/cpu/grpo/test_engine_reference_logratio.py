@@ -15,8 +15,9 @@ import pytest
 import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
+from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_engine_reference
+from halo.trainers.grpo.environmental.loss import importance_sampling
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.objective.logratio import select_mask_logratio

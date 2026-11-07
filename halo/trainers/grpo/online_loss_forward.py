@@ -23,7 +23,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     record_world_token_mass,
     token_mass_sums,
 )
-from halo.trainers.token_metrics import effective_loss_mask
+from halo.trainers.metrics.token_metrics import effective_loss_mask
 
 # The positive and negative token masses; a negative-only mass is the environmental trainer's.
 _MASS_KEYS = TOKEN_MASS_SUM_KEYS[:2]

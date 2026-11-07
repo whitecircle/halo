@@ -9,9 +9,9 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.introspection.context_window import is_bounded_length
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.runtime.consensus import reject_across_ranks
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.grpo.offline.reference import ReferenceMode
 from halo.trainers.parallelism.pipeline_rules import reject_pp_compute_metrics, reject_pp_peft
-from halo.trainers.training_args_overrides import uses_evaluation
 
 
 def require_tokenizer(processing_class):

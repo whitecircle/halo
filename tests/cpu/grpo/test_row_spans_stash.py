@@ -20,7 +20,7 @@ from halo.trainers.grpo.logprob_scoring import (
     row_spans_on_device,
 )
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.grpo.row_order import permute_rows
+from halo.trainers.grpo.rounds.row_order import permute_rows
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY, RowSpanStashMixin
 from tests.common.chunked_logprobs import EmbeddingBackboneHarness
 from tests.common.gloo import run_gloo_ranks

@@ -16,8 +16,8 @@ from halo.trainers.grpo.objective.score_centering import (
     ScoreCenteringMetrics,
     centered_logps,
 )
-from halo.trainers.token_metrics import effective_loss_mask
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.token_metrics import effective_loss_mask
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 _METRIC_PREFIX = "score_centering"
 

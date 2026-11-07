@@ -20,7 +20,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus, rank_max
 from halo.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
-from halo.trainers.dataloaders import dp_representative_ranks, dp_scoped_gather, find_batch_sampler_shard
+from halo.trainers.loop.dataloaders import dp_representative_ranks, dp_scoped_gather, find_batch_sampler_shard
 
 logger = logging.getLogger(__name__)
 

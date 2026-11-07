@@ -17,7 +17,7 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.loss_inputs import IS_SAMPLING_LOGPS_KEY
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.chunked_logprobs import EmbeddingBackboneHarness
 from tests.common.length_deal import (
     packed_host,

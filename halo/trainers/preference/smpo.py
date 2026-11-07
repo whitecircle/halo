@@ -51,8 +51,10 @@ from halo.models.segment_markers import (
     segment_markers_for,
 )
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.trainer_rules import reject_cp_packed_collator
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.evaluation import split_rows_head, split_rows_mean
+from halo.trainers.loop.evaluation import split_rows_head, split_rows_mean
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from halo.trainers.preference.preference_rules import (
     reject_smpo_options,
@@ -68,8 +70,6 @@ from halo.trainers.preference.smpo_objective import (
     metrics_from_sums,
 )
 from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
-from halo.trainers.stored_metrics import StoredMetricsMixin
-from halo.trainers.trainer_rules import reject_cp_packed_collator
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ from halo.data.collators.offline_grpo import (
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 _KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]

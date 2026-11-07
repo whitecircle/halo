@@ -19,7 +19,7 @@ import halo.checkpoint.parallel.adapters as peft_mod
 import halo.checkpoint.parallel.ep as saving_mod
 import halo.checkpoint.parallel.resume_weights as loader_mod
 import halo.checkpoint.parallel.save as save_mod
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,

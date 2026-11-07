@@ -14,7 +14,7 @@ from torch import nn
 
 import halo.checkpoint.parallel.ep as ep_mod
 import halo.checkpoint.parallel.save as save_mod
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 import halo.trainers.parallelism.adapter_rules as adapter_rules
 import halo.trainers.parallelism.grad_sync as grad_sync_mod
 import halo.trainers.parallelism.mode_setup as mode_setup_mod

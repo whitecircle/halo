@@ -7,7 +7,7 @@ from typing import Literal
 
 import torch
 
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 
 class StoredMetricsMixin:
