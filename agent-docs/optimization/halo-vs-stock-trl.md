@@ -78,8 +78,8 @@ cross-entropy, batch 1, gradient checkpointing, tok/s/GPU · peak GiB. Nothing o
 - Dense CP-only ZeRO-3 is the leanest point (32–56 GiB across 128k→256k) and the only long-context mode with no DeepEP
   dependency. Splitting 4-way instead of 8 trades memory for throughput (256k: CP4 2,257 · 98 vs CP8 1,836 · 56).
 - `EP1` ZeRO-2 OOMs (ZeRO-2 keeps ~40 GB of params resident). `EP8`, `EP8+CP2` and `EP8+TP8` put 128k tokens per rank
-  through the dispatch, which neither transport trains: elastic EP8 deadlocks at ≥~64k tokens per rank (its combine
-  barrier races FSDP2's reduce-scatter) and `ep_buffer_backend: legacy` fails at 128k
+  through the dispatch, which no transport is validated for: elastic EP8 deadlocks at ≥~64k tokens per rank (its combine
+  barrier races FSDP2's reduce-scatter) and `ep_buffer_backend: legacy` is not validated at 128k tokens per rank
   ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend),
   [Dispatch token ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)).
 
