@@ -326,6 +326,7 @@ def test_the_online_weight_push_runs_outside_the_round_being_binned_and_restores
     )
     trainer = types.SimpleNamespace(
         _bins_round_scoring=True,
+        first_push_verified=True,
         _phase_timers=PhaseTimers(enabled=False),
         accelerator=types.SimpleNamespace(is_main_process=True),
         vllm_generation=types.SimpleNamespace(vllm_client="client"),
