@@ -303,10 +303,61 @@ auto-selected Blackwell MoE backends (`FLASHINFER_TRTLLM` / `CUTLASS`) repack ex
 the `flashinfer_trtllm*`, aiter and quantized runners repack after the load, and an update into them is
 not validated.
 
-The same rule excludes quantized serving: serve bf16. The startup preflight refuses a server that reports quantized weights. For gpt-oss that means the **BF16** checkpoint,
+The same rule excludes quantized serving unless the run declares `rollout_weight_precision: fp8_block` ([FP8 rollouts](#fp8-rollouts)): the startup preflight refuses a server that reports quantized weights under a bf16 run. For gpt-oss that means the **BF16** checkpoint,
 not the stock MXFP4 `openai/gpt-oss-20b`, whose expert loader drops every synced bf16 expert weight
 while the biases land, silently, leaving only a slow log-ratio drift. Checkpoint layout and expert
 un-fuse rules: [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
+
+### FP8 rollouts
+
+`rollout_weight_precision: fp8_block` (online GRPO on vLLM, environmental GRPO on either engine) pushes the attention and MLP
+projections of the text decoder, shared and routed experts included, as DeepSeek-style block FP8: float8_e4m3fn
+values plus one fp32 power-of-two `weight_scale_inv` per 128x128 block (zero padding at an edge). The trainer stays
+bf16; the quantizer (`halo/kernels/lowp/block_fp8.py`) runs on the sync GPU after the PEFT fold and the expert gather,
+and a fused expert bank goes out split per expert, the layout vLLM's FP8 expert loader reads. Routers and gates,
+linear-attention (GDN, Mamba) blocks, embeddings, the head, norms, vision towers and MTP heads stay bf16.
+Validated families: Qwen3 dense and MoE, Qwen3.5/3.6 dense and MoE (`MoEFamilySpec.fp8_rollout_refusal`,
+`DENSE_FP8_ROLLOUT_MODEL_TYPES`); every other family is refused at startup with its reason, as are adapter sync and
+QLoRA.
+
+Serve a checkpoint written by the same plan:
+
+```bash
+python scripts/before_training/export_block_fp8.py --input_dir <bf16 checkpoint> --output_dir <fp8 checkpoint>
+```
+
+It writes the same tensors the push sends (name, dtype, shape, bytes) and a `quantization_config`
+(`fp8`, `dynamic` activations, block `[128, 128]`) whose `modules_to_not_convert` lists every bf16 linear by exact
+module path, as vLLM matches the list by exact path. Launch the server on it with `--moe-backend triton`, which keeps
+the TRITON FP8 MoE backend and the checkpoint layout (no repack). A weight and its scale travel in one chunk (a
+co-load group keyed on the fp8 dtype), because vLLM's layerwise reload re-derives a layer's kernel tensors once both
+have landed.
+
+The preflight accepts a quantized server only for an `fp8_block` run, and refuses a bf16 or other-format server under
+it; the bf16 run refuses any quantized server. Only the quantization method (`fp8`) is on `/server_info`: the block
+size and activation scheme come from the served checkpoint's `config.json` and are not verified by the trainer. A
+pushed policy served from a bf16 checkpoint booted with online `--quantization fp8` also reads `fp8`, so serve the
+exported checkpoint.
+
+Measured on Qwen3.5-35B-A3B (vLLM 0.32.0, triton MoE): pushing the quantized weights in place is bit-exact against a
+fresh boot of the same checkpoint. Against the trainer's bf16 log-probs the mean per-position gap grows from 0.042 to
+0.064 nats on prompts (p99 0.38 to 0.56), so the first-push parity probe's bound is 1.5 nats for `fp8_block` against 1
+([First-push parity probe](#first-push-parity-probe)). The gain is halved bytes on the wire for the quantized
+tensors and fewer engine GPUs at scale; decode speed on vLLM was flat at the load measured (SGLang below). The larger
+trainer-versus-engine gap is absorbed by the importance-sampling correction or score centering
+([Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)).
+
+SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (and `--moe-runner-backend
+triton`, as always): pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16
+trainer matches vLLM's (mean 0.063 nats, p99 0.57). With DeepGEMM on, SGLang requantizes a block-FP8 checkpoint's dense
+scales to UE8M0 at boot, the first chunk carrying dense fp8 weights and scales fails inside `load_weights` with an empty
+message, and the server answers "partially updated" and stays paused. `/server_info` does not report the variable (it
+lists the resolved server arguments and the launch command, not the environment), so the preflight cannot read it; the
+client appends the remedy to a chunk failure that carries that answer
+(`CHUNK_FAILURE_REMEDIES`), per server and under `single_group`. Set it in the SGLang service's environment.
+
+The decode gain depends on the engine: flat on vLLM, and +26 to +28% on SGLang with the triton runner (11,208 against
+8,739 tokens/s at 256 x 1,024 on one B300). The trainer-versus-engine gap is the same on both.
 
 ### vLLM server patches
 
@@ -415,8 +466,8 @@ engine answers `200` for a tensor its loader does not map and keeps the launch v
 wrongly serves another model. After a trainer's first push (online GRPO's, the environmental trainer's forced start
 push) every rank scores one fixed 1,100-token counting row with the trainer's own log-prob path
 (`_get_per_token_logps_and_entropies`), and rank 0 scores it through the client's `score_completion_logprobs` (a pool
-scores on its first server; the row is cut to the served window). A mean gap above 1 nat per position
-(`PARITY_MAX_MEAN_GAP_NATS`) is logged as a warning. The bound sits above the 0.65 floor measured on Laguna; no other
+scores on its first server; the row is cut to the served window). A mean gap above 1 nat per position (1.5 under `rollout_weight_precision: fp8_block`;
+`PARITY_MAX_MEAN_GAP_NATS`) is logged as a warning. The bound sits above the 0.65 floor measured on Laguna; no other
 family, QLoRA trainer or composite has been measured, so the default warns instead of stopping a run that may work.
 `HALO_WEIGHT_SYNC_PARITY_PROBE=raise` stops every rank on a gap, `off` skips the probe; context parallelism skips it,
 as its batches shard the row. Later pushes pay nothing.

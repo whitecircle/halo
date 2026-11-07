@@ -161,6 +161,7 @@ changes.
 | `halo/model_loading/liger/` | `agent-docs/optimization/liger-kernels.md` |
 | `halo/optimizers/` | `agent-docs/optimization/{bf16-optimizer,muon-optimizer,flash-adamw}.md` |
 | `halo/optimizers/step_skip.py` | `agent-docs/reference/trainer-architecture.md`, `agent-docs/optimization/bf16-optimizer.md`, `agent-docs/optimization/muon-optimizer.md` |
+| `halo/kernels/lowp/block_fp8.py`, `halo/models/fp8_rollout.py`, `halo/checkpoint/tools/block_fp8_export.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/kernels/lowp/` | `agent-docs/optimization/low-precision-moe-kernels.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/parallel/lowp_compute.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `halo/kernels/histogram.py` | `agent-docs/training-methods/callbacks.md` |
