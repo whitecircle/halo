@@ -32,6 +32,7 @@ class EvaluationRecorder(TrainerCallback):
 
 
 def _dataset(vocab_size, rows):
+    """Build variable-length rows with an ignored prompt prefix to exercise real-token accounting."""
     records = []
     for row in range(rows):
         tokens = [3 + (row + token) % (vocab_size - 3) for token in range(18 + row % 3)]
@@ -40,6 +41,7 @@ def _dataset(vocab_size, rows):
 
 
 def run(ctx):
+    """Collectively verify CP2 resume/export, evaluation schedules and each training phase's measured efficiency."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, choices=(1, 3), default=1)
     parser.add_argument("--gc", action="store_true")

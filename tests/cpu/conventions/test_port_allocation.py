@@ -62,6 +62,7 @@ def test_ports_lie_below_the_ephemeral_range():
 
 @pytest.mark.parametrize("floor", [16000, 32768])
 def test_concurrent_xdist_workers_never_share_a_port(monkeypatch, floor):
+    """Worker slices remain disjoint for both normal and fallback allocation pools."""
     monkeypatch.setattr(ports, "ephemeral_floor", lambda: floor)
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(_WORKERS))
     slices = []
@@ -126,6 +127,7 @@ def test_a_port_in_time_wait_is_never_handed_out():
     ],
 )
 def test_pool_selection_respects_ephemeral_and_reserved_ranges(monkeypatch, floor, workers, expected):
+    """The pool must fit every worker while excluding privileged, reserved and ephemeral ranges."""
     monkeypatch.setattr(ports, "ephemeral_floor", lambda: floor)
     pool = resolve_port_pool(workers)
     assert pool == expected
@@ -143,6 +145,7 @@ def test_no_safe_worker_slice_names_the_fix(monkeypatch, floor, workers):
 
 
 def test_low_pool_worker_slices_stay_nonempty_at_the_boundary(monkeypatch):
+    """The smallest valid pool gives every worker exactly one usable port."""
     monkeypatch.setattr(ports, "ephemeral_floor", lambda: 1028)
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "4")
     blocks = []

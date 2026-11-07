@@ -49,6 +49,7 @@ LEARNING_RATE = 0.1
 
 
 def _kernel_target(function):
+    """Return the native hub-kernel implementation or fail if its dispatch chain cannot be verified."""
     for _ in range(5):
         if not inspect.isfunction(function):
             break
@@ -60,12 +61,14 @@ def _kernel_target(function):
 
 
 def _check_tensor(checks, metrics, name, actual, expected, *, gradient=False):
+    """Record agreement and error metrics using the existing output or gradient tolerance."""
     passed, values = hybrid_tensor_agreement(actual, expected, gradient=gradient)
     checks[name] = passed
     metrics.update({f"{name}/{key}": value for key, value in values.items()})
 
 
 def _block_capture(layer, hidden, mask, target, *, checkpointing):
+    """Return detached outputs, input gradients and full parameter gradients for a masked linear objective."""
     layer.zero_grad(set_to_none=True)
     inputs = hidden.detach().clone().requires_grad_(True)
     output = checkpoint(layer, inputs, use_reentrant=True) if checkpointing else layer(inputs)
@@ -74,6 +77,7 @@ def _block_capture(layer, hidden, mask, target, *, checkpointing):
 
 
 def _gdn_blocks(ctx, batch, checkpointing):
+    """Collectively compare native and CP2 blocks, including real-prefix mask parity and row-mixing controls."""
     native = build_gpu_hybrid_model().model.layers[0].linear_attn.to(device=ctx.device, dtype=torch.bfloat16)
     finalize_loaded_model(native)
     hidden, mask, targets = hybrid_hidden_batch(batch, 130, native.hidden_size, device=ctx.device)
@@ -122,6 +126,7 @@ def _gdn_blocks(ctx, batch, checkpointing):
 
 
 def _full_weights(model):
+    """Collectively snapshot trainable parameters after resharding transient FSDP2 views."""
     reshard_fsdp2_modules(model)
     return {
         name: materialize_dtensor(value.detach()).clone()
@@ -131,6 +136,7 @@ def _full_weights(model):
 
 
 def _build_trainer(ctx, source, tokenizer, batch, checkpointing, cp_size, attention):
+    """Collectively load a local native checkpoint with FP32 masters and momentum-free SGD."""
     parallelism = ParallelismConfig(cp_size=cp_size, fp32_non_ep_params=True)
     model, _ = load_distributed_model(
         source,
@@ -181,6 +187,7 @@ def _build_trainer(ctx, source, tokenizer, batch, checkpointing, cp_size, attent
 
 
 def _step(trainer, batch):
+    """Collectively capture native-kernel use, full gradients and dtype-exact SGD proof for one optimizer step."""
     model = trainer.model
     model.train()
     model.zero_grad(set_to_none=True)
@@ -239,6 +246,7 @@ def _step(trainer, batch):
 
 
 def _whole_model(ctx, source, tokenizer, batch, checkpointing, attention):
+    """Collectively compare two CP1/CP2 updates and prove that dropping a boundary target changes the objective."""
     batches = [hybrid_token_batch(batch, len(tokenizer), boundary_only=boundary) for boundary in (False, True)]
     reference = _build_trainer(ctx, source, tokenizer, batch, checkpointing, 1, attention)
     reference_steps = [_step(reference, copy.deepcopy(values)) for values in batches]
@@ -309,6 +317,7 @@ def _whole_model(ctx, source, tokenizer, batch, checkpointing, attention):
 
 
 def run(ctx):
+    """Collectively qualify native CUDA dispatch, block parity and whole-model SGD at the requested batch size."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch-size", type=int, choices=(1, 3), required=True)
     parser.add_argument("--gc", action="store_true")
