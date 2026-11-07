@@ -14,6 +14,7 @@ from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.configs.distillation import SDPGArguments
+from halo.kernels import logprobs
 from halo.trainers.distillation.divergences import pooled_token_mean, reverse_kl_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -206,6 +207,7 @@ def _opd_trainer(model, *, positive_advantage_only: bool) -> tuple[DistributedSD
     trainer.state = types.SimpleNamespace(global_step=3, max_steps=10)
     trainer.current_gradient_accumulation_steps = 2
     trainer.model_kwarg_keys = {"logits_to_keep"}
+    trainer._use_chunked_grpo_logprobs = False
     stored = {}
 
     def _store(metrics, train_eval, rows=1):
@@ -371,6 +373,42 @@ def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_
     for name, param in model.named_parameters():
         if name in grads:
             torch.testing.assert_close(grads[name], param.grad, atol=1e-5, rtol=1e-3, msg=name)
+
+
+def _opd_parts(chunked: bool, dtype: torch.dtype):
+    """``(trainer, model, inputs, student logits parts)`` on a tiny Qwen3 of ``dtype``."""
+    torch.manual_seed(0)
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).to(dtype).train()
+    inputs = _real_inputs()
+    trainer = _real_loss_trainer(model, chunked=chunked, batch_size=3)
+    student = trainer._completion_logits(
+        model, inputs["prompt_ids"], inputs["prompt_mask"], inputs["completion_ids"], inputs["completion_mask"]
+    )
+    return trainer, model, inputs, [student]
+
+
+@pytest.mark.parametrize(("dtype", "tol"), [(torch.float32, 1e-5), (torch.bfloat16, 2e-2)])
+def test_the_chunked_teacher_divergence_matches_the_full_plane_one(dtype, tol):
+    """Both sides project the same hidden states through the same head; chunking only regroups rows of the matmul, so
+    fp32 agrees to rounding and bf16 to a few of its 2**-8 mantissa steps on a sum over the vocabulary."""
+    full_trainer, model, inputs, student = _opd_parts(False, dtype)
+    full = full_trainer._opd_token_divergence(model, inputs, student)
+    chunked_trainer, _, _, _ = _opd_parts(True, dtype)
+    chunked = chunked_trainer._opd_token_divergence(model, inputs, student)
+    assert full.abs().sum() > 0
+    torch.testing.assert_close(chunked.float(), full.float(), atol=tol, rtol=tol)
+
+
+def test_the_chunked_teacher_never_builds_a_batch_by_completion_by_vocab_plane(monkeypatch):
+    """Every head call of the term sees one row's chunk of tokens, never the batch's whole completion window."""
+    monkeypatch.setattr(logprobs, "LOGIT_CHUNK_ELEMENTS", 4 * TINY_QWEN3_CONFIG["vocab_size"])
+    trainer, model, inputs, student = _opd_parts(True, torch.float32)
+    shapes = []
+    model.lm_head.register_forward_hook(lambda _m, _i, out: shapes.append(tuple(out.shape)))
+    trainer._opd_token_divergence(model, inputs, student)
+    batch, width = inputs["completion_ids"].shape
+    assert shapes and all(len(shape) == 2 and shape[0] <= 4 for shape in shapes), shapes
+    assert sum(shape[0] for shape in shapes) == batch * width, "every teacher token is projected exactly once"
 
 
 if __name__ == "__main__":
