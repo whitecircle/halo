@@ -12,6 +12,10 @@ from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY
 from halo.environments.messages import Trajectory, task_prompt
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, VALID_REASONING_EFFORTS
 
+# The effort-profile keys the trainer's reasoning terms read off an episode's level.
+REASONING_BUDGET_KEY = "reasoning_budget"
+REASONING_PRICE_KEY = "reasoning_price"
+
 
 def resolve_reasoning_effort(effort: str | None) -> str | None:
     """``"random"`` draws uniformly (call once per episode); any other value passes through."""
@@ -26,11 +30,6 @@ def stable_reasoning_effort(task: str | list[dict[str, Any]]) -> str:
     text = str(task_prompt(task) or "")
     digest = hashlib.blake2b(text.encode("utf-8", "surrogatepass"), digest_size=8).digest()
     return VALID_REASONING_EFFORTS[int.from_bytes(digest, "big") % len(VALID_REASONING_EFFORTS)]
-
-
-# The effort-profile keys the trainer's reasoning terms read off an episode's level.
-REASONING_BUDGET_KEY = "reasoning_budget"
-REASONING_PRICE_KEY = "reasoning_price"
 
 
 class EffortProfilesMixin:
