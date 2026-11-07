@@ -23,7 +23,6 @@ from halo.trainers.grpo.environmental.step_batch import IS_WEIGHTS_FROM_LOSS_FOR
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 from halo.trainers.grpo.loss_forward_seam import LossForwardSeam
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.objective.logratio import (
     LOGRATIO_MEAN_KEY,
     clamp_ref_logps,
@@ -46,11 +45,13 @@ from halo.trainers.world_metrics import WorldMetrics
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import (
     packed_host,
+    plan_for,
     recompute_logps,
     sampling_side_round,
     single_process_accelerator,
     tiny_llama,
     train_window,
+    windows_close,
 )
 
 _VOCAB, _ROWS, _CLOSE, _CLIP = 64, 8, 7, 3.0
@@ -215,16 +216,12 @@ def _train(batch: dict, *, loss_type: str, beta: float, fused: bool, packed: boo
     host = _host(loss_type=loss_type, beta=beta, fused=fused, packed=packed)
     plan = None
     if packed:
-        lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
-        plan = agree_microbatch_geometry(lengths, 40, slots=4, ceiling=None, round_rows=_ROWS)
+        plan = plan_for(batch, 40, 4, _ROWS)
     total, grads = train_window(host, batch, plan)
     return host, total, grads
 
 
-def _close_to(got, want) -> bool:
-    return got[0] == pytest.approx(want[0], rel=1e-4, abs=1e-6) and all(
-        torch.allclose(g, w, rtol=1e-3, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
-    )
+_close_to = partial(windows_close, rel=1e-4, grad_rtol=1e-3)
 
 
 @pytest.mark.parametrize("packed", [False, True])

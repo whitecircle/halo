@@ -23,14 +23,13 @@ from tests.common.length_deal import (
     PACKED_DENSE_BUDGET,
     PACKED_DENSE_ROW_TOKENS,
     PACKED_SLOTS,
-    ragged_round,
-    with_world_normalizer,
     world_accelerator,
 )
 from tests.common.models import QWEN3_0_6B
 from tests.common.online_rounds import old_policy_pass, online_host, train_online_window
 from tests.common.packed_grad_floor import build_fp32_reference, judge_packed_grads
 from tests.common.rank_log import log_all
+from tests.common.rank_rounds import reversed_order_round
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
 SLOTS = PACKED_SLOTS
@@ -38,14 +37,6 @@ ROW_TOKENS, BUDGET = PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET
 VOCAB = 32_000
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
 LOGP_MEAN_ABS_MAX = 1e-2
-
-
-def _rank_round(ctx) -> dict:
-    """Each rank's rows in the opposite order, so the ranks' bins differ in content and, with an uneven total, in size."""
-    lengths = ROW_TOKENS if ctx.rank % 2 == 0 else ROW_TOKENS[::-1]
-    halves = [n // 2 for n in lengths]
-    completions = [n - h for n, h in zip(lengths, halves, strict=True)]
-    return with_world_normalizer(ragged_round(halves, completions, vocab=VOCAB, seed=ctx.rank, device=ctx.device))
 
 
 def _host(model, *, packed: bool, scaled: bool = True, loss_type: str = "grpo"):
@@ -72,7 +63,7 @@ def run(ctx) -> dict:
         model, ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=True, reshard_after_forward=True
     )
     model.train()
-    batch = _rank_round(ctx)
+    batch = reversed_order_round(ctx, ROW_TOKENS, VOCAB)
     checks, metrics = {}, {}
 
     def old_pass_matches_per_row():

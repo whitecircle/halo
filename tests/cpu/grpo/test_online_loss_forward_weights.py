@@ -5,23 +5,25 @@ packed or not; the pass kept wherever a consumer needs the round's log-probs ear
 
 import math
 from collections import defaultdict
+from functools import partial
 
 import pytest
 import torch
 
 from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 from halo.trainers.grpo.loss_forward_seam import LossForwardSeamMixin
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps
 from halo.trainers.grpo.objective.loss_inputs import NET_TOKEN_MASS_KEY, record_token_mass
 from halo.trainers.grpo.online_loss_forward import online_loss_forward_blocker
 from halo.trainers.token_metrics import effective_loss_mask
 from tests.common.length_deal import (
+    plan_for,
     recompute_logps,
     sampling_side_round,
     single_process_accelerator,
     tiny_llama,
     train_window,
+    windows_close,
 )
 from tests.common.online_rounds import online_host
 
@@ -170,16 +172,12 @@ def _train(batch: dict, *, mode: str, loss_type: str, beta: float, fused: bool, 
         host._adopt_loss_forward_weights(None)
     plan = None
     if packed:
-        lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
-        plan = agree_microbatch_geometry(lengths, 40, slots=4, ceiling=None, round_rows=_ROWS)
+        plan = plan_for(batch, 40, 4, _ROWS)
     total, grads = train_window(host, batch, plan)
     return host, total, grads
 
 
-def _close_to(got, want) -> bool:
-    return got[0] == pytest.approx(want[0], rel=1e-4, abs=1e-6) and all(
-        torch.allclose(g, w, rtol=1e-3, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
-    )
+_close_to = partial(windows_close, rel=1e-4, grad_rtol=1e-3)
 
 
 @pytest.mark.parametrize("packed", [False, True])

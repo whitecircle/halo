@@ -42,15 +42,14 @@ from halo.trainers.world_metrics import WorldMetrics
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.length_deal import (
     packed_host,
-    ragged_round,
     stacked,
     train_window,
-    with_world_normalizer,
     world_accelerator,
 )
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.rank_log import log_all
+from tests.common.rank_rounds import reversed_order_round
 from tests.common.routing import distinct_expert_picks, ragged_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
@@ -71,14 +70,6 @@ _GROUP = _PARSER.add_mutually_exclusive_group()
 _GROUP.add_argument("--packed", action="store_true", help="train both windows on packed bins")
 _GROUP.add_argument("--moe", action="store_true", help="the EP-2 MoE arm, with R3")
 ARGS = _PARSER.parse_args()
-
-
-def _rank_round(ctx, row_tokens: list[int], vocab: int) -> dict:
-    """Each rank's rows in the opposite order, so the ranks' micro-batches differ in content and size."""
-    lengths = row_tokens if ctx.rank % 2 == 0 else row_tokens[::-1]
-    halves = [n // 2 for n in lengths]
-    completions = [n - h for n, h in zip(lengths, halves, strict=True)]
-    return with_world_normalizer(ragged_round(halves, completions, vocab=vocab, seed=ctx.rank, device=ctx.device))
 
 
 def _host(model, *, fused: bool, plan=None, injector=None):
@@ -203,7 +194,7 @@ def run_dense(ctx) -> dict:
         model, ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=True, reshard_after_forward=True
     )
     model.train()
-    batch = _rank_round(ctx, ROW_TOKENS, DENSE_VOCAB)
+    batch = reversed_order_round(ctx, ROW_TOKENS, DENSE_VOCAB)
     plan = _plan(batch, BUDGET) if ARGS.packed else None
     checks, metrics = {}, {}
     _check_pass_slot(model, batch, checks)
@@ -227,7 +218,7 @@ def run_moe(ctx) -> dict:
     apply_fsdp2_for_dp(model, ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=True, ignored_params=ep_params)
     model.train()
     injector = build_routing_replay_injector(model)
-    batch = _rank_round(ctx, MOE_ROW_TOKENS, len(tokenizer))
+    batch = reversed_order_round(ctx, MOE_ROW_TOKENS, len(tokenizer))
     checks, metrics = {}, {}
     _check_pass_slot(model, batch, checks)
     _check_windows(model, batch, None, checks, metrics)

@@ -5,13 +5,14 @@ import time
 import types
 from collections import defaultdict
 
+import pytest
 import torch
 import torch.distributed as dist
 from transformers import LlamaConfig, LlamaForCausalLM
 from trl import GRPOTrainer
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
+from halo.trainers.grpo.microbatch_plan import MicrobatchPlan, agree_microbatch_geometry
 
 MAX_COMPLETION_LENGTH = 64
 
@@ -101,6 +102,18 @@ def ragged_round(
         "num_items_in_batch": completion_mask.sum(),
     }
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+
+
+def random_ragged_round(rows: int, vocab: int, seed: int) -> tuple[dict[str, torch.Tensor], torch.Generator]:
+    """A :func:`ragged_round` of random prompt and completion lengths, with the generator that drew them."""
+    gen = torch.Generator().manual_seed(seed)
+    batch = ragged_round(
+        torch.randint(1, 6, (rows,), generator=gen).tolist(),
+        torch.randint(1, 9, (rows,), generator=gen).tolist(),
+        vocab=vocab,
+        seed=seed,
+    )
+    return batch, gen
 
 
 def sampling_side_round(*, vocab: int, close: int, rows: int, seed: int = 5) -> dict:
@@ -252,11 +265,26 @@ def train_window(
     return total, [grad.float().clone() for grad in grads]
 
 
+def windows_close(
+    got: tuple[float, list[torch.Tensor]], want: tuple[float, list[torch.Tensor]], *, rel: float, grad_rtol: float
+) -> bool:
+    """Whether two :func:`train_window` results agree: totals to ``rel``, every gradient to ``grad_rtol``."""
+    return got[0] == pytest.approx(want[0], rel=rel, abs=1e-6) and all(
+        torch.allclose(g, w, rtol=grad_rtol, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
+    )
+
+
 def with_world_normalizer(batch: dict) -> dict:
     """``batch`` with the world's loss-token count as its DAPO normalizer, as the batch build gathers it."""
     world_items = batch["num_items_in_batch"].clone()
     dist.all_reduce(world_items)
     return batch | {"num_items_in_batch": world_items}
+
+
+def plan_for(batch: dict, budget: int, slots: int, rows: int) -> MicrobatchPlan:
+    """The packed plan of a round's row lengths, as the trainer agrees it."""
+    lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
+    return agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=None, round_rows=rows)
 
 
 def timed_no_grad_pass(host, batch: dict, order: torch.Tensor | None, repeats: int) -> float:

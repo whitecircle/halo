@@ -2,7 +2,7 @@
 
 import torch
 
-from tests.common.length_deal import ragged_round
+from tests.common.length_deal import ragged_round, with_world_normalizer
 
 VOCAB = 64
 ROWS_PER_RANK = 4
@@ -20,6 +20,15 @@ def skewed_round(rank: int, nprocs: int, *, seed: int = 3) -> dict:
     batch["advantages"] = torch.arange(ROWS_PER_RANK, dtype=torch.float32) + 10 * rank
     batch["old_per_token_logps"] = -torch.rand_like(batch["importance_sampling_ratio"]) * batch["completion_mask"]
     return batch
+
+
+def reversed_order_round(ctx, row_tokens: list[int], vocab: int) -> dict:
+    """Each rank's rows in the opposite order on odd ranks, so the ranks' bins differ in content and, with an uneven
+    total, in size."""
+    lengths = row_tokens if ctx.rank % 2 == 0 else row_tokens[::-1]
+    halves = [n // 2 for n in lengths]
+    completions = [n - h for n, h in zip(lengths, halves, strict=True)]
+    return with_world_normalizer(ragged_round(halves, completions, vocab=vocab, seed=ctx.rank, device=ctx.device))
 
 
 def row_tokens(batch: dict) -> torch.Tensor:

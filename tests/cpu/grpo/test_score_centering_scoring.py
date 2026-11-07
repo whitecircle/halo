@@ -6,50 +6,31 @@ warmed at construction under the knob only."""
 import ast
 import inspect
 import textwrap
+from functools import partial
 
 import pytest
 import torch
-from transformers import PretrainedConfig
 
 import halo.trainers.grpo.logprob_scoring as logprob_scoring
 from halo.configs.grpo import ScoreCenteringConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.objective.loss_inputs import IS_SAMPLING_LOGPS_KEY
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
 from halo.trainers.world_metrics import WorldMetrics
+from tests.common.chunked_logprobs import EmbeddingBackboneHarness
 from tests.common.length_deal import (
     packed_host,
-    ragged_round,
+    plan_for,
+    random_ragged_round,
     scoring_host,
     single_process_accelerator,
     tiny_llama,
     train_window,
+    windows_close,
 )
 
 VOCAB, HIDDEN, CANDIDATES = 40, 8, 4
-
-
-class _Harness(ChunkedGRPOLogprobsMixin):
-    temperature = 1.0
-
-    def __init__(self, attn_impl: str):
-        torch.manual_seed(0)
-        self.embed = torch.nn.Embedding(VOCAB, HIDDEN)
-        self.model = torch.nn.Module()
-        self.model.lm_head = torch.nn.Linear(HIDDEN, VOCAB, bias=False)
-        self.model.config = PretrainedConfig()
-        self.model.config._attn_implementation = attn_impl
-        self.model.get_output_embeddings = lambda: self.model.lm_head
-
-    def _head_transform(self, unwrapped_model):
-        return IDENTITY_HEAD_TRANSFORM
-
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        return self.embed(input_ids)[:, :-1, :][:, -logits_to_keep:, :]
 
 
 def _batch():
@@ -65,7 +46,7 @@ def _batch():
 @pytest.mark.parametrize(("attn_impl", "batch_size"), [("sdpa", 2), ("sdpa", 1), ("flash_attention_4", 2)])
 def test_candidates_are_scored_beside_the_sampled_token_on_every_row_path(attn_impl, batch_size):
     input_ids, attention_mask, candidates, ltk = _batch()
-    harness = _Harness(attn_impl)
+    harness = EmbeddingBackboneHarness(attn_impl)
     plain, plain_entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, batch_size, True)
     with harness._scoring_with_candidates(candidates):
         logps, entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, batch_size, True)
@@ -88,7 +69,7 @@ def test_candidates_are_scored_beside_the_sampled_token_on_every_row_path(attn_i
 
 def test_the_gradient_reaches_the_head_and_the_backbone_through_the_candidates():
     input_ids, attention_mask, candidates, ltk = _batch()
-    harness = _Harness("sdpa")
+    harness = EmbeddingBackboneHarness("sdpa")
     with harness._scoring_with_candidates(candidates):
         logps, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
     logps[..., 1:][candidates >= 0].sum().backward()
@@ -97,7 +78,7 @@ def test_the_gradient_reaches_the_head_and_the_backbone_through_the_candidates()
 
 def test_misaligned_candidates_are_refused_naming_both_shapes():
     input_ids, attention_mask, candidates, ltk = _batch()
-    harness = _Harness("sdpa")
+    harness = EmbeddingBackboneHarness("sdpa")
     with harness._scoring_with_candidates(candidates[:, :3]):
         with pytest.raises(ValueError, match=r"\(2, 3, 4\).*\(2, 4\)"):
             harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
@@ -105,7 +86,7 @@ def test_misaligned_candidates_are_refused_naming_both_shapes():
 
 def test_scoring_without_candidates_is_the_sampled_token_alone():
     input_ids, attention_mask, _, ltk = _batch()
-    harness = _Harness("sdpa")
+    harness = EmbeddingBackboneHarness("sdpa")
     logps, entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, True)
     assert logps.shape == entropy.shape == (2, ltk)
 
@@ -117,13 +98,7 @@ _LLAMA_VOCAB, _ROWS, _SLOTS, _BUDGET, _K = 64, 16, 4, 40, 8
 
 def _sampler_round(seed: int = 9) -> dict:
     """A ragged round carrying a sampler's top-K candidates, its log-prob of each sampled token and a unit ratio."""
-    gen = torch.Generator().manual_seed(seed)
-    batch = ragged_round(
-        torch.randint(1, 6, (_ROWS,), generator=gen).tolist(),
-        torch.randint(1, 9, (_ROWS,), generator=gen).tolist(),
-        vocab=_LLAMA_VOCAB,
-        seed=seed,
-    )
+    batch, gen = random_ragged_round(_ROWS, _LLAMA_VOCAB, seed)
     real = batch["completion_mask"].bool()
     sampler = torch.log_softmax(torch.randn(*real.shape, _LLAMA_VOCAB, generator=gen) * 2, dim=-1)
     top = torch.topk(sampler, _K, dim=-1)
@@ -142,16 +117,12 @@ def _window(batch: dict, *, packed: bool, centering: ScoreCenteringConfig | None
     if not packed:
         host._packs_microbatches = False
         return train_window(host, batch)
-    lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
-    plan = agree_microbatch_geometry(lengths, _BUDGET, slots=_SLOTS, ceiling=None, round_rows=_ROWS)
+    plan = plan_for(batch, _BUDGET, _SLOTS, _ROWS)
     assert plan.num_bins < _SLOTS, "a window without a no-op slot leaves the filler rows untested"
     return train_window(host, batch, plan)
 
 
-def _close(got: tuple[float, list[torch.Tensor]], want: tuple[float, list[torch.Tensor]]) -> bool:
-    return got[0] == pytest.approx(want[0], rel=1e-5, abs=1e-6) and all(
-        torch.allclose(g, w, rtol=1e-4, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
-    )
+_close = partial(windows_close, rel=1e-5, grad_rtol=1e-4)
 
 
 @pytest.mark.parametrize("weights", ["none", "tis", "mis"])

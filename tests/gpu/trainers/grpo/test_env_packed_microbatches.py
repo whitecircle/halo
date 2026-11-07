@@ -46,15 +46,14 @@ from tests.common.length_deal import (
     PACKED_ROWS,
     PACKED_SLOTS,
     packed_host,
-    ragged_round,
     stacked,
     train_window,
-    with_world_normalizer,
     world_accelerator,
 )
 from tests.common.models import QWEN3_0_6B
 from tests.common.packed_grad_floor import build_fp32_reference, judge_packed_grads
 from tests.common.rank_log import log, log_all
+from tests.common.rank_rounds import reversed_order_round
 from tests.common.routing import (
     check_flips_are_near_ties,
     dense_rows,
@@ -77,14 +76,6 @@ MOE_ROW_TOKENS, MOE_BUDGET = PACKED_MOE_ROW_TOKENS, PACKED_MOE_BUDGET
 _PARSER = argparse.ArgumentParser(description=__doc__)
 _PARSER.add_argument("--moe", action="store_true", help="the EP-2 MoE arm under routing replay")
 ARGS = _PARSER.parse_args()
-
-
-def _rank_round(ctx, row_tokens: list[int], vocab: int) -> dict:
-    """Each rank's rows in the opposite order, so the ranks' bins differ in content and, with an uneven total, in size."""
-    lengths = row_tokens if ctx.rank % 2 == 0 else row_tokens[::-1]
-    halves = [n // 2 for n in lengths]
-    completions = [n - h for n, h in zip(lengths, halves, strict=True)]
-    return with_world_normalizer(ragged_round(halves, completions, vocab=vocab, seed=ctx.rank, device=ctx.device))
 
 
 def _plan(batch: dict, budget: int):
@@ -153,7 +144,7 @@ def run_dense(ctx) -> dict:
         model, ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=True, reshard_after_forward=True
     )
     model.train()
-    batch = _rank_round(ctx, ROW_TOKENS, DENSE_VOCAB)
+    batch = reversed_order_round(ctx, ROW_TOKENS, DENSE_VOCAB)
     ids, mask, keep = stacked(batch)
     checks, metrics = {}, {}
 
@@ -197,7 +188,7 @@ def _load_moe_policy(ctx):
 def run_moe(ctx) -> dict:
     model, vocab = _load_moe_policy(ctx)
     injector = build_routing_replay_injector(model)
-    batch = _rank_round(ctx, MOE_ROW_TOKENS, vocab)
+    batch = reversed_order_round(ctx, MOE_ROW_TOKENS, vocab)
     ids, mask, keep = stacked(batch)
     checks, metrics = {}, {}
     plan = _plan(batch, MOE_BUDGET)

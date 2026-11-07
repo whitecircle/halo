@@ -4,18 +4,16 @@ zeros and NaN payloads included) with a layer issued ahead on the side stream an
 four and over two EP groups of two, whose second group joins no collective."""
 
 import os
-import types
 
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
-from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime.collectives import build_groups
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout.weight_push import _send_ep_expert_weights
+from tests.common.ep_stubs import GatherStubLayer, RecordingForwarder, signed_zero_nan
 from tests.common.harness import gpu_test_main
 
 LAYERS = 4
@@ -24,38 +22,18 @@ _SPEC = MoEFamilySpec(model_types=("gather_to_forwarder",), expert_layout=Expert
 
 def _fill(rank: int, layer: int, shape, device) -> torch.Tensor:
     values = torch.randn(shape, generator=torch.Generator().manual_seed(1000 * layer + rank)).to(device)
-    values.view(-1)[0] = -0.0
-    values.view(-1)[1] = float("nan")
-    return values.to(torch.bfloat16)
+    return signed_zero_nan(values)
 
 
-class _Layer(EPGatherMixin, nn.Module):
-    has_expert_lora = False
-
-    def __init__(self, rank, index, group, ep_size, device):
-        nn.Module.__init__(self)
-        self.FAMILY = _SPEC
-        self.ep_config = types.SimpleNamespace(process_group=group, dispatch_ep_group=group, ep_size=ep_size)
-        self.expert_tp_group, self.expert_tp_size = None, 1
-        self.expert_lora_scaling, self._expert_lora_attrs = 1.0, frozenset()
-        self.gate_up_proj = nn.Parameter(_fill(rank, index, (4, 64, 96), device), requires_grad=False)
-        self.down_proj = nn.Parameter(_fill(rank, index, (4, 96, 64), device), requires_grad=False)
-
-    def _base_expert_named_params(self):
-        return [("gate_up_proj", self.gate_up_proj), ("down_proj", self.down_proj)]
-
-    expert_named_params = _base_expert_named_params
-
-
-class _Forwarder:
-    def __init__(self):
-        self.sent: dict[str, torch.Tensor] = {}
-
-    def send(self, name, tensor, *, bounded=True):
-        self.sent[name] = tensor.clone()
-
-    def flush(self):
-        pass
+def _layer(rank, index, group, ep_size, device) -> GatherStubLayer:
+    return GatherStubLayer(
+        _SPEC,
+        _fill(rank, index, (4, 64, 96), device),
+        _fill(rank, index, (4, 96, 64), device),
+        process_group=group,
+        dispatch_ep_group=group,
+        ep_size=ep_size,
+    )
 
 
 def _bitwise_equal(a: torch.Tensor, b: torch.Tensor) -> bool:
@@ -67,8 +45,8 @@ def _row(ctx, group_lists, ahead: int) -> bool:
     mine = next(i for i, ranks in enumerate(group_lists) if ctx.rank in ranks)
     group = build_groups(group_lists, mine=mine, what="gather test group")
     ep_size = len(group_lists[mine])
-    layers = {f"layers.{i}": _Layer(ctx.rank, i, group, ep_size, ctx.device) for i in range(LAYERS)}
-    forwarder = _Forwarder() if ctx.rank == 0 else None
+    layers = {f"layers.{i}": _layer(ctx.rank, i, group, ep_size, ctx.device) for i in range(LAYERS)}
+    forwarder = RecordingForwarder() if ctx.rank == 0 else None
     guard = DeferredRankFailure("gather test")
     _send_ep_expert_weights(layers, forwarder, guard)
     guard.reject()

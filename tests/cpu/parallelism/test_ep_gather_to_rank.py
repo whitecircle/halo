@@ -8,20 +8,18 @@ from __future__ import annotations
 import datetime
 import json
 import os
-import types
 
 import pytest
 import torch
 import torch.distributed as dist
-import torch.nn as nn
 
 from halo.distributed.expert_parallel.moe_layer import gather as gather_module
-from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime import collectives
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout.weight_push import _send_ep_expert_weights
+from tests.common.ep_stubs import GatherStubLayer, RecordingForwarder, signed_zero_nan
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 PG_TIMEOUT = datetime.timedelta(seconds=90)
@@ -36,40 +34,18 @@ def _fill(rank: int, layer: int, shape: tuple[int, ...]) -> torch.Tensor:
     values = (
         torch.arange(int(torch.Size(shape).numel()), dtype=torch.float32).reshape(shape) + 100 * rank + 1000 * layer
     )
-    values.view(-1)[0] = -0.0
-    values.view(-1)[1] = float("nan")
-    return values.to(torch.bfloat16)
+    return signed_zero_nan(values)
 
 
-class _Layer(EPGatherMixin, nn.Module):
-    has_expert_lora = False
-
-    def __init__(self, rank: int, index: int, process_group, ep_group, ep_size: int):
-        nn.Module.__init__(self)
-        self.FAMILY = _SPEC
-        self.ep_config = types.SimpleNamespace(
-            process_group=process_group, dispatch_ep_group=ep_group, ep_size=ep_size
-        )
-        self.expert_tp_group, self.expert_tp_size = None, 1
-        self.expert_lora_scaling, self._expert_lora_attrs = 1.0, frozenset()
-        self.gate_up_proj = nn.Parameter(_fill(rank, index, (2, 3, 5)), requires_grad=False)
-        self.down_proj = nn.Parameter(_fill(rank, index, (2, 5, 3)), requires_grad=False)
-
-    def _base_expert_named_params(self):
-        return [("gate_up_proj", self.gate_up_proj), ("down_proj", self.down_proj)]
-
-    expert_named_params = _base_expert_named_params
-
-
-class _Forwarder:
-    def __init__(self):
-        self.sent: dict[str, torch.Tensor] = {}
-
-    def send(self, name: str, tensor: torch.Tensor, *, bounded: bool = True) -> None:
-        self.sent[name] = tensor.clone()
-
-    def flush(self) -> None:
-        pass
+def _layer(rank: int, index: int, process_group, ep_group, ep_size: int) -> GatherStubLayer:
+    return GatherStubLayer(
+        _SPEC,
+        _fill(rank, index, (2, 3, 5)),
+        _fill(rank, index, (2, 5, 3)),
+        process_group=process_group,
+        dispatch_ep_group=ep_group,
+        ep_size=ep_size,
+    )
 
 
 def _worker(rank: int, out: str, group_lists: list[list[int]], ahead: int) -> None:
@@ -91,8 +67,8 @@ def _worker(rank: int, out: str, group_lists: list[list[int]], ahead: int) -> No
     dist.reduce, dist.all_gather_into_tensor = traced_reduce, traced_all_gather
     group = new_groups(rank, group_lists, PG_TIMEOUT)
     ep_size = len(next(ranks for ranks in group_lists if rank in ranks))
-    layers = {f"layers.{i}": _Layer(rank, i, group, group, ep_size) for i in range(LAYERS)}
-    forwarder = _Forwarder() if rank == 0 else None
+    layers = {f"layers.{i}": _layer(rank, i, group, group, ep_size) for i in range(LAYERS)}
+    forwarder = RecordingForwarder() if rank == 0 else None
     guard = DeferredRankFailure("weight-sync push")
     _send_ep_expert_weights(layers, forwarder, guard)
     guard.reject()

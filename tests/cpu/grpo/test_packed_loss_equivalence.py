@@ -5,12 +5,12 @@ round_rows`` and token-global ones are not."""
 
 import dataclasses
 import re
+from functools import partial
 
 import pytest
 import torch
 from trl import GRPOConfig
 
-from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.packed_rounds import LOSS_SCALE_KEY, SLOT_IS_ACTIVE_KEY
 from halo.trainers.grpo.row_order import (
     MICROBATCH_INVARIANT_LOSS_TYPES,
@@ -19,10 +19,12 @@ from halo.trainers.grpo.row_order import (
 )
 from tests.common.length_deal import (
     packed_host,
-    ragged_round,
+    plan_for,
+    random_ragged_round,
     single_process_accelerator,
     tiny_llama,
     train_window,
+    windows_close,
 )
 
 _VOCAB = 64
@@ -31,19 +33,12 @@ _ROWS, _SLOTS, _BUDGET = 16, 4, 40
 _ADMITTED = ("grpo", "sapo", "dr_grpo", "dapo", "cispo", "luspo")
 
 
-def _round(seed: int = 9) -> dict:
-    gen = torch.Generator().manual_seed(seed)
-    return ragged_round(
-        torch.randint(1, 6, (_ROWS,), generator=gen).tolist(),
-        torch.randint(1, 9, (_ROWS,), generator=gen).tolist(),
-        vocab=_VOCAB,
-        seed=seed,
-    )
+def _round() -> dict:
+    return random_ragged_round(_ROWS, _VOCAB, 9)[0]
 
 
 def _plan(batch: dict):
-    lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
-    plan = agree_microbatch_geometry(lengths, _BUDGET, slots=_SLOTS, ceiling=None, round_rows=_ROWS)
+    plan = plan_for(batch, _BUDGET, _SLOTS, _ROWS)
     assert plan.num_bins < _SLOTS and plan.rows_per_bin != _ROWS // _SLOTS, "the geometry must differ from the legacy"
     return plan
 
@@ -73,10 +68,7 @@ def _packed(batch: dict, loss_type: str, iterations: int, *, scaled: bool = True
     return train_window(host, batch, _plan(batch))
 
 
-def _close(got: tuple[float, list[torch.Tensor]], want: tuple[float, list[torch.Tensor]]) -> bool:
-    return got[0] == pytest.approx(want[0], rel=1e-5, abs=1e-6) and all(
-        torch.allclose(g, w, rtol=1e-4, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
-    )
+_close = partial(windows_close, rel=1e-5, grad_rtol=1e-4)
 
 
 @pytest.mark.parametrize("iterations", [1, 2])

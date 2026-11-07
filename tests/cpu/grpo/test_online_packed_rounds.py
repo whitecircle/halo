@@ -23,21 +23,15 @@ from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironment
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin
-from tests.common.length_deal import ragged_round, single_process_accelerator, stacked, tiny_llama
+from tests.common.length_deal import random_ragged_round, single_process_accelerator, stacked, tiny_llama
 from tests.common.online_rounds import old_policy_pass, online_host, train_online_window
 
 _VOCAB = 64
 _ROWS, _SLOTS, _BUDGET = 16, 4, 40
 
 
-def _round(seed: int = 9) -> dict:
-    gen = torch.Generator().manual_seed(seed)
-    return ragged_round(
-        torch.randint(1, 6, (_ROWS,), generator=gen).tolist(),
-        torch.randint(1, 9, (_ROWS,), generator=gen).tolist(),
-        vocab=_VOCAB,
-        seed=seed,
-    )
+def _round() -> dict:
+    return random_ragged_round(_ROWS, _VOCAB, 9)[0]
 
 
 def _online_host(*, packed: bool, loss_type: str = "dapo"):

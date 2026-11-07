@@ -6,18 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import PretrainedConfig
 from trl import GRPOTrainer
 from trl.trainer.utils import shuffle_sequence_dict, split_tensor_dict
 
 import halo.trainers.grpo.environmental.routing_replay as routing_replay
-from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
 from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import (
     STASHED_COLUMNS,
-    ChunkedGRPOLogprobsMixin,
     RowSpan,
     dense_row_spans,
     row_spans_on_device,
@@ -25,6 +22,7 @@ from halo.trainers.grpo.logprob_scoring import (
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.row_order import permute_rows
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY, RowSpanStashMixin
+from tests.common.chunked_logprobs import EmbeddingBackboneHarness
 from tests.common.gloo import run_gloo_ranks
 
 LTK = 4
@@ -70,25 +68,11 @@ def test_a_malformed_row_is_refused_where_the_spans_are_read(bad_row):
     assert row_spans_on_device(mask)[:, RowSpan.MALFORMED].tolist() == [0, 1]
 
 
-class _Harness(ChunkedGRPOLogprobsMixin):
-    """A position-free embedding backbone at batch size 1, so every row forwards densely."""
-
-    temperature = 1.0
+class _Harness(EmbeddingBackboneHarness):
+    """The backbone at batch size 1, so every row forwards densely."""
 
     def __init__(self):
-        torch.manual_seed(0)
-        self.embed = torch.nn.Embedding(40, 8)
-        self.model = torch.nn.Module()
-        self.model.lm_head = torch.nn.Linear(8, 40, bias=False)
-        self.model.config = PretrainedConfig()
-        self.model.config._attn_implementation = "sdpa"
-        self.model.get_output_embeddings = lambda: self.model.lm_head
-
-    def _head_transform(self, unwrapped_model) -> HeadTransform:
-        return IDENTITY_HEAD_TRANSFORM
-
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        return self.embed(input_ids)[:, :-1, :][:, -logits_to_keep:, :]
+        super().__init__("sdpa")
 
     def score(self, ids, mask):
         return self._chunked_logps_impl(self.model, ids, mask, LTK, 1, False)[0]

@@ -51,17 +51,16 @@ from halo.trainers.grpo.row_order import length_deal_order
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.length_deal import (
     loss_host,
-    ragged_round,
     scoring_host,
     stacked,
     timed_no_grad_pass,
     train_round,
-    with_world_normalizer,
     world_accelerator,
 )
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2, worst_relative_l2
 from tests.common.rank_log import log, log_all
+from tests.common.rank_rounds import reversed_order_round
 from tests.common.routing import dense_rows, distinct_expert_picks, ragged_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
@@ -99,13 +98,6 @@ _PARSER.add_argument("--moe", action="store_true", help="the EP-2 MoE arm under 
 ARGS = _PARSER.parse_args()
 if ARGS.timed and ARGS.moe:
     _PARSER.error("--timed bounds the dense arm's speedup; the --moe arm checks routing, not wall time")
-
-
-def _rank_round(ctx, row_tokens: list[int], vocab: int) -> dict:
-    lengths = row_tokens if ctx.rank % 2 == 0 else row_tokens[::-1]
-    halves = [n // 2 for n in lengths]
-    completions = [n - h for n, h in zip(lengths, halves, strict=True)]
-    return with_world_normalizer(ragged_round(halves, completions, vocab=vocab, seed=ctx.rank, device=ctx.device))
 
 
 def _local_grads(model) -> dict[str, torch.Tensor]:
@@ -148,7 +140,7 @@ def run_dense(ctx) -> dict:
     )
     model.train()
     accelerator = world_accelerator()
-    batch = _rank_round(ctx, ROW_TOKENS, DENSE_VOCAB)
+    batch = reversed_order_round(ctx, ROW_TOKENS, DENSE_VOCAB)
     ids, mask, keep = stacked(batch)
     host = scoring_host(model, None, chunks=CHUNKS, accelerator=accelerator)
     order = host._no_grad_row_order(mask, "train")
@@ -245,7 +237,7 @@ def _load_moe_policy(ctx):
 def run_moe(ctx) -> dict:
     model, vocab = _load_moe_policy(ctx)
     injector = build_routing_replay_injector(model)
-    batch = _rank_round(ctx, MOE_ROW_TOKENS, vocab)
+    batch = reversed_order_round(ctx, MOE_ROW_TOKENS, vocab)
     ids, mask, keep = stacked(batch)
     engine = _engine_masks(mask, injector, MOE_SEED + ctx.rank)
     routing = ragged_routing(engine)
