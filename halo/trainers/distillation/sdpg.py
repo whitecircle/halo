@@ -5,7 +5,8 @@ import logging
 
 import torch
 
-from halo.data.collators.self_distill import format_field_names, privileged_hint
+from halo.configs.distillation import SDPGArguments
+from halo.data.collators.self_distill import format_field_names, hint_literal_bytes, privileged_hint
 from halo.log import warn_once
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.trainers.distillation.divergences import pooled_token_mean, projected_token_divergence, token_divergence
@@ -53,6 +54,22 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
     )
 
     ROUND_PROMPT_ROWS = (*PROMPT_ROWS, TEACHER_PROMPT_ROWS)
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """The online bound plus the hint template's literal text, since the teacher forwards the prompt, the hint and
+        the completion through the same dispatch. An answer the template names has no config bound, so its tokens are
+        not counted: the dispatcher's own check on the batch in hand stays the backstop for them."""
+        row = super().declared_row_length(training_config, *sources)
+        sdpg = next((source for source in sources if isinstance(source, SDPGArguments)), None)
+        if row is None:
+            return None
+        if sdpg is None:
+            raise ValueError(
+                "SDPG's teacher rows are longer than the online rows by the hint, which sizes the DeepEP dispatch "
+                "gate, but no row source carries the SDPG arguments. Pass the script arguments as a row source."
+            )
+        return row + (hint_literal_bytes(sdpg.sdpg_hint_template) if sdpg.sdpg_beta_base != 0.0 else 0)
 
     def __init__(
         self,

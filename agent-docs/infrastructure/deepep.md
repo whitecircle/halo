@@ -261,7 +261,7 @@ capacity alignment and refuses it, naming the budget, the capacity and the EP gr
 the model's context window. Online GRPO takes `max_prompt_length` (script argument) plus `max_completion_length`;
 async GRPO takes `max_train_row_tokens` alone, as the turn and episode budgets bound what is sampled, not the tool
 and observation tokens a multi-turn row carries. Both also size `per_device_eval_batch_size` rows when an evaluation
-runs. A row with no such bound is judged against the context window on a group spanning NVLink domains only, so
+runs. SDPG adds the byte length of its hint template's literal text (a bound on its tokens) to that row, since its teacher forwards prompt, hint and completion; the answer a template names has no config bound and is not counted. A row with no such bound is judged against the context window on a group spanning NVLink domains only, so
 cross-node EP needs `max_prompt_length` or `max_train_row_tokens` at or under 8,192 tokens per row, while a
 node-local run with no bound declares nothing. The dispatcher's check stays the backstop for the batch in hand.
 `packed_microbatch_tokens` (either trainer) is a per-rank budget checked the same way at construction, and its planner
