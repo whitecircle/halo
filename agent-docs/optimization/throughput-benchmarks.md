@@ -156,7 +156,8 @@ Halo 1.2.0, same rows and optimizer as the table.
 
 - **[Fused linear cross-entropy](liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy).** On Qwen3.5-9B at 64k the
   first-step loss is identical with and without it. Without checkpointing the 64k row still runs out of memory with it (DP8, 264–265 GiB at the failure), and under TP, where it is forced off, the checkpointed row
-  peaks at 215–217 GiB.
+  peaks at 215–217 GiB. Qwen3.5/3.6 default to plain cross-entropy, whose fp32 `[tokens, vocab]` plane over their 248k
+  vocabulary is 129.5 GiB at a 140k-token row, so rows that long need `fused_linear_cross_entropy: true`.
 - **EP1 over EP8 with checkpointing.** Qwen3.6-35B-A3B at 64k, batch 1: EP1 22,301 (115.8 GiB), EP2 21,869 (154.5),
   EP8 19,326 (122.1), all on FA2. EP2 with FA4 reads 22,522 against EP1's 22,937, and varying `HALO_DEEPEP_NUM_SMS`
   changes nothing. The order can reverse without checkpointing at 16k ([by layout](#results-by-parallelism-layout)).

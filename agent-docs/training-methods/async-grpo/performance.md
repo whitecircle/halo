@@ -122,6 +122,33 @@ The loss and no-grad loops run once per row at `per_device_train_batch_size: 1`,
 
 TRL's loss forward reduces six metrics across the ranks per micro-step (entropy, three clip ratios and two clip extremes), each ending in a host read; Halo leaves that block as TRL has it.
 
+## Long trajectories
+
+A row's training cost grows with its length as attention FLOPs do, and its memory linearly. The update pass on 8 B300s,
+one row per micro-step (4 per rank), chunked log-probs and gradient checkpointing on:
+
+| Row tokens | Qwen3-8B FSDP2, FA4: s per 1k loss tokens | Qwen3-8B, FA2 | Qwen3.5-35B-A3B EP1 ZeRO-3, sdpa | Peak GiB, 8B / 35B |
+|---|---:|---:|---:|---:|
+| 16k | | 0.261 | 0.193 | 17.0 / 32.5 |
+| 32k | | 0.368 | 0.202 | 25.6 / 38.9 |
+| 64k | 0.270 | 0.581 | 0.260 | 42.8 / 52.6 |
+| 128k | 0.397 | 1.010 | 0.399 | 77.5 / 80.5 |
+
+What keeps long rows cheap:
+
+- **A varlen flash backend.** FA4 runs the 8B 2.2× faster than FA2 at 64k and 2.5× at 128k, at the same peak; FA2's
+  attention falls below GEMM efficiency as its share of the FLOPs grows (27% at 16k, 75% at 128k).
+- **[Weight from the loss forward](#weight-from-the-loss-forward).** The separate no-grad pass it skips takes 23 s per
+  4 rows of 128k on the 8B with FA4 (55 s with FA2) and 22 s on the 35B.
+- **[Packed micro-batches](#packed-micro-batches)** cost nothing at one row per bin (64k measured), so a round of mixed
+  lengths keeps them on for its short rows.
+- **Routing replay.** `routing_replay: recompute` holds the captured routing on the host and pads only the rows a
+  forward runs: on the 35B at 24 rows of 64k it adds 0.16 GiB to the update's peak and 0.94 GiB to the capture pass.
+- **EP.** Within one NVLink domain a row has no dispatch ceiling; across domains the
+  [dispatch token ceiling](../../infrastructure/deepep.md#dispatch-token-ceiling) applies.
+
+A row over [`max_train_row_tokens`](episodes.md#training-row-cap) leaves the batch.
+
 ## Sizing a run
 
 For a new model, environment or GPU, size in order:
