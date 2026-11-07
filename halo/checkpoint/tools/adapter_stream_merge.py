@@ -50,6 +50,7 @@ from halo.checkpoint.tools.offline_export import (
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.model_loading.tokenizer_setup import load_processing_class
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_layout import (
     SEPARATE_GLU_PROJECTIONS,
     SEPARATE_MLP_PROJECTIONS,
@@ -60,7 +61,6 @@ from halo.models.moe.expert_layout import (
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_lora_delta
 from halo.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec, moe_model_types
 from halo.models.peft_adapters import lora_folded
-from halo.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
 logger = logging.getLogger(__name__)
 

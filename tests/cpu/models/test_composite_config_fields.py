@@ -12,9 +12,9 @@ from halo.callbacks.balancing import apply_balancing_mode
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.model_loading.tokenizer_setup import sync_special_token_id
-from halo.models import config_access
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
-from halo.models.config_access import (
+from halo.models.introspection import config_access
+from halo.models.introspection.config_access import (
     apply_config_overrides,
     config_sources,
     configs_declaring,

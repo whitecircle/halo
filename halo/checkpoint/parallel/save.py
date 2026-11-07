@@ -24,8 +24,8 @@ from halo.checkpoint.parallel.writing import (
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from halo.models.external_tables import named_external_tables
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_toolkit_wrappers
 from halo.models.mtp.head import mtp_trunk_copy_keys
-from halo.models.unwrapping import find_peft_model, unwrap_toolkit_wrappers
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.filesystem import fs_aware_makedirs
 from halo.runtime.ranks import get_global_world_size

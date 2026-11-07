@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Distributed sequence-classification training. Text-only: few families have a multimodal classification head
-upstream, and halo/models/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6.
+upstream, and halo/models/upstream/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6.
 
 Modes: EP, TP, ETP, PP. CP is not supported, as the trainer pools over the complete sequence, which no CP shard holds.
 Under PP a multimodal checkpoint trains its text tower and score head; untouched vision tensors ride every checkpoint

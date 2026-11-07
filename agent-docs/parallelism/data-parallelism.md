@@ -110,7 +110,7 @@ reduce after it, the same sum added in another order.
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
 `__call__` runs before the lookup: on a multimodal wrapper that is the composite `model.model`, which
 builds `inputs_embeds` itself before handing them to the decoder backbone below it
-(`input_embedding_backbone`, `halo/models/module_tree.py`). A composite with no `.model` that holds
+(`input_embedding_backbone`, `halo/models/introspection/module_tree.py`). A composite with no `.model` that holds
 `language_model` itself (Llama 4) embeds at its root, so the group holding the embedding is the wrap's root,
 the module whose `__call__` a wrapper above the composite cannot bypass. The rule is ancestry — `model.model` is
 taken whenever the layer backbone sits under it, however the text stack is spelled — and the probe
@@ -143,7 +143,7 @@ Two setups **raise** rather than wrap:
 
 - A generative decoder whose layer list the backbone probe cannot reach (`DECODER_LAYER_LIST_ATTRS` —
   `.layers`, `.h`, `.layer`); the message names the class. The fix for a decoder is to add its spelling to
-  `DECODER_LAYER_LIST_ATTRS` (`halo/models/module_tree.py`).
+  `DECODER_LAYER_LIST_ATTRS` (`halo/models/introspection/module_tree.py`).
 
     The alternative is one root shard group all-gathered for the whole forward, the per-rank memory
     ceiling FSDP2 exists to remove, reported as a successful wrap. Models that carry no such list by

@@ -19,7 +19,7 @@ from halo.distributed.expert_parallel.families.qwen4_exp import EPQwen4ExpMoELay
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.models.config_access import config_model_types
+from halo.models.introspection.config_access import config_model_types
 from halo.models.moe.family_specs import find_moe_family_spec
 from halo.subclass_registry import build_class_claim_map, iter_subclasses
 

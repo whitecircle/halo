@@ -8,8 +8,8 @@ from dataclasses import dataclass
 
 import torch
 
-from halo.models.config_access import TOOLKIT_STAMP_PREFIX, get_config_field, set_config_field_run_scoped
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.config_access import TOOLKIT_STAMP_PREFIX, get_config_field, set_config_field_run_scoped
+from halo.models.introspection.unwrapping import base_transformers_model
 
 ROUTER_LOGITS_KEY = "router_logits"
 # Stamped where router logits must stay off (EP layers that never populate them, aux-loss paths that would crash).

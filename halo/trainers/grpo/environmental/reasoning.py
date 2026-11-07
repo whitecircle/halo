@@ -15,8 +15,8 @@ from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.messages import Trajectory
 from halo.environments.reasoning_effort import EpisodeEffort, efforts_by_level, has_thinking_cap
 from halo.environments.rollout_config import SGLANG_BACKEND, find_reasoning_end_ids
-from halo.models.config_access import config_model_types
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.config_access import config_model_types
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from halo.runtime.ranks import is_global_main_process
 from halo.weight_sync.registry import resolve_weight_sync_client

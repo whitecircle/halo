@@ -23,7 +23,7 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, is_lazy_loadable
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.models import TINY_NEMOTRON_H_CONFIG, TINY_RADIO_VISION_CONFIG
 from tests.common.nemotron_h import BIAS_SLOT, write_tiny_hub_checkpoint, write_tiny_lightning_checkpoint
 from tests.common.numerics import tensors_equal_at_narrower_dtype

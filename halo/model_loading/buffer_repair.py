@@ -16,7 +16,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from halo.hardware import current_device
 from halo.log import warn_once
 from halo.models.attention.layout import resolve_head_dim
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 
 logger = logging.getLogger(__name__)
 

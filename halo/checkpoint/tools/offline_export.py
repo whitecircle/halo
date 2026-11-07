@@ -48,6 +48,7 @@ from halo.checkpoint.writing import sweep_after_full_save
 from halo.hardware import available_host_ram_bytes, free_disk_bytes, nearest_existing_path
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.models.introspection.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.mtp.head import mtp_head_path
 from halo.models.mtp.spec import (
@@ -58,7 +59,6 @@ from halo.models.mtp.spec import (
     tail_load_patterns,
     unbuilt_tail_keys,
 )
-from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 
 logger = logging.getLogger(__name__)
 

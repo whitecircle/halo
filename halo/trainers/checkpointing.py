@@ -34,8 +34,8 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.tokenizer_setup import pristine_model_max_length
 from halo.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
-from halo.models.config_access import config_export_ready, restore_config_fields
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.config_access import config_export_ready, restore_config_fields
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process

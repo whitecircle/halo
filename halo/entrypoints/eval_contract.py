@@ -25,7 +25,7 @@ from halo.environments.rollout_config import (
     resolve_rollout_stop_token_ids,
 )
 from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
-from halo.models.config_access import config_model_types
+from halo.models.introspection.config_access import config_model_types
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)

@@ -12,8 +12,8 @@ import torch
 
 from halo.kernels.lowp.block_fp8 import BLOCK, SCALE_SUFFIX, quantize_block_fp8
 from halo.kernels.lowp.spec import ATTENTION_PROJECTIONS, MLP_PROJECTIONS
-from halo.models.config_access import config_model_types, text_config
-from halo.models.module_tree import decoder_layer_index
+from halo.models.introspection.config_access import config_model_types, text_config
+from halo.models.introspection.module_tree import decoder_layer_index
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import (
     UNVALIDATED_FP8_ROLLOUT,

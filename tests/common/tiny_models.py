@@ -105,8 +105,8 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 from halo.checkpoint.config_export import restore_model_type
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
-from halo.models.param_roles import fp32_pinned_names
-from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
+from halo.models.introspection.param_roles import fp32_pinned_names
+from halo.models.upstream.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
     BAILING_LING_3_TINY,

@@ -12,8 +12,8 @@ from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.parallel.frozen_models import ReferenceAlternatives, warn_unparallelized_reference
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.config_access import model_type_matches
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.config_access import model_type_matches
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import (
     logits_forward_inputs,

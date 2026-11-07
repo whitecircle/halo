@@ -8,7 +8,7 @@ import torch
 from transformers import Qwen3_5Config
 
 from halo.checkpoint.writing import reconcile_tie_word_embeddings
-from halo.models.config_access import tie_flag_configs
+from halo.models.introspection.config_access import tie_flag_configs
 
 
 def _model(tied=True):

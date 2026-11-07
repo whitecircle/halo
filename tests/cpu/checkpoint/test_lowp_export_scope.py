@@ -12,7 +12,7 @@ from safetensors.torch import load_file, save_file
 
 from halo.checkpoint.tools.lowp_export import quantize_checkpoint
 from halo.kernels.lowp.spec import kept_block_indices
-from halo.models.module_tree import decoder_layer_index
+from halo.models.introspection.module_tree import decoder_layer_index
 
 _BLOCKS = 3
 

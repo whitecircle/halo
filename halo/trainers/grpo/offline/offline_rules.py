@@ -6,7 +6,7 @@ from datasets import Dataset
 
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.context_window import is_bounded_length
+from halo.models.introspection.context_window import is_bounded_length
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.runtime.consensus import reject_across_ranks
 from halo.trainers.grpo.offline.reference import ReferenceMode

@@ -11,7 +11,7 @@ from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.save import saves_adapters_only
 from halo.hardware import free_disk_bytes
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, config_only_parameter_bytes
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.dtensor import local_numel
 from halo.runtime.filesystem import is_output_shared_filesystem

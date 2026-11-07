@@ -25,8 +25,8 @@ from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, St
 from halo.model_loading.model_preparation import auto_load_model, resolve_text_only_config
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.pp import StageKeyFilter, _instantiate_untied_on_meta, _load_stage_lazy
-from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, text_config, ties_word_embeddings
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.config_access import TIE_WORD_EMBEDDINGS_FLAG, text_config, ties_word_embeddings
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.models.moe import family_specs
 from tests.common.checkpoint_io import loading_problems, safetensors_state_dict, save_context
 from tests.common.gloo import run_gloo_ranks

@@ -29,10 +29,10 @@ from halo.distributed.pipeline_parallel.partition import (
 )
 from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from halo.models.mtp.spec import MTP_LAYER_COUNT_FIELDS
-from halo.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.pp_fakes import registered_pp_backbones

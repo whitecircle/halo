@@ -6,7 +6,7 @@ from typing import Literal
 
 import torch
 
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 
 # A backbone spelling missing here is invisible to every consumer.
 DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h", "layer")

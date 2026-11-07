@@ -24,7 +24,7 @@ from halo.models import segment_markers
 from halo.models.attention import selection
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_gated_delta_net_layers
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.modality import is_vlm_model
 from tests.common.repo import load_script_module
 
 # The families the default moves to FA2: GatedDeltaNet decoders on FA4's head_dim-256 kernel, every spelling,

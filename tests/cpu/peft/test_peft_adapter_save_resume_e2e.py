@@ -23,7 +23,7 @@ from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.models.attention.gpt_oss_sinks import SINKS_POLICY_ATTR, SinksPolicy
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 

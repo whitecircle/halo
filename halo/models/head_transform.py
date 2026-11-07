@@ -11,10 +11,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from halo.models.config_access import get_config_field, text_config
-from halo.models.model_classes import transformers_model_class
-from halo.models.module_tree import hidden_state_backbone, module_path
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.config_access import get_config_field, text_config
+from halo.models.introspection.model_classes import transformers_model_class
+from halo.models.introspection.module_tree import hidden_state_backbone, module_path
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.subclass_registry import build_class_claim_map
 
 

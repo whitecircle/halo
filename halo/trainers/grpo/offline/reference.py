@@ -22,7 +22,7 @@ from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import resolve_training_dtype
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.consensus import (
     DeferredRankFailure,
     rank_consensus,

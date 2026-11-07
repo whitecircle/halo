@@ -34,15 +34,15 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.lora_fold import lora_folded_data
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from halo.models.external_tables import named_external_tables
-from halo.models.moe.family_specs import find_moe_family_spec, moe_model_types
-from halo.models.param_roles import persistent_buffers
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets
-from halo.models.unwrapping import (
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import (
     base_transformers_model,
     plain_peft_param_name,
     strip_cp_attention_level,
     unwrap_toolkit_wrappers,
 )
+from halo.models.moe.family_specs import find_moe_family_spec, moe_model_types
+from halo.models.peft_adapters import LoraFolds, lora_fold_targets
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors

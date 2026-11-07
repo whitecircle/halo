@@ -29,10 +29,10 @@ from halo.checkpoint.format import (
 from halo.checkpoint.hub_layout import revert_to_load_layout
 from halo.checkpoint.reading import read_checkpoint_index
 from halo.env import env_int
-from halo.models.config_access import ties_word_embeddings, untie_word_embeddings
+from halo.models.introspection.config_access import ties_word_embeddings, untie_word_embeddings
+from halo.models.introspection.param_roles import fp32_pinned_names, norm_param_keys
+from halo.models.introspection.unwrapping import strip_peft_adapter_segment
 from halo.models.moe.balancing import balancing_param_keys, is_balancing_state_key
-from halo.models.param_roles import fp32_pinned_names, norm_param_keys
-from halo.models.unwrapping import strip_peft_adapter_segment
 
 logger = logging.getLogger(__name__)
 

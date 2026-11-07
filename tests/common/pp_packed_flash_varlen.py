@@ -20,7 +20,7 @@ from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp
 from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, TokenLoss
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from halo.models.segment_markers import SegmentMarkers, packed_row_segment_kwargs, segment_markers_for
 from tests.common.packed_flash_varlen import (
     PACKING_FAMILIES,

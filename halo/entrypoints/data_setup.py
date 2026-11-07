@@ -27,9 +27,14 @@ from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_pat
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
+from halo.models.introspection.module_tree import (
+    backbone_with_layers,
+    decoder_layers,
+    embedding_module,
+    media_module_names,
+)
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process

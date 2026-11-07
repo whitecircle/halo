@@ -48,7 +48,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from halo.model_loading.parallel.frozen_models import place_and_freeze
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
-from halo.models.context_window import is_bounded_length
+from halo.models.introspection.context_window import is_bounded_length
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin

@@ -20,8 +20,8 @@ from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.config_fields import require_expert_count
-from halo.models.param_roles import persistent_buffers
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,

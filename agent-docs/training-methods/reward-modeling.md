@@ -66,7 +66,7 @@ LoRA is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallel
 
 ## Vision-language
 
-Image-carrying pairs train on the families with both a vision tower and a sequence-classification head. transformers 5.20 ships one for `gemma3`, `qwen3_5` (dense), `t5gemma2` and `modernvbert`; the toolkit registers Gemma 4 and MoE Qwen3.5/3.6 in `halo/models/seq_cls_heads.py`. A checkpoint outside that live registry is refused before the model load, naming the supported list.
+Image-carrying pairs train on the families with both a vision tower and a sequence-classification head. transformers 5.20 ships one for `gemma3`, `qwen3_5` (dense), `t5gemma2` and `modernvbert`; the toolkit registers Gemma 4 and MoE Qwen3.5/3.6 in `halo/models/upstream/seq_cls_heads.py`. A checkpoint outside that live registry is refused before the model load, naming the supported list.
 
 The data path follows the **run**, not the checkpoint: a vision run is one whose dataset carries an `images`/`image` column, or has `images_field` name one. A text recipe on a multimodal checkpoint stays on TRL's tokenize map.
 

@@ -35,10 +35,10 @@ from halo.models.attention.tree_plan import (
     build_tree_attention_plan,
 )
 from halo.models.attention.tree_sparse import reject_unfoldable_tree_options, tree_sparse_forward
-from halo.models.config_access import text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.segment_markers import require_linear_attention_kernels
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

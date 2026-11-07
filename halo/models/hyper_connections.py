@@ -12,9 +12,9 @@ import transformers.models.glm5_next.modeling_glm5_next as glm5_next_modeling
 
 from halo.env import env_flag
 from halo.kernels.hyper_connection import collapse_streams, mix_streams, project_streams, sinkhorn_knopp
-from halo.models.config_access import model_type_matches
+from halo.models.introspection.config_access import model_type_matches
 from halo.models.moe.family_specs import DEEPSEEK_V4, GLM5_NEXT
-from halo.models.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

@@ -59,7 +59,7 @@ On the real weights:
 
 ## Mamba layers
 
-`apply_nemotron_h_patches` (`halo/models/nemotron_h.py`) replaces upstream's module-level scan and leaves the mixer's forward in place:
+`apply_nemotron_h_patches` (`halo/models/families/nemotron_h.py`) replaces upstream's module-level scan and leaves the mixer's forward in place:
 
 - **Per-group scan.** A group's heads share B and C, which upstream copies per head. The output matches upstream's to 1e-7. On one layer and one GPU at 8,192 tokens it takes 31.8 ms against 34.7 ms and 5.23 GiB of scan memory against 8.29 GiB, by arithmetic about 1.05× faster over a step. Autocast is off inside it, as it would run this fp32 body in bf16.
 - **Documents.** A row holding several documents scans each from a zero state, with its chunks counted from its first token. Documents share a padded batch while it costs at most 1.25× their tokens.

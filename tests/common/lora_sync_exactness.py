@@ -19,8 +19,8 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_exp
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.peft_adapters import lora_fold_targets
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.trainers.grpo.rollout.weight_push import (
     gather_and_send_weights,

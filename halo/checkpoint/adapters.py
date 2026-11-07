@@ -24,8 +24,8 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.reading import read_checkpoint_config
 from halo.log import KEY_PREVIEW_COUNT
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
 logger = logging.getLogger(__name__)
 

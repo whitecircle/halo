@@ -12,10 +12,10 @@ from typing import ClassVar
 import torch
 
 from halo.distributed.expert_parallel.config import EPConfig
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.expert_layout import ExpertLayout, to_hub_expert_tensors
 from halo.models.moe.expert_lora_spec import expert_lora_delta
 from halo.models.moe.family_specs import MoEFamilySpec
-from halo.models.param_roles import persistent_buffers
 from halo.runtime.collectives import all_gather_cat, gather_cat_to_rank, group_holds_rank
 from halo.runtime.dtensor import full_cpu_tensor, materialize_dtensor
 from halo.runtime.ranks import get_global_rank

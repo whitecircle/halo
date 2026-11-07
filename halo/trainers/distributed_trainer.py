@@ -35,17 +35,17 @@ from halo.model_loading.parallel.frozen_models import (
     warn_unparallelized_reference,
 )
 from halo.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     ROUTER_AUX_FIELDS,
     SPECIAL_TOKEN_ID_FIELDS,
     restore_config_fields,
     set_config_field_run_scoped,
     snapshot_config_fields,
 )
-from halo.models.context_window import bounded_row_length
+from halo.models.introspection.context_window import bounded_row_length
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.moe.config_fields import resolve_active_router_aux_loss_coef
 from halo.models.moe.router_logits import mark_router_logits_forced_off
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.optimizers.registry import (
     NAMED_OPTIMIZER_BUILDERS,
     optim_name,

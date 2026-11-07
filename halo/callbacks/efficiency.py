@@ -18,7 +18,7 @@ from halo.kernels.lowp.deepgemm import use_deepgemm
 from halo.kernels.lowp.spec import LOWP_RECIPES
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.models.attention.layout import AttentionLayout
-from halo.models.context_window import bounded_row_length
+from halo.models.introspection.context_window import bounded_row_length
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)

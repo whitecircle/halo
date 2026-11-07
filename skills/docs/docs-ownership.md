@@ -93,8 +93,8 @@ changes.
 | `halo/checkpoint/tools/adapter_merge.py`, `halo/checkpoint/tools/adapter_stream_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
 | `halo/checkpoint/model_card.py` | `agent-docs/reference/checkpoints.md`, `human-docs/checkpoints.md` |
 | `halo/checkpoint/parallel/writing.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
-| `halo/models/unwrapping.py`, `halo/models/param_roles.py`, `halo/models/model_classes.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
-| `halo/models/module_tree.py` | `agent-docs/parallelism/data-parallelism.md` |
+| `halo/models/introspection/unwrapping.py`, `halo/models/introspection/param_roles.py`, `halo/models/introspection/model_classes.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
+| `halo/models/introspection/module_tree.py` | `agent-docs/parallelism/data-parallelism.md` |
 | `halo/models/peft_adapters.py`, `halo/distributed/lora_fold.py` | `agent-docs/optimization/peft.md` |
 | `halo/models/head_transform.py` | `agent-docs/models/adding-a-model.md`, `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `halo/models/forward_capture.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/training-methods/embedding.md` |
@@ -116,24 +116,24 @@ changes.
 | `halo/` area | Owning doc page(s) |
 |---|---|
 | `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md`; a `weight_sync_refusal` also `agent-docs/infrastructure/rollout-servers.md` and `human-docs/supported-matrix.md` |
-| `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/zaya.py` | `agent-docs/models/zaya.md` |
-| `halo/models/mistral4.py` | `agent-docs/models/mistral4.md` |
-| `halo/distributed/expert_parallel/families/nemotron_h.py`, `halo/models/nemotron_h.py` | `agent-docs/models/nemotron-h.md`, `human-docs/cookbooks/halo-nemotron-3.5-super-cookbook.md` |
+| `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/families/zaya.py` | `agent-docs/models/zaya.md` |
+| `halo/models/families/mistral4.py` | `agent-docs/models/mistral4.md` |
+| `halo/distributed/expert_parallel/families/nemotron_h.py`, `halo/models/families/nemotron_h.py` | `agent-docs/models/nemotron-h.md`, `human-docs/cookbooks/halo-nemotron-3.5-super-cookbook.md` |
 | `halo/distributed/expert_parallel/families/qwen3_next.py` | `agent-docs/models/qwen3-next.md` |
-| `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
+| `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/families/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
 | `halo/models/external_tables.py`, `halo/model_loading/external_tables.py`, `halo/checkpoint/external_tables.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/qwen4_exp.md` |
 | `halo/model_loading/parallel/loader.py`, `halo/model_loading/parallel/load_rules.py`, `halo/model_loading/parallel/whole_model.py`, `halo/model_loading/model_preparation.py`, `halo/model_loading/remote_code.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` |
-| `halo/models/seq_cls_heads.py` | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/reward-modeling.md` |
-| `halo/model_loading/tokenizer_setup.py`, `halo/models/context_window.py` | `agent-docs/reference/configuration-reference.md`; the vocabulary grow also `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
+| `halo/models/upstream/seq_cls_heads.py` | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/reward-modeling.md` |
+| `halo/model_loading/tokenizer_setup.py`, `halo/models/introspection/context_window.py` | `agent-docs/reference/configuration-reference.md`; the vocabulary grow also `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
 | `halo/model_loading/buffer_repair.py`, `halo/model_loading/finalization.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/hub_kernel_dispatch.py` | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
 | `halo/kernels/fla_launch.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/checkpoint_coverage.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`; the full-weight loads under accelerate FSDP also `agent-docs/parallelism/data-parallelism.md` |
 | `halo/model_loading/dtype.py` | `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
-| `halo/models/config_access.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
-| `halo/models/modality.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
+| `halo/models/introspection/config_access.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
+| `halo/models/introspection/modality.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `halo/models/attention/layout.py`, `halo/callbacks/model_flops.py` | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
-| `halo/models/conversion_overrides.py`, `halo/models/row_documents.py`, `halo/models/upstream_guard.py` | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
+| `halo/models/upstream/conversion_overrides.py`, `halo/models/row_documents.py`, `halo/models/upstream/upstream_guard.py` | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
 | `halo/models/segment_markers.py` | `agent-docs/data/collators.md`, `agent-docs/optimization/padding-free-collator.md`, `agent-docs/training-methods/preference/smpo.md` |
 | new model support | new `agent-docs/models/<family>.md` + every family roster listed in step 8 of `agent-docs/models/adding-a-model.md` |
 

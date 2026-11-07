@@ -31,8 +31,8 @@ from halo.models.attention.layout import (
     resolve_qk_v_head_dims,
 )
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.config_access import get_config_field, set_config_field_run_scoped, text_config
-from halo.models.model_classes import is_remote_code_class, mapped_model_class
+from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped, text_config
+from halo.models.introspection.model_classes import is_remote_code_class, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 

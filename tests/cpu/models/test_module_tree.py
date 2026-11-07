@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-from halo.models.module_tree import (
+from halo.models.introspection.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     decoder_layers,
     decoder_layers_attr,

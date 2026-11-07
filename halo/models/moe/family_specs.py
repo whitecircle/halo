@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from halo.models.config_access import config_sources, text_config
+from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_layout import (
     GLU_PROJECTIONS,

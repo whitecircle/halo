@@ -73,9 +73,9 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import _holds_unsharded_grad, fsdp2_param_groups
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.family_specs import find_moe_family_spec
-from halo.models.unwrapping import base_transformers_model
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset

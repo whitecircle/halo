@@ -14,7 +14,7 @@ from transformers import TrainerCallback
 from halo.hardware import current_device
 from halo.kernels.histogram import accumulate_bincount
 from halo.log import warn_once
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     get_config_field,
     set_config_field_run_scoped,
 )

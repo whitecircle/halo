@@ -14,8 +14,8 @@ from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import get_newto
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from halo.config_validation import differs_from_default
-from halo.models.module_tree import embedding_module
-from halo.models.param_roles import EMBEDDING_HEAD_MARKERS
+from halo.models.introspection.module_tree import embedding_module
+from halo.models.introspection.param_roles import EMBEDDING_HEAD_MARKERS
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.optimizers.param_groups import decay_groups
 from halo.optimizers.step_skip import DeviceStepSkipMixin

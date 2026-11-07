@@ -11,7 +11,7 @@ from trl.trainer.utils import selective_log_softmax
 
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models import head_transform
-from halo.models import nemotron_h as _sets_the_composite_head_accessors  # noqa: F401
+from halo.models.families import nemotron_h as _sets_the_composite_head_accessors  # noqa: F401
 from halo.models.head_transform import (
     IDENTITY_HEAD_TRANSFORM,
     GraniteHeadTransform,

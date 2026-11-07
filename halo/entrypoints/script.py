@@ -30,7 +30,7 @@ from halo.env import nccl_timeout
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.models.attention.selection import effective_attn_implementation, enable_flash_attention_deterministic
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import run_on_rank0_raising_everywhere
 from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing

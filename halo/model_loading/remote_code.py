@@ -20,8 +20,8 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from halo.checkpoint.atomic import create_staged_file, publish_staged_file
 from halo.model_loading.buffer_repair import default_rope_parameters
 from halo.models.attention.remote_flash_attention import patch_remote_llama_flash_template
-from halo.models.config_access import ties_word_embeddings
-from halo.models.nemotron_h import set_composite_head_accessors
+from halo.models.families.nemotron_h import set_composite_head_accessors
+from halo.models.introspection.config_access import ties_word_embeddings
 
 # Names a published modeling file calls but never imports (Ring-mini-linear-2.0's cached forward builds a
 # ``DynamicLayer``); only the module whose global lookup misses can be given them.

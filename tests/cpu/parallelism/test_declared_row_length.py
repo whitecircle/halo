@@ -7,7 +7,7 @@ import pytest
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from halo.models.context_window import bounded_row_length
+from halo.models.introspection.context_window import bounded_row_length
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer

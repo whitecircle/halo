@@ -22,9 +22,9 @@ from halo.model_loading.dtype import is_kbit_quantized
 from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns, unfreeze_modules_by_patterns
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from halo.models.introspection.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
-from halo.models.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from halo.runtime.consensus import reject_across_ranks, reject_divergent_settings
 
 if TYPE_CHECKING:

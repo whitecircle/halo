@@ -27,7 +27,7 @@ from halo.models.attention.selection import (
     has_head_dim_beyond_flash,
     resolve_attn_implementation,
 )
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.attention_stubs import CompileCountingCute, install_compile_counting_cute
 from tests.common.models import (
     NEMOTRON_H_RELEASE_TEXT_CONFIG,

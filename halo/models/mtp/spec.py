@@ -8,7 +8,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from halo.models.config_access import config_sources, text_config
+from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.family_specs import (
     BAILING,
     DEEPSEEK_V4,

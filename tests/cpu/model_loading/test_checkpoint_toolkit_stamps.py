@@ -19,7 +19,7 @@ from halo.model_loading.model_preparation import resolve_auto_model_class
 from halo.model_loading.parallel import frozen_models, loader
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR, SinksPolicy
-from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_export_ready, config_sources
+from halo.models.introspection.config_access import TOOLKIT_STAMP_PREFIX, config_export_ready, config_sources
 from halo.models.moe.router_logits import (
     ROUTER_LOGITS_FORCED_OFF_ATTR,
     mark_router_logits_forced_off,

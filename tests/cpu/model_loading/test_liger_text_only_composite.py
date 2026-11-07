@@ -19,7 +19,7 @@ from halo.model_loading.liger.applier import LigerApplier
 from halo.model_loading.model_preparation import resolve_auto_model_class
 from halo.model_loading.parallel import loader as model_loading
 from halo.model_loading.parallel.model_source import ModelSource
-from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_export_ready, text_config
+from halo.models.introspection.config_access import TOOLKIT_STAMP_PREFIX, config_export_ready, text_config
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import probe_findings
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model

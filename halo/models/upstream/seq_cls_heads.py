@@ -11,7 +11,7 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4PreTrainedModel
 from transformers.models.qwen3_5_moe import Qwen3_5MoePreTrainedModel, Qwen3_5MoeTextConfig
 
-from halo.models.modality import config_declares_multimodality
+from halo.models.introspection.modality import config_declares_multimodality
 
 
 def _register_sequence_classification_head(model_cls) -> None:

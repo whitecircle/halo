@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 from gram_newton_schulz import Muon as UpstreamMuon
 
-from halo.models.param_roles import EMBEDDING_HEAD_MARKERS
+from halo.models.introspection.param_roles import EMBEDDING_HEAD_MARKERS
 from halo.optimizers import muon
 from halo.optimizers.muon import _is_embedding_or_head, build_muon_optimizer
 

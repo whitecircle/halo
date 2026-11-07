@@ -28,14 +28,14 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.model_loading.tokenizer_setup import vocabulary_grown
-from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.models.peft_adapters import tuner_adapter_param_ids
-from halo.models.unwrapping import (
+from halo.models.introspection.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
     base_transformers_model,
     find_peft_model,
     unwrap_framework_wrappers,
 )
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.runtime.collectives import broadcast_from_rank0, combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, rank0_verdict
 from halo.runtime.ranks import is_global_main_process

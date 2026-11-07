@@ -26,8 +26,8 @@ from halo.distributed.fsdp import (
     reshard_fsdp2_modules,
 )
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.module_tree import find_module_path, input_embedding_backbone
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
+from halo.models.introspection.module_tree import find_module_path, input_embedding_backbone
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks

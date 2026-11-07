@@ -19,8 +19,8 @@ from transformers import (
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger import cross_entropy
 from halo.model_loading.tokenizer_setup import grow_vocabulary
-from halo.models.config_access import text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.models.mtp.head import (
     build_mtp_head,
     find_mtp_head,

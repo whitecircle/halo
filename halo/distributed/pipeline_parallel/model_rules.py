@@ -6,9 +6,9 @@ from __future__ import annotations
 import torch.nn as nn
 
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP, resolve_pp_spec
-from halo.models.config_access import get_config_field, text_config, ties_word_embeddings
 from halo.models.head_transform import resolve_head_transform
-from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
+from halo.models.introspection.config_access import get_config_field, text_config, ties_word_embeddings
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers, embedding_module
 from halo.models.moe.balancing import accepts_native_balancing_bias, resolve_balancing_mode
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import find_moe_family_spec

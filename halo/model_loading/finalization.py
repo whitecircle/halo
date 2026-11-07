@@ -9,8 +9,8 @@ from halo.kernels.fla_launch import apply_fla_launch_options
 from halo.log import warn_once
 from halo.model_loading.buffer_repair import apply_buffer_repairs
 from halo.model_loading.external_tables import attach_external_tables
-from halo.models.config_access import text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers, embedding_module
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

@@ -18,8 +18,8 @@ from halo.data.collators.vlm_preference import DataCollatorForVLMPreference
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints import model_setup
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.modality import config_declares_multimodality, is_vlm_model
-from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
+from halo.models.introspection.modality import config_declares_multimodality, is_vlm_model
+from halo.models.upstream.seq_cls_heads import multimodal_sequence_classification_model_types
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module

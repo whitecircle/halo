@@ -42,9 +42,9 @@ from halo.model_loading.parallel.model_source import fetch_checkpoint_config, re
 from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_sinks_without_sinks
-from halo.models.config_access import drop_toolkit_stamps
-from halo.models.context_window import resolve_length_to_context
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
+from halo.models.introspection.config_access import drop_toolkit_stamps
+from halo.models.introspection.context_window import resolve_length_to_context
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.runtime.collectives import barrier

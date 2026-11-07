@@ -12,9 +12,9 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, Tensor
 
 from halo.distributed.tensor_parallel.local_linears import install_planned_local_forwards
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, register_per_head_norm_params
-from halo.models.config_access import text_config, ties_word_embeddings
-from halo.models.model_classes import mapped_model_class
-from halo.models.module_tree import find_module_path
+from halo.models.introspection.config_access import text_config, ties_word_embeddings
+from halo.models.introspection.model_classes import mapped_model_class
+from halo.models.introspection.module_tree import find_module_path
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

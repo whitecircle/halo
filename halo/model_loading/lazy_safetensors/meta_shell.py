@@ -13,7 +13,7 @@ from transformers import GenerationConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from halo.model_loading.dtype import resolve_load_dtype
-from halo.models.param_roles import fp32_pin_matches
+from halo.models.introspection.param_roles import fp32_pin_matches
 
 logger = logging.getLogger(__name__)
 

@@ -27,7 +27,7 @@ from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel import tp as tp_loading
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from tests.common.distributed import fake_process_group, fake_process_group_mesh
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import (

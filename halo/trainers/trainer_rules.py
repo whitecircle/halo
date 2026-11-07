@@ -9,12 +9,12 @@ from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import effective_attn_implementation
-from halo.models.config_access import get_config_field
 from halo.models.external_tables import named_external_tables
+from halo.models.introspection.config_access import get_config_field
+from halo.models.introspection.unwrapping import find_peft_model
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.mtp.head import find_mtp_head
-from halo.models.unwrapping import find_peft_model
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
 # FSDP2 shaping knobs only the trainer's own wrap implements; each one's unrequested value is its ParallelismConfig

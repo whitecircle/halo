@@ -34,7 +34,7 @@ from halo.env import env_flag
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
-from halo.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment
+from halo.models.introspection.unwrapping import plain_adapter_key, strip_peft_adapter_segment
 from halo.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
 from tests.common.memory import cleanup_memory

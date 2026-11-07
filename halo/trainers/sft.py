@@ -15,10 +15,10 @@ from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.balancing import expert_load_token_weights
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.mtp.acceptance import MTP_ACCEPTANCE_GREEDY, MTP_ACCEPTANCE_TV, MTP_SCORED_POSITIONS, MTP_TOP1
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from halo.trainers.distributed_trainer import DistributedTrainerMixin

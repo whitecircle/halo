@@ -33,8 +33,8 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     select_supported_attn_implementation,
 )
-from halo.models.config_access import text_config
-from halo.models.context_window import bounded_row_length, is_bounded_length
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts

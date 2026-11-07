@@ -26,12 +26,12 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.head_transform import HeadTransform, resolve_head_transform
-from halo.models.modality import config_declares_multimodality
-from halo.models.module_tree import embedding_module, find_module_path, hidden_state_backbone
+from halo.models.introspection.modality import config_declares_multimodality
+from halo.models.introspection.module_tree import embedding_module, find_module_path, hidden_state_backbone
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.segment_markers import segment_markers_for
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor

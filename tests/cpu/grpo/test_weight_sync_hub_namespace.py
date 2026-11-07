@@ -17,7 +17,7 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGe
 
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout import weight_push
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights

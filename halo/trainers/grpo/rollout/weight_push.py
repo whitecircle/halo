@@ -23,8 +23,13 @@ from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, 
 from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from halo.models.config_access import config_model_types, get_config_field
 from halo.models.fp8_rollout import Fp8RolloutPlan, RolloutWeightPrecision, fp8_rollout_refusal
+from halo.models.introspection.config_access import config_model_types, get_config_field
+from halo.models.introspection.unwrapping import (
+    base_transformers_model,
+    plain_peft_param_name,
+    unwrap_framework_wrappers,
+)
 from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
@@ -33,7 +38,6 @@ from halo.models.moe.balancing import (
 )
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.peft_adapters import LoraFolds, lora_fold_targets
-from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from halo.runtime.collectives import collective_side_stream
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor

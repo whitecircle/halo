@@ -16,8 +16,8 @@ from halo.model_loading.parallel.frozen_models import (
     on_policy_grpo_holds_reference,
     place_and_freeze,
 )
-from halo.models.config_access import config_sources
 from halo.models.fp8_rollout import RolloutWeightPrecision
+from halo.models.introspection.config_access import config_sources
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from halo.trainers.grpo.grpo_rules import reject_unhonored_trl_options, reject_unread_reference

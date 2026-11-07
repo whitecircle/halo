@@ -9,7 +9,7 @@ import torch
 import yaml
 from peft import LoraConfig, get_peft_model
 
-import halo.models.qwen4_exp.forwards as qwen4_exp_forwards
+import halo.models.families.qwen4_exp.forwards as qwen4_exp_forwards
 from halo.models.gradient_checkpointing import install_recompute_scopes
 from halo.models.moe.expert_lora_spec import expert_target_projections
 from tests.common.models import TINY_QWEN4_EXP_CONFIG

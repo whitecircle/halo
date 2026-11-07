@@ -14,7 +14,7 @@ from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, ins
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
-from halo.models.module_tree import decoder_layer_index, find_module_path
+from halo.models.introspection.module_tree import decoder_layer_index, find_module_path
 from halo.runtime.dtensor import to_local
 
 logger = logging.getLogger(__name__)

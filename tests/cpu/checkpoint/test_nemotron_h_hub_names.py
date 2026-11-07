@@ -22,8 +22,8 @@ from halo.checkpoint.hub_layout import export_conversions, revert_conversions
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
-from halo.models.conversion_overrides import CONVERSION_OVERRIDES
-from halo.models.param_roles import fp32_pinned_names
+from halo.models.introspection.param_roles import fp32_pinned_names
+from halo.models.upstream.conversion_overrides import CONVERSION_OVERRIDES
 from tests.common.conversion_mapping import restored_conversion_mapping
 from tests.common.models import (
     NEMOTRON_3_5_LIGHTNING,

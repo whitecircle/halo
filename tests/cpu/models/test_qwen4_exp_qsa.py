@@ -12,14 +12,14 @@ from torch.utils.checkpoint import checkpoint
 from transformers.integrations.sdpa_attention import sdpa_attention_forward
 from transformers.masking_utils import create_causal_mask
 
-from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
-from halo.models.qwen4_exp import sparse_attention
-from halo.models.qwen4_exp.sparse_attention import (
+from halo.models.families.qwen4_exp import sparse_attention
+from halo.models.families.qwen4_exp.sparse_attention import (
     QUERY_TILE,
     qsa_attention_forward,
     select_qsa_keys,
     tiled_qsa_attention,
 )
+from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.qwen4_exp import (
     QSA_LAYER_IDX,
     LargestTensor,

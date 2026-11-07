@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 
-from halo.models.qwen4_exp.ngram_table import HostNGramTable
+from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.segment_markers import document_boundaries, document_starts
 
 

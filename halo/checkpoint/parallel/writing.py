@@ -28,10 +28,10 @@ from halo.checkpoint.writing import (
 )
 from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from halo.models.config_access import ties_word_embeddings
-from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.introspection.config_access import ties_word_embeddings
+from halo.models.introspection.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.mtp.head import mtp_trunk_copy_keys
-from halo.models.param_roles import persistent_buffers
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors

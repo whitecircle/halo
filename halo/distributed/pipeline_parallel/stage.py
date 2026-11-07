@@ -26,8 +26,8 @@ from halo.distributed.pipeline_parallel.partition import resolve_layer_partition
 from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLossFn
 from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
-from halo.models.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR, remote_code_model_class
-from halo.models.module_tree import (
+from halo.models.introspection.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR, remote_code_model_class
+from halo.models.introspection.module_tree import (
     backbone_with_layers,
     decoder_layers,
     decoder_layers_attr,
@@ -36,7 +36,7 @@ from halo.models.module_tree import (
     split_layer_path,
 )
 from halo.models.segment_markers import packed_row_segment_kwargs, segment_markers_for
-from halo.models.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import verify_upstream_parameters
 
 logger = logging.getLogger(__name__)
 

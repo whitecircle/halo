@@ -76,7 +76,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.context_window import resolve_model_context_window
+from halo.models.introspection.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process

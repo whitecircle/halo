@@ -8,7 +8,7 @@ from transformers import PreTrainedTokenizer
 from halo.data.chat_render import render_conversation, tokenize_rendered
 from halo.data.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
 from halo.data.pipeline.rejected_rows import build_rejection_row
-from halo.models.context_window import is_bounded_length
+from halo.models.introspection.context_window import is_bounded_length
 
 _TEXT_RENDER_KNOBS = (
     "conversation_field",

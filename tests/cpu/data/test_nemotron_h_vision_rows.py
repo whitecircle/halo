@@ -24,8 +24,8 @@ from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from halo.data.vlm_render import resolve_image_token_ids
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import resolve_preference_vlm_run
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NEMOTRON_H
-from halo.models.nemotron_h import apply_nemotron_h_patches
 from halo.trainers.distillation.self_distillation import _teacher_inputs
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model, word_level_tokenizer
 from tests.common.tiny_processors import tiny_processor

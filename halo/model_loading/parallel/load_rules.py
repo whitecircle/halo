@@ -23,10 +23,10 @@ from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, 
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.tp import uses_attention_only_tp
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_sinks_without_sinks, uses_gpt_oss_sinks
-from halo.models.config_access import text_config
-from halo.models.context_window import context_window_from_config
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
-from halo.models.model_classes import is_remote_code_class
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.context_window import context_window_from_config
+from halo.models.introspection.model_classes import is_remote_code_class
 from halo.models.moe.config_fields import (
     has_routed_experts,
     resolve_expert_count,

@@ -21,8 +21,8 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger.cross_entropy import fused_head_ce_sum
 from halo.model_loading.liger.dispatch import LIGER_CP_FUSED_LOSS_ATTR
-from halo.models.config_access import set_config_field_run_scoped
 from halo.models.head_transform import HeadTransform
+from halo.models.introspection.config_access import set_config_field_run_scoped
 from tests.common.cp_model import head_input_lengths
 from tests.common.distributed import world_mean
 from tests.common.ep_reference import random_token_batch

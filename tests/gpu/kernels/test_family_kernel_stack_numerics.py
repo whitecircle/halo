@@ -62,7 +62,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.fla_autotune import pin_fla_autotune_first_fit

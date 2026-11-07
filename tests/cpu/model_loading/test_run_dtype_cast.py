@@ -33,7 +33,7 @@ from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.pp import StageKeyFilter, _load_stage_lazy
 from halo.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
-from halo.models.param_roles import fp32_pinned_names
+from halo.models.introspection.param_roles import fp32_pinned_names
 from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from halo.models.config_access import config_sources, get_config_field
+from halo.models.introspection.config_access import config_sources, get_config_field
 from halo.models.moe.router_logits import has_discard_expert_slot
 
 # First non-zero wins, so the unambiguous fields precede bare ``top_k``, which is also a generation parameter.

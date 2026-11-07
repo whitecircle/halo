@@ -15,7 +15,11 @@ from halo.environments.messages import engine_view
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.log import warn_once
-from halo.models.context_window import UNSET_MODEL_MAX_LENGTH, is_bounded_length, resolve_model_context_window
+from halo.models.introspection.context_window import (
+    UNSET_MODEL_MAX_LENGTH,
+    is_bounded_length,
+    resolve_model_context_window,
+)
 from halo.trainers.grpo.environmental.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
 logger = logging.getLogger(__name__)

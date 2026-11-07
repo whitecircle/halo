@@ -17,8 +17,8 @@ from transformers.utils import CONFIG_NAME
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
-from halo.models.config_access import drop_toolkit_stamps
-from halo.models.conversion_overrides import verify_conversion_overrides_intact
+from halo.models.introspection.config_access import drop_toolkit_stamps
+from halo.models.upstream.conversion_overrides import verify_conversion_overrides_intact
 
 logger = logging.getLogger(__name__)
 

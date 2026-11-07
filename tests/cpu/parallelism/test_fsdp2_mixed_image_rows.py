@@ -25,7 +25,12 @@ from halo.distributed.fsdp import IdentityParamSet
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import apply_vision_options
 from halo.entrypoints.script import run_trainer
-from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
+from halo.models.introspection.module_tree import (
+    backbone_with_layers,
+    decoder_layers,
+    embedding_module,
+    media_module_names,
+)
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.composite_rows import COMPOSITE_FAMILIES, composite_model_and_rows, text_row
 from tests.common.gloo import run_gloo_ranks

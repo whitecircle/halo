@@ -50,8 +50,8 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import warn_once
 from halo.models.forward_capture import capturing_forward_outputs
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.models.peft_adapters import lora_fold_targets
-from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors

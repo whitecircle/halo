@@ -7,7 +7,7 @@ import torch
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 
-from halo.models.qwen4_exp.documents import (
+from halo.models.families.qwen4_exp.documents import (
     document_ngram_ids,
     document_ple_forward,
     document_short_conv,

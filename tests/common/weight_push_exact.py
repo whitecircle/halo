@@ -22,7 +22,7 @@ from transformers import AutoTokenizer
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_flag, env_str
-from halo.models.config_access import config_model_types
+from halo.models.introspection.config_access import config_model_types
 from halo.models.moe.balancing import is_balancing_state_key
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.runtime.collectives import broadcast_from_rank0

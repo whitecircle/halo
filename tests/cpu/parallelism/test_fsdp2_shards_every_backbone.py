@@ -11,7 +11,7 @@ from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
 
 import halo.distributed.fsdp as fsdp
 from halo.distributed.fsdp import IdentityParamSet
-from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.introspection.module_tree import DECODER_LAYER_LIST_ATTRS
 
 
 class _ProbeConfig(PretrainedConfig):

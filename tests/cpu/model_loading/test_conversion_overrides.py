@@ -19,8 +19,8 @@ from transformers.core_model_loading import WeightRenaming
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from halo.models import conversion_overrides
-from halo.models.conversion_overrides import ConversionOverride, register_conversion_overrides
+from halo.models.upstream import conversion_overrides
+from halo.models.upstream.conversion_overrides import ConversionOverride, register_conversion_overrides
 from tests.common.conversion_mapping import restored_conversion_mapping
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
@@ -138,7 +138,7 @@ def test_entries_that_moved_refuse_the_override_and_register_nothing(restored_ma
 )
 def test_every_path_reading_the_mapping_imports_the_overrides(module):
     """Fresh interpreter, as this one has already imported the leaf."""
-    probe = f"import sys, {module}; sys.exit(0 if 'halo.models.conversion_overrides' in sys.modules else 3)"
+    probe = f"import sys, {module}; sys.exit(0 if 'halo.models.upstream.conversion_overrides' in sys.modules else 3)"
     assert subprocess.run([sys.executable, "-c", probe], capture_output=True, check=False).returncode == 0
 
 

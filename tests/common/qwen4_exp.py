@@ -17,8 +17,8 @@ from halo.model_loading.checkpoint_keys import is_expert_bank_merge
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.external_tables import ExternalTable, named_external_tables
-from halo.models.qwen4_exp.forwards import patch_qwen4_exp_document_forwards
-from halo.models.qwen4_exp.sparse_attention import QSASelection
+from halo.models.families.qwen4_exp.forwards import patch_qwen4_exp_document_forwards
+from halo.models.families.qwen4_exp.sparse_attention import QSASelection
 from halo.models.segment_markers import document_ids, segment_marker_kwargs, segment_markers_for
 from tests.common.models import TINY_QWEN4_EXP_CONFIG
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_SHARD_SIZE, tiny_family_model

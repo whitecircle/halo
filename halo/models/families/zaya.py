@@ -13,9 +13,9 @@ from torch import nn
 from halo.kernels.histogram import accumulate_bincount
 from halo.models.attention.packed_position_ids import get_stashed_position_ids, install_packed_position_ids_injection
 from halo.models.gradient_checkpointing import counts_toward_expert_load
-from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
+from halo.models.introspection.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
 from halo.models.segment_markers import document_ids, document_starts
-from halo.models.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

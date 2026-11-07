@@ -25,7 +25,7 @@ from halo.models.attention.masked_matmul import warm_masked_matmul_kernels
 from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
 from halo.models.attention.tree_plan import FullAttentionForm
-from halo.models.config_access import set_config_field_run_scoped
+from halo.models.introspection.config_access import set_config_field_run_scoped
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_global_world_size

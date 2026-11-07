@@ -12,10 +12,10 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrain
 from transformers.utils import cached_file
 
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
-from halo.models.config_access import set_config_field
+from halo.models.introspection.config_access import set_config_field
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.models.mtp.head import find_mtp_head
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
 if TYPE_CHECKING:

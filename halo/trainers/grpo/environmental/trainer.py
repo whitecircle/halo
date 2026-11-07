@@ -14,8 +14,8 @@ from halo.environments.messages import task_prompt
 from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.context_window import is_bounded_length
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.context_window import is_bounded_length
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.centered_scoring import ScoreCenteringMixin

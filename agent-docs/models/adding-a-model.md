@@ -33,7 +33,7 @@ Add the family predicate beside the existing ones and wire it into whichever sea
 
 ## Correct the conversion mapping
 
-transformers' `conversion_mapping` both spells a checkpoint's keys at load and reverts them at save, so a wrong entry shows up as randomly initialized weights or an export no engine reads. A family corrects it with one `ConversionOverride` in `CONVERSION_OVERRIDES` (`halo/models/conversion_overrides.py`), never inside `apply_family_patches`, which a merge tool or stock `from_pretrained` never calls. The leaf registers at import, and `checkpoint_keys.py` and `checkpoint_coverage.py` both import it, so every load, revert and tool reads the corrected mapping.
+transformers' `conversion_mapping` both spells a checkpoint's keys at load and reverts them at save, so a wrong entry shows up as randomly initialized weights or an export no engine reads. A family corrects it with one `ConversionOverride` in `CONVERSION_OVERRIDES` (`halo/models/upstream/conversion_overrides.py`), never inside `apply_family_patches`, which a merge tool or stock `from_pretrained` never calls. The leaf registers at import, and `checkpoint_keys.py` and `checkpoint_coverage.py` both import it, so every load, revert and tool reads the corrected mapping.
 
 An entry names `key` (a `model_type` or class name), `upstream` (transformers' own entries as `(sources, targets)`, empty where it ships none) and `rewrite` (from those entries to the ones to register). When transformers' entries stop matching `upstream`, the import raises: a rewrite of moved entries would misplace weights with no other symptom, and it is cheapest to catch at the pin bump.
 
@@ -49,7 +49,7 @@ A family that also declares `exports_source_config_schema` keeps transformers' o
 
 ## Replacing an upstream forward
 
-Guard each upstream signature a replacement is written for with `verify_upstream_parameters` (`halo/models/upstream_guard.py`), so a release that moved it fails at load. Where the forward calls a module-level helper, replace the helper instead of copying the forward, as `halo/models/nemotron_h.py` does for the Mamba scan. A forward walking a packed row reads `row_documents` (`halo/models/row_documents.py`), which gives each document's span and its unpadded tokens.
+Guard each upstream signature a replacement is written for with `verify_upstream_parameters` (`halo/models/upstream/upstream_guard.py`), so a release that moved it fails at load. Where the forward calls a module-level helper, replace the helper instead of copying the forward, as `halo/models/families/nemotron_h.py` does for the Mamba scan. A forward walking a packed row reads `row_documents` (`halo/models/row_documents.py`), which gives each document's span and its unpadded tokens.
 
 ## Declare the head transform
 
@@ -280,7 +280,7 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
     AutoModelForCausalLM.register(YourConfig, YourForCausalLM)
     ```
 
-3. **Trigger registration** by adding a module-level side-effect import of that module to `halo/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `halo/models/seq_cls_heads.py` register).
+3. **Trigger registration** by adding a module-level side-effect import of that module to `halo/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `halo/models/upstream/seq_cls_heads.py` register).
 
     `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy list-form tied-weight keys, which convert to the v5 dict form; `reject_untieable_list_ties` refuses a tied config that carried one, since `{}` ties nothing.
 

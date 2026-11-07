@@ -17,9 +17,9 @@ from torch import nn
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from halo.models.config_access import text_config
-from halo.models.module_tree import decoder_layer_index
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import decoder_layer_index
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
 from halo.trainers.grpo.environmental.rollout_routing import (

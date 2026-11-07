@@ -32,7 +32,7 @@ from halo.distributed.fsdp import IdentityParamSet
 from halo.entrypoints import data_setup
 from halo.models import gradient_checkpointing
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from halo.models.module_tree import (
+from halo.models.introspection.module_tree import (
     backbone_with_layers,
     decoder_layers,
     embedding_module,

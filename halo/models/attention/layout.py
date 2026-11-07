@@ -11,9 +11,9 @@ from typing import NamedTuple
 
 import torch
 
-from halo.models.config_access import get_config_field, text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.config_access import get_config_field, text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 
 # The key/value head split a GatedDeltaNet mixer is built from. Kimi Delta Attention also spells its layers
 # ``linear_attention`` but declares a single ``linear_num_heads``.

@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 from transformers import LlamaConfig
 
-from halo.models.config_access import apply_config_overrides
+from halo.models.introspection.config_access import apply_config_overrides
 
 # Spelled out: parametrizing over the production tuple turns shrinking it into a silently dropped test node.
 # transformers 5 renamed ``torch_dtype`` to ``dtype`` and keeps the old name as an alias, so both must be refused.

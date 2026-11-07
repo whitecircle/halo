@@ -11,7 +11,7 @@ from transformers.models.qwen4_exp import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.models import segment_markers
-from halo.models.config_access import config_model_types, model_type_matches
+from halo.models.introspection.config_access import config_model_types, model_type_matches
 from halo.models.segment_markers import (
     SegmentMarkers,
     reject_unmarked_sequence_mixer_rows,

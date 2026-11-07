@@ -13,18 +13,18 @@ import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 from transformers.masking_utils import create_recurrent_attention_mask
 
-from halo.models.config_access import set_config_field_run_scoped
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP, reject_state_dict_save
-from halo.models.qwen4_exp.documents import (
+from halo.models.families.qwen4_exp.documents import (
     document_ngram_ids,
     document_ple_forward,
     ngram_rows,
     reject_unmarked_documents,
 )
-from halo.models.qwen4_exp.ngram_table import HostNGramTable
-from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward
+from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
+from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward
+from halo.models.introspection.config_access import set_config_field_run_scoped
 from halo.models.segment_markers import document_starts
-from halo.models.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

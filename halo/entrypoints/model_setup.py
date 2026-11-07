@@ -54,10 +54,10 @@ from halo.models.attention.selection import (
     preferred_flash_impl,
     uses_fa4_dedicated_head_dim,
 )
-from halo.models.context_window import is_bounded_length, resolve_length_to_context
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.context_window import is_bounded_length, resolve_length_to_context
+from halo.models.introspection.modality import is_vlm_model
 from halo.models.mtp.spec import MtpHeadRequest
-from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
+from halo.models.upstream.seq_cls_heads import multimodal_sequence_classification_model_types
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process

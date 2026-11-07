@@ -4,7 +4,7 @@ import logging
 
 from transformers import PretrainedConfig, PreTrainedModel, PreTrainedTokenizer
 
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

@@ -11,7 +11,7 @@ from transformers import CONFIG_MAPPING
 
 import halo.trainers.distributed_trainer as spine
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
+from halo.models.introspection.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer

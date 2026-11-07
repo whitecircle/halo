@@ -19,9 +19,9 @@ from halo.data.collators.factory import select_data_collator
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.lazy_safetensors.materialization import init_checkpoint_absent_modules
 from halo.model_loading.model_preparation import apply_family_patches
-from halo.models import nemotron_h
 from halo.models.attention.tree import resolve_tree_plan_options
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families import nemotron_h
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.segment_markers import reject_pipeline_packed_rows, segment_markers_for
 from tests.common.models import TINY_NEMOTRON_H_CONFIG
 from tests.common.packed_flash_varlen import padding_tokenizer

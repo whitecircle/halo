@@ -28,8 +28,8 @@ from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.external_tables import named_external_tables
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.family_specs import expert_weight_roots, experts_container_attrs, moe_model_types
-from halo.models.param_roles import persistent_buffers
 from halo.trainers.grpo.rollout.weight_push import _dense_params, gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems, safetensors_state_dict, save_context
 from tests.common.ep_stubs import StubEPLayerBase, bare_ep_layer

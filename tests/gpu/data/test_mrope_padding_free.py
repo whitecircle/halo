@@ -16,7 +16,7 @@ from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import DataCollatorWithFlattening
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.segment_markers import segment_markers_for
 from tests.common.attention_kernels import kernel_calls
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
