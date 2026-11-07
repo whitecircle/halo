@@ -10,12 +10,11 @@ from typing import Literal
 
 import torch
 
-from halo.kernels.lowp.block_fp8 import SCALE_SUFFIX, quantize_block_fp8
+from halo.kernels.lowp.block_fp8 import BLOCK, SCALE_SUFFIX, quantize_block_fp8
 from halo.kernels.lowp.spec import ATTENTION_PROJECTIONS, MLP_PROJECTIONS
 from halo.models.config_access import config_model_types, text_config
 from halo.models.module_tree import decoder_layer_index
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.moe.expert_layout import iter_per_expert_split
 from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec_for_config
 from halo.models.mtp.spec import ROOT_HEAD_ATTR
 
@@ -24,6 +23,8 @@ RolloutWeightPrecision = Literal["bf16", "fp8_block"]
 # Dense families a GPU row validated (an MoE family declares its own on its spec).
 DENSE_FP8_ROLLOUT_MODEL_TYPES = ("qwen3", "qwen3_5", "qwen3_5_text")
 _FUSED_BANKS = ("gate_up_proj", "down_proj")
+# Elements one batched quantization call works on, about 1 GiB of its fp32 copy.
+_QUANTIZE_ELEMENTS = 1 << 28
 
 
 def fp8_rollout_refusal(config) -> str | None:
@@ -62,12 +63,34 @@ class Fp8RolloutPlan:
             prefix, _, bank_name = name.rpartition(".")
             gate, up, down = self.expert_keys
             names = (gate, up) if bank_name == "gate_up_proj" else (down,)
-            for expert_name, part in iter_per_expert_split([(tensor, names)]):
-                yield from self._quantized(f"{prefix}.{expert_name}.weight", part)
+            yield from self._expand_bank(prefix, tensor, names)
         elif self._is_projection(name, tensor):
             yield from self._quantized(name, tensor)
         else:
             yield name, tensor
+
+    @staticmethod
+    def _expand_bank(prefix: str, bank: torch.Tensor, names: tuple[str, ...]) -> Iterator[tuple[str, torch.Tensor]]:
+        """``bank`` ``[E, N, K]`` as per-expert fp8 views and scale views of batched calls, so a layer's launches do not
+        grow with its expert count. A bank is one call, or a few slices of experts past :data:`_QUANTIZE_ELEMENTS`,
+        which bound the fp32 working copy. A gate/up pair splits into per-expert views of one result when the half
+        width is a block multiple, and is quantized per half otherwise, where one grid would span the seam."""
+        part_rows = bank.shape[1] // len(names)
+        joint = part_rows % BLOCK == 0
+        groups = (
+            [(bank, names)] if joint else [(half, (name,)) for half, name in zip(bank.chunk(len(names), 1), names, strict=False)]
+        )
+        step = max(1, _QUANTIZE_ELEMENTS // groups[0][0][0].numel())
+        for start in range(0, bank.shape[0], step):
+            quantized = [(quantize_block_fp8(source[start : start + step]), parts) for source, parts in groups]
+            for offset in range(quantized[0][0][0].shape[0]):
+                for (weights, scales), parts in quantized:
+                    for index, name in enumerate(parts):
+                        stem = f"{prefix}.{start + offset}.{name}.weight"
+                        rows = slice(index * part_rows, (index + 1) * part_rows)
+                        grid = slice(index * part_rows // BLOCK, (index + 1) * part_rows // BLOCK)
+                        yield stem, weights[offset, rows] if len(parts) > 1 else weights[offset]
+                        yield stem + SCALE_SUFFIX, scales[offset, grid] if len(parts) > 1 else scales[offset]
 
     @staticmethod
     def _quantized(name: str, weight: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:

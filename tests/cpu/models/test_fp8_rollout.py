@@ -5,6 +5,8 @@ import pytest
 import torch
 from transformers import LlamaConfig, MixtralConfig
 
+from halo.kernels.lowp.block_fp8 import quantize_block_fp8
+from halo.models import fp8_rollout
 from halo.models.fp8_rollout import Fp8RolloutPlan, fp8_rollout_refusal
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, QWEN3, QWEN3_5
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
@@ -89,6 +91,58 @@ def test_a_one_dimensional_or_fused_tensor_without_expert_keys_passes_through():
     assert [n for n, _ in plan.expand("model.layers.0.self_attn.q_proj.bias", torch.randn(8))] == [
         "model.layers.0.self_attn.q_proj.bias"
     ]
+
+
+def _reference_experts(bank: torch.Tensor, names: tuple[str, ...]) -> dict[str, torch.Tensor]:
+    """The per-expert quantization the batched path must reproduce, one expert and one projection at a time."""
+    expected = {}
+    for expert in range(bank.shape[0]):
+        for name, part in zip(names, bank[expert].chunk(len(names)), strict=True):
+            weights, scales = quantize_block_fp8(part)
+            expected[f"m.layers.0.mlp.experts.{expert}.{name}.weight"] = weights
+            expected[f"m.layers.0.mlp.experts.{expert}.{name}.weight_scale_inv"] = scales
+    return expected
+
+
+def _expand_banks(width, monkeypatch, budget=None):
+    if budget is not None:
+        monkeypatch.setattr(fp8_rollout, "_QUANTIZE_ELEMENTS", budget)
+    torch.manual_seed(0)
+    plan = Fp8RolloutPlan(num_layers=1, expert_keys=("gate_proj", "up_proj", "down_proj"))
+    gate_up, down = torch.randn(7, 2 * width, 130), torch.randn(7, 130, width)
+    calls = []
+    real = fp8_rollout.quantize_block_fp8
+    monkeypatch.setattr(fp8_rollout, "quantize_block_fp8", lambda w: calls.append(tuple(w.shape)) or real(w))
+    got = dict(plan.expand("m.layers.0.mlp.experts.gate_up_proj", gate_up))
+    got |= dict(plan.expand("m.layers.0.mlp.experts.down_proj", down))
+    expected = _reference_experts(gate_up, ("gate_proj", "up_proj")) | _reference_experts(down, ("down_proj",))
+    return got, expected, calls
+
+
+@pytest.mark.parametrize("width", [128, 192], ids=["aligned", "off-the-block"])
+@pytest.mark.parametrize("budget", [None, 3 * 130 * 128], ids=["one-call", "sliced"])
+def test_a_fused_bank_equals_the_per_expert_quantization_whatever_the_batching(width, budget, monkeypatch):
+    got, expected, _ = _expand_banks(width, monkeypatch, budget)
+    assert got.keys() == expected.keys()
+    for name, value in expected.items():
+        assert got[name].shape == value.shape and torch.equal(got[name].view(torch.uint8), value.view(torch.uint8)), (
+            name
+        )
+
+
+def test_a_bank_is_one_quantize_call_not_one_per_expert(monkeypatch):
+    """Aligned halves share one call over the gate/up bank; an off-block width quantizes each half apart."""
+    _, _, aligned = _expand_banks(128, monkeypatch)
+    assert aligned == [(7, 256, 130), (7, 130, 128)]
+    _, _, off_block = _expand_banks(192, monkeypatch)
+    assert off_block == [(7, 192, 130), (7, 192, 130), (7, 130, 192)]
+
+
+def test_the_experts_are_views_of_the_batched_result_that_the_client_may_keep(monkeypatch):
+    got, _, _ = _expand_banks(128, monkeypatch)
+    weight = got["m.layers.0.mlp.experts.3.up_proj.weight"]
+    assert weight.is_contiguous() and weight._base is not None
+    assert got["m.layers.0.mlp.experts.3.up_proj.weight_scale_inv"].is_contiguous()
 
 
 def test_only_the_families_a_gpu_row_validated_declare_block_fp8_rollouts():

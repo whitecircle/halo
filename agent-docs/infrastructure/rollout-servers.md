@@ -347,6 +347,13 @@ tensors and fewer engine GPUs at scale; decode speed on vLLM was flat at the loa
 trainer-versus-engine gap is absorbed by the importance-sampling correction or score centering
 ([Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)).
 
+On a fast single-server path the fp8 push is slower than bf16, not faster. Experts go out per expert (about 62,000
+weights and scales for Qwen3.5-35B-A3B against 1,000 fused banks), and the engine's loader runs once per tensor, at
+about 48 microseconds each on vLLM: a bf16 push of 1.4 s became 9.4 s before the trainer side batched its work. The
+trainer quantizes each bank in one call and hands the client per-expert views of the result, so the quantize and
+snapshot launches no longer grow with the expert count; the per-expert engine loading stays, about 2 s on that model.
+Halved bytes pay where the wire dominates: many servers, or a slower network than a single node's NVLink.
+
 SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (export it before
 `docker compose up`; the SGLang compose file passes it through only when set) and `--moe-runner-backend triton`, as always: pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16
 trainer matches vLLM's (mean 0.063 nats, p99 0.57). With DeepGEMM on, SGLang requantizes a block-FP8 checkpoint's dense

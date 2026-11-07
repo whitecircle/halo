@@ -89,10 +89,12 @@ def snapshot_to_sync_device(
     buffered_bytes: int,
     budget: int,
     flush: Callable[[], None],
+    owned: bool = False,
 ) -> torch.Tensor:
     """A contiguous copy of ``weights`` on ``device`` (the source's when ``None``), after ``flush`` sent the pending
     chunk if ``weights`` would pass ``budget``. An alias would let the next optimizer step rewrite a buffered weight.
-    Async, completed by the flush. A param no broadcast can carry raises first, before it can quiesce an engine."""
+    ``owned`` says the caller made ``weights`` for this push and keeps no other reference, so a contiguous one already
+    on ``device`` is its own snapshot. Async, completed by the flush. A param no broadcast can carry raises first, before it can quiesce an engine."""
     if isinstance(weights, DTensor):
         raise TypeError(
             f"Parameter {name!r} is a DTensor: the weight-sync client broadcasts raw local storage but "
@@ -107,6 +109,8 @@ def snapshot_to_sync_device(
         )
     if buffered_bytes > 0 and buffered_bytes + weights.nbytes > budget:
         flush()
+    if owned and weights.is_contiguous() and (device is None or weights.device == device):
+        return weights
     snapshot = torch.empty_like(weights, memory_format=torch.contiguous_format, device=device)
     snapshot.copy_(weights.detach(), non_blocking=True)
     return snapshot

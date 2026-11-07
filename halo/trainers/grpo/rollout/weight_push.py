@@ -52,7 +52,7 @@ class WeightSyncSender(Protocol):
 
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None: ...
 
-    def update_named_param(self, name: str, weights: torch.Tensor) -> None: ...
+    def update_named_param(self, name: str, weights: torch.Tensor, *, owned: bool = False) -> None: ...
 
     def finish_weight_update(self) -> None: ...
 
@@ -365,7 +365,8 @@ class _HubForwarder:
             self._client.update_named_param(hub_name, tensor)
             return
         for sent_name, sent in self._fp8_plan.expand(hub_name, tensor):
-            self._client.update_named_param(sent_name, sent)
+            # A tensor the plan made is nobody else's; one it passed through still aliases the live weight.
+            self._client.update_named_param(sent_name, sent, owned=sent is not tensor)
 
 
 def _send_ep_expert_weights(

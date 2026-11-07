@@ -143,7 +143,7 @@ class WeightSyncPool:
                 if config["url"] in restarted:
                     self._reconnect(index, peer_gone=True)
 
-    def update_named_param(self, name: str, weights: torch.Tensor) -> None:
+    def update_named_param(self, name: str, weights: torch.Tensor, *, owned: bool = False) -> None:
         """Buffer one shared snapshot in every client, sending the pending chunk to every server first when it would
         overflow, as a snapshot may go only once every server sent it."""
         if not self._initialized:
@@ -157,6 +157,7 @@ class WeightSyncPool:
             buffered_bytes=self._buffered_bytes,
             budget=WEIGHT_SYNC_CHUNK_BYTES,
             flush=self._flush_chunk_to_every_server,
+            owned=owned,
         )
         for client in self._clients:
             client.buffer_param(name, snapshot)

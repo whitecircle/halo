@@ -48,6 +48,24 @@ def test_the_checkpoint_holds_what_the_push_sends_in_name_dtype_shape_and_bytes(
         assert torch.equal(stored[name].view(torch.uint8), value.contiguous().view(torch.uint8)), name
 
 
+def test_the_push_hands_the_client_the_tensors_it_made_without_a_copy_each(tmp_path):
+    """Every fp8 weight and scale is the plan's own output (``owned``), so the pool snapshots none of them; a tensor the
+    plan passed through still aliases the live weight and is copied."""
+    torch.manual_seed(0)
+    model = tiny_family_model(_FAMILIES["qwen3_5_moe"]).to(torch.bfloat16)
+    flags = {}
+
+    class Sender(RecordingSender):
+        def update_named_param(self, name, data, *, owned=False):
+            flags[name] = (owned, data.dtype)
+            super().update_named_param(name, data)
+
+    gather_and_send_weights(model, Sender(), precision="fp8_block")
+    made = {name for name, (_, dtype) in flags.items() if dtype == torch.float8_e4m3fn or name.endswith("_scale_inv")}
+    assert made and all(flags[name][0] for name in made)
+    assert not any(owned for name, (owned, _) in flags.items() if name not in made)
+
+
 def test_the_config_names_every_bf16_linear_by_exact_path_and_never_a_quantized_one(tmp_path):
     torch.manual_seed(0)
     model = tiny_family_model(_FAMILIES["qwen3_5_moe"]).to(torch.bfloat16)

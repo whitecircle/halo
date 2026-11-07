@@ -160,7 +160,7 @@ class RecordingSender:
     def scope_co_load_groups(self, module_names) -> None:
         pass
 
-    def update_named_param(self, name: str, data: torch.Tensor) -> None:
+    def update_named_param(self, name: str, data: torch.Tensor, *, owned: bool = False) -> None:
         value = data.detach().clone() if self.keep_values else None
         self.params.append(ForwardedParam(name, tuple(data.shape), isinstance(data, DTensor), value))
 

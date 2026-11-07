@@ -550,8 +550,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
         self._group_instance = None
         self._reset_transport_state()
 
-    def update_named_param(self, name: str, weights: torch.Tensor):
-        """Buffer a snapshot of one gathered param, sending the pending chunk first when it would overflow."""
+    def update_named_param(self, name: str, weights: torch.Tensor, *, owned: bool = False):
+        """Buffer a snapshot of one gathered param, sending the pending chunk first when it would overflow; ``owned``
+        marks a tensor made for this push, which needs no copy."""
         snapshot = snapshot_to_sync_device(
             name,
             weights,
@@ -559,6 +560,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
             buffered_bytes=self._buffered_bytes,
             budget=WEIGHT_SYNC_CHUNK_BYTES,
             flush=self.flush_chunk,
+            owned=owned,
         )
         self.buffer_param(name, snapshot)
 
