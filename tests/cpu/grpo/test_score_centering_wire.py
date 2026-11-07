@@ -10,9 +10,9 @@ import numpy as np
 import pytest
 import torch
 
-from halo.environments.candidate_logprobs import NO_CANDIDATE_ID, CandidateLogprobs
-from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.candidate_logprobs import NO_CANDIDATE_ID, CandidateLogprobs
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult, TurnGeneration, step_context_from_generation
 from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer

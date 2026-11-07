@@ -13,9 +13,9 @@ from accelerate.data_loader import prepare_data_loader
 from accelerate.state import GradientState
 from torch.utils.data import DataLoader
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import SOLVE_RATE_KEY
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import SOLVE_RATE_KEY
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin

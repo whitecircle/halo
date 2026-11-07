@@ -23,10 +23,10 @@ import pytest
 import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ReasoningCostArguments
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY, EnvironmentTerm, JudgeTerm, Requirement
 from halo.trainers.grpo.environmental.environmental_rules import reject_inert_reasoning_terms
 from halo.trainers.grpo.environmental.reasoning import (

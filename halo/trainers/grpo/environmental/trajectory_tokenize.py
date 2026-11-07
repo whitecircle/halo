@@ -8,12 +8,16 @@ from typing import NamedTuple
 
 import torch
 
-from halo.environments.candidate_logprobs import CandidateLogprobs
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
-from halo.environments.messages import engine_view
+from halo.environments.episodes.candidate_logprobs import CandidateLogprobs
+from halo.environments.episodes.episode_keys import (
+    CONTEXT_OVERFLOW_KEY,
+    EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
+)
+from halo.environments.episodes.messages import engine_view
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.log import warn_once
 from halo.models.introspection.context_window import (
     UNSET_MODEL_MAX_LENGTH,

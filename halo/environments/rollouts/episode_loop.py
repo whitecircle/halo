@@ -11,11 +11,11 @@ from typing import Any
 
 import backoff
 
-from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from halo.environments.episode_keys import EPISODE_ERROR_KEY, LAST_TURN_KEY
-from halo.environments.messages import EnvStep, Trajectory
-from halo.environments.reasoning_effort import EpisodeEffort
+from halo.environments.episodes.candidate_logprobs import CandidateLogprobs
+from halo.environments.episodes.episode_keys import EPISODE_ERROR_KEY, LAST_TURN_KEY
+from halo.environments.episodes.messages import EnvStep, Trajectory
+from halo.environments.episodes.reasoning_effort import EpisodeEffort
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.openai_client import TRANSIENT_CLIENT_ERROR_CODES
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_ABORT, FINISH_REASON_LENGTH

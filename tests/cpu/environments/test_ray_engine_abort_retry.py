@@ -5,9 +5,9 @@ the episode errors into a masked row."""
 
 import pytest
 
-from halo.environments.episode import TurnGeneration
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.episode_loop import TurnGeneration
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.inference.response import FINISH_REASON_ABORT
 
 _OBSERVATION = [{"role": "user", "content": "2+2?"}]

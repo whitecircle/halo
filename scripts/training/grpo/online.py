@@ -32,7 +32,7 @@ from halo.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from halo.environments.reasoning_effort import resolve_reasoning_effort
+from halo.environments.episodes.reasoning_effort import resolve_reasoning_effort
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import (
     load_reference_model_for_on_policy_grpo,

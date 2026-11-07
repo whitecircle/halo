@@ -9,7 +9,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.models import QWEN3_0_6B

@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 import halo.entrypoints.code_contests_eval as code_contests_eval
-import halo.environments.eval_runner as eval_runner
+import halo.environments.rollouts.eval_runner as eval_runner
 from halo.entrypoints.code_contests_eval import (
     FLAG_OWNED_ENV_KWARGS,
     NO_REASONING_EFFORT,
@@ -35,7 +35,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 )
 from halo.environments.tasks.coding.contest_datasets import ContestSelection
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from scripts.environments.inference.eval_code_contests import parse_args
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,

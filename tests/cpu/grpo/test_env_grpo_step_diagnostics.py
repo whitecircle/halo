@@ -12,9 +12,9 @@ import torch
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import SOLVE_RATE_KEY
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import SOLVE_RATE_KEY
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer

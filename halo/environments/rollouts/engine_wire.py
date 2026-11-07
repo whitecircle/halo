@@ -6,13 +6,13 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
-from halo.environments.candidate_logprobs import parse_sglang_candidates
-from halo.environments.episode import TurnGeneration, describe_exception
+from halo.environments.episodes.candidate_logprobs import parse_sglang_candidates
 from halo.environments.rollout_config import (
     SGLANG_BACKEND,
     VLLM_BACKEND,
     RolloutConfig,
 )
+from halo.environments.rollouts.episode_loop import TurnGeneration, describe_exception
 from halo.inference.response import FINISH_REASON_LENGTH, get_finish_reason, get_reasoning_text
 from halo.log import warn_once
 

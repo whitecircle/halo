@@ -13,10 +13,8 @@ from transformers import AutoConfig, AutoTokenizer
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.script_arguments import ModelArguments
-from halo.environments.engine_wire import reject_unenforceable_thinking_budget
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.eval_runner import trajectory_path, write_trajectories_jsonl
-from halo.environments.reasoning_effort import efforts_by_level, has_thinking_cap
+from halo.environments.episodes.reasoning_effort import efforts_by_level, has_thinking_cap
 from halo.environments.rollout_config import (
     VLLM_BACKEND,
     RolloutConfig,
@@ -24,6 +22,8 @@ from halo.environments.rollout_config import (
     resolve_reasoning_end_token_id,
     resolve_rollout_stop_token_ids,
 )
+from halo.environments.rollouts.engine_wire import reject_unenforceable_thinking_budget
+from halo.environments.rollouts.eval_runner import trajectory_path, write_trajectories_jsonl
 from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from halo.models.introspection.config_access import config_model_types
 from halo.weight_sync.registry import resolve_weight_sync_client

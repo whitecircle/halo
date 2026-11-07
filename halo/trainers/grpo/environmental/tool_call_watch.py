@@ -5,7 +5,7 @@ to compare, so the watch reads the replies: the literal a rendered call opens wi
 import logging
 import os.path
 
-from halo.environments.episode import RolloutResult
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.world_metrics import world_sums
 

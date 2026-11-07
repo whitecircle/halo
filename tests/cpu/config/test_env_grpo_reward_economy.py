@@ -20,7 +20,7 @@ import pytest
 from ruamel.yaml import YAML
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.reasoning_effort import (
+from halo.environments.episodes.reasoning_effort import (
     REASONING_BUDGET_KEY,
     REASONING_PRICE_KEY,
     EpisodeEffort,

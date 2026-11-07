@@ -16,9 +16,9 @@ from halo.entrypoints.eval_contract import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import collect_results, report
+from halo.environments.episodes.episode_keys import ANSWER_KEY
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.eval_runner import collect_results, report
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,

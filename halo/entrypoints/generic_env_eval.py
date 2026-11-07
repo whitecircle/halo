@@ -17,10 +17,10 @@ from halo.entrypoints.eval_contract import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import collect_results, reject_answerless_examples, report
+from halo.environments.episodes.episode_keys import ANSWER_KEY
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.eval_runner import collect_results, reject_answerless_examples, report
 from halo.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)

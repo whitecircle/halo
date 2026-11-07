@@ -13,7 +13,7 @@ import pytest
 import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
-from halo.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
+from halo.environments.episodes.reasoning_effort import bind_episode_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.trainers.grpo.environmental import step_batch
 from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback

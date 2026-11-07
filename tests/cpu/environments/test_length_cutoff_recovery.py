@@ -10,13 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode import TurnGeneration, step_context_from_generation
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
-from halo.environments.messages import Message, Trajectory, engine_view
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.episodes.messages import Message, Trajectory, engine_view
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.rollouts.episode_loop import TurnGeneration, step_context_from_generation
 from halo.environments.tasks.qa import ExamQAEnvironment
-from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY

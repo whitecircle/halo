@@ -1,11 +1,11 @@
 # Custom Environments
 
-Subclass `EnvironmentBase` (`halo/environments/environment_base.py`) and implement three methods, then register a factory for YAML or pass the class from Python. The base composes the tool accounting (`tool_accounting.py`), turn recovery (`turn_recovery.py`), effort profiles (`reasoning_effort.py`) and scoring (`episode_scoring.py`, `EpisodeGrade`) your class inherits.
+Subclass `EnvironmentBase` (`halo/environments/environment_base.py`) and implement three methods, then register a factory for YAML or pass the class from Python. The base composes the tool accounting (`tools/accounting.py`), turn recovery (`episodes/turn_recovery.py`), effort profiles (`episodes/reasoning_effort.py`) and scoring (`episodes/episode_scoring.py`, `EpisodeGrade`) your class inherits.
 
 ```python
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import StepOutcome
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import StepOutcome
 
 class GuessEnvironment(EnvironmentBase):
     DEFAULT_MAX_TURNS = 6

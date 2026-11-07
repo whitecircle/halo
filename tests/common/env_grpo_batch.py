@@ -8,8 +8,8 @@ import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow

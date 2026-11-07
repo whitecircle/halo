@@ -7,8 +7,8 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
-from halo.environments.eval_runner import GENERATION_ERROR_KEY
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.eval_runner import GENERATION_ERROR_KEY
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
@@ -18,7 +18,7 @@ from halo.environments.tasks.coding.code_contests_prompts import NOT_GRADED_PREF
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
 from halo.environments.tasks.coding.grading import grade_solution
 from halo.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall, ToolArgumentError
 from halo.log import info_logger
 

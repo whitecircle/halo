@@ -14,8 +14,8 @@ from dataclasses import replace
 import pytest
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.engine_wire import generation_control_fields
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import generation_control_fields
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 
 

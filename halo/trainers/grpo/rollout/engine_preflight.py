@@ -17,8 +17,8 @@ import requests
 from urllib3.util.retry import Retry
 
 from halo.env import env_positive_int
-from halo.environments.engine_wire import build_payload, capture_generation_tokens, turn_from_chat_completion
 from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
+from halo.environments.rollouts.engine_wire import build_payload, capture_generation_tokens, turn_from_chat_completion
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere

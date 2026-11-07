@@ -16,14 +16,24 @@ from typing import Any
 import httpx
 from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from halo.environments.engine_wire import (
+from halo.environments.environment_base import EnvironmentBase
+from halo.environments.episodes.episode_keys import ANSWER_KEY, CONTEXT_KEY, EPISODE_INVALID_REASON_KEY, solve_verdict
+from halo.environments.episodes.messages import Message, Trajectory, task_prompt
+from halo.environments.episodes.reasoning_effort import (
+    EpisodeEffort,
+    bind_episode_effort,
+    efforts_by_level,
+    stable_reasoning_effort,
+)
+from halo.environments.episodes.turn_recovery import EMPTY_TURNS_KEY
+from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
+from halo.environments.rollouts.engine_wire import (
     capture_request_fields,
     generation_control_fields,
     turn_from_chat_completion,
     with_cut_call_as_written,
 )
-from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode import (
+from halo.environments.rollouts.episode_loop import (
     TurnGeneration,
     describe_exception,
     generate_turn,
@@ -31,17 +41,7 @@ from halo.environments.episode import (
     is_engine_fault,
     play_episode,
 )
-from halo.environments.episode_keys import ANSWER_KEY, CONTEXT_KEY, EPISODE_INVALID_REASON_KEY, solve_verdict
-from halo.environments.messages import Message, Trajectory, task_prompt
-from halo.environments.reasoning_effort import (
-    EpisodeEffort,
-    bind_episode_effort,
-    efforts_by_level,
-    stable_reasoning_effort,
-)
-from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
-from halo.environments.tool_accounting import TOTAL_TOOL_CALLS_KEY
-from halo.environments.turn_recovery import EMPTY_TURNS_KEY
+from halo.environments.tools.accounting import TOTAL_TOOL_CALLS_KEY
 from halo.inference.openai_client import chat_completion
 from halo.inference.response import FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY

@@ -7,9 +7,9 @@ from collections import defaultdict
 
 import pytest
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_SLICES_KEY
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import EPISODE_SLICES_KEY
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
 from halo.trainers import world_metrics
 from halo.trainers.grpo.environmental import rollout_metrics

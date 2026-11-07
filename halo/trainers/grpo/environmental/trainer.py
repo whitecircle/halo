@@ -10,8 +10,8 @@ from trl.extras.profiling import profiling_context
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.diagnostics.phase_timers import Phase
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.messages import task_prompt
-from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.episodes.messages import task_prompt
+from halo.environments.episodes.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.introspection.context_window import is_bounded_length

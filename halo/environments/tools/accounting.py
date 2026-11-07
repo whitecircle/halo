@@ -5,14 +5,14 @@ import logging
 from typing import Any
 
 from halo.config_validation import require_finite, require_int
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     SANDBOX_FAULT_AGENT,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.messages import Trajectory, truncate_text
+from halo.environments.episodes.messages import Trajectory, truncate_text
 from halo.environments.sandbox.results import SandboxFault, SandboxInfraError
 from halo.environments.tools.definitions import (
     TOOL_CALL_REFUSALS,

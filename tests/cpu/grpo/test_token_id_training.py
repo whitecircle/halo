@@ -6,9 +6,9 @@ import types
 import pytest
 import torch
 
-from halo.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.engine_wire import _extract_token_ids, _extract_token_logprobs
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.models import GPT_OSS_20B

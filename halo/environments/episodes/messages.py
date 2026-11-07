@@ -4,8 +4,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
-from halo.environments.candidate_logprobs import CandidateLogprobs
-from halo.environments.episode_keys import EPISODE_INVALID_KEY
+from halo.environments.episodes.candidate_logprobs import CandidateLogprobs
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_KEY
 
 TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
 

@@ -14,7 +14,7 @@ import pytest
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
 from halo.environments.registry import build_environment
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 # The generic refusal, as the protocol prefixes it: the tool's name and the fact, no cap and no count.

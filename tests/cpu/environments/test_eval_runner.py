@@ -23,9 +23,13 @@ from openai import (
     PermissionDeniedError,
 )
 
-import halo.environments.eval_runner as eval_runner
-from halo.environments.episode_keys import EPISODE_ERROR_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
-from halo.environments.eval_runner import (
+import halo.environments.rollouts.eval_runner as eval_runner
+from halo.environments.episodes.episode_keys import EPISODE_ERROR_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.episodes.reasoning_effort import stable_reasoning_effort
+from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
+from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
+from halo.environments.rollouts.eval_runner import (
     collect_results,
     report,
     run_episode,
@@ -34,10 +38,6 @@ from halo.environments.eval_runner import (
     trajectory_path,
     write_trajectories_jsonl,
 )
-from halo.environments.messages import Message, Trajectory
-from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
-from halo.environments.reasoning_effort import stable_reasoning_effort
-from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from halo.environments.tools.toolsets import build_simulated_file_tools
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
@@ -813,7 +813,7 @@ async def test_without_a_verdict_the_threshold_decides(monkeypatch):
 
 def test_report_states_the_generation_error_count(caplog):
     lost = {"reward": None, "success": None, eval_runner.GENERATION_ERROR_KEY: "RuntimeError: gone"}
-    with caplog.at_level(logging.INFO, logger="halo.environments.eval_runner"):
+    with caplog.at_level(logging.INFO, logger="halo.environments.rollouts.eval_runner"):
         report([{"samples": [lost, {"reward": 1.0, "success": True}]}], num_samples=2, title="lost")
     assert "generation_errors=1" in caplog.records[-1].getMessage()
 
@@ -821,7 +821,7 @@ def test_report_states_the_generation_error_count(caplog):
 def test_report_states_the_invalid_count_even_when_none_is(caplog):
     clean = [{"samples": [{"reward": 1.0, "success": True}, {"reward": 0.0, "success": False}]}]
     lost = [{"samples": [{"reward": 0.0, "success": False, "error": "outage"}]}]
-    with caplog.at_level(logging.INFO, logger="halo.environments.eval_runner"):
+    with caplog.at_level(logging.INFO, logger="halo.environments.rollouts.eval_runner"):
         report(clean, num_samples=2, title="clean")
         report(lost, num_samples=1, title="lost")
     clean_log, lost_log = (r.getMessage() for r in caplog.records)

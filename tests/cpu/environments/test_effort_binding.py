@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: both rollout drivers bind an episode's reasoning effort through ONE seam.
 
-``bind_episode_effort`` (``halo/environments/reasoning_effort.py``) resolves the episode's level once and binds the
+``bind_episode_effort`` (``halo/environments/episodes/reasoning_effort.py``) resolves the episode's level once and binds the
 run's token caps every turn runs under: the reasoning cap is ``rollout_max_thinking_tokens``, else the turn
 less its answer room, the same at every level. A level's profile (``reasoning_budget``,
 ``reasoning_price``) is what the trainer's reasoning terms read; it never reaches the engine or the
@@ -25,14 +25,14 @@ from types import SimpleNamespace
 
 import pytest
 
-import halo.environments.eval_runner as eval_runner
-import halo.environments.ray_actors as ray_actors
-from halo.environments import reasoning_effort
-from halo.environments.engine_wire import generation_control_fields
-from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.messages import Trajectory
+import halo.environments.rollouts.eval_runner as eval_runner
+import halo.environments.rollouts.ray_actors as ray_actors
+from halo.environments.episodes import reasoning_effort
+from halo.environments.episodes.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.rollouts.engine_wire import generation_control_fields
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from tests.common.fake_chat_client import chat_reply
 

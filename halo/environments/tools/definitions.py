@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from halo.environments.messages import Message
+from halo.environments.episodes.messages import Message
 from halo.environments.sandbox.results import SandboxFault
 
 # What reading model-authored arguments as JSON or a Python literal raises past a syntax error: an unhashable key

@@ -2,7 +2,7 @@
 retried within the episode's turn and recovery budgets."""
 
 from halo.config_validation import present, require_int
-from halo.environments.messages import Message, StepOutcome, Trajectory
+from halo.environments.episodes.messages import Message, StepOutcome, Trajectory
 
 # The trajectory-info counters of recovered turns; a turn cut inside a tool call counts under both cut keys.
 LENGTH_CUTOFF_TURNS_KEY = "length_cutoff_turns"

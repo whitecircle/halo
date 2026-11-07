@@ -8,8 +8,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from halo.config_validation import require_finite, require_int
-from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY
-from halo.environments.messages import Trajectory, task_prompt
+from halo.environments.episodes.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY
+from halo.environments.episodes.messages import Trajectory, task_prompt
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, VALID_REASONING_EFFORTS
 
 # The effort-profile keys the trainer's reasoning terms read off an episode's level.

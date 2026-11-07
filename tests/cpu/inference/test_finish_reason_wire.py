@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from halo.environments.engine_wire import turn_from_chat_completion
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import turn_from_chat_completion
 from halo.inference.openai_client import generate_openai_response
 from halo.inference.response import (
     ENGINE_CUT_FINISH_REASONS,

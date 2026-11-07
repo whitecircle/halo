@@ -5,9 +5,9 @@ prompt plus ``max_tokens`` past the window, so a shipped 131k window at 30k per 
 
 import pytest
 
-from halo.environments import ray_actors
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_ERROR_KEY
+from halo.environments.episodes.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_ERROR_KEY
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts import ray_actors
 from tests.cpu.environments.test_effort_binding import _actor_text_turn, _actor_tool_turn, _PlainEnv
 
 _OVERFLOW = ray_actors.RolloutHTTPError(

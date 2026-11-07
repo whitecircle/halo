@@ -23,10 +23,10 @@ from halo.checkpoint.atomic import atomic_torch_save
 from halo.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from halo.checkpoint.parallel.reading import consensus_read
 from halo.diagnostics.phase_timers import Phase
-from halo.environments.episode import RolloutResult
-from halo.environments.ray_actors import RolloutManager, ray_init_kwargs
 from halo.environments.rollout_config import resolve_reasoning_end_token_id
-from halo.environments.rollout_pool import RolloutPoolPlan, resolve_rollout_pool
+from halo.environments.rollouts.episode_loop import RolloutResult
+from halo.environments.rollouts.ray_actors import RolloutManager, ray_init_kwargs
+from halo.environments.rollouts.rollout_pool import RolloutPoolPlan, resolve_rollout_pool
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure, rank_consensus
 from halo.runtime.ranks import (

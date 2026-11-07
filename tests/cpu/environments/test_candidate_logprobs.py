@@ -7,9 +7,9 @@ import base64
 import numpy as np
 import pytest
 
-from halo.environments.candidate_logprobs import parse_sglang_candidates
-from halo.environments.engine_wire import build_payload, turn_from_chat_completion
+from halo.environments.episodes.candidate_logprobs import parse_sglang_candidates
 from halo.environments.rollout_config import SGLANG_BACKEND, RolloutConfig
+from halo.environments.rollouts.engine_wire import build_payload, turn_from_chat_completion
 
 
 def _sglang_meta(ids: np.ndarray, logps: np.ndarray, null_prefix: int = 0) -> dict:

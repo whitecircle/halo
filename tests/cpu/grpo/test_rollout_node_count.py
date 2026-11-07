@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from halo.environments.rollout_pool import RolloutPoolPlan
+from halo.environments.rollouts.rollout_pool import RolloutPoolPlan
 from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 

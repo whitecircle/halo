@@ -5,9 +5,9 @@ import re
 from typing import Any
 
 from halo.config_validation import require_bool
-from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import ANSWER_KEY, COMPLETED_KEY
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeToolRegistry
 from halo.environments.tools.toolsets import build_python_tools, build_search_tools

@@ -5,7 +5,7 @@ import contextlib
 from contextlib import AbstractContextManager
 from typing import ClassVar
 
-from halo.environments.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
+from halo.environments.episodes.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
 from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin

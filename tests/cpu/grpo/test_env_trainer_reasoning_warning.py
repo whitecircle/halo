@@ -18,10 +18,10 @@ import pytest
 import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics

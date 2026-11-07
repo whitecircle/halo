@@ -13,9 +13,9 @@ from accelerate.utils import gather
 from trl.trainer.utils import pad
 
 from halo.diagnostics.phase_timers import Phase
-from halo.environments.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
+from halo.environments.episodes.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.runtime.consensus import DeferredRankFailure, rank_max, reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts

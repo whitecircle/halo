@@ -4,8 +4,12 @@ hidden test passed +weight, and a grade saying nothing about the code pays no ru
 
 import pytest
 
-from halo.environments.episode_keys import EPISODE_ERROR_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import (
+    EPISODE_ERROR_KEY,
+    EPISODE_INVALID_REASON_KEY,
+    REWARD_COMPONENTS_KEY,
+)
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.swe import SweEnvironment

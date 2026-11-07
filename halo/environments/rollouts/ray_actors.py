@@ -20,9 +20,13 @@ import aiohttp
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from halo.environments.engine_wire import build_payload, turn_from_chat_completion, with_cut_call_as_written
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode import (
+from halo.environments.episodes.episode_keys import CONTEXT_OVERFLOW_KEY
+from halo.environments.episodes.reasoning_effort import EpisodeEffort, bind_episode_effort
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import build_payload, turn_from_chat_completion, with_cut_call_as_written
+from halo.environments.rollouts.episode_loop import (
     RolloutResult,
     TurnGeneration,
     describe_exception,
@@ -31,10 +35,6 @@ from halo.environments.episode import (
     is_terminal_client_status,
     play_episode,
 )
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY
-from halo.environments.reasoning_effort import EpisodeEffort, bind_episode_effort
-from halo.environments.registry import build_environment
-from halo.environments.rollout_config import RolloutConfig
 from halo.inference.endpoints import is_loopback
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_versions import AdapterVersions
@@ -403,7 +403,7 @@ class RolloutManager:
         adapter_routes: AdapterRoutes | None = None,
     ):
         """``num_workers`` is this rank's actor count and ``max_concurrent_rollouts`` its in-flight cap, both resolved
-        by :func:`~halo.environments.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
+        by :func:`~halo.environments.rollouts.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
         round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
         ones. With ``adapter_versions`` every episode leases the newest adapter and its requests name it through
         ``adapter_model_name``, for the episode's whole length, and goes only to a server ``adapter_routes`` does not

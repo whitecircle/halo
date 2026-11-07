@@ -10,8 +10,8 @@ import pytest
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs

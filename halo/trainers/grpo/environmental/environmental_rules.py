@@ -6,8 +6,8 @@ import math
 from collections.abc import Mapping
 
 from halo.configs.grpo_environmental import ReasoningCostArguments
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.reasoning_effort import REASONING_BUDGET_KEY, REASONING_PRICE_KEY
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.reasoning_effort import REASONING_BUDGET_KEY, REASONING_PRICE_KEY
 from halo.environments.rollout_config import (
     IDENTITY_SAMPLER,
     REASONING_END_TOKEN_EXAMPLES,

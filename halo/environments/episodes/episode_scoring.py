@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from halo.config_validation import is_finite_number, require_finite
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     ANSWER_KEY,
     CONTEXT_KEY,
     EPISODE_ERROR_KEY,
@@ -18,7 +18,7 @@ from halo.environments.episode_keys import (
     REWARD_DETAILS_KEY,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.rewards.composer import RewardComposer
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
 from halo.rewards.scorers.base import ScoreResult

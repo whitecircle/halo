@@ -8,7 +8,7 @@ from dataclasses import replace
 from typing import Any
 
 from halo.config_validation import require_finite, require_int
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     ANSWER_KEY,
     COMPLETED_KEY,
     EPISODE_INVALID_KEY,
@@ -17,8 +17,8 @@ from halo.environments.episode_keys import (
     SANDBOX_FAULT_KEY,
     SOLVE_RATE_KEY,
 )
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import TRUNCATION_MARKER, StepOutcome, Trajectory
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import TRUNCATION_MARKER, StepOutcome, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated
@@ -57,7 +57,7 @@ from halo.environments.tasks.coding.submission_record import (
     is_grading_infra_outage,
 )
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_OUTCOME, find_stated_float_tolerance
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, MAGNITUDE_WHY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY, MAGNITUDE_WHY
 from halo.environments.tools.definitions import (
     NativeToolCall,
     NativeToolRegistry,

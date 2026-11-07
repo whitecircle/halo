@@ -4,7 +4,7 @@ cluster (budget cluster-wide), from one rank to 512."""
 
 import pytest
 
-from halo.environments.rollout_pool import MIN_ACTORS_PER_RANK, resolve_rollout_pool
+from halo.environments.rollouts.rollout_pool import MIN_ACTORS_PER_RANK, resolve_rollout_pool
 
 
 def _resolve(*, ranks, address, workers=256, per_node=8, rows=24, eval_rows=None, cap=None):

@@ -66,8 +66,8 @@ from halo.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_cap
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_cap
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.model_loading.parallel.frozen_models import (

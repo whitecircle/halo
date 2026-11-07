@@ -13,7 +13,7 @@ import pytest
 
 from halo.entrypoints.code_contests_eval import FLAG_OWNED_ENV_KWARGS, parse_language_flag
 from halo.entrypoints.eval_contract import reject_flag_owned_env_kwargs
-from halo.environments.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.languages import LANGUAGES
 from halo.environments.sandbox.local import LocalSubprocessSandbox
@@ -22,7 +22,7 @@ from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import SUBMISSION_AFTER_ACCEPT_REPLY
 from halo.environments.tasks.coding.grading import GradingSpec, grade_solution
 from halo.environments.tasks.coding.program_source import find_evident_language
-from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import TOOL_CALL_COUNTS_KEY
 
 _ADD = {"answer": {"tests": [{"input": "2 3\n", "output": "5\n"}], "time_limit": 1.0}}
 # Every recording run answers 5, so this answer fails each submission and none ends the episode early.

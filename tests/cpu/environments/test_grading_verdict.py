@@ -9,7 +9,7 @@ from unittest import mock
 import pytest
 
 import halo.environments.tasks.coding.grading as grading_module
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment

@@ -2,7 +2,7 @@
 """Gradio Environment Playground: interactive UI for testing GRPO environments.
 
 Episodes run against a live rollout server through the offline eval's driver
-(:func:`halo.environments.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
+(:func:`halo.environments.rollouts.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
 """
 
 import argparse
@@ -14,11 +14,11 @@ from typing import Any
 
 import gradio as gr
 
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.registry import build_environment, get_registered_environments
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from halo.inference.openai_client import build_openai_client
 from scripts.cli_arguments import add_openai_endpoint_args

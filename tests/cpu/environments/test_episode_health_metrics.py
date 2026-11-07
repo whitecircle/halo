@@ -4,7 +4,7 @@ reasoning drifting into another script."""
 
 import pytest
 
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 

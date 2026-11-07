@@ -8,11 +8,11 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-import halo.environments.engine_wire as engine_wire
+import halo.environments.rollouts.engine_wire as engine_wire
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import capture_generation_tokens, turn_from_chat_completion
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient

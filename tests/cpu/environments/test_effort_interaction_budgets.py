@@ -10,13 +10,17 @@ import re
 
 import pytest
 
-from halo.environments.episode import TurnGeneration, sampled_reasoning_tokens, step_context_from_generation
-from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.reasoning_effort import bind_episode_effort
+from halo.environments.episodes.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.reasoning_effort import bind_episode_effort
 from halo.environments.rollout_config import (
     find_reasoning_end_ids,
     resolve_reasoning_end_ids,
     resolve_reasoning_end_token_id,
+)
+from halo.environments.rollouts.episode_loop import (
+    TurnGeneration,
+    sampled_reasoning_tokens,
+    step_context_from_generation,
 )
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import (
@@ -26,7 +30,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 )
 from halo.environments.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
@@ -191,7 +195,7 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
 
-    with caplog.at_level(logging.DEBUG, logger="halo.environments.tool_accounting"):
+    with caplog.at_level(logging.DEBUG, logger="halo.environments.tools.accounting"):
         env._execute_tool_calls([call(0), call(1), call(2)], traj)
 
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []

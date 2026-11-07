@@ -14,19 +14,19 @@ import pytest
 import ray
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments import ray_actors
-from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
-from halo.environments.ray_actors import (
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts import ray_actors
+from halo.environments.rollouts.episode_loop import RolloutResult, TurnGeneration, step_context_from_generation
+from halo.environments.rollouts.ray_actors import (
     EnvironmentActor,
     RolloutHTTPError,
     RolloutManager,
     _should_giveup,
     ray_init_kwargs,
 )
-from halo.environments.registry import build_environment
-from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from halo.environments.tools.toolsets import build_math_tools

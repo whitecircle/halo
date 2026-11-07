@@ -10,7 +10,7 @@ from unittest import mock
 import pytest
 
 from halo.entrypoints.code_contests_regrade import submitted_solutions
-from halo.environments.episode_scoring import EpisodeScoringMixin
+from halo.environments.episodes.episode_scoring import EpisodeScoringMixin
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding import grading as grading_module

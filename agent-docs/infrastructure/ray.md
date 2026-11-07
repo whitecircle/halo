@@ -7,7 +7,7 @@ Ray's entire job: weight sync and gradients go over NCCL, generation is HTTP to
 [Rollout Servers](rollout-servers.md), and Ray carries only episode dispatch and results.
 
 On a single node Ray configures itself. The implementation lives in
-`halo/environments/ray_actors.py` and the trainer's `_init_async_components`; the pin is
+`halo/environments/rollouts/ray_actors.py` and the trainer's `_init_async_components`; the pin is
 `ray[default] 2.58.x` (`pyproject.toml`). Terms: [glossary](../reference/glossary.md).
 
 ## Lifecycle
@@ -69,10 +69,10 @@ exit hangs.
 - **Lazy environment build**: the env is constructed inside the actor on its first episode. A broken
   environment constructor surfaces as per-episode errors, not a startup crash.
 
-The actor and the offline eval driver (`run_episode` in `halo/environments/eval_runner.py`) play one
-episode loop, `play_episode` in `halo/environments/episode.py`: reset, the per-turn caps, the step
+The actor and the offline eval driver (`run_episode` in `halo/environments/rollouts/eval_runner.py`) play one
+episode loop, `play_episode` in `halo/environments/rollouts/episode_loop.py`: reset, the per-turn caps, the step
 context, the truncated close, the effort stamp and the cleanup. Both read replies with
-`turn_from_chat_completion` (`halo/environments/engine_wire.py`) and retry turns under `generate_turn`
+`turn_from_chat_completion` (`halo/environments/rollouts/engine_wire.py`) and retry turns under `generate_turn`
 (backoff, engine-abort re-issue). The actor keeps its own aiohttp transport and retryable-4xx rule, and
 turns a fault anywhere in the episode into a masked row.
 

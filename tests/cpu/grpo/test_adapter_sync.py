@@ -15,11 +15,11 @@ from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from halo.environments.engine_wire import build_payload
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Trajectory
-from halo.environments.ray_actors import EnvironmentActor, RolloutManager
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import build_payload
+from halo.environments.rollouts.episode_loop import RolloutResult
+from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,

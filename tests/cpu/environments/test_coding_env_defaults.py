@@ -13,9 +13,9 @@ import pytest
 from datasets import Dataset
 
 from halo.entrypoints import generic_env_eval
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
-from halo.environments.eval_runner import reject_answerless_examples
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.eval_runner import reject_answerless_examples
 from halo.environments.sandbox import factory as factory_module
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox

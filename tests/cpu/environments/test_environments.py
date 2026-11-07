@@ -10,9 +10,13 @@ import pytest
 
 from halo.configs.grpo_environmental import EnvironmentConfig
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import (
+    EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
+    REWARD_COMPONENTS_KEY,
+)
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.protocols.mcp import (
     MCP_SERVERS,
     NativeMCPClientEnvironment,
@@ -26,9 +30,9 @@ from halo.environments.protocols.react import (
     build_react_search_environment,
     parse_react_output,
 )
-from halo.environments.ray_actors import RolloutManager
 from halo.environments.registry import build_environment, get_registered_environments, register_environment
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import RolloutManager
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.grading import run_solution_against_tests
@@ -616,7 +620,7 @@ def test_react_tool_that_raises_is_logged_and_charged(caplog):
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
 
-    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tools.accounting"):
         steps = env.step(episode_ids, ['Thought: compute\nAction: calculate(expression="1+1")'])
 
     assert any("raised during execution" in record.getMessage() for record in caplog.records), (
@@ -634,7 +638,7 @@ def test_native_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog
     trajectory = Trajectory()
     trajectory.info.update(total_tool_calls=0, successful_tool_calls=0)
     call = NativeToolCall(id="1", name="submit_solution", arguments={})
-    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tools.accounting"):
         results, reward = env._execute_tool_calls([call], trajectory)
 
     assert results[0].success is False
@@ -657,7 +661,7 @@ def test_react_call_missing_a_required_argument_is_a_refusal_not_a_fault(caplog)
     )
     env = ReActEnvironment(tool_registry=registry, max_turns=5, tool_error_penalty=0.1, thought_reward=0.0)
     episode_ids, _ = env.reset(["Test"])
-    with caplog.at_level(logging.WARNING, logger="halo.environments.tool_accounting"):
+    with caplog.at_level(logging.WARNING, logger="halo.environments.tools.accounting"):
         steps = env.step(episode_ids, ["Thought: compute\nAction: calculate()"])
 
     assert steps[0].reward == pytest.approx(-0.1)

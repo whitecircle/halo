@@ -7,14 +7,14 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_SLICES_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
     SOLVE_RATE_KEY,
 )
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.samples import CUT_CALL_NOTE
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
 from halo.runtime.ranks import is_global_main_process

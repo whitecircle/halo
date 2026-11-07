@@ -19,8 +19,8 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfi
 from halo.diagnostics.phase_timers import UNACCOUNTED
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_flag, env_int, env_str
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer

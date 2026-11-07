@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import halo.environments.ray_actors as ray_actors
-from halo.environments.ray_actors import EnvironmentActor, RolloutManager
+import halo.environments.rollouts.ray_actors as ray_actors
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
 from halo.trainers.grpo.environmental.step_batch import rollout_valid_mask
 
 _CPU = torch.device("cpu")

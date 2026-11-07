@@ -9,8 +9,8 @@ import sys
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from tests.common.repo import REPO_ROOT
@@ -18,7 +18,7 @@ from tests.common.repo import REPO_ROOT
 _DRAWN_PROBLEMS = [f"problem {i}" for i in range(24)]
 # Prints the stable draw of each of ``_DRAWN_PROBLEMS`` as JSON, for a fresh interpreter under a chosen hash seed.
 _STABLE_DRAW_PROBE = (
-    "import json; from halo.environments.reasoning_effort import stable_reasoning_effort; "
+    "import json; from halo.environments.episodes.reasoning_effort import stable_reasoning_effort; "
     f"print(json.dumps([stable_reasoning_effort(p) for p in {_DRAWN_PROBLEMS!r}]))"
 )
 
