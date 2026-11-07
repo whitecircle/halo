@@ -2,7 +2,6 @@
 
 import dataclasses
 import logging
-import math
 import weakref
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
@@ -26,6 +25,8 @@ from halo.trainers.grpo.objective.logratio import (
     apply_opsm,
     compute_is_ratio,
     corrected_token_mask,
+    record_is_ratio_extreme_frac,
+    record_is_ratio_survivors,
     sampled_token_mask,
     sampler_certain_mask,
     select_mask_logratio,
@@ -201,12 +202,9 @@ class ImportanceSamplingMixin:
                     importance_sampling_ratio = torch.ones_like(importance_sampling_ratio)
                 # Unclamped mean log-ratio (nats): ~0 when conditioning matches the engine's exact prompt.
                 self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
-                clip_max = self.vllm_importance_sampling_clip_max
-                # Past the truncation point in either direction, on the raw trainer-vs-sampler ratio; the
-                # band [1/clip_max, clip_max] is empty at or below 1.
-                if clip_max > 1:
-                    extreme = corrected_mask & (logps_diff.abs() > math.log(clip_max))
-                    self._world_metrics.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), corrected_mask.sum())
+                record_is_ratio_extreme_frac(
+                    self._world_metrics, logps_diff, corrected_mask, self.vllm_importance_sampling_clip_max
+                )
             # Policy tokens the sampler emitted with probability 1 (budget-forced closes): uncorrected.
             certain = sampler_certain_mask(step.sampling_logps, step.completion_mask, step.has_sampling)
             sampled = sampled_token_mask(step.completion_mask, step.has_sampling)
@@ -285,15 +283,10 @@ class ImportanceSamplingMixin:
         world = self._world_metrics
         world.fraction("sampling/is_correction_coverage", eff_corrected.sum(), loss_mask.sum())
         if not fused:
-            # Masked ratios are zeroed in place, so a raw mean collapses as masking grows; report survivors.
-            ratios = importance_sampling_ratio[eff_corrected]
-            surviving = ratios[ratios > 0]
-            world.fraction("sampling/is_masked_frac", ratios.numel() - surviving.numel(), ratios.numel())
-            if surviving.numel():
-                world.fraction("sampling/is_ratio_mean", surviving.sum(), surviving.numel())
-                world.maximum("sampling/is_ratio_max", surviving.max())
-            # Over the weights the loss applies, masked ones as zeros: a thrown-away token is a lost sample.
-            world.effective_sample_frac("sampling/is_ess_frac", importance_sampling_ratio, eff_corrected)
+            # The effective sample share counts masked weights as zeros: a thrown-away token is a lost sample.
+            num_corrected = eff_corrected.sum()
+            num_surviving = record_is_ratio_survivors(world, importance_sampling_ratio, eff_corrected)
+            world.fraction("sampling/is_masked_frac", num_corrected - num_surviving, num_corrected)
         return eff_corrected
 
     def _update_breaker_tripped(

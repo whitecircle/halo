@@ -47,7 +47,7 @@ def test_a_supported_run_and_a_run_with_the_knob_off_pass():
 @pytest.mark.parametrize(
     ("overrides", "args", "match"),
     [
-        ({"rollout_backend": "vllm"}, {}, "65% of rollout throughput at K=16 and 80% at K=32"),
+        ({"rollout_backend": "vllm"}, {}, "single API-server process"),
         ({"train_on_sampled_tokens": False}, {}, "train_on_sampled_tokens: false"),
         ({"rollout_top_p": 0.9}, {}, r"\{'rollout_top_p': 0.9\}"),
         ({"rollout_top_k": 20}, {}, r"\{'rollout_top_k': 20\}"),

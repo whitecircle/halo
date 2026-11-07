@@ -546,7 +546,7 @@ class AsyncRolloutMixin:
 
     def _halting_counters(self) -> dict[str, Any]:
         """The streaks the run's halting rules count, which a restart would otherwise reset to a full patience budget."""
-        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        stop = self._find_early_stop_callback()
         return {
             "zero_gradient_rounds": self._zero_gradient_rounds,
             "policy_gradient_seen": self._policy_gradient_seen,
@@ -555,12 +555,16 @@ class AsyncRolloutMixin:
             "early_stop_streaks": {} if stop is None else dict(stop.streaks),
         }
 
+    def _find_early_stop_callback(self) -> GRPOEarlyStopCallback | None:
+        return next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+
     def _restore_halting_counters(self, counters: dict[str, Any]) -> None:
+        """Write the saved streaks back, the early-stop callback's included."""
         self._zero_gradient_rounds = counters["zero_gradient_rounds"]
         self._policy_gradient_seen = counters["policy_gradient_seen"]
         self._empty_rollout_steps = counters["empty_rollout_steps"]
         self._episode_error_rounds = counters["episode_error_rounds"]
-        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        stop = self._find_early_stop_callback()
         if stop is not None:
             stop.streaks = dict(counters["early_stop_streaks"])
 

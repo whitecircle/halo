@@ -18,13 +18,12 @@ from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_l
 from halo.trainers.grpo.objective.loss_inputs import (
     IMPORTANCE_RATIO_KEY,
     REF_LOGPS_KEY,
+    SAMPLING_LOGPS_KEY,
     TOKEN_MASS_SUM_KEYS,
     record_world_token_mass,
     token_mass_sums,
 )
 from halo.trainers.token_metrics import effective_loss_mask
-
-SAMPLING_LOGPS_KEY = "sampling_per_token_logps"
 
 # The positive and negative token masses; a negative-only mass is the environmental trainer's.
 _MASS_KEYS = TOKEN_MASS_SUM_KEYS[:2]

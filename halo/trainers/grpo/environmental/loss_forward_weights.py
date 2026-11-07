@@ -1,8 +1,6 @@
 """The importance weight and KL tail clamp of an aligned one-step round, built in the loss forward from its detached
 log-probs in place of the no-grad pass, with the metrics that pass fed."""
 
-import math
-
 import torch
 
 from halo.configs.grpo_environmental import ISRMaskConfig
@@ -20,6 +18,8 @@ from halo.trainers.grpo.objective.logratio import (
     clamp_ref_logps,
     compute_token_is_ratio,
     kl_clamp_counts,
+    record_is_ratio_extreme_frac,
+    record_is_ratio_survivors,
 )
 from halo.trainers.grpo.objective.loss_inputs import (
     IMPORTANCE_RATIO_KEY,
@@ -163,15 +163,8 @@ class LossForwardImportanceMixin(LossForwardSeamMixin):
         # A mean, not a fraction: a round with no loss token logs no ratio, as the pass does, not a 0.0.
         num_counted = counted.sum()
         world.mean(LOGRATIO_MEAN_KEY, (logps_diff * counted).sum() / num_counted.clamp(min=1), num_counted)
-        clip_max = self.vllm_importance_sampling_clip_max
-        if clip_max > 1:
-            extreme = counted & (logps_diff.abs() > math.log(clip_max))
-            world.fraction("sampling/is_ratio_extreme_frac", extreme.sum(), counted.sum())
-        survivors = counted & (ratio > 0)
-        num_survivors = survivors.sum()
-        world.mean("sampling/is_ratio_mean", (ratio * survivors).sum() / num_survivors.clamp(min=1), num_survivors)
-        world.maximum("sampling/is_ratio_max", (ratio * survivors).max())
-        world.effective_sample_frac("sampling/is_ess_frac", ratio, counted)
+        record_is_ratio_extreme_frac(world, logps_diff, counted, self.vllm_importance_sampling_clip_max)
+        record_is_ratio_survivors(world, ratio, counted)
 
     def _flush_loss_forward_metrics(self) -> None:
         """COLLECTIVE. The round's accumulated sums folded across the ranks and logged; a non-finite token mass raises

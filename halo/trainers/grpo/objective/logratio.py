@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from halo.configs.grpo_environmental import ISRMaskConfig
+from halo.trainers.world_metrics import WorldMetrics
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
@@ -15,6 +18,11 @@ KL_CLAMP_FRAC_KEY = "kl_clamp_frac"
 
 LOGRATIO_MEAN_KEY = "sampling/logratio_mean"
 """Metric key of the environmental trainer's mean :func:`compute_is_ratio` log-ratio over the corrected tokens."""
+
+IS_RATIO_EXTREME_FRAC_KEY = "sampling/is_ratio_extreme_frac"
+IS_RATIO_MEAN_KEY = "sampling/is_ratio_mean"
+IS_RATIO_MAX_KEY = "sampling/is_ratio_max"
+IS_ESS_FRAC_KEY = "sampling/is_ess_frac"
 
 UPDATE_SKIPPED_KEY = "sampling/update_skipped"
 """Metric key of the environmental trainer's trust-region breaker verdict over the mask stages: 1 when it skipped
@@ -118,6 +126,28 @@ def compute_is_ratio(
     corrected_mask = corrected_token_mask(sampling_logps, completion_mask, row_has_sampling)
     ratio, logps_diff = compute_token_is_ratio(recompute_logps, sampling_logps, corrected_mask, clip_max)
     return ratio, logps_diff, corrected_mask
+
+
+def record_is_ratio_extreme_frac(
+    world: WorldMetrics, logps_diff: torch.Tensor, counted: torch.Tensor, clip_max: float
+) -> None:
+    """The share of ``counted`` tokens past the truncation point in either direction, on the raw log-ratio; nothing
+    when ``clip_max`` is at or below 1, as the band ``[1/clip_max, clip_max]`` is then empty."""
+    if clip_max > 1:
+        extreme = counted & (logps_diff.abs() > math.log(clip_max))
+        world.fraction(IS_RATIO_EXTREME_FRAC_KEY, extreme.sum(), counted.sum())
+
+
+def record_is_ratio_survivors(world: WorldMetrics, ratio: torch.Tensor, counted: torch.Tensor) -> torch.Tensor:
+    """Mean and max of the ratio over the ``counted`` tokens it left unmasked (masked ratios are zeros, so a raw mean
+    collapses as masking grows), and the effective sample share over all of ``counted``. Returns the survivor count."""
+    survivors = counted & (ratio > 0)
+    num_survivors = survivors.sum()
+    surviving = torch.where(survivors, ratio, 0.0)
+    world.mean(IS_RATIO_MEAN_KEY, surviving.sum() / num_survivors.clamp(min=1), num_survivors)
+    world.maximum(IS_RATIO_MAX_KEY, surviving.max())
+    world.effective_sample_frac(IS_ESS_FRAC_KEY, ratio, counted)
+    return num_survivors
 
 
 def select_mask_logratio(

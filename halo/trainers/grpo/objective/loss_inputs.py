@@ -16,6 +16,7 @@ NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"
 # loss forward clamps them against the policy's.
 IMPORTANCE_RATIO_KEY = "importance_sampling_ratio"
 REF_LOGPS_KEY = "ref_per_token_logps"
+SAMPLING_LOGPS_KEY = "sampling_per_token_logps"
 IS_SAMPLING_LOGPS_KEY = "is_sampling_logps"
 IS_CORRECTED_MASK_KEY = "is_corrected_mask"
 IS_FORCED_ZERO_KEY = "is_forced_zero_mask"
