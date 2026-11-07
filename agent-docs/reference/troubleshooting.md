@@ -354,6 +354,7 @@ The toolkit's fused kernels, the MoE ones, the hyper-connection ones and the fle
 
 - **Flex-sliding attention** (models with sliding-window layers or heads wider than 256, such as Step-3.7 and Gemma 4, on a run resolved to `sdpa`): `HALO_FLEX_SLIDING=0` sends every attention layer back to plain SDPA.
 - **Masked matmul attention** (GLM-5 Next's DSA layers on `sdpa`, `halo/kernels/masked_softmax.py`, warmed at model load at world size above 1, otherwise compiled at the first backward): `HALO_DSA_MATMUL=0` keeps stock SDPA.
+- **Block-sparse QSA attention** (`halo/kernels/block_sparse_attention.py`, Qwen3.8-Flash-Next): `HALO_QSA_KERNEL=off` keeps the tiled SDPA path; `auto` falls back on its own where the kernel cannot run.
 - **Fused GLU** (`halo/kernels/fused_glu.py`, every expert and dense-MLP combine, grouped and loop paths alike): `HALO_FUSED_GLU=0` runs each combine through its eager form on CUDA too, and the EP layers' construction lines read `glu_combine=eager`. On CPU tensors, and for an activation the kernels do not compute exactly, the eager form runs anyway.
 - **Hyper-connection kernels** (`halo/kernels/hyper_connection.py`, GLM-5 Next and DeepSeek-V4): `HALO_HC_KERNELS=0` runs upstream's forwards unpatched.
 - **Native RMSNorm** (a Liger role): `liger_kernel_config: {rms_norm: false}` keeps the family's own norm, and `use_liger_kernel: false` turns off every Liger role.

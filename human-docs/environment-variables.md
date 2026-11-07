@@ -74,7 +74,9 @@ the default.
   `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels),
   `HALO_HC_KERNELS=0` (the hyper-connections of GLM-5 Next and DeepSeek-V4),
-  `HALO_DSA_MATMUL=0` (the DSA layers of GLM-5 Next on SDPA) or
+  `HALO_DSA_MATMUL=0` (the DSA layers of GLM-5 Next on SDPA),
+  `HALO_QSA_KERNEL=off` (the QSA layers of Qwen3.8-Flash-Next on tiled SDPA),
+  `HALO_GATED_RESIDUAL_KERNELS=0` (its hyper-connections, once turned on) or
   `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
   also needed for `full_determinism` on more than one GPU).
 - **A weight sync that raises naming `HALO_WEIGHT_SYNC_CHUNK_MB`:** set it above the

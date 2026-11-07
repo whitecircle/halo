@@ -525,6 +525,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_masked_matmul_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
     ),
+    "kernels/test_block_sparse_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_gated_residual_kernels.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
+    "kernels/test_fla_l2norm_constant_nb.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
     "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_reward_scorer_flex_sliding.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "gemma4"), timeout=900
@@ -1219,6 +1222,12 @@ MANIFEST: dict[str, TestSpec] = {
             "--mode packed",
             "--mode gc",
             "--family qwen3_5_moe_text --mode packed",
+            "--mode ep2 --gated-residual",
+            "--mode etp2 --gated-residual",
+            "--mode packed --gated-residual",
+            "--mode gc --gated-residual",
+            "--mode ep2 --qsa-kernel",
+            "--mode gc --qsa-kernel --gated-residual",
         ),
     ),
     "parallelism/pp/test_pp_qwen4_exp_resume.py": TestSpec(
@@ -2836,6 +2845,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_attention_implementations.py",
     "profiling/benchmark_collators.py",
     "profiling/benchmark_convergence.py",
+    "profiling/benchmark_gated_residual.py",
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",

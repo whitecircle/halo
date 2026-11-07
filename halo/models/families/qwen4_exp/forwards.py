@@ -20,9 +20,16 @@ from halo.models.families.qwen4_exp.documents import (
     ngram_rows,
     reject_unmarked_documents,
 )
+from halo.models.families.qwen4_exp.gated_residual import (
+    inject_block,
+    patch_qwen4_exp_gated_residual,
+    uses_gated_residual_kernels,
+    warm_gated_residual,
+)
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
-from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward
+from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, warm_qsa_kernels
 from halo.models.introspection.config_access import set_config_field_run_scoped
+from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
@@ -41,6 +48,9 @@ def apply_qwen4_exp_patches(model_config) -> None:
     """Stamps ``model_config`` (run-scoped) so its n-gram tables build in host memory."""
     patch_qwen4_exp_ngram_embedding()
     patch_qwen4_exp_document_forwards()
+    patch_qwen4_exp_gated_residual()
+    register_kernel_warmup(warm_qsa_kernels)
+    register_kernel_warmup(warm_gated_residual)
     set_config_field_run_scoped(model_config, EXTERNAL_TABLES_STAMP, True)
 
 
@@ -158,18 +168,19 @@ def _document_decoder_forward(
     layer: nn.Module, hidden_states, position_embeddings, attention_mask, conv_mask, ple_input_ids, **kwargs
 ) -> torch.Tensor:
     """Upstream's decoder layer for an uncached row, its PLE kept inside the ``seq_idx`` documents."""
-    hidden_states = hidden_states + document_ple_forward(
-        layer.ple, hidden_states, ple_input_ids, kwargs.get("seq_idx"), conv_mask
-    )
+    if layer.ple is not None:
+        hidden_states = hidden_states + document_ple_forward(
+            layer.ple, hidden_states, ple_input_ids, kwargs.get("seq_idx"), conv_mask
+        )
     hidden_states, hyper_input, injection_weights = layer.attn_hyper_connection(hidden_states)
     if layer.layer_type == "linear_attention":
         hidden_states = layer.linear_attn(hidden_states, cache_params=None, attention_mask=conv_mask, **kwargs)
     else:
         hidden_states, _ = layer.self_attn(hidden_states, position_embeddings, attention_mask=attention_mask, **kwargs)
-    hidden_states = hyper_input + (hidden_states.unsqueeze(-2) * injection_weights.unsqueeze(-1)).flatten(-2)
+    hidden_states = inject_block(hyper_input, hidden_states, injection_weights)
     hidden_states, hyper_input, injection_weights = layer.mlp_hyper_connection(hidden_states)
     hidden_states = layer.mlp(hidden_states)
-    return hyper_input + (hidden_states.unsqueeze(-2) * injection_weights.unsqueeze(-1)).flatten(-2)
+    return inject_block(hyper_input, hidden_states, injection_weights)
 
 
 def patch_qwen4_exp_document_forwards() -> None:
@@ -281,7 +292,10 @@ def patch_qwen4_exp_document_forwards() -> None:
         ple_input_ids=None,
         **kwargs,
     ):
-        if self.ple is None or not _is_document_call(attention_mask, past_key_values):
+        # A layer without PLE keeps upstream's body unless the kernels take its injections.
+        if (self.ple is None and not uses_gated_residual_kernels()) or not _is_document_call(
+            attention_mask, past_key_values
+        ):
             return original_layer(
                 self,
                 hidden_states,

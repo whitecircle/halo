@@ -5,12 +5,13 @@ from collections.abc import Callable
 
 import torch.nn as nn
 
-from halo.kernels.fla_launch import apply_fla_launch_options
+from halo.kernels.fla_launch import apply_fla_launch_options, warm_fla_l2norm
 from halo.log import warn_once
 from halo.model_loading.buffer_repair import apply_buffer_repairs
 from halo.model_loading.external_tables import attach_external_tables
 from halo.models.introspection.config_access import text_config
 from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers, embedding_module
+from halo.models.kernel_warmups import warm_registered_kernels
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,12 @@ def finalize_loaded_model(
 ) -> None:
     """Post-load repair every load path must run. transformers 5 re-materializes non-persistent buffers as
     ``torch.empty_like``, and a remote-code ``_init_weights`` without ``super()`` never repairs them: a zero inv_freq
-    degenerates RoPE to NoPE at a plausible loss. Also sets FLA launch options and attaches external tables."""
+    degenerates RoPE to NoPE at a plausible loss. Also sets FLA launch options, attaches external tables and warms
+    the kernels the model's family registered and the q/k norm of its gated-delta-rule layers (rank-local, unfenced)."""
     apply_buffer_repairs(model)
     _retie_shared_weights(model)
     _warn_on_idle_mtp_tail(model)
     apply_fla_launch_options()
     attach_external_tables(model, weights_dir, checkpoint_name)
+    warm_registered_kernels(model)
+    warm_fla_l2norm(model)

@@ -1,30 +1,54 @@
-"""Tiled Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, memory linear in the row length,
-selecting the blocks transformers' dense indexer selects. A checkpoint's recompute attends the first pass's."""
+"""Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, memory linear in the row length, selecting the
+blocks transformers' dense indexer selects. Attention runs on the block-sparse kernel or, as reference and fallback, on
+masked SDPA tiles. A checkpoint's recompute attends the first pass's selection."""
 
+import logging
 import math
 from dataclasses import dataclass
+from typing import Literal, get_args
 
 import torch
 import torch.nn.functional as F
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 from torch.autograd.function import once_differentiable
+from triton.errors import TritonError
 
+from halo.env import env_positive_int, env_str
+from halo.kernels.block_sparse_attention import (
+    SUPPORTED_DTYPES,
+    block_sparse_attention,
+    block_sparse_unsupported,
+    warm_block_sparse_kernels,
+)
 from halo.kernels.fp32_matmul import to_autocast_dtype
+from halo.log import warn_once
+from halo.models.attention.selection import flash_attention_deterministic
 from halo.models.gradient_checkpointing import active_recompute_scope
 from halo.models.row_documents import RowDocument, row_documents
+from halo.runtime.ranks import is_global_main_process
+
+logger = logging.getLogger(__name__)
 
 QUERY_TILE = 128
 _SELECTION_SLOT = "qsa_selection"
+QSAKernelMode = Literal["auto", "on", "off"]
+_QSA_KERNEL_DEFAULT: QSAKernelMode = "off"
+_logged_tiled_reasons: set[str] = set()
+# Layouts whose kernels failed to build at warm-up under ``auto``, with the error: they run the tiled path.
+_failed_warmups: dict[tuple, str] = {}
 
 
 @dataclass(frozen=True)
 class QSASelection:
     """``blocks[row, query]`` holds block indices counted from the document's first key, ``-1`` in unused slots; the
-    keys after the last complete block are always attended."""
+    keys after the last complete block are always attended. ``spans[row, query]`` is ``(first, visible)``: the
+    document's first unpadded key and how many keys the query sees from it, which the kernel reads in place of
+    ``documents``. A query's valid slots are a prefix of ``blocks``, ``min(visible // ratio, block_topk)`` long."""
 
     documents: tuple[RowDocument, ...]
     blocks: torch.Tensor
+    spans: torch.Tensor
     compress_ratio: int
 
 
@@ -37,6 +61,14 @@ def _block_scores(queries: torch.Tensor, pooled: torch.Tensor) -> torch.Tensor:
 def _rescore_like_transformers(query: torch.Tensor, pooled: torch.Tensor, count: int, block_topk: int) -> torch.Tensor:
     """One query against its ``count`` complete blocks, so a tie at the cutoff resolves in transformers' order."""
     return _block_scores(query, pooled[:count]).topk(min(block_topk, count), dim=0).indices
+
+
+def _indexer_chunk(blocks: int, index_heads: int) -> int:
+    """Queries scored per matmul: whole tiles whose fp32 per-head products, their ReLU and the scores fit
+    ``HALO_QSA_INDEXER_MIB``."""
+    per_query = 4 * blocks * (2 * index_heads + 1)
+    budget = env_positive_int("HALO_QSA_INDEXER_MIB", 256) << 20
+    return QUERY_TILE * max(1, budget // (QUERY_TILE * per_query))
 
 
 def _select_tile(
@@ -80,7 +112,10 @@ def _compute_selection(
     most_blocks = max((doc.key_stop - doc.key_start) // ratio for doc in documents)
     index_dtype = torch.int16 if most_blocks <= torch.iinfo(torch.int16).max else torch.int32
     blocks = torch.full((batch, length, block_topk), -1, dtype=index_dtype, device=hidden_states.device)
+    spans = torch.zeros(batch, length, 2, dtype=torch.int32, device=hidden_states.device)
     for doc in documents:
+        spans[doc.row, doc.start : doc.stop, 0] = doc.key_start
+        spans[doc.row, doc.start : doc.stop, 1] = doc.visible_keys(doc.start, doc.stop, hidden_states.device)
         count = (doc.key_stop - doc.key_start) // ratio
         if count == 0:
             continue
@@ -92,19 +127,20 @@ def _compute_selection(
         ).squeeze(1)
         # Read back once per document, as a host read per tile would stall the device per tile.
         tied = torch.zeros(doc.stop - doc.start, dtype=torch.bool, device=hidden_states.device)
-        for lo in range(doc.start, doc.stop, QUERY_TILE):
-            hi = min(lo + QUERY_TILE, doc.stop)
-            tile_blocks = doc.tile_keys(hi) // ratio
-            if tile_blocks == 0:
+        chunk = _indexer_chunk(count, queries.shape[2])
+        for lo in range(doc.start, doc.stop, chunk):
+            hi = min(lo + chunk, doc.stop)
+            chunk_blocks = doc.tile_keys(hi) // ratio
+            if chunk_blocks == 0:
                 continue
             complete = doc.visible_keys(lo, hi, hidden_states.device) // ratio
-            selected, tile_tied = _select_tile(queries[doc.row, lo:hi], pooled, complete, tile_blocks, block_topk)
+            selected, chunk_tied = _select_tile(queries[doc.row, lo:hi], pooled, complete, chunk_blocks, block_topk)
             blocks[doc.row, lo:hi] = selected.to(index_dtype)
-            tied[lo - doc.start : hi - doc.start] = tile_tied
+            tied[lo - doc.start : hi - doc.start] = chunk_tied
         for query in (tied.nonzero().flatten() + doc.start).tolist():
             complete = doc.tile_keys(query + 1) // ratio
             blocks[doc.row, query] = _rescore_like_transformers(queries[doc.row, query], pooled, complete, block_topk)
-    return QSASelection(documents=documents, blocks=blocks, compress_ratio=ratio)
+    return QSASelection(documents=documents, blocks=blocks, spans=spans, compress_ratio=ratio)
 
 
 def select_qsa_keys(
@@ -145,18 +181,20 @@ def _tile_mask(blocks: torch.Tensor, visible: torch.Tensor, keys: int, ratio: in
 def _attend_tile(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, mask: torch.Tensor, scale: float
 ) -> torch.Tensor:
-    """Each K/V head's query group is folded into the query axis, so K/V are never repeated."""
+    """Each K/V head's query group is folded into the query axis, so K/V are never repeated. A query whose mask row is
+    empty reads zeros: SDPA's output for a fully masked row is undefined, so such a row attends every key and is zeroed."""
     heads, tile, dim = query.shape
     kv_heads, keys, _ = key.shape
     groups = heads // kv_heads
+    live = mask.any(dim=-1)
     output = F.scaled_dot_product_attention(
         query.reshape(1, kv_heads, groups * tile, dim),
         key.unsqueeze(0),
         value.unsqueeze(0),
-        attn_mask=mask.expand(groups, tile, keys).reshape(1, 1, groups * tile, keys),
+        attn_mask=(mask | ~live.unsqueeze(-1)).expand(groups, tile, keys).reshape(1, 1, groups * tile, keys),
         scale=scale,
     )
-    return output.reshape(heads, tile, dim)
+    return output.reshape(heads, tile, dim) * live.unsqueeze(-1).to(output.dtype)
 
 
 def _tiles(selection: QSASelection, device: torch.device):
@@ -234,6 +272,101 @@ def tiled_qsa_attention(
     return output.transpose(1, 2)
 
 
+def qsa_kernel_mode() -> QSAKernelMode:
+    mode = env_str("HALO_QSA_KERNEL", _QSA_KERNEL_DEFAULT)
+    if mode not in get_args(QSAKernelMode):
+        raise ValueError(f"HALO_QSA_KERNEL={mode!r} is not one of {get_args(QSAKernelMode)}")
+    return mode
+
+
+def qsa_kernel_refusal(
+    dtype: torch.dtype, device: torch.device, head_dim: int, heads: int, kv_heads: int, ratio: int
+) -> str | None:
+    """Why the block-sparse kernel cannot serve this layer under this run, else ``None``."""
+    if torch.are_deterministic_algorithms_enabled() or flash_attention_deterministic():
+        return (
+            "the kernel accumulates dK and dV with fp32 atomics, which deterministic mode (full_determinism) forbids"
+        )
+    failure = _failed_warmups.get((dtype, device, head_dim, heads, kv_heads, ratio))
+    if failure is not None:
+        return f"the kernel failed to build for this layer at load: {failure}"
+    return block_sparse_unsupported(dtype, device, head_dim, heads, kv_heads, ratio)
+
+
+def resolve_qsa_kernel(
+    dtype: torch.dtype, device: torch.device, head_dim: int, heads: int, kv_heads: int, ratio: int
+) -> bool:
+    """Whether attention runs on the block-sparse kernel: ``HALO_QSA_KERNEL=on`` raises ``ValueError`` where it cannot,
+    ``auto`` takes the tiled path for the reason it logs once on rank 0, ``off`` always takes it."""
+    mode = qsa_kernel_mode()
+    if mode == "off":
+        return False
+    reason = qsa_kernel_refusal(dtype, device, head_dim, heads, kv_heads, ratio)
+    if reason is None:
+        return True
+    if mode == "on":
+        raise ValueError(
+            f"HALO_QSA_KERNEL=on cannot run: {reason}. Set HALO_QSA_KERNEL=auto to fall back to the tiled path, or off."
+        )
+    if is_global_main_process():
+        warn_once(logger, _logged_tiled_reasons, reason, "QSA runs on the tiled path: %s.", reason)
+    return False
+
+
+def qsa_attention(
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, selection: QSASelection, scale: float
+) -> torch.Tensor:
+    """``[batch, length, heads, dim]`` from the block-sparse kernel or, where :func:`resolve_qsa_kernel` says so, the
+    tiled path."""
+    query, key, value = to_autocast_dtype(query, key, value)
+    if resolve_qsa_kernel(
+        query.dtype, query.device, query.shape[-1], query.shape[1], key.shape[1], selection.compress_ratio
+    ):
+        return block_sparse_attention(
+            query, key, value, selection.blocks, selection.spans, selection.compress_ratio, scale
+        ).transpose(1, 2)
+    return tiled_qsa_attention(query, key, value, selection, scale)
+
+
+def qsa_layouts(model: nn.Module) -> set[tuple[torch.device, int, int, int, int]]:
+    """``(device, query heads, K/V heads, head_dim, compress_ratio)`` of each QSA layer of ``model``."""
+    return {
+        (
+            next(module.parameters()).device,
+            module.config.num_attention_heads,
+            module.config.num_key_value_heads,
+            module.head_dim,
+            module.indexer.compress_ratio,
+        )
+        for module in model.modules()
+        if isinstance(module, qwen4_exp_modeling.Qwen4ExpTextAttention)
+    }
+
+
+def warm_qsa_kernels(model: nn.Module) -> None:
+    """Compile the block-sparse kernels the model's QSA layers run, so no step compiles one. Rank-local, no collective;
+    bf16 and fp16 are both warmed because the run dtype is not known here. A layout the kernel cannot build runs the
+    tiled path under ``HALO_QSA_KERNEL=auto``, logged once, and raises ``RuntimeError`` under ``on``."""
+    if qsa_kernel_mode() == "off" or not torch.cuda.is_available():
+        return
+    for device, heads, kv_heads, head_dim, ratio in sorted(qsa_layouts(model), key=str):
+        if device.type != "cuda":
+            continue
+        for dtype in SUPPORTED_DTYPES:
+            if not resolve_qsa_kernel(dtype, device, head_dim, heads, kv_heads, ratio):
+                continue
+            try:
+                warm_block_sparse_kernels(device, dtype, heads, kv_heads, head_dim, ratio)
+            except TritonError as error:
+                if qsa_kernel_mode() == "on":
+                    raise RuntimeError(
+                        f"HALO_QSA_KERNEL=on: the block-sparse kernel failed to build for {dtype} with {heads} query "
+                        f"heads, {kv_heads} K/V heads and head_dim {head_dim}: {error}. Set HALO_QSA_KERNEL=auto to "
+                        "fall back to the tiled path, or off."
+                    ) from error
+                _failed_warmups[(dtype, device, head_dim, heads, kv_heads, ratio)] = str(error)
+
+
 def qsa_attention_forward(
     module: nn.Module,
     hidden_states: torch.Tensor,
@@ -245,12 +378,12 @@ def qsa_attention_forward(
 ) -> tuple[torch.Tensor, None]:
     """``attention_mask`` is the 2-D padding mask or ``None`` and ``seq_idx`` marks the documents."""
     if past_key_values is not None:
-        raise ValueError("Tiled QSA serves uncached rows; a call with past_key_values takes the stock forward.")
+        raise ValueError("QSA serves uncached rows; a call with past_key_values takes the stock forward.")
     if module.training and module.attention_dropout:
-        raise ValueError(f"Tiled QSA applies no attention dropout, got attention_dropout={module.attention_dropout}")
+        raise ValueError(f"QSA applies no attention dropout, got attention_dropout={module.attention_dropout}")
     if attention_mask is not None and attention_mask.ndim != 2:
         raise ValueError(
-            f"Tiled QSA reads documents from seq_idx and padding from a 2-D mask, got a {attention_mask.ndim}-D "
+            f"QSA reads documents from seq_idx and padding from a 2-D mask, got a {attention_mask.ndim}-D "
             "attention_mask: pass the model the per-layer-type mask mapping."
         )
     selection = select_qsa_keys(module.indexer, hidden_states, position_embeddings, seq_idx, attention_mask)
@@ -263,6 +396,6 @@ def qsa_attention_forward(
     value = module.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
     cos, sin = position_embeddings
     query, key = qwen4_exp_modeling.apply_rotary_pos_emb(query, key, cos, sin)
-    output = tiled_qsa_attention(query, key, value, selection, module.scaling)
+    output = qsa_attention(query, key, value, selection, module.scaling)
     output = output.reshape(*input_shape, -1) * torch.sigmoid(gate)
     return module.o_proj(output), None
