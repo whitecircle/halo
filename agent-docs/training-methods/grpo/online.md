@@ -112,6 +112,7 @@ TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the mod
 - **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
 - **TRL's `use_liger_kernel` is off:** it routes the log-probs through TRL's chunked LM head, past the family's head transform. Model-level Liger kernels still apply.
 - **`text_only_model` is refused** by the script: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would miss a multimodal server's `model.language_model.layers.*`.
+- **Token budget refused at load:** `reject_unsupported_model` sizes `per_device_train_batch_size × (max_prompt_length + max_completion_length)` against DeepEP's wire index and, on a group spanning NVLink domains (cross-node EP), the proxy-GIN ceiling before any weight is read ([Dispatch wire-index limit](../../infrastructure/deepep.md#dispatch-wire-index-limit)).
 - **Refused at construction** (online and async GRPO): `use_adaptive_entropy` (a sharded resume does not restore its coefficient), a non-zero `entropy_coef` with `use_chunked_grpo_logprobs` (the chunked sweep returns a detached entropy), and an `IterableDataset` on the DP-sharded loader that TP, ETP and pre-sharded datasets use.
 
 ## GRPO objective for verifiable rewards
@@ -169,7 +170,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 
 ### Weight sync
 
-Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). The script refuses a family no engine sync reaches right after init (`reject_unsyncable_config`), and `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
+Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). The script refuses a family no engine sync reaches right after init (`reject_unsyncable_config`), and `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)); the first push is checked against the trainer's own log-probs ([first-push parity probe](../../infrastructure/rollout-servers.md#first-push-parity-probe)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 
@@ -211,7 +212,7 @@ The weight sync folds each adapter, native expert-LoRA included, into its base w
 
 ## Data flow and batch construction
 
-Each row becomes a group of `num_generations` completions. Under TP and ETP every rank takes its group leader's completions; TRL's `rollout_func` is refused there. The collator is TRL's row collator (left-padded prompts, right-padded completions, never packed), hence no CP.
+Each row becomes a group of `num_generations` completions. Under TP and ETP every rank takes its group leader's completions; TRL's `rollout_func` is refused there. The collator is TRL's row collator (left-padded prompts, right-padded completions), hence no CP. Rows stay padded; `packed_microbatch_tokens` packs them into flattened bins as a separate step ([Packed micro-batches](#packed-micro-batches)).
 
 **Counting.** Rollouts per optimizer step = `per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`. `per_device_train_batch_size` counts completions, not prompts; with the completion length, it sets per-forward memory.
 
@@ -237,6 +238,10 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
+- `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
+- `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
+- Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, SDPG's teacher forward included) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
+- A first-push parity warning in the log when the served model scores a fixed row more than 1 nat per position away from the trainer; `HALO_WEIGHT_SYNC_PARITY_PROBE=raise` stops the run, `off` skips it ([probe](../../infrastructure/rollout-servers.md#first-push-parity-probe)).
 - `advantage/net_token_mass` every round (an early sign of entropy drift) and, under `balance_token_mass`, `advantage/token_mass_scale`; the sign reads as the entropy push only under a token-sum loss such as `dapo`.
 
 `early_stop_entropy_band` and `early_stop_logratio_gap` work as on [Async GRPO](../async-grpo/monitoring.md#early-stop); the gap needs `vllm_importance_sampling_correction` and reads TRL's `sampling/sampling_logp_difference/mean` (a mean absolute difference), so a threshold read off an Async GRPO run does not carry over. `save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits, `_eval` suffix for evaluation).
