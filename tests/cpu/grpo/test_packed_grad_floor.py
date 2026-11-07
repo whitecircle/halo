@@ -60,6 +60,21 @@ def test_a_rescaled_window_is_not_identical():
     assert not _verdict(1.0, unscaled_scale=1.5).rescale_changes_nothing
 
 
+def test_an_unscaled_gap_within_the_repeat_noise_changes_nothing():
+    packed = [torch.randn(64, generator=torch.Generator().manual_seed(0))]
+    repeat = [packed[0] + 2e-2 * _unit_noise(1, packed[0])]
+    unscaled = [packed[0] + 2e-2 * _unit_noise(2, packed[0])]
+    assert judge_packed_grads(packed, packed, packed, unscaled, None, repeat=repeat).rescale_changes_nothing
+    assert not judge_packed_grads(packed, packed, packed, unscaled, None).rescale_changes_nothing
+
+
+def test_a_rescale_past_the_repeat_noise_is_caught():
+    packed = [torch.randn(64, generator=torch.Generator().manual_seed(0))]
+    repeat = [packed[0] + 2e-2 * _unit_noise(1, packed[0])]
+    unscaled = [1.5 * packed[0]]
+    assert not judge_packed_grads(packed, packed, packed, unscaled, None, repeat=repeat).rescale_changes_nothing
+
+
 def test_without_a_reference_the_order_floor_is_the_floor():
     gradient = [torch.randn(64, generator=torch.Generator().manual_seed(0))]
     reorder = [gradient[0] + 1e-2 * _unit_noise(1, gradient[0])]

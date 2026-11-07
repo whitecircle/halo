@@ -105,8 +105,9 @@ def _check_window(model, reference_model, batch: dict, budget: int, checks: dict
     loss_f, grads_f = _window(model, batch, seed=FLOOR_SEED)
     loss_p, grads_p = _window(model, batch, plan=plan)
     unscaled = _window(model, batch, plan=plan, scaled=False)[1]
+    repeat = _window(model, batch, plan=plan)[1]
     grads_ref = None if reference_model is None else _window(reference_model, batch)[1]
-    verdict = judge_packed_grads(grads_s, grads_f, grads_p, unscaled, grads_ref)
+    verdict = judge_packed_grads(grads_s, grads_f, grads_p, unscaled, grads_ref, repeat=repeat)
     metrics.update(loss_per_row=loss_s, loss_order_floor=loss_f, loss_packed=loss_p, **verdict.metrics)
     metrics.update(bins=plan.num_bins, rows_per_bin=plan.rows_per_bin)
     log_all(

@@ -17,9 +17,11 @@ GRAD_COSINE_MIN = 0.999
 # (rows_per_bin * slots / round_rows, 1.5) moves the gradient by about 1 - 1/1.5 = 0.33, 7.5x the ~0.045 bf16 floor
 # measured against the fp32 reference; a bf16-noise error cannot reach 5x its own measured level.
 CONTROL_MARGIN = 5
-# Two bf16 windows over identical rows and plan must agree to this relative L2: the kernels are deterministic, so
-# only a rescale of the loss can open a gap wider than summation-order noise.
+# Two bf16 windows over identical rows and plan must agree to this relative L2, or to REPEAT_MARGIN times the gap
+# between two runs of the same packed window where the backward is not deterministic (FlashAttention's varlen dq
+# accumulates with atomics): a rescale the loss should not carry moves the gradient by about 0.33.
 IDENTICAL_WINDOW_TOLERANCE = 1e-3
+REPEAT_MARGIN = 3
 
 
 @dataclass(frozen=True)
@@ -30,6 +32,7 @@ class PackedGradVerdict:
     cosine: float
     unscaled_err: float
     unscaled_vs_packed: float
+    repeat_vs_packed: float
 
     @property
     def metrics(self) -> dict[str, float]:
@@ -40,6 +43,7 @@ class PackedGradVerdict:
             "grad_cosine": self.cosine,
             "grad_unscaled": self.unscaled_err,
             "grad_unscaled_vs_packed": self.unscaled_vs_packed,
+            "grad_repeat_vs_packed": self.repeat_vs_packed,
         }
 
     @property
@@ -58,7 +62,7 @@ class PackedGradVerdict:
 
     @property
     def rescale_changes_nothing(self) -> bool:
-        return self.unscaled_vs_packed <= IDENTICAL_WINDOW_TOLERANCE
+        return self.unscaled_vs_packed <= max(IDENTICAL_WINDOW_TOLERANCE, REPEAT_MARGIN * self.repeat_vs_packed)
 
 
 def build_fp32_reference(model: torch.nn.Module, *, world_size: int) -> torch.nn.Module:
@@ -87,12 +91,15 @@ def judge_packed_grads(
     packed: list[torch.Tensor],
     unscaled: list[torch.Tensor],
     reference: list[torch.Tensor] | None,
+    *,
+    repeat: list[torch.Tensor] | None = None,
 ) -> PackedGradVerdict:
     """The bf16 per-row window's distance from the fp32 per-row ``reference`` is the floor; the packed window must stay
     within :data:`GRAD_FLOOR_FACTOR` of it. ``reorder`` (a per-row window in another shuffle) is reported as the order
     floor. Every error, the unscaled control's included, is measured against the same anchor (the fp32 ``reference``);
-    ``unscaled_vs_packed`` is the direct distance of the two packed gradients. Without a ``reference`` (an arm with no
-    fp32 model) the order floor is the floor and the per-row window the reference."""
+    ``unscaled_vs_packed`` is the direct distance of the two packed gradients and ``repeat_vs_packed`` that of a second
+    run of the packed window (0 without ``repeat``). Without a ``reference`` (an arm with no fp32 model) the order floor
+    is the floor and the per-row window the reference."""
     order_floor = relative_l2(_by_index(reorder), _by_index(per_row))
     anchor = _by_index(per_row if reference is None else reference)
     return PackedGradVerdict(
@@ -102,4 +109,5 @@ def judge_packed_grads(
         cosine=cos_sim(_flat(packed), _flat(per_row), label="packed vs per-row gradient"),
         unscaled_err=relative_l2(_by_index(unscaled), anchor),
         unscaled_vs_packed=relative_l2(_by_index(unscaled), _by_index(packed)),
+        repeat_vs_packed=0.0 if repeat is None else relative_l2(_by_index(repeat), _by_index(packed)),
     )
