@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from halo.models.config_access import get_config_field, text_config
@@ -34,8 +35,18 @@ class HeadTransform:
             return weight, bias
         return weight[: self.vocab_size], None if bias is None else bias[: self.vocab_size]
 
-    def project(self, head: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
-        logits = head(self.scale_hidden(hidden))
+    def project(
+        self,
+        head: nn.Module,
+        hidden: torch.Tensor,
+        *,
+        weight: torch.Tensor | None = None,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Logits of ``hidden``; ``weight`` and ``bias`` stand in for ``head``'s own parameters, for a caller holding
+        gathered values while the module's are sharded."""
+        scaled = self.scale_hidden(hidden)
+        logits = head(scaled) if weight is None else F.linear(scaled, weight, bias)
         if self.vocab_size is not None:
             logits = logits[..., : self.vocab_size]
         if self.logit_scale is not None:

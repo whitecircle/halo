@@ -9,6 +9,7 @@ from halo.configs.distillation import SDPGArguments
 from halo.data.collators.self_distill import format_field_names, hint_literal_bytes, privileged_hint
 from halo.log import warn_once
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.distillation.divergences import pooled_token_mean, projected_token_divergence, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
@@ -209,10 +210,17 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 model, unwrapped, self._teacher_hidden_states, unwrapped, *prefix, *completion
             )
         transform, head = self._head_transform(unwrapped), unwrapped.get_output_embeddings()
+        self._assert_output_embeddings_unadapted(unwrapped, head)
+        # The redirected forward has ended, so under ZeRO-3 the root group is resharded and the module's weight is a
+        # DTensor. The values are gathered once here and held by `project`, which the backward recompute reuses, until
+        # the autograd graph frees it; a plain parameter (ZeRO-2) is used as it is.
+        with torch.no_grad():
+            weight = materialize_dtensor(head.weight).detach()
+            bias = materialize_dtensor(getattr(head, "bias", None))
 
         def project(hidden: torch.Tensor) -> torch.Tensor:
             with torch.no_grad():
-                return transform.project(head, hidden)
+                return transform.project(head, hidden, weight=weight, bias=bias)
 
         return torch.cat(
             [
@@ -223,8 +231,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
 
     def _teacher_hidden_states(self, unwrapped_model, prefix_ids, prefix_mask, completion_ids, completion_mask):
         """``[B, C, H]`` at the positions predicting the completion, run inside the redirected forward where FSDP2 has
-        gathered the root parameters. The head is applied later, in token chunks, from the gathered root group
-        FSDP2 keeps unsharded until backward."""
+        gathered the root parameters. The head is applied later, in token chunks, from its gathered values."""
         return self._backbone_hidden_state(
             unwrapped_model,
             torch.cat([prefix_ids, completion_ids], dim=1),

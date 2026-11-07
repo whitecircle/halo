@@ -3,7 +3,9 @@
 A real tokenizer is needed for the hint encoding; the test skips when none is cached.
 """
 
+import gc
 import types
+import weakref
 from collections import defaultdict
 from unittest import mock
 
@@ -11,13 +13,18 @@ import pytest
 import torch
 from datasets import Dataset
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
+import halo.trainers.distillation.sdpg as sdpg_module
 from halo.configs.distillation import SDPGArguments
 from halo.kernels import logprobs
+from halo.models import head_transform
 from halo.trainers.distillation.divergences import pooled_token_mean, reverse_kl_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -403,12 +410,49 @@ def test_the_chunked_teacher_never_builds_a_batch_by_completion_by_vocab_plane(m
     """Every head call of the term sees one row's chunk of tokens, never the batch's whole completion window."""
     monkeypatch.setattr(logprobs, "LOGIT_CHUNK_ELEMENTS", 4 * TINY_QWEN3_CONFIG["vocab_size"])
     trainer, model, inputs, student = _opd_parts(True, torch.float32)
+    trainer._head_transform(model)  # resolved once, its probe forward is not the term's
     shapes = []
-    model.lm_head.register_forward_hook(lambda _m, _i, out: shapes.append(tuple(out.shape)))
+    linear = head_transform.F.linear
+
+    monkeypatch.setattr(
+        head_transform.F, "linear", lambda *args: shapes.append(tuple((out := linear(*args)).shape)) or out
+    )
     trainer._opd_token_divergence(model, inputs, student)
     batch, width = inputs["completion_ids"].shape
+    shapes = [shape for shape in shapes if shape[-1] == TINY_QWEN3_CONFIG["vocab_size"]]
     assert shapes and all(len(shape) == 2 and shape[0] <= 4 for shape in shapes), shapes
     assert sum(shape[0] for shape in shapes) == batch * width, "every teacher token is projected exactly once"
+
+
+def _resharded_head_worker(rank: int, nprocs: int) -> None:
+    """ZeRO-3 leaves the head a sharded DTensor once the redirected forward ends; the teacher still projects."""
+    trainer, model, inputs, student = _opd_parts(True, torch.float32)
+    expected = _opd_parts(False, torch.float32)[0]._opd_token_divergence(model, inputs, student)
+    mesh = init_device_mesh("cpu", (nprocs,))
+    head = model.lm_head
+    head.weight = nn.Parameter(distribute_tensor(head.weight.detach(), mesh, [Shard(0)]))
+    seen = []
+    handle = head.register_forward_hook(lambda *_: seen.append(1))
+    gathered = []
+    gather = sdpg_module.materialize_dtensor
+    with mock.patch.object(
+        sdpg_module,
+        "materialize_dtensor",
+        lambda t: (out := gather(t), t is None or gathered.append(weakref.ref(out)))[0],
+    ):
+        got = trainer._opd_token_divergence(model, inputs, student)
+    torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
+    assert not seen, "the module's own forward ran against its sharded weight"
+    handle.remove()
+    (student[0].sum() * 0 + got.sum()).backward()
+    assert head.weight.grad is None, "the teacher side must take no head gradient"
+    del got, student
+    gc.collect()
+    assert gathered[0]() is None, "the gathered head outlived the OPD term's backward"
+
+
+def test_the_chunked_teacher_projects_from_gathered_values_when_the_head_is_resharded():
+    run_gloo_ranks(_resharded_head_worker, 2, 2)
 
 
 if __name__ == "__main__":
