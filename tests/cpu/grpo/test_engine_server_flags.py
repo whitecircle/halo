@@ -98,6 +98,15 @@ def test_a_repacking_moe_backend_is_refused_on_a_moe_and_passes_on_a_dense_model
     _verify(server, client_cls, is_moe=False)
 
 
+@_ENGINES_FIXTURE
+def test_a_quantized_server_is_refused_on_every_model(engine):
+    server, client_cls = engine
+    server.quantization = "fp8"
+    for is_moe in (True, False):
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, client_cls, is_moe=is_moe)
+
+
 @pytest.mark.parametrize(
     ("flag", "other"),
     [("dtype", "float16"), ("quantization", "fp8"), ("moe_backend", "auto"), ("reasoning_parser", "other")],

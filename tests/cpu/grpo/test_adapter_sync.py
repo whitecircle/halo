@@ -778,17 +778,6 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
         fake.close()
 
 
-def test_a_quantized_server_is_refused():
-    fake = FakeSGLangServer()
-    try:
-        fake.lora = dict(_LORA)
-        fake.quantization = "fp8"
-        with pytest.raises(ValueError, match="base is quantized"):
-            _verify(fake)
-    finally:
-        fake.close()
-
-
 def test_a_server_launched_for_adapters_is_accepted():
     fake = FakeSGLangServer()
     try:

@@ -303,7 +303,7 @@ auto-selected Blackwell MoE backends (`FLASHINFER_TRTLLM` / `CUTLASS`) repack ex
 the `flashinfer_trtllm*`, aiter and quantized runners repack after the load, and an update into them is
 not validated.
 
-The same rule excludes quantized serving: serve bf16. For gpt-oss that means the **BF16** checkpoint,
+The same rule excludes quantized serving: serve bf16. The startup preflight refuses a server that reports quantized weights. For gpt-oss that means the **BF16** checkpoint,
 not the stock MXFP4 `openai/gpt-oss-20b`, whose expert loader drops every synced bf16 expert weight
 while the biases land, silently, leaving only a slow log-ratio drift. Checkpoint layout and expert
 un-fuse rules: [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).

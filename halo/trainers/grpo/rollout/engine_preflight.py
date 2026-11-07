@@ -104,6 +104,12 @@ def _server_flag_refusals(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
             f"{client_cls.IMAGE_REMEDY}"
         )
+    if flags.quantization:
+        refusals.append(
+            f"its weights are quantized ({flags.quantization}), while every push writes bf16 checkpoint-layout "
+            f"tensors in place, which a quantized loader stores transformed, so each update would land wrong behind a "
+            f"200. Serve the bf16 checkpoint."
+        )
     if needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
             f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "
@@ -160,8 +166,6 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
         )
     if facts.get("speculative_algorithm"):
         refusals.append("it serves with speculative decoding, whose draft runs without the adapter.")
-    if flags.quantization:
-        refusals.append(f"its base is quantized ({flags.quantization}), not the trainer's.")
     if int(facts.get("dp_size") or 1) != 1:
         refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
     remedy = (
