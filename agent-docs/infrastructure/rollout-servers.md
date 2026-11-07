@@ -543,6 +543,7 @@ server that does not answer is logged as unread.
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
 | No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM reasoning cap | A cap answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
 | `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
+| `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |
 | A server that, timed on a 64-token completion (the better of two, one idle sequence), would need over twice `request_timeout` to decode a full `rollout_max_tokens` turn (`verify_turn_deadline`); over half of it only warns, since a loaded server decodes slower per sequence | A timed-out episode trains as a masked row, so the batch keeps only the episodes that finished fast ([Monitoring](../training-methods/async-grpo/monitoring.md#halts)) |
 | A server whose prompt does not move with the reasoning level, where the trainer's does (`verify_server_chat_template`) | Its template ignores the level, and the reasoning terms charge for a contract the model never read ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)) |
 
@@ -554,6 +555,33 @@ their hub keys. One-to-one renames stream tensor by tensor; a tensor a reverse c
 fused `gate_up_proj` the hub stores split, a vision tower's fused q/k/v) is held until its sources are
 complete, since the engine loads one tensor at a time. Held dense tensors are bounded at
 `HALO_WEIGHT_SYNC_CHUNK_MB`, and experts are not: the gather keeps them alive until each layer's flush anyway.
+
+### Candidate log-probs
+
+`score_centering_top_k: K` asks the rollout engine for the K most probable tokens' log-probs at every generated token,
+which the objective subtracts as a tail mass. It needs `rollout_backend: sglang` and `train_on_sampled_tokens: true`.
+vLLM is refused: it returns one JSON object per candidate through a single-threaded API server, which cost 65% of rollout
+throughput at K=16 and 80% at K=32 (Qwen3.5-35B-A3B, 256 x 1,024 tokens, one B300; two API servers recover only
+1.72x). SGLang's flat arrays cost nothing beyond the run noise (about 4%) at either K, and online GRPO rolls out through
+vLLM only.
+
+The request is the chat route's `top_logprobs: K` with `return_meta_info` and `return_flat_raw_output_top_logprobs`; the
+reply carries `meta_info.output_top_logprobs_{val,idx}_flat_b64` (`float32` and `int32`, with their `_dtype` fields),
+`output_top_logprobs_shape` and `output_top_logprobs_null_prefix`, whose unfilled leading rows read as unused. A turn
+becomes two arrays, `int32` ids with `-1` for an unused slot and `float32` log-probs with `-inf`, carried to the batch as
+`[rows, completion_width, K]` beside the completions. SGLang's float32 minimum reads as probability zero.
+
+The candidates are the temperature-scaled softmax over the whole vocabulary, and the sampled token's own log-prob equals
+its candidate entry exactly. That holds only for a plain sampler (`top_p` 1, `top_k` off, `min_p` 0, no repetition
+penalty): every request states each filter explicitly, since the engine otherwise fills an omitted one from the model's
+`generation_config.json` (Qwen3.5: `top_k` 20, `top_p` 0.95), and the run refuses any cut or penalty before its server
+preflights. With `SGLANG_RETURN_ORIGINAL_LOGPROB` set the values are pre-temperature, which the sampler probe refuses at a
+temperature other than 1. A one-token startup probe refuses an image that does not return the arrays, or returns
+candidates that are no distribution holding the sampled token at its own log-prob.
+
+A flat reply is 0.17 MB per 1,000 tokens at K=16 and 0.33 MB at K=32, decoded and parsed in under 1 ms. A turn that
+returns no candidates, or fewer rows than sampled tokens, fails the batch on every rank, as does a row re-tokenized from
+the render.
 
 ### Which families each engine serves
 

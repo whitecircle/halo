@@ -67,7 +67,7 @@ changes.
 | `halo/trainers/grpo/environmental/async_rollouts.py` | `agent-docs/training-methods/async-grpo/setup.md` |
 | `halo/trainers/grpo/{microbatch_plan,packed_forward,packed_rounds,packed_rules,rank_balance,row_order}.py`, `halo/trainers/grpo/environmental/{packed_rounds,row_order}.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/environmental/{trainer,environmental_rules}.py` | `agent-docs/training-methods/async-grpo/{setup,objective,reasoning}.md`, `agent-docs/reference/trainer-architecture.md` |
-| `halo/trainers/grpo/environmental/{step_batch,importance_sampling}.py` | `agent-docs/training-methods/async-grpo/{objective,monitoring}.md` |
+| `halo/trainers/grpo/environmental/{step_batch,importance_sampling,centered_scoring}.py` | `agent-docs/training-methods/async-grpo/{objective,monitoring}.md` |
 | `halo/trainers/grpo/environmental/loss_forward_weights.py` | `agent-docs/training-methods/async-grpo/{performance,objective,monitoring}.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/environmental/{routing_replay,rollout_routing}.py` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
 | `halo/trainers/grpo/environmental/row_order.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
@@ -204,7 +204,7 @@ changes.
 | `halo/environments/tasks/coding/`, `halo/environments/tasks/qa.py` | `agent-docs/training-methods/async-grpo/environments/tasks/{swe,qa-benchmarks}.md`, `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/*.md` |
 | `halo/environments/sandbox/` | `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 | `halo/environments/tools/` | `agent-docs/training-methods/async-grpo/environments/protocols/native-tool-use.md`, `agent-docs/training-methods/async-grpo/environments/tasks/swe.md` |
-| `halo/environments/engine_wire.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
+| `halo/environments/{engine_wire,candidate_logprobs}.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
 | `halo/environments/rollout_config.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `halo/environments/eval_runner.py` | `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/environments/tools/web_search.py` | `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`, `agent-docs/reference/configuration-reference.md` |

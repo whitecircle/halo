@@ -195,6 +195,10 @@ class ImportanceSamplingMixin:
                     step.has_sampling,
                     self.vllm_importance_sampling_clip_max,
                 )
+                if self._score_centering is not None:
+                    # Score centering weighs the token itself, so the ratio shrinks to the 0/1 keep the stages below
+                    # draw: a masked token drops its centering term with its score.
+                    importance_sampling_ratio = torch.ones_like(importance_sampling_ratio)
                 # Unclamped mean log-ratio (nats): ~0 when conditioning matches the engine's exact prompt.
                 self._world_metrics.fraction(LOGRATIO_MEAN_KEY, logps_diff.sum(), corrected_mask.sum())
                 clip_max = self.vllm_importance_sampling_clip_max

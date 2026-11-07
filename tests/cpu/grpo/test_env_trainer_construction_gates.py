@@ -66,6 +66,8 @@ _INIT_GATES = (
     "_arm_update_breaker",
     "reject_unread_grpo_knobs",
     "reject_prefetch_past_retry_budget",
+    "reject_unsupported_score_centering",
+    "reject_unsupported_score_centering_loss",
 )
 
 
@@ -80,7 +82,7 @@ def _called_names(fn: ast.FunctionDef) -> set[str]:
     return names
 
 
-_INIT_PHASES = ("__init__", "_configure_rollout_state", "_configure_importance_sampling")
+_INIT_PHASES = ("__init__", "_configure_rollout_state", "_configure_importance_sampling", "_configure_score_centering")
 
 
 def _method_source(name: str) -> ast.FunctionDef:

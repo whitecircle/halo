@@ -281,7 +281,7 @@ def test_the_construction_warm_up_leaves_no_expert_load_for_the_first_bias_updat
     host._get_per_token_logps_and_entropies = score
     host._finish_fsdp2_backward = lambda _model: None
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr("halo.trainers.grpo.packed_rounds.barrier", lambda: None)
+    monkeypatch.setattr("halo.trainers.grpo.logprob_scoring.barrier", lambda: None)
     host._warm_packed_row_kernels()
     assert router.expert_load_counter is None
 

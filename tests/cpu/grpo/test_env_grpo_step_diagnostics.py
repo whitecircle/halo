@@ -123,6 +123,7 @@ def _is_host(clip_max: float):
         types.SimpleNamespace(
             vllm_importance_sampling_clip_max=clip_max,
             _is_correction=True,
+            _score_centering=None,
             _isr_mask_config=types.SimpleNamespace(any_mask_active=False),
             _metrics={"train": defaultdict(list)},
         )

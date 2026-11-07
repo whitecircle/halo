@@ -289,20 +289,51 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
 
 
 def reject_unsupported_score_centering(async_config) -> None:
-    """Score centering reads the candidates the sampler returns beside each sampled token, which SGLang sends as flat
-    arrays."""
+    """Score centering reads the candidates SGLang returns beside each sampled token as the plain sampler's full
+    distribution, through the chunked head, and owns the token's importance weight."""
     top_k = async_config.score_centering_top_k
     if top_k is None:
         return
     reasons = []
     if async_config.rollout_backend != SGLANG_BACKEND:
         reasons.append(
-            f"rollout_backend: {async_config.rollout_backend!r} (vLLM returns each candidate as one JSON object through "
-            "a single API-server process, measured at 65% of rollout throughput at K=16 and 80% at K=32, where "
+            f"rollout_backend: {async_config.rollout_backend!r} (vLLM returns each candidate as one JSON object "
+            "through a single API-server process, measured at 65% of rollout throughput at K=16 and 80% at K=32, where "
             "SGLang's flat arrays cost nothing beyond run noise; serve the rollouts with SGLang)"
         )
     if not async_config.train_on_sampled_tokens:
         reasons.append("train_on_sampled_tokens: false (the candidates align with the sampled token ids)")
+    sources = async_config.rollout_field_sources()
+    plain = {sources[name]: value for name, value in IDENTITY_SAMPLER.items() if name != "temperature"}
+    moved = {name: current for name, value in plain.items() if (current := getattr(async_config, name)) != value}
+    if moved:
+        reasons.append(f"a filtered sampler {moved} (the candidates' log-probs are the unfiltered distribution's)")
+    if not async_config.use_chunked_grpo_logprobs:
+        reasons.append("use_chunked_grpo_logprobs: false (only the chunked head scores the candidates)")
+    if async_config.loss_forward_importance_weights:
+        reasons.append("loss_forward_importance_weights (it builds the token ratio score centering replaces)")
+    if async_config.balance_token_mass:
+        reasons.append("balance_token_mass (it reweights by the token ratio score centering replaces)")
+    if async_config.isr_engine_reference:
+        reasons.append("isr_engine_reference (its mask log-ratio comes from an engine re-score score centering skips)")
+    if reasons:
+        raise ValueError(f"score_centering_top_k={top_k} is not supported with: {'; '.join(reasons)}.")
+
+
+def reject_unsupported_score_centering_loss(top_k: int, args, *, misaligned_accumulation: bool) -> None:
+    """Score centering's surrogate carries a REINFORCE-style gradient through TRL's per-token coefficient over one
+    on-policy pass."""
+    reasons = []
+    if args.num_iterations > 1:
+        reasons.append(f"num_iterations={args.num_iterations} (TRL's PPO clip would replace the centered gradient)")
+    if misaligned_accumulation:
+        reasons.append(
+            "gradient_accumulation_steps straddling a generation round (later micro-batches run off-policy)"
+        )
+    if args.beta != 0.0:
+        reasons.append(f"beta={args.beta} (the surrogate's gradient would leak into TRL's KL term)")
+    if args.importance_sampling_level != "token":
+        reasons.append(f"importance_sampling_level={args.importance_sampling_level!r} (the centering is per token)")
     if reasons:
         raise ValueError(f"score_centering_top_k={top_k} is not supported with: {'; '.join(reasons)}.")
 

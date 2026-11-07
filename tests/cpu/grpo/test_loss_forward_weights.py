@@ -363,6 +363,7 @@ def _pass_metrics(in_pass: dict, fused: dict) -> dict[str, float]:
     host = types.SimpleNamespace(
         vllm_importance_sampling_clip_max=_CLIP,
         _is_correction=True,
+        _score_centering=None,
         _isr_mask_config=types.SimpleNamespace(any_mask_active=False),
         _metrics={"train": defaultdict(list)},
     )

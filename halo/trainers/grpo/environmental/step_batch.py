@@ -32,6 +32,7 @@ from halo.trainers.grpo.objective.logratio import (
 from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
     IMPORTANCE_RATIO_KEY,
+    IS_SAMPLING_LOGPS_KEY,
     REF_LOGPS_KEY,
     expand_traj_to_rows,
     gathered_num_items,
@@ -251,6 +252,7 @@ class StepBatchMixin:
         if step.topk_ids is not None:
             # Row-first, so TRL's shuffle and slice and the packed slot view move them with the completion positions.
             result[TOPK_IDS_KEY], result[TOPK_LOGPS_KEY] = step.topk_ids, step.topk_logps
+            result[IS_SAMPLING_LOGPS_KEY] = step.sampling_logps
         if scores.captured_routing is not None:
             rollout_routing = self._rollout_routing = scores.captured_routing
         if rollout_routing is not None:
@@ -306,7 +308,8 @@ class StepBatchMixin:
         return num_dummy_rows
 
     def _stack_rows(self, rows: list[TurnRow], device: torch.device) -> StepRows:
-        """Sampling log-probs under the IS correction only, a config-derived gate every rank takes alike."""
+        """Sampling log-probs under the IS correction or score centering only, a config-derived gate every rank takes
+        alike."""
         prompt_ids = pad([row.prompt_ids for row in rows], padding_value=self.pad_token_id, padding_side="left")
         completion_ids = pad(
             [row.completion_ids for row in rows], padding_value=self.pad_token_id, padding_side="right"
@@ -319,8 +322,9 @@ class StepBatchMixin:
         tool_mask = pad([row.loss_mask for row in rows], padding_value=0, padding_side="right")
         real = pad([torch.ones_like(row.loss_mask) for row in rows], padding_value=0, padding_side="right")
         completion_mask = real & tool_mask.any(dim=1, keepdim=True)
+        k = self.async_config.score_centering_top_k
         sampling_logps = has_sampling = None
-        if self._is_correction:
+        if self._is_correction or k is not None:
             # A turn missing sampling log-probs keeps ratio ≡ 1 for that row alone: has_sampling masks its zeros.
             sampling_logps = pad(
                 [
@@ -334,7 +338,7 @@ class StepBatchMixin:
             )
             has_sampling = torch.tensor([row.sampling_logps is not None for row in rows], device=device)
         topk_ids = topk_logps = None
-        if k := self.async_config.score_centering_top_k:
+        if k is not None:
             topk_ids, topk_logps = _stack_candidates(rows, completion_ids.size(1), k, device)
         return StepRows(
             prompt_ids=prompt_ids,

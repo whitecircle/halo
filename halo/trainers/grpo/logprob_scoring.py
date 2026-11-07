@@ -28,9 +28,11 @@ from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.modality import config_declares_multimodality
 from halo.models.module_tree import embedding_module, find_module_path, hidden_state_backbone
+from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.segment_markers import segment_markers_for
 from halo.models.unwrapping import base_transformers_model
+from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
@@ -174,6 +176,9 @@ class LogprobScoringMixin:
     _row_span_mismatches: torch.Tensor | None = None
     # Set by :meth:`_scoring_with_row_spans`: the host spans of the one mask the next scoring call reads.
     _given_row_spans: tuple[list[tuple[int, int]], list[int]] | None = None
+    # Set by :meth:`_scoring_with_candidates`: the ``[rows, completion_width, K]`` candidate ids the next scoring call
+    # also scores, so its log-probs come back ``[rows, completion_width, 1 + K]`` with the sampled token first.
+    _armed_candidate_ids: torch.Tensor | None = None
 
     @contextmanager
     def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
@@ -229,6 +234,28 @@ class LogprobScoringMixin:
         if verdict is not None and self.accelerator.is_main_process:
             logger.warning(verdict[1])
 
+    def _warm_scoring_pass(self, input_ids: torch.Tensor, logits_to_keep: int, *, compute_entropy: bool) -> None:
+        """COLLECTIVE. One train-mode forward and backward of ``input_ids`` through the trainer's own scorer, so the
+        kernels it launches compile and load here, on every rank, and not between a MoE dispatch and its combine in
+        the first step. The gradients it leaves are dropped, and the expert loads it counted are reset so no bias
+        update sees its tokens."""
+        model = self.model
+        mask = torch.ones_like(input_ids)
+        was_training = model.training
+        model.train()
+        try:
+            logps, _, _ = self._get_per_token_logps_and_entropies(
+                model, input_ids, mask, logits_to_keep, compute_entropy=compute_entropy
+            )
+            logps.sum().backward()
+            self._finish_fsdp2_backward(model)
+        finally:
+            model.zero_grad(set_to_none=True)
+            model.train(was_training)
+            for router in iter_balancing_routers(model):
+                router.expert_load_counter = None
+        barrier()
+
     @contextmanager
     def _reference_policy(self) -> Iterator[nn.Module]:
         """The frozen ``ref_model`` when the trainer holds one, else the PEFT policy with its adapters disabled."""
@@ -247,6 +274,28 @@ class LogprobScoringMixin:
             yield
         finally:
             self._given_row_spans = None
+
+    @contextmanager
+    def _scoring_with_candidates(self, candidate_ids: torch.Tensor) -> Iterator[None]:
+        """The block's chunked scoring forward also scores ``candidate_ids`` (ids below 0 are unused slots)."""
+        self._armed_candidate_ids = candidate_ids
+        try:
+            yield
+        finally:
+            self._armed_candidate_ids = None
+
+    def _scored_targets(self, completion_ids: torch.Tensor, rows: slice) -> torch.Tensor:
+        """``completion_ids`` ``[b, T]``, or ``[b, T, 1 + K]`` with the armed candidates of ``rows`` after them."""
+        candidates = self._armed_candidate_ids
+        if candidates is None:
+            return completion_ids
+        candidates = candidates[rows]
+        if candidates.shape[:2] != completion_ids.shape:
+            raise ValueError(
+                f"The candidate ids are {tuple(candidates.shape)} for completions {tuple(completion_ids.shape)}: "
+                "the rollout's candidates do not line up with its completion tokens."
+            )
+        return torch.cat([completion_ids.unsqueeze(-1), candidates.to(completion_ids.dtype)], dim=-1)
 
     def _chunked_completion_logps(
         self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
@@ -301,10 +350,12 @@ class LogprobScoringMixin:
         for start in range(0, input_ids.size(0), batch_size):
             ids = input_ids[start : start + batch_size]
             mask = attention_mask[start : start + batch_size]
+            rows = slice(start, start + batch_size)
             completion_ids = ids[:, -logits_to_keep:]
+            targets = self._scored_targets(completion_ids, rows)
             if not dense:
                 hidden = self._backbone_hidden_state(unwrapped_model, ids, mask, logits_to_keep)  # (b, ltk, H)
-                logps, entropies = sweep(hidden, completion_ids, compute_entropy)
+                logps, entropies = sweep(hidden, targets, compute_entropy)
                 all_logps.append(logps)
                 all_entropies.append(entropies)
                 if self._completion_logits_sink is not None:
@@ -312,12 +363,11 @@ class LogprobScoringMixin:
                 continue
             # Dense rows: one sweep over every row's real completion tokens, the window's zero tail masked
             # downstream, so the head pays the rows' lengths, not the padded width, and runs once.
-            rows = slice(start, start + batch_size)
             hidden, widths = self._dense_last_hidden_state(
                 unwrapped_model, ids, mask, logits_to_keep, spans=(spans[rows], completions[rows])
             )
-            targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
-            logps, entropies = sweep(hidden, targets, compute_entropy)
+            row_targets = torch.cat([row_ids[:width] for row_ids, width in zip(targets, widths, strict=True)])
+            logps, entropies = sweep(hidden, row_targets, compute_entropy)
             all_logps.append(_completion_window(logps.split(widths), logits_to_keep))
             all_entropies.append(
                 _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None
@@ -339,7 +389,7 @@ class LogprobScoringMixin:
         widths = [max(n_comp, 1) for n_comp in n_comps]
         rows = build_packed_rows(input_ids, spans, widths, segment_markers_for(unwrapped_model.config))
         hidden = self._packed_hidden_state(unwrapped_model, rows)
-        completion_ids = input_ids[:, -logits_to_keep:]
+        completion_ids = self._scored_targets(input_ids[:, -logits_to_keep:], slice(None))
         targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
         logps, entropies = sweep(hidden, targets, compute_entropy)
         return (

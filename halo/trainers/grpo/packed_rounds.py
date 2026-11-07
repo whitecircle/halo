@@ -11,8 +11,6 @@ from typing import ClassVar
 import torch
 
 from halo.models.attention.selection import effective_attn_implementation
-from halo.models.moe.balancing import iter_balancing_routers
-from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan, build_slot_layout, plan_round_microbatches
 from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY
@@ -83,27 +81,13 @@ class PackedRoundMixin:
             )
 
     def _warm_packed_row_kernels(self) -> None:
-        """COLLECTIVE. A two-document packed forward and backward through the trainer's own scorer, so the varlen
-        attention and the delta-rule and conv variants a packed call launches compile and load here, on every rank,
-        and not between a MoE dispatch and its combine in the first step. The gradients it leaves are dropped, and the
-        expert loads it counted are reset so no bias update sees its tokens."""
+        """COLLECTIVE. A two-document packed forward and backward, so the varlen attention and the delta-rule and conv
+        variants a packed call launches compile and load at construction (:meth:`_warm_scoring_pass`)."""
         if not torch.cuda.is_available():
             return
-        model, device, keep = self.model, self.accelerator.device, 4
-        ids = torch.zeros(2, 2 * keep, dtype=torch.long, device=device)
-        mask = torch.ones_like(ids)
-        was_training = model.training
-        model.train()
-        try:
-            logps, _, _ = self._get_per_token_logps_and_entropies(model, ids, mask, keep, compute_entropy=False)
-            logps.sum().backward()
-            self._finish_fsdp2_backward(model)
-        finally:
-            model.zero_grad(set_to_none=True)
-            model.train(was_training)
-            for router in iter_balancing_routers(model):
-                router.expert_load_counter = None
-        barrier()
+        keep = 4
+        ids = torch.zeros(2, 2 * keep, dtype=torch.long, device=self.accelerator.device)
+        self._warm_scoring_pass(ids, keep, compute_entropy=False)
 
     def _plan_round(self, attention_mask: torch.Tensor, num_dummy_rows: int = 0) -> MicrobatchPlan:
         """COLLECTIVE. The round's real rows planned into bins, the world's bin count and widest bin agreed."""

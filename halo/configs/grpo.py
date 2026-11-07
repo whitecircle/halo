@@ -3,10 +3,11 @@
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, differs_from_default, present, require_finite, require_int
 from halo.models.fp8_rollout import RolloutWeightPrecision
 
 _RLRRMode = Literal["hrr", "prr"]
+ScoreCenteringWeights = Literal["none", "tis", "mis"]
 
 
 def rlrr_arg_name(config_field: str) -> str:
@@ -241,22 +242,97 @@ class GRPOEarlyStopArguments(ValidatedConfig):
         return False
 
 
+@dataclass(frozen=True)
+class ScoreCenteringConfig:
+    """What a run with score centering on reads, and its knobs' defaults: ``top_k`` candidates per generated token, the
+    importance weight ``weights`` and its MIS bounds. The TIS clip is the trainer's
+    ``vllm_importance_sampling_clip_max``."""
+
+    top_k: int
+    weights: ScoreCenteringWeights = "tis"
+    mis_low: float = 0.5
+    mis_high: float = 5.0
+
+
 @dataclass
 class ScoreCenteringArguments(ValidatedConfig):
-    """Score centering (arXiv:2609.20807, App. A) of the environmental GRPO objective."""
+    """Score centering (arXiv:2609.20807, App. A) of the environmental GRPO objective; the knobs below
+    ``score_centering_top_k`` are refused while it is unset."""
 
     score_centering_top_k: int | None = field(
         default=None,
         metadata={
-            "help": "Candidate log-probs the SGLang rollout server returns per generated token for score centering; "
-            "unset = none are requested. Needs rollout_backend: sglang and train_on_sampled_tokens; refused at "
-            "construction otherwise."
+            "help": "Candidates the SGLang rollout server returns per generated token for score centering, which "
+            "subtracts their score-function mean from each token's gradient so a sampler-vs-trainer mismatch cannot "
+            "drift the policy on a constant reward. Unset = off; 16 to 32 suits most runs. Needs rollout_backend: "
+            "sglang, train_on_sampled_tokens, use_chunked_grpo_logprobs, a plain sampler, num_iterations 1 and beta 0; "
+            "refused at construction otherwise. "
+            "See agent-docs/training-methods/async-grpo/objective.md#score-centering."
         },
+    )
+    score_centering_weights: ScoreCenteringWeights = field(
+        default=ScoreCenteringConfig.weights,
+        metadata={
+            "help": "Importance weight f of the score-centered gradient: 'none' (f = 1), 'tis' (truncated at "
+            "vllm_importance_sampling_clip_max) or 'mis' (kept inside [score_centering_mis_low, "
+            "score_centering_mis_high], else zero). Replaces the token ratio of the IS correction, which feeds the "
+            "isr_* masks only. See agent-docs/training-methods/async-grpo/objective.md#score-centering."
+        },
+    )
+    score_centering_mis_low: float = field(
+        default=ScoreCenteringConfig.mis_low,
+        metadata={"help": "Lower bound of the 'mis' weight on the trainer-to-sampler ratio (0 < low <= high)."},
+    )
+    score_centering_mis_high: float = field(
+        default=ScoreCenteringConfig.mis_high,
+        metadata={"help": "Upper bound of the 'mis' weight on the trainer-to-sampler ratio."},
     )
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        require_int(type(self).__name__, ge=1, **present(score_centering_top_k=self.score_centering_top_k))
+        owner = type(self).__name__
+        require_int(owner, ge=1, **present(score_centering_top_k=self.score_centering_top_k))
+        if self.score_centering_weights not in get_args(ScoreCenteringWeights):
+            raise ValueError(
+                f"score_centering_weights must be one of {get_args(ScoreCenteringWeights)}, "
+                f"got {self.score_centering_weights!r}"
+            )
+        require_finite(
+            owner,
+            gt=0,
+            score_centering_mis_low=self.score_centering_mis_low,
+            score_centering_mis_high=self.score_centering_mis_high,
+        )
+        if self.score_centering_mis_low > self.score_centering_mis_high:
+            raise ValueError(
+                f"score_centering_mis_low ({self.score_centering_mis_low}) must not exceed "
+                f"score_centering_mis_high ({self.score_centering_mis_high})"
+            )
+        bounds_set = differs_from_default(self, "score_centering_mis_low") or differs_from_default(
+            self, "score_centering_mis_high"
+        )
+        if self.score_centering_top_k is None and (
+            bounds_set or differs_from_default(self, "score_centering_weights")
+        ):
+            raise ValueError(
+                f"{owner}: score_centering_weights/mis_low/mis_high are set, but score_centering_top_k is unset, "
+                "so score centering is off and they would do nothing."
+            )
+        if bounds_set and self.score_centering_weights != "mis":
+            raise ValueError(
+                f"{owner}: score_centering_mis_low/high bound the 'mis' weight, but score_centering_weights is "
+                f"{self.score_centering_weights!r}."
+            )
+
+    def build_score_centering_config(self) -> ScoreCenteringConfig | None:
+        if self.score_centering_top_k is None:
+            return None
+        return ScoreCenteringConfig(
+            top_k=self.score_centering_top_k,
+            weights=self.score_centering_weights,
+            mis_low=self.score_centering_mis_low,
+            mis_high=self.score_centering_mis_high,
+        )
 
 
 @dataclass

@@ -52,6 +52,12 @@ Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first: rank 0 waits only `roll
 120 s, 180 in the code-contests recipes) for a server still loading. Parsers, `--moe-backend triton` and the rest:
 [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
 
+## Candidate log-probs
+
+`score_centering_top_k` reads candidate log-probs from an SGLang server of the toolkit's image, which returns them as flat
+arrays; vLLM is refused, and a startup probe refuses a server that does not return them
+([Candidate log-probs](../../infrastructure/rollout-servers.md#candidate-log-probs)).
+
 ## Launching the trainer
 
 ```bash

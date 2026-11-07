@@ -18,6 +18,7 @@ from halo.models.context_window import is_bounded_length
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.trainers.grpo.environmental.centered_scoring import ScoreCenteringMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
@@ -87,6 +88,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     TrajectoryTokenizeMixin,
     GenerationRoundMixin,
     LossForwardImportanceMixin,
+    ScoreCenteringMixin,
     PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
@@ -161,6 +163,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # After the model is placed: the deal reads its attention implementation.
         self._resolve_length_ordered_rows()
         self._configure_packed_microbatches()
+        self._configure_score_centering()
         self._configure_loss_forward_weights()
 
     @classmethod

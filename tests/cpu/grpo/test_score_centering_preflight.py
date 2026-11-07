@@ -1,8 +1,7 @@
 #!/usr/bin/env python
-"""The startup checks score centering adds. Candidate log-probs reach the objective only from an SGLang server that
-returns K of them as a distribution holding the sampled token, so vLLM, a run without the sampled ids, an image without
-SGLang's flat arrays and a reply that is no such distribution are each refused before a rollout trains on a wrong tail
-mass."""
+"""The server preflight score centering adds. Candidate log-probs reach the objective only from an SGLang server that
+returns K of them as a distribution holding the sampled token, so an image without the flat arrays and a reply that is
+no such distribution are each refused before a rollout trains on a wrong tail mass."""
 
 import ast
 
@@ -10,8 +9,6 @@ import numpy as np
 import pytest
 
 import tests.common.fake_engines as fake_engines
-from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_score_centering
 from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_server_flags
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer
@@ -60,31 +57,10 @@ def test_candidates_that_are_no_distribution_holding_the_sampled_token_are_refus
         _verify_candidates(server)
 
 
-@pytest.mark.parametrize(
-    ("overrides", "match"),
-    [
-        ({"rollout_backend": "vllm"}, "65% of rollout throughput at K=16 and 80% at K=32"),
-        ({"train_on_sampled_tokens": False}, "train_on_sampled_tokens: false"),
-    ],
-)
-def test_vllm_and_a_run_without_sampled_ids_are_refused(overrides, match):
-    config = AsyncRolloutConfig(
-        score_centering_top_k=16, **{"rollout_backend": "sglang", "train_on_sampled_tokens": True, **overrides}
-    )
-    with pytest.raises(ValueError, match=match):
-        reject_unsupported_score_centering(config)
-    reject_unsupported_score_centering(AsyncRolloutConfig(**overrides))
-
-
-def test_the_environmental_script_refuses_before_its_preflights_and_arms_the_probe():
-    """A script that drops the early refusal sends a vLLM run into the candidate probe, and one that drops the keyword
-    leaves an image without the arrays unrefused."""
+def test_the_environmental_script_arms_the_probe_from_the_knob():
+    """A script that drops the keyword leaves an image without the arrays unrefused."""
     tree = ast.parse((REPO_ROOT / "scripts/training/grpo/environmental.py").read_text())
     calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
-    first_line = {}
-    for node in calls:
-        first_line.setdefault(ast.unparse(node.func), node.lineno)
-    assert first_line["reject_unsupported_score_centering"] < first_line["verify_server_flags"]
     requirements = [
         {k.arg: ast.unparse(k.value) for k in node.keywords}
         for node in calls
