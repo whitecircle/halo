@@ -112,7 +112,7 @@ TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the mod
 - **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
 - **TRL's `use_liger_kernel` is off:** it routes the log-probs through TRL's chunked LM head, past the family's head transform. Model-level Liger kernels still apply.
 - **`text_only_model` is refused** by the script: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would miss a multimodal server's `model.language_model.layers.*`.
-- **Token budget refused at load:** `reject_unsupported_model` sizes `per_device_train_batch_size × (max_prompt_length + max_completion_length)` against DeepEP's wire index and, on a group spanning NVLink domains (cross-node EP), the proxy-GIN ceiling before any weight is read ([Dispatch wire-index limit](../../infrastructure/deepep.md#dispatch-wire-index-limit)).
+- **Token budget refused at load:** `reject_unsupported_model` sizes `per_device_train_batch_size × (max_prompt_length + max_completion_length)` against the proxy-GIN ceiling on a group spanning NVLink domains (cross-node EP) before any weight is read ([Dispatch token ceiling](../../infrastructure/deepep.md#dispatch-token-ceiling)).
 - **Refused at construction** (online and async GRPO): `use_adaptive_entropy` (a sharded resume does not restore its coefficient), a non-zero `entropy_coef` with `use_chunked_grpo_logprobs` (the chunked sweep returns a detached entropy), and an `IterableDataset` on the DP-sharded loader that TP, ETP and pre-sharded datasets use.
 
 ## GRPO objective for verifiable rewards
