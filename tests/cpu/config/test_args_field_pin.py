@@ -127,6 +127,7 @@ _EXPECTED = {
         "rlrr_tau": "0.1",
         "rlrr_xi_neg": "-0.001",
         "rlrr_xi_pos": "0.001",
+        "rollout_weight_precision": "'bf16'",
         "scale_rewards_std_floor": "0.0",
         "sdpg_beta_base": "1.0",
         "sdpg_beta_decay_steps": "0",
