@@ -78,6 +78,17 @@ def _cases(fmt: str):
     t = torch.full((64, K), format_max * 2.0**5, device=DEV)
     yield "fp32_ulp_edge", torch.nextafter(t, torch.full_like(t, 1e30))
     yield "near_denorm", torch.full((64, K), 3e-36, device=DEV, dtype=bf)
+    # fp32 block maxima where amax / format max lands one ulp apart under true division and under torch's reciprocal
+    # multiply, moving the exponent (mxfp8: 0x04600028, mxfp4: 0x20c00011), plus maxima whose quotient is subnormal.
+    # The rest of each block steps down to 2^-20 of the max, into the element formats' subnormal range, where an
+    # exponent one off changes the output.
+    amax = torch.tensor([0x04600028, 0x20C00011], dtype=torch.int32).view(torch.float32).tolist()
+    amax += [5e-38, 3.6e-38, 3e-36, 5e-36]
+    lead = torch.tensor(amax, device=DEV)[:, None]
+    steps = 2.0 ** (-torch.arange(1, 32, device=DEV) / 1.5) * (-1.0) ** torch.arange(1, 32, device=DEV)
+    t = torch.cat([lead, lead * steps], dim=1)
+    t[0, 1] = 1.2627380721723792e-40  # in the mxfp8 row, an element whose bf16 output moves with the exponent
+    yield "e8m0_edges", t
     yield "empty", torch.empty(0, K, device=DEV, dtype=bf)
     yield "fp16", torch.randn(64, K, device=DEV, dtype=torch.float16)
     yield "fp32", torch.randn(64, K, device=DEV, dtype=torch.float32)

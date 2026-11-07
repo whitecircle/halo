@@ -41,9 +41,10 @@ def _load_blocks(x_ptr, n_blocks, BPP: tl.constexpr, BLOCK: tl.constexpr):
 @triton.jit
 def _e8m0_exponent(x, FMAX: tl.constexpr, TINY: tl.constexpr):
     """Per-block shared exponent, as the eager ``_e8m0_scale``: ``ceil(log2(max(amax, TINY) / FMAX))`` clamped to
-    e8m0's [-127, 127]."""
+    e8m0's [-127, 127]. Torch on CUDA divides by a Python scalar as a multiply by its fp32 reciprocal, which can land
+    one ulp from a true division and move the exponent, so the kernel does the same."""
     amax = tl.max(tl.abs(x), axis=1)
-    y = tl.math.div_rn(tl.maximum(amax, TINY), FMAX)
+    y = _mul_rn(tl.maximum(amax, TINY), tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX))
     se = libdevice.ceil(libdevice.log2(y))
     return tl.minimum(tl.maximum(se, -127.0), 127.0).to(tl.int32)
 
