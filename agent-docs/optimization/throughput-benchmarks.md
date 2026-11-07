@@ -96,7 +96,7 @@ tok/s/GPU (peak GiB); † marks an nvidia-smi peak.
 | Qwen3.5-122B-A10B, 64k | **8,933** (188.7) | 4,781 (254.0†) | 5,936 (194.5) | 5,397 (219.3) |
 | Qwen3.5-122B-A10B, 128k | **8,943** (188.7) | does not fit | 5,951 (194.5) | 4,683 (227.1) |
 
-Versions: Halo 1.2.0 (image `blackwell-1.2.0`); TRL 1.17.1 with Transformers 5.20.2, Liger 0.8.2 and FA4 4.0.0b37 on that
+Versions: Halo 1.2.0 (its released `blackwell` image); TRL 1.17.1 with Transformers 5.20.2, Liger 0.8.2 and FA4 4.0.0b37 on that
 image; NeMo AutoModel 0.7.0 (container 26.10.00, Transformers 5.18.0); Megatron Bridge from the NeMo 26.10 container, a
 0.7.0 release-candidate commit with Megatron Core 0.20.0.
 

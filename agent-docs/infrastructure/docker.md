@@ -253,15 +253,15 @@ docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 ```
 
-Each moving tag has an immutable release pin: `blackwell-1.2.0`, `hopper-1.2.0`, `vllm-0.32.0-1.2.0`,
-`sglang-0.5.22-1.2.0`. There is deliberately no `latest`, which would let a Hopper host pull a
+Each moving tag has an immutable release pin: `blackwell-1.3.0rc1`, `hopper-1.3.0rc1`, `vllm-0.32.0-1.3.0rc1`,
+`sglang-0.5.22-1.3.0rc1`. There is deliberately no `latest`, which would let a Hopper host pull a
 Blackwell image. Pair a trainer with the server images of the same release: the vLLM image unpickles
 the trainer's `ncclUniqueId` through a shim at the trainer's module path. Pin a release by pulling its
 tag and retagging it under the local name the `make` targets use:
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:hopper-1.2.0
-docker tag  public.ecr.aws/whitecircle/halo:hopper-1.2.0 halo:hopper
+docker pull public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1
+docker tag  public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1 halo:hopper
 ```
 
 The compose files take the server images from `VLLM_IMAGE` / `SGLANG_IMAGE` (default: the local

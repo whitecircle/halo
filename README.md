@@ -55,6 +55,15 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
+- **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
+  Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
+  ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
+  - **Faster GRPO:** rows pack into token-budget micro-batches, importance weights can come from the loss forward,
+    and weight sync can run one group across servers.
+  - **New in RL:** score centering on SGLang, FP8-weight rollouts for Qwen3.5/3.6 MoE, adapter-only sync to
+    SGLang, and GLM-5.3-Flash under GRPO.
+  - **Scale:** gathered EP saves striped over several writers, adapter merges with no model load, and startup
+    checks for setups that used to fail hours into a run.
 - **2026-11-04 — Halo 1.2.0.** Training steps are faster than in 1.1.0 on all twelve shapes benchmarked
   against it, from 1.11× to 2.07×, and GLM-5.3-Flash more than doubles its LoRA throughput with two new kernels.
   Halo also gains pipeline parallelism and three more model families ([benchmarks](human-docs/performance.md)).
@@ -91,9 +100,9 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell
 docker pull public.ecr.aws/whitecircle/halo:hopper
 ```
 
-Versioned tags (`:blackwell-1.2.0`, `:hopper-1.2.0`) pin the release. There is no `latest` tag, since
+Versioned tags (`:blackwell-1.3.0rc1`, `:hopper-1.3.0rc1`) pin the release. There is no `latest` tag, since
 the images are architecture-specific. The RL inference images are published alongside them
-(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.2.0` and `:sglang-0.5.22-1.2.0`.
+(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc1` and `:sglang-0.5.22-1.3.0rc1`.
 
 To build locally instead:
 ```bash
