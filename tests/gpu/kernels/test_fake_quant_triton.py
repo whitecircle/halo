@@ -61,6 +61,11 @@ def _cases(fmt: str):
     yield "zeros", torch.zeros(64, K, device=DEV, dtype=bf)
     yield "negzero", torch.full((64, K), -0.0, device=DEV, dtype=bf)
     yield "tiny", torch.full((64, K), 1e-40, device=DEV, dtype=bf)
+    # A format max leads every block, so the scale is 1 and each -1e-40 stays a negative subnormal: its sign must
+    # survive the scaling as -0.0, which a flush to zero would lose.
+    t = torch.full((64, K), -1e-40, device=DEV)
+    t[:, ::32] = format_max
+    yield "max_and_neg_subnormal", t.to(bf)
     yield "huge", torch.full((64, K), 3e38, device=DEV, dtype=bf)
     t = torch.randn(64, K, device=DEV, dtype=bf)
     t[3, 5] = float("nan")
@@ -131,7 +136,7 @@ def test_bit_exact_against_eager():
 
 
 def test_routing():
-    """fake_quant takes the fast path only for CUDA / contiguous / last-axis / MX / K % 32 == 0."""
+    """fake_quant takes the fast path only for CUDA / contiguous / real / last-axis / MX / K % 32 == 0."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
     expected = {"mxfp8": int(_kernel_supported()), "mxfp4": 1}  # below SM 8.9 mxfp8 runs eager
     with _Spy() as s:
@@ -142,6 +147,8 @@ def test_routing():
             fake_quant(t, fmt, axis=0)  # non-last axis → eager
             fake_quant(t.t().contiguous().t(), fmt)  # non-contiguous → eager
             fake_quant(t.cpu(), fmt)  # CPU → eager
+            c = t.to(torch.complex64)  # complex → eager, which keeps the real part
+            assert torch.equal(fake_quant(c, fmt), _block_round_trip(c, fmt, -1).to(c.dtype)), f"{fmt}: complex"
         fake_quant(t, "nvfp4")  # tensor-wide scale → eager
         assert s.calls == expected, f"fallback cases took the fast path: {s.calls}"
     for fmt in FUSED:

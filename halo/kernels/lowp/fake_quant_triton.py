@@ -92,6 +92,7 @@ def _mxfp4_fake_quant_kernel(
 
 
 def _launch(kernel, t: torch.Tensor, block_size: int, format_max: float, amax_floor: float) -> torch.Tensor:
+    """Run ``kernel`` over ``t`` in blocks of ``block_size`` into a new tensor of the same shape and dtype."""
     if t.numel() == 0:
         return torch.empty_like(t)
     out = torch.empty_like(t)

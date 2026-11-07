@@ -268,6 +268,7 @@ class _FakeQuant(torch.autograd.Function):
             fused is not None
             and t.is_cuda
             and t.is_contiguous()
+            and not t.is_complex()  # Triton has no complex type
             and axis in (-1, t.ndim - 1)
             and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
             and (fmt != "mxfp8" or _fp8_triton_supported(t.device.index))
