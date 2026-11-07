@@ -169,7 +169,7 @@ TINY_GEMMA4_MOE_CONFIG = {
 # Callers add ``layer_types``.
 TINY_GEMMA4_WIDE_HEAD_CONFIG = {
     "vocab_size": 256,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 128,
     "num_hidden_layers": 2,
     "num_attention_heads": 4,
@@ -187,7 +187,7 @@ TINY_GEMMA4_WIDE_HEAD_CONFIG = {
 # experts top-2.
 TINY_QWEN35_MOE_CONFIG = {
     "vocab_size": 1024,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 256,
     "moe_intermediate_size": 64,
     "shared_expert_intermediate_size": 64,
@@ -273,7 +273,7 @@ TINY_MIXTRAL_CONFIG = {
 # GLM-4.7-Flash: dense first layer + one sparse layer, MLA attention, grouped top-k with one group, one shared expert.
 TINY_GLM4_MOE_LITE_CONFIG = {
     "vocab_size": 1024,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 256,
     "moe_intermediate_size": 64,
     "num_hidden_layers": 2,
@@ -398,7 +398,7 @@ TINY_BAILING_LING3_MLA_CONFIG = {
 # 8 layers keep the period-4 pattern intact across a pp2 split, so both layer kinds sit on every stage.
 TINY_QWEN35_CONFIG = {
     "vocab_size": 1024,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 256,
     "num_hidden_layers": 8,
     "num_attention_heads": 4,
@@ -416,7 +416,7 @@ TINY_QWEN35_CONFIG = {
 # 8 layers so a 2- or 4-stage split is exact and every stage still holds several.
 TINY_QWEN3_CONFIG = {
     "vocab_size": 1024,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 256,
     "num_hidden_layers": 8,
     "num_attention_heads": 4,
@@ -674,7 +674,7 @@ TINY_STEP3P7_VISION_CONFIG = {
 # shard evenly; 16 experts split evenly at every EP size up to 8.
 TINY_MISTRAL4_CONFIG = {
     "vocab_size": 512,
-    "hidden_size": 512,
+    "hidden_size": 128,
     "intermediate_size": 256,
     "moe_intermediate_size": 64,
     "n_routed_experts": 16,
@@ -749,7 +749,7 @@ TINY_QWEN35_VISION_CONFIG = {
     "depth": 1,
     "hidden_size": 16,
     "intermediate_size": 16,
-    "num_heads": 8,
+    "num_heads": 2,
     "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"],
 }
 # M-RoPE's three sections split head_dim / 2; a one-block vision tower with no deepstack taps.
@@ -767,7 +767,7 @@ TINY_QWEN4_EXP_VISION_CONFIG = {
     "depth": 2,
     "hidden_size": 32,
     "intermediate_size": 64,
-    "num_heads": 8,
+    "num_heads": 2,
     "num_position_embeddings": 64,
     "out_hidden_size": TINY_QWEN4_EXP_CONFIG["hidden_size"],
 }
@@ -852,7 +852,7 @@ NEMOTRON_H_RELEASE_VISION_CONFIG = {
 # Its heads at the width FA4 takes, which a GPU row reaches unless it pins another backend.
 TINY_RADIO_VISION_CONFIG = {
     "model_type": "radio",
-    "hidden_size": 512,
+    "hidden_size": 128,
     "num_hidden_layers": 2,
     "num_attention_heads": 2,
     "max_img_size": 64,
