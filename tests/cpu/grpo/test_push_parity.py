@@ -43,6 +43,7 @@ def _trainer(*, cp: bool = False):
 
     return SimpleNamespace(
         first_push_verified=False,
+        _rollout_weight_precision="bf16",
         parallelism_config=SimpleNamespace(is_cp_mode=cp),
         processing_class=lambda _text: {"input_ids": list(range(_ROW + 40))},
         accelerator=SimpleNamespace(device=torch.device("cpu")),
@@ -52,7 +53,7 @@ def _trainer(*, cp: bool = False):
 
 
 def test_an_engine_at_the_trainers_log_probs_passes_once():
-    trainer, engine = _trainer(), _Engine(offset=PARITY_MAX_MEAN_GAP_NATS / 2)
+    trainer, engine = _trainer(), _Engine(offset=PARITY_MAX_MEAN_GAP_NATS["bf16"] / 2)
     verify_first_push_parity(trainer, engine)
     verify_first_push_parity(trainer, engine)
     assert len(engine.scored) == 1
@@ -157,7 +158,7 @@ def test_a_single_group_pool_scores_on_its_leader():
 
 def test_the_environmental_trainer_probes_after_each_push_it_makes(monkeypatch):
     probed = []
-    monkeypatch.setattr(async_rollouts, "sync_trainer_weights", lambda trainer, client: None)
+    monkeypatch.setattr(async_rollouts, "sync_trainer_weights", lambda trainer, client, **_: None)
     monkeypatch.setattr(async_rollouts, "profiling_context", lambda trainer, name: contextlib.nullcontext())
     monkeypatch.setattr(async_rollouts, "verify_first_push_parity", lambda trainer, client: probed.append(client))
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
@@ -173,7 +174,7 @@ def test_the_environmental_trainer_probes_after_each_push_it_makes(monkeypatch):
 
 def test_the_online_trainer_probes_after_each_push_it_makes(monkeypatch):
     probed = []
-    monkeypatch.setattr(online, "sync_trainer_weights", lambda trainer, client: None)
+    monkeypatch.setattr(online, "sync_trainer_weights", lambda trainer, client, **_: None)
     monkeypatch.setattr(online, "verify_first_push_parity", lambda trainer, client: probed.append(client))
     trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer.accelerator = SimpleNamespace(is_main_process=True)

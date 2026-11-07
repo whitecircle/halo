@@ -8,6 +8,7 @@ import torch
 import halo.weight_sync.clients.base as base_module
 from halo.weight_sync.chunking import declared_co_load_groups, split_co_loaded
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.weight_sync import Wire, offline_client, push
 
 GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
@@ -116,6 +117,43 @@ def test_a_scoped_client_sends_a_partnerless_half_and_closes(streamed):
     client.update_named_param(_layer(0, "kv_a_proj_with_mqa"), _param())
     client.finish_weight_update()
     assert wire.chunk_names == [[_layer(0, "kv_a_proj_with_mqa")]]
+
+
+# A block-FP8 weight and its scale: found by dtype and name, in any client, with no declared group.
+def _fp8_pair(layer: int) -> list[tuple[str, torch.Tensor]]:
+    name = _layer(layer, "q_proj")
+    return [(name, torch.zeros(8, dtype=torch.float8_e4m3fn)), (name + "_scale_inv", torch.zeros(2))]
+
+
+def test_a_block_fp8_weight_waits_for_its_scale_and_the_scale_for_its_weight():
+    weight, scale = _fp8_pair(0)
+    assert _names(split_co_loaded([weight], ())[0]) == []
+    assert _names(split_co_loaded([weight, scale], ())[0]) == [weight[0], scale[0]]
+    assert _names(split_co_loaded([scale], ())[1]) == [scale[0]]
+
+
+def test_a_bf16_weight_and_a_name_that_only_ends_alike_are_not_pairs():
+    chunk = [(_layer(0, "q_proj"), _param()), ("model.layers.0.hc_attn_scale_inv", torch.zeros(1))]
+    sendable, held = split_co_loaded(chunk, ())
+    assert _names(sendable) == _names(chunk) and held == []
+
+
+def test_a_budget_cut_between_a_weight_and_its_scale_moves_the_pair_whole(monkeypatch):
+    monkeypatch.setattr(base_module, "WEIGHT_SYNC_CHUNK_BYTES", 16)
+    wire = Wire()
+    client = wire.attach(offline_client(VLLMWeightSyncClient))
+    other = (_layer(1, "k_proj"), _param())
+    push(client, [other, *_fp8_pair(0)])
+    assert wire.chunk_names == [[other[0]], [_layer(0, "q_proj"), _layer(0, "q_proj") + "_scale_inv"]]
+
+
+def test_the_close_refuses_a_weight_whose_scale_never_came(monkeypatch):
+    wire = Wire()
+    client = wire.attach(offline_client(VLLMWeightSyncClient))
+    client.update_named_param(*_fp8_pair(0)[0])
+    with pytest.raises(RuntimeError, match="missing their partners"):
+        client.finish_weight_update()
+    assert wire.chunks == []
 
 
 if __name__ == "__main__":

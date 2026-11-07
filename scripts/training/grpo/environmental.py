@@ -159,6 +159,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         captures_routing=async_config.routing_replay == "rollout",
         reasoning_consumers=tuple(name for name, on in consumers if on),
         sampled_token_ids=async_config.train_on_sampled_tokens,
+        weight_precision=async_config.rollout_weight_precision,
     )
 
 
@@ -335,7 +336,7 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    reject_unsyncable_config(checkpoint_config, async_config.rollout_backend)
+    reject_unsyncable_config(checkpoint_config, async_config.rollout_backend, async_config.rollout_weight_precision)
 
     # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
     ds, dataset_presharded = load_script_datasets(

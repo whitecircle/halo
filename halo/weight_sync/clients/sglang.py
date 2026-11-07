@@ -83,6 +83,15 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     # The MLA loaders fuse this pair from a cache local to one ``load_weights`` call and silently drop a lone half.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     ADAPTER_SYNC_REFUSAL = None
+    FP8_BLOCK_ROLLOUT_REFUSAL = None
+    # The engine's answer to a chunk it cannot load is "partially updated", whatever the cause.
+    CHUNK_FAILURE_REMEDIES = {
+        "partially updated": (
+            "If this run pushes block-FP8 weights (rollout_weight_precision: fp8_block), the usual cause is DeepGEMM "
+            "requantizing the checkpoint's dense scales to UE8M0 at boot, which rejects the fp32 scales a push "
+            "carries: launch the server with SGLANG_ENABLE_JIT_DEEPGEMM=0."
+        )
+    }
     # The adapted module names the load validates against: the attention and dense-MLP projections. Qwen3.5's
     # linear-attention ``in_proj_ba`` is not adaptable, and the stacked ``in_proj_qkvz`` has no counterpart in the
     # trainer's split names.

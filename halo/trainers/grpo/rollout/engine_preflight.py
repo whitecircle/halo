@@ -20,6 +20,7 @@ from halo.env import env_positive_int
 from halo.environments.engine_wire import build_payload, capture_generation_tokens
 from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
 from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
@@ -85,6 +86,7 @@ class ServerRequirements(NamedTuple):
     captures_routing: bool = False
     reasoning_consumers: tuple[str, ...] = ()
     sampled_token_ids: bool = False
+    weight_precision: RolloutWeightPrecision = "bf16"
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -92,6 +94,28 @@ def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
         f"it serves no tool parser and the environment sends tools, so calls stay text, each turn reads as a final "
         f"answer and every episode scores alike with no error. Serve with {client_cls.TOOL_PARSER_FLAG}."
     )
+
+
+def _quantization_refusals(flags: ServerFlags, needs: ServerRequirements) -> list[str]:
+    """The server's weight format against the run's ``rollout_weight_precision``. Only the quantization method is on
+    ``/server_info``: the block size and activation scheme come from the served checkpoint's config, which the
+    block-FP8 export tool writes and the first-push parity probe holds to account."""
+    if needs.weight_precision == "fp8_block":
+        if flags.quantization == "fp8":
+            return []
+        served = "reports no quantization" if flags.quantization is None else f"serves {flags.quantization or 'bf16'}"
+        return [
+            f"rollout_weight_precision is fp8_block and the server {served}, so the pushed fp8 weights and scales "
+            f"would land in tensors of another format, or be dropped, behind a 200. Serve the checkpoint written by "
+            f"the block-FP8 export tool (scripts/before_training/export_block_fp8.py)."
+        ]
+    if flags.quantization:
+        return [
+            f"its weights are quantized ({flags.quantization}), while every push writes bf16 checkpoint-layout "
+            f"tensors in place, which a quantized loader stores transformed, so each update would land wrong behind a "
+            f"200. Serve the bf16 checkpoint, or set rollout_weight_precision: fp8_block with a block-FP8 checkpoint."
+        ]
+    return []
 
 
 def _server_flag_refusals(
@@ -104,12 +128,7 @@ def _server_flag_refusals(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
             f"{client_cls.IMAGE_REMEDY}"
         )
-    if flags.quantization:
-        refusals.append(
-            f"its weights are quantized ({flags.quantization}), while every push writes bf16 checkpoint-layout "
-            f"tensors in place, which a quantized loader stores transformed, so each update would land wrong behind a "
-            f"200. Serve the bf16 checkpoint."
-        )
+    refusals.extend(_quantization_refusals(flags, needs))
     if needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
             f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "

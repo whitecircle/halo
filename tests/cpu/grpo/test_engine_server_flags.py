@@ -107,6 +107,33 @@ def test_a_quantized_server_is_refused_on_every_model(engine):
             _verify(server, client_cls, is_moe=is_moe)
 
 
+@_ENGINES_FIXTURE
+def test_a_bf16_run_names_the_fp8_remedy_when_it_meets_a_quantized_server(engine):
+    server, client_cls = engine
+    server.quantization = "fp8"
+    with pytest.raises(ValueError, match="rollout_weight_precision: fp8_block"):
+        _verify(server, client_cls, is_moe=True)
+
+
+@_ENGINES_FIXTURE
+def test_an_fp8_run_accepts_an_fp8_server_and_refuses_every_other_format(engine):
+    server, client_cls = engine
+    server.quantization = "fp8"
+    _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+    for served, wording in (("", "serves bf16"), ("awq", "serves awq")):
+        server.quantization = served
+        with pytest.raises(ValueError, match=wording):
+            _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+
+
+@_ENGINES_FIXTURE
+def test_an_fp8_run_still_needs_the_triton_moe_backend(engine):
+    server, client_cls = engine
+    server.quantization, server.moe_backend = "fp8", "auto"
+    with pytest.raises(ValueError, match="repacks expert weights"):
+        _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+
+
 @pytest.mark.parametrize(
     ("flag", "other"),
     [("dtype", "float16"), ("quantization", "fp8"), ("moe_backend", "auto"), ("reasoning_parser", "other")],

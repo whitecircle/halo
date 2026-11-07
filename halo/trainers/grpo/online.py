@@ -85,6 +85,7 @@ class DistributedOnlineGRPOTrainer(
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
         self._log_phase_times = kwargs.pop("log_phase_times", False)
         self._packed_microbatch_tokens = kwargs.pop("packed_microbatch_tokens", None)
+        self._rollout_weight_precision = kwargs.pop("rollout_weight_precision", "bf16")
         self._balances_rank_tokens = kwargs.pop("balance_rank_tokens", False)
         self._requests_loss_forward_weights = kwargs.pop(LOSS_FORWARD_KNOB, False)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
@@ -206,7 +207,7 @@ class DistributedOnlineGRPOTrainer(
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
         with self.unbinned_scoring():
             with self._phase_timers.span(Phase.SYNC, "host"):
-                sync_trainer_weights(self, client)
+                sync_trainer_weights(self, client, precision=self._rollout_weight_precision)
             verify_first_push_parity(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):

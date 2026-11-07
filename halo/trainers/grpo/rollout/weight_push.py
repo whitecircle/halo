@@ -24,6 +24,7 @@ from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from halo.models.config_access import config_model_types, get_config_field
+from halo.models.fp8_rollout import Fp8RolloutPlan, RolloutWeightPrecision, fp8_rollout_refusal
 from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
@@ -184,7 +185,19 @@ def _reject_refused_families(families: list[tuple[str, type[EPMoELayerBase]]], c
             )
 
 
-def reject_unsyncable_config(config, backend: str) -> None:
+def _reject_unquantizable_rollout(config, backend: str, client_cls, precision: RolloutWeightPrecision) -> None:
+    """Refuses ``rollout_weight_precision: fp8_block`` on an engine or family no GPU row has validated it for."""
+    if precision == "bf16":
+        return
+    reason = client_cls.FP8_BLOCK_ROLLOUT_REFUSAL or fp8_rollout_refusal(config)
+    if reason is not None:
+        raise ValueError(
+            f"rollout_weight_precision={precision!r} with rollout_backend={backend!r} and model_type "
+            f"{sorted(config_model_types(config))} is refused: {reason}. Set rollout_weight_precision: bf16."
+        )
+
+
+def reject_unsyncable_config(config, backend: str, precision: RolloutWeightPrecision = "bf16") -> None:
     """What ``config`` alone settles, for a script to raise before the load and the server preflights a refused family
     would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model."""
     if config is None:
@@ -193,6 +206,7 @@ def reject_unsyncable_config(config, backend: str) -> None:
     _reject_unservable_model_types(config, backend, client_cls)
     registry = f"model_type registry for {config.model_type}"
     _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
+    _reject_unquantizable_rollout(config, backend, client_cls, precision)
 
 
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
@@ -266,11 +280,13 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
         )
 
 
-def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
+def reject_unsyncable_model(model: torch.nn.Module, backend: str, precision: RolloutWeightPrecision = "bf16") -> None:
     """Refuses at construction; structural, so every rank raises alike."""
     ep_layers = dict(named_ep_layers(model))
     _reject_model_state(model, ep_layers)
     _reject_engine_fit(model, backend, ep_layers)
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    _reject_unquantizable_rollout(config, backend, resolve_weight_sync_client(backend), precision)
     _reject_balancing_state(model)
 
 
@@ -285,9 +301,11 @@ class _HubForwarder:
         ep_layers: dict[str, EPMoELayerBase],
         peft_prefix: str | None,
         guard: DeferredRankFailure,
+        fp8_plan: Fp8RolloutPlan | None = None,
     ):
         self._client = client
         self._guard = guard
+        self._fp8_plan = fp8_plan
         self._ep_layers = ep_layers
         self._peft_prefix = peft_prefix
         self._held: dict[str, torch.Tensor] = {}
@@ -314,11 +332,11 @@ class _HubForwarder:
             if name is None:
                 return
         if not self._conversions:
-            self._client.update_named_param(name, tensor)
+            self._emit(name, tensor)
             return
         renamed, claimed_by = rename_source_key(name, self._renamings, self._converters, reverse=True)
         if claimed_by is None:
-            self._client.update_named_param(renamed, tensor)
+            self._emit(renamed, tensor)
             return
         self._held[name] = tensor
         if not bounded:
@@ -339,7 +357,15 @@ class _HubForwarder:
             return
         held, self._held, self._held_bytes = self._held, {}, 0
         for hub_name, hub_tensor in revert_conversions(self._model, held, self._conversions).items():
-            self._client.update_named_param(hub_name, hub_tensor)
+            self._emit(hub_name, hub_tensor)
+
+    def _emit(self, hub_name: str, tensor: torch.Tensor) -> None:
+        """Under block-FP8 rollouts a selected weight goes out as the fp8 values and scales the server stores."""
+        if self._fp8_plan is None:
+            self._client.update_named_param(hub_name, tensor)
+            return
+        for sent_name, sent in self._fp8_plan.expand(hub_name, tensor):
+            self._client.update_named_param(sent_name, sent)
 
 
 def _send_ep_expert_weights(
@@ -433,19 +459,25 @@ def _send_dense_weights(
 
 
 def gather_and_send_weights(
-    model: torch.nn.Module, sender: WeightSyncSender | None, *, fold_adapters: bool = True
+    model: torch.nn.Module,
+    sender: WeightSyncSender | None,
+    *,
+    fold_adapters: bool = True,
+    precision: RolloutWeightPrecision = "bf16",
 ) -> None:
     """COLLECTIVE. A send can fail on the forwarding rank alone, so each runs under a deferred failure: a rank raising
     mid-loop would leave every peer blocked in the next gather until the watchdog fires. The caller closes the
-    update. ``fold_adapters=False`` sends the frozen base alone, for an engine that serves the adapters apart."""
+    update. ``fold_adapters=False`` sends the frozen base alone, for an engine that serves the adapters apart.
+    ``precision="fp8_block"`` quantizes the selected weights after the adapters are folded."""
     # Read the shards the optimizer steps, not the unsharded copies a forward can leave registered.
     reshard_fsdp2_modules(model)
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
     peft = is_peft_model(model)
     # Live EP layers, not has_ep_group: ep_size==1 is still EP-wrapped.
     ep_layers = dict(named_ep_layers(model))
+    fp8_plan = Fp8RolloutPlan.for_config(base_transformers_model(model).config) if precision == "fp8_block" else None
     forwarder = (
-        guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard))
+        guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard, fp8_plan))
         if sender
         else None
     )
@@ -481,6 +513,7 @@ def sync_weights_to_client(
     is_tp_main: bool,
     *,
     fold_adapters: bool = True,
+    precision: RolloutWeightPrecision = "bf16",
 ) -> None:
     """COLLECTIVE. Only the forwarding rank (global main, TP rank 0) sends; its missing ``client`` is refused on every
     rank at the close's verdict."""
@@ -492,7 +525,7 @@ def sync_weights_to_client(
     if sender is not None:
         sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
-        gather_and_send_weights(model, sender, fold_adapters=fold_adapters)
+        gather_and_send_weights(model, sender, fold_adapters=fold_adapters, precision=precision)
     except BaseException:
         # The push opened an update mid-gather, which only the forwarding rank can close.
         if sender is not None:
@@ -504,7 +537,9 @@ def sync_weights_to_client(
     flush.reject()
 
 
-def sync_trainer_weights(trainer, client: WeightSyncSender | None, *, fold_adapters: bool = True) -> None:
+def sync_trainer_weights(
+    trainer, client: WeightSyncSender | None, *, fold_adapters: bool = True, precision: RolloutWeightPrecision = "bf16"
+) -> None:
     """COLLECTIVE. ``client`` is the caller's handle on the main process."""
     model = unwrap_framework_wrappers(trainer.model)
     config = trainer.parallelism_config
@@ -517,7 +552,7 @@ def sync_trainer_weights(trainer, client: WeightSyncSender | None, *, fold_adapt
 
     # Every rank waits for the push to land, and a raise must not skip the barrier the peers block in.
     with barrier_on_exit(f"Weight sync at step {trainer.state.global_step}"):
-        sync_weights_to_client(model, client, is_main, is_tp_main, fold_adapters=fold_adapters)
+        sync_weights_to_client(model, client, is_main, is_tp_main, fold_adapters=fold_adapters, precision=precision)
 
     if log_memory:
         log_cuda_memory("weight-sync post")

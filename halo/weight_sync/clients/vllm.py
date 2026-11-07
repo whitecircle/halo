@@ -70,6 +70,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         f"{ENGINE_RELEASE} loads an adapter only from a directory both containers mount, and its decode with an "
         f"adapter served ran over 5% slower than the merged weights on the model measured"
     )
+    FP8_BLOCK_ROLLOUT_REFUSAL = None
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (

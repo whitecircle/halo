@@ -129,7 +129,7 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    reject_unsyncable_config(checkpoint_config, VLLM_BACKEND)
+    reject_unsyncable_config(checkpoint_config, VLLM_BACKEND, args.rollout_weight_precision)
 
     # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
     # must exist, and empty-prompt rows drop.
@@ -221,7 +221,7 @@ def main():
     )
     verify_server_flags(
         [vllm_base_url],
-        ServerRequirements(is_moe=has_routed_experts(model.config)),
+        ServerRequirements(is_moe=has_routed_experts(model.config), weight_precision=args.rollout_weight_precision),
         backend=VLLM_BACKEND,
         connection_timeout=grpo_config.vllm_server_timeout,
     )
@@ -277,6 +277,7 @@ def main():
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
         log_phase_times=args.log_phase_times,
         packed_microbatch_tokens=args.packed_microbatch_tokens,
+        rollout_weight_precision=args.rollout_weight_precision,
         balance_rank_tokens=args.balance_rank_tokens,
         loss_forward_importance_weights=args.loss_forward_importance_weights,
         save_completions=args.save_completions,

@@ -7,6 +7,7 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from halo.env import env_positive_int
+from halo.kernels.lowp.block_fp8 import SCALE_SUFFIX
 from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
 
 # Read once at import. The forwarding rank holds this plus the largest tensor, which is a chunk of its own; each
@@ -22,8 +23,19 @@ def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], li
     return names, dtypes, shapes
 
 
-def _co_load_key(name: str, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
-    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``."""
+# A block-FP8 weight and its scale are one co-load group of two, found by dtype and name, as the engine re-derives a
+# layer's kernel tensors only once both have landed.
+_FP8_PAIR_GROUP = -1
+_FP8_PAIR_SIZE = 2
+
+
+def _co_load_key(name: str, tensor: torch.Tensor, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
+    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``; a block-FP8 weight and
+    its ``_scale_inv`` share the group :data:`_FP8_PAIR_GROUP` keyed by the weight's name."""
+    if tensor.dtype == torch.float8_e4m3fn:
+        return _FP8_PAIR_GROUP, name
+    if name.endswith(".weight" + SCALE_SUFFIX):
+        return _FP8_PAIR_GROUP, name.removesuffix(SCALE_SUFFIX)
     for index, suffixes in enumerate(groups):
         for suffix in suffixes:
             if name == suffix or name.endswith("." + suffix):
@@ -35,14 +47,15 @@ def split_co_loaded(
     chunk: list[tuple[str, torch.Tensor]], groups: tuple[tuple[str, ...], ...]
 ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
     """``(sendable, held)``, order kept: a co-load group not yet complete in ``chunk`` waits for its partners."""
-    keys = [_co_load_key(name, groups) for name, _ in chunk]
+    keys = [_co_load_key(name, tensor, groups) for name, tensor in chunk]
     members: dict[tuple[int, str], set[str]] = {}
     for (name, _), key in zip(chunk, keys, strict=True):
         if key is not None:
             members.setdefault(key, set()).add(name)
     sendable, held = [], []
     for item, key in zip(chunk, keys, strict=True):
-        complete = key is None or len(members[key]) == len(groups[key[0]])
+        size = None if key is None else _FP8_PAIR_SIZE if key[0] == _FP8_PAIR_GROUP else len(groups[key[0]])
+        complete = key is None or len(members[key]) == size
         (sendable if complete else held).append(item)
     return sendable, held
 

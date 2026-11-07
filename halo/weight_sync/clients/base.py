@@ -6,7 +6,7 @@ import logging
 import socket
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
 from urllib.parse import urlparse
@@ -148,6 +148,10 @@ class WeightSyncClientBase(UpdateStream, ABC):
     SUPPORTS_ENGINE_RESCORE = True
     # Why this engine cannot serve the policy as an adapter beside the frozen base, ``None`` where it can.
     ADAPTER_SYNC_REFUSAL: str | None
+    # Why this engine cannot take a block-FP8 weight push, ``None`` where it can.
+    FP8_BLOCK_ROLLOUT_REFUSAL: str | None
+    # Text in an engine's failure of a chunk -> the launch fact that causes it, appended to the raised error.
+    CHUNK_FAILURE_REMEDIES: Mapping[str, str] = {}
     # The adapted module names the engine validates and serves.
     ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
@@ -746,8 +750,20 @@ class WeightSyncClientBase(UpdateStream, ABC):
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "
                 f"({type(error).__name__}: {error}); the server's {server_call.name} call failed with: "
-                f"{type(server_error).__name__}: {server_error}.{hint}"
+                f"{type(server_error).__name__}: {server_error}.{hint}{self.chunk_failure_remedy([server_error])}"
             ) from server_error
+
+    @classmethod
+    def chunk_failure_remedy(cls, errors: Sequence[BaseException | str]) -> str:
+        """The remedy for the first of ``errors`` an entry of :attr:`CHUNK_FAILURE_REMEDIES` matches, else empty."""
+        return next(
+            (
+                f" {remedy}"
+                for needle, remedy in cls.CHUNK_FAILURE_REMEDIES.items()
+                if any(needle in str(e) for e in errors)
+            ),
+            "",
+        )
 
     def mark_unusable_after(self, chunks_sent: int) -> None:
         """:meth:`_mark_unusable` for a group's sync, whose chunk count this client never saw."""

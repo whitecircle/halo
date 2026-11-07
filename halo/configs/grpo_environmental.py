@@ -21,6 +21,7 @@ from halo.configs.grpo import (
     PackedMicrobatchArguments,
     PhaseTimerArguments,
     PromptDatasetArguments,
+    RolloutWeightPrecisionArguments,
 )
 from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSamplingArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
@@ -219,6 +220,7 @@ class AsyncRolloutConfig(
     ChunkedLogprobsArguments,
     PackedMicrobatchArguments,
     PhaseTimerArguments,
+    RolloutWeightPrecisionArguments,
 ):
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""
@@ -554,6 +556,13 @@ class AsyncRolloutConfig(
             raise ValueError(
                 "rollout_chat_template_kwargs must not carry 'reasoning_effort': the level is per episode and "
                 "travels as the request's top-level field."
+            )
+        if self.rollout_weight_precision != "bf16" and self.rollout_adapter_sync:
+            raise ValueError(
+                f"rollout_weight_precision={self.rollout_weight_precision!r} cannot be combined with "
+                "rollout_adapter_sync: the base is pushed once and the adapter is served apart from it, so no folded "
+                "weight is ever quantized and the server would hold a different policy than the trainer. Set one of "
+                "them back to its default."
             )
         # SGLang drops the field silently. The level still steers through the template; this only caps.
         if self.rollout_backend == SGLANG_BACKEND and self.rollout_max_thinking_tokens is not None:

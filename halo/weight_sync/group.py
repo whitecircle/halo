@@ -363,7 +363,7 @@ class WeightSyncGroup(UpdateStream):
             f"({type(cause).__name__}: {cause}). One broken group leaves every server holding "
             f"{self.leader.INTERRUPTED_UPDATE_STATE}, so all are left PAUSED and refuse further syncs. RESTART the "
             f"{self.BACKEND_NAME} servers: {', '.join([*failed, *rest])}."
-            f"{remedy}"
+            f"{remedy}{self.leader.chunk_failure_remedy([call.error for call in declared if call.error is not None])}"
         ) from error
 
     def _mark_unusable(self, why: str = "a sync failed after its first chunk") -> None:

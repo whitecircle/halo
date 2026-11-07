@@ -11,6 +11,7 @@ from halo.configs.grpo import (
     PromptDatasetArguments,
     RankBalanceArguments,
     RLRRArguments,
+    RolloutWeightPrecisionArguments,
 )
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from halo.environments.rollout_config import ReasoningEffortChoice
@@ -24,6 +25,7 @@ class OnlineGRPOScriptArguments(
     ChunkedLogprobsArguments,
     PackedMicrobatchArguments,
     RankBalanceArguments,
+    RolloutWeightPrecisionArguments,
     PhaseTimerArguments,
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,

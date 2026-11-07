@@ -342,7 +342,7 @@ class AsyncRolloutMixin:
         self._form_weight_sync_group()
         with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):
             if self._adapter_sync is None:
-                sync_trainer_weights(self, self._weight_sync_client)
+                sync_trainer_weights(self, self._weight_sync_client, precision=self._rollout_weight_precision)
             else:
                 self._adapter_sync.sync(self, self._weight_sync_client)
         if self._adapter_sync is None:

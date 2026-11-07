@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
 from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.models.fp8_rollout import RolloutWeightPrecision
 
 _RLRRMode = Literal["hrr", "prr"]
 
@@ -277,6 +278,23 @@ class PackedMicrobatchArguments(ValidatedConfig):
         super()._validate_fields()
         # A one-token bin leaves no next-token target.
         require_int(type(self).__name__, ge=2, **present(packed_microbatch_tokens=self.packed_microbatch_tokens))
+
+
+@dataclass
+class RolloutWeightPrecisionArguments:
+    """The precision the on-policy GRPO trainers (online, environmental) store the rollout servers' weights in."""
+
+    rollout_weight_precision: RolloutWeightPrecision = field(
+        default="bf16",
+        metadata={
+            "help": "Precision of the weights the rollout servers hold: bf16 pushes the trainer's weights as they are, "
+            "fp8_block quantizes the attention and MLP projections on the sync GPU to 128x128 block FP8 "
+            "(power-of-two scales) and pushes those, halving their bytes on the wire. The trainer stays bf16, and "
+            "the server must serve a checkpoint written by the block-FP8 export tool with --moe-backend triton. "
+            "a validated family only (Qwen3, Qwen3.5/3.6 dense and MoE), and SGLang needs "
+            "SGLANG_ENABLE_JIT_DEEPGEMM=0; refused beside adapter sync and QLoRA. See agent-docs/infrastructure/rollout-servers.md#fp8-rollouts."
+        },
+    )
 
 
 @dataclass

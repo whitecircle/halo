@@ -9,6 +9,7 @@ from collections.abc import Callable
 
 import torch
 
+from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import refusal_text, run_on_rank0_raising_everywhere
 from halo.runtime.ranks import is_global_main_process
@@ -19,8 +20,10 @@ from halo.weight_sync.pool import WeightSyncPool
 logger = logging.getLogger(__name__)
 
 # Mean absolute log-prob gap per position. The floor on identical weights reaches 0.65 on Laguna; a load that drops or
-# scrambles a tensor reads in nats.
-PARITY_MAX_MEAN_GAP_NATS = 1.0
+# scrambles a tensor reads in nats. Block-FP8 weights widen the mean gap by 1.5x (0.064 against 0.042 nats on prompts
+# on Qwen3.5-35B-A3B), and the bound grows with it.
+_FP8_BLOCK_GAP_GROWTH = 1.5
+PARITY_MAX_MEAN_GAP_NATS: dict[RolloutWeightPrecision, float] = {"bf16": 1.0, "fp8_block": 1.0 * _FP8_BLOCK_GAP_GROWTH}
 
 
 def _scoring_client(client):
@@ -38,14 +41,17 @@ def _trainer_logps(trainer, token_ids: list[int]) -> list[float]:
     return logps[0].float().cpu().tolist()
 
 
-def _compare_on_rank0(client, token_ids: list[int], trainer_logps: list[float], mode: str) -> None:
+def _compare_on_rank0(
+    client, token_ids: list[int], trainer_logps: list[float], mode: str, precision: RolloutWeightPrecision
+) -> None:
     engine_logps = _scoring_client(client).score_completion_logprobs(token_ids[:1], token_ids[1:])
     gaps = [abs(a - b) for a, b in zip(trainer_logps, engine_logps, strict=True)]
     mean_gap = sum(gaps) / len(gaps) if all(map(math.isfinite, gaps)) else math.inf
-    if mean_gap > PARITY_MAX_MEAN_GAP_NATS:
+    bound = PARITY_MAX_MEAN_GAP_NATS[precision]
+    if mean_gap > bound:
         message = (
             f"After the first weight push the rollout engine's log-probs on a {len(token_ids)}-token probe row "
-            f"differ from the trainer's by {mean_gap:.2f} nats per position (bound {PARITY_MAX_MEAN_GAP_NATS}): the "
+            f"differ from the trainer's by {mean_gap:.2f} nats per position (bound {bound}): the "
             f"engine may not have taken the pushed weights as sent. It answers 200 for a tensor its loader does "
             f"not map and keeps the launch value, and a mis-stacked or mis-shaped one serves a different model. "
             f"Compare the pushed names with the engine loader's (the exact-push GPU test's reach mode scales each "
@@ -98,4 +104,6 @@ def verify_first_push_parity(trainer, client) -> None:
     if window := broadcast_from_rank0(windows[0] if windows else None):
         token_ids = token_ids[: window - 1]
     trainer_logps = _trainer_logps(trainer, token_ids)
-    _run_on_rank0_or_warn(lambda: _compare_on_rank0(client, token_ids, trainer_logps, mode), mode)
+    _run_on_rank0_or_warn(
+        lambda: _compare_on_rank0(client, token_ids, trainer_logps, mode, trainer._rollout_weight_precision), mode
+    )
