@@ -140,8 +140,9 @@ Conditions that decide how to read the table:
   the 9B tried no TP and no layout without activation checkpointing. The 122B EP4 gain over EP8 (3.9%) is confounded with
   expandable segments and is a single run. NeMo's 35B EP2 uses 99.1 GiB against Halo's 139.1.
 - **Halo EP above 1 was not run at 128k.** The dispatch has no token ceiling within a domain
-  ([ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)), but elastic EP8 deadlocks at ≥~64k tokens per rank
-  ([Transport backend](../infrastructure/deepep.md#transport-backend)), so 128k runs on EP1.
+  ([ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)). EP2 trains 140k-token rows on Qwen3.5-35B-A3B in a
+  separate SFT step (one row per rank, two GPUs) with the loss matching EP1 on both transports, legacy 1.6x slower;
+  elastic EP8 deadlocks at ≥~64k tokens per rank ([Transport backend](../infrastructure/deepep.md#transport-backend)).
 - **Isolation was checked on slices, not on full rows in the training step.** An edit-one-document test with a negative
   control (the same forward without document boundaries moves the other documents) passed for Halo 35B and 122B on
   slices of about 5k tokens, forward only, on EP1 with FA4. The same kind of test covers Halo 9B, TRL 9B, 35B and 122B,

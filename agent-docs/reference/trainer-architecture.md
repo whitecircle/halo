@@ -122,7 +122,7 @@ SDPG, reward and classification; SMPO, KTO, teacher distillation and embedding a
 and self-distillation under EP only. A **No** PP trainer is refused at config time
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
-`DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` (a packed slot cannot pair the student's per-row logits with the teacher pass) and takes `balance_rank_tokens`; it declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
+`DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
 `SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,

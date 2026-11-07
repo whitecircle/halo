@@ -303,7 +303,8 @@ auto-selected Blackwell MoE backends (`FLASHINFER_TRTLLM` / `CUTLASS`) repack ex
 the `flashinfer_trtllm*`, aiter and quantized runners repack after the load, and an update into them is
 not validated.
 
-The same rule excludes quantized serving unless the run declares `rollout_weight_precision: fp8_block` ([FP8 rollouts](#fp8-rollouts)): the startup preflight refuses a server that reports quantized weights under a bf16 run. For gpt-oss that means the **BF16** checkpoint,
+The same rule excludes quantized serving unless the run declares `rollout_weight_precision: fp8_block` ([FP8 rollouts](#fp8-rollouts)),
+and the [startup preflight](#startup-preflight) refuses a quantized server under a bf16 run. For gpt-oss that means the **BF16** checkpoint,
 not the stock MXFP4 `openai/gpt-oss-20b`, whose expert loader drops every synced bf16 expert weight
 while the biases land, silently, leaving only a slow log-ratio drift. Checkpoint layout and expert
 un-fuse rules: [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
@@ -316,9 +317,10 @@ values plus one fp32 power-of-two `weight_scale_inv` per 128x128 block (zero pad
 bf16; the quantizer (`halo/kernels/lowp/block_fp8.py`) runs on the sync GPU after the PEFT fold and the expert gather,
 and a fused expert bank goes out split per expert, the layout vLLM's FP8 expert loader reads. Routers and gates,
 linear-attention (GDN, Mamba) blocks, embeddings, the head, norms, vision towers and MTP heads stay bf16.
-Validated families: Qwen3 dense and MoE, Qwen3.5/3.6 dense and MoE (`MoEFamilySpec.fp8_rollout_refusal`,
-`DENSE_FP8_ROLLOUT_MODEL_TYPES`); every other family is refused at startup with its reason, as are adapter sync and
-QLoRA.
+The validated family is Qwen3.5 MoE, the one a GPU row covered (Qwen3.6 ships under its types;
+`MoEFamilySpec.fp8_rollout_refusal`), under the model types its spec names, so a composite that wraps its text tower
+in other towers is refused too. Every other family, dense ones included, is refused at startup with its reason, as
+are adapter sync and QLoRA.
 
 Serve a checkpoint written by the same plan:
 
@@ -333,26 +335,34 @@ the TRITON FP8 MoE backend and the checkpoint layout (no repack). A weight and i
 co-load group keyed on the fp8 dtype), because vLLM's layerwise reload re-derives a layer's kernel tensors once both
 have landed.
 
-The preflight accepts a quantized server only for an `fp8_block` run, and refuses a bf16 or other-format server under
-it; the bf16 run refuses any quantized server. Only the quantization method (`fp8`) is on `/server_info`: the block
-size and activation scheme come from the served checkpoint's `config.json` and are not verified by the trainer. A
-pushed policy served from a bf16 checkpoint booted with online `--quantization fp8` also reads `fp8`, so serve the
-exported checkpoint.
+The [startup preflight](#startup-preflight) matches the server's weight format to the run's precision. Only the
+quantization method (`fp8`) is read: the block size and activation scheme come from the served checkpoint's
+`config.json` and are not verified by the trainer. A pushed policy served from a bf16 checkpoint booted with online
+`--quantization fp8` also reads `fp8`, so serve the exported checkpoint. vLLM reports the format it resolved from the
+checkpoint. SGLang's `/server_info` reports its `--quantization` argument, which the checkpoint's own
+`quantization_config` fills for a few architectures only, so with none the client reads that config off the
+checkpoint at the server's `model_path`, from that directory or from the same hub snapshot in the trainer's own
+cache, as the compose file's same-path mounts allow. Where the trainer cannot read it, a bf16 run passes unchecked
+and an `fp8_block` run is refused until the server is launched with `--quantization fp8` (`SGLANG_EXTRA_ARGS`), which
+keeps the checkpoint's block layout.
 
 Measured on Qwen3.5-35B-A3B (vLLM 0.32.0, triton MoE): pushing the quantized weights in place is bit-exact against a
 fresh boot of the same checkpoint. Against the trainer's bf16 log-probs the mean per-position gap grows from 0.042 to
 0.064 nats on prompts (p99 0.38 to 0.56), so the first-push parity probe's bound is 1.5 nats for `fp8_block` against 1
-([First-push parity probe](#first-push-parity-probe)). The gain is halved bytes on the wire for the quantized
-tensors and fewer engine GPUs at scale; decode speed on vLLM was flat at the load measured (SGLang below). The larger
-trainer-versus-engine gap is absorbed by the importance-sampling correction or score centering
+([First-push parity probe](#first-push-parity-probe)). The larger trainer-versus-engine gap is absorbed by the
+importance-sampling correction or score centering
 ([Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)).
 
-On a fast single-server path the fp8 push is slower than bf16, not faster. Experts go out per expert (about 62,000
-weights and scales for Qwen3.5-35B-A3B against 1,000 fused banks), and the engine's loader runs once per tensor, at
-about 48 microseconds each on vLLM: a bf16 push of 1.4 s became 9.4 s before the trainer side batched its work. The
-trainer quantizes each bank in one call and hands the client per-expert views of the result, so the quantize and
-snapshot launches no longer grow with the expert count; the per-expert engine loading stays, about 2 s on that model.
-Halved bytes pay where the wire dominates: many servers, or a slower network than a single node's NVLink.
+The fp8 push is slower than bf16 on every topology measured, as experts go out per expert (about 62,500 weights and
+scales for Qwen3.5-35B-A3B against 1,000 fused banks) and the engine's loader runs once per tensor. With one vLLM
+server (ep2 trainer) it takes 4.3 s against 1.4 s for bf16: about 3.0 s of engine loading at about 48 microseconds a
+tensor, about 1.45 s of trainer per-tensor overhead, and 0.4 s of bank-level quantization (one call per bank, with the
+experts handed to the client as views of its result). With two TP1 servers on another node over EFA (ep8 trainer) it
+takes 7.84 s against 2.24 s on SGLang under `single_group` and 5.64 s against 2.68 s on vLLM per server, so the whole
+step grows from 33.5 to 39.7 s on SGLang (+19%) and from 33.5 to 35.9 s on vLLM (+7%) (TRL's `step_time`
+[leaves the push out](../training-methods/async-grpo/monitoring.md#step-timings)). Halving the bytes on the wire does
+not pay for the per-tensor loading at these rates. What
+`fp8_block` buys is engine memory (a larger model on fewer engine GPUs) and memory-bound decode on SGLang.
 
 SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (export it before
 `docker compose up`; the SGLang compose file passes it through only when set) and `--moe-runner-backend triton`, as always: pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16
@@ -363,8 +373,8 @@ lists the resolved server arguments and the launch command, not the environment)
 client appends the remedy to a chunk failure that carries that answer
 (`CHUNK_FAILURE_REMEDIES`), per server and under `single_group`. Set it in the SGLang service's environment.
 
-The decode gain depends on the engine: flat on vLLM, and +26 to +28% on SGLang with the triton runner (11,208 against
-8,739 tokens/s at 256 x 1,024 on one B300). The trainer-versus-engine gap is the same on both.
+Decode on vLLM is flat (-0.9% on one server). On SGLang with the triton runner and DeepGEMM off, decode is 26% faster
+at 256 x 1,024 on one B300, and rollouts on the two-server EFA run above took 7.34 s against 8.26 s for bf16 (-11%).
 
 ### vLLM server patches
 
@@ -537,6 +547,7 @@ server that does not answer is logged as unread.
 |---|---|
 | A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
+| A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
 | Servers of a `single_group` run that serve different models or launch flags | One broadcast reaches all of them, and each would load it differently |
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
@@ -810,6 +821,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `SGLANG_ATTENTION_BACKEND` | *(unset)* | `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the default backend (`Unsupported head dimensions`) |
 | `SGLANG_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) repos need |
+| `SGLANG_ENABLE_JIT_DEEPGEMM` | *(unset; passed through only when set)* | `0` for `rollout_weight_precision: fp8_block` ([FP8 rollouts](#fp8-rollouts)) |
 | `SGLANG_EXTRA_ARGS` | *(unset)* | Further flags, appended last. `--enable-deterministic-inference` for GLM-4 MoE Lite: under triton attention its greedy logits differ between a prefill and a prefix-cache hit, which the tier's zero-noise probe refuses |
 
 `SGLANG_GROUP_HOST` belongs to the trainer (the `VLLM_GROUP_HOST` equivalent). Engine behavior under RL:

@@ -65,6 +65,14 @@ Serve bf16 weights, not a quantized checkpoint: a weight update cannot reach the
 transformed tensors a quantized engine stores. For GPT-OSS that means a bf16
 conversion of the release, not the stock MXFP4 one.
 
+The one exception is `rollout_weight_precision: fp8_block`, for a validated family.
+Export the server's checkpoint with `scripts/before_training/export_block_fp8.py`,
+serve it with the triton MoE backend, and on SGLang also export
+`SGLANG_ENABLE_JIT_DEEPGEMM=0` before `docker compose up`. Each sync then pushes
+block-FP8 weights. It saves engine memory and speeds up SGLang decode, but the sync
+itself is slower than bf16
+([FP8 rollouts](../agent-docs/infrastructure/rollout-servers.md#fp8-rollouts) ↗).
+
 The trainers send every sampling field with each request, so the run config, not
 the checkpoint's `generation_config.json`, decides how rollouts sample.
 

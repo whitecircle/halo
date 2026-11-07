@@ -298,7 +298,7 @@ def reject_unsupported_score_centering(async_config) -> None:
     if async_config.rollout_backend != SGLANG_BACKEND:
         reasons.append(
             f"rollout_backend: {async_config.rollout_backend!r} (vLLM returns each candidate as one JSON object "
-            "through a single API-server process, measured at 65% of rollout throughput at K=16 and 80% at K=32, where "
+            "through a single API-server process, which cost 65% of rollout throughput at K=16 and 80% at K=32, where "
             "SGLang's flat arrays cost nothing beyond run noise; serve the rollouts with SGLang)"
         )
     if not async_config.train_on_sampled_tokens:

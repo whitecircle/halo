@@ -502,8 +502,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         return int(args.per_device_train_batch_size * args.gradient_accumulation_steps * self._max_seq_len)
 
     def _fallback_step_tokens(self, world_size: int, measured_cluster: int | None) -> int:
-        """The padded-length estimate for an unusable token delta, warned once. A batch holding no ``*input_ids`` tensor
-        (online GRPO's loader yields prompts) lands here every step, so its throughput is a config-derived constant."""
+        """The padded-length estimate for a step with no usable token delta (no counter, a non-positive delta such as an
+        online GRPO step that builds no round, or an implausible one), warned once."""
         if not self._warned_token_estimate:
             self._warned_token_estimate = True
             cause = (
@@ -514,9 +514,10 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.warning(
                 f"EfficiencyCallback: {cause}, so token throughput and MFU fall back to a "
                 "padded-length ESTIMATE (per_device_train_batch_size x gradient_accumulation_steps x "
-                f"max_seq x {_ESTIMATE_FILL_FRACTION}), not a measurement. If this repeats every step "
-                "the trainer's batches carry no '*input_ids' tensor to count, so "
-                "tokens/s is a constant rescaling of step time — treat it as an estimate."
+                f"max_seq x {_ESTIMATE_FILL_FRACTION}), not a measurement. If this repeats every step, nothing "
+                "adds the trainer's tokens to num_input_tokens_seen (or, on online GRPO, steps_per_generation "
+                "exceeds gradient_accumulation_steps and most steps build no round), so tokens/s is a constant "
+                "rescaling of step time — treat it as an estimate."
             )
         return int(self._nominal_step_tokens() * _ESTIMATE_FILL_FRACTION) * world_size
 
