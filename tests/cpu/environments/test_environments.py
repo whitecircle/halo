@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 import asyncio
 import dataclasses
+import json
 import logging
 import time
 import warnings
 
+import httpx
 import numpy as np
 import pytest
 
@@ -60,6 +62,31 @@ def allow_mock_search(monkeypatch):
     """Opt into the fabricated-results search backend: ``build_search_tools`` refuses an unselectable backend at
     construction."""
     monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
+
+
+@pytest.fixture
+def keenable_http(monkeypatch):
+    """Answer both search transports with one Keenable result and record each request, with ``KEENABLE_API_KEY`` set.
+    The result is shaped as the API returns it: ``description`` empty, multi-line page text in ``snippet``."""
+    sent: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        text = "Paris is the capital\nand largest city of France.\n\n" + "x" * 2000
+        result = {"title": "Paris", "url": "https://en.wikipedia.org/wiki/Paris", "description": "", "snippet": text}
+        return httpx.Response(200, json={"results": [result]})
+
+    transport = httpx.MockTransport(handler)
+    async_client = httpx.AsyncClient
+
+    def request(method, url, **kwargs):
+        with httpx.Client(transport=transport) as client:
+            return client.request(method, url, **kwargs)
+
+    monkeypatch.setattr(ws.httpx, "request", request)
+    monkeypatch.setattr(ws.httpx, "AsyncClient", lambda **kwargs: async_client(transport=transport, **kwargs))
+    monkeypatch.setenv("KEENABLE_API_KEY", "kn-test")
+    return sent
 
 
 def test_message_creation():
@@ -1357,6 +1384,36 @@ def test_an_unselectable_search_backend_is_refused_when_the_ENV_IS_BUILT(monkeyp
         build_search_tools(backend="mock")
     with pytest.raises(ValueError, match="Unknown search backend: nonexistent"):
         build_qa_search_environment(max_turns=3, search_backend="nonexistent")
+
+
+async def test_keenable_posts_the_query_with_its_key_on_both_transports(keenable_http):
+    web_search_raw("capital of France", max_results=3, backend="keenable")
+    await async_web_search("capital of France", max_results=3, backend="keenable")
+    assert len(keenable_http) == 2
+    for request in keenable_http:
+        assert (request.method, str(request.url)) == ("POST", "https://api.keenable.ai/v1/search")
+        assert json.loads(request.content) == {"query": "capital of France", "max_results": 3}
+        assert request.headers["X-API-Key"] == "kn-test"
+
+
+def test_keenable_reads_its_page_text_from_snippet_on_one_line_capped(keenable_http):
+    [result] = web_search_raw("capital of France", backend="keenable")
+    assert (result["title"], result["url"]) == ("Paris", "https://en.wikipedia.org/wiki/Paris")
+    assert result["snippet"].startswith("Paris is the capital and largest city of France. xxx")
+    assert len(result["snippet"]) == 500
+
+
+def test_keenable_is_auto_selected_by_its_key_after_the_other_keyed_backends(monkeypatch):
+    """A run with no key stays on DuckDuckGo, and one that also sets an earlier backend's key keeps that backend."""
+    for var in ("SERPER_API_KEY", "BRAVE_API_KEY", "TAVILY_API_KEY", "KEENABLE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    assert ws._resolve_backend(None)[0] == "duckduckgo"
+    monkeypatch.setenv("KEENABLE_API_KEY", "kn-test")
+    assert ws._resolve_backend(None)[0] == "keenable"
+    for var, backend in (("SERPER_API_KEY", "serper"), ("BRAVE_API_KEY", "brave"), ("TAVILY_API_KEY", "tavily")):
+        monkeypatch.setenv(var, "test-key")
+        assert ws._resolve_backend(None)[0] == backend
+        monkeypatch.delenv(var)
 
 
 def test_normalize_text():

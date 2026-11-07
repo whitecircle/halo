@@ -179,8 +179,8 @@ The toolkit configures no other Ray ports; upstream defaults apply. What must ho
 
 - **Actor processes inherit the `ray start` daemon's environment, not the trainer's.** Export
   `HALO_SANDBOX_*`, `TMPDIR`, search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` /
-  `TAVILY_API_KEY`), and any HF/proxy vars *before* `ray start` on each node; nothing forwards the
-  trainer's env to remote actors.
+  `TAVILY_API_KEY` / `KEENABLE_API_KEY`), and any HF/proxy vars *before* `ray start` on each node;
+  nothing forwards the trainer's env to remote actors.
 
 ## Data through the object store
 

@@ -90,7 +90,7 @@ and the toolkit and cache variables are cataloged in
 | `WANDB_API_KEY` | Weights & Biases logging | `.env` | — |
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
 | `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
-| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
+| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY`, `KEENABLE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
 | `VLLM_API_KEY` | The key a local OpenAI-compatible server expects (its `--api-key`), else `OPENAI_API_KEY` | `.env` | [Environment variables](../reference/configuration-reference.md#environment-variables) |
 | `HALO_SCRATCH` | The large host volume the `make` targets, the dev container and `docker-compose.vllm.yml` mount | shell export (compose also reads `.env`; `make` does not) | [Docker](../infrastructure/docker.md#standard-training-launch) |
 | `SGLANG_MODEL_DIR` | The host directory `docker-compose.sglang.yml` mounts (required, no fallback) | shell export or `.env` | [Rollout Servers](../infrastructure/rollout-servers.md#sglang) |

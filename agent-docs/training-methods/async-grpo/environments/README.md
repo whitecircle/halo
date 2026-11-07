@@ -38,7 +38,7 @@ Actors run environments on CPU and inherit the `ray start` daemon's environment,
 |---|---|
 | `code_contests`, `codeforces`, `swe` | A sandbox backend and a large `TMPDIR` ([Code Execution Sandboxes](sandbox.md)) |
 | `react_math`, `native_math`, `native_coding`, closed-book `exam_qa` | Nothing beyond the image (in-process tools) |
-| `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` picks a keyed search backend, else keyless DuckDuckGo. `search_backend` names one instead ([QA Benchmarks](tasks/qa-benchmarks.md#configuration)) |
+| `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` / `KEENABLE_API_KEY` picks a keyed search backend, else keyless DuckDuckGo. `search_backend` names one instead ([QA Benchmarks](tasks/qa-benchmarks.md#configuration)) |
 | `mcp` | The preset's launcher on `PATH` (`npx`; `uvx` for `fetch`) and its credential. An SSE server needs only network to `server_url` |
 
 ## Configuration
