@@ -285,7 +285,7 @@ every trainer.
 
 **FusedLinearCrossEntropy** fuses `lm_head` with the loss, never materializing logits ([measured
 saving](#benchmarks)). On Halo 1.2.0 it runs at equal speed or faster: Qwen3-8B and Qwen3-30B-A3B at 16k within 0.2%
-with 12.5–13.2 GiB lower peak, gpt-oss-20b at 4k–16k 2.7–3.4% faster with 15–16.5 GiB lower, and Qwen3.5-9B at 64k
+with 12.5–13.2 GiB lower peak, gpt-oss-20b at 4k–16k 2.4–3.4% faster with 15–16.5 GiB lower, and Qwen3.5-9B at 64k
 +4.4% with 133 → 54 GiB (batch 1, full checkpointing, FA2 on both sides; same A/B runs as the [framework comparison](throughput-benchmarks.md#full-parameter-sft-framework-comparison)). Trade-offs: `outputs.logits` is `None` (entropy logging disabled); SFT-only
 (other trainers need logits for log-probs).
 
@@ -390,7 +390,7 @@ loss path's memory saving.
 
 Upstream Liger's `gpt_oss` applier accepts a `swiglu` flag but has no patch block for it: GptOss's custom
 clamped/interleaved expert FFN has no standard-SwiGLU equivalent, so `swiglu` is a no-op at any value and
-defaults off. FLCE is supported and runs 2.7–3.4% faster than CE on gpt-oss-20b EP1 at 4k–16k, at 15–16.5 GiB lower peak.
+defaults off. FLCE is supported and runs 2.4–3.4% faster than CE on gpt-oss-20b EP1 at 4k–16k, at 15–16.5 GiB lower peak.
 
 Effective options: `rope`, `cross_entropy`, `fused_linear_cross_entropy`, `rms_norm`. The last is served by
 the toolkit's spec with Gemma's casting mode (`GptOssRMSNorm` multiplies its weight in fp32 before the cast

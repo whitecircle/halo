@@ -53,8 +53,8 @@ lora_target_modules:
 - gate_up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF
-                                      #   checkpoint; without it the mixed adapter resumes here but
-                                      #   merge_peft_adapters.py refuses it
+                                      #   checkpoint; without it the adapter stays mixed and
+                                      #   merge_peft_adapters.py streams the merge instead
 
 # --- Attention & sequence ---
 # Padded rows: flat packing is refused for this family. On SDPA its DSA layers read only the padding

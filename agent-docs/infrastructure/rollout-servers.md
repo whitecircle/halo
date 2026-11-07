@@ -354,15 +354,16 @@ importance-sampling correction or score centering
 ([Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)).
 
 The fp8 push is slower than bf16 on every topology measured, as experts go out per expert (about 62,500 weights and
-scales for Qwen3.5-35B-A3B against 1,000 fused banks) and the engine's loader runs once per tensor. With one vLLM
-server (ep2 trainer) it takes 4.3 s against 1.4 s for bf16: about 3.0 s of engine loading at about 48 microseconds a
-tensor, about 1.45 s of trainer per-tensor overhead, and 0.4 s of bank-level quantization (one call per bank, with the
-experts handed to the client as views of its result). With two TP1 servers on another node over EFA (ep8 trainer) it
-takes 7.84 s against 2.24 s on SGLang under `single_group` and 5.64 s against 2.68 s on vLLM per server, so the whole
-step grows from 33.5 to 39.7 s on SGLang (+19%) and from 33.5 to 35.9 s on vLLM (+7%) (TRL's `step_time`
-[leaves the push out](../training-methods/async-grpo/monitoring.md#step-timings)). Halving the bytes on the wire does
-not pay for the per-tensor loading at these rates. What
-`fp8_block` buys is engine memory (a larger model on fewer engine GPUs) and memory-bound decode on SGLang.
+scales for Qwen3.5-35B-A3B against 1,026 tensors, 80 of them fused expert banks) and the engine's loader runs once per
+tensor. With one vLLM server (ep2 trainer) it takes 4.3 s against 1.4 s for bf16. In the timed push (5.9 s against 1.7
+s) the engine's loader takes 3.0 s against 0.9 s, about 33 microseconds more a tensor over 62,546 tensors, bank-level
+quantization takes 0.4 s (one batched call per bank, a few slices for a very large one, with the experts handed to the
+client as views of its result), and the rest is the trainer's per-tensor staging and emit. With two TP1 servers on
+another node over EFA (ep8 trainer) it takes 7.84 s against 2.24 s on SGLang under `single_group` and 5.64 s against
+2.68 s on vLLM per server, so the whole step grows from 33.5 to 39.7 s on SGLang (+19%) and from 33.5 to 35.9 s on
+vLLM (+7%) (TRL's `step_time` [leaves the push out](../training-methods/async-grpo/monitoring.md#step-timings)).
+Halving the bytes on the wire does not pay for the per-tensor loading at these rates. What `fp8_block` buys is engine
+memory (a larger model on fewer engine GPUs) and memory-bound decode on SGLang.
 
 SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (export it before
 `docker compose up`; the SGLang compose file passes it through only when set) and `--moe-runner-backend triton`, as always: pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16

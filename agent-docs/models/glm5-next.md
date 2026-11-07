@@ -91,7 +91,7 @@ Both kernels on, with torch's general kernel and upstream's hyper-connections in
 | Full fine-tune, two 8-GPU machines | `ep16` global, 8,192 | 1,504 (913) | 20.63 (33.99) | 212.7–214.1 |
 | | `pp2 × ep8`, 8,192 | 2,423 (about 1,060) | 12.82 (29.29) | 218.0–218.7 / 197.5–197.9 |
 
-- The PP rate counts attended tokens ([logged rates count padding](../parallelism/pipeline-parallelism.md#measured-throughput)). PP leads `ep16` by 1.61×, 1.16× on the general kernels.
+- The PP rate counts attended tokens ([how a PP rate is counted](../parallelism/pipeline-parallelism.md#measured-throughput)). PP leads `ep16` by 1.61×, 1.16× on the general kernels.
 - `ep8` with DP runs out of memory in the first optimizer step, about 3 minutes in, since no gate refuses it first. At 40.2B trainable per rank, AdamWBF16's state takes the allocation to 243–250 GiB of 267.7.
 - The LoRA rows are long real-text rows averaging about 7,760 and 15,520 tokens, rendered with `glm-chat.jinja`. The shipped recipe reads `ultrachat_200k` at about 1,140 tokens a row under `glm5-chat.jinja`; it ran 5 steps on a cold cache with no steady rate to read, and its loss and rate do not compare with these rows.
 - Raising `max_length` still costs tok/s, 16% from 8k to 16k against 30% on the general kernels: a query's keys are capped at 2,051, while each tile's forward still scores its crop up to its last selected key.

@@ -130,8 +130,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 - **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
   Blackwell runs FA4, and FA2 on packed SFT rows
   ([Attention backends](../supported-matrix.md#attention-backends)).
-- **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
-  crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
+- **Packing or padding-free.** Both pack documents without cross-document attention on this family. An unset
+  `attn_implementation` loads FA2 for either, and the shipped recipes use `packing: true` with fixed-length rows.
+  Rows that share a long prefix can pack as trees on FA2
   (`tree_packing: true`;
   [Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
 - **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes
