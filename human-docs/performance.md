@@ -113,7 +113,9 @@ conditions that decide how to read them are in the
 [framework comparison](../agent-docs/optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison) ↗; the
 TRL side is in [Halo vs stock TRL](../agent-docs/optimization/halo-vs-stock-trl.md) ↗.
 
-<!-- MILES: pending fresh release-candidate runs -->
+In GRPO on Qwen3.5-35B-A3B, with one 8× B300 node training and another serving SGLang rollouts, Halo takes 22% less
+time per response token than Miles v0.1.3 on-policy (0.137 against 0.176 s per 1k tokens, step 14.0 against 18.6 s) at
+63 against 109 GiB on the trainer node, and 8% less with rollouts overlapped: [GRPO against Miles](../agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles) ↗.
 
 For memory rather than speed, start at [Parallelism](parallelism.md). For a run
 slower than these numbers with no obvious cause, turn on the profiler

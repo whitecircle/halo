@@ -18,7 +18,8 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
 - **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110), the
   [EP phase split](#where-the-ep-steps-time-goes), [recipes and real text](#recipes-and-real-text), the NUMA A/B and the
-  [framework comparison on Halo 1.2.0 against TRL, NeMo AutoModel and Megatron Bridge](#long-context-against-trl-nemo-automodel-and-megatron-bridge) ran on 1.2.0 code; every other table ran on Halo
+  [framework comparison on Halo 1.2.0 against TRL, NeMo AutoModel and Megatron Bridge](#long-context-against-trl-nemo-automodel-and-megatron-bridge) ran on 1.2.0 code and
+  [GRPO against Miles](#grpo-against-miles) on this release's; every other table ran on Halo
   1.1.0 code or earlier. Those older rows predate 1.2.0's
   MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
   ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
@@ -146,8 +147,6 @@ Conditions that decide how to read the table:
   NeMo 9B and 35B (its 64k best rows compare edited and unedited runs without a control run of their own) and
   Megatron 9B and 35B. NeMo's 122B and 128k 35B rows and
   Megatron's 122B rows have no such check.
-
-<!-- MILES: pending fresh release-candidate runs -->
 
 ### Levers on packed 64k and 128k rows
 
@@ -370,6 +369,51 @@ cross-GPU row as a ceiling on the gap, not the gap.
   Halo 31,262 vs Axolotl 28,330 at seq 8192, 35,517 vs 29,520 at seq 16384.
 
 The Laguna and LFM2.5 rows are from the Halo research page (whitecircle.com/research/halo).
+
+## GRPO against Miles
+
+GRPO on Qwen3.5-35B-A3B with GSM8K prompts: 32 prompts × 8 samples per step, responses up to 1,024 tokens,
+temperature 1.0. One node of 8 B300s trains and a second node of 8 B300s serves SGLang rollouts. Both frameworks read
+the same prompts in the same order, checked token for token at every step. The metric is whole-step seconds (rollout,
+training and weight sync) per 1k response tokens, the mean of 3 runs per framework alternated on the same nodes, over
+steps 3–12 on-policy and 4–14 with rollouts overlapped (the pipeline fills in three steps); per-token rates absorb the
+drift in response length between runs. Lower is better.
+
+| Per step, mean of 3 runs | Halo, on-policy | Miles v0.1.3, on-policy | Halo, overlapped | Miles v0.1.3, overlapped |
+|---|---:|---:|---:|---:|
+| Seconds per 1k response tokens | **0.137** (sd 0.009) | 0.176 (sd 0.005) | **0.102** (sd 0.006) | 0.111 (sd 0.001) |
+| Step time, s | **14.0** | 18.6 | **10.5** | 11.8 |
+| Training, s per 1k response tokens | **0.014** | 0.047 | **0.023** | 0.046 |
+| Waiting on rollouts, s | 6.5 | 6.7 | 5.0 | **3.6** |
+| Weight sync, s | 6.1 | 6.0 | 3.1 | 3.3 |
+| Trainer node peak, GiB (nvidia-smi) | **63** | 109 | **63** | 117 |
+
+On-policy, Halo takes 22% less time per response token: its training phase is 3.4× shorter per token, and rollout and
+weight sync are within 4%. With rollouts overlapped, Halo takes 8% less: its training phase is half of Miles' per token,
+while it waits longer on rollouts. Overlapped, both push weights every second step, so the sync row is averaged over steps.
+
+Layouts, each framework's best found on these nodes:
+
+- **Halo.** FSDP2 with EP8, rows packed into micro-batches of up to 12,288 tokens (`packed_microbatch_tokens`),
+  importance weights from the loss forward (`loss_forward_importance_weights`), full checkpointing. Eight one-GPU SGLang
+  engines with the Triton MoE backend; per-server weight sync over EFA. Overlapped: `prefetch_depth: 1` with
+  `sync_weights_every_n_steps: 2`.
+- **Miles.** Megatron TP1 EP8 with full recompute and its fused log-prob backend; FlashInfer CUTLASS MoE and TRT-LLM
+  attention on the engines; packed broadcast weight sync over sockets, since its image has no EFA. On-policy: one SGLang
+  engine over the 8 GPUs (TP8, EP8). Overlapped: `train_async.py` with weight updates every second step and TIS
+  (clip 3), on eight one-GPU engines.
+
+How to read the table:
+
+- **Speed only.** The mean rewards over the window match (0.947 and 0.946 on-policy); runs this short say nothing about
+  learning quality.
+- **Both trainers run FA2.** Miles' default attention (FA4 through Transformer Engine) fails in the first backward on
+  Qwen3.5's head_dim 256 on B300.
+- **Phase times come from each framework's own timers.** Halo's training time is the step minus rollout and sync, so it
+  includes small overheads; Miles' is its log-prob, data and actor-training timers.
+- **Prefetch shifts Halo's rounds by one step.** Under prefetch Halo trains each round one step after sampling it, so
+  its overlapped runs match the prompt sequence one step late.
+- **Miles' spread is a lower bound.** Its repeats are seeded, so they vary less than independent runs would.
 
 ## Metrics
 

@@ -254,6 +254,14 @@ Megatron Bridge is a 0.7.0 release-candidate commit with Megatron Core 0.20.0. H
 Rates per parallelism layout, the 16k and 4k tables, and the other conditions: [Throughput Benchmarks](agent-docs/optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison);
 the TRL side: [Halo vs stock TRL](agent-docs/optimization/halo-vs-stock-trl.md).
 
+### GRPO against Miles
+
+GRPO on Qwen3.5-35B-A3B (GSM8K, 32 prompts × 8 samples, one 8× B300 node training and one serving SGLang
+rollouts, same prompts on both sides): on-policy, Halo takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176, 22% less,
+with a 14.0 s step against 18.6 s and 63 against 109 GiB on the trainer node. With rollouts overlapped it takes 0.102
+against 0.111, 8% less. Layouts and conditions:
+[GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles).
+
 ### Halo 1.2.0 against 1.1.0
 
 | Result | Configuration |
