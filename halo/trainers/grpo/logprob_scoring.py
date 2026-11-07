@@ -438,7 +438,9 @@ class LogprobScoringMixin:
         return logps, shifted_labels
 
     def _head_sweep(self, unwrapped_model) -> Callable[..., tuple[torch.Tensor, torch.Tensor | None]]:
-        """``sweep(hidden, targets, compute_entropy=False) -> (logps, entropy)`` under the verified head transform."""
+        """``sweep(hidden, targets, compute_entropy=False) -> (logps, entropy)`` under the verified head transform.
+        ``targets`` is one id per position or ``(..., m)`` ids (a sampled token and its candidates, negatives masked),
+        scored under the position's one ``log Z`` (``chunked_head_logprobs``)."""
         lm_head = unwrapped_model.get_output_embeddings()
         self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
         weight = materialize_dtensor(lm_head.weight)
