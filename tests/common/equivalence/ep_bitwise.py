@@ -53,6 +53,7 @@ from tests.common.equivalence.tensor_records import (
 )
 from tests.common.parallelism import single_process_ep_config, stubbed_process_groups
 from tests.common.repo import REPO_ROOT
+from tests.common.routing import dense_rows
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 FAMILIES = tuple(TINY_MOE_FAMILIES)
@@ -249,7 +250,7 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
         injector.disarm()
     tensors = {"loss": outputs.loss, "logits": outputs.logits}
     if routing:
-        tensors["routing"] = routing[0]
+        tensors["routing"] = dense_rows(routing[0], device)
     tensors |= {
         f"{GRADIENT_PREFIX}{name}": param.grad for name, param in model.named_parameters() if param.grad is not None
     }

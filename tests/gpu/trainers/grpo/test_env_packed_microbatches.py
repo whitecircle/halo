@@ -55,7 +55,13 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.packed_grad_floor import build_fp32_reference, judge_packed_grads
 from tests.common.rank_log import log, log_all
-from tests.common.routing import check_flips_are_near_ties, distinct_expert_picks, ragged_routing, router_margins
+from tests.common.routing import (
+    check_flips_are_near_ties,
+    dense_rows,
+    distinct_expert_picks,
+    ragged_routing,
+    router_margins,
+)
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -225,6 +231,7 @@ def run_moe(ctx) -> dict:
             _, captured = packed._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order, plan)
             shifted = ids.roll(1, dims=1)
             _, misrouted = packed._recompute_logps_and_routing_masks(shifted, mask, keep, None, "train", order, plan)
+        plain, captured, misrouted = (dense_rows(r, ctx.device) for r in (plain, captured, misrouted))
         real = plain[..., 0] >= 0
         margins = torch.zeros(plain.shape[:3], device=plain.device)
         for layer_index, chunks in enumerate(gate_logits):
@@ -245,7 +252,7 @@ def run_moe(ctx) -> dict:
             (ROWS, ids.size(1)), injector.num_ep_layers, injector.top_k, injector.num_experts
         )
         engine = engine.masked_fill(~mask.bool().cpu()[:, :, None, None], -1)
-        routing = ragged_routing(engine, batch["prompt_ids"].size(1))
+        routing = ragged_routing(engine)
         built = host()
         built._rollout_routing_replay = True
         built._rollout_routing = routing

@@ -30,7 +30,7 @@ from tests.common.length_deal import (
     tiny_llama,
     train_round,
 )
-from tests.common.routing import bare_replay_injector, ragged_routing
+from tests.common.routing import bare_replay_injector, dense_rows, ragged_routing
 
 _VOCAB = 64
 # Losses TRL's real loss below shows to be the same in any deal of a round's rows; bnpo differs and vespo is
@@ -282,7 +282,7 @@ def _captured(order: torch.Tensor | None) -> torch.Tensor:
             for r in forwarded:
                 lo, hi = _SPANS[r]
                 layer._captured_routing_chunks.append(mask[r, lo:hi, i])
-    return result[0]
+    return dense_rows(result[0])
 
 
 def test_the_replay_deal_is_not_its_own_inverse():
@@ -297,7 +297,7 @@ def test_an_armed_mask_feeds_each_dealt_forward_its_own_rows_routing():
     injector, mask = _injector(), _routed_mask()
     forwarded = _DEALT.tolist()
     attended = torch.stack([torch.arange(_SEQ) >= _SPANS[r][0] for r in forwarded])
-    injector.arm_rows(ragged_routing(mask, 3), forwarded, attended, [_SPANS[r] for r in forwarded])
+    injector.arm_rows(ragged_routing(mask), forwarded, attended, [_SPANS[r] for r in forwarded])
     for i, layer in enumerate(injector._layers):
         want = torch.cat([mask[r, _SPANS[r][0] : _SPANS[r][1], i] for r in forwarded])
         assert torch.equal(layer._forced_topk_indices, want.long()), f"layer {i}"
@@ -337,9 +337,9 @@ def _step_recompute(rollout_replay: bool, dealt: bool) -> tuple[torch.Tensor, to
     host._get_per_token_logps_and_entropies = _replaying_scorer(injector, replayed)
     order = host._no_grad_row_order(mask, "train") if dealt else None
     assert order is None or not torch.equal(order, torch.argsort(order)), "the deal should not be self-inverse"
-    engine = ragged_routing(_routed_mask(ids.size(0), ids.size(1)), 3) if rollout_replay else None
+    engine = ragged_routing(_routed_mask(ids.size(0), ids.size(1))) if rollout_replay else None
     logps, routing = host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order)
-    return logps, routing, replayed
+    return logps, None if routing is None else dense_rows(routing), replayed
 
 
 @pytest.mark.parametrize("mode", ["recompute", "rollout"])

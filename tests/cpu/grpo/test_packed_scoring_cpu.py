@@ -10,7 +10,7 @@ from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjecto
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.packed_forward import build_packed_rows
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
-from tests.common.routing import BareEPLayer, distinct_expert_picks, ragged_routing
+from tests.common.routing import BareEPLayer, dense_rows, distinct_expert_picks, ragged_routing
 
 _VOCAB = 64
 _TOL = {"rtol": 1e-4, "atol": 1e-5}
@@ -155,6 +155,7 @@ def test_capture_through_packed_bins_equals_capture_through_per_row_forwards():
         _, routing_per_row = per_row._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
         _, routing_packed = packed._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order, _PLAN)
     assert routing_per_row is not None and routing_packed is not None
+    routing_packed, routing_per_row = dense_rows(routing_packed), dense_rows(routing_per_row)
     assert torch.equal(routing_packed, routing_per_row)
     assert routing_packed.shape[0] == len(_PROMPTS) and (routing_packed != -1).any()
 
@@ -165,7 +166,7 @@ def test_replay_across_packed_bins_consumes_exactly_the_armed_routing():
     ids, mask, keep = _round()
     order = torch.tensor(_PLAN.order)
     host = _routing_host(True)
-    engine = ragged_routing(distinct_expert_picks((len(_PROMPTS), ids.size(1)), _LAYERS, _TOP_K, 8), 3)
+    engine = ragged_routing(distinct_expert_picks((len(_PROMPTS), ids.size(1)), _LAYERS, _TOP_K, 8))
     with torch.no_grad():
         host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order, _PLAN)
     assert not host._routing_injector._armed, "the recompute must disarm the mask it armed"

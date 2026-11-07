@@ -28,7 +28,7 @@ from halo.trainers.grpo.environmental.rollout_routing import (
     RowsReplay,
     build_rollout_routing,
 )
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY, StepRows
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY, StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans, host_row_spans
 from halo.trainers.grpo.row_span_stash import ROW_SPANS_KEY
@@ -136,42 +136,31 @@ class RoutingReplayInjector:
         row_spans: list[tuple[int, int]] | None = None,
         row_order: torch.Tensor | None = None,
     ):
-        """The yielded list holds the ``[rows, seq, layers, top_k]`` mask on exit. ``row_spans`` describes span-trimmed
-        per-row forwards, ``row_order[p]`` the batch row the ``p``-th forward is. An error inside resets every layer
-        and propagates, so the token-count check cannot shadow an OOM."""
+        """The yielded list holds the pass's :class:`RolloutRouting` on exit, ragged on the host: each forwarded row
+        keeps only its tokens, and a forward pads the rows it uses. ``row_spans`` describes span-trimmed per-row
+        forwards, ``row_order[p]`` the batch row the ``p``-th forward is. An error inside resets every layer and
+        propagates, so the token-count check cannot shadow an OOM."""
         _require_spans_with_order(row_spans, row_order)
         targets = list(range(rows)) if row_order is None else row_order.tolist()
         for layer in self._layers:
             layer._capture_routing = True
             layer._captured_routing_chunks = []
-        result: list[torch.Tensor] = []
+        result: list[RolloutRouting] = []
         try:
             yield result
             expected = sum(hi - lo for lo, hi in row_spans) if row_spans is not None else rows * seq_len
-            per_layer = []
-            errors = []
-            layer_chunks = []
-            for layer in self._layers:
-                layer_chunks.append(layer._captured_routing_chunks)
+            layer_chunks = [layer._captured_routing_chunks for layer in self._layers]
         finally:
             # Reset every layer on any exception path, else stale capture state leaks into the next forward.
             for layer in self._layers:
                 layer._capture_routing = False
                 layer._captured_routing_chunks = []
-        for chunks in layer_chunks:
-            flat = torch.cat(chunks, dim=0) if chunks else None
-            if flat is None or flat.size(0) != expected:
-                got = 0 if flat is None else flat.size(0)
-                errors.append(f"layer {len(per_layer) + len(errors)}: {got} tokens")
-            elif row_spans is None:
-                per_layer.append(flat.view(rows, seq_len, -1))
-            else:
-                full = flat.new_full((rows, seq_len, flat.size(-1)), -1)
-                offset = 0
-                for r, (lo, hi) in zip(targets, row_spans, strict=True):
-                    full[r, lo:hi] = flat[offset : offset + (hi - lo)]
-                    offset += hi - lo
-                per_layer.append(full)
+        flats = [torch.cat(chunks, dim=0) if chunks else None for chunks in layer_chunks]
+        errors = [
+            f"layer {index}: {0 if flat is None else flat.size(0)} tokens"
+            for index, flat in enumerate(flats)
+            if flat is None or flat.size(0) != expected
+        ]
         if errors:
             raise RuntimeError(
                 f"routing-replay capture recorded a wrong token count (expected {expected} = "
@@ -179,7 +168,15 @@ class RoutingReplayInjector:
                 f"{'; '.join(errors)}. The capture forwards must tile exactly the declared row layout "
                 f"(pass row_spans for span-trimmed per-row forwards)."
             )
-        result.append(torch.stack(per_layer, dim=2))  # [rows, seq, layers, top_k] int16
+        spans = row_spans if row_spans is not None else [(0, seq_len)] * rows
+        segments: list[torch.Tensor | None] = [None] * rows
+        starts = [0] * rows
+        offset = 0
+        for row, (lo, hi) in zip(targets, spans, strict=True):
+            segments[row] = torch.stack([flat[offset : offset + hi - lo] for flat in flats], dim=1).cpu()
+            starts[row] = lo
+            offset += hi - lo
+        result.append(RolloutRouting(segments, starts, seq_len, len(flats), flats[0].size(-1)))
 
     @contextlib.contextmanager
     def paused(self):
@@ -223,7 +220,7 @@ class RoutingReplayInjector:
         attended: torch.Tensor,
         row_spans: list[tuple[int, int]] | None = None,
     ) -> None:
-        """:meth:`arm` over the named rows of a round's engine routing, in the order they forward. Only that padded
+        """:meth:`arm` over the named rows of a round's routing, in the order they forward. Only that padded
         slice is built, on ``attended``'s device and outside the attended positions ``-1``; it is freed on return."""
         if attended.shape != (len(rows), routing.width):
             raise RuntimeError(
@@ -325,8 +322,9 @@ class RoutingReplayMixin:
         token: an all-masked step has nothing to replay and trains as a no-op. A train round's routing stays on the
         host, ragged, for its forwards to pad."""
         rollout_routing = None
-        if self._rollout_routing_replay and mode == "train":
+        if mode == "train":
             self._rollout_routing = None
+        if self._rollout_routing_replay and mode == "train":
             if any(row.turn_routing is not None for row in rows):
                 rollout_routing = self._rollout_routing_with_coverage(rows, step)
                 self._rollout_routing = rollout_routing
@@ -387,10 +385,9 @@ class RoutingReplayMixin:
     def _arm_loss_forward_replay(self, inputs: dict) -> None:
         """Over the positions the gradient forward attends; the rest route naturally. That excludes padding and the
         completion of a row dropped from the loss, which this forward reads as attention padding, in a context other
-        than its mask's. A rollout round's micro-batch pads its own rows from the host."""
-        masks = inputs.get(ROUTING_MASKS_KEY)
+        than its mask's. A micro-batch pads its own rows of the round's routing from the host."""
         round_rows = inputs.get(ROUTING_ROWS_KEY)
-        if masks is None and round_rows is None:
+        if round_rows is None:
             return
         attended = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
         stashed = inputs.get(ROW_SPANS_KEY)
@@ -400,9 +397,6 @@ class RoutingReplayMixin:
             spans = host_row_spans(stashed)[0]
         else:
             spans = dense_row_spans(attended)[0]
-        if round_rows is not None:
-            if self._rollout_routing is None:
-                raise RuntimeError("the batch names rollout routing rows but the trainer holds none for this round")
-            self._routing_injector.arm_rows(self._rollout_routing, round_rows.tolist(), attended, spans)
-        else:
-            self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), spans)
+        if self._rollout_routing is None:
+            raise RuntimeError("the batch names routing rows but the trainer holds none for this round")
+        self._routing_injector.arm_rows(self._rollout_routing, round_rows.tolist(), attended, spans)

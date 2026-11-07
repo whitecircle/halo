@@ -5,7 +5,7 @@ import contextlib
 from contextlib import AbstractContextManager
 from typing import ClassVar
 
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin
 
 
@@ -16,7 +16,6 @@ class PackedMicrobatchMixin(PackedRoundMixin):
 
     PACKED_FILLER_VALUES: ClassVar[dict[str, int]] = {
         **PackedRoundMixin.PACKED_FILLER_VALUES,
-        ROUTING_MASKS_KEY: -1,
         ROUTING_ROWS_KEY: -1,
     }
 

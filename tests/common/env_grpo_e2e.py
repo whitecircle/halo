@@ -59,6 +59,7 @@ from tests.common.on_policy_e2e import (
     sink_round,
 )
 from tests.common.rank_log import log
+from tests.common.routing import dense_rows
 from tests.common.thinking_budget import (
     ReasoningTurnRecorder,
     record_budget_acceptance,
@@ -263,7 +264,7 @@ def capture_routing(trainer, ids: torch.Tensor) -> torch.Tensor:
     with trainer._routing_injector.capture(ids.size(0), ids.size(1)) as captured, torch.no_grad():
         trainer.model(input_ids=ids)
     reshard_fsdp2_modules(unwrap(trainer.model))
-    return captured[0]
+    return dense_rows(captured[0], ids.device)
 
 
 @contextlib.contextmanager

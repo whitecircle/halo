@@ -1,5 +1,6 @@
-"""The engine's routing of one train round, kept ragged on the host: each row holds only the positions the engine
-covered, and the padded ``[rows, prompt + completion, layers, top_k]`` slice a forward needs is built on demand."""
+"""A train round's routing (the engine's under R3, the recompute pass's under R2), kept ragged on the host: each row
+holds only the positions covered, and the padded ``[rows, width, layers, top_k]`` slice a forward needs is built on
+demand."""
 
 from collections.abc import Sequence
 from typing import NamedTuple
@@ -12,22 +13,20 @@ ROLLOUT_COVERAGE_SHAPES = ("full", "engine_omits_last", "completion_only", "unre
 
 
 class RolloutRouting:
-    """Per row, the covered run of an int16 ``[tokens, layers, top_k]`` mask: its first ``prompt_covered`` entries sit
-    at the end of the left-padded prompt, the rest at the start of the completion. A row without routing is ``None``."""
+    """Per row, the covered run of an int16 ``[tokens, layers, top_k]`` mask, laid at ``starts[row]`` of a row
+    ``width`` positions wide. A row without routing is ``None``."""
 
     def __init__(
         self,
         segments: list[torch.Tensor | None],
-        prompt_covered: list[int],
-        prompt_width: int,
-        completion_width: int,
+        starts: list[int],
+        width: int,
         num_layers: int,
         top_k: int,
     ):
         self._segments = segments
-        self._prompt_covered = prompt_covered
-        self.prompt_width = prompt_width
-        self.width = prompt_width + completion_width
+        self._starts = starts
+        self.width = width
         self.num_layers = num_layers
         self.top_k = top_k
 
@@ -44,11 +43,10 @@ class RolloutRouting:
             segment = None if row < 0 else self._segments[row]
             if segment is None:
                 continue
-            segment = segment.to(device)
-            head = self._prompt_covered[row]
-            if head:
-                out[i, self.prompt_width - head : self.prompt_width] = segment[:head]
-            out[i, self.prompt_width : self.prompt_width + segment.size(0) - head] = segment[head:]
+            start = self._starts[row]
+            if start + segment.size(0) > self.width:
+                raise ValueError(f"routing row {row} runs {start}+{segment.size(0)} past a width of {self.width}")
+            out[i, start : start + segment.size(0)] = segment.to(device)
         return out
 
 
@@ -77,10 +75,10 @@ def build_rollout_routing(
     full, engine_omits_last, completion_only, unresolved = ROLLOUT_COVERAGE_SHAPES
     stats = {**dict.fromkeys(ROLLOUT_COVERAGE_SHAPES, 0), "prompt_len_mismatch": 0}
     segments: list[torch.Tensor | None] = []
-    prompt_covered: list[int] = []
+    starts: list[int] = []
     for i, turn in enumerate(turn_masks):
         segments.append(None)
-        prompt_covered.append(0)
+        starts.append(max_prompt_len)
         if turn is None:
             continue
         mask, engine_p = turn
@@ -109,7 +107,7 @@ def build_rollout_routing(
             stats[full if tokens == ep + c else engine_omits_last] += 1
             covered = min(tokens - ep, c)
             if ep == p:
-                segments[i], prompt_covered[i] = mask[: p + covered], p
+                segments[i], starts[i] = mask[: p + covered], max_prompt_len - p
             else:
                 segments[i] = mask[ep : ep + covered]
                 stats["prompt_len_mismatch"] += 1  # completion still replayed; prompt stays natural
@@ -118,5 +116,5 @@ def build_rollout_routing(
             segments[i] = mask
         else:
             stats[unresolved] += 1
-    routing = RolloutRouting(segments, prompt_covered, max_prompt_len, max_completion_len, num_layers, top_k)
+    routing = RolloutRouting(segments, starts, max_prompt_len + max_completion_len, num_layers, top_k)
     return routing, stats

@@ -17,14 +17,14 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.microbatch_plan import MicrobatchPlan
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
 from halo.trainers.grpo.packed_rounds import SLOT_ACTIVE_KEY, SLOT_IS_ACTIVE_KEY, SLOT_ROWS_KEY, PackedRoundMixin
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import ragged_round, scoring_host, single_process_accelerator, stacked, tiny_llama
-from tests.common.routing import bare_replay_injector, ragged_routing
+from tests.common.routing import bare_replay_injector, dense_rows, ragged_routing
 
 _VOCAB = 64
 _LENGTHS = (5, 1, 7, 2, 6, 3, 4, 8)
@@ -170,7 +170,7 @@ def test_a_capture_over_a_subset_of_rows_leaves_the_others_natural():
         len(_SPANS), _SEQ, row_spans=[_SPANS[r] for r in forwarded.tolist()], row_order=forwarded
     ) as result:
         _forward(injector, mask, forwarded.tolist())
-    captured = result[0]
+    captured = dense_rows(result[0])
     assert captured.shape[0] == len(_SPANS)
     for r in range(len(_SPANS)):
         lo, hi = _SPANS[r]
@@ -197,7 +197,7 @@ def test_an_inert_forward_inside_a_capture_miscounts_unless_it_is_paused():
         with injector.paused():
             _forward(injector, mask, [3])
         _forward(injector, mask, [1])
-    captured = result[0]
+    captured = dense_rows(result[0])
     assert (captured[3] == -1).all() and torch.equal(captured[4, :3], mask[4, :3])
 
 
@@ -225,7 +225,7 @@ def test_arming_checks_the_spans_against_the_forwarded_rows():
 def test_arming_named_rows_builds_only_those_rows_in_forward_order():
     """A packed bin forwards a subset of the round's rows: only theirs are padded, spans trimmed, in forward order."""
     injector, mask = _injector(), _mask(len(_SPANS))
-    routing = ragged_routing(mask, prompt_width=2)
+    routing = ragged_routing(mask)
     forwarded = [2, 0]
     spans = [_SPANS[r] for r in forwarded]
     attended = torch.stack([torch.arange(_SEQ) >= _SPANS[r][0] for r in forwarded])
@@ -347,7 +347,6 @@ def test_a_slots_filler_rows_are_inert_and_carry_no_routing_row():
         "prompt_mask": torch.zeros(2, 2, dtype=torch.bool),
         "importance_sampling_ratio": torch.ones(2),
         ROUTING_ROWS_KEY: torch.tensor([0, 1]),
-        ROUTING_MASKS_KEY: torch.tensor([[0, 1], [1, 0]]),
     }
     slot = {
         SLOT_ROWS_KEY: torch.tensor([1, -1]),
@@ -356,7 +355,6 @@ def test_a_slots_filler_rows_are_inert_and_carry_no_routing_row():
     }
     view = host._build_slot_view(slot)
     assert view[ROUTING_ROWS_KEY].tolist() == [1, -1]
-    assert view[ROUTING_MASKS_KEY].tolist() == [[1, 0], [-1, -1]]
     assert view["prompt_ids"].tolist() == [[3, 4], [9, 9]]
     assert view["prompt_mask"].tolist() == [[False, False], [False, True]]
     assert view["importance_sampling_ratio"].tolist() == [1.0, 1.0]

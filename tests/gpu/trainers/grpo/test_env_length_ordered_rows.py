@@ -62,7 +62,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2, worst_relative_l2
 from tests.common.rank_log import log, log_all
-from tests.common.routing import distinct_expert_picks, ragged_routing
+from tests.common.routing import dense_rows, distinct_expert_picks, ragged_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 # The stage recipes' attention. No gradient checkpointing: what the deal changes is the row order alone.
@@ -248,7 +248,7 @@ def run_moe(ctx) -> dict:
     batch = _rank_round(ctx, MOE_ROW_TOKENS, vocab)
     ids, mask, keep = stacked(batch)
     engine = _engine_masks(mask, injector, MOE_SEED + ctx.rank)
-    routing = ragged_routing(engine, batch["prompt_ids"].size(1))
+    routing = ragged_routing(engine)
     host = loss_host(model, chunks=CHUNKS, accelerator=world_accelerator())
     host._routing_injector = injector
     host.use_liger_kernel = False
@@ -264,6 +264,7 @@ def run_moe(ctx) -> dict:
             plain_logps, plain = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
             dealt_logps, dealt = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
             _, floor = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", floor_order)
+        plain, dealt, floor = (dense_rows(r, ctx.device) for r in (plain, dealt, floor))
         dealt_layout, dealt_flips = _selection_flips(dealt, plain)
         floor_layout, floor_flips = _selection_flips(floor, plain)
         bar = max(R2_FLIP_MAX, R2_FLOOR_FACTOR * floor_flips)
@@ -282,7 +283,8 @@ def run_moe(ctx) -> dict:
         spans, _ = dense_row_spans(mask[order])
         with torch.no_grad(), injector.capture(ROWS, mask.size(1), row_spans=spans) as replayed:
             logps, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order)
-        wrong = [p for p in range(ROWS) if not torch.equal(replayed[0][p], engine[order[p]])]
+        captured = dense_rows(replayed[0], ctx.device)
+        wrong = [p for p in range(ROWS) if not torch.equal(captured[p], engine[order[p]])]
         assert bool(torch.isfinite(logps).all()), "the replayed recompute returned non-finite log-probs"
         assert not wrong, f"dealt positions {wrong} replayed routing other than their row's engine routing"
 
@@ -308,7 +310,8 @@ def run_moe(ctx) -> dict:
             injector.disarm()
             losses.append(loss.item())
             forwarded.append(inputs["row_id"].cpu())
-            wrong += [int(r) for i, r in enumerate(forwarded[-1]) if not torch.equal(replayed[0][i], engine[r])]
+            captured = dense_rows(replayed[0], ctx.device)
+            wrong += [int(r) for i, r in enumerate(forwarded[-1]) if not torch.equal(captured[i], engine[r])]
         model.zero_grad(set_to_none=True)
         metrics["replayed_loss"] = sum(losses)
         assert all(map(math.isfinite, losses)), f"replayed micro-batch losses {losses}"

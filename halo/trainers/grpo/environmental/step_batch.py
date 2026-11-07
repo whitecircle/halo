@@ -42,9 +42,8 @@ from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
-ROUTING_MASKS_KEY = "routing_masks"
-# Int64 ``[rows]`` of the round rows whose engine routing the trainer holds ragged on the host (``-1``: none), riding the
-# batch dict row-aligned in place of a dense mask.
+# Int64 ``[rows]`` of the round rows whose routing the trainer holds ragged on the host (``-1``: none), riding the
+# batch dict row-aligned so TRL's shuffle and slicing carry the routing with its rows.
 ROUTING_ROWS_KEY = "routing_rows"
 # Consecutive steps with no valid episode anywhere that halt the run: one can be a grader blip, a second
 # means the rollout path is down.
@@ -97,7 +96,7 @@ class StepScores:
 
     recompute_logps: torch.Tensor | None
     old_logps: torch.Tensor | None
-    routing_masks: torch.Tensor | None
+    captured_routing: RolloutRouting | None
     ratio: torch.Tensor
     logps_diff: torch.Tensor | None
     corrected_mask: torch.Tensor | None
@@ -231,9 +230,8 @@ class StepBatchMixin:
         }
         if scores.fused:
             result = self._with_loss_forward_inputs(result, step, scores)
-        if scores.routing_masks is not None:
-            # Rides the batch dict like old_per_token_logps so TRL's shuffle/slice keep it row-aligned.
-            result[ROUTING_MASKS_KEY] = scores.routing_masks
+        if scores.captured_routing is not None:
+            rollout_routing = self._rollout_routing = scores.captured_routing
         if rollout_routing is not None:
             result[ROUTING_ROWS_KEY] = torch.arange(len(rollout_routing), device=device)
         return result if plan is None else self._lay_out_packed_round(result, plan)
@@ -326,7 +324,7 @@ class StepBatchMixin:
             else torch.tensor(plan.order, dtype=torch.long, device=step.attention_mask.device)
         )
         with self._phase_timers.span(Phase.NO_GRAD):
-            recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
+            recompute_logps, captured_routing = self._recompute_logps_and_routing_masks(
                 step.prompt_completion_ids,
                 step.attention_mask,
                 step.logits_to_keep,
@@ -353,7 +351,7 @@ class StepBatchMixin:
         return StepScores(
             recompute_logps,
             old_logps,
-            routing_masks,
+            captured_routing,
             ratio,
             logps_diff,
             corrected_mask,
@@ -373,13 +371,13 @@ class StepBatchMixin:
         mode: str,
         order: torch.Tensor | None = None,
         plan: MicrobatchPlan | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """The log-probs in batch order and, under R2, the routing the pass captured. Under R3 each scoring call
+    ) -> tuple[torch.Tensor | None, RolloutRouting | None]:
+        """The log-probs in batch order and, under R2, the ragged routing the pass captured. Under R3 each scoring call
         replays the engine's routing of its own rows. The gate is config- and mode-derived, so the forward and its EP
         dispatch are entered by every rank or by none."""
         # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
-        routing_masks = None
+        captured_routing = None
         if self._runs_logprob_recompute and not self._uses_loss_forward_weights(mode):
             ids, mask = prompt_completion_ids, attention_mask
             if order is not None:
@@ -412,8 +410,8 @@ class StepBatchMixin:
                 )
                 recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order, plan, replay)
             if captured:
-                routing_masks = captured[0]
-        return recompute_logps, routing_masks
+                captured_routing = captured[0]
+        return recompute_logps, captured_routing
 
     def _compute_ref_logps(
         self,

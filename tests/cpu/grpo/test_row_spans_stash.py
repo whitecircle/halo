@@ -13,7 +13,7 @@ from trl.trainer.utils import shuffle_sequence_dict, split_tensor_dict
 import halo.trainers.grpo.environmental.routing_replay as routing_replay
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import (
     STASHED_COLUMNS,
@@ -336,10 +336,11 @@ def test_the_replay_arm_reads_the_stashed_spans_and_falls_back_to_the_mask(monke
     armed = []
     host = SimpleNamespace(
         _replay_row_spans=True,
-        _routing_injector=SimpleNamespace(arm=lambda masks, row_spans: armed.append(row_spans)),
+        _rollout_routing=object(),
+        _routing_injector=SimpleNamespace(arm_rows=lambda routing, rows, attended, spans: armed.append(spans)),
     )
     batch = _round()
-    batch[ROUTING_MASKS_KEY] = torch.zeros(8, 10 + LTK, 1, 1, dtype=torch.int16)
+    batch[ROUTING_ROWS_KEY] = torch.arange(8)
     table = _fresh(batch).cpu()
 
     with monkeypatch.context() as patch:

@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, ROUTING_ROWS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from tests.common.env_grpo_batch import batch_host, build, episode
@@ -144,11 +144,7 @@ def _loss_forward(*, replay: str, dense: bool, corrupt: tuple[int, int] | None =
     host.compute_loss(host.model, batch)
     injector.disarm()
     forced = sum(int(layer._replay_flip_counts[1]) for layer in injector._layers)
-    if ROUTING_ROWS_KEY in batch:
-        assert ROUTING_MASKS_KEY not in batch, "R3 carries row ids, not a dense mask"
-        masks = host._rollout_routing.pad_rows(batch[ROUTING_ROWS_KEY].tolist(), torch.device("cpu"))
-    else:
-        masks = batch[ROUTING_MASKS_KEY]
+    masks = host._rollout_routing.pad_rows(batch[ROUTING_ROWS_KEY].tolist(), torch.device("cpu"))
     return _LossForward(injector.drain_flip_rate(), forced, batch, routed, masks)
 
 
@@ -180,10 +176,10 @@ def test_the_padded_recompute_capture_records_ordinary_padding():
 
 
 @_LOSS_PATHS
-def test_a_rollout_round_carries_row_ids_in_place_of_a_dense_mask(dense):
+@_REPLAY_MODES
+def test_a_round_carries_row_ids_in_place_of_a_dense_mask(replay, dense):
     """The batch holds one int64 id per row, and no tensor spans the round's width in the routing's layers."""
-    batch = _loss_forward(replay="rollout", dense=dense).batch
-    assert ROUTING_MASKS_KEY not in batch
+    batch = _loss_forward(replay=replay, dense=dense).batch
     ids = batch[ROUTING_ROWS_KEY]
     assert ids.dtype == torch.long and ids.tolist() == list(range(len(_REWARDS)))
     assert not any(isinstance(v, torch.Tensor) and v.dtype == torch.int16 for v in batch.values())

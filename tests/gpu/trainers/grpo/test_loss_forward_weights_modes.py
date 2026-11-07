@@ -28,7 +28,7 @@ from halo.distributed.fsdp import apply_fsdp2_for_dp
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY
+from halo.trainers.grpo.environmental.step_batch import ROUTING_ROWS_KEY
 from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
 from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.objective.logratio import clamp_ref_logps, compute_is_ratio
@@ -51,7 +51,7 @@ from tests.common.length_deal import (
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import cos_sim, relative_l2
 from tests.common.rank_log import log_all
-from tests.common.routing import distinct_expert_picks
+from tests.common.routing import distinct_expert_picks, ragged_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
 
 MODEL, ATTN = QWEN3_0_6B, "flash_attention_2"
@@ -243,7 +243,8 @@ def run_moe(ctx) -> dict:
         built = _host(model, fused=True, injector=injector)
         built._rollout_routing_replay = True
         built._step, built._buffered_inputs = 0, None
-        round_batch = fused | {ROUTING_MASKS_KEY: engine}
+        built._rollout_routing = ragged_routing(engine)
+        round_batch = fused | {ROUTING_ROWS_KEY: torch.arange(engine.size(0), device=ctx.device)}
         built._generate_and_score_completions = lambda _inputs: dict(round_batch)
         model.zero_grad(set_to_none=True)
         for _ in range(SLOTS):

@@ -593,7 +593,7 @@ frozen-reference scores).
 `BatchBuildFence`), `importance_sampling.py` (`ImportanceSamplingMixin`: the engine-to-trainer ratio, its mask
 stages, the engine re-score and the trust-region breaker), `reasoning.py` (`ReasoningBudgetMixin`: the per-level
 thinking contract and the rollout rewards with the reasoning length terms charged), `routing_replay.py` (the
-routing-replay injector and `RoutingReplayMixin`), `rollout_routing.py` (R3's ragged per-row routing), `async_rollouts.py` (`AsyncRolloutMixin`: Ray actors, the prefetch
+routing-replay injector and `RoutingReplayMixin`), `rollout_routing.py` (the round's ragged per-row routing, R2's captured or R3's engine), `async_rollouts.py` (`AsyncRolloutMixin`: Ray actors, the prefetch
 thread, engine weight sync), `trajectory_tokenize.py` and `trajectory_spans.py` (`TrajectoryTokenizeMixin`:
 trajectory → training rows), and `rollout_metrics.py` (`RolloutMetricsMixin`: completion logs and per-episode
 diagnostics).

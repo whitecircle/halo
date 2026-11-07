@@ -19,6 +19,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
 from tests.common.rank_log import log, log_all
+from tests.common.routing import dense_rows
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -76,7 +77,7 @@ def run(ctx) -> dict:
 
     with injector.capture(BATCH, SEQ_LEN) as cap:
         _forward_loss(model, batch)
-    masks = cap[0]
+    masks = dense_rows(cap[0], device)
     assert masks.shape[:3] == (BATCH, SEQ_LEN, num_layers), f"mask shape {tuple(masks.shape)}"
     assert masks.dtype == torch.int16 and (masks >= 0).all() and (masks < num_experts).all()
     log(f"  [1] capture: mask {tuple(masks.shape)} OK")

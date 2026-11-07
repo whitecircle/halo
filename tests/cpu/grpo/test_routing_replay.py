@@ -26,7 +26,7 @@ from halo.trainers.grpo.environmental.routing_replay import (
     decode_rollout_routing,
     decoder_layer_indices,
 )
-from tests.common.routing import BareEPLayer, npy_routing_payload, raw_routing_payload
+from tests.common.routing import BareEPLayer, dense_rows, npy_routing_payload, raw_routing_payload
 
 T, E, K = 6, 8, 2  # tokens, experts, top_k
 
@@ -321,7 +321,7 @@ def test_injector_capture_assembles_and_arm_slices_per_layer():
     rows, seq = 4, 3
     with injector.capture(rows, seq) as captured:
         per_layer = _capture_rows(layers, rows, seq)
-    masks = captured[0]
+    masks = dense_rows(captured[0])
     assert masks.shape == (rows, seq, len(layers), K) and masks.dtype == torch.int16
     for i, full in enumerate(per_layer):
         assert torch.equal(masks[:, :, i, :].reshape(-1, K), full)
@@ -353,7 +353,7 @@ def test_injector_span_capture_scatters_and_arm_trims():
             for w in widths:
                 layer._captured_routing_chunks.append(trimmed[offset : offset + w])
                 offset += w
-    masks = captured[0]
+    masks = dense_rows(captured[0])
     assert masks.shape == (rows, seq, len(layers), K) and masks.dtype == torch.int16
     for i, trimmed in enumerate(per_layer_trimmed):
         offset = 0

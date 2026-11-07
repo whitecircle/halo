@@ -113,10 +113,13 @@ def distinct_expert_picks(
     return scores.topk(top_k, dim=-1).indices.to(torch.int16)
 
 
-def ragged_routing(masks: torch.Tensor, prompt_width: int) -> RolloutRouting:
+def ragged_routing(masks: torch.Tensor) -> RolloutRouting:
     """The round's routing of a dense ``[rows, prompt + completion, layers, top_k]`` mask: each row whole, so padding
     rides as ``-1`` and ``pad_rows`` returns the dense rows back."""
     rows, width, layers, top_k = masks.shape
-    return RolloutRouting(
-        list(masks.cpu().unbind()), [prompt_width] * rows, prompt_width, width - prompt_width, layers, top_k
-    )
+    return RolloutRouting(list(masks.cpu().unbind()), [0] * rows, width, layers, top_k)
+
+
+def dense_rows(routing: RolloutRouting, device: torch.device | str = "cpu") -> torch.Tensor:
+    """Every row of ``routing`` padded: its ``[rows, width, layers, top_k]`` int16 mask."""
+    return routing.pad_rows(list(range(len(routing))), torch.device(device))
