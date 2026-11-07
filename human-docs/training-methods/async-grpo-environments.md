@@ -86,7 +86,7 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 expert_parallel_size: 4
 environment_type: react_math
 max_turns: 10
-num_rollout_workers: 16            # Ray environment actors per training rank
+rollout_actor_budget: 64            # Ray environment actors per node (16 per rank at 4 GPUs)
 rollout_max_tokens: 8192           # budget for ONE turn, not the trajectory
 enable_prefetch: false             # one server; true overlaps rollout with training
 num_generations: 8                 # episodes per prompt
@@ -125,16 +125,17 @@ A turn the engine cut at its cap, an empty turn, or one whose every tool call wa
 It trains only as a penalty, when its episode scored below the group's mean
 ([Untrainable turns](../../agent-docs/training-methods/async-grpo/objective.md#untrainable-turns) ↗).
 
-### Thinking budgets
+### Reasoning caps and budgets
 
-`reasoning_effort_profiles` gives each level a per-turn `thinking_tokens` budget, which the engine enforces
-by default. `enforce_thinking_cap: false` makes it a soft target stated in the template, closed only at the
-run's ceiling. Engine caps bind on vLLM only; `rollout_backend: sglang` refuses
-`rollout_max_thinking_tokens` and `carry_reasoning`
-([Enforced and soft budgets](../../agent-docs/training-methods/async-grpo/reasoning.md#enforced-and-soft-budgets) ↗).
+The model is told its effort level and nothing else. The engine's per-turn reasoning cap is run-wide, the same at
+every level: `rollout_max_thinking_tokens`, else the turn less `rollout_max_answer_tokens`. It binds on vLLM only;
+`rollout_backend: sglang` refuses `rollout_max_thinking_tokens` and `carry_reasoning`
+([Reasoning cap](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-cap) ↗).
 
-`reasoning_price` and `reasoning_floor` charge long and short reasoning in the trainer. Neither is charged in
-a group where no episode earned the objective, unless `reasoning_terms_in_failed_groups: true`
+Each level's profile in `reasoning_effort_profiles` sets a `reasoning_budget` (reasoning tokens an episode spends
+free, summed over its turns) and a `reasoning_price` charged per 1,000 tokens past it. `reasoning_floor` charges a
+failed episode that reasons under its budget. Neither is charged in a group where no episode earned the objective,
+unless `reasoning_terms_in_failed_groups: true`
 ([Reasoning length reward](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ↗).
 
 ### One server or several

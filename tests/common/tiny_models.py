@@ -341,6 +341,9 @@ class TinyFamily:
     attention_targets: tuple[str, ...] = ()
 
 
+RANDOMIZED_INIT_STD = 0.1
+
+
 def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     return lambda overrides: model_cls(config_cls(**{**tiny, **overrides}))
 
@@ -692,6 +695,20 @@ TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
 }
 # Past that roster: no window, no softcap, and a head width of its own that the FA4 parity row sets.
 TINY_GEMMA_FAMILY = TinyFamily(_causal(GemmaConfig, GemmaForCausalLM, TINY_QWEN3_CONFIG))
+
+
+def randomized_weights(after: Callable[[PreTrainedModel], None] | None = None) -> Callable[[PreTrainedModel], None]:
+    """A checkpoint ``edit`` that widens every matrix's init, so a document leaking into the next reads well above bf16
+    noise; ``after`` runs on the widened model."""
+
+    def edit(model: PreTrainedModel) -> None:
+        for param in model.parameters():
+            if param.dim() >= 2:
+                torch.nn.init.normal_(param, std=RANDOMIZED_INIT_STD)
+        if after is not None:
+            after(model)
+
+    return edit
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

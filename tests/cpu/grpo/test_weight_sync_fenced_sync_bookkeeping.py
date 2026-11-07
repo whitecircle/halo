@@ -34,7 +34,12 @@ class _Trainer(AsyncRolloutMixin):
 
 def _manager() -> RolloutManager:
     return RolloutManager(
-        num_workers=1, env_type="native_math", env_config={}, server_urls=["http://x"], rollout_config=RolloutConfig()
+        num_workers=1,
+        env_type="native_math",
+        env_config={},
+        server_urls=["http://x"],
+        rollout_config=RolloutConfig(),
+        max_concurrent_rollouts=1,
     )
 
 

@@ -61,7 +61,9 @@ def _make_trainer_stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -91,7 +93,9 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
         _tokenizer=fake_tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -110,6 +114,34 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
     assert len(rows) == 1
     assert rows[0][0].tolist() == engine_prompt, "row prompt must be the engine's rendered ids verbatim"
     assert rows[0][1].tolist() == comp
+
+
+class _EffortRecorder:
+    """Records the ``reasoning_effort`` every render receives; one id per character."""
+
+    model_max_length = 100_000
+
+    def __init__(self):
+        self.efforts = []
+
+    def apply_chat_template(self, messages, tools=None, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.efforts.append(kwargs.get("reasoning_effort", "<<unset>>"))
+        return "".join(f"<{m['role']}>{m.get('content', '')}" for m in messages)
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [ord(c) for c in text]}
+
+
+def test_a_turn_without_engine_prompt_ids_renders_its_prompt_at_the_episodes_level():
+    """The fallback render stands in for the engine's: it must state the level the episode was sampled at, or the
+    row trains under a prompt the model never saw."""
+    traj = Trajectory(reasoning_effort="high")
+    traj.add_message(Message.user("solve it"))
+    traj.add_message(Message.assistant("done", token_ids=[7, 8, 9]))
+    recorder = _EffortRecorder()
+    rows = _make_trainer_stub(recorder)._tokenize_trajectory_turns(RolloutResult(prompt="solve it", trajectory=traj))
+    assert rows[0][1].tolist() == [7, 8, 9]
+    assert recorder.efforts and set(recorder.efforts) == {"high"}, recorder.efforts
 
 
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
@@ -240,7 +272,9 @@ def _turns_stub():
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -264,7 +298,7 @@ def test_old_logps_aligned_1to1_with_sampled_ids():
     rows = _turns_stub()._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
 
     assert len(rows) == 2
-    for (_, comp, mask, old, _routing, _negative_only), ids, lps in zip(
+    for (_, comp, mask, old, _routing, _negative_only, _candidates), ids, lps in zip(
         rows, [[10, 11, 12], [20, 21]], [[-0.1, -0.2, -0.3], [-0.4, -0.5]], strict=True
     ):
         assert comp.tolist() == ids
@@ -307,7 +341,9 @@ def _render_stub(render):
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
         _batch_errors=BatchBuildFence(),
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
         eos_token_id=2,

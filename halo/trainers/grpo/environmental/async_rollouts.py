@@ -12,6 +12,7 @@ import time
 import weakref
 from collections import deque
 from functools import partial
+from typing import Any
 
 import ray
 import torch
@@ -21,14 +22,36 @@ from trl.extras.profiling import profiling_context
 from halo.checkpoint.atomic import atomic_torch_save
 from halo.checkpoint.format import PREFETCH_PENDING_PREFIX, prefetch_pending_filename
 from halo.checkpoint.parallel.reading import consensus_read
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.episode import RolloutResult
 from halo.environments.ray_actors import RolloutManager, ray_init_kwargs
 from halo.environments.rollout_config import resolve_reasoning_end_token_id
+from halo.environments.rollout_pool import RolloutPoolPlan, resolve_rollout_pool
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure, rank_consensus
-from halo.runtime.ranks import get_global_rank, get_global_world_size, get_num_nodes, is_global_main_process
+from halo.runtime.ranks import (
+    get_global_rank,
+    get_global_world_size,
+    get_local_world_size,
+    get_num_nodes,
+    is_global_main_process,
+)
+from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
+from halo.trainers.grpo.rollout.adapter_sync import (
+    AdapterSync,
+    build_adapter_requirements,
+    reject_unadaptable_config,
+    reject_unadaptable_model,
+    resolve_adapter_serving,
+    resolve_launch_base,
+)
+from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
+from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.trainers.world_metrics import world_sums
+from halo.weight_sync.adapter_routes import AdapterRoutes
+from halo.weight_sync.adapter_servers import AdapterServers
+from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.pool import WeightSyncPool
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -66,6 +89,15 @@ class AsyncRolloutMixin:
     # Whether the weight-sync group is formed, held alike on every rank (the client itself is the main
     # process's alone): set by the fenced formation, cleared first thing by the cleanup.
     _weight_sync_group_formed: bool = False
+    # Whether the rollout components are up, held alike on every rank (a TP/ETP follower builds no manager, so the
+    # manager cannot say): set by the init, cleared by the cleanup.
+    _async_components_started: bool = False
+    # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
+    first_push_verified: bool = False
+    # Set by _install_adapter_sync when the policy is served as an adapter beside the frozen base.
+    _adapter_versions: AdapterVersions | None = None
+    _adapter_routes: AdapterRoutes | None = None
+    _adapter_sync: AdapterSync | None = None
 
     def _init_async_state(self):
         self._rollout_manager = None
@@ -73,7 +105,6 @@ class AsyncRolloutMixin:
         # Score-only clients, one per rollout server on EVERY rank (isr_engine_reference).
         self._engine_rescore_clients: list[WeightSyncClientBase] | None = None
         self._loop = None
-
         self._prefetch_enabled = self.async_config.prefetch_active()
         if self.async_config.enable_prefetch is None and not self._prefetch_enabled and is_global_main_process():
             logger.info(
@@ -103,16 +134,39 @@ class AsyncRolloutMixin:
         self._rollout_start_callback = None
         self._rollout_generation_started = False
 
+    def _install_adapter_sync(self) -> None:
+        """Refuses on every rank a config or model whose adapters the engine cannot serve, else arms the adapter sync."""
+        config = self.async_config
+        if not config.rollout_adapter_sync:
+            return
+        reject_unadaptable_config(config)
+        reject_unadaptable_model(
+            self.model, self.parallelism_config, resolve_weight_sync_client(config.rollout_backend)
+        )
+        serving = resolve_adapter_serving(self.model)
+        verify_adapter_servers(
+            config.get_server_urls(),
+            build_adapter_requirements(serving, config),
+            backend=config.rollout_backend,
+            connection_timeout=config.rollout_connection_timeout,
+        )
+        self._adapter_versions = AdapterVersions()
+        self._adapter_routes = AdapterRoutes(resolve_weight_sync_client(config.rollout_backend).is_adapter_missing)
+        self._adapter_sync = AdapterSync(
+            serving, self._adapter_versions, self._adapter_routes, resolve_launch_base(self.model, config)
+        )
+
     def _init_async_components(self):
         """COLLECTIVE. Each failure is deferred to a verdict all ranks join, so none is raised on one rank while its
         peers wait."""
-        if self._rollout_manager is not None:
+        if self._async_components_started:
             return
 
         guard = DeferredRankFailure("Rollout component start")
         guard.run(self._start_rank_rollout_components)
         guard.reject()
         self._form_weight_sync_group()
+        self._async_components_started = True
 
         # Registered once; a second train() re-arms it through _cleanup_async_components.
         if self._rollout_start_callback is None:
@@ -120,12 +174,31 @@ class AsyncRolloutMixin:
             self.add_callback(self._rollout_start_callback)
 
     def _start_rank_rollout_components(self) -> None:
+        """A TP/ETP follower starts no pool: it takes its group leader's rollouts, and only the score-only clients are
+        built on every rank."""
+        if not self._is_tp_follower():
+            self._start_rollout_pool()
+        if self.async_config.isr_engine_reference:
+            self._engine_rescore_clients = self._build_engine_rescore_clients()
+
+    def _start_rollout_pool(self) -> None:
         if not ray.is_initialized():
             ray.init(**ray_init_kwargs(address=self.async_config.ray_address))
 
-        # One manager per rank over its DP shard: on a shared Ray cluster the actor budget is split across ranks.
+        plan = self._resolve_rollout_pool()
+        if is_global_main_process():
+            logger.info(
+                f"Rollout pool: {plan.actors_per_rank} actors per rank from rollout_actor_budget "
+                f"{self.async_config.rollout_actor_budget}, {plan.max_concurrent} rollouts in flight per rank."
+            )
+            for warning in plan.warnings:
+                logger.warning(warning)
+        adapter_model_name = None
+        if self._adapter_versions is not None:
+            client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
+            adapter_model_name = partial(client_cls.adapter_request_model, self.async_config.model_name)
         self._rollout_manager = RolloutManager(
-            num_workers=self.async_config.num_rollout_workers,
+            num_workers=plan.actors_per_rank,
             env_type=self._environment_spec,
             env_config=self._env_config_dict,
             server_urls=self.async_config.get_server_urls(),
@@ -133,9 +206,11 @@ class AsyncRolloutMixin:
                 stop_token_ids=self._rollout_stop_token_ids,
                 reasoning_end_token_id=resolve_reasoning_end_token_id(self._reasoning_end_ids),
             ),
-            max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
-            pool_replicas=self.accelerator.num_processes if self.async_config.ray_address is not None else 1,
+            max_concurrent_rollouts=plan.max_concurrent,
             first_server=self.parallelism_config.get_data_parallel_rank(),
+            adapter_versions=self._adapter_versions,
+            adapter_model_name=adapter_model_name,
+            adapter_routes=self._adapter_routes,
         )
         self._rollout_manager.reject_loopback_servers(self._rollout_node_count())
 
@@ -143,8 +218,19 @@ class AsyncRolloutMixin:
         asyncio.set_event_loop(self._loop)
         self._reject_eval_round_over_cap(self._rollout_manager.max_concurrent)
         self._loop.run_until_complete(self._rollout_manager.start())
-        if self.async_config.isr_engine_reference:
-            self._engine_rescore_clients = self._build_engine_rescore_clients()
+
+    def _resolve_rollout_pool(self) -> RolloutPoolPlan:
+        """Rollout ranks are one per TP/ETP group, its leader."""
+        group_size = self._get_tp_or_etp_group_size()
+        return resolve_rollout_pool(
+            num_workers=self.async_config.rollout_actor_budget,
+            shared_cluster=self.async_config.ray_address is not None,
+            rollout_ranks=get_global_world_size() // group_size,
+            rollout_ranks_per_node=max(1, get_local_world_size() // group_size),
+            rows_per_round=self._train_loader_batch_size(),
+            eval_rows=self.async_config.eval_rollout_batch_size,
+            max_concurrent_rollouts=self.async_config.max_concurrent_rollouts,
+        )
 
     def _rollout_node_count(self) -> int:
         """Actors follow the launch across its nodes and spill over a shared Ray cluster's, which a head on this host
@@ -168,18 +254,23 @@ class AsyncRolloutMixin:
         """One per server a round's trajectories reach (trajectory ``t`` on server ``t mod N``); HTTP only, no
         communicator."""
         client_cls = resolve_weight_sync_client(self.async_config.rollout_backend)
-        return [
+        clients = [
             client_cls(base_url=url, connection_timeout=self.async_config.rollout_connection_timeout)
             for url in self.async_config.get_server_urls()[: self._train_loader_batch_size()]
         ]
+        if self._adapter_versions is not None:
+            for client in clients:
+                client.adapter_source = lambda versions=self._adapter_versions: versions.current
+        return clients
 
     def _form_weight_sync_group(self) -> None:
-        """COLLECTIVE while it forms. The main process's client failure raises on every rank."""
+        """COLLECTIVE while it forms, over the c10d store: rank 0 waits on each server in turn for longer than the
+        NCCL watchdog allows its peers. The main process's client failure raises on every rank."""
         if self._weight_sync_group_formed:
             return
         guard = DeferredRankFailure("Weight-sync client formation")
         guard.run(self._init_weight_sync_client)
-        guard.reject()
+        guard.store_reject("rollout/weight_sync_group")
         self._weight_sync_group_formed = True
 
     def _init_weight_sync_client(self):
@@ -196,8 +287,15 @@ class AsyncRolloutMixin:
             connection_timeout=config.rollout_connection_timeout,
             client_cls=resolve_weight_sync_client(config.rollout_backend),
             base_group_port=config.rollout_group_port,
+            topology=config.rollout_sync_topology,
         )
         self._weight_sync_client.init_communicator(device=self.accelerator.device)
+        if self._adapter_sync is not None:
+            self._adapter_sync.servers = AdapterServers(
+                config.get_server_urls(),
+                client_cls=resolve_weight_sync_client(config.rollout_backend),
+                connection_timeout=config.rollout_connection_timeout,
+            )
 
     def _start_rollout_generation(self):
         """COLLECTIVE. Push the trainer's weights to the engines, then start the prefetch thread; idempotent."""
@@ -207,7 +305,7 @@ class AsyncRolloutMixin:
         # Stamped though forced: a resumed run's first step at this global_step must not push again.
         self._last_sync_attempt_step = self.state.global_step
         self._sync_weights_to_engine_fenced(force=True)
-        if self._prefetch_enabled:
+        if self._prefetch_enabled and not self._is_tp_follower():
             self._start_prefetch_thread()
             # After the push, so the resumed rounds are drawn from the restored policy.
             for prompts, contexts in self._resumed_prefetch_rounds:
@@ -238,10 +336,17 @@ class AsyncRolloutMixin:
         weights went out."""
         # Evaluated alike on every rank: the push it gates is a collective gather.
         if not force and self.state.global_step % self.async_config.sync_weights_every_n_steps != 0:
+            if self._adapter_sync is not None:
+                self._adapter_sync.recover(self._weight_sync_client)
             return False
         self._form_weight_sync_group()
-        with profiling_context(self, "weight_sync"):
-            sync_trainer_weights(self, self._weight_sync_client)
+        with profiling_context(self, "weight_sync"), self._phase_timers.span(Phase.SYNC, "host"):
+            if self._adapter_sync is None:
+                sync_trainer_weights(self, self._weight_sync_client, precision=self._rollout_weight_precision)
+            else:
+                self._adapter_sync.sync(self, self._weight_sync_client)
+        if self._adapter_sync is None:
+            verify_first_push_parity(self, self._weight_sync_client)
         self._last_pushed_step = self.state.global_step
         return True
 
@@ -423,17 +528,41 @@ class AsyncRolloutMixin:
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
         """Write this rank's pending rounds, oldest first, which a resume submits again first: they left the dataloader
-        untrained, and the resumed one starts past them."""
+        untrained, and the resumed one starts past them. A TP/ETP follower holds none and writes an empty list, so
+        every rank has its file. The halting counters ride beside them, so a resumed run keeps the patience it had
+        left."""
         super()._persist_trainer_sidecars(checkpoint_dir)
-        if not self._prefetch_enabled:
-            return
         path = os.path.join(checkpoint_dir, prefetch_pending_filename(get_global_rank(), get_global_world_size()))
-        payload = {"layout": self._prefetch_round_layout(), "rounds": list(self._prefetch_pending)}
+        payload = {
+            "layout": self._prefetch_round_layout(),
+            "rounds": list(self._prefetch_pending) if self._prefetch_enabled else [],
+            "halting": self._halting_counters(),
+        }
         guard = DeferredRankFailure(f"pending prefetch rounds write to {checkpoint_dir}")
         # Ray's pickler, which ships the same contexts: a row's may carry a callable (an answer
         # ``validator``) that the stdlib pickler refuses.
         guard.run(partial(atomic_torch_save, path, lambda: payload, pickle_module=ray.cloudpickle))
         guard.reject()
+
+    def _halting_counters(self) -> dict[str, Any]:
+        """The streaks the run's halting rules count, which a restart would otherwise reset to a full patience budget."""
+        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        return {
+            "zero_gradient_rounds": self._zero_gradient_rounds,
+            "policy_gradient_seen": self._policy_gradient_seen,
+            "empty_rollout_steps": self._empty_rollout_steps,
+            "episode_error_rounds": self._episode_error_rounds,
+            "early_stop_streaks": {} if stop is None else dict(stop.streaks),
+        }
+
+    def _restore_halting_counters(self, counters: dict[str, Any]) -> None:
+        self._zero_gradient_rounds = counters["zero_gradient_rounds"]
+        self._policy_gradient_seen = counters["policy_gradient_seen"]
+        self._empty_rollout_steps = counters["empty_rollout_steps"]
+        self._episode_error_rounds = counters["episode_error_rounds"]
+        stop = next((cb for cb in self.callback_handler.callbacks if isinstance(cb, GRPOEarlyStopCallback)), None)
+        if stop is not None:
+            stop.streaks = dict(counters["early_stop_streaks"])
 
     def _prefetch_round_layout(self) -> dict[str, int]:
         """What a round's prompts were drawn and grouped under; a resume under another layout drops them."""
@@ -458,13 +587,21 @@ class AsyncRolloutMixin:
             f"{PREFETCH_PENDING_PREFIX}-* files to open with cold rounds.",
         )
         if path is None:
-            if self._prefetch_enabled and is_global_main_process():
+            if is_global_main_process():
+                prefetched = (
+                    " and opens with cold rounds: if the saving run prefetched, the batches it had drawn but not "
+                    "trained are skipped and the next ones trained twice"
+                    if self._prefetch_enabled
+                    else ""
+                )
                 logger.warning(
-                    f"{checkpoint} holds no pending prefetch rounds for this world size, so the run opens with "
-                    "cold rounds: if the saving run prefetched, the batches it had drawn but not trained are "
-                    "skipped and the next ones trained twice."
+                    f"{checkpoint} holds no resume sidecar for this world size, so the halting counters "
+                    f"(zero-gradient, empty-rollout and episode-error rounds, early-stop streaks) restart at zero"
+                    f"{prefetched}."
                 )
             return
+        if "halting" in payload:
+            self._restore_halting_counters(payload["halting"])
         if not self._prefetch_enabled:
             if payload["rounds"] and is_global_main_process():
                 logger.warning(
@@ -485,13 +622,14 @@ class AsyncRolloutMixin:
                 f"{path} holds {len(rounds)} pending prefetch rounds, more than prefetch_depth={depth}: the "
                 f"oldest {depth} are resubmitted, and the newest {len(rounds) - depth} are not trained."
             )
-        self._resumed_prefetch_rounds = rounds[:depth]
+        self._resumed_prefetch_rounds = [] if self._is_tp_follower() else rounds[:depth]
 
     def _cleanup_async_components(self):
         """Run by every rank."""
         # First, on every rank: the client below is the main process's alone, and a teardown step that
         # raises must not leave the ranks disagreeing on whether the next push forms the group.
         self._weight_sync_group_formed = False
+        self._async_components_started = False
         self._stop_prefetch_thread()
 
         if self._rollout_manager and self._loop:
@@ -509,6 +647,9 @@ class AsyncRolloutMixin:
             for client in self._engine_rescore_clients:
                 client.close_http_session()
             self._engine_rescore_clients = None
+
+        if self._adapter_sync is not None:
+            self._adapter_sync.reset()
 
         self._loop = None
         # Re-arm: a second train() rebuilds the components above and needs a fresh push to the

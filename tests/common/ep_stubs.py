@@ -52,6 +52,23 @@ class LoopbackBackend(DeepEPBackend):
         return grad_combined_x.clone()
 
 
+class ReadyGather:
+    """An issued expert gather whose result is already in hand."""
+
+    def __init__(self, tensors: dict):
+        self._tensors = tensors
+
+    def finish(self) -> dict:
+        return self._tensors
+
+
+class ReadyGatherMixin:
+    """The weight sync's issue-then-finish seam for a stub that defines only ``gather_expert_state_dict``."""
+
+    def start_gather_expert_state_dict(self, *, device="cpu", merge_lora=False, retain=True, dst=None, stream=None):
+        return ReadyGather(self.gather_expert_state_dict(device=device, merge_lora=merge_lora, retain=retain))
+
+
 class StubEPLayerBase(EPMoELayerBase):
     """An EP MoE layer constructible with no live EP groups; its spec claims no ``model_type``, so it never joins the
     roster."""

@@ -61,19 +61,22 @@ changes.
 | `halo/distributed/grad_reduce.py` | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/weight_sync/` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/rollout/weight_push.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/grpo/online.md`, `agent-docs/optimization/peft.md`, `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/reference/debugging.md` |
+| `halo/trainers/grpo/rollout/adapter_sync.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/optimization/peft.md`, `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/rollout/trl_vllm_client.py` | `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/trainer-architecture.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/rollout/engine_preflight.py` | `agent-docs/training-methods/async-grpo/setup.md`, `agent-docs/training-methods/grpo/online.md` |
 | `halo/trainers/grpo/environmental/async_rollouts.py` | `agent-docs/training-methods/async-grpo/setup.md` |
+| `halo/trainers/grpo/{microbatch_plan,packed_forward,packed_rounds,packed_rules,rank_balance,row_order}.py`, `halo/trainers/grpo/environmental/{packed_rounds,row_order}.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/environmental/{trainer,environmental_rules}.py` | `agent-docs/training-methods/async-grpo/{setup,objective,reasoning}.md`, `agent-docs/reference/trainer-architecture.md` |
-| `halo/trainers/grpo/environmental/{step_batch,importance_sampling}.py` | `agent-docs/training-methods/async-grpo/{objective,monitoring}.md` |
-| `halo/trainers/grpo/environmental/routing_replay.py` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
+| `halo/trainers/grpo/environmental/{step_batch,importance_sampling,centered_scoring}.py` | `agent-docs/training-methods/async-grpo/{objective,monitoring}.md` |
+| `halo/trainers/grpo/environmental/loss_forward_weights.py` | `agent-docs/training-methods/async-grpo/{performance,objective,monitoring}.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/trainers/grpo/environmental/{routing_replay,rollout_routing}.py` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/infrastructure/rollout-servers.md` |
 | `halo/trainers/grpo/environmental/row_order.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/environmental/{trajectory_tokenize,trajectory_spans}.py` | `agent-docs/training-methods/async-grpo/objective.md` |
 | `halo/trainers/grpo/environmental/rollout_metrics.py`, `halo/trainers/grpo/rollout/completions_logging.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
 | `halo/trainers/grpo/early_stop.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/objective/` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/training-methods/grpo/{online,offline}.md` |
 | `halo/trainers/grpo/logprob_scoring.py`, `halo/kernels/head_logprobs.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md`; the compiled tiles also `agent-docs/optimization/torch-compile.md` |
-| `halo/environments/ray_actors.py` | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` |
+| `halo/environments/ray_actors.py`, `halo/environments/rollout_pool.py` | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` |
 | `halo/checkpoint/parallel/save.py`, `halo/checkpoint/parallel/resume_weights.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/trainer-architecture.md`, `agent-docs/parallelism/tensor-parallelism.md` |
 | `halo/checkpoint/parallel/ep.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` |
 | `halo/checkpoint/parallel/pp.py`, `halo/checkpoint/tools/pp_stage_merge.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/multi-node.md` |
@@ -83,15 +86,16 @@ changes.
 | `halo/checkpoint/atomic.py`, `halo/checkpoint/parallel/completeness.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `halo/checkpoint/reading.py`, `halo/checkpoint/tools/offline_export.py`, `halo/checkpoint/tools/fp8_dequant.py`, `halo/checkpoint/tools/deepseek_v4_dequant.py`, `halo/checkpoint/tools/sink_reset.py`, `halo/checkpoint/tools/expert_unfuse.py`, `halo/checkpoint/tools/vision_reattach.py`, `halo/checkpoint/tools/vocab_patch.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/checkpoint/parallel/resume_source.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/architecture.md` |
+| `halo/checkpoint/parallel/disk_budget.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/architecture.md` |
 | `halo/checkpoint/parallel/reading.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/optimizer.py`, `halo/checkpoint/parallel/optimizer_meta.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`, `agent-docs/data/filesystem-handling.md` |
 | `halo/checkpoint/config_export.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
-| `halo/checkpoint/tools/adapter_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
+| `halo/checkpoint/tools/adapter_merge.py`, `halo/checkpoint/tools/adapter_stream_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
 | `halo/checkpoint/model_card.py` | `agent-docs/reference/checkpoints.md`, `human-docs/checkpoints.md` |
 | `halo/checkpoint/parallel/writing.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `halo/models/unwrapping.py`, `halo/models/param_roles.py`, `halo/models/model_classes.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
 | `halo/models/module_tree.py` | `agent-docs/parallelism/data-parallelism.md` |
-| `halo/models/peft_adapters.py` | `agent-docs/optimization/peft.md` |
+| `halo/models/peft_adapters.py`, `halo/distributed/lora_fold.py` | `agent-docs/optimization/peft.md` |
 | `halo/models/head_transform.py` | `agent-docs/models/adding-a-model.md`, `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `halo/models/forward_capture.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/training-methods/embedding.md` |
 | `halo/model_loading/parallel/frozen_models.py` | `agent-docs/training-methods/distillation/teacher-distillation.md`, `agent-docs/training-methods/preference/dpo.md` |
@@ -103,6 +107,8 @@ changes.
 | `halo/runtime/` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md`, `agent-docs/reference/debugging.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/distributed/nvlink.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |
 | `halo/diagnostics/profiling.py`, `halo/diagnostics/py_spy.py` | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `halo/diagnostics/phase_timers.py`, `halo/callbacks/phase_timer_callback.py`, `halo/trainers/grpo/phase_timing.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/trainer-architecture.md` |
+| `halo/trainers/grpo/row_span_stash.py`, `halo/trainers/grpo/logprob_scoring.py` (the row spans) | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/trainer-architecture.md` |
 | `halo/weight_sync/transport_check.py`, `scripts/profiling/weight_sync_transport.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/debugging.md` |
 
 ## Models
@@ -155,6 +161,7 @@ changes.
 | `halo/model_loading/liger/` | `agent-docs/optimization/liger-kernels.md` |
 | `halo/optimizers/` | `agent-docs/optimization/{bf16-optimizer,muon-optimizer,flash-adamw}.md` |
 | `halo/optimizers/step_skip.py` | `agent-docs/reference/trainer-architecture.md`, `agent-docs/optimization/bf16-optimizer.md`, `agent-docs/optimization/muon-optimizer.md` |
+| `halo/kernels/lowp/block_fp8.py`, `halo/models/fp8_rollout.py`, `halo/checkpoint/tools/block_fp8_export.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/kernels/lowp/` | `agent-docs/optimization/low-precision-moe-kernels.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/parallel/lowp_compute.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `halo/kernels/histogram.py` | `agent-docs/training-methods/callbacks.md` |
@@ -197,7 +204,7 @@ changes.
 | `halo/environments/tasks/coding/`, `halo/environments/tasks/qa.py` | `agent-docs/training-methods/async-grpo/environments/tasks/{swe,qa-benchmarks}.md`, `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/*.md` |
 | `halo/environments/sandbox/` | `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 | `halo/environments/tools/` | `agent-docs/training-methods/async-grpo/environments/protocols/native-tool-use.md`, `agent-docs/training-methods/async-grpo/environments/tasks/swe.md` |
-| `halo/environments/engine_wire.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
+| `halo/environments/{engine_wire,candidate_logprobs}.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
 | `halo/environments/rollout_config.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `halo/environments/eval_runner.py` | `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/environments/tools/web_search.py` | `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`, `agent-docs/reference/configuration-reference.md` |

@@ -5,17 +5,22 @@ import logging
 
 import torch
 
-from halo.data.collators.self_distill import format_field_names, privileged_hint
+from halo.configs.distillation import SDPGArguments
+from halo.data.collators.self_distill import format_field_names, hint_literal_bytes, privileged_hint
 from halo.log import warn_once
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.trainers.distillation.divergences import pooled_token_mean, token_divergence
+from halo.runtime.dtensor import materialize_dtensor
+from halo.trainers.distillation.divergences import pooled_token_mean, projected_token_divergence, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.grpo.rank_balance import PROMPT_ROWS
 from halo.trainers.stored_metrics import StoredMetricsMixin
 from halo.trainers.token_metrics import effective_loss_mask
 
 logger = logging.getLogger(__name__)
+
+TEACHER_PROMPT_ROWS = ("teacher_prompt_ids", "teacher_prompt_mask")
 
 
 def positive_advantage_gate(
@@ -42,6 +47,30 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         "back into the step. The advantage-gated token denominator is knowable before the step from "
         "the rollout batch and is not a blocker"
     )
+
+    PACKED_ROWS_REFUSAL = (
+        "the OPD term reads the student's completion logits off the loss forward and pairs them row for row with a "
+        "teacher pass over [teacher_prompt ⧺ completion] rows sized by the micro-batch, neither of which a packed "
+        "slot's flattened scorer and filler rows provide"
+    )
+
+    ROUND_PROMPT_ROWS = (*PROMPT_ROWS, TEACHER_PROMPT_ROWS)
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """The online bound plus the hint template's literal text, since the teacher forwards the prompt, the hint and
+        the completion through the same dispatch. An answer the template names has no config bound, so its tokens are
+        not counted: the dispatcher's own check on the batch in hand stays the backstop for them."""
+        row = super().declared_row_length(training_config, *sources)
+        sdpg = next((source for source in sources if isinstance(source, SDPGArguments)), None)
+        if row is None:
+            return None
+        if sdpg is None:
+            raise ValueError(
+                "SDPG's teacher rows are longer than the online rows by the hint, which sizes the DeepEP dispatch "
+                "gate, but no row source carries the SDPG arguments. Pass the script arguments as a row source."
+            )
+        return row + (hint_literal_bytes(sdpg.sdpg_hint_template) if sdpg.sdpg_beta_base != 0.0 else 0)
 
     def __init__(
         self,
@@ -75,15 +104,18 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 f"sdpg_beta_base: 0 to drop the term."
             )
 
-    def _generate_and_score_completions(self, inputs):
+    def _build_privileged_rows(self, result, inputs):
+        if self.sdpg.sdpg_beta_base == 0.0:
+            return {}
         # Answers in prompt row order, aligned 1:1 with rollout rows (RepeatSampler already expanded).
         answers = [x.get(self.sdpg_answer_field) for x in inputs]
-        output = super()._generate_and_score_completions(inputs)
-        if self.sdpg.sdpg_beta_base != 0.0:
-            output["teacher_prompt_ids"], output["teacher_prompt_mask"] = self._build_teacher_prompts(
-                output["prompt_ids"], output["prompt_mask"], answers
+        if len(answers) != result["prompt_ids"].size(0):
+            raise RuntimeError(
+                f"SDPG got {len(answers)} answers for {result['prompt_ids'].size(0)} rollout rows, so a teacher "
+                f"prompt would carry another row's answer."
             )
-        return output
+        ids, mask = self._build_teacher_prompts(result["prompt_ids"], result["prompt_mask"], answers)
+        return {"teacher_prompt_ids": ids, "teacher_prompt_mask": mask}
 
     def _build_teacher_prompts(self, prompt_ids, prompt_mask, answers):
         """Left-padded ``[prompt + hint]`` token ids per rollout row."""
@@ -126,7 +158,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         # The GRPO loss forward hands its completion logits back, so the student runs forward and backward once.
         with self._capturing_completion_logits() as student_logits:
             loss = super()._compute_loss(model, inputs)
-        completion_ids, completion_mask = inputs["completion_ids"], inputs["completion_mask"]
+        completion_ids = inputs["completion_ids"]
         rows = [part.size(0) for part in student_logits]
         if sum(rows) != completion_ids.size(0) or any(
             part.size(1) != completion_ids.size(1) for part in student_logits
@@ -138,16 +170,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 f"_get_per_token_logps_and_entropies, or an override forwards around it. Keep the loss forward "
                 f"on that scorer, or set sdpg_beta_base: 0 to drop the term."
             )
-        with privileged_teacher_pass(model):
-            teacher_logits = self._completion_logits(
-                model, inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"], completion_ids, completion_mask
-            )
-        opd_per_token = torch.cat(
-            [
-                token_divergence(self.sdpg_loss_fn, student, teacher, self.sdpg.sdpg_temperature)
-                for student, teacher in zip(student_logits, teacher_logits.split(rows), strict=True)
-            ]
-        )
+        opd_per_token = self._opd_token_divergence(model, inputs, student_logits)
 
         # The tokens the GRPO loss trains: a tool-output token is attention-valid but never trained.
         gate = positive_advantage_gate(
@@ -163,6 +186,58 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         if model.training:
             opd = opd / self.current_gradient_accumulation_steps
         return loss + beta * opd
+
+    def _opd_token_divergence(self, model, inputs, student_logits):
+        """``[B, C]`` divergence of each student part from the teacher on the same rows."""
+        rows = [part.size(0) for part in student_logits]
+        loss_fn, temperature = self.sdpg_loss_fn, self.sdpg.sdpg_temperature
+        prefix = (inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"])
+        completion = (inputs["completion_ids"], inputs["completion_mask"])
+        # The chunked head needs the family's verified head transform, which only the chunked scorer checks at
+        # construction; the full-logits scorer holds the student's [B, C, V] plane anyway.
+        if not self._use_chunked_grpo_logprobs:
+            with privileged_teacher_pass(model):
+                teacher_logits = self._completion_logits(model, *prefix, *completion)
+            return torch.cat(
+                [
+                    token_divergence(loss_fn, student, teacher, temperature)
+                    for student, teacher in zip(student_logits, teacher_logits.split(rows), strict=True)
+                ]
+            )
+        unwrapped = self.accelerator.unwrap_model(model)
+        with privileged_teacher_pass(model):
+            teacher_hidden = self._chunked_forward_redirection(
+                model, unwrapped, self._teacher_hidden_states, unwrapped, *prefix, *completion
+            )
+        transform, head = self._head_transform(unwrapped), unwrapped.get_output_embeddings()
+        self._assert_output_embeddings_unadapted(unwrapped, head)
+        # The redirected forward has ended, so under ZeRO-3 the root group is resharded and the module's weight is a
+        # DTensor. The values are gathered once here and held by `project`, which the backward recompute reuses, until
+        # the autograd graph frees it; a plain parameter (ZeRO-2) is used as it is.
+        with torch.no_grad():
+            weight = materialize_dtensor(head.weight).detach()
+            bias = materialize_dtensor(getattr(head, "bias", None))
+
+        def project(hidden: torch.Tensor) -> torch.Tensor:
+            with torch.no_grad():
+                return transform.project(head, hidden, weight=weight, bias=bias)
+
+        return torch.cat(
+            [
+                projected_token_divergence(loss_fn, student, hidden, project, temperature)
+                for student, hidden in zip(student_logits, teacher_hidden.split(rows), strict=True)
+            ]
+        )
+
+    def _teacher_hidden_states(self, unwrapped_model, prefix_ids, prefix_mask, completion_ids, completion_mask):
+        """``[B, C, H]`` at the positions predicting the completion, run inside the redirected forward where FSDP2 has
+        gathered the root parameters. The head is applied later, in token chunks, from its gathered values."""
+        return self._backbone_hidden_state(
+            unwrapped_model,
+            torch.cat([prefix_ids, completion_ids], dim=1),
+            torch.cat([prefix_mask, completion_mask], dim=1),
+            completion_ids.size(1),
+        )
 
     def _completion_logits(self, model, prefix_ids, prefix_mask, completion_ids, completion_mask):
         """``[B, C, V]``. Where the forward takes ``logits_to_keep`` the prompt's rows are never built. The prefixes

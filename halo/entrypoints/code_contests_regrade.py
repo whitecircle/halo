@@ -14,10 +14,9 @@ from halo.environments.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,
     CodeContestsEnvironment,
 )
-from halo.environments.tasks.coding.code_contests_prompts import SUBMIT_TOOL
+from halo.environments.tasks.coding.code_contests_prompts import NOT_GRADED_PREFIX, SUBMIT_TOOL
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, ContestSelection
 from halo.environments.tasks.coding.grading import grade_solution
-from halo.environments.tasks.coding.program_source import normalized_program
 from halo.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
 from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall, ToolArgumentError
@@ -87,11 +86,28 @@ def build_payloads(meta: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     )
 
 
+def regradable_profiles(profiles: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """``profiles`` without the keys the environment no longer admits, each dropped one logged. Grading reads a
+    profile's interaction budgets only, so a meta line written under an earlier profile schema still re-grades."""
+    admitted = CodeContestsEnvironment.effort_profile_key_minima()
+    kept = {}
+    for level, entry in profiles.items():
+        dropped = sorted(set(entry) - set(admitted))
+        if dropped:
+            logger.info(
+                "reasoning_effort_profiles[%r]: dropping %s, which the environment no longer admits", level, dropped
+            )
+        kept[level] = {key: value for key, value in entry.items() if key in admitted}
+    return kept
+
+
 def rebuild_environment(meta: dict[str, Any]) -> CodeContestsEnvironment:
     """The environment the run used: ``env_kwargs`` carries the budgets (``max_submissions``,
     ``reasoning_effort_profiles``) that decide how many submissions count, so a class default would report a lower s@k
     than the online number. A meta line naming no protocol ran the harness."""
     env_kwargs = {k: v for k, v in (meta.get("env_kwargs") or {}).items() if k not in _TOP_LEVEL_ENV_KEYS}
+    if "reasoning_effort_profiles" in env_kwargs:
+        env_kwargs["reasoning_effort_profiles"] = regradable_profiles(env_kwargs["reasoning_effort_profiles"])
     return build_environment(
         meta["env_type"],
         {
@@ -111,27 +127,49 @@ def episode_submission_budget(episode: dict[str, Any], env: Any) -> int:
     return int(stamped) if isinstance(stamped, int) and stamped > 0 else env.max_submissions
 
 
+def turn_replies(messages: list[dict[str, Any]], start: int) -> dict[str, str]:
+    """The recorded replies of the turn whose calls precede ``messages[start]``, by call id: the tool messages that
+    follow it, up to the next other message. An id an engine reuses from turn to turn pairs with its own turn's
+    reply."""
+    replies = {}
+    for message in messages[start:]:
+        if message.get("role") != "tool":
+            break
+        if message.get("tool_call_id"):
+            replies[message["tool_call_id"]] = str(message.get("content") or "")
+    return replies
+
+
 def submitted_solutions(episode: dict[str, Any], env: CodeContestsEnvironment) -> list[tuple[str, str | None]]:
-    """The ``submit_solution`` payloads ``env`` admitted, as ``(code, language)`` in order (``None`` where the run
-    fixed the language), read the way the environment read them. A call the tool refuses to bind, code refused as
-    another language (:meth:`CodeContestsEnvironment.find_mislabel`) or code identical comments aside to one already
-    graded (:func:`normalized_program`) was never graded and spent no budget, so it takes no slot here."""
+    """The ``submit_solution`` payloads the run admitted, as ``(code, language)`` in order (``None`` where the run
+    fixed the language), read the way the environment read them.
+
+    A call's recorded reply says whether the run admitted it: one starting ``Error:`` was refused unrun and one starting
+    :data:`NOT_GRADED_PREFIX` was passed over (after an accept, or past the budget); both spent no slot. Any other was
+    graded and keeps its slot, so a record re-grades under the rules it ran under, whatever ``env``
+    refuses today. A call with no recorded reply is judged by ``env``: one the tool refuses to bind, or code it refuses
+    as another language (:meth:`CodeContestsEnvironment.find_mislabel`), takes no slot; a program identical to one
+    already graded took the earlier grade again and keeps its slot."""
     tool = env.registry.get(SUBMIT_TOOL)
+    messages = episode.get("messages", [])
     solutions: list[tuple[str, str | None]] = []
-    graded: set[str] = set()
-    for message in episode.get("messages", []):
+    for position, message in enumerate(messages):
+        replies = turn_replies(messages, position + 1)
         for raw in message.get("tool_calls") or []:
             call = NativeToolCall.from_openai_format(raw)
             if call.name != SUBMIT_TOOL:
+                continue
+            reply = replies.get(call.id) if call.id else None
+            if reply is not None:
+                if not reply.startswith(("Error:", NOT_GRADED_PREFIX)):
+                    solutions.append((str(call.arguments.get("code", "")), call.arguments.get("language")))
                 continue
             try:
                 bound = tool.bind(call.arguments)
             except ToolArgumentError:
                 continue
             language = bound.get("language")
-            program = normalized_program(bound["code"], language or env.language)
-            if env.find_mislabel(bound["code"], language) is None and program not in graded:
-                graded.add(program)
+            if env.find_mislabel(bound["code"], language) is None:
                 solutions.append((bound["code"], language))
     return solutions
 

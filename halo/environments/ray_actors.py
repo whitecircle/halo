@@ -2,6 +2,7 @@
 and :class:`RolloutManager` fans prompts across actors and server URLs under a bounded semaphore."""
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import logging
@@ -9,8 +10,8 @@ import os
 import tempfile
 import time
 import uuid
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Iterator
+from dataclasses import dataclass, replace
 from functools import cached_property, partial
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +36,8 @@ from halo.environments.reasoning_effort import EpisodeEffort, bind_episode_effor
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.endpoints import is_loopback
+from halo.weight_sync.adapter_routes import AdapterRoutes
+from halo.weight_sync.adapter_versions import AdapterVersions
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +47,6 @@ _PausedClock = Callable[[], float | Awaitable[float]]
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
 _RAY_LINK_PARENT = "/tmp"
-
-# Actors multiplex episodes on one loop, so oversubscribing keeps the servers fed while a turn is graded.
-_DEFAULT_ROLLOUTS_PER_WORKER = 4
 
 
 class RolloutHTTPError(RuntimeError):
@@ -228,7 +228,9 @@ class EnvironmentActor:
     def _http_client(self) -> aiohttp.ClientSession:
         # force_close: the server drops idle keepalives between batches, so a pooled socket
         # yields ServerDisconnectedError whose retries stall this rank at the next collective.
-        connector = aiohttp.TCPConnector(force_close=True, enable_cleanup_closed=True)
+        # limit=0: the default 100-connection cap would queue a request inside aiohttp, where the wait counts against
+        # its deadline, when a rank's in-flight cap exceeds 100 per actor; max_concurrent_rollouts is the bound.
+        connector = aiohttp.TCPConnector(limit=0, force_close=True, enable_cleanup_closed=True)
         # No session timeout: aiohttp's would charge a weight-sync pause; _generate's deadline credits it.
         return aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None), connector=connector)
 
@@ -320,16 +322,7 @@ class EnvironmentActor:
     ) -> TurnGeneration:
         """A genuine client 4xx or a shutdown error is terminal; any other transport or engine fault retries."""
         return await generate_turn(
-            partial(
-                self._generate,
-                client,
-                server_url,
-                messages,
-                config,
-                effort.level,
-                effort.thinking_budget,
-                effort.budget_soft,
-            ),
+            partial(self._generate, client, server_url, messages, config, effort.level),
             config,
             retry_on=(TimeoutError, aiohttp.ClientError, RuntimeError),
             giveup=_should_giveup,
@@ -344,13 +337,11 @@ class EnvironmentActor:
         messages: list[dict[str, str]],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
-        reasoning_budget: int | None = None,
-        budget_soft: bool = False,
     ) -> TurnGeneration:
         """One chat-completions request, and a ``/detokenize`` for a call cut at the cap, each under
         ``config.request_timeout`` of engine-serving time. Raw aiohttp, since the server URL is chosen per call."""
         url = _http_url(server_url.rstrip("/"))
-        payload = self._build_payload(messages, config, reasoning_effort, reasoning_budget, budget_soft)
+        payload = self._build_payload(messages, config, reasoning_effort)
 
         async def _exchange() -> dict:
             async with client.post(f"{url}/v1/chat/completions", json=payload) as resp:
@@ -379,10 +370,8 @@ class EnvironmentActor:
         messages: list[dict],
         config: RolloutConfig,
         reasoning_effort: str | None = None,
-        reasoning_budget: int | None = None,
-        budget_soft: bool = False,
     ) -> dict[str, Any]:
-        return build_payload(messages, config, reasoning_effort, self._tools_schema, reasoning_budget, budget_soft)
+        return build_payload(messages, config, reasoning_effort, self._tools_schema)
 
     async def shutdown(self):
         """Idempotent; called by RolloutManager.shutdown."""
@@ -407,28 +396,27 @@ class RolloutManager:
         env_config: dict[str, Any],
         server_urls: list[str],
         rollout_config: RolloutConfig,
-        max_concurrent_rollouts: int | None = None,
-        pool_replicas: int = 1,
+        max_concurrent_rollouts: int,
         first_server: int = 0,
+        adapter_versions: AdapterVersions | None = None,
+        adapter_model_name: Callable[[str], str] | None = None,
+        adapter_routes: AdapterRoutes | None = None,
     ):
-        """``num_workers`` is the actor budget for the whole Ray cluster, divided among the ``pool_replicas`` peers
-        building a pool against it (the DP size on a shared cluster, else 1). ``first_server`` offsets this manager's
+        """``num_workers`` is this rank's actor count and ``max_concurrent_rollouts`` its in-flight cap, both resolved
+        by :func:`~halo.environments.rollout_pool.resolve_rollout_pool`. ``first_server`` offsets this manager's
         round-robin, as peers all starting at server 0 pile a round narrower than the server count onto the first
-        ones."""
-        self.num_workers = max(1, num_workers // max(1, pool_replicas))
+        ones. With ``adapter_versions`` every episode leases the newest adapter and its requests name it through
+        ``adapter_model_name``, for the episode's whole length, and goes only to a server ``adapter_routes`` does not
+        know to lack that version: one that answers "not loaded" is skipped and the episode replayed on another."""
+        self.num_workers = num_workers
         self.env_type = env_type
         self.env_config = env_config
         self.server_urls = server_urls
         self.rollout_config = rollout_config
-
-        requested = max_concurrent_rollouts or self.num_workers * _DEFAULT_ROLLOUTS_PER_WORKER
-        if requested < self.num_workers:
-            logger.warning(
-                f"max_concurrent_rollouts ({requested}) < num_workers ({self.num_workers}), "
-                f"clamping to {self.num_workers}"
-            )
-            requested = self.num_workers
-        self.max_concurrent = requested
+        self.max_concurrent = max_concurrent_rollouts
+        self._adapter_versions = adapter_versions
+        self._adapter_model_name = adapter_model_name
+        self._adapter_routes = adapter_routes
 
         self._actors: list = []
         self._started = False
@@ -508,15 +496,57 @@ class RolloutManager:
         self._started = False
         logger.info("RolloutManager shutdown complete")
 
+    @contextlib.contextmanager
+    def _episode_config(self) -> Iterator[tuple[RolloutConfig, str | None]]:
+        """The config an episode plays under and the adapter version it leased: the manager's config, or with an adapter
+        served, the newest version's, leased until the episode ends so a retired version never serves a later turn of
+        it."""
+        if self._adapter_versions is None:
+            yield self.rollout_config, None
+            return
+        with self._adapter_versions.lease() as adapter:
+            yield replace(self.rollout_config, model_name=self._adapter_model_name(adapter)), adapter
+
     def _next_actor(self):
         actor = self._actors[self._actor_idx % len(self._actors)]
         self._actor_idx += 1
         return actor
 
-    def _next_url(self) -> str:
-        url = self.server_urls[self._url_idx % len(self.server_urls)]
+    def _next_url(self, adapter: str | None = None) -> str:
+        """The next server in the round-robin, among those that hold ``adapter`` when an episode leased one."""
+        urls = self.server_urls
+        if adapter is not None and self._adapter_routes is not None:
+            urls = self._adapter_routes.eligible(urls, adapter)
+            if not urls:
+                raise RuntimeError(
+                    f"No rollout server holds adapter version {adapter!r} ({self.server_urls} all lack it); the next "
+                    f"adapter sync loads it again."
+                )
+        url = urls[self._url_idx % len(urls)]
         self._url_idx += 1
         return url
+
+    async def _play_leased(self, prompt: str, ctx: dict | None, config: RolloutConfig, adapter: str | None):
+        """One episode on a server that holds ``adapter``. A server that answers that it does not is excluded for the
+        version and the episode replayed on the next, as it failed on its first request."""
+        for _ in range(len(self.server_urls)):
+            url = self._next_url(adapter)
+            ref = self._next_actor().run_episode.remote(prompt=prompt, context=ctx, server_url=url, config=config)
+            try:
+                result = await _await_with_deadline(
+                    ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
+                )
+            except TimeoutError:
+                # Ray forbids force=True on an async-actor task, so it would never cancel.
+                ray.cancel(ref, force=False)
+                raise
+            if adapter is None or self._adapter_routes is None or not result.error:
+                return result
+            if not self._adapter_routes.is_missing(result.error, adapter):
+                return result
+            logger.warning(f"Rollout server {url} holds no adapter {adapter}; routing its episodes elsewhere.")
+            self._adapter_routes.exclude(url, adapter)
+        return result
 
     async def collect_rollouts(
         self,
@@ -534,21 +564,10 @@ class RolloutManager:
 
         async def _run(idx: int, prompt: str, ctx: dict | None):
             async with sem:
-                ref = None
                 try:
-                    ref = self._next_actor().run_episode.remote(
-                        prompt=prompt,
-                        context=ctx,
-                        server_url=self._next_url(),
-                        config=self.rollout_config,
-                    )
-                    results[idx] = await _await_with_deadline(
-                        ref, self.rollout_config.episode_timeout, lambda: self.paused_seconds
-                    )
+                    with self._episode_config() as (config, adapter):
+                        results[idx] = await self._play_leased(prompt, ctx, config, adapter)
                 except Exception as e:
-                    if isinstance(e, TimeoutError):
-                        # Ray forbids force=True on an async-actor task, so it would never cancel.
-                        ray.cancel(ref, force=False)
                     self._log_failure(idx, e)
                     errors[idx] = e
 

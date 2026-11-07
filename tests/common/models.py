@@ -559,14 +559,29 @@ TINY_ZAYA_CONFIG = {
 # Dense first layer + sparse layers (default ``mlp_layer_types`` leaves this depth all-dense), the KDA/DSA interleave,
 # sigmoid noaux-tc routing, one shared expert, clamped SwiGLU, hyper-connections. Validation requires KV heads == heads
 # and qk_rope_head_dim 0. pad_token_id None: the default 154820 exceeds a tiny vocab.
+# The release's attention, indexer and linear-attention dims, which the serving kernels gate: vLLM's FlashInfer no-rope
+# sparse MLA takes only qk_nope 256 / kv_lora 512, FlashMLA and SGLang's indexer cache take index_head_dim 128.
+GLM5_ENGINE_GATED_DIMS = {
+    "num_attention_heads": 64,
+    "num_key_value_heads": 64,
+    "q_lora_rank": 1536,
+    "kv_lora_rank": 512,
+    "qk_nope_head_dim": 256,
+    "v_head_dim": 256,
+    "index_topk": 2048,
+    "index_kpool": 16,
+    "index_n_heads": 32,
+    "index_head_dim": 128,
+    "linear_head_dim": 128,
+    "hc_mult": 4,
+}
 TINY_GLM5_CONFIG = {
+    **GLM5_ENGINE_GATED_DIMS,
     "vocab_size": 2048,
     "hidden_size": 256,
     "intermediate_size": 256,
     "moe_intermediate_size": 128,
     "num_hidden_layers": 4,
-    "num_attention_heads": 4,
-    "num_key_value_heads": 4,
     "n_routed_experts": 8,
     "num_experts_per_tok": 2,
     "n_shared_experts": 1,
@@ -575,37 +590,46 @@ TINY_GLM5_CONFIG = {
     "norm_topk_prob": True,
     "routed_scaling_factor": 2.5,
     "swiglu_limit": 10.0,
-    "kv_lora_rank": 64,
-    "q_lora_rank": 64,
-    "qk_nope_head_dim": 32,
-    "v_head_dim": 32,
-    "index_topk": 16,
-    "index_kpool": 4,
-    "index_n_heads": 2,
-    "index_head_dim": 32,
     "linear_num_heads": 4,
-    "linear_head_dim": 64,
-    "hc_mult": 2,
     "hc_sinkhorn_iters": 4,
     "mlp_layer_types": ["dense", "sparse", "sparse", "sparse"],
     "max_position_embeddings": 4096,
     "pad_token_id": None,
     "tie_word_embeddings": False,
+    # The release's keys the transformers class does not declare but both serving engines read off the config
+    # (vLLM and SGLang raise on a missing ``mhc`` or ``index_kpool_compress``). Values as the release spells them;
+    # no MTP head is built, and the dense prefix matches ``mlp_layer_types``.
+    "mhc": True,
+    "index_kpool_compress": True,
+    "mla_use_nope": True,
+    "indexer_rope_interleave": True,
+    "index_share_for_mtp_iteration": True,
+    "num_nextn_predict_layers": 0,
+    "first_k_dense_replace": 1,
+    "scoring_func": "sigmoid",
+    "topk_method": "noaux_tc",
+    "moe_router_dtype": "float32",
 }
 
 # The family ships no text-only CausalLM. out_hidden_size is the projector's output width, so it equals the text
-# hidden_size.
-TINY_GLM5_VISION_CONFIG = {
-    "depth": 2,
-    "hidden_size": 32,
-    "num_heads": 2,
-    "intermediate_size": 64,
-    "out_hidden_size": 256,
-    "projection_intermediate_size": 64,
-    "patch_size": 4,
-    "image_size": 32,
+# hidden_size. The patch, merge and image sizes are the release's: both engines' image processors read the hub
+# processor files (14 px patches, 2 frames, 2x2 merge), so a different size here breaks the patch embed's view of the
+# processor output. The head dim is the release's too (hidden_size / num_heads = 64), which sizes the engines' vision
+# rotary table; depth and width stay tiny, and eight heads divide by every engine tensor-parallel size up to 8.
+GLM5_ENGINE_GATED_VISION_DIMS = {
+    "patch_size": 14,
     "temporal_patch_size": 2,
     "spatial_merge_size": 2,
+    "image_size": 336,
+}
+TINY_GLM5_VISION_CONFIG = {
+    **GLM5_ENGINE_GATED_VISION_DIMS,
+    "depth": 2,
+    "hidden_size": 512,
+    "num_heads": 8,
+    "intermediate_size": 1024,
+    "out_hidden_size": 256,
+    "projection_intermediate_size": 64,
 }
 
 # Dense first layer + sparse layers, SwiGLU clamps on the last two MoE layers only, sigmoid routing with

@@ -22,6 +22,7 @@ from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.objective.logratio import select_mask_logratio
 from halo.trainers.grpo.rollout import engine_preflight
 from halo.trainers.grpo.rollout.engine_preflight import _probe_prompt_logprobs, verify_engine_prompt_logprobs
+from halo.weight_sync.adapter_versions import AdapterVersions
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient as VLLMClient
 from tests.common.fake_engines import GRAPH_CAPTURE_TOKENS, FakeEngineServer, fake_server_class
@@ -122,6 +123,7 @@ def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
     monkeypatch.setattr(async_rollouts, "resolve_weight_sync_client", lambda backend: _Scorer)
     host = types.SimpleNamespace(
         _weight_sync_client=None,
+        _adapter_versions=None,
         _train_loader_batch_size=lambda: 8,
         async_config=AsyncRolloutConfig(
             rollout_connection_timeout=7.0,
@@ -435,6 +437,26 @@ def test_the_env_script_runs_the_prompt_logprob_probe_under_isr_engine_reference
         )
     ]
     assert guards == ["async_config.isr_engine_reference"], guards
+
+
+def test_an_adapter_run_re_scores_through_the_newest_version(monkeypatch):
+    class _Scorer:
+        def __init__(self, base_url, connection_timeout):
+            self.adapter_source = None
+
+    monkeypatch.setattr(async_rollouts, "resolve_weight_sync_client", lambda backend: _Scorer)
+    versions = AdapterVersions()
+    host = types.SimpleNamespace(
+        _weight_sync_client=None,
+        _adapter_versions=versions,
+        _train_loader_batch_size=lambda: 8,
+        async_config=AsyncRolloutConfig(rollout_server_url="http://a:8000"),
+    )
+    [client] = DistributedAsyncEnvironmentalGRPOTrainer._build_engine_rescore_clients.__get__(host)()
+
+    assert client.adapter_source() is None
+    versions.publish("v3")
+    assert client.adapter_source() == "v3"
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The packing collator warns once per instance when rows carry no ``seq_lengths``: each row then collates as one
-document and concatenated documents attend across each other, which wrapped pretraining may intend but never
-silently."""
+"""The packing collator warns once per instance when rows carry no ``seq_lengths`` (a corpus baked before wrapped rows
+carried them): each row then collates as one document and concatenated documents attend across each other. Rows with
+them restart their positions at every document."""
 
 import warnings
 from unittest.mock import MagicMock
@@ -48,6 +48,15 @@ def test_rows_without_seq_lengths_warn_once():
     # A fresh collator warns again; a class-level latch would silence every instance after the first.
     with pytest.warns(UserWarning, match="seq_lengths"):
         DataCollatorWithPacking(tokenizer=make_tokenizer()).torch_call(rows)
+
+
+def test_wrapped_rows_isolate_their_documents():
+    """The collator turns a wrapped row's ``seq_lengths`` into per-piece positions, a cut piece's first token
+    included, and masks each piece's first label."""
+    rows = [{"input_ids": [5, 6, 7, 8, 9], "attention_mask": [1] * 5, "seq_lengths": [2, 3]}]
+    batch = DataCollatorWithPacking(tokenizer=make_tokenizer()).torch_call(rows)
+    assert batch["position_ids"].tolist() == [[0, 1, 0, 1, 2]]
+    assert batch["labels"].tolist() == [[-100, 6, -100, 8, 9]]
 
 
 def test_packed_rows_do_not_warn():

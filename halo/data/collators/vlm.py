@@ -78,7 +78,7 @@ class VLMDataCollator:
         if train_on_completions_only:
             reject_untrainable_completions(
                 lambda conversation: render_vlm_text(processor, conversation),
-                _PROBE_CONVERSATION,
+                (_PROBE_CONVERSATION,),
                 tokenizer,
                 response_prompt_template,
                 self.eos_token_ids,

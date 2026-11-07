@@ -251,6 +251,7 @@ def test_the_token_sum_losses_take_the_balance(loss_type):
 def _online_host(balance: bool, training: bool = True):
     host = types.SimpleNamespace(
         _balance_token_mass=balance,
+        _fuses_round=False,
         model=types.SimpleNamespace(training=training),
         accelerator=types.SimpleNamespace(gather=_local, process_index=0),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},

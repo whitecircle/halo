@@ -40,6 +40,8 @@ class RendezvousListener:
         self.port: int = listener.getsockname()[1]
         self.handed_over = False
         self._socket: socket.socket | None = listener
+        # A second handle on the socket a store took over, kept to stop its listening on demand.
+        self._handed: socket.socket | None = None
         # The handover may run on a formation thread while a failure path closes from the caller's.
         self._lock = threading.Lock()
 
@@ -65,6 +67,7 @@ class RendezvousListener:
                 state = "handed to a store" if self.handed_over else "closed"
                 raise RuntimeError(f"The rendezvous listener on {self.bind_address}:{self.port} was already {state}.")
             self.handed_over = True
+            self._handed = listener.dup()
         try:
             yield listener.fileno()
         finally:
@@ -77,11 +80,30 @@ class RendezvousListener:
         if listener is not None:
             listener.close()
 
+    def free_port(self) -> None:
+        """Free the port even when the store that took it over is still referenced, as by a group whose teardown is
+        parked: a shutdown stops the socket listening whoever else holds its fd. Idempotent; ends the rendezvous, so
+        call it only once the group is released or abandoned."""
+        self.close()
+        with self._lock:
+            handed, self._handed = self._handed, None
+        if handed is not None:
+            try:
+                handed.shutdown(socket.SHUT_RDWR)
+            except OSError as e:
+                # ENOTCONN is the answer of a socket the store already closed.
+                logger.debug(f"Rendezvous port {self.port} was already released: {e}")
+            handed.close()
+
     def __enter__(self) -> "RendezvousListener":
         return self
 
-    def __exit__(self, *exc_info) -> None:
-        self.close()
+    def __exit__(self, exc_type, *exc_info) -> None:
+        """Free the port unless a store took it over; a failed block frees it even then, its group being released."""
+        if exc_type is None:
+            self.close()
+        else:
+            self.free_port()
 
 
 def _route_source_ip(host: str) -> str:
@@ -94,7 +116,7 @@ def _route_source_ip(host: str) -> str:
             return "127.0.0.1"
 
 
-def _is_local_address(host: str) -> bool:
+def is_local_address(host: str) -> bool:
     if is_loopback(host):
         return True
     try:
@@ -113,9 +135,9 @@ def _master_address(
     master_address = advertised_host or env_str(host_env)
     if not master_address:
         # Same-host groups stay on loopback, as firewalls drop hairpin traffic on the external NIC.
-        master_address = "127.0.0.1" if _is_local_address(server_host) else _route_source_ip(server_host)
+        master_address = "127.0.0.1" if is_local_address(server_host) else _route_source_ip(server_host)
 
-    if is_loopback(master_address) and not _is_local_address(server_host):
+    if is_loopback(master_address) and not is_local_address(server_host):
         raise RuntimeError(
             f"{engine} server {server_url} is on a remote host ({server_host}) but the "
             f"NCCL weight-sync group address resolved to loopback ({master_address}): the address set is "
@@ -150,8 +172,8 @@ def _bind_address(master_address: str, *, engine: str, server_host: str, host_en
         return _ALL_INTERFACES
     if (
         bind_address == _ALL_INTERFACES
-        or not _is_local_address(bind_address)
-        or (is_loopback(bind_address) and not _is_local_address(server_host))
+        or not is_local_address(bind_address)
+        or (is_loopback(bind_address) and not is_local_address(server_host))
     ):
         raise RuntimeError(
             f"{engine} weight-sync group address {master_address} (resolves to "

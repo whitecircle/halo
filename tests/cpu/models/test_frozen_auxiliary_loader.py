@@ -391,5 +391,16 @@ def test_an_untagged_fetch_opens_no_coordination_scope():
     caps.fetch_scope.assert_not_called()
 
 
+def test_the_on_policy_reference_load_checks_its_fit_then_warns_before_loading(monkeypatch):
+    order = []
+    monkeypatch.setattr(frozen_models, "reject_unfit_reference", lambda *args, **kwargs: order.append("fit"))
+    monkeypatch.setattr(frozen_models, "warn_unparallelized_reference", lambda *args: order.append("warn"))
+    monkeypatch.setattr(frozen_models, "load_frozen_reference_model", lambda *args, **kwargs: order.append("load"))
+
+    _on_policy_grpo_reference(reset_sinks=True)
+
+    assert order == ["fit", "warn", "load"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -18,8 +18,9 @@ force_chat_template: true
 # --- Parallelism (4 train GPUs: EP=4 single dispatch group, DP=4) ---
 expert_parallel_size: 4            # ep_size == GPUs-in-the-job = one DeepEP group; EP ⊥ DP
 fsdp_reshard_after_forward: false  # ZeRO-2 for the non-expert base params; ZeRO-3 is rejected under EP
-ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only: the long-context pick
-                                   # (agent-docs/infrastructure/deepep.md); these rows stay under the 32-bit wire index
+ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only. Rows reach ~128k tokens per rank, past the ~64k
+                                   # where elastic's combine barrier deadlocked against FSDP2's reduce-scatter at ep8;
+                                   # legacy has no such barrier (agent-docs/infrastructure/deepep.md#transport-backend)
 
 # --- LoRA (r=64, all linear layers: attention + MoE experts) ---
 use_peft: true
@@ -47,13 +48,12 @@ environment_kwargs:
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
-  # One profile per effort level: CoT budget + interaction budgets. thinking_tokens is a soft per-turn budget
-  # (enforce_thinking_cap: false): priced past it (reasoning_price_past_budget), never cut there; the engine closes
-  # the reasoning only where rollout_max_answer_tokens is left of the turn.
+  # reasoning_budget is the reasoning an episode spends free, summed over its turns, and reasoning_price what the
+  # trainer charges per 1,000 reasoning tokens past it, the lowest level highest; the model is told neither.
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, enforce_thinking_cap: false, max_submissions: 1, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, enforce_thinking_cap: false, max_submissions: 2, max_test_calls: 4}
-    high: {thinking_tokens: 16384, enforce_thinking_cap: false, max_submissions: 3, max_test_calls: 6}
+    low: {reasoning_budget: 40000, reasoning_price: 0.008, max_submissions: 1, max_test_calls: 2}
+    medium: {reasoning_budget: 50000, reasoning_price: 0.006, max_submissions: 2, max_test_calls: 4}
+    high: {reasoning_budget: 60000, reasoning_price: 0.004, max_submissions: 3, max_test_calls: 6}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
@@ -64,7 +64,7 @@ environment_kwargs:
   tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
 
 # --- Rewards ---
-# The length economy: the level's per-turn thinking budget, soft (priced past it), the engine's ceiling where the
+# The length economy: the level's episode reasoning budget (priced past it), the engine's ceiling where the
 # answer room is left of the turn, the interaction budgets and the output budget. The judge reads the whole episode, every
 # turn's reasoning included, and vetoes the credit of one that carried its working-out into a program, spent a call on
 # an unfinished draft, or faked, probed or mined the grade; working-out in a scratchpad run is logged, never priced, so
@@ -87,7 +87,7 @@ rewards:
     checks: environment        # the environment's audit rubric (CodeContestsEnvironment.JUDGE_CHECKS)
 
 # --- Ray Workers ---
-num_rollout_workers: 32
+rollout_actor_budget: 128
 max_concurrent_rollouts: 50  # = eval_rollout_batch_size: the eval round must fit one wave
 
 # --- vLLM Servers ---
@@ -108,13 +108,11 @@ episode_timeout: 2700         # whole-episode deadline in engine-serving time (a
 rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
 rollout_stop_tokens: ["<|call|>"]      # end each turn at the harmony tool-call terminator
-rollout_max_tokens: 30000              # per-turn total; under a soft budget the reasoning may run until only the answer room is left of it
+rollout_max_tokens: 30000              # per-turn total; the reasoning may run until only the answer room is left of it
 rollout_max_answer_tokens: 8192      # the most a turn generates past its reasoning cap (never stated to the model): an honest call fits well inside it, a program carrying the reasoning on in its comments is cut at it
 rollout_max_episode_tokens: 128000  # the most an episode may sample over all its turns, reasoning and visible output together, under the 131072 window so the prompt and tool schema fit beside it (never stated to the model; a turn's caps narrow to what is left)
 rollout_reasoning_end_token: "<|end|><|start|>assistant<|channel|>final<|message|>"  # the move into the final channel vLLM's budget forces (openai_gptoss plugin)
-reasoning_floor: 0.05  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
-reasoning_price: {low: 0.008, medium: 0.006, high: 0.004}  # per 1,000 reasoning tokens a turn spends past its level's soft budget, the lowest level highest
-reasoning_price_past_budget: true  # free within the budget: the soft budget's only ceiling below the engine's
+reasoning_floor: 0.25  # the one term that pays for MORE reasoning: a failed episode reasoning under its level's reasoning_budget pays up to this, in proportion to the shortfall
 reasoning_price_cap: 0.28          # the most the price charges an episode: under one more failed submission (resubmission + untested_submission)
 
 # --- Prefetch ---

@@ -19,7 +19,6 @@ from halo.entrypoints.eval_contract import (
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.eval_runner import collect_results, report
 from halo.environments.registry import build_environment
-from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
     DEFAULT_REASONING_EFFORT,
@@ -31,8 +30,6 @@ from halo.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
 
-# thinking_tokens is the CoT budget, so this keeps the solution and its tool call from competing with the CoT.
-SOLUTION_HEADROOM_TOKENS = 4096
 # The coding envs this eval's adapters, language prompt and report buckets are written for.
 CODING_ENV_TYPES = ("codeforces", "code_contests")
 # Defaults where neither a flag nor ``--training_config`` sets the knob. No language or turn budget: those are the env
@@ -40,7 +37,7 @@ CODING_ENV_TYPES = ("codeforces", "code_contests")
 DEFAULT_ENV_TYPE = "codeforces"
 DEFAULT_TEMPERATURE = 0.2
 FLAG_OWNED_ENV_KWARGS = ("max_turns", "language", "eval_protocol", "reasoning_effort")
-# ``--reasoning_effort``'s spelling of no level: no episode sends a level or its thinking budget (non-thinking models).
+# ``--reasoning_effort``'s spelling of no level: no episode sends a level (non-thinking models).
 NO_REASONING_EFFORT = "none"
 
 
@@ -88,20 +85,6 @@ def resolve_effort_setting(flag: str | None, trained_env: dict[str, Any]) -> str
     if flag is not None:
         return None if flag == NO_REASONING_EFFORT else flag
     return trained_env.get("reasoning_effort", DEFAULT_REASONING_EFFORT)
-
-
-def default_max_tokens(env: CodeContestsEnvironment, flag: str | None) -> int:
-    """``--max_tokens``' default without ``--training_config``: the flag's level's thinking budget as ``env`` binds it
-    plus :data:`SOLUTION_HEADROOM_TOKENS`. Without a level or budget it takes the training rollout's default; a soft
-    budget, which a turn may reason past, takes the larger of the two. The level is read off the flag alone, since a
-    training config's may be ``random``, which has no budget."""
-    level = resolve_effort_setting(flag, {})
-    budget = env.thinking_budget_for_effort(level) if level is not None else None
-    if budget is None:
-        return RolloutConfig.max_tokens
-    if not env.thinking_budget_enforced(level):
-        return max(RolloutConfig.max_tokens, budget + SOLUTION_HEADROOM_TOKENS)
-    return budget + SOLUTION_HEADROOM_TOKENS
 
 
 def resolve_env_config(args: argparse.Namespace, trained_env: dict[str, Any], env_kwargs: dict) -> dict[str, Any]:
@@ -212,15 +195,7 @@ def run_code_contests_eval(args: argparse.Namespace) -> None:
     reasoning_effort = env_config["reasoning_effort"]
     env = build_environment(env_type, env_config)
     try:
-        # Without a training config the flag's effort level sets the budget: too small a budget truncates the chain of
-        # thought before any solution and scores the problem 0.
-        rollout = rollout_config_from_args(
-            args,
-            contract,
-            env,
-            default_temperature=DEFAULT_TEMPERATURE,
-            default_max_tokens=default_max_tokens(env, args.reasoning_effort),
-        )
+        rollout = rollout_config_from_args(args, contract, env, default_temperature=DEFAULT_TEMPERATURE)
         logger.info("reasoning_effort=%s, max_tokens=%d", reasoning_effort, rollout.max_tokens)
         # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
         env.verify_backend()

@@ -24,9 +24,7 @@ def _scripted(actor, finish_reasons: list[str | None]):
     """Make the actor's engine call answer ``finish_reasons`` in order; ``None`` is a completed turn."""
     served: list[list[dict]] = []
 
-    async def _generate(
-        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
-    ):
+    async def _generate(client, url, messages, config, reasoning_effort=None):
         served.append(messages)
         reason = finish_reasons[len(served) - 1]
         if reason == FINISH_REASON_ABORT:

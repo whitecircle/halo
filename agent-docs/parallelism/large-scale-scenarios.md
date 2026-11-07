@@ -158,7 +158,8 @@ reserves 268–283 GB, 99.4% of the device on its top rank. These plans count al
 **The DeepEP arena is a separate term**, paid once for the model rather than once per layer. It is
 receive-side and linear in the dispatch-group width: at this model's `hidden=4096`, `top_k=10` an
 `ep64` group at 8192 tokens per rank costs **4.06 GiB** on top of the columns below. Formula and
-growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing).
+growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing). A build or grow takes
+1.5x the capacity needed, so the arena can sit up to 1.5x above that figure.
 
 It does not shape the choice of `ep_size` at any cell here; a wide dispatch group keeps its
 expert-memory saving instead of spending it back. The one exception is `HALO_EP_CAPACITY_DEDUP=0`,
@@ -414,7 +415,7 @@ Values that differ from it or are load-bearing at 397B:
 |---|---|---|
 | `expert_parallel_size` / `ep_scope` | per the table above / `global` | node-scope EP caps `X` at 8 and cannot hold `P_e` |
 | `attn_implementation` | `flash_attention_2` | unset, these packed rows load FA2 on Blackwell too (unpacked rows take FA4, [Qwen3.5 → Configs](../models/qwen3_5.md#configs)) and Hopper picks FA3; the pin keeps Hopper on FA2 as well. An explicit FA2 is kept as-is |
-| `packing` / `padding_free` | `true` / `false` | fixed-length only — the M-RoPE varlen path crashes FA2 |
+| `packing` / `padding_free` | `true` / `false` | fixed-length rows, as the shipped recipe |
 | `fsdp_reshard_after_forward` | `false` | ZeRO-3 is rejected under EP |
 | `gradient_checkpointing` | `true` | the activation column assumes it |
 | `bf16` + `optim` | as shipped | AdamWBF16 auto-enables whenever `bf16: true` and `optim` is `adamw_torch_fused`/`adamw_torch` outside accelerate-managed DDP — both are already the defaults, so neither key has to be written to get the 8 B/param cost. `optim: muon` or `flash_adamw` opts out |
@@ -470,7 +471,8 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
     Rotation deletes the previous checkpoint only after the new one completes, so
     `save_total_limit: 1` still transiently holds **both**: budget ~1.6 TB free per save, ~4.8 TB with
-    optimizer shards. Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
+    optimizer shards. The trainer checks the peak against `output_dir`'s volume at construction
+    ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
     `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` at it.
 
     On the `save_sharded_ep` cells budget for the merge too: `merge_ep_shards.py` streams (peak host

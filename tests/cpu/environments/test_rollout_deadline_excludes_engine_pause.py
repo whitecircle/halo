@@ -97,6 +97,7 @@ def _manager(episode_timeout: float) -> RolloutManager:
         env_config={},
         server_urls=["http://x"],
         rollout_config=RolloutConfig(episode_timeout=episode_timeout),
+        max_concurrent_rollouts=1,
     )
 
 

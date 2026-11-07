@@ -13,7 +13,8 @@ Async GRPO metrics are namespaced by the question they answer. The rollout, `sam
 | `judge/*`, `reward_model/*` | external reward terms | `<source>/<name>/scored` plus per-source keys: [judge](../grpo/rewards/judge.md#metrics), [reward model](../grpo/rewards/reward-model.md) |
 | `logps/*` | policy confidence | `sampling_mean`, `advantage_cov`; the related `kl`, `entropy`, `kl_clamp_frac` are unnamespaced |
 | `advantage/*` | the round's push on the sampled tokens | `net_token_mass`, `token_mass_scale`, `negative_only_mass` ([Token-mass balance](objective.md#token-mass-balance)) |
-| `sampling/*` | engine/trainer agreement | `is_correction_active`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac`, `zero_gradient_round` |
+| `sampling/*` | engine/trainer agreement | `is_correction_active`, `is_weights_from_loss_forward`, `logratio_mean`, `is_ratio_mean` / `is_ratio_max`, `is_ratio_extreme_frac`, `is_ess_frac`, `is_correction_coverage`, `is_masked_frac`, `sampler_certain_frac`, `update_skipped`, `degenerate_group_frac`, `invalid_episode_frac`, `rows_over_cap_frac`, `forced_close_frac`, `untrainable_rows_frac`, `untrainable_rows_trained_frac`, `untrainable_turns_rowless_frac`, `zero_gradient_round` |
+| `score_centering/*` | the centered gradient under `score_centering_top_k` | `active_frac`, `head_mass_mean`, `tail_ratio_mean`, `weight_zero_frac`, `correction_mean` ([Score centering](objective.md#score-centering)) |
 | `routing/*` | MoE [routing replay](objective.md#routing-replay) | `replay_flip_rate`; under R3 ([rollout replay](objective.md#routing-replay)), the capture shape classes `rollout_full_frac`, `rollout_engine_omits_last_frac`, `rollout_completion_only_frac`, `rollout_unresolved_frac`, plus `rollout_prompt_len_mismatch_frac` |
 | unnamespaced | TRL loss internals | `clip_ratio/*`, `cispo_clip_ratio` (under `loss_type: cispo`), `step_time` |
 
@@ -54,7 +55,8 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 | `is_masked_frac` | Share of those a mask stage zeroed |
 | `is_ratio_extreme_frac` | Share of corrected tokens whose raw ratio lies outside `[1/c, c]` before any mask, `c` being `vllm_importance_sampling_clip_max` |
 | `is_ess_frac` | Normalized effective sample size `(Σw)² / (n Σw²)` of the applied IS weights; it falls as a few tokens carry the correction |
-| `is_ratio_mean` / `is_ratio_max` | The ratios that survive the mask stages |
+| `is_ratio_mean` / `is_ratio_max` | The ratios that survive the mask stages; under score centering the 0/1 keep verdict, 1 on every kept token, as the centered term carries the weight ([Score centering](objective.md#score-centering)) |
+| `is_weights_from_loss_forward` | 1 on a round whose IS weights came from the loss forward, 0 on one a no-grad pass weighed ([Weight from the loss forward](performance.md#weight-from-the-loss-forward)). On a 1 round `logratio_mean`, `is_ratio_*` and `is_ess_frac` read loss tokens only and `is_masked_frac` is absent (no mask stage can run) |
 | `sampler_certain_frac` | Tokens the engine emitted with probability 1, which carry no correction (a forced reasoning close instead gets ratio 0, `forced_close_frac`) |
 
 ### `routing/*`
@@ -71,6 +73,28 @@ Each episode's resolved effort level slices the metrics as `effort/<level>/*`, a
 ### Step timings
 
 `profiling/Time taken: <Trainer>.<name>` (main process) includes `rollout_acquire` (the generation wait, near zero on a prefetch hit), `build_training_tensors` and `weight_sync`.
+
+TRL's unnamespaced `step_time` times only its own `training_step` body, so it leaves out the clip and the optimizer step and, on the environmental trainer, the weight push, which runs before that body. The whole step is `step_time_seconds` (`enable_efficiency_metrics: true`) or the sum of the [phase times](#phase-times).
+
+### Phase times
+
+`log_phase_times: true` on the online and environmental trainers logs where each optimizer step's wall time goes, as `phase_time/<phase>_s` (the mean over the ranks) and `phase_time/<phase>_max_s` (the slowest rank), seconds per step averaged since the last log. Each phase is its own time, less the phases nested in it, so the keys add up to the step's wall time. The slowest-rank key shows skew the mean hides: an EP rank waiting on a hot peer, or one rank's slow rollout.
+
+| Phase | Time between |
+|---|---|
+| `rollout` | the generation wait: the environmental trainer's round acquisition (near zero on a prefetch hit), online GRPO's engine generation |
+| `sync` | the engine weight push |
+| `build` | the rest of building a round's training tensors, the no-grad forwards aside |
+| `no_grad`, `no_grad_ref` | the policy's and the KL reference's no-grad forwards on the environmental trainer, which times each of its two passes. Online GRPO reports every no-grad scoring pass, TRL's old-policy and reference forwards, as `no_grad` |
+| `loss_forward` | `_compute_loss`, summed over micro-steps |
+| `post_backward_finish` | completing FSDP2's post-backward after each micro-step |
+| `micro_step` | the rest of each `training_step`: mostly the backward |
+| `reduce` | the last micro-step's end to the optimizer: the clip, the norm all-reduce, the deferred EP and TP gradient sweeps |
+| `optimizer` | the optimizer step |
+| `log_emit` | the `log` call, completions record included |
+| `unaccounted` | the step's wall time no phase holds (an untimed phase, an eval round, a checkpoint save); negative where spans overlap that should nest |
+
+Phases run on CUDA events recorded on the current stream, so timing does not drain the queue; the report costs one all-reduce per log.
 
 ## Reading the metrics
 
@@ -120,6 +144,20 @@ A turn the engine cut mid-tool-call shows the partial call after its text, tagge
 ### Writer rank
 
 Every rank writes its own part into its node's `output_dir`, so no rank gathers another's trajectories and a node's directory holds its own ranks' parts on per-node storage; only the tables' sample reaches global rank 0. A failed write (a full disk, a wandb outage) fails the step on every rank.
+
+## Halts
+
+Three rules end a run whose rounds train on nothing or on a biased sample, each raising on every rank:
+
+| Rule | Halts when |
+|---|---|
+| Empty steps | two steps in a row hold no valid episode anywhere in the world |
+| [`zero_gradient_round_limit`](../../reference/configuration-reference.md#asyncrolloutconfig) | that many train rounds in a row carry no policy gradient, in a launch that has not trained yet |
+| `episode_error_rate_limit` | the world-wide `episode/error_rate` of a train round stays over it (0.5) for `episode_error_round_limit` rounds (3) in a row |
+
+An episode that errored or outran `request_timeout` trains as a masked row and stays out of the baseline, so a run whose slow episodes time out learns from the fast ones alone, toward short answers; half the episodes failing three rounds running is far past a grader blip. The error rate is logged as `episode/error_rate` every round, and the startup preflight times a short generation per server and warns when a full `rollout_max_tokens` turn could not finish inside `request_timeout` ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
+
+The counters of all three, and the early-stop streaks below, are written beside the pending prefetch rounds in each checkpoint and read back on a resume, so a restart continues the patience budget instead of granting a full one.
 
 ## Early stop
 

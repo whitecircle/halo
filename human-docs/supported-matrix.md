@@ -113,7 +113,8 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
-| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
+| GLM-5 Next | Yes | Yes | Not run | A tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
+| Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
 no validated expert layout on either engine and is refused too. Offline GRPO needs no
@@ -240,6 +241,7 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 | QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
+| FP8 rollouts (`rollout_weight_precision: fp8_block`) | online GRPO on vLLM and async GRPO on either engine, on Qwen3.5/3.6 MoE only; ran on Qwen3.5-35B-A3B; refused beside adapter sync and QLoRA ([FP8 rollouts](../agent-docs/infrastructure/rollout-servers.md#fp8-rollouts) ↗) |
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
 | Tree packing (`tree_packing`) | SFT on raw text datasets: GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE) on FA4 or FA2, GLM-5 Next on SDPA; refused under CP, TP and PP; ETP and EP+ETP are admitted ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |

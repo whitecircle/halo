@@ -62,7 +62,7 @@ def test_one_request_timeout_serves_every_unconfigured_request():
     """The batched generation and an eval without --training_config time a request out alike."""
     batched = inspect.signature(generate_openai_response).parameters["request_timeout"].default
     args = argparse.Namespace(model="m", temperature=None, top_p=None, max_tokens=None, request_timeout=None)
-    evaluated = rollout_config_from_args(args, None, None, default_temperature=0.0, default_max_tokens=8)
+    evaluated = rollout_config_from_args(args, None, None, default_temperature=0.0)
     assert batched == evaluated.request_timeout == REQUEST_TIMEOUT_SECONDS
 
 

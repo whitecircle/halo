@@ -47,6 +47,7 @@ def host(monkeypatch):
     )
     host = SimpleNamespace(
         _weight_sync_client=None,
+        _adapter_sync=None,
         accelerator=SimpleNamespace(is_main_process=True, device=torch.device("cpu")),
         async_config=SimpleNamespace(
             rollout_backend="vllm",
@@ -54,6 +55,7 @@ def host(monkeypatch):
             rollout_server_configs=None,
             rollout_connection_timeout=1.0,
             rollout_group_port=51216,
+            rollout_sync_topology="per_server",
         ),
     )
     AsyncRolloutMixin._init_weight_sync_client(host)

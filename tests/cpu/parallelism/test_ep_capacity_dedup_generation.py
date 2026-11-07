@@ -55,16 +55,16 @@ class _StubDispatcher:
     def __init__(self, group: object, hidden_dim: int):
         self.dispatch_group = group
         self.hidden_dim = hidden_dim
-        self.spans_domains = False
+        self.spans_domains = True
 
 
 def _isolated_backend(module, monkeypatch, group: object, *, dedup: bool) -> object:
-    """The wire width trips the 32-bit index guard right after the cache write, the cheapest exit that needs no
-    DeepEP buffer."""
+    """A one-token Gin ceiling on a cross-domain group trips the dispatch check right after the cache write, the
+    cheapest exit that needs no DeepEP buffer."""
     capacity_mod.capacity_scope.clear()
     monkeypatch.setattr(module, "EP_CAPACITY_DEDUP", dedup)
-    hidden = capacity_mod.DEEPEP_INDEX_LIMIT // capacity_mod.EP_CAPACITY_ALIGN
-    return module._ElasticBackend(_StubDispatcher(group, hidden))
+    monkeypatch.setattr(capacity_mod, "GIN_MAX_TOKENS_PER_RANK", 1)
+    return module._ElasticBackend(_StubDispatcher(group, 2048))
 
 
 def _stub_capacity_all_reduce(module, monkeypatch) -> list:
@@ -76,7 +76,7 @@ def _stub_capacity_all_reduce(module, monkeypatch) -> list:
 
 
 def _size_capacity(backend, num_tokens: int = 8, num_topk: int = 1) -> None:
-    with pytest.raises(ValueError, match="wire-index limit"):
+    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
         backend.ensure(num_tokens, num_topk, deterministic=False)
 
 

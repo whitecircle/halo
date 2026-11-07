@@ -265,11 +265,11 @@ class AttentionWork:
         self.layout = None
         self.documents: tuple[int, ...] = ()
 
-    def drain_step_work(self) -> tuple[float, int]:
+    def drain_step_work(self) -> tuple[float, int, float]:
         documents, self.documents = self.documents, ()
         if self.layout is None or not documents:
-            return 0.0, 0
-        return float(self.layout.flops_for_documents(torch.tensor(documents))), len(documents)
+            return 0.0, 0, 0.0
+        return float(self.layout.flops_for_documents(torch.tensor(documents))), len(documents), 0.0
 
 
 class _PackageRecords(logging.Handler):

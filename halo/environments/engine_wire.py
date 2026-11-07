@@ -6,10 +6,9 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
+from halo.environments.candidate_logprobs import parse_sglang_candidates
 from halo.environments.episode import TurnGeneration, describe_exception
 from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
     SGLANG_BACKEND,
     VLLM_BACKEND,
     RolloutConfig,
@@ -131,6 +130,12 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
             "count the captured token ids instead (0 when none are captured).",
             config.backend,
         )
+    candidates = None
+    if config.capture_candidate_logprobs and token_ids is not None:
+        # SGLang only: a construction refusal keeps vLLM, which would return none here, off the knob.
+        candidates = parse_sglang_candidates(
+            choice.get("meta_info") or {}, len(token_ids), config.capture_candidate_logprobs
+        )
     routing_mask = None
     if config.capture_routed_experts:
         # vLLM attaches it per choice; SGLang in the echoed ``meta_info`` when asked, else under ``sglext``.
@@ -146,6 +151,7 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
         tokens=tokens,
         token_ids=token_ids,
         token_logprobs=token_logprobs,
+        candidates=candidates,
         routing_mask=routing_mask,
         # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
         routing_prompt_tokens=usage.get("prompt_tokens") if routing_mask else None,
@@ -204,7 +210,8 @@ def _thinking_cap_fields(config: RolloutConfig) -> dict[str, Any]:
     if config.backend == VLLM_BACKEND:
         # vLLM forces the reasoning-end marker; needs a server-side reasoning parser.
         return {"thinking_token_budget": config.max_thinking_tokens}
-    # From the env's profile (a global cap is rejected at config time); the budget still reaches the reward side.
+    # The turn less its answer room (a global cap is rejected at config time); the profile budgets still reach the
+    # reward side.
     warn_once(
         logger,
         _thinking_budget_unenforced_warned,
@@ -221,18 +228,11 @@ def _thinking_cap_fields(config: RolloutConfig) -> dict[str, Any]:
     return {}
 
 
-def _template_fields(
-    config: RolloutConfig, reasoning_effort: str | None, reasoning_budget: int | None, budget_soft: bool
-) -> dict[str, Any]:
-    """The level goes top-level, where both engines derive their thinking toggles from it; the template variables go
-    nested, joined by the level's budget."""
+def _template_fields(config: RolloutConfig, reasoning_effort: str | None) -> dict[str, Any]:
+    """The level goes top-level, where both engines derive their thinking toggles from it; the run's template
+    variables go nested."""
     fields: dict[str, Any] = {}
     template_kwargs = dict(config.chat_template_kwargs or {})
-    if reasoning_budget is not None:
-        # Episode-constant: the trainer renders every turn with this value, never a late turn's narrower cap.
-        template_kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
-        if budget_soft:
-            template_kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
     if reasoning_effort is not None:
         fields["reasoning_effort"] = reasoning_effort
         if config.backend != VLLM_BACKEND:
@@ -243,18 +243,13 @@ def _template_fields(
     return fields
 
 
-def generation_control_fields(
-    config: RolloutConfig,
-    reasoning_effort: str | None = None,
-    reasoning_budget: int | None = None,
-    budget_soft: bool = False,
-) -> dict[str, Any]:
+def generation_control_fields(config: RolloutConfig, reasoning_effort: str | None = None) -> dict[str, Any]:
     """Sampler filters, the engine's reasoning cap, the level and the template variables; one owner for the training
     payload and the eval's SDK call alike."""
     return {
         **_sampler_fields(config),
         **_thinking_cap_fields(config),
-        **_template_fields(config, reasoning_effort, reasoning_budget, budget_soft),
+        **_template_fields(config, reasoning_effort),
     }
 
 
@@ -273,8 +268,12 @@ def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
             # SGLang's OpenAI `logprobs` drops the id; its meta_info keeps it, and prompt ids come back on the choice.
             fields["return_meta_info"] = True
             fields["return_prompt_token_ids"] = True
+            if config.capture_candidate_logprobs:
+                # The candidates ride flat base64 arrays in meta_info instead of one JSON object per token.
+                fields["top_logprobs"] = config.capture_candidate_logprobs
+                fields["return_flat_raw_output_top_logprobs"] = True
     if config.capture_routed_experts and not is_vllm:
-        # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as assemble_rollout_masks expects.
+        # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as build_rollout_routing expects.
         fields["return_routed_experts"] = True
     return fields
 
@@ -284,11 +283,8 @@ def build_payload(
     config: RolloutConfig,
     reasoning_effort: str | None = None,
     tools: list[dict] | None = None,
-    reasoning_budget: int | None = None,
-    budget_soft: bool = False,
 ) -> dict[str, Any]:
-    """``config.max_thinking_tokens`` carries the turn's engine cap and ``reasoning_budget`` the level's budget the
-    template states (:func:`generation_control_fields`)."""
+    """``config.max_thinking_tokens`` carries the turn's engine cap (:func:`generation_control_fields`)."""
     payload: dict[str, Any] = {
         "messages": messages,
         "temperature": config.temperature,
@@ -300,7 +296,7 @@ def build_payload(
         payload["model"] = config.model_name
     if tools:
         payload["tools"] = tools
-    payload.update(generation_control_fields(config, reasoning_effort, reasoning_budget, budget_soft))
+    payload.update(generation_control_fields(config, reasoning_effort))
     return payload
 
 
@@ -311,6 +307,6 @@ def reject_unenforceable_thinking_budget(model_types: Iterable[str], unenforceab
         facts = "; ".join(unenforceable[model_type] for model_type in unmatched)
         raise ValueError(
             f"The rollout engine cannot enforce a thinking budget for model_type {unmatched}: {facts}, so the "
-            "budget never starts counting and reasoning runs uncapped. Unset rollout_max_thinking_tokens and the "
-            "thinking_tokens of every effort level the environment draws, and steer with reasoning_effort instead."
+            "budget never starts counting and reasoning runs uncapped. Unset rollout_max_thinking_tokens and "
+            "rollout_max_answer_tokens, and steer with reasoning_effort instead."
         )

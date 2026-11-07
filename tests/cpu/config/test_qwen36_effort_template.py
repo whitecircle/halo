@@ -1,13 +1,15 @@
 #!/usr/bin/env python
-"""``jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`` states the episode's reasoning effort and budget in the
-system block and otherwise renders the hub template's ``preserve_thinking=true`` form token-for-token."""
+"""``jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`` states the episode's reasoning effort level and what it
+asks for in the system block, never a token count, and otherwise renders the hub template's ``preserve_thinking=true`` form token-for-token."""
 
+import re
 from pathlib import Path
 
 import pytest
 from huggingface_hub import try_to_load_from_cache
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
+from tests.common.effort_templates import LEVEL_LINES
 from tests.common.models import QWEN3_6_MOE_35B
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import skip_uncached
@@ -44,11 +46,6 @@ CONVERSATION = [
     {"role": "user", "content": "Now print 2."},
 ]
 
-EFFORT_LINE = (
-    "Reasoning effort: high. Think for at most 16384 tokens per turn; reasoning past that budget is cut off, "
-    "so finish the turn within it."
-)
-
 
 def _render(template_text: str, messages, **kwargs) -> str:
     return _compile_jinja_template(template_text).render(messages=messages, **kwargs)
@@ -66,50 +63,40 @@ def _stock_template() -> str | None:
     return Path(path).read_text() if isinstance(path, str) else None
 
 
-def test_effort_and_budget_are_stated_once_in_the_system_block(template):
-    text = _render(
-        template,
-        CONVERSATION,
-        tools=TOOLS,
-        add_generation_prompt=True,
-        reasoning_effort="high",
-        reasoning_budget=16384,
-    )
+@pytest.mark.parametrize("level", sorted(LEVEL_LINES))
+def test_each_level_is_stated_once_in_the_system_block(template, level):
+    text = _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True, reasoning_effort=level)
     system_block, rest = text.split("<|im_end|>\n", 1)
     assert system_block.startswith("<|im_start|>system\n# Tools\n\nYou have access to the following functions:")
-    assert system_block.endswith("You are an expert competitive programmer.\n\n" + EFFORT_LINE)
-    assert EFFORT_LINE not in rest, "the effort line belongs to the system block only"
+    assert system_block.endswith("You are an expert competitive programmer.\n\n" + LEVEL_LINES[level])
+    assert "Reasoning effort" not in rest, "the effort line belongs to the system block only"
     assert text.endswith("<|im_start|>assistant\n<think>\n")
 
 
-def test_a_soft_budget_is_stated_as_a_target_not_a_cut(template):
-    """The engine does not enforce a soft budget, so the line must not claim reasoning past it is cut off; the
-    flag without a budget states the level alone."""
-    text = _render(
+@pytest.mark.parametrize("level", sorted(LEVEL_LINES))
+def test_the_line_states_no_token_count_whatever_the_caller_passes(template, level):
+    """The model is told its level, never a count: the line carries no digit, and a stale budget variable a
+    caller still passes changes nothing in the render."""
+    text = _render(template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort=level)
+    effort_line = next(line for line in text.splitlines() if line.startswith("Reasoning effort"))
+    assert not re.search(r"\d", effort_line), effort_line
+    assert "tokens" not in text
+    stale = _render(
         template,
         CONVERSATION[:2],
         add_generation_prompt=True,
-        reasoning_effort="high",
+        reasoning_effort=level,
         reasoning_budget=16384,
         reasoning_budget_soft=True,
     )
-    assert text.startswith(
-        "<|im_start|>system\nYou are an expert competitive programmer.\n\n"
-        "Reasoning effort: high. Aim to think for at most 16384 tokens per turn.<|im_end|>\n"
-    )
-    assert "cut off" not in text
-    bare = _render(
-        template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort="low", reasoning_budget_soft=True
-    )
-    assert "Reasoning effort: low.<|im_end|>" in bare and "tokens per turn" not in bare
+    assert stale == text
 
 
-def test_level_without_a_budget_states_the_level_alone(template):
-    text = _render(template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort="low")
+def test_an_unknown_level_states_the_level_alone(template):
+    text = _render(template, CONVERSATION[:2], add_generation_prompt=True, reasoning_effort="extreme")
     assert text.startswith(
-        "<|im_start|>system\nYou are an expert competitive programmer.\n\nReasoning effort: low.<|im_end|>\n"
+        "<|im_start|>system\nYou are an expert competitive programmer.\n\nReasoning effort: extreme.<|im_end|>\n"
     )
-    assert "tokens per turn" not in text
 
 
 def test_no_effort_renders_no_effort_line(template):
@@ -119,10 +106,8 @@ def test_no_effort_renders_no_effort_line(template):
 
 
 def test_effort_without_a_system_message_opens_a_system_block(template):
-    text = _render(
-        template, CONVERSATION[1:2], add_generation_prompt=True, reasoning_effort="medium", reasoning_budget=12288
-    )
-    assert text.startswith("<|im_start|>system\nReasoning effort: medium. Think for at most 12288 tokens per turn;")
+    text = _render(template, CONVERSATION[1:2], add_generation_prompt=True, reasoning_effort="medium")
+    assert text.startswith("<|im_start|>system\n" + LEVEL_LINES["medium"] + "<|im_end|>\n<|im_start|>user\nPrint 1.")
     assert text.count("<|im_start|>system\n") == 1
 
 
@@ -151,16 +136,9 @@ def test_matches_the_hub_template_apart_from_the_effort_line(template):
     stock = _stock_template()
     if stock is None:
         skip_uncached(STOCK_TEMPLATE_REPO, "chat template of")
-    ours = _render(
-        template,
-        CONVERSATION,
-        tools=TOOLS,
-        add_generation_prompt=True,
-        reasoning_effort="high",
-        reasoning_budget=16384,
-    )
+    ours = _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True, reasoning_effort="high")
     theirs = _render(stock, CONVERSATION, tools=TOOLS, add_generation_prompt=True, preserve_thinking=True)
-    assert ours.replace("\n\n" + EFFORT_LINE, "") == theirs
+    assert ours.replace("\n\n" + LEVEL_LINES["high"], "") == theirs
     assert _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True) == theirs
 
 

@@ -1,178 +1,171 @@
 # Reasoning Budgets
 
-An episode's effort level reaches the model through the chat template and sets a per-turn reasoning budget, which
-the engine enforces or treats as a soft target. Two trainer-side terms price the reasoning tokens.
+The model is told one thing about its reasoning: the episode's effort level, through the chat template. A level's
+profile can set a reasoning budget and price for the whole episode, which the trainer charges against; the engine's
+per-turn reasoning cap is run-wide and the same at every level. No budget, price or cap reaches the prompt.
 
 ## Effort levels
 
 | Knob (`environment_kwargs`) | Default | Effect |
 |---|---|---|
 | `reasoning_effort` | `null` on `EnvironmentBase`, `medium` on `code_contests` | `low` / `medium` / `high` / `random` / `null` |
-| `reasoning_effort_profiles` | the class's per-level table | per-level overrides, merged over that table |
+| `reasoning_effort_profiles` | empty at every level | per-level keys |
 
 - `random` draws one level per generation group, so a group shares its conditioning. An eval round draws it from the
   problem's text, so every checkpoint scores a problem at the same level.
-- A profile takes `thinking_tokens` (int ≥ 1, the per-turn budget) and `enforce_thinking_cap` (default `true`).
-  Environment classes add keys, such as code contests' tool budgets
-  ([Reasoning effort](environments/tasks/code-contests/README.md#reasoning-effort)).
-- An unknown profile key, a value below its minimum, or `enforce_thinking_cap: false` without `thinking_tokens`
-  raises at environment construction.
+- A profile takes `reasoning_budget` (int ≥ 0) and `reasoning_price` (≥ 0), the
+  [reasoning length terms](#reasoning-length-reward). Environment classes add keys, such as code contests' tool
+  budgets ([Reasoning effort](environments/tasks/code-contests/README.md#reasoning-effort)).
+- An unknown level or key, a value below its minimum, a non-int count, or `reasoning_price` without
+  `reasoning_budget` raises at environment construction.
 
 ## Effort templates
 
-- gpt-oss's template renders the level natively and states no budget.
+- gpt-oss's harmony template renders the level natively.
 - The stock Qwen3.x and Gemma 4 templates have no effort variable. The code-contests recipes pin
   `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`: the hub
-  template cut to text only with thinking always on, plus a system-block line built from `reasoning_effort`,
-  `reasoning_budget` and `reasoning_budget_soft` that states the budget as a cut-off, or as a target when soft. An
-  episode with no level gets no line.
+  template cut to text only with thinking always on, plus one system-block line read off `reasoning_effort`.
 - The Gemma 4 file opens every system turn with `<|think|>`, so it needs no `enable_thinking` variable.
+
+| Level | Line |
+|---|---|
+| `low` | `Reasoning effort: low. Keep your reasoning short: take the most direct approach and act on it.` |
+| `medium` | `Reasoning effort: medium. Reason as far as the problem needs, without exhaustive exploration.` |
+| `high` | `Reasoning effort: high. Reason thoroughly: weigh alternatives and check your work before you act.` |
+
+Any other level renders `Reasoning effort: <level>.` alone, and an episode with no level gets no line.
 
 Pin either with `chat_template:` + `force_chat_template: true` and serve the same file (`VLLM_CHAT_TEMPLATE` /
 `SGLANG_CHAT_TEMPLATE` in the compose files; [Chat template](episodes.md#chat-template)).
 
-`reasoning_effort` travels as the request's top-level field (copied into `chat_template_kwargs` on SGLang), the two
-budget variables in `chat_template_kwargs`. Both engines derive their thinking toggle from that field
-(`enable_thinking`, plus `thinking` on SGLang): on for any level but `none`, unless `rollout_chat_template_kwargs`
-sets it. The trainer's own renders carry the same variables, but not the derived toggle, and
-`rollout_chat_template_kwargs` refuses all three.
+`reasoning_effort` travels as the request's top-level field (copied into `chat_template_kwargs` on SGLang). The
+trainer's own renders carry it too, and `rollout_chat_template_kwargs` refuses it.
 
-## Reasoning budget
+## Reasoning cap
 
-The budget is per turn; `rollout_max_tokens` bounds the whole turn, reasoning and answer together.
+The engine's reasoning cap is per turn and run-wide: every level runs under the same one. `rollout_max_tokens` bounds
+the whole turn, reasoning and answer together.
 
 `rollout_max_thinking_tokens` is the run-wide per-turn reasoning cap (vLLM `thinking_token_budget`), and
-`rollout_max_answer_tokens` the most a turn may generate past its reasoning cap ([Answer room](#answer-room)); types
-and defaults are in [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
+`rollout_max_answer_tokens` the most a turn may generate past it ([Answer room](#answer-room)); types and defaults are
+in [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 
-Any reasoning cap on vLLM needs a reasoning parser on the server, which enforces it on the image's
-Model Runner V2 ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)). A vLLM cap on Mistral 4 is
-refused at trainer construction and when an eval loads a training config: vLLM serves the family with its
-`mistral_common` tokenizer, which encodes the `[THINK]`/`[/THINK]` markers as plain text, so the budget would
-never start counting ([Mistral4](../../models/mistral4.md#serving)). The fact is the vLLM client's
-`UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES` (`halo/weight_sync/clients/vllm.py`).
-
-### Enforced and soft budgets
-
-- **Enforced** (default): the engine closes the turn's reasoning at the budget, mid-thought if need be.
-- **Soft** (`enforce_thinking_cap: false`): the template states the budget as a target and the
-  [reasoning length terms](#reasoning-length-reward) read it. The engine closes the reasoning only at the run's
-  ceiling: `rollout_max_thinking_tokens`, else `rollout_max_tokens − rollout_max_answer_tokens`; none if both are unset.
-
-With `T` the level's `thinking_tokens`, `M` `rollout_max_thinking_tokens`, `A` `rollout_max_answer_tokens` and `R`
-`rollout_max_tokens`, each cell gives a turn's budget (what the template is handed and the reasoning terms read),
-which is also its engine cap unless a cap is named:
-
-| Level | `M` set | `A` set, `M` unset | neither |
-|---|---|---|---|
-| Enforced `T` | `min(T, M)` | `T` | `T` |
-| Soft `T` | `T`, cap `M` | `T`, cap `R − A` | `T`, no cap |
-| No `thinking_tokens` (or no level) | `M` | refused | no budget, no cap |
-
-A turn's total is `R`, or `min(R, cap + A)` where a cap and `A` are both set. An episode output budget narrows a late
-turn's cap and total ([Trajectory length](episodes.md#trajectory-length)), never the stated budget.
-
-Refused at trainer construction and at eval start, for every level the environment can draw (all three under
-`random`):
-
-- a budget at or above `R`, which leaves no answer room;
-- a soft `T` at or above its ceiling (`M`, or `R − A`), where the engine would enforce it;
-- `A` set while a drawable level has no engine cap.
-
-`M` or `A` outside `[1, R)` is refused when the config is parsed.
+- The cap is `rollout_max_thinking_tokens`, else `rollout_max_tokens − rollout_max_answer_tokens`, else none. The
+  engine closes the reasoning there, mid-thought if need be.
+- A turn's total is `rollout_max_tokens`, or the cap plus `rollout_max_answer_tokens` where smaller. An episode
+  output budget narrows a late turn's cap and total ([Trajectory length](episodes.md#trajectory-length)).
+- Either knob outside `[1, rollout_max_tokens)` is refused when the config is parsed.
+- Any cap on vLLM needs a reasoning parser on the server, which enforces it on the image's Model Runner V2
+  ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
+- A vLLM cap on Mistral 4 is refused at trainer construction and when an eval loads a training config: vLLM serves the
+  family with its `mistral_common` tokenizer, which encodes the `[THINK]`/`[/THINK]` markers as plain text, so the
+  budget would never start counting ([Mistral4](../../models/mistral4.md#serving)). The fact is the vLLM client's
+  `UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES` (`halo/weight_sync/clients/vllm.py`).
 
 ### Answer room
 
 `rollout_max_answer_tokens` bounds what a turn generates past its reasoning cap. Without it, a turn whose reasoning
-the engine closed can keep reasoning in its visible output (comment lines in a tool call, say) until `R` cuts it.
+the engine closed can keep reasoning in its visible output (comment lines in a tool call, say) until
+`rollout_max_tokens` cuts it.
 
-The answer room is `R − cap`, or `A` where smaller; the whole turn without a cap. It is never stated to the model.
+The answer room is `rollout_max_tokens` less the cap, or `rollout_max_answer_tokens` where smaller; the whole turn
+without a cap. It is never stated to the model.
 
 ### SGLang
 
-SGLang takes no `thinking_token_budget`, the vLLM field every reasoning cap travels in.
+SGLang takes no `thinking_token_budget`, the vLLM field the cap travels in.
 
 - `rollout_max_thinking_tokens` is refused when the config is parsed.
-- An enforced budget and a soft ceiling are dropped from the request (warned once per process), so nothing caps
-  reasoning below the turn's total.
-- The template still states the budget and the reasoning terms still read it. Prefer a soft budget here: an enforced
-  one is stated as a cut this engine never makes.
-- `rollout_max_answer_tokens` still caps the turn at the cap plus `A`, since `max_tokens` binds on both engines.
+- The cap `rollout_max_answer_tokens` leaves is dropped from the request (warned once per process), so nothing caps
+  reasoning below `rollout_max_tokens`. The knob then only sets the answer room an output budget keeps a late turn.
+- The level still reaches the template, and the [reasoning length terms](#reasoning-length-reward) alone hold
+  reasoning length.
 
 ## Thinking-cap metric
 
 `episode/thinking_cap_turns` counts turns whose reasoning (sampled ids through `rollout_reasoning_end_token`) reached
-the cap they ran under: an enforced budget or a soft ceiling. It ignores the narrower cap an output budget leaves a
-late turn.
+the run's reasoning cap. It ignores the narrower cap an output budget leaves a late turn.
 
-It is logged only on a budgeted vLLM run, with `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
+It is logged only on a capped vLLM run, with `train_on_sampled_tokens` and a `rollout_reasoning_end_token` that
 encodes to one added token. gpt-oss's six-token move into the final channel logs none, nor do the standalone eval scripts.
 
 ## Reasoning length reward
 
-Two trainer-side terms add to the task reward before advantages.
+Two trainer-side terms add to the task reward before advantages. Both read an episode's reasoning tokens summed over
+its turns against its level's `reasoning_budget`: the price charges what it reasoned past the budget, the floor a
+failed episode's shortfall under it.
 
-`reasoning_floor` weighs the [shortfall penalty](#floor), and `reasoning_price` maps each level to the reward units
-it charges per 1,000 reasoning tokens, at most `reasoning_price_cap` per episode. `reasoning_price_past_budget`
-prices only reasoning past each turn's soft budget, and `reasoning_terms_in_failed_groups` charges both terms in a
-[failed group](#failed-groups) too. Both terms are off by default; types and defaults are in
-[AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
+Each level's profile sets `reasoning_budget` (the reasoning tokens an episode spends free; `0` prices every token) and
+`reasoning_price` (reward units per 1,000 reasoning tokens past it; off at `0`). `reasoning_price_cap` is the most the
+price charges one episode, `reasoning_floor` weighs the [floor](#floor), and `reasoning_terms_in_failed_groups` charges
+both terms in a [failed group](#failed-groups) too. Both terms are off by default; types and defaults are in
+[AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig). The per-level keys sit in the
+effort profiles, the rest at the top level:
 
+```yaml
+environment_kwargs:
+  reasoning_effort: random
+  reasoning_effort_profiles:
+    low: {reasoning_budget: 40000, reasoning_price: 0.008}
+    medium: {reasoning_budget: 50000, reasoning_price: 0.006}
+    high: {reasoning_budget: 60000, reasoning_price: 0.004}
+reasoning_floor: 0.25
+```
+
+- Reasoning tokens only: visible output, code and tool calls are free. An episode whose level sets no budget pays
+  neither term.
+- The price is 0 within the budget and the floor 0 past it, so an episode pays one term at most and a short solve
+  pays neither: the policy can stay short where the problem is easy.
 - While `drop_degenerate_groups` is on (the default), both reach the gradient only through groups the environment's
   reward separates: it judges a group without them ([Advantages](objective.md#advantages)).
-- Watch `reward/reasoning_price` and `reward/reasoning_floor`.
+- Watch `reward/reasoning_price` and `reward/reasoning_floor`, each logged while its term is on.
+
+### Price
+
+An episode past its budget pays `-min(reasoning_price_cap, price × (tokens − budget) / 1000)`, a solve included.
+
+- Price the lowest level highest, so the same trace costs most where little reasoning was asked.
+- At `reasoning_budget: 0` every token is priced, and group-relative advantages then reward the sibling that reasons
+  less, whatever the outcome. Pair a price with the floor, which pays a failed episode to reason up to its budget
+  (`tests/cpu/config/test_env_grpo_reward_economy.py` holds every shipped recipe to that).
+
+### Floor
+
+A baseline episode that earned no objective and reasoned under its level's budget pays
+`-reasoning_floor × (budget − tokens) / budget`: the whole weight for no reasoning at all.
+
+- A solve never pays it, nor does an episode outside the group baseline or one with no assistant turn.
+- It reads the total, not a per-turn mean, so an extra short turn never lowers the score.
+- It is the one term that pays for more reasoning, and it can reward padding in failing episodes: watch
+  first-submission pass against reasoning.
 
 ### Failed groups
 
 A training group in which no baseline episode earned the objective (a positive `reward/objective`; a veto zeroes it)
 is charged neither term.
 
-- Shaping and judge terms still separate such a group, so it trains, but the length terms would be most of what tells
+- Shaping and judge terms can still separate such a group, so it can train, but the length terms would be most of what tells
   its attempts apart: the advantage would train reasoning length, not the task, wherever the task is out of reach.
 - A group with a success is charged in full, its failures included. Eval episodes are always charged.
-- Under `reasoning_price_past_budget`, only the engine's ceiling holds a soft budget in such a group.
 - `outcome/reasoning_terms_waived_frac` logs the waived share of training episodes.
-- `reasoning_terms_in_failed_groups: true` charges them there too. A reward that prices no success above zero (no
-  environment term, or one of weight ≤ 0) needs that setting; trainer construction refuses it otherwise. Set while
-  both terms are off, the switch is refused when the config is parsed.
+- `reasoning_terms_in_failed_groups: true` charges them there too.
 
-### Floor
+### Construction checks
 
-The reference is three quarters of the episode's per-turn budget, enforced or soft
-([table](#enforced-and-soft-budgets)).
+Trainer construction reads the levels the environment can draw (all three under `random`) and refuses:
 
-- An episode whose reasoning tokens, summed over its turns, fall short pays `-floor × shortfall / reference`: the
-  whole weight for no reasoning at all.
-- It reads the total, not a per-turn mean, so an extra short turn never lowers the score.
-- An episode with no budget or no assistant turn pays nothing.
-- A run where no drawable level has a budget and `rollout_max_thinking_tokens` is unset is refused at trainer
-  construction.
-
-### Price
-
-An episode pays `-min(reasoning_price_cap, price[level] × tokens / 1000)` on its reasoning tokens summed over turns.
-
-- The map must name exactly `low`, `medium` and `high`, and the environment must set `reasoning_effort`; both are
-  refused at trainer construction.
-- Price the lowest level highest, so the same trace costs most where little reasoning was asked.
-- Code and tool calls are free. An episode with no level pays nothing.
-
-Under group-relative advantages, a price on every token rewards the sibling that reasons less, whatever the outcome.
-Hence the cap. A price without the floor is accepted, and then nothing pays a level to reason more. Pair it with the
-floor, which must out-slope the price below its reference, so a short episode is still paid to reason more
-(`tests/cpu/config/test_env_grpo_reward_economy.py` holds every shipped recipe that sets a price to that).
-
-### Price past the budget
-
-`reasoning_price_past_budget: true` prices only what each turn reasons past its soft budget:
-`-min(cap, price[level] × Σ max(0, turn − budget) / 1000)`.
-
-- It is then a soft budget's only ceiling below the engine's. Reasoning within the budget is free.
-- Every drawable level must have a soft budget, or trainer construction refuses the run.
+- a profile `reasoning_budget` or `reasoning_price` while the environment's `reasoning_effort` is unset;
+- `reasoning_price_cap` at another value, or `reasoning_terms_in_failed_groups` with the floor off, while no drawn
+  level prices reasoning;
+- `reasoning_floor` while the environment draws no level, or a drawn level sets no `reasoning_budget` above 0;
+- a drawn level's `reasoning_budget` that neither its price nor the floor reads;
+- `reasoning_budget` or `reasoning_price` among `rollout_chat_template_kwargs`, where the template could state it;
+- under a reward that prices no success above zero (no environment term, or one of weight ≤ 0), the floor, and the
+  price while failed groups are waived: every episode would read as failed.
 
 ### Sizing
 
-Keep `reasoning_price_cap + reasoning_floor` below what the environment charges for the decisions it prices. Under
-`reasoning_price_past_budget` each alone must sit below it: an episode pays one at most, since a turn past its budget
-clears the floor's reference. The code-contests recipes run the past-budget mode and size both under one more
-failed submission, the resubmission penalty plus `untested_submission` ([Shipped recipes](environments/tasks/code-contests/README.md#shipped-recipes)).
+Keep `reasoning_price_cap` and `reasoning_floor` each below what the environment charges for the decisions it prices.
+An episode pays one of them at most, so a failed one pays at most the larger. The code-contests recipes hold both
+under one more failed submission, itself under running out
+([Shipped recipes](environments/tasks/code-contests/README.md#shipped-recipes)).

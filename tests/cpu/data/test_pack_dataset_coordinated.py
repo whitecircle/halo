@@ -119,6 +119,8 @@ def test_the_pack_is_trls_single_process_pack_at_any_worker_count(documents, tmp
     would fail."""
     uncached = {"keep_in_memory": True}
     reference = pack_dataset(documents, _SEQ_LENGTH, strategy, map_kwargs=uncached).remove_columns("attention_mask")
+    # The one column halo adds: wrapped rows carry the document lengths TRL's packer leaves out.
+    halo_columns = ["seq_lengths"] if strategy == "wrapped" else []
     parallel_trl = pack_dataset(documents, _SEQ_LENGTH, strategy, map_kwargs={**uncached, "num_proc": 3})
     assert _rows(parallel_trl.remove_columns("attention_mask")) != _rows(reference), (
         "control: the input must be batch-boundary sensitive"
@@ -128,9 +130,33 @@ def test_the_pack_is_trls_single_process_pack_at_any_worker_count(documents, tmp
         monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / f"cache-{strategy}-{num_proc}"))
         packed = coordinated_pack(documents, _SEQ_LENGTH, strategy, num_proc=num_proc)
         assert "attention_mask" not in packed.column_names, f"{strategy}: packed rows store an all-ones mask"
-        assert _rows(packed) == _rows(reference), f"{strategy} at num_proc={num_proc} packed other rows than TRL"
-        assert packed.features == reference.features, f"{strategy} at num_proc={num_proc}: {packed.features}"
-        assert packed.format == reference.format, f"{strategy} at num_proc={num_proc}: {packed.format}"
+        trl_columns = packed.remove_columns(halo_columns)
+        assert _rows(trl_columns) == _rows(reference), f"{strategy} at num_proc={num_proc} packed other rows than TRL"
+        assert trl_columns.features == reference.features, f"{strategy} at num_proc={num_proc}: {packed.features}"
+        assert packed.format["type"] == reference.format["type"], f"{strategy} at num_proc={num_proc}: {packed.format}"
+
+
+def test_wrapped_rows_carry_the_lengths_of_their_documents(documents, tmp_path, monkeypatch):
+    """Each row's ``seq_lengths`` sum to its length and cut the row exactly where its source documents end, so the
+    packing collator isolates them."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "cache"))
+    packed = _rows(coordinated_pack(documents, _SEQ_LENGTH, "wrapped", num_proc=2))
+    row_lengths = packed["seq_lengths"]
+    assert [sum(pieces) for pieces in row_lengths] == [len(ids) for ids in packed["input_ids"]]
+    assert all(length > 0 for pieces in row_lengths for length in pieces), "an empty document became a piece"
+    assert any(len(pieces) > 1 for pieces in row_lengths), "control: the input must hold several documents a row"
+
+    # The first source batch fills the first rows: their boundaries are its document ends and the row edges.
+    first_batch = [len(ids) for ids in _rows(documents)["input_ids"][:1000]]
+    full_rows = sum(first_batch) // _SEQ_LENGTH
+    consumed = full_rows * _SEQ_LENGTH
+    boundaries = {
+        row_start + end
+        for row_start, pieces in zip(range(0, consumed, _SEQ_LENGTH), row_lengths[:full_rows], strict=True)
+        for end in np.cumsum(pieces).tolist()
+    }
+    document_ends = {end for end in np.cumsum(first_batch).tolist() if 0 < end <= consumed}
+    assert boundaries == document_ends | set(range(_SEQ_LENGTH, consumed + 1, _SEQ_LENGTH)), "pieces cut elsewhere"
 
 
 def test_a_follower_at_another_worker_count_reads_the_writers_cache(documents, tmp_path):

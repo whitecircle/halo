@@ -34,6 +34,7 @@ from tests.common.tiny_models import (
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
     TinyFamily,
+    randomized_weights,
     shared_tiny_family_checkpoint,
     word_level_tokenizer,
 )
@@ -42,7 +43,6 @@ SEED = 0
 DOCUMENTS = (48, 40)
 # Each past FlexAttention's one tile, under which a masked call keeps plain SDPA.
 FLEX_DOCUMENTS = (192, 160)
-INIT_STD = 0.1
 # Fraction of doc B's largest |logit|. Isolated, only bf16 reduction order differs; a leak, a dropped causal flag or a
 # wrong scale moves the logits by O(1) of their scale.
 ISOLATED_REL_MAX = 2e-2
@@ -59,7 +59,7 @@ FA2 = "flash_attention_2"
 SHORT_WINDOW = {"sliding_window": 16}
 # Each release's head width: the width FA4 trains on its dedicated kernel, which a packed run leaves for FA2 on these.
 _GATED_DELTA_NET_256 = {"head_dim": 256}
-# Over ``INIT_STD``: fifty times Mamba's stock ``in_proj``, whose stock init leaves a crossed boundary below rounding.
+# Over ``RANDOMIZED_INIT_STD``: fifty times Mamba's stock ``in_proj``, whose stock init leaves a crossed boundary below rounding.
 MAMBA_IN_PROJ_SCALE = 10.0
 
 
@@ -161,19 +161,6 @@ PARSER.add_argument("--liger", action="store_true", help="Liger's kernels, as a 
 ARGS = PARSER.parse_args()
 
 
-def _randomized(after: Callable | None) -> Callable:
-    """Widen the random init so a leak reads well above bf16 noise."""
-
-    def edit(model) -> None:
-        for param in model.parameters():
-            if param.dim() >= 2:
-                torch.nn.init.normal_(param, std=INIT_STD)
-        if after is not None:
-            after(model)
-
-    return edit
-
-
 def _packed_run_request(ckpt: str, attn_implementation: str | None) -> str | None:
     """The request ``scripts/training/sft.py`` makes of the loader for a packed run."""
     return default_training_rows_attn_implementation(
@@ -251,7 +238,7 @@ def run(ctx) -> dict:
         f"{ARGS.family}_packing_isolation",
         tokenizer,
         SEED,
-        edit=_randomized(row.after_randomize),
+        edit=randomized_weights(row.after_randomize),
         overrides=row.overrides,
     )
     model = _load(ckpt, _packed_run_request(ckpt, ARGS.attn))

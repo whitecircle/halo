@@ -1,7 +1,6 @@
 """MFU / throughput accounting: step time, token throughput, MFU / S-MFU and GPU memory per step."""
 
 import logging
-import time
 import weakref
 from dataclasses import asdict, dataclass, field
 from typing import NamedTuple
@@ -10,6 +9,7 @@ import torch
 import transformers
 
 from halo.callbacks.model_flops import RankFlopsModel, estimate_rank_flops
+from halo.diagnostics.phase_timers import BoundaryMark, mark_boundary, seconds_between
 from halo.diagnostics.profiling import read_cuda_memory
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -33,20 +33,18 @@ _TOKEN_DELTA_UPPER_BOUND = 2 * 1.25
 _TERA = 10**12
 _DISPLAY_DECIMALS = 2
 
-# A CUDA event on the current stream, or the host clock without a GPU.
-_BoundaryMark = torch.cuda.Event | float
-
 
 @dataclass
 class _RunState:
     n_warmup_steps: int = 0
     global_start_step: int = 0
     # Where the next step's time starts: the last step's end, or its own begin where none precedes it (``None``).
-    step_start: _BoundaryMark | None = None
+    step_start: BoundaryMark | None = None
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
     step_times: list[float] = field(default_factory=list)
     elapsed_cluster_tokens: int = 0  # cluster-wide unique
+    elapsed_data_wait: float = 0.0
     total_flops: float = 0.0
     total_active_flops: float = 0.0
 
@@ -92,6 +90,14 @@ class _SMFUMetrics:
 
 
 @dataclass
+class DataWaitMetrics:
+    """Seconds an optimizer step spent blocked fetching batches from the train loader (mean over ranks)."""
+
+    step_data_wait_seconds: float = 0.0
+    avg_data_wait_seconds: float = 0.0
+
+
+@dataclass
 class _MemoryMetrics:
     """GPU memory in GiB; ``peak_allocated_gb`` is this step's, ``training_peak_allocated_gb`` the run's."""
 
@@ -104,11 +110,19 @@ class _MemoryMetrics:
 class _PendingStep(NamedTuple):
     """A measured step whose time is read once its end mark is: its boundary marks and the work it did."""
 
-    start: _BoundaryMark
-    end: _BoundaryMark
+    start: BoundaryMark
+    end: BoundaryMark
     rank_tokens: int
     cluster_tokens: int
     measured_attention_flops: float | None
+    data_wait: float
+
+
+class _StepWork(NamedTuple):
+    """What the bound trainer reports for the step that just ended."""
+
+    attention_flops: float | None
+    data_wait: float
 
 
 class _Utilization(NamedTuple):
@@ -122,24 +136,6 @@ class _Utilization(NamedTuple):
 
 # Zeroed rather than left as is, so an unknown FLOPS/token or GPU peak never republishes stale figures.
 _UNKNOWN_UTILIZATION = _Utilization(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
-
-
-def _mark_boundary() -> _BoundaryMark:
-    """An event recorded behind the queued work, timing the step without draining the queue as a clock read would."""
-    if not torch.cuda.is_available():
-        return time.perf_counter()
-    event = torch.cuda.Event(enable_timing=True)
-    event.record()
-    return event
-
-
-def _seconds_between(start: _BoundaryMark, end: _BoundaryMark) -> float:
-    """Seconds from ``start`` to ``end``, waiting only for an end event the device has not reached yet."""
-    if isinstance(end, float):
-        return end - start
-    if not end.query():
-        end.synchronize()
-    return start.elapsed_time(end) / 1000.0
 
 
 def _utilization_report(
@@ -211,10 +207,11 @@ class EfficiencyCallback(transformers.TrainerCallback):
     the steps sum to the wall clock. An epoch turnover, evaluation or save is not a step: the next step starts at its
     own begin.
 
-    ``num_input_tokens_seen`` is summed across ranks. A rank's own tokens divide it by ``world_size`` and ``cp_size``,
-    since CP splits the sequence inside ``forward()``; TP, expert-TP and pipeline ranks each run every token through
-    their parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``. ``max_seq_len`` is
-    for runs whose real bound is not the declared length fields (a multi-turn RL trajectory)."""
+    ``num_input_tokens_seen`` counts attended tokens (padding excluded), summed across ranks. A rank's own tokens
+    divide it by ``world_size`` and ``cp_size``, since CP splits the sequence inside ``forward()``; TP, expert-TP and
+    pipeline ranks each run every token through their parameter slice. Throughput per GPU is the cluster's unique
+    tokens over ``world_size``. ``max_seq_len`` is for runs whose real bound is not the declared length fields (a
+    multi-turn RL trajectory)."""
 
     def __init__(
         self,
@@ -231,6 +228,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.flops_model: RankFlopsModel | None = None
         self.time = StepTimeMetrics()
         self.tps = ThroughputMetrics()
+        self.data_wait = DataWaitMetrics()
         self.mfu = MFUMetrics()
         self.smfu = _SMFUMetrics()
         self.memory = _MemoryMetrics()
@@ -273,20 +271,27 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def on_step_begin(self, args, state, control, **kwargs):
         self._initialize_once_model_arrives(args, kwargs)
         if self._run.step_start is None:
-            self._run.step_start = _mark_boundary()
+            self._run.step_start = mark_boundary()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
     def on_step_end(self, args, state, control, **kwargs):
-        step_end = _mark_boundary()
+        step_end = mark_boundary()
         # Before the warmup gate, so a warmup step's work never leaks into the first measured one.
-        measured_attention_flops = self._drain_measured_attention_flops()
+        work = self._drain_step_work()
         if not self._is_warmup_step(state):
             rank_tokens, cluster_tokens = self._step_tokens(state)
             # One step later the earlier end marks have passed, so reading them waits on nothing.
             self._record_pending_steps()
             self._pending_steps.append(
-                _PendingStep(self._run.step_start, step_end, rank_tokens, cluster_tokens, measured_attention_flops)
+                _PendingStep(
+                    self._run.step_start,
+                    step_end,
+                    rank_tokens,
+                    cluster_tokens,
+                    work.attention_flops,
+                    work.data_wait,
+                )
             )
             self._record_memory()
         self._run.step_start = step_end
@@ -305,6 +310,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._record_pending_steps()
         logs.update(asdict(self.time))
         logs.update(asdict(self.tps))
+        logs.update(asdict(self.data_wait))
         logs.update(asdict(self.memory))
         if self._report_mfu_diagnostics:
             logs.update(asdict(self.mfu))
@@ -395,18 +401,20 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 f"(dense: {flops.model_flops_per_token / _TERA:.4f} TFLOPS)"
             )
 
-    def _drain_measured_attention_flops(self) -> float | None:
+    def _drain_step_work(self) -> _StepWork:
         """COLLECTIVE through a bound source, which also sums the step's input tokens into the throughput's state. This
-        rank's measured attention-score FLOPs, or ``None`` with no document measured (the config term stands in)."""
+        rank's measured attention-score FLOPs, or ``None`` with no document measured (the config term stands in), and
+        the step's data wait."""
         source = self._attention_source() if self._attention_source is not None else None
         if source is None:
-            return None
-        flops, documents = source.drain_step_work()
+            return _StepWork(None, 0.0)
+        flops, documents, data_wait = source.drain_step_work()
         if documents <= 0 or self.flops_model is None:
-            return None
+            return _StepWork(None, data_wait)
         parallelism = self._parallelism_config
         # The rank's share of the layout, 1/tp of each layer's heads, and under CP 1/cp of the sequence's heads.
-        return flops * self.flops_model.attention_share / parallelism.tp_size / parallelism.cp_size
+        share = self.flops_model.attention_share / parallelism.tp_size / parallelism.cp_size
+        return _StepWork(flops * share, data_wait)
 
     def _is_warmup_step(self, state) -> bool:
         """HF increments ``global_step`` before ``on_step_end``: the first completed step is
@@ -419,8 +427,9 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self._pending_steps.clear()
 
     def _record_step(self, step: _PendingStep) -> None:
-        step_time = self._record_step_time(_seconds_between(step.start, step.end))
+        step_time = self._record_step_time(seconds_between(step.start, step.end))
         self._record_token_throughput(step.cluster_tokens, step_time)
+        self._record_data_wait(step.data_wait)
         flops = self.flops_model
         dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None
         if flops is not None:
@@ -438,6 +447,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             active_per_token, self._run.total_active_flops, smfu_ratio, *work
         )
         self.smfu = _SMFUMetrics(*report)
+
+    def _record_data_wait(self, seconds: float) -> None:
+        self._run.elapsed_data_wait += seconds
+        self.data_wait = DataWaitMetrics(
+            round(seconds, 4),
+            round(self._run.elapsed_data_wait / len(self._run.step_times), 4),
+        )
 
     def _record_step_time(self, step_time: float) -> float:
         self._run.elapsed_time += step_time
@@ -486,8 +502,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         return int(args.per_device_train_batch_size * args.gradient_accumulation_steps * self._max_seq_len)
 
     def _fallback_step_tokens(self, world_size: int, measured_cluster: int | None) -> int:
-        """The padded-length estimate for an unusable token delta, warned once. A collator with no ``input_ids`` key
-        (SMPO, embedding) lands here every step, so its throughput is a config-derived constant."""
+        """The padded-length estimate for a step with no usable token delta (no counter, a non-positive delta such as an
+        online GRPO step that builds no round, or an implausible one), warned once."""
         if not self._warned_token_estimate:
             self._warned_token_estimate = True
             cause = (
@@ -498,9 +514,10 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.warning(
                 f"EfficiencyCallback: {cause}, so token throughput and MFU fall back to a "
                 "padded-length ESTIMATE (per_device_train_batch_size x gradient_accumulation_steps x "
-                f"max_seq x {_ESTIMATE_FILL_FRACTION}), not a measurement. If this repeats every step "
-                "the trainer's collator emits no 'input_ids' key (SMPO and embedding do not), so "
-                "tokens/s is a constant rescaling of step time — treat it as an estimate."
+                f"max_seq x {_ESTIMATE_FILL_FRACTION}), not a measurement. If this repeats every step, nothing "
+                "adds the trainer's tokens to num_input_tokens_seen (or, on online GRPO, steps_per_generation "
+                "exceeds gradient_accumulation_steps and most steps build no round), so tokens/s is a constant "
+                "rescaling of step time — treat it as an estimate."
             )
         return int(self._nominal_step_tokens() * _ESTIMATE_FILL_FRACTION) * world_size
 
@@ -525,7 +542,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             logger.info(
                 "EfficiencyCallback: no measured attention work reached this step, so the "
                 "attention-score term is the config model at the declared length bound (every "
-                "token in a max_seq_len document). Trainers whose collator emits no 'input_ids' "
+                "token in a max_seq_len document). Trainers whose batches carry no 'input_ids' "
                 "stay on that model."
             )
         total_flops += step_flops

@@ -7,6 +7,8 @@ import itertools
 import logging
 import re
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from functools import partial
 
 import torch
@@ -14,10 +16,15 @@ import torch.nn as nn
 
 from halo.checkpoint.config_export import save_model_config
 from halo.checkpoint.external_tables import write_external_tables
+from halo.checkpoint.format import STREAM_PART_PREFIX, stripe_writer_part_prefix
 from halo.checkpoint.writing import (
     StreamingShardWriter,
     is_tie_reconcile_key,
+    merge_streamed_parts,
+    publish_hf_parts,
     reconcile_tie_word_embeddings,
+    resolve_checkpoint_writers_per_node,
+    validate_checkpoint_writers_per_node,
 )
 from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
@@ -25,13 +32,55 @@ from halo.models.config_access import ties_word_embeddings
 from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from halo.models.mtp.head import mtp_trunk_copy_keys
 from halo.models.param_roles import persistent_buffers
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.collectives import combine_across_ranks
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
-from halo.runtime.ranks import is_global_main_process
+from halo.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
+from halo.runtime.ranks import (
+    get_local_rank,
+    get_local_world_size,
+    get_node_rank,
+    get_num_nodes,
+    is_global_main_process,
+)
 
 logger = logging.getLogger(__name__)
 
 _LAYER_CHUNK_RE = re.compile(rf"^((?:.*\.)?(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
+
+
+@dataclass(frozen=True)
+class WriterStripe:
+    """The ranks that write one gathered save and the chunks each owns. ``index`` is this rank's place among the
+    ``count`` writers, ``None`` off them. Every rank holds the whole chunk after its gather, so ownership only decides
+    who pays the host copy and the write."""
+
+    index: int | None
+    count: int
+
+    @property
+    def is_writer(self) -> bool:
+        return self.index is not None
+
+    def owns(self, chunk: int) -> bool:
+        """Chunk 0 (the replicated tensors, tied embeddings and tables) is the first writer's; each later chunk, one
+        decoder layer, goes round-robin."""
+        return self.index is not None and self.index == (max(chunk - 1, 0) % self.count)
+
+
+def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
+    """The stripe of a gathered save. A shared output filesystem takes ``HALO_CHECKPOINT_WRITERS_PER_NODE`` writers
+    per node, the save rank first; a count of 0, or per-node storage (each node's directory must hold the whole
+    checkpoint), keeps the save rank alone."""
+    requested = validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node())
+    if requested == 0 or not is_output_shared_filesystem():
+        return WriterStripe(0 if is_save_rank else None, 1)
+    per_node = min(requested, get_local_world_size())
+    count = get_num_nodes() * per_node
+    if is_save_rank:
+        return WriterStripe(0, count)
+    local_rank = get_local_rank()
+    return WriterStripe(get_node_rank() * per_node + local_rank if local_rank < per_node else None, count)
 
 
 def saveable_items(
@@ -98,13 +147,19 @@ def stream_gathered_checkpoint(
     is_save_rank: bool,
     max_shard_size: str,
     normalize: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
+    stripe: WriterStripe | None = None,
 ) -> tuple[int, int]:
     """COLLECTIVE: write a gathered save to safetensors parts, then its config, external tables and index. ``chunks``
-    is a retain-gated gather driven on every rank; ``normalize`` brings each chunk to its on-disk names and dtypes. A
-    failing write is deferred to a collective, so it raises on every rank. Returns ``(tensors, bytes)``, zeros off the
-    save rank."""
+    is a retain-gated gather driven on every rank; ``normalize`` brings each chunk to its on-disk names and dtypes. With
+    a ``stripe`` of several writers, each retains and writes the chunks it owns (``chunks`` retains per ``stripe.owns``)
+    under its own part prefix, and the save rank, the stripe's first writer, renames the parts and writes the one
+    index; without one the save rank alone writes. A failing write is deferred to a collective, so it raises on every
+    rank. Returns ``(tensors, bytes)``, the whole checkpoint's on the save rank."""
+    stripe = stripe or WriterStripe(0 if is_save_rank else None, 1)
+    striped = stripe.count > 1
+    prefix = stripe_writer_part_prefix(stripe.index) if striped and stripe.is_writer else STREAM_PART_PREFIX
     # Entered, so the parts are written in the background; the exit waits them out before any raise leaves.
-    with StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank) as writer:
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=stripe.is_writer, filename_prefix=prefix) as writer:
         guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
         # Held only where the reconcile below can act on them; these are two of the largest tensors in the checkpoint.
         keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
@@ -125,8 +180,8 @@ def stream_gathered_checkpoint(
                     written += 1
 
         for chunk in chunks:
-            # Driven on every rank, as its gathers are collective; only the writer has a chunk to normalize.
-            if is_save_rank:
+            # Driven on every rank, as its gathers are collective; only a writer holds a chunk to normalize.
+            if stripe.is_writer and chunk:
                 guard.run(partial(stage, chunk))
             del chunk  # released before the next chunk is gathered
         # Collective, so a stream failed anywhere stops the job before an index over tensors never written.
@@ -140,8 +195,34 @@ def stream_gathered_checkpoint(
                 reconcile_tie_word_embeddings(model, tied)
                 finalize.run(partial(save_model_config, model, output_dir))
             finalize.run(partial(write_external_tables, model, writer))
-            # The index is the last thing written: the parts are only a checkpoint once it names them.
-            total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
-        # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
-        finalize.store_reject("checkpoint/gathered_finalize")
+        if striped:
+            parts = finalize.run(writer.close_parts) if stripe.is_writer else None
+            # Over the store: the peers wait out the slowest writer's last part, unbounded on slow storage.
+            finalize.store_reject("checkpoint/gathered_finalize")
+            merged = combine_across_ranks(parts, merge_streamed_parts, what="the checkpoint index")
+            with barrier_on_exit(f"Writing the checkpoint index to {output_dir}"):
+                if is_save_rank:
+                    total_bytes = publish_hf_parts(output_dir, merged)
+                    written = len(merged.weight_map)
+        else:
+            if is_save_rank:
+                # The index is the last thing written: the parts are only a checkpoint once it names them.
+                total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
+            # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
+            finalize.store_reject("checkpoint/gathered_finalize")
     return written, total_bytes
+
+
+@contextmanager
+def save_pretrained_on_save_rank(model: torch.nn.Module) -> Iterator[None]:
+    """Let ``model.save_pretrained`` write on the filesystem-aware save rank. transformers requires global rank 0
+    besides ``is_main_process``, so on per-node output storage nodes 1..N would keep no weights; on shared storage the
+    save rank is global rank 0 and nothing changes. Enter it only where the save rank calls ``save_pretrained``."""
+    held = model.__dict__.pop("should_save_on_this_rank", None)
+    model.should_save_on_this_rank = lambda is_main_process: is_main_process and is_fs_save_rank()
+    try:
+        yield
+    finally:
+        del model.should_save_on_this_rank
+        if held is not None:
+            model.should_save_on_this_rank = held

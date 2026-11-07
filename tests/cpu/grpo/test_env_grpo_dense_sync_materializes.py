@@ -57,6 +57,7 @@ def _stub_trainer(model: nn.Module, client: _RecordingClient):
     trainer.parallelism_config = ParallelismConfig()
     trainer._weight_sync_client = client
     trainer._prefetch_enabled = False
+    trainer.first_push_verified = True
     return trainer
 
 

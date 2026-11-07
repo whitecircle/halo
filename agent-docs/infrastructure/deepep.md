@@ -74,7 +74,7 @@ before the process starts. It does not make the racy single-domain multi-group s
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
-`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`,
+`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`, `HALO_CHECKPOINT_WRITERS_PER_NODE`,
 `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
 `FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`. A divergence is a hang
 or a silent drift, not a slow run: the dedup changes how many
@@ -153,9 +153,13 @@ eval, raises it for the rest of the run. A grow *retires* the previous arena rat
 in-flight microbatch's backward may still name it); the trainer frees the retired arenas once the
 optimizer step's last backward is done, on every rank of the group. Within the step that grew, the group
 holds the **sum** of the capacities it grew through (~4 GiB per generation at `ep64` with 8k
-tokens/rank), and from the next step only the live arena. Each growth still rebuilds the arena, so avoid
-the growths: pack the corpus, or let the first forward present the run's maximum tokens per rank. The
-`DeepEP arena grew …` line (once per EP group) marks each one. Packed batches above batch 1 flatten to a
+tokens/rank), and from the next step only the live arena. A build or grow takes the tokens/rank the forward
+needs times 1.5 (`ARENA_HEADROOM`, a constant so every rank sizes alike), rounded up to 256 and held across NVLink
+domains to the largest aligned capacity the Gin ceiling allows (a group within one domain has no ceiling), so a rising
+high-water mark rebuilds the arena a few times per run, and an arena already at the Gin ceiling takes no headroom. The capacity dedup still caches the exact need, and the legacy arena is never grown. Each growth still
+rebuilds the arena: pack the corpus, or let the first forward present the run's maximum tokens per rank. The
+`DeepEP arena grew …` line (once per EP group, old and new capacity) marks each one;
+`tests/gpu/profiling/bench_ep_arena_headroom.py` times dispatch and combine at an exact and a headroomed capacity. Packed batches above batch 1 flatten to a
 row of variable width, so a later step can still set a new high-water mark, bounded by
 `per_device_train_batch_size × max_length`.
 
@@ -186,7 +190,7 @@ behind one interface (`DeepEPBackend`, built by `build_ep_backend` in
 
 | `ep_buffer_backend` | Buffer | Transport | Dispatch limit | Cross-node |
 |---|---|---|---|---|
-| `elastic` (= `auto`, default) | `deep_ep.ElasticBuffer` (V2) | NCCL Gin across domains; NVLink within one | intranode: up to the 32-bit wire index (~175k tok/rank); cross-node Gin: [~8k tok/rank](#expert-parallelism-over-aws-efa) | **Yes** (AWS EFA) |
+| `elastic` (= `auto`, default) | `deep_ep.ElasticBuffer` (V2) | NCCL Gin across domains; NVLink within one | intranode: no ceiling; cross-node Gin: [~8k tok/rank](#expert-parallelism-over-aws-efa) | **Yes** (AWS EFA) |
 | `legacy` | `deep_ep.Buffer` (V1) | CUDA IPC P2P over NVLink | fixed-size chunked pipeline sized by hidden, streams any length | **No** (rejected at config time) |
 
 The two are numerically identical (bit-identical loss and matching expert/router gradients on
@@ -231,28 +235,32 @@ combine reuses that layout through the `handle`. The count exchange earns its co
 real tokens instead of a capacity-padded buffer. Within one NVLink domain the dispatch is 9–13% of the EP phases, and
 at ep8 the combine's larger share is mostly the wait for the busiest rank
 ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). Levers:
-`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN, and
+`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN (+2.1–2.5% on Qwen3.5-35B-A3B and
+Qwen3.6-35B-A3B EP8 at 16k, with a small reduction-order shift in the gradients; it cost 4.6% on Qwen3.5-122B-A10B EP8
+with activation offload at 64k), and
 `HALO_DEEPEP_NUM_SMS` tunes the split.
 
-## Dispatch wire-index limit
+## Dispatch token ceiling
 
-`ElasticBuffer` forwards arbitrary sequence length intranode (gpt-oss-20b ep8 to 65536); cross-node Gin
-has its own ~8k tokens/rank ceiling ([EFA](#expert-parallelism-over-aws-efa)). The guarded limit is
-DeepEP's 32-bit **wire index**: the kernels offset the per-rank wire buffer (`num_max_tokens_per_rank ×
-num_topk` rows of `padded_hidden`) with 32-bit indices, so `reject_oversized_dispatch`
-(`DEEPEP_INDEX_LIMIT = 2³¹`) refuses an extent that would wrap and illegal-access. The boundary is
-`2³¹ / (num_topk × padded_hidden)`, ~175k tokens/rank for gpt-oss-20b (topk 4, padded hidden 3072). It
-bites only a single very long sequence in one MoE forward; the buffer is per-rank, so a larger
-`ep_size` does not lower it. Levers: `per_device_train_batch_size=1`, a shorter `max_length`, or fewer
-generations / shorter trajectories in async GRPO.
+A dispatch within one NVLink domain has no token ceiling: `ElasticBuffer` addresses its wire buffer with 64-bit
+offsets, and the legacy buffer streams any length through a fixed-size chunked pipeline. The only ceiling is
+cross-node Gin at ~8k tokens/rank ([EFA](#expert-parallelism-over-aws-efa)). What bounds a long single-domain
+sequence is memory and, for elastic ep8, the combine-barrier deadlock under
+[Transport backend](#transport-backend).
 
-Both ceilings are also applied before any weight is read: `reject_unsupported_model` sizes the run's
+The Gin ceiling is also applied before any weight is read: `reject_unsupported_model` sizes the run's
 declared budget (`per_device_train_batch_size` × the row length, doubled for the trainers that forward
-chosen and rejected together, divided by `cp_size`) through the dispatcher's own
+chosen and rejected together) through the dispatcher's own
 capacity alignment and refuses it, naming the budget, the capacity and the EP group. The row length is
 `max_length`; unbounded, `max_prompt_length + max_completion_length` where the config bounds both, else
-the model's context window. The dispatcher's check stays the backstop for the batch in hand and the
-only check for online and async GRPO, which declare no budget. Whether the Gin ceiling applies is
+the model's context window. Online GRPO takes `max_prompt_length` (script argument) plus `max_completion_length`;
+async GRPO takes `max_train_row_tokens` alone, as the turn and episode budgets bound what is sampled, not the tool
+and observation tokens a multi-turn row carries. Both also size `per_device_eval_batch_size` rows when an evaluation
+runs. SDPG adds the byte length of its hint template's literal text (a bound on its tokens) to that row, since its teacher forwards prompt, hint and completion; the answer a template names has no config bound and is not counted. A row with no such bound is judged against the context window on a group spanning NVLink domains only, so
+cross-node EP needs `max_prompt_length` or `max_train_row_tokens` at or under 8,192 tokens per row, while a
+node-local run with no bound declares nothing. The dispatcher's check stays the backstop for the batch in hand.
+`packed_microbatch_tokens` (either trainer) is a per-rank budget checked the same way at construction, and its planner
+caps every bin at the same Gin ceiling. Whether the Gin ceiling applies is
 decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
 There is no lower "symmetric-window" ceiling. What carries long-context ep8 is the int64 program offset
@@ -369,7 +377,7 @@ nvcc needs ninja and the host compiler on `PATH`; use the full `PATH` export abo
 | `DeepEP timeout check failed` → `CUDA error: unspecified launch failure` (~step 2) | Sustained severe host contention tripping the 100 s barrier → do not run EP training beside heavy CPU/IO load (a large build) on the same node |
 | Memory allocation failures | The grow-only arena ([Buffer sizing](#buffer-sizing)) → fewer tokens per rank (batch, `max_length`) or a larger `ep_size`. Fragmentation OOMs on variable-shape packed runs respond to `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`, which costs throughput under EP: set it only to fit; the EP examples leave it off ([measured](../optimization/throughput-benchmarks.md#allocator-expandable-segments)) |
 | `DeepEP receive counts disagree with the received expert ids` in a `device-side assert triggered` on one rank, its peers then timing out in DeepEP's barrier | The receive counts the dispatch returned do not match the expert ids it delivered ([How the toolkit drives it](#how-the-toolkit-drives-it)) → check that `deep_ep` is the image's build at `af9a040` ([Build from source](#build-from-source)); on that build, report it with the EP shape (`ep_size`, `ep_buffer_backend`) |
-| `CUDA error: an illegal memory access` (Xid 31) at a large `num_max_tokens_per_rank` | The 32-bit wire-index limit, normally refused first → `per_device_train_batch_size: 1` for long trajectories, or shorten them. Async GRPO chunks its log-prob precompute to `per_device_train_batch_size`, so it never dispatches the whole `grad_accum × num_generations` batch at once |
+| `CUDA error: an illegal memory access` (Xid 31) at a large `num_max_tokens_per_rank` | An oversized dispatch faulting in the kernel on-stream; the DeepEP wire offsets are 64-bit, so check the activation kernels and memory first ([Dispatch token ceiling](#dispatch-token-ceiling)) → `per_device_train_batch_size: 1` for long trajectories, or shorten them |
 
 Under EP+ETP the EP group splits into `expert_tp_size` dispatch groups coupled by the strided expert-TP
 all-reduce, which must stay in **token space** (`SumGradAcrossGroup` before dispatch,

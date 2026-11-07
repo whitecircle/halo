@@ -4,6 +4,7 @@ peaks differ within one architecture."""
 import logging
 import math
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -175,6 +176,19 @@ def available_host_ram_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def nearest_existing_path(path: str) -> str:
+    """``path`` resolved, or its nearest existing ancestor, whose volume a directory yet to be created lands on."""
+    target = os.path.realpath(path)
+    while not os.path.exists(target):
+        target = os.path.dirname(target)
+    return target
+
+
+def free_disk_bytes(path: str) -> int:
+    """Free bytes on the volume ``path`` lands on, whether or not it exists yet."""
+    return shutil.disk_usage(nearest_existing_path(path)).free
 
 
 def _read_cgroup_file(path: str) -> str | None:

@@ -5,9 +5,12 @@ here."""
 
 import contextlib
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
+import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
@@ -33,6 +36,7 @@ from tests.common.ep_reference import (
     scores_any,
 )
 from tests.common.parallelism import single_process_ep_config
+from tests.common.pp_equivalence import score_stage_grads_vs_reference
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
 
@@ -798,6 +802,93 @@ def test_picks_that_do_not_tile_the_forwards_raise(ep_models, extra, error):
     with pytest.raises(error), routing_pinned(bf16, [mask, *picks[1:]]), torch.no_grad():
         _rows_loss(bf16, rows)
     assert all(layer._forced_topk_indices is None and layer._forced_cursor == 0 for layer in ep_layers(bf16))
+
+
+# fp32 hyper-connection gradients as the PP row scores them: base and scale 5e-4 and 3e-5 of their layer's largest, over
+# the floor, so the direction and norm bars take them.
+HC_LAYER_BASE, HC_LAYER_SCALE = "model.layers.2.attn_hc.base", "model.layers.2.attn_hc.scale"
+HC_LAYER_PROJ = "model.layers.2.mlp.down_proj.weight"
+HC_LAYERED = {
+    HC_LAYER_PROJ: _vector((8, 16), 1.0, 10),
+    HC_LAYER_BASE: _vector((24,), 5e-4, 11),
+    HC_LAYER_SCALE: _vector((3,), 3e-5, 12),
+}
+
+
+def test_an_fp32_hyper_connection_gradient_inside_rounding_passes():
+    got = {name: ref * (1 + 1e-4) for name, ref in HC_LAYERED.items()}
+    checks, _, floors = _score_layered(got, HC_LAYERED)
+    assert all(checks[f"{name}_matches"] for name in HC_LAYERED), checks
+    assert floors[HC_LAYER_SCALE] < HC_LAYERED[HC_LAYER_SCALE].norm()
+
+
+@pytest.mark.parametrize("name", [HC_LAYER_BASE, HC_LAYER_SCALE])
+@pytest.mark.parametrize("scale", [2.0, 0.5], ids=["doubled", "dropped_dp_average"])
+def test_a_mis_reduced_hyper_connection_gradient_fails(name, scale):
+    checks, _, _ = _score_layered({name: HC_LAYERED[name] * scale}, HC_LAYERED)
+    assert not checks[f"{name}_matches"]
+    assert all(checks[f"{other}_matches"] for other in HC_LAYERED if other != name)
+
+
+class _HyperConnectionStage(nn.Module):
+    """A one-stage pipeline holding a hyper-connection module's three roles, named as the unsplit reference spells them."""
+
+    def __init__(self):
+        super().__init__()
+        self.attn_hc = nn.Module()
+        self.attn_hc.fn = nn.Parameter(torch.zeros(24, 16))
+        self.attn_hc.base = nn.Parameter(torch.zeros(24))
+        self.attn_hc.scale = nn.Parameter(torch.zeros(3))
+
+    @staticmethod
+    def global_parameter_name(local: str) -> str:
+        return f"model.layers.2.{local}"
+
+
+@pytest.fixture
+def one_rank_group(tmp_path):
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
+    try:
+        yield SimpleNamespace(rank=0, world_size=1, device=torch.device("cpu"))
+    finally:
+        dist.destroy_process_group()
+
+
+def _score_stage(ctx, grads: dict[str, torch.Tensor], *, unscored: frozenset[str]):
+    stage = _HyperConnectionStage()
+    for local, param in stage.named_parameters():
+        param.grad = grads[local].clone()
+    reference = SimpleNamespace(
+        grads={stage.global_parameter_name(local): HC_STAGE_REFERENCE[local] for local in HC_STAGE_REFERENCE},
+        expert_grads={},
+        expert_param_names=set(),
+    )
+    checks, metrics = {}, {}
+    score_stage_grads_vs_reference(ctx, stage, reference, checks, metrics, unscored=unscored)
+    return checks, metrics
+
+
+HC_STAGE_REFERENCE = {
+    "attn_hc.fn": _vector((24, 16), 0.2, 13),
+    "attn_hc.base": _vector((24,), 0.1, 11),
+    "attn_hc.scale": _vector((3,), 0.05, 12),
+}
+HC_UNSCORED = frozenset({"attn_hc.base", "attn_hc.scale"})
+
+
+def test_unscored_roles_are_held_to_no_bar_but_still_count_toward_coverage(one_rank_group):
+    wrong = {**HC_STAGE_REFERENCE, "attn_hc.base": -HC_STAGE_REFERENCE["attn_hc.base"] * 3}
+    checks, metrics = _score_stage(one_rank_group, wrong, unscored=HC_UNSCORED)
+    assert checks["stage_grads_match_reference"] and checks["stages_cover_every_reference_grad"], checks
+    assert metrics["params_compared"] == 1
+    checks, metrics = _score_stage(one_rank_group, wrong, unscored=frozenset())
+    assert not checks["stage_grads_match_reference"] and metrics["params_compared"] == 3
+
+
+def test_a_mis_reduced_hyper_connection_projection_still_fails_beside_its_unscored_roles(one_rank_group):
+    wrong = {**HC_STAGE_REFERENCE, "attn_hc.fn": HC_STAGE_REFERENCE["attn_hc.fn"] * 0.5}
+    checks, _ = _score_stage(one_rank_group, wrong, unscored=HC_UNSCORED)
+    assert not checks["stage_grads_match_reference"]
 
 
 if __name__ == "__main__":

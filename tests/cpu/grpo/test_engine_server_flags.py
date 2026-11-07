@@ -4,11 +4,14 @@ those trains silently wrong. Both engines report the facts on ``/server_info``, 
 and a client refuses before forming a group."""
 
 import ast
+import json
 import logging
+import threading
 
 import pytest
+from huggingface_hub import constants
 
-from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_server_flags
+from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_group_servers, verify_server_flags
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import _IDENTITY_KEY, VLLMWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
@@ -25,6 +28,16 @@ def engine(request):
     server = server_cls()
     yield server, client_cls
     server.close()
+
+
+def _checkpoint(directory, **config) -> str:
+    """A checkpoint directory holding only ``config`` as its ``config.json``, for a fake server to report serving."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(json.dumps({"model_type": "qwen3_5_moe", **config}))
+    return str(directory)
+
+
+_FP8_CHECKPOINT = {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}
 
 
 def _verify(server, client_cls, **needs) -> None:
@@ -65,7 +78,7 @@ def test_an_upstream_server_is_refused_by_the_preflight_and_by_group_formation(e
         _verify(server, client_cls, is_moe=False)
     client = client_cls(base_url=server.url)
     with pytest.raises(RuntimeError, match="toolkit's image"):
-        client._fetch_engine_world_size()
+        client.require_engine_world_size()
 
 
 def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog):
@@ -75,7 +88,7 @@ def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog)
         server.status["/server_info"] = 500
         client = VLLMWeightSyncClient(base_url=server.url)
         with caplog.at_level(logging.WARNING):
-            assert client._fetch_engine_world_size() == 1
+            assert client.require_engine_world_size() == 1
         assert "its image goes unchecked" in caplog.text
     finally:
         server.close()
@@ -95,6 +108,109 @@ def test_a_repacking_moe_backend_is_refused_on_a_moe_and_passes_on_a_dense_model
     with pytest.raises(ValueError, match="repacks expert weights"):
         _verify(server, client_cls, is_moe=True)
     _verify(server, client_cls, is_moe=False)
+
+
+@_ENGINES_FIXTURE
+def test_a_quantized_server_is_refused_on_every_model(engine):
+    server, client_cls = engine
+    server.quantization = "fp8"
+    for is_moe in (True, False):
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, client_cls, is_moe=is_moe)
+
+
+@_ENGINES_FIXTURE
+def test_a_bf16_run_names_the_fp8_remedy_when_it_meets_a_quantized_server(engine):
+    server, client_cls = engine
+    server.quantization = "fp8"
+    with pytest.raises(ValueError, match="rollout_weight_precision: fp8_block"):
+        _verify(server, client_cls, is_moe=True)
+
+
+@_ENGINES_FIXTURE
+def test_an_fp8_run_accepts_an_fp8_server_and_refuses_every_other_format(engine, tmp_path):
+    server, client_cls = engine
+    server.model_path = _checkpoint(tmp_path)
+    server.quantization = "fp8"
+    _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+    for served, wording in (("", "serves bf16"), ("awq", "serves awq")):
+        server.quantization = served
+        with pytest.raises(ValueError, match=wording):
+            _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+
+
+def _sglang_on(model_path: str) -> FakeSGLangServer:
+    """An SGLang server launched without --quantization, which it reports as null, on the checkpoint at
+    ``model_path``."""
+    server = FakeSGLangServer()
+    server.quantization, server.model_path = "", model_path
+    return server
+
+
+def test_sglang_reports_the_format_of_a_quantized_checkpoint_it_was_launched_on_without_the_flag(tmp_path):
+    server = _sglang_on(_checkpoint(tmp_path, **_FP8_CHECKPOINT))
+    try:
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True)
+        _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+    finally:
+        server.close()
+
+
+def test_sglang_finds_the_checkpoint_of_a_snapshot_path_in_this_hosts_hub_cache(tmp_path, monkeypatch):
+    """The server's cache sits elsewhere: the same repo and commit are read from this host's."""
+    commit = "a" * 40
+    _checkpoint(tmp_path / "models--org--policy" / "snapshots" / commit, **_FP8_CHECKPOINT)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    server = _sglang_on(f"/server/hf/hub/models--org--policy/snapshots/{commit}")
+    try:
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True)
+    finally:
+        server.close()
+
+
+def test_an_sglang_format_this_host_cannot_read_passes_a_bf16_run_and_refuses_an_fp8_one_naming_the_flag():
+    server = _sglang_on("/server/only/checkpoint")
+    try:
+        _verify(server, SGLangWeightSyncClient, is_moe=True)
+        with pytest.raises(ValueError, match="Launch it with --quantization fp8"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+        server.quantization = "fp8"
+        _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+    finally:
+        server.close()
+
+
+@_ENGINES_FIXTURE
+def test_an_fp8_run_still_needs_the_triton_moe_backend(engine):
+    server, client_cls = engine
+    server.quantization, server.moe_backend = "fp8", "auto"
+    with pytest.raises(ValueError, match="repacks expert weights"):
+        _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+
+
+@pytest.mark.parametrize(
+    ("flag", "other"),
+    [("dtype", "float16"), ("quantization", "fp8"), ("moe_backend", "auto"), ("reasoning_parser", "other")],
+)
+@pytest.mark.parametrize("server_cls", [FakeVLLMServer, FakeSGLangServer], ids=["vllm", "sglang"])
+def test_servers_of_one_group_must_agree_on_every_launch_flag_that_changes_how_the_weights_load(
+    server_cls, flag, other, tmp_path
+):
+    servers = [server_cls(), server_cls()]
+    try:
+        for server in servers:
+            server.model_path = _checkpoint(tmp_path)
+        urls = [server.url for server in servers]
+        backend = server_cls.CLIENT_CLASS.BACKEND_KEY
+        verify_group_servers(urls, backend=backend, connection_timeout=5.0)
+        setattr(servers[1], flag, other)
+        with pytest.raises(ValueError, match=f"disagree on their {flag}"):
+            verify_group_servers(urls, backend=backend, connection_timeout=5.0)
+    finally:
+        for server in servers:
+            server.close()
 
 
 def test_strict_tool_calling_is_refused_only_where_a_request_carries_tools():
@@ -186,6 +302,100 @@ def test_each_script_runs_the_flag_preflight(script):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_server_flags"
     ]
     assert len(calls) == 1
+
+
+_LAUNCH_FACTS = {
+    FakeVLLMServer: {
+        "tensor_parallel_size": 8,
+        "data_parallel_size": 1,
+        "pipeline_parallel_size": 1,
+        "expert_parallel": True,
+        "max_num_seqs": 256,
+        "max_num_batched_tokens": 16384,
+        "attention_backend": "FLASH_ATTN",
+        "compilation_mode": "VLLM_COMPILE",
+        "cudagraph_mode": "FULL_AND_PIECEWISE",
+    },
+    FakeSGLangServer: {
+        "tp_size": 1,
+        "dp_size": 1,
+        "pp_size": 1,
+        "max_running_requests": 256,
+        "attention_backend": "flashinfer",
+    },
+}
+
+
+@pytest.mark.parametrize("server_cls", [FakeVLLMServer, FakeSGLangServer], ids=["vllm", "sglang"])
+def test_the_launch_facts_a_server_reports_are_read_and_a_fact_it_lacks_is_left_out(server_cls):
+    server = server_cls()
+    try:
+        flags = server_cls.CLIENT_CLASS(base_url=server.url).read_server_flags()
+    finally:
+        server.close()
+    assert dict(flags.extras) == _LAUNCH_FACTS[server_cls]
+
+
+@_ENGINES_FIXTURE
+def test_the_launch_line_carries_every_servers_facts_and_names_one_that_did_not_answer(engine, caplog):
+    server, client_cls = engine
+    silent = type(server)()
+    silent.status["/server_info"] = 500
+    try:
+        with caplog.at_level(logging.INFO):
+            verify_server_flags(
+                [server.url, silent.url],
+                ServerRequirements(is_moe=False),
+                backend=client_cls.BACKEND_KEY,
+                connection_timeout=5.0,
+            )
+    finally:
+        silent.close()
+    launch_lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.getMessage().startswith("Rollout server") and "launch flags" in r.getMessage()
+    ]
+    [served] = [line for line in launch_lines if server.url in line]
+    [unanswered] = [line for line in launch_lines if silent.url in line]
+    assert "extras=" in served and "'attention_backend'" in served
+    assert "unread" in unanswered
+
+
+@_ENGINES_FIXTURE
+def test_the_servers_are_probed_at_once(engine):
+    """Every server's /server_info is reached while the first is still unanswered, which a loop over the servers
+    cannot do."""
+    server, client_cls = engine
+    others = [type(server)() for _ in range(2)]
+    servers = [server, *others]
+    for each in servers:
+        each.hold.add("/server_info")
+    failures: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            verify_server_flags(
+                [each.url for each in servers],
+                ServerRequirements(is_moe=False),
+                backend=client_cls.BACKEND_KEY,
+                connection_timeout=5.0,
+            )
+        except BaseException as e:  # reported below, on the test thread
+            failures.append(e)
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        for each in servers:
+            each.wait_for_request("GET /server_info", timeout=10.0)
+    finally:
+        for each in servers:
+            each.release()
+        thread.join(timeout=30.0)
+        for each in others:
+            each.close()
+    assert not failures, failures
 
 
 if __name__ == "__main__":

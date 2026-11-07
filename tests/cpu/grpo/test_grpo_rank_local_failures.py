@@ -69,7 +69,7 @@ class _Host(AsyncRolloutMixin):
         self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: rank)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=1,
+            rollout_actor_budget=1,
             max_concurrent_rollouts=4,
             eval_rollout_batch_size=None,
             isr_engine_reference=True,
@@ -92,8 +92,14 @@ class _Host(AsyncRolloutMixin):
         if self._fail_client and self.accelerator.is_main_process:
             raise ConnectionError("the NCCL group to the engine did not form")
 
+    def _is_tp_follower(self) -> bool:
+        return False
+
     def _train_loader_batch_size(self) -> int:
         return 8
+
+    def _get_tp_or_etp_group_size(self) -> int:
+        return 1
 
     def add_callback(self, callback):
         self.callbacks.append(callback)

@@ -13,7 +13,9 @@ from collections.abc import Callable
 from typing import Any
 
 import datasets
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 from datasets import Dataset, DatasetDict, load_from_disk
 from datasets import fingerprint as hf_fingerprint
 from multiprocess.reduction import ForkingPickler
@@ -42,10 +44,27 @@ _scratch_cache_dir: str | None = None
 # The rows TRL's ``pack_dataset`` packs as one unit: its batched map leaves ``batch_size`` at the datasets default.
 _PACK_BATCH_ROWS = inspect.signature(Dataset.map).parameters["batch_size"].default
 
+
+def _pack_wrapped_with_document_lengths(examples: pa.Table, seq_length: int) -> pa.Table:
+    """TRL's wrapped pack plus the ``seq_lengths`` its chunks lack: each row's pieces of the source documents, cut at
+    document ends and at the chunk edge, summing to the row length."""
+    packed = _pack_wrapped(examples, seq_length)
+    document_ends = np.cumsum(pc.list_value_length(examples["input_ids"]).to_numpy(zero_copy_only=False))
+    total = int(document_ends[-1]) if len(document_ends) else 0
+    chunk_starts = np.arange(0, total, seq_length)
+    # Unique drops the empty documents' repeated ends.
+    cuts = np.unique(np.concatenate(([0], document_ends, chunk_starts, [total])))
+    pieces = np.diff(cuts).astype(np.int32)
+    row_of_piece = cuts[:-1] // seq_length
+    offsets = np.concatenate(([0], np.cumsum(np.bincount(row_of_piece, minlength=len(chunk_starts))))).astype(np.int32)
+    lengths = pa.ListArray.from_arrays(offsets, pa.array(pieces, type=pa.int32()))
+    return packed.append_column("seq_lengths", lengths)
+
+
 _TRL_PACKERS = {
     "bfd": functools.partial(_pack_bfd, on_seq_length_overflow="truncate"),
     "bfd_split": functools.partial(_pack_bfd, on_seq_length_overflow="split"),
-    "wrapped": _pack_wrapped,
+    "wrapped": _pack_wrapped_with_document_lengths,
 }
 
 
@@ -425,7 +444,9 @@ def coordinated_pack(
         raise ValueError(f"Invalid packing strategy {strategy!r}: TRL packs with one of {sorted(_TRL_PACKERS)}.")
     operation_name = f"packing the {split} split"
     documents = dataset.remove_columns("attention_mask") if "attention_mask" in dataset.column_names else dataset
-    cache_file_name = packed_cache_file_name(documents, strategy, seq_length, split)
+    # Wrapped rows once packed without ``seq_lengths``: a distinct name never serves those.
+    cache_strategy = "wrapped_documents" if strategy == "wrapped" else strategy
+    cache_file_name = packed_cache_file_name(documents, cache_strategy, seq_length, split)
     # Workers split the map's input contiguously at any boundary, so its rows are the batches, never the documents.
     batch_starts = Dataset.from_dict({"batch_start": list(range(0, len(dataset), _PACK_BATCH_ROWS))})
     num_proc = max(1, min(num_proc, len(batch_starts)))  # no idle worker, and no datasets warning about one

@@ -231,8 +231,10 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
   both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
   sum once), and every other registered MoE family against its unsplit ep1 twin through the real
-  trainer at `ep2` (`test_pp_family_vs_reference.py`). One released checkpoint has run the split as a correctness
-  smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
+  trainer at `ep2` (`test_pp_family_vs_reference.py`; fp32 under ETP, and for a hyper-connection family wherever no DeepEP dispatch
+  runs, since its base and scale gradients sit 4 to 5 orders under their layer's largest and bf16 accumulation order
+  decides them; a bf16 `ep2` row leaves those parameters unscored and the fp32 ETP row covers them). One released
+  checkpoint has run the split as a correctness smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
   relative loss gap 3.4e-4, largest 1.16e-3), as two `torchrun` agents on one host.
 
 ## PP + ETP (MoE)
@@ -341,7 +343,7 @@ Between machines on a fast link, PP is not a speedup for a model that fits on on
 
 Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per arm. The arms of a block train the same rows at the same tokens per GPU per step. Peaks are allocated GiB, the highest rank of each stage. Every gpt-oss row runs grouped GEMM and `moe_balancing: bias_update`, and the Qwen3-8B and gpt-oss rows run packed `HuggingFaceH4/ultrachat_200k`.
 
-**A logged PP rate counts padding.** `num_input_tokens_seen` counts every row of a PP batch at `max_length`, so the rate `EfficiencyCallback` logs from it reads high: 17,709 for the 17,608 below, 15,820 for 15,715, and 2,556 for GLM-5.3-Flash's 2,423. The PP rates on this page divide the attended tokens of the matching non-PP arm, on the same rows, by PP's step time. To compare a PP run with another layout, compare step times at equal tokens.
+**A PP rate counts attended tokens.** A PP batch is padded to `max_length`, and the count reads its `attention_mask`, or the `row_lengths` of packed rows, so the rate `EfficiencyCallback` logs equals the one of any other layout on the same rows. Halo 1.2.0 counted every padded row and logged 17,709 for the 17,608 below, 15,820 for 15,715, and 2,556 for GLM-5.3-Flash's 2,423; the PP rates on this page divide the attended tokens of the matching non-PP arm, on the same rows, by PP's step time.
 
 ![Tokens/s/GPU on B300. Two 8-GPU machines on a fast link: Qwen3-8B pp2 × dp8 at 17,608 is 4.0% below dp16 and 1.63× dp8 × tp2; gpt-oss-20b pp2 × ep8 at 15,715 is 15.9% below ep8 with DP and 3.82× ep16. Forced onto plain TCP sockets, pp2 × dp8 holds 15,414 where dp16 falls to 1,117. One machine: pp2 × dp4 is 8.5% below dp8, and pp2 × ep4 is 9.2% above ep8. GLM-5.3-Flash full fine-tune: pp2 × ep8 at 2,423 is 1.61× ep16, and ep8 with DP runs out of memory](../assets/benchmarks/pp_throughput.png)
 
@@ -367,7 +369,7 @@ Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per a
 
 **Qwen3.5 and 3.6, which fit either way.** The text tower through its class, two 8-GPU machines, `max_length` 8192, packed, m=8, `moe_balancing: none`, median of steps 4–13 on the same rows. Qwen3.5-35B-A3B with GC off: `pp2 × ep8` attends 15,306 tok/s/GPU against 15,758 for `ep8` + DP (0.97×), at 126.7 / 62.7 GiB against 148.7. With GC on: 12,202 against 12,994 (0.94×), at 59.5 / 39.1 GiB against 91.0. Qwen3.6-35B-A3B with GC off: 15,202 against 15,698 (0.97×), at 126.5 / 63.0 GiB against 149.0. PP costs 3 to 6% here and pays in memory, the far stage most. A one-step save merged with `merge_pp_stages.py`, took its tower back with `reattach_vision_tower.py` and loaded as the composite with no key missing or unexpected.
 
-**Two more text towers, on GC.** `pp2 × ep8` at m=8 on Qwen3.8-Flash-Next and Nemotron 3.5 Super VL runs out of memory in the first step with GC off, at about 260 of 267.7 GiB with eight full graphs live on a stage. With GC on, 13 steps ran at 16.89 and 13.69 s a step, 1,940 and 2,394 tok/s/GPU as logged, which counts padding, at 115.7 / 78.2 and 100.9 / 96.8 GiB.
+**Two more text towers, on GC.** `pp2 × ep8` at m=8 on Qwen3.8-Flash-Next and Nemotron 3.5 Super VL runs out of memory in the first step with GC off, at about 260 of 267.7 GiB with eight full graphs live on a stage. With GC on, 13 steps ran at 16.89 and 13.69 s a step, 1,940 and 2,394 tok/s/GPU as logged by 1.2.0, which counted padding, at 115.7 / 78.2 and 100.9 / 96.8 GiB.
 
 **One 8-GPU machine**, GC off, `max_length` 8192, 524k tokens (64 rows) per step, m=16 (a 1/17 bubble), median of steps 6–15. A single `torchrun` refuses an NVLink domain smaller than its node (`nvlink_domain_size` must be a multiple of `gpus_per_node`), so the `pp2` rows run two `torchrun` agents in one container, `--nnodes=2 --nproc_per_node=4` with `--node_rank=0` on `CUDA_VISIBLE_DEVICES=0,1,2,3` and `--node_rank=1` on `4,5,6,7`: each agent is a 4-GPU node to the toolkit, and each half is one stage. The traffic between the halves stays inside the host, over NCCL shared memory, so these rows price the schedule and the narrower groups, not an inter-node link. The `dp8` and `ep8` rows run one agent on the host's 8-GPU domain.
 

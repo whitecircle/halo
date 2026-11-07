@@ -11,6 +11,7 @@ from typing import Any
 
 import backoff
 
+from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
 from halo.environments.episode_keys import EPISODE_ERROR_KEY, LAST_TURN_KEY
 from halo.environments.messages import EnvStep, Trajectory
@@ -30,6 +31,7 @@ _TURN_STAMPS = (
     "reasoning",
     "token_ids",
     "token_logprobs",
+    "candidates",
     "prompt_token_ids",
     "routing_mask",
     "routing_prompt_tokens",
@@ -83,6 +85,7 @@ class TurnGeneration:
     """Why generation stopped; ``"length"`` and ``"abort"`` both mean the text is a fragment."""
     token_ids: list[int] | None = None
     token_logprobs: list[float] | None = None
+    candidates: CandidateLogprobs | None = None
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
@@ -205,6 +208,8 @@ def step_context_from_generation(
     # Behavior-policy logprobs for the IS trust region; keep only when id-aligned.
     if captured and gen.token_logprobs is not None and len(gen.token_logprobs) == len(gen.token_ids):
         step_ctx["token_logprobs"] = gen.token_logprobs
+    if captured and gen.candidates is not None and len(gen.candidates.ids) == len(gen.token_ids):
+        step_ctx["candidates"] = gen.candidates
     # Engine routing for R3 replay; only meaningful beside the ids it aligns with.
     if captured and gen.routing_mask:
         step_ctx["routing_mask"] = gen.routing_mask

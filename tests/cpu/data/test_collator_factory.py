@@ -4,6 +4,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+from transformers import PreTrainedTokenizerFast
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
@@ -343,6 +345,58 @@ def test_pipeline_parallelism_is_not_warned():
 
 
 _MARKER_LOGGER = "halo.data.turn_markers"
+
+_ASSISTANT_MARKER = "<|assistant|>"
+_TURN_TEMPLATE = "{% for m in messages %}<|{{ m.role }}|> {{ m.content }} {{ CLOSE }}{% endfor %}"
+_TURN_END = "{% if m.role == 'assistant' %}<eos> {% endif %}"
+
+
+def _template_tokenizer(*, closes_turns: bool) -> PreTrainedTokenizerFast:
+    """A word-level tokenizer whose template ends an assistant turn with ``<eos>``, or with nothing."""
+    vocab = {token: i for i, token in enumerate(["<pad>", "<eos>", "<|user|>", _ASSISTANT_MARKER, "q", "a", "<unk>"])}
+    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        pad_token="<pad>",
+        eos_token="<eos>",
+        chat_template=_TURN_TEMPLATE.replace("{{ CLOSE }}", _TURN_END if closes_turns else ""),
+    )
+
+
+def _select_completion_only(tokenizer, model_config=None, **flags):
+    return select_data_collator(
+        tokenizer=tokenizer,
+        train_on_completions_only=True,
+        assistant_message_template=_ASSISTANT_MARKER,
+        model_config=model_config,
+        **flags,
+    )
+
+
+def test_a_template_ending_no_turn_is_refused_at_construction():
+    """The padded policy masks a terminator-less span entirely, so the run would train no token."""
+    assert _select_completion_only(_template_tokenizer(closes_turns=True)) is not None
+    with pytest.raises(ValueError, match="ends in a turn terminator"):
+        _select_completion_only(_template_tokenizer(closes_turns=False))
+
+
+@pytest.mark.parametrize("flags", [{"packing": True}, {"padding_free": True}], ids=("packed", "flat"))
+def test_packed_rows_run_a_terminator_less_final_turn_to_the_row_end(flags):
+    """The packed policy's fallback trains a row's last turn, so the probe judges these routes by it."""
+    assert _select_completion_only(_template_tokenizer(closes_turns=False), **flags) is not None
+
+
+def test_a_turn_ended_by_the_next_role_marker_is_accepted():
+    """GLM closes an assistant turn at the next ``<|user|>``, which its model config lists as a terminator."""
+    config = _mock_model_config()
+    config.eos_token_id = [1, 2]
+    config.text_config = None
+    tokenizer = _template_tokenizer(closes_turns=False)
+    assert tokenizer.convert_tokens_to_ids("<|user|>") == 2
+    assert _select_completion_only(tokenizer, config) is not None
+    with pytest.raises(ValueError, match="ends in a turn terminator"):
+        _select_completion_only(tokenizer, None)
 
 
 def _probe_tokenizer(*, renders: bool):

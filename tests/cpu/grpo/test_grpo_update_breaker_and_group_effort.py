@@ -356,7 +356,7 @@ _PHASE_HELPERS = (
     "_apply_breaker_and_record_metrics",
 )
 # The helpers those phases call in turn, each holding or gating a collective of its own.
-_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_narrow_corrected_mask_and_record")
+_NESTED_HELPERS = ("_recompute_logps_and_routing", "_apply_is_correction", "_narrow_corrected_mask_and_record")
 _RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
 
 
@@ -485,7 +485,7 @@ def test_an_eval_scores_each_problem_at_one_level_whatever_the_draw_order():
 
 def test_bind_episode_effort_prefers_the_context_level():
     def level(context, effort):
-        env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=lambda level: None)
+        env = types.SimpleNamespace(reasoning_effort=effort)
         return bind_episode_effort(context, env, max_tokens=1000).level
 
     assert level({"reasoning_effort": "high"}, "random") == "high"

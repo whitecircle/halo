@@ -26,6 +26,12 @@ def format_field_names(template: str) -> set[str]:
     return names
 
 
+def hint_literal_bytes(template: str) -> int:
+    """UTF-8 bytes of ``template`` outside its fields. A token spans at least one byte, so this bounds the tokens the
+    literal text encodes to; a field's value is the dataset's and has no bound here."""
+    return sum(len(literal.encode()) for literal, _, _, _ in string.Formatter().parse(template))
+
+
 def privileged_hint(template: str, **slots: Any) -> str | None:
     """``None`` when a slot the template names is blank (it states its slots as fact); a slot the caller does not
     supply raises ``KeyError``."""

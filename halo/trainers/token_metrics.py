@@ -4,14 +4,15 @@ world in one all-reduce per log, and the attention work is read once per optimiz
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Iterator, Mapping
 from typing import Any
 
 import torch
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
-from halo.runtime.ranks import is_global_main_process
+from halo.runtime.ranks import get_global_world_size, is_global_main_process
 from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,48 @@ def effective_loss_mask(masks: Mapping[str, torch.Tensor | Any]) -> torch.Tensor
     return completion_mask if tool_mask is None else completion_mask * tool_mask
 
 
+def count_attended_tokens(inputs: Mapping[str, torch.Tensor | Any]) -> torch.Tensor | int:
+    """Real tokens of a batch, summed over its token groups (``input_ids`` and every ``<group>_input_ids``): the
+    group's ``attention_mask`` sum, else its ``row_lengths`` (rows a collator padded after packing), else its last
+    ``cu_seq_lens_q`` offset (a flattened row), else its element count, which only an unpadded batch can mean.
+    A device tensor, never read on the host; ``0`` for a batch with no group."""
+    total = 0
+    for key, ids in inputs.items():
+        if not key.endswith("input_ids") or not isinstance(ids, torch.Tensor):
+            continue
+        prefix = key[: -len("input_ids")]
+        mask = inputs.get(f"{prefix}attention_mask")
+        row_lengths = inputs.get(f"{prefix}row_lengths")
+        offsets = inputs.get(f"{prefix}cu_seq_lens_q")
+        if mask is not None and mask.shape == ids.shape:
+            total = total + mask.sum()
+        elif row_lengths is not None:
+            total = total + row_lengths.sum()
+        elif offsets is not None and offsets.dim() == 1:
+            total = total + offsets[-1]
+        else:
+            total = total + ids.numel()
+    return total
+
+
+class _TimedIterator:
+    """Reports the host seconds each ``next`` blocks, the end of an epoch included."""
+
+    def __init__(self, iterator: Iterator, report: Callable[[float], None]):
+        self._iterator = iterator
+        self._report = report
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        start = time.perf_counter()
+        try:
+            return next(self._iterator)
+        finally:
+            self._report(time.perf_counter() - start)
+
+
 class TokenMetricsMixin:
     # Set by the first ``training_step``: the efficiency callback binds here and hands over the layout.
     _attention_work_bound: bool = False
@@ -34,24 +77,38 @@ class TokenMetricsMixin:
     # ``(model, non-embedding parameter count)`` for :meth:`floating_point_ops`, set on its first call.
     _flops_parameter_count: tuple | None = None
     # This rank's input tokens not yet summed into ``state.num_input_tokens_seen`` (HF's ``"all"`` mode).
-    _unsummed_input_tokens: int = 0
+    _unsummed_input_tokens: int | torch.Tensor = 0
+    # Seconds this rank blocked fetching batches since the last :meth:`drain_step_work`.
+    _data_wait_seconds: float = 0.0
 
     def _track_num_input_tokens(self, inputs) -> None:
-        """In HF's ``"all"`` mode the count is a shape, so each micro-batch adds it on the host and its world sum lands
-        where it is read (each log, save and measured step); HF would gather and read it on every micro-batch."""
+        """In HF's ``"all"`` mode each micro-batch adds its attended tokens (:func:`count_attended_tokens`), padding
+        excluded, on the device, and the world sum lands where it is read (each log, save and measured step); HF
+        would gather and read the padded shape on every micro-batch."""
         if self.args.include_num_input_tokens_seen != "all":
             super()._track_num_input_tokens(inputs)
             return
-        main_input = getattr(self.model, "main_input_name", "input_ids")
-        if main_input in inputs:
-            self._unsummed_input_tokens += inputs[main_input].numel()
+        # Environmental GRPO's epoch hands rollout rows, not a tensor batch: they hold no token group to count yet.
+        if isinstance(inputs, Mapping):
+            self._unsummed_input_tokens = self._unsummed_input_tokens + count_attended_tokens(inputs)
 
-    def _sum_input_tokens(self) -> None:
-        """COLLECTIVE in HF's ``"all"`` mode."""
-        if self.args.include_num_input_tokens_seen == "all":
-            (tokens,) = world_sums([self._unsummed_input_tokens])
-            self.state.num_input_tokens_seen += int(tokens)
-            self._unsummed_input_tokens = 0
+    def time_batch_fetches(self, epoch_iterator: Iterator) -> Iterator:
+        """``epoch_iterator`` with each ``next`` timed into the step's data wait. Host clock only: a device sync would
+        hide the wait it measures."""
+        return _TimedIterator(epoch_iterator, self._add_data_wait)
+
+    def _add_data_wait(self, seconds: float) -> None:
+        self._data_wait_seconds += seconds
+
+    def _sum_input_tokens(self, extra: float = 0.0) -> float:
+        """COLLECTIVE in HF's ``"all"`` mode, where ``extra`` rides the same all-reduce and comes back as its world
+        sum; elsewhere ``extra`` comes back as given."""
+        if self.args.include_num_input_tokens_seen != "all":
+            return extra
+        tokens, extra_sum = world_sums([self._unsummed_input_tokens, extra])
+        self.state.num_input_tokens_seen += int(tokens)
+        self._unsummed_input_tokens = 0
+        return extra_sum
 
     def store_flos(self) -> None:
         """COLLECTIVE off a logged step. A logged step's one all-reduce carries the count
@@ -128,16 +185,21 @@ class TokenMetricsMixin:
         prev = getattr(self, "_local_attention_work_accum", None)
         self._local_attention_work_accum = step if prev is None else prev + step
 
-    def drain_step_work(self) -> tuple[float, int]:
-        """COLLECTIVE in HF's ``"all"`` mode, once per optimizer step. Rank-local work, as each pipeline stage costs
-        documents through its own layer slice."""
-        self._sum_input_tokens()
+    def drain_step_work(self) -> tuple[float, int, float]:
+        """COLLECTIVE in HF's ``"all"`` mode, once per optimizer step: ``(attention FLOPs, documents, data-wait
+        seconds)``. The first two are rank-local, as each pipeline stage costs documents through its own layer slice;
+        the wait is the mean over ranks."""
+        wait_sum = self._sum_input_tokens(self._data_wait_seconds)
+        self._data_wait_seconds = 0.0
+        data_wait = (
+            wait_sum / get_global_world_size() if self.args.include_num_input_tokens_seen == "all" else wait_sum
+        )
         accum = getattr(self, "_local_attention_work_accum", None)
         if accum is None:
-            return 0.0, 0
+            return 0.0, 0, data_wait
         self._local_attention_work_accum = None
         flops, documents = accum.tolist()
-        return flops, int(documents)
+        return flops, int(documents), data_wait
 
     def _extract_output_token_count(self, inputs):
         """Per-rank count of loss tokens; ``None`` for sequence-level and preference trainers, whose batches carry no

@@ -108,10 +108,10 @@ def test_the_merged_save_reloads_in_stock_transformers(recipe, monkeypatch, tmp_
     assert fro_rel_err(live_logits, base_logits) > 0.05, "the adapters moved nothing, so the fold proves nothing"
     assert fro_rel_err(merged_logits, live_logits) < 1e-3, "the merged save lost part of the trained model"
 
-    # What the flag is for: this same adapter saved unmerged has no tool that folds it.
+    # What the flag is for: this same adapter saved unmerged is refused by the in-memory merge.
     adapter_dir = str(tmp_path / "adapter")
     save_peft_adapters(context, adapter_dir)
-    with pytest.raises(ValueError, match="merge_expert_lora_on_save=True from the run's first save"):
+    with pytest.raises(ValueError, match="or set merge_expert_lora_on_save=True"):
         reject_expert_lora_adapter(adapter_dir)
 
 

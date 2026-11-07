@@ -8,15 +8,12 @@ from typing import NamedTuple
 
 import torch
 
+from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
 from halo.environments.messages import engine_view
 from halo.environments.registry import build_environment
-from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
-    VLLM_BACKEND,
-)
+from halo.environments.rollout_config import VLLM_BACKEND
 from halo.log import warn_once
 from halo.models.context_window import UNSET_MODEL_MAX_LENGTH, is_bounded_length, resolve_model_context_window
 from halo.trainers.grpo.environmental.trajectory_spans import TemplateSpanError, locate_assistant_spans
@@ -42,24 +39,19 @@ class TurnRow(NamedTuple):
     sampling_logps: torch.Tensor | None
     turn_routing: TurnRouting | None
     negative_only: bool = False
+    candidates: CandidateLogprobs | None = None
 
 
 def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> list[TurnRow]:
     return [TurnRow(*tokenized, None, None)]
 
 
-def rollout_template_kwargs(
-    rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None, budget_soft: bool = False
-) -> dict:
-    """The run's template variables plus the episode's ``reasoning_effort`` and per-turn budget (flagged soft where the
-    engine did not enforce it), so a trainer-side render reproduces the engine's."""
+def rollout_template_kwargs(rollout_kwargs: dict, reasoning_effort: str | None) -> dict:
+    """The run's template variables plus the episode's ``reasoning_effort``, so a trainer-side render reproduces the
+    engine's effort line."""
     kwargs = dict(rollout_kwargs)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
-    if reasoning_budget is not None:
-        kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
-        if budget_soft:
-            kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
     return kwargs
 
 
@@ -103,7 +95,7 @@ class TrajectoryTokenizeMixin:
             "no_reasoning_captured",
             "No assistant turn in this step carried reasoning, and the run reads it (%s): the rollout server is most "
             "likely running without a reasoning parser (or the model emits none). The reasoning floor then "
-            "scores every episode as maximal under-use, the reasoning price charges nothing, and a carried "
+            "scores every episode it charges as maximal under-use, the reasoning price charges nothing, and a carried "
             "thought is never sent. Serve with the family's reasoning parser, or turn off what reads it.",
             " and ".join(consumers),
         )
@@ -222,6 +214,7 @@ class TrajectoryTokenizeMixin:
             ),
             turn_routing=turn_routing,
             negative_only=message.untrainable,
+            candidates=message.candidates,
         )
 
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -276,12 +269,7 @@ class TrajectoryTokenizeMixin:
         )
 
     def _template_kwargs(self, trajectory) -> dict:
-        return rollout_template_kwargs(
-            self.async_config.rollout_chat_template_kwargs,
-            trajectory.reasoning_effort,
-            trajectory.reasoning_budget,
-            trajectory.reasoning_budget_soft,
-        )
+        return rollout_template_kwargs(self.async_config.rollout_chat_template_kwargs, trajectory.reasoning_effort)
 
     def _render_messages_to_ids(
         self,

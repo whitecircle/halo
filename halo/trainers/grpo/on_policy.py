@@ -17,6 +17,7 @@ from halo.model_loading.parallel.frozen_models import (
     place_and_freeze,
 )
 from halo.models.config_access import config_sources
+from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from halo.trainers.grpo.grpo_rules import reject_unhonored_trl_options, reject_unread_reference
@@ -91,6 +92,9 @@ class OnPolicyGRPOInitMixin:
     POLICY_GRADIENT_LOSS = True
     SYNCS_TO_EXTERNAL_GENERATOR = True
     REFERENCE_ALTERNATIVES = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
+    GENERATION_SHAPED_ROWS = True
+    # What the weight push stores on the rollout servers; the trainer's own weights stay bf16.
+    _rollout_weight_precision: RolloutWeightPrecision = "bf16"
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Returns ``(config, kwargs)``. TRL's Liger flag must go off before ``_init_distributed_config``, and
@@ -170,7 +174,7 @@ class OnPolicyGRPOInitMixin:
         self._validate_held_reference_model()
         self._reject_unreproducible_chunked_head()
         self._verify_full_logits_fit(self._loss_logits_width())
-        reject_unsyncable_model(self.model, self._rollout_backend)
+        reject_unsyncable_model(self.model, self._rollout_backend, self._rollout_weight_precision)
         self._install_weight_sync()
         self._disable_dropout_for_onpolicy()
 

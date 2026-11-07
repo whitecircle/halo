@@ -58,7 +58,7 @@ reference.
 ## RL runs (vLLM / SGLang)
 
 Server setup is in [Rollout Servers](rollout-servers.md), which also covers
-tool parsers, thinking budgets and port binding.
+tool parsers, reasoning caps and port binding.
 
 | Symptom | Cause → fix |
 | --- | --- |
@@ -77,7 +77,7 @@ tool parsers, thinking budgets and port binding.
 | SGLang exits at start with "Unsupported head dimensions" | GLM-4 MoE Lite on Blackwell. Start the server with `--attention-backend triton` (`SGLANG_ATTENTION_BACKEND=triton` for compose). |
 | `GENERATION is paused or wedged` at startup | A previous trainer died attached to the engine. Lift the pause (`POST /resume` on vLLM, `/continue_generation` on SGLang), or restart the container if that sync had started sending. |
 | "Excluded N of M `lora_target_modules` matches from PEFT injection" at startup | Expected. Those modules have no stock LoRA fit (a Gemma 4 vision-tower projection wrapper, DeepSeek-V4's grouped `o_a_proj`); everything else is adapted. |
-| `a vLLM thinking budget can be enforced but the importance-sampling correction is off` | Turn `train_on_sampled_tokens` and `vllm_importance_sampling_correction` back on. |
+| `a vLLM reasoning cap can be enforced but the importance-sampling correction is off` | Turn `train_on_sampled_tokens` and `vllm_importance_sampling_correction` back on. |
 | `consecutive steps produced no valid episode anywhere in the world` | Two steps in a row had nothing to train on; the message ends with the cause. `reward term 'audit' scored nothing` is a judge outage: fix `OPENROUTER_API_KEY` or the provider and resume. A rollout error points at the server or the sandbox. |
 | A `bubblewrap` sandbox fails to start (`Can't mount proc on /newroot/proc`, `loopback: Failed RTM_NEWADDR`) | The container lacks the rights the sandbox needs ([Async GRPO](training-methods/async-grpo-environments.md#the-environments) lists them). |
 

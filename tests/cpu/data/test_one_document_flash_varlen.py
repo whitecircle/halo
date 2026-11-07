@@ -157,7 +157,7 @@ def test_the_full_sequence_route_is_trls_collator(rows, pad_to_multiple_of, labe
 
 
 def test_a_wrapped_packed_row_gets_the_set():
-    """``wrapped`` packing emits no ``seq_lengths``, so the packing collator keeps each row whole, mask included: one
+    """A packed row without ``seq_lengths`` (a corpus baked by an earlier release) stays whole, mask included: one
     such row is one unpadded document."""
     with pytest.warns(UserWarning, match="seq_lengths"):
         batch = _collator(_config("flash_attention_2"), packing=True)([{"input_ids": [5, 6, 7, 8]}])

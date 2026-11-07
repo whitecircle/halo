@@ -2,19 +2,30 @@
 """The weight sync folds each LoRA layer out of place into exactly what PEFT's merge would write.
 The frozen base is never written; a layer the fold cannot reproduce, or a target the dense push skips, is refused."""
 
+import copy
+
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
+from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor, Shard, distribute_tensor
 
+from halo.distributed.lora_fold import lora_folded_data
 from halo.models.peft_adapters import lora_fold_targets, lora_folded
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
 from tests.common.adapters import adapter_param_items, randomize_adapters
-from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.ep_stubs import ReadyGatherMixin, StubEPLayerBase
+from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender, as_pushed, local_parameters, merged_by_peft, moved_parameters
 
 _DIM = 16
 _VOCAB = 32
+
+
+def _patch_embed() -> nn.Conv3d:
+    """A vision patch embedding's shape: a strided kernel over time and space."""
+    return nn.Conv3d(3, _DIM, kernel_size=(2, 4, 4), stride=(2, 4, 4))
 
 
 class _Net(nn.Module):
@@ -24,6 +35,9 @@ class _Net(nn.Module):
         super().__init__()
         self.embed_tokens = nn.Embedding(_VOCAB, _DIM)
         self.conv = nn.Conv2d(_DIM, _DIM, 1, groups=conv_groups)
+        self.conv1d = nn.Conv1d(_DIM, _DIM, 3)
+        self.conv2d = nn.Conv2d(_DIM, _DIM, 3)
+        self.conv3d = _patch_embed()
         self.proj = nn.Linear(_DIM, _DIM)
         self.lm_head = nn.Linear(_DIM, _VOCAB, bias=False)
         if tied:
@@ -53,7 +67,7 @@ class _MoeNet(nn.Module):
         return x
 
 
-class _EPExperts(StubEPLayerBase):
+class _EPExperts(ReadyGatherMixin, StubEPLayerBase):
     """The same bank on an EP layer, which the expert gather sends as it is and the dense push skips."""
 
     def __init__(self):
@@ -84,6 +98,10 @@ _CASES = {
     "embedding_dora": (_Net, {"target_modules": ["embed_tokens"], "use_dora": True}),
     "conv": (_Net, {"target_modules": ["conv"]}),
     "conv_dora": (_Net, {"target_modules": ["conv"], "use_dora": True}),
+    "conv1d": (_Net, {"target_modules": ["conv1d"]}),
+    "conv2d_kernel": (_Net, {"target_modules": ["conv2d"]}),
+    "conv3d": (_Net, {"target_modules": ["conv3d"]}),
+    "conv3d_dora": (_Net, {"target_modules": ["conv3d"], "use_dora": True}),
     "tied_head": (lambda: _Net(tied=True), {"target_modules": ["lm_head", "proj"]}),
     "tied_both": (lambda: _Net(tied=True), {"target_modules": ["embed_tokens", "lm_head"]}),
     "two_adapters": (_Net, {"target_modules": ["proj", "embed_tokens"]}),
@@ -194,6 +212,43 @@ def test_a_peft_target_the_dense_push_skips_is_refused():
         reject_unsyncable_model(model, "vllm")
     with pytest.raises(ValueError, match="does not send through its dense push"):
         gather_and_send_weights(model, RecordingSender())
+
+
+class _PatchEmbed(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.proj = _patch_embed()
+
+    def forward(self, x):  # pragma: no cover - never called
+        return x
+
+
+def _fold_sharded_conv(rank: int, use_dora: bool) -> None:
+    """Base and adapters sharded on dim 0 across two ranks, as FSDP2 holds them."""
+    torch.manual_seed(0)
+    model = get_peft_model(_PatchEmbed(), LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], use_dora=use_dora))
+    randomize_adapters(model, std=0.1)
+    expected = merged_by_peft(copy.deepcopy(model))
+    mesh = init_device_mesh("cpu", (2,))
+    for module in model.modules():
+        for key, param in list(module._parameters.items()):
+            if param is None:
+                continue
+            module._parameters[key] = nn.Parameter(
+                distribute_tensor(param.data, mesh, [Shard(0)]), requires_grad=param.requires_grad
+            )
+    targets = lora_fold_targets(model)
+    for name, param in model.named_parameters():
+        if id(param) in targets:
+            folded = lora_folded_data(param, targets)
+            assert isinstance(folded, DTensor), "the fold must stay sharded like its base"
+            assert torch.equal(folded.full_tensor(), expected[name]), f"rank {rank}: {name} differs from PEFT's merge"
+
+
+@pytest.mark.parametrize("use_dora", [False, True], ids=["lora", "dora"])
+def test_a_sharded_conv_adapter_folds_to_peft_merge(use_dora):
+    """A DTensor convolution convolves each rank's shard of the rank dimension, so the fold gathers the adapter first."""
+    run_gloo_ranks(_fold_sharded_conv, 2, use_dora)
 
 
 if __name__ == "__main__":

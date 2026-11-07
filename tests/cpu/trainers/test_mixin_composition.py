@@ -13,6 +13,7 @@ from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 from halo.trainers.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.token_metrics import TokenMetricsMixin
 
 # name -> the sub-mixin that must own it, so an owner change stays MRO-visible from the composed class.
 _OWNERSHIP = {
@@ -212,6 +213,12 @@ def test_super_calls_reach_the_base_trainer():
                 f"super().{name}() from {mixin.__name__} resolves to {owner.__name__}, not the base Trainer — "
                 f"a sibling mixin now intercepts it."
             )
+
+
+def test_step_guard_timing_seam_is_carried_by_the_trainer_mixin():
+    """The guard's ``get_batch_samples`` calls ``time_batch_fetches``, which only the token-metrics mixin owns."""
+    assert _owner(DistributedTrainerMixin, "time_batch_fetches") is TokenMetricsMixin
+    assert _owner(DistributedTrainerMixin, "get_batch_samples") is NonFiniteStepGuardMixin
 
 
 def test_sibling_mixins_declare_no_overlapping_methods():

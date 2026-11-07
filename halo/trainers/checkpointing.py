@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from functools import partial
 
 import torch.nn as nn
-from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
+from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, SaveStrategy, rotate_checkpoints
 
 from halo.checkpoint.atomic import apply_umask_mode
 from halo.checkpoint.config_export import finalize_exported_config
@@ -21,14 +21,17 @@ from halo.checkpoint.parallel.completeness import (
     trainer_state_withheld,
 )
 from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
+from halo.checkpoint.parallel.disk_budget import verify_checkpoint_disk_space
 from halo.checkpoint.parallel.optimizer import OptimizerShardStore
 from halo.checkpoint.parallel.resume_source import resolve_resume_checkpoint
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases, save_lr_scheduler
+from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
 from halo.checkpoint.weights_source import config_schema_source
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.tokenizer_setup import pristine_model_max_length
 from halo.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
 from halo.models.config_access import config_export_ready, restore_config_fields
@@ -147,6 +150,19 @@ class CheckpointingMixin:
             logger.info(f"Loading best model from {checkpoint} (parallelism-aware)")
         self._load_from_checkpoint(checkpoint, for_best_model=True)
 
+    def _verify_save_disk_space(self) -> None:
+        """COLLECTIVE. Refuse a run whose output volume cannot hold its rotation peak of checkpoints."""
+        if self.args.save_strategy == SaveStrategy.NO:
+            return
+        verify_checkpoint_disk_space(
+            self._checkpoint_context(),
+            self.args.output_dir,
+            resolve_training_dtype(self.args),
+            save_total_limit=self.args.save_total_limit,
+            save_optimizer=not self.args.save_only_model,
+            writes_optimizer_shards=self._optimizer_store().writes_shards,
+        )
+
     def _save_checkpoint(self, model, trial):
         """COLLECTIVE. Hold rotation, the Hub push and ``trainer_state.json`` until the resume adapter, sidecars and
         optimizer shards are written, so a preemption leaves this checkpoint passed over on resume."""
@@ -258,10 +274,12 @@ class CheckpointingMixin:
             # The base save has no re-emission seam, so restore the sinks FA2 drops to None and the config's run-scoped
             # router mutations for the write, and keep save_pretrained from re-adding a prefix a text-only load
             # stripped.
+            base_model = base_transformers_model(ctx.model)
             with (
                 gpt_oss_sinks_restored(ctx.model),
                 config_export_ready(getattr(ctx.model, "config", None)),
-                save_pretrained_layout(base_transformers_model(ctx.model)),
+                save_pretrained_layout(base_model),
+                save_pretrained_on_save_rank(base_model),
             ):
                 super().save_model(output_dir, _internal_call=_internal_call)
             # A family-less vendor config (Bailing/Ling) or a source-schema family (Step-3.7) saved single-GPU/DDP is

@@ -67,7 +67,7 @@ _PACKAGE_FREE_UNITS = frozenset({"cli"})
 # Per package, the order its members import in, bottom to top: a member imports only members of lower rows.
 _MEMBER_ORDERS = {
     "distributed": (
-        ("group_layout", "mesh", "nvlink", "grad_reduce"),
+        ("group_layout", "mesh", "nvlink", "grad_reduce", "lora_fold"),
         ("fsdp", "tensor_parallel", "expert_parallel"),
         ("rank_uniform_env", "context_parallel"),
         ("parallelism_rules",),

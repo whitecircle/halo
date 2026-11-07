@@ -683,6 +683,7 @@ def test_rollout_manager_round_robin():
         env_config={},
         server_urls=["http://server1:8000", "http://server2:8000", "http://server3:8000"],
         rollout_config=RolloutConfig(),
+        max_concurrent_rollouts=2,
     )
 
     # Stand-in actors: the real ones would need a live Ray cluster.

@@ -182,7 +182,7 @@ runtime tensors; the family's `ExpertLayout` then writes them as it would withou
 - GptOss re-interleaves.
 - Contiguous-halves families concatenate gate and up along dim 2 and transpose back from matmul
   convention.
-- GLM4/Laguna/LFM2/Qwen3-Next (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
+- GLM4/GLM-5 Next/Laguna/LFM2/Qwen3-Next (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
 - Qwen3/Bailing (`SEPARATE_GLU`) write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
 - Nemotron-H (`SEPARATE_MLP`) writes per-expert `experts.{i}.{up,down}_proj.weight`.
 

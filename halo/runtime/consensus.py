@@ -47,6 +47,30 @@ def run_on_rank0_raising_everywhere(
         raise exc_type(failure) from cause
 
 
+def store_run_on_rank0_raising_everywhere(
+    tag: str, step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
+) -> None:
+    """COLLECTIVE over the c10d store (same tag, same order on every rank): :func:`run_on_rank0_raising_everywhere`
+    bounded by ``DIST_STORE_TIMEOUT_HOURS`` instead of the NCCL watchdog, for a ``step`` that waits on servers."""
+    failure: str | None = None
+    cause: Exception | None = None
+    if is_global_main_process():
+        try:
+            step()
+        except Exception as e:  # every failure must reach the peers
+            cause, failure = e, describe(e) or type(e).__name__
+    if is_multi_rank_run():
+        rank, world = get_global_rank(), get_global_world_size()
+        phase = StorePhase(f"verdict/{tag}", "world", rank, world, store_timeout())
+        try:
+            records = phase.arrive_and_wait(failure)
+        finally:
+            phase.finish([])
+        failure = records[0] if records else None
+    if failure is not None:
+        raise exc_type(failure) from cause
+
+
 def refusal_text(error: Exception) -> str:
     """A check's own refusal (a ``ValueError``) verbatim; any other failure with its type, which ``str`` drops."""
     return str(error) if isinstance(error, ValueError) else f"{type(error).__name__}: {error}"

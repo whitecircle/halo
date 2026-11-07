@@ -12,12 +12,13 @@ from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from tests.common.ep_stubs import ReadyGatherMixin
 
 LAYER_PATH = "mlp"
 NUM_EXPERTS, HIDDEN, INTERMEDIATE = 2, 6, 4
 
 
-class _LagunaEPLayerStub(EPMoELayerBase):
+class _LagunaEPLayerStub(ReadyGatherMixin, EPMoELayerBase):
     """A gatherable stand-in for the EP-wrapped Laguna block, built on the base (``EPLagunaMoELayer.__init__`` needs
     live EP process groups). ``gather_expert_state_dict`` ignores the device, since this test asserts key spelling."""
 

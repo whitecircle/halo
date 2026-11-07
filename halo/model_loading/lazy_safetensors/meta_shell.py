@@ -101,6 +101,16 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
     return model
 
 
+def config_only_parameter_bytes(
+    model_class, config, dtype: torch.dtype, *, trust_remote_code: bool, revision: str | None = None
+) -> int:
+    """Bytes of the parameters ``model_class`` builds from ``config`` alone at ``dtype``, fp32 pins included: no weight
+    is read. Raises :class:`MetaShellBuildError` for a class the meta device cannot build."""
+    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, revision)
+    shell = _instantiate_from_config_on_meta(model_class, config, resolve_load_dtype(dtype, config), trust_remote_code)
+    return sum(p.numel() * p.element_size() for p in shell.parameters())
+
+
 def _materialize_nonpersistent_buffers_from_config_twin(
     model: nn.Module, model_class, config, dtype, trust_remote_code: bool, **model_kwargs
 ) -> None:

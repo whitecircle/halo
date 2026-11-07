@@ -31,9 +31,10 @@ is no fenced-code-block fallback.
 
 - A submission that passes every hidden test ends the episode, as reaching `max_submissions` does. A later
   submission in the same turn is not graded.
-- A program identical to one this episode already graded is refused unrun and returned to its budget
-  (`episode/identical_resubmissions`); comments, trailing whitespace and blank lines are no change. The offline
-  re-grader does not count it either.
+- A program identical to one this episode already graded is not regraded: its reply repeats that grade under
+  `Identical to submission k, already graded: …` (`episode/identical_resubmissions`). It is an ordinary submission
+  otherwise: it spends one of `max_submissions`, pays the resubmission price, and its turn trains. Comments and
+  trailing whitespace are no change. The offline re-grader gives it its slot.
 
 ## Refused calls
 
@@ -44,10 +45,10 @@ A call is refused when:
   `submit_solution` past `max_submissions` in the same turn
   `Error: Not graded: this task's submission budget is spent.`;
 - its arguments do not bind: an undeclared argument such as `language` on a single-language run
-  (`Error: <tool>: unknown argument 'language'; …`), a list or object as `code` or `stdin`, or a `language`
-  outside the run's list;
-- its program is [evidently in another language](#evident-language) than its `language` names;
-- it resubmits a graded program: `Error: Not graded: this program is identical to one already graded …`.
+  (`Error: <tool>: unknown argument 'language'; …`), a list or object as `code` or `stdin`, a `language`
+  outside the run's list, or a value ending in its own closing tag (a `stdin` ending `</stdin>`, see
+  [Argument binding](../../protocols/native-tool-use.md#argument-binding));
+- its program is [evidently in another language](#evident-language) than its `language` names.
 
 A refused call pays `tool_error_penalty`, never `tool_success_reward`. It spends its turn but none of
 `max_test_calls` or `max_submissions`, and grades nothing. A turn whose every call was refused or unknown is

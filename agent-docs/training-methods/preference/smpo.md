@@ -49,7 +49,7 @@ output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 
 `max_length` is the total budget and defaults to `1024`; `null` or a non-positive value resolves it to the context window. An unset `max_prompt_length` takes half of it and `max_completion_length` the remainder. Shares summing past `max_length` are rejected at construction — the two truncate independently. Prompts cut per `truncation_mode` (`keep_end`), completions from the end; a completion cut by `max_completion_length` carries no EOS.
 
-`padding_free` is SMPO's one multi-document row, so `allow_cross_document_linear_attention` without it raises. It needs a varlen Flash Attention kernel and raises on anything else, including the `sdpa` the script defaults to off Blackwell (and for a remote-code checkpoint) under `reset_sinks: true` outside CP. It is also incompatible with CP, PP and VLM runs, and refused on an M-RoPE decoder (Qwen3.5/3.6, text towers included) on every backend, as for SFT (`reject_mrope_padding_free`, [Collators](../../data/collators.md)).
+`padding_free` is SMPO's one multi-document row, so `allow_cross_document_linear_attention` without it raises. It needs a varlen Flash Attention kernel and raises on anything else, including the `sdpa` the script defaults to off Blackwell (and for a remote-code checkpoint) under `reset_sinks: true` outside CP. It is also incompatible with CP, PP and VLM runs.
 
 Under PP the percentile clips are refused, since a quantile over the whole batch half changes with the microbatch split: set `lower_clip_percentile: null` (its default is `0.02`) and leave `upper_clip_percentile` unset; `min_log_prob` stays. VLM runs and PEFT are refused too ([Rejected combinations](../../parallelism/pipeline-parallelism.md#rejected-combinations)).
 

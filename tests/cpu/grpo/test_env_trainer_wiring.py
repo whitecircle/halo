@@ -44,13 +44,13 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     trainer.use_vllm = False
     trainer._rollout_env = SimpleNamespace(
         reasoning_effort=None,
-        thinking_budget_for_effort=lambda level: None,
-        thinking_budget_enforced=lambda level: True,
+        reasoning_terms_for_effort=lambda level: (None, 0.0),
         get_tools_schema=lambda: None,
         TOOLS_ARRIVE_ON_RESET=False,
     )
     trainer._tokenizer = word_level_tokenizer([_STOP])
     trainer.model = torch.nn.Module()
+    trainer.parallelism_config = SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     trainer.callback_handler = CallbackHandler([], trainer.model, trainer._tokenizer, None, None)
     return trainer
 

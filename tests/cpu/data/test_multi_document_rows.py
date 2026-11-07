@@ -66,14 +66,6 @@ _RULES = {
         "padding_free requires a varlen",
         {"attn": FA2},
     ),
-    "mrope-padding-free": (
-        TINY_DENSE_FAMILIES["qwen3_5"],
-        "padding_free",
-        FA2,
-        {},
-        "rotates by M-RoPE",
-        {"mode": "packing"},
-    ),
     "compressed-kv": (TINY_MOE_FAMILIES["deepseek_v4"], "packing", FA2, {}, "pool KV over windows", {"mode": None}),
     "segment-aware-kernels": (
         TINY_DENSE_FAMILIES["qwen3_5"],
@@ -245,9 +237,8 @@ def _sft_main(tmp_path, yaml_body: str, checkpoint_config, *, kernels_missing: b
             "packing=True on attn_implementation='sdpa'",
         ),
         ("packing: true\n", TINY_DENSE_FAMILIES["qwen3_5"], None, True, "causal_conv1d unavailable"),
-        ("padding_free: true\n", TINY_DENSE_FAMILIES["qwen3_5"], None, False, "rotates by M-RoPE"),
     ],
-    ids=["dense-packing", "segment-aware-kernels", "mrope-padding-free"],
+    ids=["dense-packing", "segment-aware-kernels"],
 )
 def test_the_sft_script_refuses_the_rows_before_its_distributed_init(
     tmp_path, yaml_body, family, attn_impl, kernels_missing, match

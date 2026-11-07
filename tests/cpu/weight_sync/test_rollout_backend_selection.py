@@ -200,8 +200,9 @@ def test_vllm_payload_still_carries_them():
 
 
 def test_dropped_thinking_budget_is_announced_once(caplog):
-    """The budget here came from ``reasoning_effort_profiles``, since ``rollout_max_thinking_tokens`` is rejected for
-    SGLang. The template still renders it, so dropping it silently leaves a cap nothing enforces."""
+    """The cap here is the turn less its answer room (``rollout_max_answer_tokens``), since
+    ``rollout_max_thinking_tokens`` is rejected for SGLang. Dropping it silently would leave a cap the config states
+    and nothing enforces."""
     engine_wire._thinking_budget_unenforced_warned.discard("sglang")
     try:
         with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):

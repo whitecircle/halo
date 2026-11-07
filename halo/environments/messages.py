@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
+from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.episode_keys import EPISODE_INVALID_KEY
 
 TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
@@ -63,6 +64,7 @@ class Message:
     # Engine captures, dropped by to_dict; ``routing_mask`` stays raw base64, cheap to pickle through Ray.
     token_ids: list[int] | None = None
     token_logprobs: list[float] | None = None
+    candidates: CandidateLogprobs | None = None
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None
@@ -134,7 +136,7 @@ class Message:
 
 def engine_view(messages: Sequence[Message], carry_reasoning: bool) -> list[Message]:
     """Every message's visible text and, with ``carry_reasoning``, the last assistant turn's reasoning, so a request
-    grows by at most one reasoning budget. The rollout observation and the trainer's re-render both use this."""
+    grows by at most one turn's reasoning. The rollout observation and the trainer's re-render both use this."""
     last = max((i for i, m in enumerate(messages) if m.role == "assistant"), default=None)
     return [
         m if m.thinking is None or (carry_reasoning and i == last) else replace(m, thinking=None)
@@ -149,11 +151,9 @@ class Trajectory:
     done: bool = False
     truncated: bool = False
     info: dict[str, Any] = field(default_factory=dict)
-    # The generation contract the rollout stamps, so a re-render states the level and budget the model ran under
-    # (soft: stated, never enforced by the engine); the trainer's under-use floor is a share of the budget.
+    # The level the rollout stamps, so a re-render states what the model ran under and the reasoning terms read the
+    # level's budget and price.
     reasoning_effort: str | None = None
-    reasoning_budget: int | None = None
-    reasoning_budget_soft: bool = False
 
     _assistant_count: int = field(default=0, repr=False)
 

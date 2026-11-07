@@ -41,14 +41,17 @@ def vllm_pynccl_disabled() -> bool:
 class UniqueIdStore:
     """Rank 0's rendezvous store, carrying only the NCCL unique id."""
 
-    def __init__(self, store: TCPStore, world_size: int):
+    def __init__(self, store: TCPStore, world_size: int, listener: RendezvousListener):
         self._store: TCPStore | None = store
+        self._listener = listener
         self.world_size = world_size
 
     @classmethod
     def create(cls, *, host: str, listener: RendezvousListener, world_size: int) -> "UniqueIdStore":
         """Host the store on ``listener`` and block until every engine worker joined it."""
-        return cls(listener.start_store(host, world_size, timeout_s=_STORE_TIMEOUT_S, use_libuv=False), world_size)
+        return cls(
+            listener.start_store(host, world_size, timeout_s=_STORE_TIMEOUT_S, use_libuv=False), world_size, listener
+        )
 
     def publish(self, unique_id: ncclUniqueId) -> None:
         if self._store is None:
@@ -59,6 +62,7 @@ class UniqueIdStore:
         """Release the listener so the group port can be rebound, even while a thread parked in ``ncclCommInitRank``
         still holds this object; idempotent."""
         self._store = None
+        self._listener.free_port()
 
 
 class PyNcclCommunicator:

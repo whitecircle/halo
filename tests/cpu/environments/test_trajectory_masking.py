@@ -233,7 +233,7 @@ def test_episode_generation_tokens_mean_max_p90():
         for v in vals
     ]
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = SimpleNamespace(truncation_alarm_rate=None)
+    host.async_config = SimpleNamespace(truncation_alarm_rate=None, episode_error_rate_limit=None)
     host._metrics = {"train": defaultdict(list)}
     host._log_rollout_metrics(results, "train", [[] for _ in vals])
     m = host._metrics["train"]

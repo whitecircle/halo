@@ -59,9 +59,9 @@ class _EPLayerStub(EPMoELayerBase):
     def forward(self, hidden_states, **kwargs):  # pragma: no cover - never called
         return hidden_states
 
-    def gather_expert_state_dict(self, *, device="cpu", merge_lora: bool = False, retain: bool = True) -> dict:
+    def start_gather_expert_state_dict(self, *, device="cpu", **kwargs):
         """The real gather, pinned to CPU."""
-        return super().gather_expert_state_dict(device="cpu", merge_lora=merge_lora, retain=retain)
+        return super().start_gather_expert_state_dict(device="cpu", **kwargs)
 
 
 @pytest.fixture(autouse=True)

@@ -123,6 +123,7 @@ def _is_host(clip_max: float):
         types.SimpleNamespace(
             vllm_importance_sampling_clip_max=clip_max,
             _is_correction=True,
+            _score_centering=None,
             _isr_mask_config=types.SimpleNamespace(any_mask_active=False),
             _metrics={"train": defaultdict(list)},
         )
@@ -169,7 +170,7 @@ def test_a_truncation_point_at_one_leaves_no_band_and_logs_no_extreme_fraction()
 class _RoundHost(rm.RolloutMetricsMixin):
     def __init__(self, alarm_rate, *, mask_truncated: bool = False):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
-        self.async_config = types.SimpleNamespace(truncation_alarm_rate=alarm_rate)
+        self.async_config = types.SimpleNamespace(truncation_alarm_rate=alarm_rate, episode_error_rate_limit=None)
         self.args = types.SimpleNamespace(mask_truncated_completions=mask_truncated)
 
 

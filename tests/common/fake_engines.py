@@ -1,13 +1,18 @@
 """HTTP stand-ins for the rollout engines' control planes; each acts on a request before replying, so a scripted
 failure keeps its state change."""
 
+import base64
+import io
 import json
+import pickle
 import re
 import threading
+import time
 from collections import deque
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import numpy as np
 import torch
 from torch.distributed import TCPStore
 
@@ -21,6 +26,13 @@ from tests.common.repo import REPO_ROOT
 GRAPH_CAPTURE_TOKENS = 512
 # Tells a request's retries apart from new requests.
 CALL_ID_HEADER = "X-Halo-Call-Id"
+
+
+def candidate_distribution(k: int, sampled: int) -> tuple[list[int], list[float]]:
+    """A one-token reply's top ``k`` of a toy vocabulary (probabilities 1/2, 1/4, ... with ``sampled`` the largest), as
+    ids and log-probs, descending."""
+    ids = [sampled] + [sampled + 1 + j for j in range(k - 1)]
+    return ids, [-(j + 1) * float(np.log(2.0)) for j in range(k)]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -40,7 +52,7 @@ class _Handler(BaseHTTPRequestHandler):
 class FakeEngineServer:
     """One engine's routes on a loopback port, with failures scripted per path. ``status[path]`` answers every request;
     ``replies[path]`` answers the next ones first. ``refuse`` answers 503 before the engine acts; ``hold`` keeps the
-    reply until :meth:`release`."""
+    reply until :meth:`release`; ``delay_s[path]`` delays each reply."""
 
     CLIENT_CLASS: type[WeightSyncClientBase]
     # vLLM's raw default, its processed mode (temperature and nucleus renormalization), or SGLang's (temperature only).
@@ -53,6 +65,9 @@ class FakeEngineServer:
         self.moe_backend = "triton"
         self.reasoning_parser = ""
         self.tool_call_parser = "family"
+        self.dtype = "bfloat16"
+        # Empty for a server that runs unquantized.
+        self.quantization = ""
         # The prompt ids a chat completion's reply carries.
         self.render_prompt = lambda body: [1, 2, 3]
         self.captures_routing = False
@@ -72,6 +87,7 @@ class FakeEngineServer:
         self.replies: dict[str, deque[int]] = {}
         self.refuse: set[str] = set()
         self.hold: set[str] = set()
+        self.delay_s: dict[str, float] = {}
         self._released = threading.Event()
         self._lock = threading.Condition()
         self._httpd = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
@@ -105,6 +121,8 @@ class FakeEngineServer:
                 scripted = self.replies.get(path)
                 code = scripted.popleft() if scripted else self.status.get(path, code)
             self._lock.notify_all()
+        if path in self.delay_s:
+            time.sleep(self.delay_s[path])
         if path in self.hold:
             self._released.wait()
         payload = json.dumps(reply).encode()
@@ -194,6 +212,9 @@ class FakeVLLMServer(FakeEngineServer):
         self.version = self.VERSION
         self.update_open = False
         self.world_size = 1
+        self.pp_size = 1
+        # The launch id a restart changes; reported only when set, as an engine whose id the client never read.
+        self.instance_id: str | None = None
         self.strict_tool_calling = False
         self.returns_token_ids = True
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
@@ -209,9 +230,20 @@ class FakeVLLMServer(FakeEngineServer):
             if self.toolkit_image:
                 env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
             config = {
+                **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
+                "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
+                "parallel_config": {
+                    "tensor_parallel_size": 8,
+                    "data_parallel_size": 1,
+                    "enable_expert_parallel": True,
+                    "pipeline_parallel_size": self.pp_size,
+                },
+                "scheduler_config": {"max_num_seqs": 256, "max_num_batched_tokens": 16384},
+                "attention_config": {"backend": "FLASH_ATTN"},
+                "compilation_config": {"mode": "VLLM_COMPILE", "cudagraph_mode": "FULL_AND_PIECEWISE"},
             }
             return 200, {"vllm_env": env, "vllm_config": config}
         if (method, path) == ("POST", "/v1/chat/completions"):
@@ -236,6 +268,8 @@ class FakeVLLMServer(FakeEngineServer):
             for _ in range(self.world_size):
                 threading.Thread(target=self._join_store, args=address, daemon=True).start()
             return 200, {}
+        if method == "POST" and path == "/shutdown_weight_transfer_engine":
+            return 200, {}
         if method == "POST" and path in ("/pause", "/resume"):
             self.paused = path == "/pause"
             return 200, {}
@@ -257,6 +291,25 @@ class FakeVLLMServer(FakeEngineServer):
     def close(self) -> None:
         super().close()
         self.joined_stores.clear()
+
+
+class _TensorUnpickler(pickle.Unpickler):
+    """SGLang's SafeUnpickler narrowed to what a tensor dict needs; storage arrives as torch's own serialized bytes."""
+
+    _ALLOWED = {
+        ("builtins", "dict"),
+        ("collections", "OrderedDict"),
+        ("torch._utils", "_rebuild_tensor_v2"),
+        ("torch", "BFloat16Storage"),
+        ("torch", "bfloat16"),
+    }
+
+    def find_class(self, module, name):
+        if (module, name) == ("torch.storage", "_load_from_bytes"):
+            return lambda data: torch.load(io.BytesIO(data), weights_only=True)
+        if (module, name) not in self._ALLOWED:
+            raise RuntimeError(f"Blocked unsafe global ({module}.{name}) during pickle deserialization")
+        return super().find_class(module, name)
 
 
 class FakeSGLangServer(FakeEngineServer):
@@ -283,24 +336,82 @@ class FakeSGLangServer(FakeEngineServer):
         super().__init__()
         self.tp_size = 1
         self.dp_size = 1
+        self.pp_size = 1
+        # The message a weight update answers 400 with, as the engine does when its loader rejects a chunk.
+        self.update_failure: str | None = None
         self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
+        # Set to launch the server with --enable-lora; the facts /server_info then reports.
+        self.lora: dict | None = None
+        # Adapters loaded, by name: the config and the tensors each load carried.
+        self.adapters: dict[str, tuple[dict, dict[str, torch.Tensor]]] = {}
+        # The ``model`` of every chat completion, in arrival order.
+        self.completion_models: list[str] = []
+        # Whether the image answers return_flat_raw_output_top_logprobs; an older one ignores the field.
+        self.flat_top_logprobs = True
+        self.generate_lora_paths: list[str | None] = []
+        # The launch facts /server_info reports for the frozen base.
+        self.served_model_name = "org/policy"
+        self.model_path = "/models/policy"
+        self.revision: str | None = None
+
+    def restart(self) -> None:
+        """A process restart: the registry and the weight-update groups are gone."""
+        self.adapters.clear()
+        self.groups.clear()
+        self.session_open = False
+        self.paused = False
+
+    def _load_adapter(self, body: dict) -> tuple[int, dict]:
+        if self.lora is None:
+            return 400, {"success": False, "error_message": "LoRA is not enabled. Please set `--enable-lora`."}
+        if body["lora_name"] in self.adapters:
+            return 400, {"success": False, "error_message": f"{body['lora_name']} is already loaded"}
+        if len(body["serialized_named_tensors"]) < self.tp_size:
+            return 500, {"success": False, "error_message": "one serialized copy per tensor-parallel rank is needed"}
+        raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
+        tensors = _TensorUnpickler(io.BytesIO(raw)).load()
+        if body["config_dict"]["r"] > self.lora["max_lora_rank"]:
+            return 400, {"success": False, "error_message": "incompatible with the current LoRA memory pool"}
+        self.adapters[body["lora_name"]] = (body["config_dict"], tensors)
+        return 200, {"success": True}
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
+        if (method, path) == ("GET", "/v1/models"):
+            _, reply = super().answer(method, path, body)
+            reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
+            return 200, reply
+        if (method, path) == ("POST", "/load_lora_adapter_from_tensors"):
+            return self._load_adapter(body)
+        if (method, path) == ("POST", "/unload_lora_adapter"):
+            if body["lora_name"] not in self.adapters:
+                return 400, {"success": False, "error_message": f"{body['lora_name']} was never loaded"}
+            del self.adapters[body["lora_name"]]
+            return 200, {"success": True}
         if (method, path) == ("GET", "/server_info"):
             info = {
                 "tp_size": self.tp_size,
                 "dp_size": self.dp_size,
+                "pp_size": self.pp_size,
                 "moe_runner_backend": self.moe_backend,
                 # SGLang reports a parser it has none of as null.
                 "reasoning_parser": self.reasoning_parser or None,
                 "tool_call_parser": self.tool_call_parser or None,
                 "enable_return_routed_experts": self.captures_routing,
                 "enable_torch_compile": self.torch_compile,
+                "dtype": self.dtype,
+                "quantization": self.quantization or None,
+                "max_running_requests": 256,
+                "attention_backend": "flashinfer",
+                "served_model_name": self.served_model_name,
+                "model_path": self.model_path,
+                "revision": self.revision,
             }
             if self.toolkit_image:
                 info["halo_patches"] = True
+            if self.lora is not None:
+                info.update(enable_lora=True, **self.lora)
             return 200, info
         if method != "POST":
             return super().answer(method, path, body)
@@ -325,12 +436,40 @@ class FakeSGLangServer(FakeEngineServer):
         if path == "/update_weights_from_distributed":
             if not self.session_open:
                 return 400, {"message": "must run between begin_weight_update() and end_weight_update()"}
+            if body["group_name"] not in self.groups:
+                return 400, {"message": f"weight update group {body['group_name']} is not registered"}
+            if self.update_failure is not None:
+                return 400, {"success": False, "message": self.update_failure}
             return 200, {}
         if path == "/flush_cache":
             return 200, {}
         if path == "/v1/chat/completions":
-            return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
+            self.completion_models.append(body.get("model"))
+            _, _, adapter = (body.get("model") or "").partition(":")
+            if adapter and adapter not in self.adapters:
+                return 400, {
+                    "object": "error",
+                    "message": f"Got LoRA adapter that has never been loaded: {adapter}\n"
+                    f"All loaded adapters: dict_keys({sorted(self.adapters)}).",
+                    "type": "BadRequestError",
+                    "param": None,
+                    "code": 400,
+                }
+            choice = {"message": {"content": "x"}, "prompt_token_ids": self.render_prompt(body)}
+            if body.get("top_logprobs") and body.get("return_flat_raw_output_top_logprobs") and self.flat_top_logprobs:
+                ids, logps = candidate_distribution(body["top_logprobs"], 7)
+                choice["meta_info"] = {
+                    "output_token_logprobs": [[logps[0], 7, None]],
+                    "output_top_logprobs_val_flat_b64": base64.b64encode(np.asarray(logps, "<f4").tobytes()).decode(),
+                    "output_top_logprobs_idx_flat_b64": base64.b64encode(np.asarray(ids, "<i4").tobytes()).decode(),
+                    "output_top_logprobs_val_flat_b64_dtype": "float32",
+                    "output_top_logprobs_idx_flat_b64_dtype": "int32",
+                    "output_top_logprobs_shape": [1, len(ids)],
+                    "output_top_logprobs_null_prefix": 0,
+                }
+            return 200, {"choices": [choice]}
         if path == "/generate" and body.get("return_logprob"):
+            self.generate_lora_paths.append(body.get("lora_path"))
             # [logprob, token_id, text] per input token from logprob_start_len; the window's first entry is its anchor
             # and carries None.
             shift = self.prefill_shift(len(body["input_ids"]))

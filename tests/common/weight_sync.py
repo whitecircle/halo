@@ -13,17 +13,21 @@ from torch import nn
 from torch.distributed.tensor import DTensor
 from transformers import CONFIG_MAPPING, PretrainedConfig
 
+from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_int, env_str
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.dtensor import materialize_dtensor, to_local
-from halo.trainers.grpo.rollout.weight_push import _HubForwarder
+from halo.trainers.grpo.rollout.weight_push import _HubForwarder, gather_and_send_weights
 from halo.weight_sync.chunking import resolve_sync_device
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
+from tests.common.parallelism import single_process_ep_config
 from tests.common.ports import free_port
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 # ``or`` rather than an env_str default: an exported-but-empty variable passes the conftest gate, which reads it the
 # same way.
@@ -156,7 +160,7 @@ class RecordingSender:
     def scope_co_load_groups(self, module_names) -> None:
         pass
 
-    def update_named_param(self, name: str, data: torch.Tensor) -> None:
+    def update_named_param(self, name: str, data: torch.Tensor, *, owned: bool = False) -> None:
         value = data.detach().clone() if self.keep_values else None
         self.params.append(ForwardedParam(name, tuple(data.shape), isinstance(data, DTensor), value))
 
@@ -169,6 +173,23 @@ class RecordingSender:
     @property
     def names(self) -> list[str]:
         return [param.name for param in self.params]
+
+
+def ep_model(family: str, overrides: dict | None = None) -> nn.Module:
+    """A tiny model of ``family`` under single-process EP layers, in bf16 as the trainer holds it."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(torch.bfloat16)
+    apply_ep_layers(model, single_process_ep_config())
+    assert named_ep_layers(model), f"{family}: no EP layer to gather"
+    return model
+
+
+def pushed_values(model: nn.Module) -> dict[str, torch.Tensor]:
+    """Every tensor one push forwards, by hub name; a name sent twice raises."""
+    sender = RecordingSender(keep_values=True)
+    gather_and_send_weights(model, sender)
+    assert len(sender.names) == len(set(sender.names)), "a tensor was forwarded twice"
+    return {param.name: param.value for param in sender.params}
 
 
 def local_parameters(
@@ -225,6 +246,18 @@ def as_pushed(model: nn.Module, tensors: dict[str, torch.Tensor]) -> dict[str, t
     if guard.reason is not None:
         raise RuntimeError(f"the sync's forwarder refused the expected tensors: {guard.reason}")
     return {param.name: param.value for param in recorder.params}
+
+
+@contextmanager
+def gathering_on_the_host() -> Iterator[None]:
+    """The push asks for its experts on the GPU, which the CPU tier does not have."""
+    start = EPGatherMixin.start_gather_expert_state_dict
+
+    def on_host(self, *, device="cpu", **kwargs):
+        return start(self, device="cpu", **kwargs)
+
+    with patch.object(EPGatherMixin, "start_gather_expert_state_dict", on_host):
+        yield
 
 
 @contextmanager

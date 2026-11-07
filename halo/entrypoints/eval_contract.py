@@ -16,7 +16,7 @@ from halo.configs.script_arguments import ModelArguments
 from halo.environments.engine_wire import reject_unenforceable_thinking_budget
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.eval_runner import trajectory_path, write_trajectories_jsonl
-from halo.environments.reasoning_effort import efforts_by_level, has_thinking_budget
+from halo.environments.reasoning_effort import efforts_by_level, has_thinking_cap
 from halo.environments.rollout_config import (
     VLLM_BACKEND,
     RolloutConfig,
@@ -56,7 +56,7 @@ class TrainingContract:
 
     def rollout_config(self, env: EnvironmentBase) -> RolloutConfig:
         """The run's ``RolloutConfig`` for an eval of ``env``, stop tokens resolved by the trained tokenizer. A vLLM
-        thinking budget a level of ``env`` draws is refused where vLLM cannot enforce it, and has the eval capture
+        reasoning cap the run binds is refused where vLLM cannot enforce it, and has the eval capture
         sampled ids to count reasoning as training does; routing is never captured. The eval joins no process group, so
         no NCCL watchdog bound."""
         cfg, model = self.async_config, self.model_config
@@ -67,8 +67,8 @@ class TrainingContract:
             max_episode_tokens=cfg.rollout_max_episode_tokens,
             max_answer_tokens=cfg.rollout_max_answer_tokens,
         )
-        budgeted = cfg.rollout_backend == VLLM_BACKEND and has_thinking_budget(efforts)
-        if budgeted:
+        capped = cfg.rollout_backend == VLLM_BACKEND and has_thinking_cap(efforts)
+        if capped:
             hf_config = AutoConfig.from_pretrained(
                 model.model_name_or_path, revision=model.model_revision, trust_remote_code=model.trust_remote_code
             )
@@ -77,13 +77,13 @@ class TrainingContract:
                 resolve_weight_sync_client(cfg.rollout_backend).UNENFORCEABLE_THINKING_BUDGET_MODEL_TYPES,
             )
         tokenizer = None
-        if budgeted or cfg.rollout_stop_tokens:
+        if capped or cfg.rollout_stop_tokens:
             tokenizer = AutoTokenizer.from_pretrained(
                 model.model_name_or_path, trust_remote_code=model.trust_remote_code
             )
         reasoning_end_token_id = (
             resolve_reasoning_end_token_id(find_reasoning_end_ids(tokenizer, cfg.rollout_reasoning_end_token))
-            if budgeted
+            if capped
             else None
         )
         rollout = cfg.get_rollout_config(
@@ -91,7 +91,12 @@ class TrainingContract:
             reasoning_end_token_id=reasoning_end_token_id,
             in_process_group=False,
         )
-        return replace(rollout, capture_token_ids=reasoning_end_token_id is not None, capture_routed_experts=False)
+        return replace(
+            rollout,
+            capture_token_ids=reasoning_end_token_id is not None,
+            capture_candidate_logprobs=0,
+            capture_routed_experts=False,
+        )
 
 
 def load_training_contract(path: str | None) -> TrainingContract | None:
@@ -111,17 +116,15 @@ def rollout_config_from_args(
     env: EnvironmentBase,
     *,
     default_temperature: float,
-    default_max_tokens: int,
 ) -> RolloutConfig:
-    """The training run's :class:`RolloutConfig` under ``--training_config``, else one from the script's defaults, with
-    the served model name and every explicit sampling flag laid over it."""
+    """The training run's :class:`RolloutConfig` under ``--training_config``, else one from the script's temperature and
+    the training rollout's other defaults, with the served model name and every explicit sampling flag laid over it."""
     if contract is not None:
         base = contract.rollout_config(env)
     else:
         base = RolloutConfig(
             temperature=default_temperature,
             top_p=RolloutConfig.top_p,
-            max_tokens=default_max_tokens,
             request_timeout=REQUEST_TIMEOUT_SECONDS,
         )
     explicit = {name: getattr(args, name) for name in _SAMPLING_FLAGS if getattr(args, name) is not None}

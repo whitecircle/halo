@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Seams that keep packed-batch inputs intact on their way into a trainer.
-Hand-built collators skip the factory, so the trainer runs the CP, compressed-KV, M-RoPE and linear-attention gates."""
+Hand-built collators skip the factory, so the trainer runs the CP, compressed-KV, dense-backend and linear-attention gates."""
 
 import contextlib
 import types
@@ -129,21 +129,22 @@ def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(roo
 
 
 @pytest.mark.parametrize(
-    ("collator_class", "flattens"),
-    [
-        (DataCollatorWithFlattening, True),
-        (DataCollatorWithFlatteningAndCompletionMask, True),
-        (DataCollatorWithPacking, False),
-    ],
+    "collator_class",
+    [DataCollatorWithFlattening, DataCollatorWithFlatteningAndCompletionMask, DataCollatorWithPacking],
 )
-@pytest.mark.parametrize(
-    ("model_type", "mrope"), [("qwen3_5", True), ("qwen3_5_moe_text", True), ("qwen3_next", False)]
-)
-def test_a_hand_built_padding_free_collator_reaches_the_mrope_gate(collator_class, flattens, model_type, mrope):
-    """A flattened M-RoPE row faults the flash varlen kernels, read through a composite wrapper too."""
+@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe_text", "qwen3_next"])
+def test_a_hand_built_flattening_collator_on_a_gated_delta_net_decoder_passes_on_flash(collator_class, model_type):
+    """An M-RoPE decoder takes a flattened row on a flash backend like any other GatedDeltaNet decoder."""
     model = types.SimpleNamespace(config=_on_flash(CONFIG_MAPPING[model_type]()))
-    with pytest.raises(ValueError, match="M-RoPE") if flattens and mrope else contextlib.nullcontext():
-        _construct_sft(cp=False, model=model, collator=object.__new__(collator_class))
+    _construct_sft(cp=False, model=model, collator=object.__new__(collator_class))
+
+
+@pytest.mark.parametrize("collator_class", [DataCollatorWithFlattening, DataCollatorWithFlatteningAndCompletionMask])
+def test_a_hand_built_flattening_collator_on_a_dense_backend_is_refused(collator_class):
+    config = CONFIG_MAPPING["qwen3_5"]()
+    config._attn_implementation = "sdpa"
+    with pytest.raises(ValueError, match="padding_free requires a varlen"):
+        _construct_sft(cp=False, model=types.SimpleNamespace(config=config), collator=object.__new__(collator_class))
 
 
 _ROOTS = [(DataCollatorWithPacking, "packing"), (DataCollatorWithFlattening, "padding_free")]

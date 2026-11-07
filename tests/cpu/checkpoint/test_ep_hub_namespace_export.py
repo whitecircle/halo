@@ -188,7 +188,7 @@ def _gather_on_cpu(layer: EPMoELayerBase):
     """The sync asks for the GPU, and the family's assembly is what is under test."""
 
     def gather(device, **kwargs):
-        return type(layer).gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
+        return type(layer).start_gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
 
     return gather
 
@@ -199,7 +199,7 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
     family declares (``engine_loaded_buffers``)."""
     loaded = _loaded(name, tmp_path)
     for layer in loaded.ep_layers.values():
-        layer.gather_expert_state_dict = _gather_on_cpu(layer)
+        layer.start_gather_expert_state_dict = _gather_on_cpu(layer)
     sender = _RecordingSender()
     gather_and_send_weights(loaded.model, sender)
 

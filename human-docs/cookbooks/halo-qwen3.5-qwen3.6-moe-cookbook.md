@@ -143,10 +143,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   `eval_loss` reads about 3.3 at step 0 on Qwen3.6-35B-A3B and about 0.83 after two updates. Train and serve under the
   same render.
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
-- **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
-  leaves the XML tool calls as text, and the run stops by its second round. The code-contests recipes run soft
-  thinking budgets, whose ceiling needs `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
-  ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
+- **Tool parser and reasoning cap.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
+  leaves the XML tool calls as text, and the run stops by its second round. The code-contests recipes cap each
+  turn's reasoning at the answer room's edge, which needs `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
+  ([Reasoning caps and budgets](../training-methods/async-grpo-environments.md#reasoning-caps-and-budgets)).
 - **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and
   only `rollout_max_tokens` bounds a turn.
 

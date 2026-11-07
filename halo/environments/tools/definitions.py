@@ -33,12 +33,13 @@ class ToolDisabled(ToolBudgetExhausted):
 class ToolArgumentError(TypeError):
     """Model-authored arguments the tool refuses, raised before the handler runs (or by a handler,
     :class:`ToolCallRefused`), so the model reads ``Error: <tool>: missing a required argument: 'code'`` instead of a
-    Python signature. Booked like :class:`ToolBudgetExhausted`."""
+    Python signature; a value ending in the closing tag of a parameter that refuses one (``stdin`` ending
+    ``</stdin>``) is refused too. Booked like :class:`ToolBudgetExhausted`."""
 
 
 class ToolCallRefused(ToolArgumentError):
-    """A handler refusing an admitted call, returned to the budget (code contests: a program already graded, or
-    evidently in another language than its call names)."""
+    """A handler refusing an admitted call, returned to the budget (code contests: a program evidently in another
+    language than its call names)."""
 
 
 # What refuses a call unrun: expected control flow, logged without a traceback.
@@ -61,13 +62,16 @@ def parse_python_expression(source: str) -> ast.expr:
 @dataclass
 class ToolParameter:
     """``type`` is the JSON-schema type, ``None`` where a schema declares none (an MCP property typed through ``anyOf``
-    or ``$ref``), which takes any value."""
+    or ``$ref``), which takes any value. ``refuse_closing_tag`` refuses a ``string`` value ending in ``</name>``, the
+    call syntax leaked into it: opt-in, since a parameter of an external tool may legitimately end in markup (an
+    ``svg`` in ``</svg>``)."""
 
     name: str
     type: str | None
     description: str
     enum: list[str] | None = None
     required: bool = True
+    refuse_closing_tag: bool = False
 
 
 @dataclass
@@ -152,6 +156,13 @@ class NativeTool:
                     )
                 else:
                     bound[parameter.name] = value = str(value)
+                    # Markup the call's own syntax leaked into the value: run as given, it is input the program was
+                    # never meant to read, and stripped silently, a habit nothing prices.
+                    if parameter.refuse_closing_tag and value.rstrip().endswith(f"</{parameter.name}>"):
+                        raise ToolArgumentError(
+                            f"{self.name}: not run — the {parameter.name} argument ends with a stray "
+                            f"`</{parameter.name}>` tag, which is no part of its value; send it again without the tag"
+                        )
             # The schema is the contract the model was shown: a missing required parameter or an out-of-enum value is
             # refused before the handler and the budget, even where the handler has its own default.
             if parameter.required and parameter.name not in bound:

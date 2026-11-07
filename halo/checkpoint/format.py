@@ -30,6 +30,8 @@ _NUMBERED_SHARD_FILE_RE = re.compile(
 )
 # A renaming writer's in-flight parts: outside HF's final pattern, inside the sweep's glob.
 STREAM_PART_PREFIX = "model-streaming"
+# A striped gathered save gives each writer its own prefix, so the writers share one directory without coordinating.
+_STRIPE_WRITER_PART = "model-writer{}"
 # Each stage picks its own part prefix without coordinating, since a global k-of-n is not derivable locally once a
 # stage emits a variable number of parts.
 PP_WRAPPER_PART_PREFIX = "model-wrapper"
@@ -141,6 +143,10 @@ def hf_shard_filename(part: int, total_parts: int, *, indexed: bool = False) -> 
 
 def stream_part_filename(prefix: str, part_index: int) -> str:
     return f"{prefix}-{part_index:05d}.safetensors"
+
+
+def stripe_writer_part_prefix(writer_index: int) -> str:
+    return _STRIPE_WRITER_PART.format(f"{writer_index:05d}")
 
 
 def pp_stage_part_prefix(pp_rank: int, pp_size: int) -> str:

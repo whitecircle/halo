@@ -58,7 +58,7 @@ card(
     card_height(4),
     "Ray actors: same node, CPU",
     [
-        "num_rollout_workers actors per training rank",
+        "rollout_actor_budget actors per node, split over its ranks",
         "each holds the environment: tools, sandbox, grader",
         "no tokenizer: the engine renders the template",
         "max_concurrent_rollouts bounds in-flight episodes",
@@ -214,7 +214,7 @@ card(
     card_height(5),
     "Ray actors: no GPU needed",
     [
-        "num_rollout_workers ÷ world_size per rank",
+        "rollout_actor_budget ÷ rollout ranks, cluster-wide",
         "soft-pinned to the rank's node, then spills",
         "each holds the environment and its tools",
         "POST /v1/chat/completions, round-robin",
@@ -232,7 +232,7 @@ card(
     "Config",
     [
         'ray_address: "ray-head:6379"',
-        "num_rollout_workers: 64",
+        "rollout_actor_budget: 64",
         "rollout_server_configs:",
         '  - {url: "http://inf1:8000", group_port: 51216}',
         '  - {url: "http://inf2:8000", group_port: 51217}',

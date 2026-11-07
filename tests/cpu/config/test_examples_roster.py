@@ -4,6 +4,7 @@ timeouts against the documented watchdog, the allocator setting, and against the
 export, context-window and shape contracts. Checks run through the production seam."""
 
 import ast
+import json
 import math
 import re
 from pathlib import Path
@@ -19,7 +20,6 @@ from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
-    padded_wire_hidden,
     reject_oversized_dispatch,
 )
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
@@ -36,7 +36,7 @@ from halo.models.attention.selection import (
 from halo.models.config_access import text_config
 from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
-from halo.models.moe.config_fields import has_routed_experts, resolve_dispatch_width, resolve_router_topk
+from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.dataloaders import uses_dp_sharded_loader
 from halo.trainers.sft_rules import reject_unsupported_mtp_options
@@ -300,10 +300,13 @@ def test_example_parallelism_shape_is_accepted(config):
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_thinking_budget_has_a_server_side_parser(config):
-    """``rollout_max_thinking_tokens`` rides on vLLM's ``thinking_token_budget``, which needs a reasoning parser
-    loaded, so the launch instructions must name its flag. Without it every episode errors with a 400 and nothing
-    raises at config time."""
-    if raw_config(config).get("rollout_max_thinking_tokens") is None:
+    """A turn's reasoning cap (``rollout_max_thinking_tokens``, or on vLLM the turn less its
+    ``rollout_max_answer_tokens``) rides on vLLM's ``thinking_token_budget``, which needs a reasoning parser loaded,
+    so the launch instructions must name its flag. Without it every episode errors with a 400 and nothing raises at
+    config time."""
+    raw = raw_config(config)
+    answer_room_cap = raw.get("rollout_max_answer_tokens") is not None and raw.get("rollout_backend") != "sglang"
+    if raw.get("rollout_max_thinking_tokens") is None and not answer_room_cap:
         return
     assert "--reasoning-parser" in comment_block(config), (
         "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
@@ -320,6 +323,26 @@ def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
         return
     tokenizer = load_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
     resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
+
+
+# Run-wide spellings of what each level's effort profile carries (``reasoning_budget``, ``reasoning_price``).
+_RETIRED_REASONING_KNOBS = {
+    "reasoning_price": {"low": 0.008, "medium": 0.006, "high": 0.004},
+    "reasoning_price_past_budget": True,
+}
+
+
+@pytest.mark.parametrize("knob", sorted(_RETIRED_REASONING_KNOBS))
+def test_a_run_wide_reasoning_price_knob_is_refused_at_parse(knob, tmp_path):
+    """The per-level price and budget live in ``environment_kwargs.reasoning_effort_profiles``; no run-wide
+    spelling is migrated, so a recipe still carrying one fails at parse instead of training unpriced."""
+    recipe = next(config for config in ENV_GRPO_EXAMPLES if "code-contests" in config.name)
+    parser = parser_for(script_for(recipe))
+    parser.parse_yaml_file(str(recipe))
+    stale = tmp_path / recipe.name
+    stale.write_text(f"{recipe.read_text(encoding='utf-8')}\n{knob}: {json.dumps(_RETIRED_REASONING_KNOBS[knob])}\n")
+    with pytest.raises(ValueError, match=rf"\['{knob}'\]"):
+        parser.parse_yaml_file(str(stale))
 
 
 def test_a_weight_sync_example_exists():
@@ -426,31 +449,36 @@ def eval_forward_rows(parsed: tuple, parallelism, trainer_cls: type) -> int:
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_eval_batch_fits_the_dispatch_budget(config):
-    """The load gate sizes a forward off the training batch, and an evaluation forward dispatches through the same
-    wire index and, across NVLink domains, the same Gin ceiling. An eval batch past either fails at the first eval."""
+    """The load gate sizes a forward off the training batch, and an evaluation forward dispatches under the same
+    Gin ceiling across NVLink domains. An eval batch past it fails at the first eval."""
     parsed, parallelism = build_parallelism_config(config)
     row_length = bounded_row_length(*parsed)
     if parallelism.ep_size <= 1 or row_length is None:
         pytest.skip("no expert dispatch, or a run that declares no row length")
-    decoder = text_config(model_config_for(config, parsed))
     for trainer_cls in script_trainer_classes(script_for(config)):
-        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length // parallelism.cp_size
-        reject_oversized_dispatch(
-            ep_dispatch_capacity(tokens),
-            num_topk=resolve_router_topk(decoder),
-            padded_hidden=padded_wire_hidden(resolve_dispatch_width(decoder)),
-            spans_domains=parallelism.requires_rdma,
-        )
+        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length
+        reject_oversized_dispatch(ep_dispatch_capacity(tokens), spans_domains=parallelism.requires_rdma)
 
 
 def test_a_train_batch_past_the_dispatch_budget_is_refused():
     """Against the load gate the shape checks reach: without a declared budget it would pass any batch."""
-    config = EXAMPLES_ROOT / "sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml"
+    config = EXAMPLES_ROOT / "sft/inkling/inkling-small-multinode-ep16.yaml"
     parsed, parallelism = build_parallelism_config(config, train_batch=4)
-    with pytest.raises(ValueError, match="32-bit wire-index"):
+    assert parallelism.requires_rdma, "precondition: the group spans NVLink domains"
+    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
         reject_unsupported_model(
             parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
         )
+
+
+def test_a_node_local_train_batch_has_no_dispatch_ceiling():
+    """The same oversized batch within one NVLink domain is dispatchable."""
+    config = EXAMPLES_ROOT / "sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml"
+    parsed, parallelism = build_parallelism_config(config, train_batch=64)
+    assert not parallelism.requires_rdma
+    reject_unsupported_model(
+        parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
+    )
 
 
 def test_an_eval_batch_counts_one_microbatch_under_pipeline_parallelism():

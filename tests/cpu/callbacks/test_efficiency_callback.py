@@ -11,6 +11,7 @@ import torch.nn as nn
 from halo.callbacks import efficiency, factory
 from halo.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMetrics, ThroughputMetrics
 from halo.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
+from halo.diagnostics import phase_timers
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
 from halo.hardware import _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
@@ -125,7 +126,7 @@ class _HostClock:
 @pytest.fixture
 def clock(monkeypatch) -> _HostClock:
     host = _HostClock()
-    monkeypatch.setattr(efficiency, "time", host)
+    monkeypatch.setattr(phase_timers, "time", host)
     return host
 
 
@@ -524,6 +525,8 @@ _LOGGED_KEYS = (
     "avg_tokens_per_second",
     "step_cluster_tokens_per_second",
     "avg_cluster_tokens_per_second",
+    "step_data_wait_seconds",
+    "avg_data_wait_seconds",
     "allocated_gb",
     "reserved_gb",
     "peak_allocated_gb",

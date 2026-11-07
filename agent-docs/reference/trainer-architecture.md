@@ -17,7 +17,7 @@ its concern:
 | `checkpointing.py` | `CheckpointingMixin`: save / resume over an explicit `CheckpointContext`, the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
 | `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
 | `evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
-| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device accumulator) and HF's input-token count (`include_num_input_tokens_seen: all`, added up on the host), summed over the world in one all-reduce per log, the input tokens also before each save and at each step the [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback) measures; the per-document attention-work accumulator the MFU attention term reads; HF's `total_flos` estimate, with its parameter count walked once per model, summed in the log's all-reduce and on its own at a save and at the end of training (`store_flos`); `effective_loss_mask` |
+| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device accumulator) and HF's input-token count (`include_num_input_tokens_seen: all`, counted as attended tokens by `count_attended_tokens` and added up on the device), summed over the world in one all-reduce per log, the input tokens also before each save and at each step the [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback) measures, where the step's data-wait seconds ride the same all-reduce (the host time of every `next` the train loop makes, timed in `NonFiniteStepGuardMixin.get_batch_samples`, the one seam every trainer draws its window through); the per-document attention-work accumulator the MFU attention term reads; HF's `total_flos` estimate, with its parameter count walked once per model, summed in the log's all-reduce and on its own at a save and at the end of training (`store_flos`); `effective_loss_mask` |
 | `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `_fsdp_excluded_params`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
 | `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
 | `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
@@ -122,6 +122,7 @@ SDPG, reward and classification; SMPO, KTO, teacher distillation and embedding a
 and self-distillation under EP only. A **No** PP trainer is refused at config time
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
+`DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
 `SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
@@ -568,7 +569,11 @@ The `halo/trainers/grpo/` package keeps the online trainer (`online.py`), the `o
 packages, and these shared leaves at the top level: `on_policy.py`, the constructor spine
 (`OnPolicyGRPOInitMixin`) and generation-round geometry (`GenerationRoundMixin`) both on-policy trainers
 compose; `grpo_rules.py`, their construction refusals as pure `reject_*` functions called ahead of TRL's
-constructor; `early_stop.py`; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
+constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase spans and their report at each log) and
+`row_span_stash.py` (`RowSpanStashMixin`, the round's row spans), both composed by the on-policy trainers ahead of
+`DistributedTrainerMixin`; `packed_rounds.py` (`PackedRoundMixin`, the packed micro-batches' plan, slot layout and bin-by-bin
+scoring), `packed_rules.py` (their refusals), `microbatch_plan.py` and `row_order.py` (the row permutation and the loss types
+that admit a regrouping of rows), which both on-policy trainers share; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
 `halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
@@ -588,7 +593,7 @@ frozen-reference scores).
 `BatchBuildFence`), `importance_sampling.py` (`ImportanceSamplingMixin`: the engine-to-trainer ratio, its mask
 stages, the engine re-score and the trust-region breaker), `reasoning.py` (`ReasoningBudgetMixin`: the per-level
 thinking contract and the rollout rewards with the reasoning length terms charged), `routing_replay.py` (the
-routing-replay injector and `RoutingReplayMixin`), `async_rollouts.py` (`AsyncRolloutMixin`: Ray actors, the prefetch
+routing-replay injector and `RoutingReplayMixin`), `rollout_routing.py` (the round's ragged per-row routing, R2's captured or R3's engine), `async_rollouts.py` (`AsyncRolloutMixin`: Ray actors, the prefetch
 thread, engine weight sync), `trajectory_tokenize.py` and `trajectory_spans.py` (`TrajectoryTokenizeMixin`:
 trajectory → training rows), and `rollout_metrics.py` (`RolloutMetricsMixin`: completion logs and per-episode
 diagnostics).
@@ -606,7 +611,7 @@ vLLM package ([generation](../training-methods/grpo/online.md#server-mode-only))
 
 TRL's default only unfolds DTensors when its `DistributedBackend.is_fsdp` flag is set (an accelerate
 `fsdp_plugin`). FSDP2 is applied manually via `fully_shard` with accelerate in MULTI_GPU mode, so
-the default forwards DTensors verbatim, and the `torch.cat` in `packed_broadcast_producer` triggers
+the default forwards DTensors verbatim, and the `torch.cat` in `pack_tensors` triggers
 a DTensor dispatch that deadlocks against the trainer↔vLLM NCCL group.
 
 `_generate_single_turn` broadcasts the per-rank rollout result from the TP-group leader; without it

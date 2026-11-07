@@ -90,14 +90,22 @@ def attention_target_modules(model_name: str, revision: str | None = None) -> li
 
 def mixer_linear_leaves(model: torch.nn.Module) -> list[str]:
     """Leaf names of every ``nn.Linear`` under a token mixer: the targets of a tiny single-file checkpoint with no
-    index to read."""
-    return sorted(
-        {
-            match.group(1)
-            for name, module in model.named_modules()
-            if isinstance(module, torch.nn.Linear) and (match := _MIXER_MODULE_RE.search(name))
-        }
-    )
+    index to read. A leaf a convolution also ends in (a vision patch embedding's ``proj`` convolution) is
+    dropped, since PEFT matches by suffix and would adapt that module too."""
+    named = list(model.named_modules())
+    linear_leaves = {
+        match.group(1)
+        for name, module in named
+        if isinstance(module, torch.nn.Linear) and (match := _MIXER_MODULE_RE.search(name))
+    }
+    shared = {
+        leaf
+        for name, module in named
+        if isinstance(module, (torch.nn.Conv1d, torch.nn.Conv2d, torch.nn.Conv3d))
+        for leaf in linear_leaves
+        if name.endswith(f".{leaf}")
+    }
+    return sorted(linear_leaves - shared)
 
 
 def _mode_targets(mode: str, model_name: str, revision: str | None) -> list[str]:

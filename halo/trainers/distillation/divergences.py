@@ -257,6 +257,23 @@ def token_divergence(
     return map_token_chunks(per_token, student_logits, teacher_logits, *labels)
 
 
+def projected_token_divergence(
+    loss_fn: Callable,
+    student_logits: torch.Tensor,
+    teacher_hidden: torch.Tensor,
+    project: Callable[[torch.Tensor], torch.Tensor],
+    temperature: float,
+) -> torch.Tensor:
+    """:func:`token_divergence` with the teacher's logits projected from its ``[B, T, H]`` hidden states one token chunk
+    at a time, so no teacher ``[B, T, V]`` plane exists. ``project`` runs again when backward recomputes a chunk, so it
+    must be valid then and take no gradient."""
+
+    def per_token(student: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        return _vocab_summed_divergence(loss_fn, student, project(hidden), temperature)
+
+    return map_token_chunks(per_token, student_logits, teacher_hidden)
+
+
 def token_divergence_and_cross_entropy(
     loss_fn: Callable,
     student_logits: torch.Tensor,

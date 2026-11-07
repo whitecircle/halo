@@ -467,16 +467,21 @@ def test_a_full_conversion_refuses_a_hub_repo_before_any_load(
         module.main()
 
 
-def test_an_expert_lora_adapter_still_reaches_its_own_refusal_with_the_flag_unset(tmp_path: Path):
-    """Resolving the default reads the adapter first, and PEFT's config class raises a bare KeyError on this type."""
+def test_an_expert_lora_adapter_takes_the_streaming_merge_with_the_flag_unset(tmp_path: Path, monkeypatch):
+    """The in-memory merge would drop the grouped expert deltas, so the tool streams without loading a model."""
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text(
         json.dumps({"peft_type": EXPERT_LORA_PEFT_TYPE, "base_model_name_or_path": "acme/base-model"})
     )
+    streamed: list[str] = []
+    monkeypatch.setattr(
+        adapter_merge, "merge_adapter_streaming", lambda adapter_dir, *_, **__: streamed.append(adapter_dir)
+    )
 
-    with pytest.raises(ValueError, match="merge_expert_lora_on_save"):
-        adapter_merge.merge_peft_adapter(str(adapter), str(tmp_path / "out"))
+    adapter_merge.merge_peft_adapter(str(adapter), str(tmp_path / "out"))
+
+    assert streamed == [str(adapter)]
 
 
 @pytest.mark.parametrize(

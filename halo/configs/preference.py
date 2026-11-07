@@ -126,8 +126,7 @@ class SMPOConfig(
         metadata={
             "help": "Flatten the batch into one varlen sequence instead of padding it. Needs a "
             "varlen Flash Attention kernel (FA2/FA3/FA4) and raises on any other implementation, "
-            "the sdpa the script defaults to under reset_sinks: true included. Incompatible with CP, PP and VLM runs, "
-            "and refused on an M-RoPE decoder (Qwen3.5/3.6)."
+            "the sdpa the script defaults to under reset_sinks: true included. Incompatible with CP, PP and VLM runs."
         },
     )
     max_length: int | None = field(

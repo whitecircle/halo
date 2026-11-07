@@ -16,7 +16,12 @@ from halo.checkpoint.config_export import save_model_config
 from halo.checkpoint.format import EP_SHARD_KEY_INFIX, ep_shard_filename, ep_sharded_index_metadata
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
 from halo.checkpoint.parallel.context import CheckpointContext
-from halo.checkpoint.parallel.writing import gather_hand_sliced_params, stream_gathered_checkpoint
+from halo.checkpoint.parallel.writing import (
+    WriterStripe,
+    gather_hand_sliced_params,
+    resolve_writer_stripe,
+    stream_gathered_checkpoint,
+)
 from halo.checkpoint.writing import (
     merge_shard_index,
     reconcile_tie_word_embeddings,
@@ -26,11 +31,12 @@ from halo.checkpoint.writing import (
 from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.lora_fold import lora_folded_data
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
 from halo.models.external_tables import named_external_tables
 from halo.models.moe.family_specs import find_moe_family_spec, moe_model_types
 from halo.models.param_roles import persistent_buffers
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
+from halo.models.peft_adapters import LoraFolds, lora_fold_targets
 from halo.models.unwrapping import (
     base_transformers_model,
     plain_peft_param_name,
@@ -75,11 +81,13 @@ def _ep_gathered_chunks(
     lora_folds: LoraFolds | None,
     cast: Callable[[str, torch.Tensor], torch.Tensor],
     *,
-    retain: bool,
+    stripe: WriterStripe,
     merge_lora: bool,
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: the non-expert tensors, then one chunk per EP layer's gather, live-named. Only ``retain`` keeps the
-    host copies; the walk is name-based, so dropping an adapter skips its collective on every rank alike."""
+    """COLLECTIVE: the non-expert tensors, then one chunk per EP layer's gather, live-named. Only the stripe's owner of
+    a chunk keeps its host copies (every rank holds the layer after its all-gather); the walk is name-based, so
+    dropping an adapter skips its collective on every rank alike."""
+    retain = stripe.owns(0)
     # Anchored prefixes: an unanchored substring test could over-match a sibling param and drop it.
     ep_prefixes = tuple(f"{path}." for path, _ in ep_layers)
     # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
@@ -103,8 +111,8 @@ def _ep_gathered_chunks(
             state.setdefault(name, sink)
     yield state
     del state
-    for path, layer in ep_layers:
-        yield layer.gather_layer_state_dict(path, merge_lora=merge_lora, retain=retain)
+    for chunk, (path, layer) in enumerate(ep_layers, start=1):
+        yield layer.gather_layer_state_dict(path, merge_lora=merge_lora, retain=stripe.owns(chunk))
 
 
 def _ep_chunk_normalizer(
@@ -145,8 +153,9 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
 
     remap = _save_key_remap(cp_key_remap=ctx.parallelism_config.is_cp_mode, peft_prefix=peft_prefix)
     cast = save_dtype_caster(model, keep_live_dtype=ctx.training_checkpoint)
+    stripe = resolve_writer_stripe(is_save_rank=ctx.is_save_rank)
     chunks = _ep_gathered_chunks(
-        model, ep_layers, remap, lora_folds, cast, retain=ctx.is_save_rank, merge_lora=ctx.merges_expert_lora
+        model, ep_layers, remap, lora_folds, cast, stripe=stripe, merge_lora=ctx.merges_expert_lora
     )
     written, total_bytes = stream_gathered_checkpoint(
         model,
@@ -155,6 +164,7 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
         is_save_rank=ctx.is_save_rank,
         max_shard_size=ctx.max_shard_size,
         normalize=_ep_chunk_normalizer(model, remap, cast),
+        stripe=stripe,
     )
     if ctx.is_save_rank and is_global_main_process():
         logger.info(f"✓ Model saved to {output_dir} ({written} parameters, {total_bytes / 1e9:.2f}GB streamed)")

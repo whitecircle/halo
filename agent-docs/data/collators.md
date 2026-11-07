@@ -64,10 +64,15 @@ Whether the packed documents actually stay isolated is **per family**, not unive
 
 Where the attention path is isolated, the remaining difference between backends is cost. The non-varlen path builds a dense `[L, L]` mask over the *flattened* row, so `L` is the whole batch's token count (up to `per_device_train_batch_size × max_length`) and the mask exhausts memory at long context. `select_data_collator` **warns** there, telling you to keep `per_device_train_batch_size` at 1.
 
-It detects packed data via the `seq_lengths` field that TRL's `pack_dataset()` emits for the `bfd` and
-`bfd_split` strategies. The `wrapped` strategy emits no `seq_lengths` column at all, so each row
-collates as **one** document and anything concatenated inside it attends across itself; the collator
-warns once per instance when it sees such rows.
+It detects packed data via the `seq_lengths` field: TRL's `pack_dataset()` emits it for `bfd` and `bfd_split`, and
+`coordinated_pack` adds it to `wrapped` rows, one entry per piece of a source document, cut at document ends and at the
+row edge and summing to the row length. A document cut by the row edge is two pieces in two rows, each isolated from
+its row's other documents. The first token of a piece has no earlier token in its row to be predicted from, so its
+label is masked like any document's first token, a continuation's included; under completion-only masking a
+continuation piece holds no assistant marker and trains nothing. A continuation also restarts its `position_ids`
+at 0, so it sees none of the prefix; under completion-only masking prefer `bfd_split` over `wrapped`. Rows without `seq_lengths` (a corpus baked by an
+earlier release) collate as **one** document, so concatenated documents attend across each other; the collator warns
+once per instance when it sees such rows.
 
 Online packing (`packing: true` at training time) and the offline `prepare_dataset.py` pipeline both
 accept all three strategies (see [Pre-Processing](dataset-preparation.md#parameters)).
@@ -130,7 +135,6 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
-| padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_multi_document_collator` in `halo/trainers/trainer_rules.py`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
 | PP + packing on a model whose conv / linear-attention layers read no boundary at all (KDA, Lightning Attention-2, Inkling's short convolutions) | **rejected**, whatever `allow_cross_document_linear_attention` says — no marker reaches those layers, so they cross the kept rows' documents; the segment markers GatedDeltaNet and LFM-2 ShortConv read each stage rebuilds ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
@@ -163,6 +167,8 @@ Packing only pays off if document B's logits do not move when document A's conte
 drift is measured per family (0 = isolated) and the verdict is **not** universal: the collator emits
 correct `position_ids` everywhere, but a family's forward has to carry them into its mask, and a
 non-attention mixer carries state along the sequence regardless of any mask.
+
+The on-policy GRPO trainers' packed micro-batches (`packed_microbatch_tokens`) flatten several rows into one varlen call under these same rules, applied with no opt-in: a family whose rows cross documents (the rows below marked refused, and the families `allow_cross_document_linear_attention` would admit for SFT), compressed-KV layers, and attention that reads a token's row index are refused at construction, since a crossing RL step corrupts the policy gradient without a trace ([Packed micro-batches](../training-methods/async-grpo/performance.md#packed-micro-batches)).
 
 | Family | Attention layers | Other layers |
 |---|---|---|
@@ -276,12 +282,16 @@ A family outside the table above and the family specs gets a warning on every ba
     zero tokens at loss ≈ 0. The text probe renders both a plain and a `thinking` assistant turn, so a
     marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
 
-    The VLM collators also refuse assistant turns that end in no turn terminator
-    (`reject_untrainable_completions`): they render two exchanges through the processor's template
-    and mask them under their own span policy, so a template borrowed from another family (a Gemma
-    template on PaliGemma, whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused
-    until `eos_token` names the token it closes a turn with. The self-distillation policy runs a
-    terminator-less span to the row end, so it passes there.
+    `select_data_collator` and the VLM collators also refuse assistant turns that end in no turn
+    terminator (`reject_untrainable_completions`): they render two exchanges through the chat template
+    and mask them under the route's span policy (packed and padding-free rows run the packed policy, the
+    rest the padded one), so a template borrowed from another family (a Gemma template on PaliGemma,
+    whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused until `eos_token` names
+    the token it closes a turn with. A template that ends a turn at the next role marker (GLM's) passes
+    through the model config's terminator set. The self-distillation policy runs a terminator-less span
+    to the row end, so it passes there. The packed and padding-free routes still accept a terminator-less template
+    (their policy trains the final turn), and the offline bake and tree packing do not go through this probe, so the
+    refusal holds for padded rows.
 
 ## EOS, pad, and the response template
 

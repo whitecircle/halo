@@ -8,6 +8,7 @@ import types
 from unittest import mock
 
 import pytest
+from transformers import Qwen3Config, Qwen3ForCausalLM
 from trl import SFTTrainer
 
 import halo.model_loading.parallel.frozen_models as frozen_models
@@ -26,7 +27,7 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
-from tests.common.repo import load_script_module
+from tests.common.repo import REPO_ROOT, load_script_module
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +54,16 @@ def _sizes(config) -> str:
         f"expert_parallel_size={config.ep_size}, expert_tensor_parallel_size={config.expert_tp_size}, "
         f"tensor_parallel_size={config.tp_size}"
     )
+
+
+def _on_policy_grpo_gate(config, ref_model):
+    host = types.SimpleNamespace(
+        model=None,
+        ref_model=ref_model,
+        parallelism_config=config,
+        REFERENCE_ALTERNATIVES=DistributedOnlineGRPOTrainer.REFERENCE_ALTERNATIVES,
+    )
+    DistributedOnlineGRPOTrainer._validate_held_reference_model(host)
 
 
 def _preference_gate(config, ref_model):
@@ -150,7 +161,10 @@ def _preference_reference(config, *, precompute=False):
 
 def _on_policy_grpo_reference(config):
     loaded = _LoadedReference()
-    with mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded):
+    with (
+        mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded),
+        mock.patch.object(frozen_models, "estimate_reference_bytes", return_value=1),
+    ):
         result = load_reference_model_for_on_policy_grpo(
             types.SimpleNamespace(),
             ModelArguments(model_name_or_path="org/policy"),
@@ -190,7 +204,7 @@ def test_precomputed_reference_log_probs_load_no_reference(axes, caplog):
 
 @pytest.mark.parametrize(
     "report",
-    [lambda config: _preference_gate(config, object()), _on_policy_grpo_reference],
+    [lambda config: _preference_gate(config, object()), lambda config: _on_policy_grpo_gate(config, object())],
     ids=["preference", "on-policy-grpo"],
 )
 @pytest.mark.parametrize("axes", SHARDED.values(), ids=list(SHARDED))
@@ -215,13 +229,7 @@ def test_the_on_policy_grpo_loader_and_trainer_gate_report_one_reference_once(ca
     config = _config(ep_size=8)
     with caplog.at_level(logging.WARNING):
         result, loaded = _on_policy_grpo_reference(config)
-        host = types.SimpleNamespace(
-            model=None,
-            ref_model=result,
-            parallelism_config=config,
-            REFERENCE_ALTERNATIVES=DistributedOnlineGRPOTrainer.REFERENCE_ALTERNATIVES,
-        )
-        DistributedOnlineGRPOTrainer._validate_held_reference_model(host)
+        _on_policy_grpo_gate(config, result)
     assert result is loaded
     (message,) = _warnings(caplog)
     assert message.startswith(PREFIX) and message.endswith(ON_POLICY_GRPO_REFERENCE_ALTERNATIVES.under(config))
@@ -283,6 +291,151 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
     ):
         module.main()
     assert received["ref_model"] is loaded
+
+
+# Sizes of the unsharded reference of a model that fits no GPU, and one that fits any.
+HUGE_REFERENCE_BYTES = 800 * 10**9
+GPU_FREE_BYTES = 270 * 10**9
+HOST_AVAILABLE_BYTES = 2000 * 10**9
+
+
+def _sized_on_policy_grpo_reference(config, reference_bytes, *, gpu_free=GPU_FREE_BYTES, host=HOST_AVAILABLE_BYTES):
+    loaded = _LoadedReference()
+    with (
+        mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded) as load,
+        mock.patch.object(frozen_models, "estimate_reference_bytes", return_value=reference_bytes),
+        mock.patch.object(frozen_models.torch.cuda, "is_available", return_value=gpu_free is not None),
+        mock.patch.object(frozen_models, "current_device", return_value=0),
+        mock.patch.object(frozen_models.torch.cuda, "mem_get_info", return_value=(gpu_free, gpu_free)),
+        mock.patch.object(frozen_models, "available_host_ram_bytes", return_value=host),
+        mock.patch.object(frozen_models, "get_local_world_size", return_value=8),
+    ):
+        try:
+            result = load_reference_model_for_on_policy_grpo(
+                types.SimpleNamespace(),
+                ModelArguments(model_name_or_path="org/policy"),
+                types.SimpleNamespace(beta=0.1),
+                config,
+                None,
+                peft_config=None,
+                reset_sinks=True,
+                attn_default=None,
+            )
+        finally:
+            loaded_calls = load.call_count
+    return result, loaded_calls
+
+
+@pytest.mark.parametrize("axes", [{}, SHARDED["ep"], SHARDED["etp"], SHARDED["tp"]], ids=["fsdp2", "ep", "etp", "tp"])
+def test_a_reference_larger_than_the_gpu_share_is_refused_before_it_loads(axes):
+    """A plain FSDP2 run is covered too: the reference is never sharded, whatever shards the policy."""
+    config = _config(**axes)
+    with pytest.raises(ValueError) as excinfo:
+        _sized_on_policy_grpo_reference(config, HUGE_REFERENCE_BYTES)
+    message = str(excinfo.value)
+    assert "800 GB on every GPU" in message
+    assert "beta: 0" in message and "Offline GRPO" in message
+    assert ("use_peft" in message) is not config.is_tp_mode
+
+
+def test_a_refused_reference_never_reaches_the_loader():
+    loaded = _LoadedReference()
+    with mock.patch.object(frozen_models, "load_frozen_reference_model", return_value=loaded) as load:
+        with pytest.raises(ValueError, match="800 GB on every GPU"):
+            with (
+                mock.patch.object(frozen_models, "estimate_reference_bytes", return_value=HUGE_REFERENCE_BYTES),
+                mock.patch.object(frozen_models.torch.cuda, "is_available", return_value=True),
+                mock.patch.object(frozen_models, "current_device", return_value=0),
+                mock.patch.object(frozen_models.torch.cuda, "mem_get_info", return_value=(GPU_FREE_BYTES,) * 2),
+            ):
+                load_reference_model_for_on_policy_grpo(
+                    types.SimpleNamespace(),
+                    ModelArguments(model_name_or_path="org/policy"),
+                    types.SimpleNamespace(beta=0.1),
+                    _config(),
+                    None,
+                    peft_config=None,
+                    reset_sinks=True,
+                    attn_default=None,
+                )
+    load.assert_not_called()
+
+
+def _early_reference_check(beta, *, reference_bytes=HUGE_REFERENCE_BYTES):
+    with (
+        mock.patch.object(frozen_models, "estimate_reference_bytes", return_value=reference_bytes),
+        mock.patch.object(frozen_models.torch.cuda, "is_available", return_value=True),
+        mock.patch.object(frozen_models, "current_device", return_value=0),
+        mock.patch.object(frozen_models.torch.cuda, "mem_get_info", return_value=(GPU_FREE_BYTES,) * 2),
+        mock.patch.object(frozen_models, "available_host_ram_bytes", return_value=HOST_AVAILABLE_BYTES),
+        mock.patch.object(frozen_models, "get_local_world_size", return_value=8),
+    ):
+        frozen_models.reject_unfit_on_policy_reference(
+            ModelArguments(model_name_or_path="org/policy"), types.SimpleNamespace(beta=beta), _config()
+        )
+
+
+def test_the_reference_refusal_runs_from_the_config_before_the_policy_loads():
+    with pytest.raises(ValueError, match=r"800 GB on every GPU.*before the policy loads"):
+        _early_reference_check(0.1)
+
+
+def test_the_early_reference_check_leaves_a_run_without_a_reference_alone():
+    _early_reference_check(0.0)
+    _early_reference_check(0.1, reference_bytes=8 * 10**9)
+
+
+@pytest.mark.parametrize("script", ["environmental", "online"])
+def test_the_grpo_scripts_check_the_reference_before_loading_the_policy(script):
+    source = (REPO_ROOT / "scripts" / "training" / "grpo" / f"{script}.py").read_text()
+    assert source.index("reject_unfit_on_policy_reference(") < source.index("load_model_and_tokenizer(context")
+
+
+def test_a_reference_the_gpus_hold_but_the_node_host_cannot_stage_is_refused():
+    """Every rank of a node stages its own copy on the host before the move."""
+    with pytest.raises(ValueError, match=r"8 ranks of a node each stage ~100 GB"):
+        _sized_on_policy_grpo_reference(_config(), 100 * 10**9, host=HOST_AVAILABLE_BYTES // 3)
+
+
+def test_a_reference_that_fits_loads_unchanged():
+    result, load_calls = _sized_on_policy_grpo_reference(_config(ep_size=8), 8 * 10**9)
+    assert isinstance(result, _LoadedReference) and load_calls == 1
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "fits"),
+    [
+        ({"reference_bytes": 100, "free_device_bytes": 200, "available_host_bytes": 10**6}, True),
+        ({"reference_bytes": 101, "free_device_bytes": 200, "available_host_bytes": 10**6}, False),
+        ({"reference_bytes": 100, "free_device_bytes": None, "available_host_bytes": 10**6}, True),
+        ({"reference_bytes": 100, "free_device_bytes": None, "available_host_bytes": 900}, False),
+        ({"reference_bytes": 100, "free_device_bytes": None, "available_host_bytes": None}, True),
+    ],
+    ids=["device-at-limit", "device-over", "device-unreadable", "host-over", "nothing-readable"],
+)
+def test_the_misfit_boundaries(kwargs, fits):
+    misfit = frozen_models.resolve_reference_misfit(**kwargs, ranks_per_node=8)
+    assert (misfit is None) is fits
+
+
+def test_the_estimate_is_the_run_dtype_parameter_bytes_of_a_config_only_shell(tmp_path):
+    config = Qwen3Config(
+        vocab_size=128,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=8,
+    )
+    config.save_pretrained(tmp_path)
+    expected = sum(p.numel() for p in Qwen3ForCausalLM(config).parameters())
+    training_config = types.SimpleNamespace(bf16=True, fp16=False)
+    model_config = ModelArguments(model_name_or_path=str(tmp_path), trust_remote_code=False)
+    assert frozen_models.estimate_reference_bytes(model_config, training_config) == 2 * expected
+    assert frozen_models.estimate_reference_bytes(model_config, types.SimpleNamespace(bf16=False, fp16=False)) == (
+        4 * expected
+    )
 
 
 if __name__ == "__main__":

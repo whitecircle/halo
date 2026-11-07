@@ -42,6 +42,7 @@ from halo.models.config_access import (
     set_config_field_run_scoped,
     snapshot_config_fields,
 )
+from halo.models.context_window import bounded_row_length
 from halo.models.moe.config_fields import resolve_active_router_aux_loss_coef
 from halo.models.moe.router_logits import mark_router_logits_forced_off
 from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
@@ -193,6 +194,9 @@ class DistributedTrainerMixin(
     SUPPORTS_LOWP_PRECISION: ClassVar[bool] = False
     # Sequence rows one model call carries per dataset example; the EP dispatch gate multiplies by it.
     FORWARD_ROWS_PER_EXAMPLE: ClassVar[int] = 1
+    # Rows come from generation, so the config has no ``max_length``: the bound is :meth:`declared_row_length`, and an
+    # unbounded one is judged only where the Gin ceiling applies.
+    GENERATION_SHAPED_ROWS: ClassVar[bool] = False
     # The loss runs outside the forward with no labels (the GRPO family): no router aux term, no Liger CE.
     POLICY_GRADIENT_LOSS: ClassVar[bool] = False
     SYNCS_TO_EXTERNAL_GENERATOR: ClassVar[bool] = False
@@ -202,6 +206,12 @@ class DistributedTrainerMixin(
     LOSS_IS_OWN_MEAN: ClassVar[bool] = False
     # A trainer's way around holding a frozen reference, named by every reference warning and refusal.
     REFERENCE_ALTERNATIVES: ClassVar[ReferenceAlternatives] = PREFERENCE_REFERENCE_ALTERNATIVES
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """The longest row one forward carries as the config bounds it, or ``None`` where it does not (the model's
+        context window then bounds it); ``sources`` are further objects that carry the bound."""
+        return bounded_row_length(training_config, *sources)
 
     @classmethod
     def reject_undeclared_axes(cls, *, cp_size: int, pp_size: int) -> None:
@@ -395,6 +405,7 @@ class DistributedTrainerMixin(
         self._warn_on_zeroed_lora_dropout()
         self._configure_wrapped_model()
 
+        self._verify_save_disk_space()
         # Setup varies per rank (TP materialization, EP patching), so ranks re-align before the first step.
         barrier()
 

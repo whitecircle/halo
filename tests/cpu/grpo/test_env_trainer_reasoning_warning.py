@@ -1,6 +1,15 @@
 #!/usr/bin/env python
-"""A reasoning-consuming knob with no captured reasoning warns once per run. Without the rollout server's reasoning
-parser the floor scores maximal under-use, the price charges nothing and ``carry_reasoning`` sends nothing."""
+"""A reasoning-consuming knob with no captured reasoning warns once per run.
+
+Reasoning reaches an assistant turn only through the rollout server's reasoning parser. Without one,
+the reasoning floor scores every episode it charges as maximal under-use, the reasoning price charges
+nothing, and ``carry_reasoning`` sends nothing back — all silently. The trainer warns once, at the point
+the reasoning terms are applied, when a step's assistant turns carry no reasoning while any of the three
+is on, naming the ones that are; a step with reasoning, a step with no assistant turn, or a run with
+all three off warns nothing. The price is on where a drawn level's effort profile prices reasoning.
+
+    python tests/cpu/grpo/test_env_trainer_reasoning_warning.py
+"""
 
 import logging
 from collections import defaultdict
@@ -11,11 +20,15 @@ import torch
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.messages import Message, Trajectory
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 LOGGER = "halo.trainers.grpo.environmental.trajectory_tokenize"
+BUDGETED = {level: {"reasoning_budget": 1000} for level in VALID_REASONING_EFFORTS}
+PRICED = {level: {"reasoning_budget": 1000, "reasoning_price": 0.01} for level in VALID_REASONING_EFFORTS}
 
 
 class _StubTokenizer:
@@ -23,9 +36,12 @@ class _StubTokenizer:
         return {"input_ids": [0] * len(text)}
 
 
-def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float] | None = None):
+def _trainer(floor_weight: float, carry_reasoning: bool, profiles: dict = BUDGETED):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncRolloutConfig(reasoning_floor=floor_weight, reasoning_price=price)
+    trainer.async_config = AsyncRolloutConfig(reasoning_floor=floor_weight)
+    trainer._rollout_env = build_environment(
+        "native_math", {"reasoning_effort": "random", "reasoning_effort_profiles": profiles}
+    )
     trainer.num_generations = 1
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)
@@ -36,8 +52,8 @@ def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float]
 
 
 def _rollouts(thinkings: list[str | None]) -> list[RolloutResult]:
-    traj = Trajectory(messages=[Message.user("task"), *(Message.assistant("step", thinking=t) for t in thinkings)])
-    traj.reasoning_budget = 1000
+    turns = (Message.assistant("step", thinking=t) for t in thinkings)
+    traj = Trajectory(messages=[Message.user("task"), *turns], reasoning_effort="low")
     return [RolloutResult(prompt="task", trajectory=traj)]
 
 
@@ -64,7 +80,7 @@ def test_the_floor_with_no_captured_reasoning_warns_once_per_run(caplog):
 
 def test_the_price_with_no_captured_reasoning_warns_by_its_own_name(caplog):
     """A price over no captured reasoning charges every episode nothing, which no metric flags."""
-    trainer = _trainer(0.0, carry_reasoning=False, price={"low": 0.01, "medium": 0.005, "high": 0.001})
+    trainer = _trainer(0.0, carry_reasoning=False, profiles=PRICED)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         trainer._build_rollout_rewards(*_with_counts(_rollouts([None])))
     assert len(_warnings(caplog)) == 1 and "(reasoning_price)" in _warnings(caplog)[0]
@@ -78,16 +94,17 @@ def test_carried_reasoning_with_no_captured_reasoning_warns_by_its_own_name(capl
 
 
 def test_a_step_with_captured_reasoning_warns_nothing(caplog):
-    trainer = _trainer(0.15, carry_reasoning=True)
+    trainer = _trainer(0.15, carry_reasoning=True, profiles=PRICED)
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         trainer._build_rollout_rewards(*_with_counts(_rollouts([None, "let me think"])))
     assert _warnings(caplog) == []
 
 
 def test_no_consumer_means_no_warning_and_no_turn_means_no_evidence(caplog):
+    """Budgets alone turn no term on: with the floor off and no level priced nothing reads the reasoning."""
     with caplog.at_level(logging.WARNING, logger=LOGGER):
         _trainer(0.0, carry_reasoning=False)._build_rollout_rewards(*_with_counts(_rollouts([None])))
-        _trainer(0.15, carry_reasoning=True)._build_rollout_rewards(*_with_counts(_rollouts([])))
+        _trainer(0.15, carry_reasoning=True, profiles=PRICED)._build_rollout_rewards(*_with_counts(_rollouts([])))
     assert _warnings(caplog) == []
 
 

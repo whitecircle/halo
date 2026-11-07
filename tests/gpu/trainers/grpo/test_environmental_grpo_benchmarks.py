@@ -2,7 +2,7 @@
 """Environmental GRPO on real benchmark datasets against a live vLLM server, in sequence on one group port.
 
 The server needs its own GPU, the trained model (``VLLM_MODEL``) and ``VLLM_REASONING_PARSER=qwen3``: code_contests'
-per-effort CoT budget draws a 400 on every rollout without one, giving zero tokens and loss=0. Without InfiniBand, set
+per-turn reasoning cap draws a 400 on every rollout without one, giving zero tokens and loss=0. Without InfiniBand, set
 ``NCCL_IB_DISABLE=1 NCCL_NET=Socket`` or the image's OFI/Gin defaults wedge the cross-container group.
 """
 
@@ -191,6 +191,7 @@ def run_env_grpo_training(
     num_workers: int = DEFAULT_NUM_WORKERS,
     max_concurrent: int = DEFAULT_MAX_CONCURRENT,
     rollout_max_tokens: int = DEFAULT_ROLLOUT_MAX_TOKENS,
+    rollout_max_thinking_tokens: int | None = None,
     max_completion_length: int = DEFAULT_MAX_COMPLETION,
     extra_grpo_kwargs: dict | None = None,
 ) -> dict[str, Any]:
@@ -243,11 +244,12 @@ def run_env_grpo_training(
             rollout_server_url=VLLM_SERVER_URL,
             rollout_group_port=GROUP_PORT,
             rollout_connection_timeout=120.0,
-            num_rollout_workers=num_workers,
+            rollout_actor_budget=num_workers,
             max_concurrent_rollouts=max_concurrent,
             rollout_temperature=0.7,
             rollout_top_p=0.95,
             rollout_max_tokens=rollout_max_tokens,
+            rollout_max_thinking_tokens=rollout_max_thinking_tokens,
             enable_prefetch=False,
             sync_weights_every_n_steps=1,
             model_name=MODEL_NAME,
@@ -423,16 +425,12 @@ def test_code_contests():
         env_name="code_contests",
         dataset=dataset,
         environment_cls=CodeContestsEnvironment,
-        # The class default level's cap (medium, 8192) would fill the 2048-token turn, which the run refuses.
-        environment_kwargs={
-            "max_turns": 4,
-            "timeout_per_test": 5,
-            "reasoning_effort_profiles": {"medium": {"thinking_tokens": 1024}},
-        },
+        environment_kwargs={"max_turns": 4, "timeout_per_test": 5},
         num_generations=4,
         batch_size=4,  # Must be divisible by num_generations.
         grad_accum=1,
         rollout_max_tokens=2048,
+        rollout_max_thinking_tokens=1024,  # half the turn: the rest is the room a tool call needs
         max_completion_length=2048,
         extra_grpo_kwargs={"learning_rate": 1e-5},
     )

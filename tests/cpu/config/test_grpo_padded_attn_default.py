@@ -26,6 +26,8 @@ _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 _GRPO_SCRIPTS = ["grpo/offline.py", "grpo/environmental.py", "grpo/online.py"]
 
 _HELPER = "default_padded_attn_implementation"
+# The GRPO scripts reach it through this, which passes the run's flag on.
+_HELPERS = (_HELPER, "grpo_row_attn_implementation")
 
 
 class _StopAtModelLoad(Exception):
@@ -262,7 +264,7 @@ def _helper_calls(path: Path) -> list[ast.Call]:
     return [
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == _HELPER
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _HELPERS
     ]
 
 
@@ -270,7 +272,7 @@ def _helper_calls(path: Path) -> list[ast.Call]:
 _HELPER_CALL_SITES = sorted(
     path
     for path in (*_TRAINING_DIR.rglob("*.py"), REPO_ROOT / "halo/entrypoints/model_setup.py")
-    if _HELPER in path.read_text(encoding="utf-8")
+    if any(helper in path.read_text(encoding="utf-8") for helper in _HELPERS)
 )
 
 
@@ -284,7 +286,7 @@ def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(script):
     reset_sinks."""
     for call in _helper_calls(script):
         wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
-        assert wired, f"{script.name} calls {_HELPER} without sinks_reset"
+        assert wired, f"{script.name} calls an attention helper without sinks_reset"
         assert not isinstance(wired[0], ast.Constant), (
             f"{script.name} hardcodes sinks_reset; it must come from the run's reset_sinks flag"
         )

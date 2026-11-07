@@ -25,6 +25,7 @@ from halo.model_loading.parallel.frozen_models import (
     load_reference_model_for_on_policy_grpo,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo import online
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
@@ -310,6 +311,22 @@ def test_a_reference_the_run_never_reads_is_refused_before_trls_constructor(
     )
     with pytest.raises(ValueError, match="never be read"):
         trainer_cls(model, ref_model=object(), parallelism_config=ParallelismConfig(), **kwargs)
+
+
+def test_sdpg_refuses_a_packed_budget_before_trls_constructor(tmp_path, base_dir, monkeypatch):
+    """The class declares why its rows cannot pack, and the check needs no TRL constructor (which on online GRPO
+    connects to the rollout server)."""
+    monkeypatch.setattr(GRPOTrainer, "__init__", _trl_constructor_reached)
+    kwargs = _trainer_kwargs(tmp_path, use_vllm=True, vllm_mode="server")
+    with pytest.raises(ValueError, match=r"DistributedSDPGTrainer.*teacher pass"):
+        DistributedSDPGTrainer(
+            Qwen3ForCausalLM.from_pretrained(base_dir),
+            sdpg_answer_field="answer",
+            opd_positive_advantage_only=True,
+            packed_microbatch_tokens=4096,
+            parallelism_config=ParallelismConfig(),
+            **kwargs,
+        )
 
 
 @pytest.mark.parametrize("script", ON_POLICY_GRPO_SCRIPTS)

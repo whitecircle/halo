@@ -19,10 +19,6 @@ SAMPLER_FILTERS_OFF = {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
 # The sampler whose reported log-probs are the raw model distribution's: every filter off, temperature and top-p 1.
 IDENTITY_SAMPLER = {"temperature": 1.0, "top_p": 1.0, **SAMPLER_FILTERS_OFF}
 
-# Chat-template variable carrying an episode's per-turn thinking budget; per episode, never run-wide.
-REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
-# Set true beside it when the engine does not enforce the budget, so a template states it as a target, not a cut.
-REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
 ReasoningEffortChoice = Literal["low", "medium", "high", "random"]
 RANDOM_REASONING_EFFORT = "random"
 VALID_REASONING_EFFORTS = tuple(level for level in get_args(ReasoningEffortChoice) if level != RANDOM_REASONING_EFFORT)
@@ -49,7 +45,8 @@ class RolloutConfig:
     max_episode_tokens: int | None = None
     """The most tokens one episode may sample over all its turns; None = only the per-turn caps and max_turns."""
     max_thinking_tokens: int | None = None
-    """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``); None = only a level's own budget caps it."""
+    """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``), the same at every effort level; None =
+    ``max_tokens`` less ``max_answer_tokens`` caps it where that is set, else nothing does."""
     max_answer_tokens: int | None = None
     """The most a turn may generate past its reasoning cap; None = ``max_tokens`` alone bounds the turn."""
     reasoning_end_token_id: int | None = None
@@ -59,6 +56,9 @@ class RolloutConfig:
     """Capture the sampled token ids and the engine's rendered prompt ids, so training uses what the server rendered
     and the model emitted. Off in a hand-built config; ``get_rollout_config`` derives it from
     ``train_on_sampled_tokens``."""
+    capture_candidate_logprobs: int = 0
+    """Candidate log-probs requested per generated token (score centering's ``K``) on SGLang; 0 = none. Needs
+    ``capture_token_ids``, which the candidates align with."""
     capture_routed_experts: bool = False
     """Capture the engine's per-token MoE routing (the raw ``routed_experts`` payload) for R3 routing replay; needs
     ``--enable-return-routed-experts`` and the triton MoE backend the weight sync also needs."""
@@ -66,7 +66,7 @@ class RolloutConfig:
     """Token ids that end a turn: the model's tool-call terminator, without which a non-eos terminator lets the model
     play the whole episode in one turn."""
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Chat-template variables sent with every request; never the per-episode effort or thinking-budget keys."""
+    """Chat-template variables sent with every request; never the per-episode effort level."""
     model_name: str | None = None
     """Model name for /v1/chat/completions; the server's loaded model when omitted."""
     request_timeout: float = 120.0

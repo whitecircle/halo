@@ -97,7 +97,7 @@ ETP is supported: the routed experts use the fused-GLU contiguous-halves layout,
 
 The shipped EP config trains Qwen3.5/3.6 35B-A3B (40 layers = 10 full + 30 linear, 256 routed experts, top-k=8) at 33K max length under EP=8 (32 experts/rank); set `fp32_non_ep_params: true` for stable long context.
 
-SFT with `packing: true` (fixed-length) loads `flash_attention_2` on Blackwell when `attn_implementation` is unset: FA4 runs packed rows only 2.9% (16k) and 4.6% (32k) faster, below the 5% gain a default change needs, so only a pinned `flash_attention_4` keeps them on FA4. Under `full_determinism` that pin loads FA2 too: the SDPA demotion would run a packed row as one dense mask with K/V repeated per query head ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Unpacked rows keep FA4; the shipped recipes pin FA2. `padding_free: true` is refused at collator selection on every backend: the M-RoPE varlen path crashes FA2 with `cudaErrorIllegalAddress`, and every Qwen3.5/3.6 decoder runs it, text towers and `text_only_model` loads included ([Collators](../data/collators.md#factory-select_data_collator)). SDPA matches FA2 at `b=1` on unpacked rows only.
+SFT with `packing: true` (fixed-length) loads `flash_attention_2` on Blackwell when `attn_implementation` is unset: FA4 runs packed rows only 2.9% (16k) and 4.6% (32k) faster, below the 5% gain a default change needs, so only a pinned `flash_attention_4` keeps them on FA4. Under `full_determinism` that pin loads FA2 too: the SDPA demotion would run a packed row as one dense mask with K/V repeated per query head ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Unpacked rows keep FA4; the shipped recipes pin FA2. SDPA matches FA2 at `b=1` on unpacked rows only.
 
 Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators and SMPO's padding-free forward, which emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
 
@@ -137,5 +137,5 @@ The Qwen3.6 code-contests async GRPO recipes pin `jinja-templates/qwen3/qwen3.6-
 (`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
 thinking always on, carried reasoning always rendered, the vision branch and the
 `enable_thinking`/`preserve_thinking` switches dropped — plus a system-block line stating the episode's
-`reasoning_effort` and `reasoning_budget`, which the hub template has no variable for
-([Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)).
+`reasoning_effort`, which the hub template has no variable for
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).

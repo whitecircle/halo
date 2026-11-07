@@ -18,7 +18,7 @@ from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
-    default_padded_attn_implementation,
+    grpo_row_attn_implementation,
     load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
@@ -34,7 +34,10 @@ from halo.entrypoints.script import (
 )
 from halo.environments.reasoning_effort import resolve_reasoning_effort
 from halo.environments.rollout_config import VLLM_BACKEND
-from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.model_loading.parallel.frozen_models import (
+    load_reference_model_for_on_policy_grpo,
+    reject_unfit_on_policy_reference,
+)
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.moe.config_fields import has_routed_experts
@@ -116,6 +119,7 @@ def main():
         dist_args,
         script_prefix="rlvr-online-grpo",
         trainer_cls=trainer_cls,
+        row_sources=(args,),
     )
     parallelism_config = context.parallelism_config
 
@@ -125,7 +129,7 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    reject_unsyncable_config(checkpoint_config, VLLM_BACKEND)
+    reject_unsyncable_config(checkpoint_config, VLLM_BACKEND, args.rollout_weight_precision)
 
     # The trainer gets dataset_presharded so it does not re-shard. The prompt column is the loader's render column: it
     # must exist, and empty-prompt rows drop.
@@ -141,7 +145,14 @@ def main():
         reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
 
     # Prompts and completions are collated into padded batches.
-    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    requested_attn = grpo_row_attn_implementation(
+        model_config,
+        grpo_config,
+        packed_microbatches=args.packed_microbatch_tokens is not None,
+        sinks_reset=args.reset_sinks,
+        checkpoint_config=checkpoint_config,
+    )
+    reject_unfit_on_policy_reference(model_config, grpo_config, parallelism_config)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # max_completion_length is the generation budget here (TRL passes it to vLLM), so it is an explicit
@@ -210,7 +221,7 @@ def main():
     )
     verify_server_flags(
         [vllm_base_url],
-        ServerRequirements(is_moe=has_routed_experts(model.config)),
+        ServerRequirements(is_moe=has_routed_experts(model.config), weight_precision=args.rollout_weight_precision),
         backend=VLLM_BACKEND,
         connection_timeout=grpo_config.vllm_server_timeout,
     )
@@ -264,6 +275,11 @@ def main():
         balance_token_mass=args.balance_token_mass,
         early_stop=args.build_early_stop_config(),
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,
+        log_phase_times=args.log_phase_times,
+        packed_microbatch_tokens=args.packed_microbatch_tokens,
+        rollout_weight_precision=args.rollout_weight_precision,
+        balance_rank_tokens=args.balance_rank_tokens,
+        loss_forward_importance_weights=args.loss_forward_importance_weights,
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )

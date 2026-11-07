@@ -4,6 +4,7 @@ other, so the engine-side release runs during the local destroy. At exit the des
 import atexit
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,8 @@ import halo.weight_sync.clients.base as client_base
 import halo.weight_sync.clients.sglang as sglang_module
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.transport import c10d_group
+from halo.weight_sync.transport.rendezvous import RendezvousListener
+from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
 
@@ -23,7 +26,7 @@ def _teardown_probe(client, monkeypatch) -> list[tuple[str, object]]:
         "release_weight_update_group",
         lambda group, *, destroy: calls.append(("destroy" if destroy else "drop", group)),
     )
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: calls.append(("remote", None)))
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: calls.append(("remote", None)))
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
     return calls
 
@@ -76,6 +79,35 @@ class _ColdEngine:
         if path == "/v1/completions" and self.polls_left >= 0:
             raise requests.exceptions.ReadTimeout(path)
         return SimpleNamespace(status_code=200, json=lambda: {"data": [{"id": "served"}]})
+
+
+class _StoreHoldingGroup:
+    """What torch's group does: it references the store it formed over for as long as it is referenced itself."""
+
+    def __init__(self, store):
+        self.store = store
+
+
+def _client_parked_over_a_live_store(monkeypatch, port: int):
+    """A client whose destroy and abort never return, on a rendezvous port a real store has taken over."""
+    client = offline_client(SGLangWeightSyncClient)
+    listener = RendezvousListener("127.0.0.1", port)
+    store = listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+    group = _StoreHoldingGroup(store)
+    client._transport = (group, store)
+    client._rendezvous = listener
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    parked = threading.Event()
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", lambda group, *, destroy: parked.wait(30))
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: parked.wait(30))
+    return client, parked
+
+
+def _binds(port: int) -> bool:
+    with RendezvousListener("127.0.0.1", port):
+        return True
 
 
 @pytest.fixture
@@ -146,7 +178,7 @@ def test_the_engine_is_asked_before_its_half_of_the_destroy_starts(monkeypatch):
     client._transport = (object(), None)
     _teardown_probe(client, monkeypatch)
     order: list[str] = []
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: order.append("remote"))
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: order.append("remote"))
     monkeypatch.setattr(client, "_engine_answers", lambda: order.append("health") or True)
 
     client._release_transport(at_exit=False)
@@ -174,7 +206,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
     client._transport = (object(), None)
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
     remote_started = threading.Event()
-    monkeypatch.setattr(client, "_destroy_remote_group", remote_started.set)
+    monkeypatch.setattr(client, "destroy_remote_group", remote_started.set)
     seen_during_destroy: list[bool] = []
     monkeypatch.setattr(
         sglang_module,
@@ -192,7 +224,7 @@ def test_the_engine_side_release_runs_while_the_local_destroy_blocks(monkeypatch
 
 def _aborts(monkeypatch) -> list[object]:
     aborted: list[object] = []
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", aborted.append)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: aborted.append(group))
     return aborted
 
 
@@ -219,7 +251,7 @@ def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
     group = object()
     client._transport = (group, None)
     monkeypatch.setattr(client, "_engine_answers", lambda: True)
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
     aborted = _aborts(monkeypatch)
     released = threading.Event()
@@ -233,6 +265,44 @@ def test_a_destroy_blocked_past_its_deadline_is_aborted(monkeypatch):
     finally:
         released.set()
     assert aborted == [group]
+
+
+def test_a_group_whose_abort_is_still_parked_is_not_released(monkeypatch):
+    """Releasing pops torch's rank map for the group while the abort thread still runs inside it."""
+    client = offline_client(SGLangWeightSyncClient)
+    group = object()
+    client._transport = (group, None)
+    calls = _teardown_probe(client, monkeypatch)
+    parked = threading.Event()
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: parked.wait(30))
+
+    try:
+        client.abort_transport()
+        client.close_communicator()
+    finally:
+        parked.set()
+
+    assert all(target is not group for _, target in calls), "the release touched a group whose abort is parked"
+
+
+def test_a_join_to_a_scheduler_parked_in_a_destroy_fails_within_the_cleanup_bound(monkeypatch):
+    """The close that clears a dead trainer's session queues behind a destroy the scheduler never finishes."""
+    client = offline_client(SGLangWeightSyncClient)
+    timeouts: list[float] = []
+
+    def request(method, path, *, timeout, **kwargs):
+        if path == client.SESSION_CLOSE_ENDPOINT:
+            timeouts.append(timeout)
+            raise requests.exceptions.ReadTimeout(path)
+        return SimpleNamespace(status_code=400)
+
+    monkeypatch.setattr(client, "request", request)
+
+    with pytest.raises(RuntimeError, match="only a restart frees"):
+        client.request_engine_join("127.0.0.1", 1, 2, 1, None)
+
+    assert timeouts == [client_base.CLEANUP_TIMEOUT_S]
 
 
 def test_a_destroy_that_returns_is_not_aborted(monkeypatch):
@@ -307,8 +377,8 @@ def test_init_registers_the_no_destroy_close_at_atexit(monkeypatch):
     client = offline_client(SGLangWeightSyncClient, "http://127.0.0.1:30000")
     registered: list[tuple[object, tuple, dict]] = []
     monkeypatch.setattr(atexit, "register", lambda fn, *args, **kwargs: registered.append((fn, args, kwargs)))
-    monkeypatch.setattr(client, "_fetch_engine_world_size", lambda: 0)
-    monkeypatch.setattr(client, "_destroy_remote_group", lambda: None)
+    monkeypatch.setattr(client, "require_engine_world_size", lambda: 0)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
     monkeypatch.setattr(client, "request", lambda method, path, **kwargs: None)
     monkeypatch.setattr(sglang_module, "build_weight_update_group", lambda **kwargs: (object(), None))
 
@@ -366,6 +436,25 @@ def test_a_failing_abort_warns_instead_of_raising(monkeypatch, caplog):
     )
 
 
+def test_an_abort_that_never_returns_ends_at_its_deadline_and_says_so(monkeypatch, caplog):
+    """Torch's abort waits on a communicator another thread may be destroying, and then parks for good."""
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    parked = threading.Event()
+    monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", lambda group: parked.wait(30))
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    started = time.monotonic()
+    try:
+        with caplog.at_level(logging.INFO):
+            client.abort_transport()
+        assert time.monotonic() - started < 5.0, "the abort held its caller past the deadline"
+        gave_up = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Gave up waiting")]
+        assert len(gave_up) == 1 and "to abort" in gave_up[0], gave_up
+        assert client._abort_parked
+    finally:
+        parked.set()
+
+
 def test_aborting_a_group_that_never_formed_does_not_enter_torch(monkeypatch):
     entered: list[object] = []
     monkeypatch.setattr(c10d_group.c10d, "_abort_process_group", entered.append)
@@ -373,6 +462,195 @@ def test_aborting_a_group_that_never_formed_does_not_enter_torch(monkeypatch):
     c10d_group.abort_weight_update_group(None)
 
     assert entered == [], "abort_weight_update_group(None) called torch's abort"
+
+
+def test_a_client_whose_group_releases_the_remote_half_does_not_destroy_it_again(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    destroyed: list[str] = []
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: destroyed.append("remote"))
+
+    client._release_transport(at_exit=False)
+    assert destroyed == ["remote"]
+
+    destroyed.clear()
+    client.group_releases_remote_half = True
+    client._release_transport(at_exit=False)
+    assert destroyed == []
+
+
+def _waits(caplog) -> list[str]:
+    return [record.getMessage() for record in caplog.records if record.getMessage().startswith("Waiting on ")]
+
+
+def test_each_silent_wait_of_a_release_names_its_server_and_bound_when_it_starts(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    _teardown_probe(client, monkeypatch)
+    monkeypatch.setattr(client, "_engine_answers", SGLangWeightSyncClient._engine_answers.__get__(client))
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
+    monkeypatch.setattr(client, "group_releases_remote_half", False)
+    monkeypatch.setattr(client, "destroy_remote_group", lambda: None)
+
+    with caplog.at_level(logging.INFO):
+        client._release_transport(at_exit=False)
+
+    waits = _waits(caplog)
+    assert len(waits) == 2, waits
+    assert all(client.base_url in wait for wait in waits), waits
+    assert waits[0].endswith("/health before the group's destroy, for at most 30s"), waits
+    assert "trainer's half" in waits[1] and waits[1].endswith("at most 30s"), waits
+
+
+def test_a_release_that_asks_for_nothing_announces_no_wait(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    _teardown_probe(client, monkeypatch)
+    monkeypatch.setattr(client, "group_releases_remote_half", True)
+
+    with caplog.at_level(logging.INFO):
+        client._release_transport(at_exit=True)
+
+    assert not any("/health" in wait or "its half" in wait for wait in _waits(caplog)), _waits(caplog)
+
+
+def test_an_abort_and_a_remote_destroy_name_their_server_and_bound(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: None)
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
+
+    with caplog.at_level(logging.INFO):
+        client.abort_transport()
+        client.destroy_remote_group()
+
+    waits = _waits(caplog)
+    assert len(waits) == 2, waits
+    assert all(client.base_url in wait and wait.endswith("at most 30s") for wait in waits), waits
+
+
+def test_closing_an_interrupted_session_names_its_server_and_bound(monkeypatch, caplog):
+    client = offline_client(SGLangWeightSyncClient)
+    client._update_session_open = True
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
+
+    with caplog.at_level(logging.INFO):
+        client.abandon_update_session()
+        client.abandon_update_session()
+
+    waits = _waits(caplog)
+    assert len(waits) == 1, "a session already closed waits on nothing, so it announces nothing"
+    assert client.base_url in waits[0] and waits[0].endswith("at most 30s"), waits
+
+    """The parked threads hold the group and through it the store, so dropping the store frees nothing."""
+    port = free_port()
+    client, parked = _client_parked_over_a_live_store(monkeypatch, port)
+    try:
+        with caplog.at_level(logging.INFO, logger="halo.weight_sync.clients.server_calls"):
+            client.close_communicator()
+        assert _binds(port), "the next group on the same port cannot bind it"
+    finally:
+        parked.set()
+    messages = [r.getMessage() for r in caplog.records]
+    assert sum("Gave up waiting" in m and "released" in m for m in messages) == 1, messages
+
+
+def test_a_released_group_frees_its_port_too(monkeypatch):
+    port = free_port()
+    client, parked = _client_parked_over_a_live_store(monkeypatch, port)
+    monkeypatch.setattr(sglang_module, "release_weight_update_group", lambda group, *, destroy: None)
+    try:
+        client.close_communicator()
+        assert _binds(port)
+    finally:
+        parked.set()
+
+
+def test_a_failed_formation_frees_the_port_a_store_took_over():
+    port = free_port()
+    with pytest.raises(RuntimeError, match="formation failed"):
+        with RendezvousListener("127.0.0.1", port) as listener:
+            listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+            raise RuntimeError("formation failed")
+    assert _binds(port)
+
+
+def test_a_formed_group_keeps_its_port_past_the_formation_block():
+    port = free_port()
+    with RendezvousListener("127.0.0.1", port) as listener:
+        store = listener.start_store("127.0.0.1", 2, timeout_s=5, wait_for_workers=False)
+    try:
+        with pytest.raises(OSError):
+            _binds(port)
+    finally:
+        listener.free_port()
+        del store
+
+
+def _blocking_peer_probe(client, monkeypatch):
+    """Every release step that needs the old peer blocks for 30 s; the calls list shows which ones were entered."""
+    calls: list[str] = []
+    release = threading.Event()
+
+    def blocked(name):
+        def call(*args, **kwargs):
+            calls.append(name)
+            release.wait(30)
+
+        return call
+
+    monkeypatch.setattr(
+        sglang_module, "release_weight_update_group", lambda group, *, destroy: calls.append(f"drop:{destroy}")
+    )
+    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: calls.append("abort"))
+    monkeypatch.setattr(client, "destroy_remote_group", blocked("remote"))
+    monkeypatch.setattr(client, "_engine_answers", blocked("probe"))
+    monkeypatch.setattr(client, "request", blocked("request"))
+    return calls, release
+
+
+def test_a_restarted_servers_client_is_dropped_without_waiting_for_the_old_peer(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+
+    started = time.monotonic()
+    client.close_communicator_of_restarted_server()
+    release.set()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["abort", "drop:False"], calls
+    assert client._transport is None
+
+
+def test_a_live_peers_close_still_destroys_and_releases_the_remote_half(monkeypatch):
+    """Negative control: the same fakes through the graceful close are entered, so the local path's skip is its own."""
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+    release.set()
+    monkeypatch.setattr(client, "_engine_answers", lambda: True)
+
+    client.close_communicator()
+
+    assert "drop:True" in calls and "remote" in calls, calls
+
+
+def test_a_blocking_abort_does_not_hold_the_known_restart_release(monkeypatch):
+    client = offline_client(SGLangWeightSyncClient)
+    client._transport = (object(), None)
+    calls, release = _blocking_peer_probe(client, monkeypatch)
+    monkeypatch.setattr(sglang_module, "CLEANUP_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(client, "abort_transport", lambda: release.wait(30))
+
+    started = time.monotonic()
+    client.close_communicator_of_restarted_server()
+    elapsed = time.monotonic() - started
+    release.set()
+
+    assert elapsed < 5.0
+    assert calls == ["drop:False"], calls
+    assert client._transport is None
 
 
 if __name__ == "__main__":

@@ -107,6 +107,11 @@ def nccl_timeout() -> timedelta:
     return timedelta(minutes=env_positive_int("DIST_NCCL_TIMEOUT_MINUTES", DEFAULT_NCCL_TIMEOUT_MINUTES))
 
 
+def weight_sync_gather_ahead() -> int:
+    """EP layers whose expert gather the RL weight sync issues ahead of the one being forwarded; ``0`` is in turn."""
+    return env_non_negative_int("HALO_WEIGHT_SYNC_GATHER_AHEAD", 1)
+
+
 def watchdog_bounded_seconds() -> float:
     """Longest a rank may block in one rollout call, since every peer waits at the next collective."""
     return nccl_timeout().total_seconds() * WATCHDOG_WARN_FRACTION
