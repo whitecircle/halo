@@ -6,13 +6,13 @@ On the trainer's real scoring path, plan and TRL's real buffer and loss (Qwen3-0
 1. the packed no-grad recompute scores every row as the per-row recompute does, and every rank ran the world's bin
    count of scoring calls;
 2. the packed window's loss equals the per-row window's;
-3. its gradients, through the FSDP2 reduce-scatter and the leading no-op slots, stray from the per-row window's no
-   further than twice as far as a per-row window in another shuffle does (bf16 accumulation rounds differently in
-   every order, so the bound is that measured floor), and point the same way;
+3. its gradients, through the FSDP2 reduce-scatter and the leading no-op slots, stray from the per-row window in fp32
+   (the same rows on sdpa) no further than twice as far as the per-row bf16 window does, and point the same way;
 4. negative control: without the row-mean rescale the gradient is off by the rows-per-bin factor.
 
 ``--moe`` runs a tiny Qwen3-MoE at ``ep_size = 2`` (DeepEP dispatch, one dispatch per bin), where the bins must run
-on every rank in equal number, under R2 capture and R3 replay:
+on every rank in equal number, under R2 capture and R3 replay (its gradient floor stays a per-row window in another
+shuffle: no fp32 copy of an EP model):
 
 5. the packed recompute captures each row's routing into its own batch slot: a selection that differs from the
    per-row run's has a near-tie margin there (packed bf16 hidden states differ slightly), wide-margin selections
@@ -26,7 +26,6 @@ on every rank in equal number, under R2 capture and R3 replay:
 """
 
 import argparse
-import math
 
 import torch
 from transformers import AutoModelForCausalLM
@@ -54,7 +53,7 @@ from tests.common.length_deal import (
     world_accelerator,
 )
 from tests.common.models import QWEN3_0_6B
-from tests.common.numerics import cos_sim, relative_l2
+from tests.common.packed_grad_floor import build_fp32_reference, judge_packed_grads
 from tests.common.rank_log import log, log_all
 from tests.common.routing import check_flips_are_near_ties, distinct_expert_picks, router_margins
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint, word_level_tokenizer
@@ -64,8 +63,6 @@ ROWS, SLOTS = PACKED_ROWS, PACKED_SLOTS
 ROW_TOKENS, BUDGET = PACKED_DENSE_ROW_TOKENS, PACKED_DENSE_BUDGET
 DENSE_VOCAB = 32_000
 SHUFFLE_SEED, FLOOR_SEED = 7, 8
-GRAD_FLOOR_FACTOR = 2.0
-GRAD_COSINE_MIN = 0.999
 ROW_MEAN_LOSS = "grpo"
 LOGP_MEAN_ABS_MAX = 1e-2
 MOE_FAMILY, MOE_WORDS, MOE_SEED = "qwen3_moe", 500, 0
@@ -90,10 +87,6 @@ def _plan(batch: dict, budget: int):
     return agree_microbatch_geometry(lengths, budget, slots=SLOTS, ceiling=None, round_rows=ROWS)
 
 
-def _flat(grads: list[torch.Tensor]) -> torch.Tensor:
-    return torch.cat([grad.flatten() for grad in grads])
-
-
 def _window(model, batch: dict, *, plan=None, seed: int = SHUFFLE_SEED, scaled: bool = True, loss_type: str = "dapo"):
     host = packed_host(model, slots=SLOTS, accelerator=world_accelerator(), loss_type=loss_type)
     host.use_liger_kernel = False
@@ -104,53 +97,51 @@ def _window(model, batch: dict, *, plan=None, seed: int = SHUFFLE_SEED, scaled: 
     return train_window(host, batch, plan, seed)
 
 
-def _check_window(ctx, model, batch: dict, budget: int, checks: dict, metrics: dict) -> None:
+def _check_window(model, reference_model, batch: dict, budget: int, checks: dict, metrics: dict) -> None:
+    """``reference_model`` is the fp32 copy the gradient floor is measured against, or ``None`` (the MoE arm)."""
     plan = _plan(batch, budget)
     assert 1 < plan.num_bins < SLOTS, f"the budget should leave both bins and no-op slots, got {plan.num_bins}"
     loss_s, grads_s = _window(model, batch)
     loss_f, grads_f = _window(model, batch, seed=FLOOR_SEED)
     loss_p, grads_p = _window(model, batch, plan=plan)
     unscaled = _window(model, batch, plan=plan, scaled=False)[1]
-    model.zero_grad(set_to_none=True)
-    floor = relative_l2(dict(enumerate(grads_f)), dict(enumerate(grads_s)))
-    packed = relative_l2(dict(enumerate(grads_p)), dict(enumerate(grads_s)))
-    cosine = cos_sim(_flat(grads_p), _flat(grads_s), label="packed vs per-row gradient")
-    off = relative_l2(dict(enumerate(unscaled)), dict(enumerate(grads_s)))
-    metrics.update(loss_per_row=loss_s, loss_floor=loss_f, loss_packed=loss_p, grad_floor=floor, grad_packed=packed)
-    metrics.update(grad_cosine=cosine, grad_unscaled=off, bins=plan.num_bins, rows_per_bin=plan.rows_per_bin)
-    log_all(f"  packed {packed:.3e} vs floor {floor:.3e}, cosine {cosine:.5f}, unscaled {off:.3e}")
-    checks["loss_matches_per_row"] = abs(loss_p - loss_s) <= 5e-3 * max(1.0, abs(loss_s))
-    checks["grads_inside_the_floor"] = math.isfinite(packed) and floor > 0.0 and packed <= GRAD_FLOOR_FACTOR * floor
-    checks["grads_point_the_same_way"] = cosine >= GRAD_COSINE_MIN
-    checks["token_global_loss_ignores_the_rescale"] = (
-        relative_l2(dict(enumerate(unscaled)), dict(enumerate(grads_p))) <= 0.1 * floor
+    grads_ref = None if reference_model is None else _window(reference_model, batch)[1]
+    verdict = judge_packed_grads(grads_s, grads_f, grads_p, unscaled, grads_ref)
+    metrics.update(loss_per_row=loss_s, loss_order_floor=loss_f, loss_packed=loss_p, **verdict.metrics)
+    metrics.update(bins=plan.num_bins, rows_per_bin=plan.rows_per_bin)
+    log_all(
+        f"  packed {verdict.packed_err:.3e} vs floor {verdict.floor:.3e} (order floor {verdict.order_floor:.3e}), "
+        f"cosine {verdict.cosine:.5f}, unscaled {verdict.unscaled_err:.3e}"
     )
-    _check_row_mean_rescale(model, batch, plan, checks, metrics)
+    checks["loss_matches_per_row"] = abs(loss_p - loss_s) <= 5e-3 * max(1.0, abs(loss_s))
+    checks["grads_inside_the_floor"] = verdict.inside_the_floor
+    checks["grads_point_the_same_way"] = verdict.points_the_same_way
+    checks["token_global_loss_ignores_the_rescale"] = verdict.rescale_changes_nothing
+    _check_row_mean_rescale(model, reference_model, batch, plan, checks, metrics)
 
 
-def _check_row_mean_rescale(model, batch: dict, plan, checks: dict, metrics: dict) -> None:
+def _check_row_mean_rescale(model, reference_model, batch: dict, plan, checks: dict, metrics: dict) -> None:
     """The default dapo normalizer is one round-global token count, so the per-bin rescale is 1 there and dropping it
     changes nothing. A row-mean loss divides each slot by its own row count: there the rescale carries the gradient and
     dropping it (the negative control) moves it by rows_per_bin * slots / round_rows."""
-    _, grads_s = _window(model, batch, loss_type=ROW_MEAN_LOSS)
-    _, grads_f = _window(model, batch, seed=FLOOR_SEED, loss_type=ROW_MEAN_LOSS)
-    _, grads_p = _window(model, batch, plan=plan, loss_type=ROW_MEAN_LOSS)
-    _, unscaled = _window(model, batch, plan=plan, scaled=False, loss_type=ROW_MEAN_LOSS)
-    model.zero_grad(set_to_none=True)
-    reference = dict(enumerate(grads_s))
-    floor = relative_l2(dict(enumerate(grads_f)), reference)
-    packed = relative_l2(dict(enumerate(grads_p)), reference)
-    off = relative_l2(dict(enumerate(unscaled)), reference)
-    metrics.update(row_mean_grad_floor=floor, row_mean_grad_packed=packed, row_mean_grad_unscaled=off)
-    log_all(f"  row-mean {ROW_MEAN_LOSS}: packed {packed:.3e} vs floor {floor:.3e}, unscaled {off:.3e}")
-    checks["row_mean_grads_inside_the_floor"] = (
-        math.isfinite(packed) and floor > 0.0 and packed <= GRAD_FLOOR_FACTOR * floor
+    grads_s = _window(model, batch, loss_type=ROW_MEAN_LOSS)[1]
+    grads_f = _window(model, batch, seed=FLOOR_SEED, loss_type=ROW_MEAN_LOSS)[1]
+    grads_p = _window(model, batch, plan=plan, loss_type=ROW_MEAN_LOSS)[1]
+    unscaled = _window(model, batch, plan=plan, scaled=False, loss_type=ROW_MEAN_LOSS)[1]
+    grads_ref = None if reference_model is None else _window(reference_model, batch, loss_type=ROW_MEAN_LOSS)[1]
+    verdict = judge_packed_grads(grads_s, grads_f, grads_p, unscaled, grads_ref)
+    metrics.update({f"row_mean_{key}": value for key, value in verdict.metrics.items()})
+    log_all(
+        f"  row-mean {ROW_MEAN_LOSS}: packed {verdict.packed_err:.3e} vs floor {verdict.floor:.3e} "
+        f"(order floor {verdict.order_floor:.3e}), unscaled {verdict.unscaled_err:.3e}"
     )
-    checks["negative_control_unscaled_row_mean_grads_are_off"] = off > 10 * max(floor, packed)
+    checks["row_mean_grads_inside_the_floor"] = verdict.inside_the_floor
+    checks["negative_control_unscaled_row_mean_grads_are_off"] = verdict.control_bites
 
 
 def run_dense(ctx) -> dict:
     model = AutoModelForCausalLM.from_pretrained(MODEL, dtype=torch.bfloat16, attn_implementation=ATTN).to(ctx.device)
+    reference_model = build_fp32_reference(model, world_size=ctx.world_size)
     apply_fsdp2_for_dp(
         model, ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=True, reshard_after_forward=True
     )
@@ -176,7 +167,7 @@ def run_dense(ctx) -> dict:
         assert diff <= LOGP_MEAN_ABS_MAX, f"packed recompute strays {diff:.3e} nats from the per-row one"
 
     record_check(checks, "recompute_matches_per_row", recompute_matches_per_row)
-    _check_window(ctx, model, batch, BUDGET, checks, metrics)
+    _check_window(model, reference_model, batch, BUDGET, checks, metrics)
     return {"checks": checks, "metrics": metrics}
 
 
@@ -273,7 +264,7 @@ def run_moe(ctx) -> dict:
 
     record_check(checks, "r2_capture_follows_each_row", r2_capture_follows_each_row)
     record_check(checks, "r3_replay_is_consumed_whole", r3_recompute_and_loss_forwards_consume_the_armed_masks)
-    _check_window(ctx, model, batch, MOE_BUDGET, checks, metrics)
+    _check_window(model, None, batch, MOE_BUDGET, checks, metrics)
     return {"checks": checks, "metrics": metrics}
 
 
