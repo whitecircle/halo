@@ -383,10 +383,11 @@ class RolloutWeightPrecisionArguments:
         metadata={
             "help": "Precision of the weights the rollout servers hold: bf16 pushes the trainer's weights as they are, "
             "fp8_block quantizes the attention and MLP projections on the sync GPU to 128x128 block FP8 "
-            "(power-of-two scales) and pushes those, halving their bytes on the wire. The trainer stays bf16, and "
-            "the server must serve a checkpoint written by the block-FP8 export tool with --moe-backend triton. "
-            "a validated family only (Qwen3, Qwen3.5/3.6 dense and MoE), and SGLang needs "
-            "SGLANG_ENABLE_JIT_DEEPGEMM=0; refused beside adapter sync and QLoRA. See agent-docs/infrastructure/rollout-servers.md#fp8-rollouts."
+            "(power-of-two scales) and pushes those. The trainer stays bf16, and the server must serve a checkpoint "
+            "written by the block-FP8 export tool with the triton MoE backend (vLLM --moe-backend triton, SGLang "
+            "--moe-runner-backend triton). Admitted only for a family whose spec validates it, refused at startup "
+            "with the reason otherwise; SGLang needs SGLANG_ENABLE_JIT_DEEPGEMM=0; refused beside adapter sync and "
+            "QLoRA. See agent-docs/infrastructure/rollout-servers.md#fp8-rollouts."
         },
     )
 

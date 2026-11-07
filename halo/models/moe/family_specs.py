@@ -16,6 +16,8 @@ from halo.models.moe.expert_layout import (
     ExpertLayoutKind,
 )
 
+UNVALIDATED_FP8_ROLLOUT = "no GPU row has validated block-FP8 rollouts for the family"
+
 
 @dataclass(frozen=True)
 class NativeBalancingSlot:
@@ -58,9 +60,6 @@ class EngineLoadedBuffers:
 
     attrs: tuple[str, ...]
     config_flag: str
-
-
-UNVALIDATED_FP8_ROLLOUT = "no GPU row has validated block-FP8 rollouts for the family"
 
 
 @dataclass(frozen=True, eq=False)
@@ -267,7 +266,6 @@ NEMOTRON_H = MoEFamilySpec(
 QWEN3 = MoEFamilySpec(
     model_types=("qwen3_moe",),
     expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
-    fp8_rollout_refusal=None,
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(

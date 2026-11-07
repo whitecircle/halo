@@ -3,12 +3,12 @@
 
 import pytest
 import torch
-from transformers import LlamaConfig, MixtralConfig
+from transformers import InternVLConfig, LlamaConfig, MixtralConfig
 
 from halo.kernels.lowp.block_fp8 import quantize_block_fp8
 from halo.models import fp8_rollout
 from halo.models.fp8_rollout import Fp8RolloutPlan, fp8_rollout_refusal
-from halo.models.moe.family_specs import MOE_FAMILY_SPECS, QWEN3, QWEN3_5
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, QWEN3_5
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.weight_sync import RecordingSender
@@ -16,9 +16,6 @@ from tests.common.weight_sync import RecordingSender
 _FAMILIES = {
     "qwen3_5_moe": TINY_MOE_VLM_FAMILIES["qwen3_5_moe"],
     "qwen3_5_moe_text": TINY_MOE_FAMILIES["qwen3_5_moe_text"],
-    "qwen3_moe": TINY_MOE_FAMILIES["qwen3_moe"],
-    "qwen3": TINY_DENSE_FAMILIES["qwen3"],
-    "qwen3_5": TINY_DENSE_FAMILIES["qwen3_5"],
 }
 # Substrings of the names a push must keep in bf16 whatever the family, and the module leaves it quantizes.
 _STAYS_BF16 = ("linear_attn", "visual", "shared_expert_gate", "mlp.gate.", "norm", "embed_tokens", "lm_head", "mtp")
@@ -146,7 +143,7 @@ def test_the_experts_are_views_of_the_batched_result_that_the_client_may_keep(mo
 
 
 def test_only_the_families_a_gpu_row_validated_declare_block_fp8_rollouts():
-    assert {spec for spec in MOE_FAMILY_SPECS if spec.fp8_rollout_refusal is None} == {QWEN3, QWEN3_5}
+    assert {spec for spec in MOE_FAMILY_SPECS if spec.fp8_rollout_refusal is None} == {QWEN3_5}
 
 
 @pytest.mark.parametrize("family_name", list(_FAMILIES))
@@ -160,11 +157,27 @@ def test_a_validated_family_has_a_plan(family_name):
     ("config", "reason"),
     [
         (LlamaConfig(), "no GPU row"),
+        (tiny_family_model(TINY_DENSE_FAMILIES["qwen3"]).config, "no GPU row"),
+        (tiny_family_model(TINY_DENSE_FAMILIES["qwen3_5"]).config, "no GPU row"),
+        (tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"]).config, "no GPU row"),
         (MixtralConfig(), "no family spec"),
         (tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"]).config, "no GPU row"),
         (tiny_family_model(TINY_MOE_FAMILIES["deepseek_v4"]).config, "no GPU row"),
+        (
+            InternVLConfig(text_config=tiny_family_model(TINY_MOE_FAMILIES["qwen3_5_moe_text"]).config.to_dict()),
+            "the composite 'internvl' wraps",
+        ),
     ],
-    ids=["dense-llama", "moe-without-spec", "gpt-oss", "deepseek-v4"],
+    ids=[
+        "dense-llama",
+        "dense-qwen3",
+        "dense-qwen3.5",
+        "qwen3-moe",
+        "moe-without-spec",
+        "gpt-oss",
+        "deepseek-v4",
+        "composite-wrapping-qwen3.5-moe",
+    ],
 )
 def test_every_other_family_is_refused_with_its_reason(config, reason):
     assert reason in fp8_rollout_refusal(config)

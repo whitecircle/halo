@@ -10,14 +10,12 @@ from safetensors import safe_open
 
 from halo.checkpoint.tools.block_fp8_export import export_block_fp8_checkpoint
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.common.weight_sync import RecordingSender
 
 _FAMILIES = {
     "qwen3_5_moe": TINY_MOE_VLM_FAMILIES["qwen3_5_moe"],
-    "qwen3_moe": TINY_MOE_FAMILIES["qwen3_moe"],
-    "qwen3": TINY_DENSE_FAMILIES["qwen3"],
-    "qwen3_5": TINY_DENSE_FAMILIES["qwen3_5"],
+    "qwen3_5_moe_text": TINY_MOE_FAMILIES["qwen3_5_moe_text"],
 }
 
 
@@ -95,7 +93,7 @@ def test_the_config_names_every_bf16_linear_by_exact_path_and_never_a_quantized_
 
 def test_a_checkpoint_that_is_already_quantized_is_refused(tmp_path):
     torch.manual_seed(0)
-    tiny_family_model(_FAMILIES["qwen3"]).to(torch.bfloat16).save_pretrained(tmp_path / "bf16")
+    tiny_family_model(_FAMILIES["qwen3_5_moe_text"]).to(torch.bfloat16).save_pretrained(tmp_path / "bf16")
     export_block_fp8_checkpoint(str(tmp_path / "bf16"), str(tmp_path / "fp8"))
     with pytest.raises(ValueError, match="already declares a quantization_config"):
         export_block_fp8_checkpoint(str(tmp_path / "fp8"), str(tmp_path / "again"))

@@ -15,28 +15,36 @@ from halo.kernels.lowp.spec import ATTENTION_PROJECTIONS, MLP_PROJECTIONS
 from halo.models.config_access import config_model_types, text_config
 from halo.models.module_tree import decoder_layer_index
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec_for_config
+from halo.models.moe.family_specs import (
+    UNVALIDATED_FP8_ROLLOUT,
+    experts_container_attrs,
+    find_moe_family_spec_for_config,
+)
 from halo.models.mtp.spec import ROOT_HEAD_ATTR
 
 RolloutWeightPrecision = Literal["bf16", "fp8_block"]
 
-# Dense families a GPU row validated (an MoE family declares its own on its spec).
-DENSE_FP8_ROLLOUT_MODEL_TYPES = ("qwen3", "qwen3_5", "qwen3_5_text")
 _FUSED_BANKS = ("gate_up_proj", "down_proj")
 # Elements one batched quantization call works on, about 1 GiB of its fp32 copy.
 _QUANTIZE_ELEMENTS = 1 << 28
 
 
 def fp8_rollout_refusal(config) -> str | None:
-    """Why block-FP8 rollouts are not validated for ``config``'s family, else ``None``."""
+    """Why block-FP8 rollouts are not validated for ``config``, else ``None``: only an MoE family whose spec a GPU row
+    passed, under a model type that spec names, so a composite that wraps its text tower in other towers is refused."""
     spec = find_moe_family_spec_for_config(config)
-    if spec is not None:
+    if spec is None:
+        if has_routed_experts(config):
+            return "it is an MoE with no family spec, so its expert layout is not declared"
+        return UNVALIDATED_FP8_ROLLOUT
+    if spec.fp8_rollout_refusal is not None:
         return spec.fp8_rollout_refusal
-    if has_routed_experts(config):
-        return "it is an MoE with no family spec, so its expert layout is not declared"
-    if set(DENSE_FP8_ROLLOUT_MODEL_TYPES) & set(config_model_types(config)):
-        return None
-    return "no GPU row has validated block-FP8 rollouts for the family"
+    if config.model_type not in spec.model_types:
+        return (
+            f"the composite {config.model_type!r} wraps a validated family's text tower, and no GPU row covered the "
+            f"composite's other towers and their names"
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -54,7 +62,7 @@ class Fp8RolloutPlan:
             model_types = list(config_model_types(config))
             raise ValueError(f"block-FP8 rollouts are refused for model_type {model_types}: {reason}.")
         spec = find_moe_family_spec_for_config(config)
-        return cls(text_config(config).num_hidden_layers, spec.expert_layout.per_expert_keys if spec else None)
+        return cls(text_config(config).num_hidden_layers, spec.expert_layout.per_expert_keys)
 
     def expand(self, name: str, tensor: torch.Tensor) -> Iterator[tuple[str, torch.Tensor]]:
         """``(name, tensor)`` as the server stores it: a selected projection as its fp8 weight and ``_scale_inv``, a

@@ -2,7 +2,7 @@
 """``rollout_weight_precision: fp8_block`` is refused where the push cannot honor it: beside adapter sync, on a family without a GPU row, and from the script's first read of the checkpoint config."""
 
 import pytest
-from transformers import LlamaConfig, Qwen3Config, Qwen3MoeConfig
+from transformers import LlamaConfig, Qwen3_5MoeConfig, Qwen3_5MoeTextConfig, Qwen3Config, Qwen3MoeConfig
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
@@ -22,14 +22,10 @@ def test_fp8_beside_adapter_sync_is_refused():
     AsyncRolloutConfig(rollout_weight_precision="fp8_block")
 
 
-@pytest.mark.parametrize("config", [Qwen3Config(), Qwen3MoeConfig()], ids=["qwen3", "qwen3-moe"])
-def test_a_validated_family_on_vllm_passes(config):
-    reject_unsyncable_config(config, "vllm", "fp8_block")
-
-
+@pytest.mark.parametrize("config", [Qwen3_5MoeConfig(), Qwen3_5MoeTextConfig()], ids=["qwen3.5-moe", "text-only"])
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_both_engines_take_block_fp8(backend):
-    reject_unsyncable_config(Qwen3Config(), backend, "fp8_block")
+def test_the_validated_family_passes_on_both_engines(config, backend):
+    reject_unsyncable_config(config, backend, "fp8_block")
 
 
 def test_a_failed_sglang_chunk_names_the_deepgemm_remedy_only_for_the_engines_partial_update_answer():
@@ -39,10 +35,13 @@ def test_a_failed_sglang_chunk_names_the_deepgemm_remedy_only_for_the_engines_pa
     assert VLLMWeightSyncClient.chunk_failure_remedy([refused]) == ""
 
 
-def test_a_family_without_a_gpu_row_is_refused_with_its_reason():
+@pytest.mark.parametrize(
+    "config", [LlamaConfig(), Qwen3Config(), Qwen3MoeConfig()], ids=["llama", "qwen3", "qwen3-moe"]
+)
+def test_a_family_without_a_gpu_row_is_refused_with_its_reason(config):
     with pytest.raises(ValueError, match="no GPU row has validated block-FP8 rollouts"):
-        reject_unsyncable_config(LlamaConfig(), "vllm", "fp8_block")
-    reject_unsyncable_config(LlamaConfig(), "vllm", "bf16")
+        reject_unsyncable_config(config, "vllm", "fp8_block")
+    reject_unsyncable_config(config, "vllm", "bf16")
 
 
 if __name__ == "__main__":
