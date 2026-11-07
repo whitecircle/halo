@@ -6,6 +6,7 @@ import functools
 import logging
 import math
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate.utils import gather
@@ -143,15 +144,16 @@ def _row_on_device(row: TurnRow, device: torch.device) -> TurnRow:
 def _stack_candidates(
     rows: list[TurnRow], width: int, k: int, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``[rows, width, k]`` candidate ids and log-probs, a row without candidates (a masked or dummy row) all unused."""
-    ids = torch.full((len(rows), width, k), NO_CANDIDATE_ID, dtype=torch.int32)
-    logps = torch.full((len(rows), width, k), NO_CANDIDATE_LOGP, dtype=torch.float32)
+    """``[rows, width, k]`` candidate ids and log-probs, a row without candidates (a masked or dummy row) all unused.
+    Filled on the host in numpy: a row's arrays arrive read-only from Ray's object store."""
+    ids = np.full((len(rows), width, k), NO_CANDIDATE_ID, dtype=np.int32)
+    logps = np.full((len(rows), width, k), NO_CANDIDATE_LOGP, dtype=np.float32)
     for i, row in enumerate(rows):
         if row.candidates is not None:
             tokens = len(row.candidates.ids)
-            ids[i, :tokens] = torch.from_numpy(row.candidates.ids)
-            logps[i, :tokens] = torch.from_numpy(row.candidates.logps)
-    return ids.to(device), logps.to(device)
+            ids[i, :tokens] = row.candidates.ids
+            logps[i, :tokens] = row.candidates.logps
+    return torch.from_numpy(ids).to(device), torch.from_numpy(logps).to(device)
 
 
 def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:

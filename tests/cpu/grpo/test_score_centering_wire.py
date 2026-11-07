@@ -4,6 +4,7 @@ so a path that shifts a row or a position (the per-turn rows, the padded stack, 
 reads back the wrong code; padding must stay unused (-1 / -inf)."""
 
 import types
+import warnings
 
 import numpy as np
 import pytest
@@ -68,6 +69,17 @@ def test_stack_rows_pads_each_rows_candidates_to_the_completion_width_in_row_ord
     assert step.topk_logps.dtype == torch.float32
     _assert_encodes_its_position(step.topk_ids, step.topk_logps, [4, 2, 3], [0, 1, 2])
     assert Trainer._stack_rows(_host(None), rows, torch.device("cpu")).topk_ids is None
+
+
+def test_read_only_candidates_from_the_object_store_stack_without_a_warning():
+    rows = [_turn_row(0, 4), _turn_row(1, 2)]
+    for row in rows:
+        row.candidates.ids.setflags(write=False)
+        row.candidates.logps.setflags(write=False)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        step = Trainer._stack_rows(_host(), rows, torch.device("cpu"))
+    _assert_encodes_its_position(step.topk_ids, step.topk_logps, [4, 2], [0, 1])
 
 
 def test_a_masked_or_dummy_row_stacks_as_unused_candidates():
