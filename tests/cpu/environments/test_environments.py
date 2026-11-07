@@ -1400,7 +1400,7 @@ def test_keenable_reads_its_page_text_from_snippet_on_one_line_capped(keenable_h
     [result] = web_search_raw("capital of France", backend="keenable")
     assert (result["title"], result["url"]) == ("Paris", "https://en.wikipedia.org/wiki/Paris")
     assert result["snippet"].startswith("Paris is the capital and largest city of France. xxx")
-    assert len(result["snippet"]) == ws._KEENABLE_SNIPPET_CHARS
+    assert len(result["snippet"]) == 500
 
 
 def test_keenable_is_auto_selected_by_its_key_after_the_other_keyed_backends(monkeypatch):
@@ -1410,8 +1410,10 @@ def test_keenable_is_auto_selected_by_its_key_after_the_other_keyed_backends(mon
     assert ws._resolve_backend(None)[0] == "duckduckgo"
     monkeypatch.setenv("KEENABLE_API_KEY", "kn-test")
     assert ws._resolve_backend(None)[0] == "keenable"
-    monkeypatch.setenv("TAVILY_API_KEY", "tv-test")
-    assert ws._resolve_backend(None)[0] == "tavily"
+    for var, backend in (("SERPER_API_KEY", "serper"), ("BRAVE_API_KEY", "brave"), ("TAVILY_API_KEY", "tavily")):
+        monkeypatch.setenv(var, "test-key")
+        assert ws._resolve_backend(None)[0] == backend
+        monkeypatch.delenv(var)
 
 
 def test_normalize_text():
