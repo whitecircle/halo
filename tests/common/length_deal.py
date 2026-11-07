@@ -103,11 +103,37 @@ def ragged_round(
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
+def sampling_side_round(*, vocab: int, close: int, rows: int, seed: int = 5) -> dict:
+    """A ragged round with a forced close, an untrainable row and a tool-output token, for suites that weigh tokens by
+    the engine's log-probs."""
+    gen = torch.Generator().manual_seed(seed)
+    batch = ragged_round(
+        torch.randint(2, 6, (rows,), generator=gen).tolist(),
+        torch.randint(3, 9, (rows,), generator=gen).tolist(),
+        vocab=vocab,
+        seed=seed,
+    )
+    batch["completion_ids"][1, 1] = close
+    batch["completion_ids"][3, 0] = close
+    batch["tool_mask"][2, 1] = 0
+    batch["advantages"][4] = 0.0
+    return batch
+
+
 def stacked(batch: dict) -> tuple[torch.Tensor, torch.Tensor, int]:
     """``(input_ids, attention_mask, logits_to_keep)`` of a round, as the no-grad pass forwards it."""
     ids = torch.cat([batch["prompt_ids"], batch["completion_ids"]], 1)
     mask = torch.cat([batch["prompt_mask"], batch["completion_mask"]], 1)
     return ids, mask, batch["completion_ids"].size(1)
+
+
+def recompute_logps(model, batch: dict) -> torch.Tensor:
+    """The old-policy pass's recompute of a round: every row, no grad, no entropy."""
+    host = packed_host(model, slots=batch["advantages"].size(0), accelerator=single_process_accelerator())
+    host._packs_microbatches = False
+    ids, mask, keep = stacked(batch)
+    with torch.no_grad():
+        return host._get_per_token_logps_and_entropies(model, ids, mask, keep, compute_entropy=False)[0]
 
 
 def scoring_host(model, ref_model, *, chunks: int, accelerator):
@@ -219,7 +245,7 @@ def train_window(
     for _ in range(host.args.gradient_accumulation_steps):
         inputs = host._prepare_inputs({})
         host._step += 1
-        loss = DistributedAsyncEnvironmentalGRPOTrainer.compute_loss(host, host.model, inputs)
+        loss = type(host).compute_loss(host, host.model, inputs)
         loss.backward()
         total += loss.item()
     grads = [p.grad.to_local() if hasattr(p.grad, "to_local") else p.grad for p in host.model.parameters()]

@@ -278,6 +278,7 @@ def main():
         log_phase_times=args.log_phase_times,
         packed_microbatch_tokens=args.packed_microbatch_tokens,
         balance_rank_tokens=args.balance_rank_tokens,
+        loss_forward_importance_weights=args.loss_forward_importance_weights,
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )

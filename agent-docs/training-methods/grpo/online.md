@@ -148,6 +148,10 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 
 `packed_microbatch_tokens` (default off) groups each rank's rows into token-budget bins that run as one flattened varlen call each, in TRL's old-policy and reference passes and in the loss forward, instead of one call per row at `per_device_train_batch_size: 1`. It needs `use_chunked_grpo_logprobs: true` and is refused with SDPG; mechanism, objective and the other refusals are on [Packed micro-batches](../async-grpo/performance.md#packed-micro-batches).
 
+## Importance ratio from the loss forward
+
+`loss_forward_importance_weights` (default off) drops TRL's no-grad old-policy pass, one forward over the round's rows, and builds the vLLM importance-sampling ratio and the KL tail clamp from the loss forward's detached log-probs. Refusals, mechanism and metrics: [Weight from the loss forward](../async-grpo/performance.md#weight-from-the-loss-forward).
+
 ## Rank balance
 
 `balance_rank_tokens` (default off) deals each round's rows across ranks so every rank trains a similar token total; the objective is unchanged. Refusals and mechanism: [Rank balance](../async-grpo/performance.md#rank-balance).

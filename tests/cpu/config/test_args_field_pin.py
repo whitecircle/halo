@@ -111,6 +111,7 @@ _EXPECTED = {
         "early_stop_logratio_gap": "None",
         "early_stop_patience": "3",
         "log_phase_times": "False",
+        "loss_forward_importance_weights": "False",
         "max_prompt_length": "None",
         "opd_positive_advantage_only": "True",
         "packed_microbatch_tokens": "None",

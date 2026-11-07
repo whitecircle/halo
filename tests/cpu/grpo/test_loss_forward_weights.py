@@ -6,6 +6,7 @@ that raises when it moves."""
 
 import types
 from collections import defaultdict
+from functools import partial
 from typing import get_args
 
 import pytest
@@ -21,6 +22,7 @@ from halo.trainers.grpo.environmental.loss_forward_weights import (
 from halo.trainers.grpo.environmental.step_batch import IS_WEIGHTS_FROM_LOSS_FORWARD_KEY, ZERO_GRADIENT_ROUND_KEY
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import ProtectedTokenEntropyMixin
+from halo.trainers.grpo.loss_forward_seam import LossForwardSeam
 from halo.trainers.grpo.microbatch_plan import agree_microbatch_geometry
 from halo.trainers.grpo.objective.logratio import (
     LOGRATIO_MEAN_KEY,
@@ -44,9 +46,9 @@ from halo.trainers.world_metrics import WorldMetrics
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.length_deal import (
     packed_host,
-    ragged_round,
+    recompute_logps,
+    sampling_side_round,
     single_process_accelerator,
-    stacked,
     tiny_llama,
     train_window,
 )
@@ -153,30 +155,7 @@ def test_a_misaligned_window_is_refused_under_true():
 # ---- the loss: fused equals the pass -------------------------------------------------------------------------------
 
 
-def _sampling_side_round(seed: int = 5, rows: int = _ROWS) -> dict:
-    """A round whose engine log-probs sit within a couple of nats of any tiny model's, so weights straddle the clamp,
-    with a forced close, a row without sampling log-probs and an untrainable row."""
-    gen = torch.Generator().manual_seed(seed)
-    batch = ragged_round(
-        torch.randint(2, 6, (rows,), generator=gen).tolist(),
-        torch.randint(3, 9, (rows,), generator=gen).tolist(),
-        vocab=_VOCAB,
-        seed=seed,
-    )
-    batch["completion_ids"][1, 1] = _CLOSE
-    batch["completion_ids"][3, 0] = _CLOSE
-    batch["tool_mask"][2, 1] = 0
-    batch["advantages"][4] = 0.0
-    return batch
-
-
-def _score(model, batch: dict) -> torch.Tensor:
-    """The pass's recompute: every row, no grad, no entropy."""
-    host = packed_host(model, slots=_ROWS, accelerator=single_process_accelerator())
-    host._packs_microbatches = False
-    ids, mask, keep = stacked(batch)
-    with torch.no_grad():
-        return host._get_per_token_logps_and_entropies(model, ids, mask, keep, compute_entropy=False)[0]
+_sampling_side_round = partial(sampling_side_round, vocab=_VOCAB, close=_CLOSE, rows=_ROWS)
 
 
 def _inputs(batch: dict, beta: float, *, seed: int = 11) -> tuple[dict, dict]:
@@ -184,7 +163,7 @@ def _inputs(batch: dict, beta: float, *, seed: int = 11) -> tuple[dict, dict]:
     the loss forward builds them from."""
     gen = torch.Generator().manual_seed(seed)
     model = tiny_llama(_VOCAB, 0)
-    recompute = _score(model, batch)
+    recompute = recompute_logps(model, batch)
     shape = recompute.shape
     has_sampling = torch.ones(shape[0], dtype=torch.bool)
     has_sampling[5] = False
@@ -350,9 +329,9 @@ def test_trls_loss_reads_both_written_keys_only_after_its_one_scoring_call(monke
     """The order the hook relies on, against the TRL this image pins: the batch carries neither key before the
     forward, and the real ``_compute_loss`` reads both after it."""
     events = []
-    note = lfw._WeightSeam._note
+    note = LossForwardSeam._note
     monkeypatch.setattr(
-        lfw._WeightSeam,
+        LossForwardSeam,
         "_note",
         lambda self, key: (events.append(f"read:{key}") if key in self._written else None, note(self, key))[1],
     )
@@ -390,7 +369,7 @@ def _pass_metrics(in_pass: dict, fused: dict) -> dict[str, float]:
     host._world_metrics = WorldMetrics()
     trainer = DistributedAsyncEnvironmentalGRPOTrainer
     loss_mask = (in_pass["completion_mask"] * in_pass["tool_mask"]).bool()
-    recompute = _score(tiny_llama(_VOCAB, 0), in_pass)
+    recompute = recompute_logps(tiny_llama(_VOCAB, 0), in_pass)
     step = types.SimpleNamespace(
         sampling_logps=fused[IS_SAMPLING_LOGPS_KEY],
         completion_mask=in_pass["completion_mask"].bool(),
@@ -449,7 +428,7 @@ def test_a_dropped_row_leaves_the_logged_log_ratio_as_decision_d1_says():
     host._metrics = {"train": defaultdict(list)}
     host._flush_loss_forward_metrics()
     fused_mean = host._metrics["train"][LOGRATIO_MEAN_KEY][-1]
-    recompute = _score(tiny_llama(_VOCAB, 0), in_pass)
+    recompute = recompute_logps(tiny_llama(_VOCAB, 0), in_pass)
     corrected = fused[IS_CORRECTED_MASK_KEY]
     diff = (recompute - fused[IS_SAMPLING_LOGPS_KEY]) * corrected
     over_loss = corrected & (dropped["completion_mask"] * dropped["tool_mask"]).bool()
