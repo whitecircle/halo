@@ -60,6 +60,9 @@ class EngineLoadedBuffers:
     config_flag: str
 
 
+UNVALIDATED_FP8_ROLLOUT = "no GPU row has validated block-FP8 rollouts for the family"
+
+
 @dataclass(frozen=True, eq=False)
 class MoEFamilySpec:
     """Identity-compared, as each family has exactly one spec constant."""
@@ -93,6 +96,8 @@ class MoEFamilySpec:
     tool_call_terminator: str | None = None
     # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
+    # Why no block-FP8 rollout server is validated for the family; None where a GPU row passed.
+    fp8_rollout_refusal: str | None = UNVALIDATED_FP8_ROLLOUT
     # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
     # (agent-docs/infrastructure/rollout-servers.md#partly-loaded-layers).
     engine_loaded_buffers: EngineLoadedBuffers | None = None
@@ -260,13 +265,16 @@ NEMOTRON_H = MoEFamilySpec(
     ),
 )
 QWEN3 = MoEFamilySpec(
-    model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS)
+    model_types=("qwen3_moe",),
+    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
+    fp8_rollout_refusal=None,
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(
     model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
+    fp8_rollout_refusal=None,
 )
 # Qwen3.5-MoE's block with a router that renormalizes only under ``norm_topk_prob``; the hub stores the experts
 # one tensor per expert, which transformers fuses on load.
