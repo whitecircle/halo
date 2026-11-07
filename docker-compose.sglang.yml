@@ -14,6 +14,9 @@ services:
       - CUDA_VISIBLE_DEVICES=${SGLANG_CUDA_DEVICES:-7}
       - HF_HOME=${HF_HOME:-/root/.cache/huggingface}
       - HF_TOKEN=${HF_TOKEN:-}
+      # Set to 0 for rollout_weight_precision: fp8_block: DeepGEMM requantizes a block-FP8 checkpoint's dense
+      # scales at boot and rejects every push of fp32 scales. Passed through only when set.
+      - SGLANG_ENABLE_JIT_DEEPGEMM
       # Weight sync shares an NCCL group with the trainer in another container. cuMem must match on
       # both ends: SGLang sets NCCL_CUMEM_ENABLE=0 process-wide unless it is already set, the
       # trainer's NCCL has it on, and the mismatch fails the first cross-container buffer import

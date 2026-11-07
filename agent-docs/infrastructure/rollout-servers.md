@@ -347,8 +347,8 @@ tensors and fewer engine GPUs at scale; decode speed on vLLM was flat at the loa
 trainer-versus-engine gap is absorbed by the importance-sampling correction or score centering
 ([Trainer and engine noise](../training-methods/async-grpo/objective.md#trainer-and-engine-noise)).
 
-SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (and `--moe-runner-backend
-triton`, as always): pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16
+SGLang takes the same push when the server runs with `SGLANG_ENABLE_JIT_DEEPGEMM=0` (export it before
+`docker compose up`; the SGLang compose file passes it through only when set) and `--moe-runner-backend triton`, as always: pushed weights equal a fresh boot of the exported checkpoint bit for bit, and the gap to the bf16
 trainer matches vLLM's (mean 0.063 nats, p99 0.57). With DeepGEMM on, SGLang requantizes a block-FP8 checkpoint's dense
 scales to UE8M0 at boot, the first chunk carrying dense fp8 weights and scales fails inside `load_weights` with an empty
 message, and the server answers "partially updated" and stays paused. `/server_info` does not report the variable (it
