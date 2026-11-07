@@ -234,6 +234,18 @@ def test_a_merge_it_cannot_make_is_refused_before_anything_is_written(tmp_path, 
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
+def test_an_adapter_directory_without_a_weight_file_is_refused_by_name(tmp_path):
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    (adapter / ADAPTER_SAFETENSORS_FILE).unlink()
+    out = tmp_path / "out"
+
+    with pytest.raises(FileNotFoundError, match=ADAPTER_SAFETENSORS_FILE):
+        merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert not out.exists()
+
+
 def _adapter_recording_sinks(tmp_path: Path, policy: SinksPolicy) -> tuple[Path, Path]:
     base, adapter = tmp_path / "base", tmp_path / "adapter"
     _dense_base(base, torch.float32)

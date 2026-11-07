@@ -16,24 +16,30 @@ from dataclasses import dataclass, field
 import torch
 from peft.tuners.lora.layer import Linear as LoraLinear
 from peft.utils.other import get_pattern_key
-from safetensors import safe_open
 
 from halo.checkpoint.adapters import (
     EXPERT_LORA_CONFIG_KEY,
     EXPERT_LORA_PEFT_TYPE,
     MIXED_EXPERT_LORA_PEFT_TYPE,
-    adapter_weight_paths,
+    find_adapter_weight_file,
     is_expert_lora_key,
     read_adapter_config,
     read_adapter_file,
 )
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
+    ADAPTER_WEIGHT_NAMES,
     DEFAULT_MAX_SHARD_SIZE,
     MERGED_ADAPTER_CONFIG_DIR,
     TRAINING_PROVENANCE_FILE,
 )
-from halo.checkpoint.reading import checkpoint_shard_files, detect_model_type, reject_partial_checkpoint
+from halo.checkpoint.reading import (
+    checkpoint_shard_files,
+    detect_model_type,
+    iter_checkpoint_shard_entries,
+    iter_checkpoint_tensors,
+    reject_partial_checkpoint,
+)
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, copy_training_sidecars
 from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
@@ -297,12 +303,10 @@ def _expert_spec(config: dict) -> ExpertLoraSpec:
 
 
 def _base_tensor_shapes(base_dir: str) -> dict[str, tuple[int, ...]]:
-    shapes: dict[str, tuple[int, ...]] = {}
-    for shard in checkpoint_shard_files(base_dir):
-        with safe_open(shard, framework="pt") as reader:
-            for key in reader.keys():  # noqa: SIM118 - safe_open has .keys() but is not a mapping
-                shapes[key] = tuple(reader.get_slice(key).get_shape())
-    return shapes
+    return {
+        key: tuple(reader.get_slice(key).get_shape())
+        for _shard, reader, key in iter_checkpoint_shard_entries(base_dir)
+    }
 
 
 def _expert_layers(
@@ -323,7 +327,12 @@ def _expert_layers(
 
 
 def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
-    path = next(path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path))
+    path = find_adapter_weight_file(adapter_dir)
+    if path is None:
+        raise FileNotFoundError(
+            f"{adapter_dir} holds none of the adapter weight files {', '.join(ADAPTER_WEIGHT_NAMES)}: point at a "
+            f"saved adapter directory."
+        )
     linear, experts, replacements = _classify_adapter_tensors(read_adapter_file(path))
     folds: dict[str, Fold] = {}
     for module, adapter in linear.items():
@@ -373,10 +382,8 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
 
 
 def _merged_tensors(base_dir: str, plan: _MergePlan) -> Iterator[tuple[str, torch.Tensor]]:
-    for shard in checkpoint_shard_files(base_dir):
-        with safe_open(shard, framework="pt") as reader:
-            for key in reader.keys():  # noqa: SIM118 - safe_open has .keys() but is not a mapping
-                yield key, plan.fold(key, reader.get_tensor(key))
+    for key, tensor in iter_checkpoint_tensors(base_dir):
+        yield key, plan.fold(key, tensor)
 
 
 def _reject_unreplayable_sidecars(adapter_dir: str) -> None:

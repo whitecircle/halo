@@ -119,9 +119,14 @@ def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
     return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
 
 
+def find_adapter_weight_file(adapter_dir: str) -> str | None:
+    """The first adapter weight file in PEFT's load-preference order, from stats alone; ``None`` when absent."""
+    return next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
+
+
 def has_adapter_weight_file(directory: str) -> bool:
     """Whether a directory holds an adapter weight file, from stats alone."""
-    return any(os.path.isfile(path) for path in adapter_weight_paths(directory))
+    return find_adapter_weight_file(directory) is not None
 
 
 def read_adapter_config(adapter_dir: str, *, missing_ok: bool = False) -> dict | None:
@@ -131,7 +136,7 @@ def read_adapter_config(adapter_dir: str, *, missing_ok: bool = False) -> dict |
 
 def read_adapter_keys(adapter_dir: str) -> list[str]:
     """The tensor names in an adapter's first weight file, read without tensor data; empty when it holds none."""
-    path = next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
+    path = find_adapter_weight_file(adapter_dir)
     if path is None:
         return []
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
