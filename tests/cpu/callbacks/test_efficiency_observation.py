@@ -43,6 +43,7 @@ def hardware(monkeypatch):
 
 
 def _phase(hardware, start_step=0, *, tokens="measured", seconds=0.25, callback_type=ObservedEfficiencyCallback):
+    """Return the callback after warmup and real step hooks, with its last timing left pending."""
     callback = callback_type(make_parallelism_config(world_size=1, gpus_per_node=1), n_warmup_steps=1)
     args = SimpleNamespace(
         include_num_input_tokens_seen="all",
@@ -66,6 +67,7 @@ def _phase(hardware, start_step=0, *, tokens="measured", seconds=0.25, callback_
 
 @pytest.mark.parametrize("memory", (_MEMORY, CudaMemoryGiB(0.001, 0.001, 0.001, 0.001)))
 def test_both_phases_accept_real_samples_including_rounded_zero(hardware, memory):
+    """Rounded allocator zero remains a measurement when each step supplied a real sample."""
     hardware.memory = memory
     for start_step, expected_steps in zip((0, 2), _PHASE_STEPS, strict=True):
         callback = _phase(hardware, start_step)
@@ -89,6 +91,7 @@ def test_observation_preserves_the_base_callback_metrics(hardware):
 @pytest.mark.parametrize("bad_phase", (0, 1))
 @pytest.mark.parametrize("tokens", ("missing", "stuck", "implausible"))
 def test_either_phase_refuses_positive_throughput_from_token_estimates(hardware, bad_phase, tokens):
+    """An estimated counter cannot qualify as measured throughput, even when its rate is positive."""
     for phase, (start_step, expected_steps) in enumerate(zip((0, 2), _PHASE_STEPS, strict=True)):
         callback = _phase(hardware, start_step, tokens=tokens if phase == bad_phase else "measured")
         checks = callback.measurement_checks(expected_steps)
@@ -99,6 +102,7 @@ def test_either_phase_refuses_positive_throughput_from_token_estimates(hardware,
 
 @pytest.mark.parametrize("bad_phase", (0, 1))
 def test_either_phase_refuses_a_missing_memory_read_despite_default_zero(hardware, bad_phase):
+    """Default-zero memory cannot stand in for a missing allocator sample in either phase."""
     for phase, (start_step, expected_steps) in enumerate(zip((0, 2), _PHASE_STEPS, strict=True)):
         hardware.memory = None if phase == bad_phase else _MEMORY
         callback = _phase(hardware, start_step)
@@ -113,7 +117,10 @@ def test_either_phase_refuses_a_missing_memory_read_despite_default_zero(hardwar
 @pytest.mark.parametrize("bad_phase", (0, 1))
 @pytest.mark.parametrize("fault", ("skip", "discard"))
 def test_either_phase_refuses_skipped_or_discarded_base_memory_collection(hardware, bad_phase, fault):
+    """A sample must reach the base report, not merely be requested or retained by the observer."""
+
     def collector(_callback):
+        """Simulate an absent collector or one that reads and discards its allocator sample."""
         if fault == "discard":
             efficiency.read_cuda_memory()
 
@@ -129,6 +136,7 @@ def test_either_phase_refuses_skipped_or_discarded_base_memory_collection(hardwa
 @pytest.mark.parametrize("field", CudaMemoryGiB._fields)
 @pytest.mark.parametrize("value", (math.nan, math.inf, -1.0))
 def test_either_phase_refuses_invalid_raw_memory_samples(hardware, bad_phase, field, value):
+    """Every raw allocator field must be finite and nonnegative, including fields not displayed."""
     for phase, (start_step, expected_steps) in enumerate(zip((0, 2), _PHASE_STEPS, strict=True)):
         hardware.memory = _MEMORY._replace(**{field: value}) if phase == bad_phase else _MEMORY
         callback = _phase(hardware, start_step)
@@ -138,6 +146,7 @@ def test_either_phase_refuses_invalid_raw_memory_samples(hardware, bad_phase, fi
 @pytest.mark.parametrize("seconds", (-0.25, math.nan, math.inf))
 @pytest.mark.parametrize("start_step,expected_steps", ((0, 3), (2, 1)))
 def test_invalid_elapsed_time_cannot_qualify_as_a_measured_step(hardware, seconds, start_step, expected_steps):
+    """A complete step count cannot legitimize a nonpositive or nonfinite time span."""
     callback = _phase(hardware, start_step, seconds=seconds)
     checks = callback.measurement_checks(expected_steps)
     assert not checks["steps_measured"] and not checks["tokens_measured"]

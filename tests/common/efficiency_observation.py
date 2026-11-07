@@ -45,9 +45,11 @@ class ObservedEfficiencyCallback(efficiency.EfficiencyCallback):
         return super()._fallback_step_tokens(world_size, measured_cluster)
 
     def _record_memory(self):
+        """Observe the base collector's device read without adding a second hardware query."""
         reader = efficiency.read_cuda_memory
 
         def read_memory():
+            """Preserve the reader's result and retain non-None samples for later validation."""
             reading = reader()
             if reading is not None:
                 self.memory_readings.append(reading)

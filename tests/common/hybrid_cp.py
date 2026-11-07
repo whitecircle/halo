@@ -106,6 +106,7 @@ def hybrid_hidden_batch(batch, length, hidden_size, *, device="cpu"):
 
 
 def build_gpu_hybrid_model(**overrides):
+    """Build a native-kernel-sized hybrid whose distinct decay and bias values expose swapped head shards."""
     model = build_hybrid_model(
         hidden_size=128,
         intermediate_size=256,
@@ -124,6 +125,7 @@ def build_gpu_hybrid_model(**overrides):
 
 
 def hybrid_token_batch(batch, vocabulary, *, boundary_only=False, length=130):
+    """Return seeded CP2 rows with boundary-only or empty-first-shard supervision; reject unsupported lengths."""
     if length % 2 or length == 16386:
         raise ValueError("Use an even hybrid CP2 fixture length other than the excluded 16,386 vendor row")
     generator = torch.Generator().manual_seed(114)

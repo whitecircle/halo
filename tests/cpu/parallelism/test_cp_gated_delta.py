@@ -34,6 +34,7 @@ from tests.common.hybrid_cp import (
 
 
 def _capture(layer, hidden, mask, targets, *, checkpointing=False):
+    """Return detached outputs and fresh gradients for the masked objective, with optional reentrant recomputation."""
     layer.zero_grad(set_to_none=True)
     inputs = hidden.detach().clone().requires_grad_()
     output = checkpoint(layer, inputs, use_reentrant=True) if checkpointing else layer(inputs)
@@ -43,6 +44,7 @@ def _capture(layer, hidden, mask, targets, *, checkpointing=False):
 
 
 def _layer_worker(rank):
+    """COLLECTIVE. Match native real-token outputs and summed gradients; require layout/state faults to diverge."""
     for batch, length, checkpointing in ((1, 12, False), (3, 14, False), (3, 12, True)):
         torch.manual_seed(114)
         config = hybrid_text_config()
@@ -103,6 +105,7 @@ def _layer_worker(rank):
         original_inverse = families.heads_to_sequence
 
         def broken_conv(inputs, weight, *args, **kwargs):
+            """Corrupt channel ownership or sever the causal convolution at the CP boundary."""
             if fault == "conv_channels":
                 return original_conv(inputs, weight.roll(1, dims=0), *args, **kwargs)
             return torch.cat(
@@ -134,6 +137,7 @@ def test_native_gated_delta_cp2_matches_outputs_and_every_gradient():
 
 
 def _model_worker(rank):
+    """Collectively match full-model loss, averaged gradients, SGD updates and native state-dict reloads."""
     for batch, checkpointing in ((1, False), (3, True)):
         baseline = build_hybrid_model()
         candidate = copy.deepcopy(baseline)
@@ -246,6 +250,7 @@ def test_hybrid_training_gate_rejects_other_trainers_adapters_and_packing(suppor
     ),
 )
 def test_hybrid_training_gate_reads_live_layers_without_linear_attention_metadata(layer_metadata):
+    """Live hybrid layers must trigger refusal even when their config metadata is absent or misleading."""
     model = build_hybrid_model()
     if layer_metadata == "missing":
         del model.config.layer_types
@@ -262,6 +267,7 @@ def test_hybrid_training_gate_reads_live_layers_without_linear_attention_metadat
 
 
 def test_hybrid_training_gate_refuses_peft_tuner_layers_injected_in_place():
+    """Refuse structural LoRA layers even after the enclosing PEFT model wrapper is removed."""
     model = get_peft_model(build_hybrid_model(), LoraConfig(r=2, target_modules=["in_proj_qkv"])).get_base_model()
     assert find_peft_model(model) is None
     assert any("lora_A" in name for name, _ in model.named_parameters())
@@ -276,6 +282,7 @@ def test_hybrid_training_gate_refuses_peft_tuner_layers_injected_in_place():
 
 @pytest.mark.parametrize("is_cp_mode", [False, True])
 def test_hybrid_training_gate_leaves_non_cp_and_attention_only_cp_unchanged(is_cp_mode):
+    """Hybrid restrictions must not reject adapter requests outside CP or on attention-only CP models."""
     model = build_hybrid_model(**({"layer_types": ["full_attention", "full_attention"]} if is_cp_mode else {}))
     reject_hybrid_cp_training(
         model,
@@ -298,6 +305,7 @@ def test_hybrid_training_gate_leaves_unmaterialized_models_for_hf_setup(model):
 
 @pytest.mark.parametrize("missing_layer_metadata", [False, True])
 def test_adoption_gate_executes_for_a_cp_capable_non_sft_trainer(missing_layer_metadata):
+    """Reject unsupported hybrid trainers before CP wrapper adoption, regardless of layer metadata."""
     model = build_hybrid_model()
     if missing_layer_metadata:
         del model.config.layer_types
@@ -319,6 +327,7 @@ def test_adoption_gate_executes_for_a_cp_capable_non_sft_trainer(missing_layer_m
     ((SMPOTrainer, None, "SFT only"), (DistributedSFTTrainer, object(), "full fine-tuning")),
 )
 def test_hybrid_trainer_initialization_refuses_before_hf_setup(trainer_class, peft, match, missing_layer_metadata):
+    """Reject unsupported trainer/adapter combinations before HuggingFace setup can obscure the failure."""
     kwargs = {
         "model": build_hybrid_model(),
         "args": SimpleNamespace(),

@@ -26,6 +26,7 @@ def test_sgd_proof_uses_native_dtype_and_keeps_zero_updates_exact(dtype):
 
 
 def test_one_ulp_update_difference_is_accepted_only_by_its_derived_rounding_budget():
+    """A one-ULP delta mismatch is admissible only when independently predicted rounding covers it."""
     before = torch.ones(1)
     first_gradient = torch.tensor([26.49 * 2**-24 / 0.1])
     second_gradient = torch.tensor([26.51 * 2**-24 / 0.1])
@@ -43,6 +44,7 @@ def test_one_ulp_update_difference_is_accepted_only_by_its_derived_rounding_budg
     "omitted", ("model.layers.0.linear_attn.A_log", "model.layers.0.linear_attn.dt_bias", "lm_head.weight")
 )
 def test_sgd_proof_rejects_one_skipped_parameter_even_when_its_update_is_small(omitted):
+    """Small updates to decay, timestep bias and head weights must remain observable to the SGD proof."""
     before = {
         "model.layers.0.linear_attn.A_log": torch.ones(8),
         "model.layers.0.linear_attn.dt_bias": torch.full((8,), 0.25),
@@ -60,6 +62,7 @@ def test_sgd_proof_rejects_one_skipped_parameter_even_when_its_update_is_small(o
 
 @pytest.mark.parametrize("fault", ("nonfinite", "dtype", "shape", "missing"))
 def test_sgd_snapshot_and_pair_refuse_invalid_captures(fault):
+    """Missing pairs fail comparison; malformed native snapshots cannot certify an update."""
     before, gradient = torch.ones(4), torch.full((4,), 0.01)
     reference = _native_step(before, gradient)
     if fault == "missing":
@@ -79,6 +82,7 @@ def test_sgd_snapshot_and_pair_refuse_invalid_captures(fault):
 @pytest.mark.parametrize("arm", ("actual", "expected"))
 @pytest.mark.parametrize("fault", ("nonfinite_ideal", "broadcastable_delta"))
 def test_sgd_pair_refuses_malformed_proof_fields(arm, fault):
+    """Neither proof arm may turn nonfinite ideals or broadcasting into an admissible update budget."""
     reference = _native_step(torch.ones(4), torch.full((4,), 0.01))
     changed = (
         replace(reference, ideal=torch.full_like(reference.ideal, float("inf")))

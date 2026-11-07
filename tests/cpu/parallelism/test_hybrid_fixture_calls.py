@@ -45,12 +45,14 @@ CALLABLES = MappingProxyType(
 
 
 def _arguments(call):
+    """Return argument placeholders for signature binding; reject starred positional requests."""
     assert not any(isinstance(value, ast.Starred) for value in call.args), "Bind an explicit fixture request"
     return [None] * len(call.args), {item.arg: None for item in call.keywords if item.arg is not None}
 
 
 @pytest.mark.parametrize("path", FIXTURES)
 def test_hybrid_fixture_calls_bind_real_runtime_signatures(path):
+    """Runtime constructors must accept the explicit requests made by GPU fixtures and the resume driver."""
     tree = ast.parse((REPO_ROOT / path).read_text())
     bound = []
     for call in ast.walk(tree):
@@ -78,6 +80,7 @@ def test_loader_call_contract_rejects_the_missing_trust_argument():
 
 
 def test_hybrid_local_loader_call_explicitly_disables_remote_code():
+    """Tiny local fixtures must opt out of remote-code trust at the actual loader call."""
     tree = ast.parse((REPO_ROOT / FIXTURES[0]).read_text())
     calls = [
         call
@@ -114,6 +117,7 @@ def test_lifecycle_save_schedule_matches_sft_config_signature(save_every):
 
 
 def test_lifecycle_trainer_callback_accepts_the_shared_resume_driver_request():
+    """Resume-driver requests must bind the fixture's keyword-only trainer builder."""
     fixture = ast.parse((REPO_ROOT / FIXTURES[1]).read_text())
     builder = next(
         node for node in ast.walk(fixture) if isinstance(node, ast.FunctionDef) and node.name == "build_trainer"
