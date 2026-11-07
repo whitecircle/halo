@@ -15,8 +15,7 @@ _CAPACITY_SCOPE = capacity_mod.capacity_scope
 
 
 def _reject_cross_node(capacity: int) -> None:
-    """A wire-index extent far below DeepEP's 32-bit limit, on a group spanning domains."""
-    capacity_mod.reject_oversized_dispatch(capacity, num_topk=1, padded_hidden=1, spans_domains=True)
+    capacity_mod.reject_oversized_dispatch(capacity, spans_domains=True)
 
 
 def _reload() -> None:
@@ -32,8 +31,10 @@ def test_default_ceiling_is_the_validated_boundary():
 
 
 def test_the_ceiling_binds_only_a_group_spanning_domains():
-    """The NVLink path has no such limit."""
-    capacity_mod.reject_oversized_dispatch(16384, num_topk=1, padded_hidden=1, spans_domains=False)
+    """The NVLink path has no ceiling at all, however large the dispatch."""
+    for capacity in (16384, 262_144, 2**31):
+        capacity_mod.reject_oversized_dispatch(capacity, spans_domains=False)
+    assert capacity_mod.max_dispatch_capacity(spans_domains=False) is None
 
 
 def test_message_names_the_mechanism_and_the_levers():

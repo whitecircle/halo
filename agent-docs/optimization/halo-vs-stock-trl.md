@@ -81,7 +81,7 @@ cross-entropy, batch 1, gradient checkpointing, tok/s/GPU · peak GiB. Nothing o
   through the dispatch, which neither transport trains: elastic EP8 deadlocks at ≥~64k tokens per rank (its combine
   barrier races FSDP2's reduce-scatter) and `ep_buffer_backend: legacy` fails at 128k
   ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend),
-  [Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit)).
+  [Dispatch token ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)).
 
 ## Convergence (Halo 1.1.0)
 

@@ -169,27 +169,23 @@ def _parallelism(ep_size: int, requires_rdma: bool = False):
     return types.SimpleNamespace(ep_size=ep_size, requires_rdma=requires_rdma)
 
 
-def _moe_config():
-    return _model(TINY_MOE_FAMILIES["qwen3_moe"]).config
+def test_a_budget_past_the_old_wire_ceiling_is_dispatchable_within_a_domain():
+    """Only the Gin ceiling bounds a dispatch, so a node-local budget of any size is accepted."""
+    for budget in (8192, 262_144, 10_000_000):
+        reject_undispatchable_budget(_parallelism(1), budget)
+        reject_undispatchable_budget(_parallelism(8), budget)
 
 
-def test_a_budget_the_dispatch_cannot_carry_is_refused_before_the_first_rollout():
-    config = _moe_config()
-    reject_undispatchable_budget(_parallelism(1), config, 10**9)
-    reject_undispatchable_budget(_parallelism(8), config, 8192)
-    with pytest.raises(ValueError, match="packed_microbatch_tokens=10000000 cannot be dispatched"):
-        reject_undispatchable_budget(_parallelism(8), config, 10_000_000)
-    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
-        reject_undispatchable_budget(_parallelism(16, requires_rdma=True), config, 9000)
+def test_the_gin_ceiling_still_refuses_a_cross_domain_budget():
+    reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 8192)
+    with pytest.raises(ValueError, match="packed_microbatch_tokens=9000 cannot be dispatched.*proxy-GIN ceiling"):
+        reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 9000)
 
 
-def test_the_planner_ceiling_is_the_tighter_of_the_wire_limit_and_the_gin_ceiling():
-    config = _moe_config()
-    assert resolve_dispatch_ceiling(_parallelism(1), config) is None
-    node_local = resolve_dispatch_ceiling(_parallelism(8), config)
-    cross_node = resolve_dispatch_ceiling(_parallelism(16, requires_rdma=True), config)
-    assert cross_node == 8192 and node_local >= cross_node
-    assert node_local % 256 == 0
+def test_the_planner_ceiling_exists_only_across_domains():
+    assert resolve_dispatch_ceiling(_parallelism(1)) is None
+    assert resolve_dispatch_ceiling(_parallelism(8)) is None
+    assert resolve_dispatch_ceiling(_parallelism(16, requires_rdma=True)) == 8192
 
 
 if __name__ == "__main__":

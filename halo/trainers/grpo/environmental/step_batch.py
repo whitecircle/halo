@@ -375,7 +375,6 @@ class StepBatchMixin:
         """The log-probs in batch order and, under R2, the ragged routing the pass captured. Under R3 each scoring call
         replays the engine's routing of its own rows. The gate is config- and mode-derived, so the forward and its EP
         dispatch are entered by every rank or by none."""
-        # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
         captured_routing = None
         if self._runs_logprob_recompute and not self._uses_loss_forward_weights(mode):

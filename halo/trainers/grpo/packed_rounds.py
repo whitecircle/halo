@@ -70,8 +70,8 @@ class PackedRoundMixin:
         )
         model = self.accelerator.unwrap_model(self.model)
         reject_unpackable_model(model, effective_attn_implementation(model.config))
-        reject_undispatchable_budget(self.parallelism_config, model.config, budget)
-        self._packed_dispatch_ceiling = resolve_dispatch_ceiling(self.parallelism_config, model.config)
+        reject_undispatchable_budget(self.parallelism_config, budget)
+        self._packed_dispatch_ceiling = resolve_dispatch_ceiling(self.parallelism_config)
         # The plan orders the round's rows, and each micro-batch's spans are read from its own mask.
         self._stashes_row_spans = False
         self._packs_microbatches = True

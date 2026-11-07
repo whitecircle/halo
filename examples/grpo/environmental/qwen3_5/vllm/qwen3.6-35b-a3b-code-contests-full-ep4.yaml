@@ -15,8 +15,7 @@ attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
 # --- Parallelism (4 train GPUs: EP=4 single dispatch group, DP=4) ---
 expert_parallel_size: 4            # ep_size == GPUs-in-the-job = one DeepEP group; EP ⊥ DP
 fsdp_reshard_after_forward: false  # ZeRO-2 for the non-expert base params; ZeRO-3 is rejected under EP
-ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only; elastic's 32-bit wire-index guard
-                                   # breaks at these tokens/rank
+ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only
 fp32_router: true
 fp32_experts: true
 

@@ -172,7 +172,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `HF_MODULE_NAMES` — the HF MoE block class name(s) this EP layer replaces. The sole registration point.
 - The expert count is not declared: the base `detect_num_experts()` reads it off the expert container, a per-expert `nn.ModuleList`'s length or else its `num_experts`, so a container carrying neither raises at the first build.
 
-    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` / `resolve_expert_ffn_width` / `resolve_dispatch_width` (the hidden state, or the latent of a block projecting into one around its experts) in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
+    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` / `resolve_expert_ffn_width` in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
 
 - `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`halo/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
 

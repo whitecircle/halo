@@ -6,13 +6,10 @@ from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.distributed.expert_parallel.deepep.capacity import (
     aligned_dispatch_ceiling,
     ep_dispatch_capacity,
-    padded_wire_hidden,
     reject_oversized_dispatch,
 )
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import is_flash_attn_implementation
-from halo.models.config_access import text_config
-from halo.models.moe.config_fields import resolve_dispatch_width, resolve_router_topk
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.trainers.grpo.row_order import reject_microbatch_dependent_objective
 from halo.trainers.training_args_overrides import uses_evaluation
@@ -89,37 +86,19 @@ def reject_unpackable_model(model, attn_impl: str | None) -> None:
         )
 
 
-def _dispatch_shape(parallelism_config, model_config) -> tuple[int, int] | None:
-    """``(num_topk, padded wire hidden)`` of the run's EP dispatch, ``None`` without one."""
+def resolve_dispatch_ceiling(parallelism_config) -> int | None:
+    """Tokens one EP dispatch can carry per rank on this run (the proxy-GIN ceiling on a group spanning NVLink
+    domains), rounded down to the arena's block; ``None`` where there is no ceiling."""
     if parallelism_config.ep_size <= 1:
         return None
-    text = text_config(model_config)
-    width, num_topk = resolve_dispatch_width(text), resolve_router_topk(text)
-    return (num_topk, padded_wire_hidden(width)) if width and num_topk else None
+    return aligned_dispatch_ceiling(spans_domains=parallelism_config.requires_rdma)
 
 
-def resolve_dispatch_ceiling(parallelism_config, model_config) -> int | None:
-    """Tokens one EP dispatch can carry per rank on this run (the 32-bit wire index, and the proxy-GIN ceiling on a
-    group spanning NVLink domains), rounded down to the arena's block; ``None`` where there is no dispatch."""
-    shape = _dispatch_shape(parallelism_config, model_config)
-    if shape is None:
-        return None
-    return aligned_dispatch_ceiling(
-        num_topk=shape[0], padded_hidden=shape[1], spans_domains=parallelism_config.requires_rdma
-    )
-
-
-def reject_undispatchable_budget(parallelism_config, model_config, budget: int) -> None:
+def reject_undispatchable_budget(parallelism_config, budget: int) -> None:
     """Refuse a ``packed_microbatch_tokens`` whose arena the first dispatch would refuse, before the first rollout."""
-    shape = _dispatch_shape(parallelism_config, model_config)
-    if shape is None:
+    if parallelism_config.ep_size <= 1:
         return
     try:
-        reject_oversized_dispatch(
-            ep_dispatch_capacity(budget),
-            num_topk=shape[0],
-            padded_hidden=shape[1],
-            spans_domains=parallelism_config.requires_rdma,
-        )
+        reject_oversized_dispatch(ep_dispatch_capacity(budget), spans_domains=parallelism_config.requires_rdma)
     except ValueError as exc:
         raise ValueError(f"{PACKED_KNOB}={budget} cannot be dispatched: lower it. {exc}") from exc

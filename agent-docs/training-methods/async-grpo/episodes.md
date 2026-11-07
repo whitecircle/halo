@@ -57,7 +57,7 @@ rows left out.
 
 The episode budget leaves tool output between turns unbounded, so it does not replace this cap.
 
-On an EP group spanning NVLink domains the cap is also the row length the load-time dispatch gate sizes, with `per_device_train_batch_size` rows (and `per_device_eval_batch_size` where an evaluation runs): unset, the gate judges the context window and refuses above the cross-node 8,192 tokens per rank ([DeepEP](../../infrastructure/deepep.md#dispatch-wire-index-limit)).
+On an EP group spanning NVLink domains the cap is also the row length the load-time dispatch gate sizes, with `per_device_train_batch_size` rows (and `per_device_eval_batch_size` where an evaluation runs): unset, the gate judges the context window and refuses above the cross-node 8,192 tokens per rank ([DeepEP](../../infrastructure/deepep.md#dispatch-token-ceiling)).
 
 ## Tool calls
 

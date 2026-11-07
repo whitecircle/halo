@@ -20,7 +20,6 @@ from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
-    padded_wire_hidden,
     reject_oversized_dispatch,
 )
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
@@ -37,7 +36,7 @@ from halo.models.attention.selection import (
 from halo.models.config_access import text_config
 from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
-from halo.models.moe.config_fields import has_routed_experts, resolve_dispatch_width, resolve_router_topk
+from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.dataloaders import uses_dp_sharded_loader
 from halo.trainers.sft_rules import reject_unsupported_mtp_options
@@ -450,31 +449,36 @@ def eval_forward_rows(parsed: tuple, parallelism, trainer_cls: type) -> int:
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_eval_batch_fits_the_dispatch_budget(config):
-    """The load gate sizes a forward off the training batch, and an evaluation forward dispatches through the same
-    wire index and, across NVLink domains, the same Gin ceiling. An eval batch past either fails at the first eval."""
+    """The load gate sizes a forward off the training batch, and an evaluation forward dispatches under the same
+    Gin ceiling across NVLink domains. An eval batch past it fails at the first eval."""
     parsed, parallelism = build_parallelism_config(config)
     row_length = bounded_row_length(*parsed)
     if parallelism.ep_size <= 1 or row_length is None:
         pytest.skip("no expert dispatch, or a run that declares no row length")
-    decoder = text_config(model_config_for(config, parsed))
     for trainer_cls in script_trainer_classes(script_for(config)):
-        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length // parallelism.cp_size
-        reject_oversized_dispatch(
-            ep_dispatch_capacity(tokens),
-            num_topk=resolve_router_topk(decoder),
-            padded_hidden=padded_wire_hidden(resolve_dispatch_width(decoder)),
-            spans_domains=parallelism.requires_rdma,
-        )
+        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length
+        reject_oversized_dispatch(ep_dispatch_capacity(tokens), spans_domains=parallelism.requires_rdma)
 
 
 def test_a_train_batch_past_the_dispatch_budget_is_refused():
     """Against the load gate the shape checks reach: without a declared budget it would pass any batch."""
-    config = EXAMPLES_ROOT / "sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml"
+    config = EXAMPLES_ROOT / "sft/inkling/inkling-small-multinode-ep16.yaml"
     parsed, parallelism = build_parallelism_config(config, train_batch=4)
-    with pytest.raises(ValueError, match="32-bit wire-index"):
+    assert parallelism.requires_rdma, "precondition: the group spans NVLink domains"
+    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
         reject_unsupported_model(
             parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
         )
+
+
+def test_a_node_local_train_batch_has_no_dispatch_ceiling():
+    """The same oversized batch within one NVLink domain is dispatchable."""
+    config = EXAMPLES_ROOT / "sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml"
+    parsed, parallelism = build_parallelism_config(config, train_batch=64)
+    assert not parallelism.requires_rdma
+    reject_unsupported_model(
+        parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
+    )
 
 
 def test_an_eval_batch_counts_one_microbatch_under_pipeline_parallelism():

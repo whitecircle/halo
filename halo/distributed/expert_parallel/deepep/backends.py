@@ -265,7 +265,7 @@ class DeepEPBackend(ABC):
 
 class _ElasticBackend(DeepEPBackend):
     """DeepEP V2 ``ElasticBuffer``, the default: grow-only sizing, hidden zero-padded to a multiple of
-    256 on the wire and sliced back before results re-enter autograd, the 32-bit wire index guarded."""
+    256 on the wire and sliced back before results re-enter autograd."""
 
     _arena: _ElasticArena | None
 
@@ -279,9 +279,7 @@ class _ElasticBackend(DeepEPBackend):
     def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
         d = self._d
         needed = self._resolve_capacity(num_tokens, num_topk)
-        reject_oversized_dispatch(
-            needed, num_topk=num_topk, padded_hidden=self._padded_hidden, spans_domains=d.spans_domains
-        )
+        reject_oversized_dispatch(needed, spans_domains=d.spans_domains)
 
         # A changed top-k reshapes the wire and a changed mode (a forward ahead of Trainer.__init__)
         # rebuilds the buffer, so this layer moves to the arena for the new kind.
@@ -301,9 +299,7 @@ class _ElasticBackend(DeepEPBackend):
         # A shared arena already holding `needed` is reused as it is; only a build or grow takes headroom.
         target = needed
         if needed > self._arena.capacity:
-            target = arena_capacity(
-                needed, num_topk=num_topk, padded_hidden=self._padded_hidden, spans_domains=d.spans_domains
-            )
+            target = arena_capacity(needed, spans_domains=d.spans_domains)
         built = self._arena.ensure(target)
         self._num_topk = num_topk
         self._resolved_num_sms = self._resolve_num_sms(num_topk)

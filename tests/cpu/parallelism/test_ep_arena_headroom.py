@@ -2,6 +2,7 @@
 """The elastic DeepEP arena is built and grown with headroom, held to the limits the dispatch check enforces, so a
 rising high-water mark rebuilds it a few times per run instead of on every step that sets a new maximum."""
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,7 @@ from halo.distributed.expert_parallel.deepep.capacity import (
     aligned_dispatch_ceiling,
     arena_capacity,
     capacity_scope,
+    ep_dispatch_capacity,
     max_dispatch_capacity,
     reject_oversized_dispatch,
 )
@@ -22,14 +24,10 @@ from halo.distributed.expert_parallel.deepep.capacity import (
 # Qwen3.5-35B-A3B wire shape; the logged grow sequence of a batch-32 run on it.
 HIDDEN, TOP_K = 2048, 8
 LOGGED_GROWS = (36096, 37120, 37632)
-# Hidden 8192 x top-8 puts the 32-bit index ceiling at 32767 tokens/rank.
-WIDE = {"num_topk": 8, "padded_hidden": 8192}
 
 
-def _capacity(needed: int, *, spans_domains: bool = False, **wire) -> int:
-    return arena_capacity(
-        needed, spans_domains=spans_domains, **(wire or {"num_topk": TOP_K, "padded_hidden": HIDDEN})
-    )
+def _capacity(needed: int, *, spans_domains: bool = False) -> int:
+    return arena_capacity(needed, spans_domains=spans_domains)
 
 
 @pytest.mark.parametrize("needed", [256, 1280, 4608, 9216, 36096])
@@ -40,16 +38,11 @@ def test_headroom_is_the_factor_rounded_up_to_the_alignment(needed):
     assert got > needed
 
 
-@pytest.mark.parametrize("needed", [256, 8192, 30000, 32512])
-def test_the_wire_index_ceiling_clamps_the_headroom(needed):
-    got = _capacity(needed, **WIDE)
-    assert got >= needed
-    assert got <= max(needed, max_dispatch_capacity(spans_domains=False, **WIDE))
-    reject_oversized_dispatch(got, spans_domains=False, **WIDE)
-    if needed == 32512:
-        assert got == needed, "an arena already at the aligned ceiling takes no headroom"
-    if needed == 30000:
-        assert got == 32512, "the headroom stops at the largest aligned capacity under the index limit"
+@pytest.mark.parametrize("needed", [30000, 32512, 262_144, 1_000_000])
+def test_headroom_within_a_domain_is_not_clamped(needed):
+    """Only the Gin ceiling bounds an arena; a single-domain dispatch has none, however many tokens it carries."""
+    assert max_dispatch_capacity(spans_domains=False) is None
+    assert _capacity(needed) == ep_dispatch_capacity(math.ceil(needed * ARENA_HEADROOM)) > needed
 
 
 def test_the_gin_ceiling_clamps_across_domains_only(monkeypatch):
@@ -65,22 +58,20 @@ def test_the_gin_ceiling_clamps_across_domains_only(monkeypatch):
 @pytest.mark.parametrize("spans_domains", [False, True])
 @pytest.mark.parametrize("needed", range(256, 40000, 1792))
 def test_headroom_never_exceeds_what_the_dispatch_check_allows(needed, spans_domains):
-    wire = {"num_topk": 4, "padded_hidden": 3072, "spans_domains": spans_domains}
-    limit = max_dispatch_capacity(**wire)
-    if needed > limit:
+    limit = max_dispatch_capacity(spans_domains=spans_domains)
+    if limit is not None and needed > limit:
         with pytest.raises(ValueError):
-            reject_oversized_dispatch(needed, **wire)
+            reject_oversized_dispatch(needed, spans_domains=spans_domains)
         return
-    reject_oversized_dispatch(arena_capacity(needed, **wire), **wire)
+    reject_oversized_dispatch(arena_capacity(needed, spans_domains=spans_domains), spans_domains=spans_domains)
 
 
-@pytest.mark.parametrize("spans_domains", [False, True])
-def test_the_aligned_ceiling_is_the_limit_rounded_down_to_the_block(spans_domains):
-    wire = {"num_topk": 8, "padded_hidden": 2048, "spans_domains": spans_domains}
-    limit = max_dispatch_capacity(**wire)
-    ceiling = aligned_dispatch_ceiling(**wire)
+def test_the_aligned_ceiling_is_the_gin_limit_rounded_down_to_the_block():
+    limit = max_dispatch_capacity(spans_domains=True)
+    ceiling = aligned_dispatch_ceiling(spans_domains=True)
     assert ceiling % EP_CAPACITY_ALIGN == 0 and limit - EP_CAPACITY_ALIGN < ceiling <= limit
-    reject_oversized_dispatch(ceiling, **wire)
+    reject_oversized_dispatch(ceiling, spans_domains=True)
+    assert aligned_dispatch_ceiling(spans_domains=False) is None
 
 
 def test_every_rank_of_a_group_builds_the_same_size():
@@ -128,9 +119,7 @@ def _replay(backend, needs) -> None:
 
 def test_the_logged_grow_sequence_builds_the_arena_once(backend):
     _replay(backend, LOGGED_GROWS)
-    assert _Buffer.built == [
-        arena_capacity(LOGGED_GROWS[0], num_topk=TOP_K, padded_hidden=HIDDEN, spans_domains=False)
-    ]
+    assert _Buffer.built == [arena_capacity(LOGGED_GROWS[0], spans_domains=False)]
     assert max(LOGGED_GROWS) <= backend._arena.capacity
 
 

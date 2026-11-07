@@ -139,8 +139,9 @@ Conditions that decide how to read the table:
 - **NeMo's search was limited and is not its ceiling.** Its EP1 layout is refused by an FSDP uniform-dtype assertion, and
   the 9B tried no TP and no layout without activation checkpointing. The 122B EP4 gain over EP8 (3.9%) is confounded with
   expandable segments and is a single run. NeMo's 35B EP2 uses 99.1 GiB against Halo's 139.1.
-- **Halo EP above 1 is refused at 128k.** DeepEP's 32-bit dispatch wire index cannot address the tokens
-  ([limit](../infrastructure/deepep.md#dispatch-wire-index-limit)), so 128k runs on EP1.
+- **Halo EP above 1 was not run at 128k.** The dispatch has no token ceiling within a domain
+  ([ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)), but elastic EP8 deadlocks at ≥~64k tokens per rank
+  ([Transport backend](../infrastructure/deepep.md#transport-backend)), so 128k runs on EP1.
 - **Isolation was checked on slices, not on full rows in the training step.** An edit-one-document test with a negative
   control (the same forward without document boundaries moves the other documents) passed for Halo 35B and 122B on
   slices of about 5k tokens, forward only, on EP1 with FA4. The same kind of test covers Halo 9B, TRL 9B, 35B and 122B,
@@ -218,7 +219,7 @@ EP1 also keeps experts FSDP-sharded. Pipeline and context parallelism are not co
 | Framework, tokens per row | EP1 / plain FSDP2 | EP2 | EP4 | EP8 |
 |---|---:|---:|---:|---:|
 | Halo 1.2.0, 64k | **23,637** | 22,522 | refused | 19,326 |
-| Halo 1.2.0, 128k | **23,647** | refused | refused | — |
+| Halo 1.2.0, 128k | **23,647** | — | refused | — |
 | Megatron Bridge, 64k | OOM | **21,559** | 19,965 | 18,638 |
 | Megatron Bridge, 128k | — | 10,567 | **21,109** | 18,873 |
 | NeMo AutoModel 0.7.0, 64k | refused | **12,340** | 11,977 | 11,360 |
@@ -229,16 +230,15 @@ EP1 also keeps experts FSDP-sharded. Pipeline and context parallelism are not co
 Each cell is that layout's best row. At 64k Halo's EP1 and TRL are batch 2 (Halo batch 1: 22,937), and Megatron's EP2 and
 EP8 use two micro-batches per step, the same tokens per step (one micro-batch: 20,273 and 18,143). Halo's EP8 ran on FA2,
 its other cells on FA4. Halo refuses EP4 alone on one NVLink domain
-([mechanism](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)) and EP2 at 128k by its
-[wire index](../infrastructure/deepep.md#dispatch-wire-index-limit); its EP8 at 128k was not run on the 35B, and the same
-limit refuses it on the 122B. Megatron's EP2 at 128k ran at the memory limit
+([mechanism](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)); its EP2 and EP8 at 128k
+were not run on the 35B, nor its EP8 on the 122B. Megatron's EP2 at 128k ran at the memory limit
 (267.7 GiB by nvidia-smi), so its rate reflects memory pressure, not the layout.
 
 **Qwen3.5-122B-A10B, packed rows, checkpointing:**
 
 | Framework | 64k | 128k |
 |---|---|---|
-| Halo 1.2.0 | **EP1 ZeRO-3 8,933** (batch 2; batch 1: 8,395); EP8 OOM; EP8 with activation offload 7,061 | **EP1 ZeRO-3 8,943**; EP8 refused |
+| Halo 1.2.0 | **EP1 ZeRO-3 8,933** (batch 2; batch 1: 8,395); EP8 OOM; EP8 with activation offload 7,061 | **EP1 ZeRO-3 8,943**; EP8 not run |
 | Megatron Bridge, fp16 master | EP8 OOM; EP8+TP2 OOM; EP8+TP4 4,454; **EP8+TP8 4,781** | EP8+TP8 OOM, and 1,935 with the optimizer on the CPU |
 | NeMo AutoModel 0.7.0 | EP2 OOM; **EP4 5,397** (expandable segments, 266.1 of 267.7 GiB by nvidia-smi); EP8 5,193 | EP8 4,683 |
 | TRL 1.17.1 | ZeRO-3 5,936 (batch 2; batch 1: 5,690) | ZeRO-3 5,951 |

@@ -19,8 +19,6 @@ DEEPEP_V1_CONFIG_RANKS = frozenset({2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 144, 1
 EP_CAPACITY_ALIGN = 256
 # The V2 combine kernel's TMA path requires a wire hidden width that is a multiple of this.
 DEEPEP_HIDDEN_ALIGN = 256
-# DeepEP offsets the per-rank wire buffer with 32-bit indices; extent >= 2**31 wraps into an illegal access.
-DEEPEP_INDEX_LIMIT = 2**31
 # Cross-node (Gin) dispatch above this many tokens/rank wedges instead of erroring; 0 disables.
 # Boundary and fault signatures: agent-docs/infrastructure/deepep.md#expert-parallelism-over-aws-efa.
 GIN_MAX_TOKENS_PER_RANK = env_non_negative_int("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", 8192)
@@ -110,46 +108,33 @@ def reject_legacy_backend_topology(dispatch_size: int, *, is_cross_node: bool, g
         )
 
 
-def max_dispatch_capacity(*, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
-    """The most tokens/rank one dispatch may carry: under the 32-bit wire index and, on a group spanning NVLink
-    domains, the proxy-Gin ceiling."""
-    limit = (DEEPEP_INDEX_LIMIT - 1) // (num_topk * padded_hidden)
-    if spans_domains and GIN_MAX_TOKENS_PER_RANK:
-        limit = min(limit, GIN_MAX_TOKENS_PER_RANK)
-    return limit
+def max_dispatch_capacity(*, spans_domains: bool) -> int | None:
+    """The most tokens/rank one dispatch may carry: the proxy-Gin ceiling on a group spanning NVLink domains, ``None``
+    (no ceiling) within one domain or with the ceiling disabled."""
+    return GIN_MAX_TOKENS_PER_RANK if spans_domains and GIN_MAX_TOKENS_PER_RANK else None
 
 
-def aligned_dispatch_ceiling(*, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
+def aligned_dispatch_ceiling(*, spans_domains: bool) -> int | None:
     """:func:`max_dispatch_capacity` rounded down to :data:`EP_CAPACITY_ALIGN`, the largest capacity an arena or a
-    token budget can take."""
-    limit = max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
-    return limit // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN
+    token budget can take; ``None`` where there is no ceiling."""
+    limit = max_dispatch_capacity(spans_domains=spans_domains)
+    return None if limit is None else limit // EP_CAPACITY_ALIGN * EP_CAPACITY_ALIGN
 
 
-def arena_capacity(needed: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> int:
+def arena_capacity(needed: int, *, spans_domains: bool) -> int:
     """The tokens/rank to build or grow an elastic arena to: ``needed`` times :data:`ARENA_HEADROOM` rounded up to
-    :data:`EP_CAPACITY_ALIGN`, held to :func:`aligned_dispatch_ceiling` and never below ``needed``. A function of
-    group-uniform inputs, so every rank of the group builds the same size."""
-    ceiling = aligned_dispatch_ceiling(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains)
+    :data:`EP_CAPACITY_ALIGN`, held to :func:`aligned_dispatch_ceiling` where there is one and never below ``needed``.
+    A function of group-uniform inputs, so every rank of the group builds the same size."""
+    ceiling = aligned_dispatch_ceiling(spans_domains=spans_domains)
     headroom = ep_dispatch_capacity(math.ceil(needed * ARENA_HEADROOM))
-    return max(needed, min(headroom, ceiling))
+    return max(needed, headroom if ceiling is None else min(headroom, ceiling))
 
 
-def reject_oversized_dispatch(capacity: int, *, num_topk: int, padded_hidden: int, spans_domains: bool) -> None:
-    """Raise past the 32-bit wire index or, on a group spanning NVLink domains, past the proxy-Gin ceiling."""
-    if capacity <= max_dispatch_capacity(num_topk=num_topk, padded_hidden=padded_hidden, spans_domains=spans_domains):
+def reject_oversized_dispatch(capacity: int, *, spans_domains: bool) -> None:
+    """Raise on a group spanning NVLink domains past the proxy-Gin ceiling."""
+    limit = max_dispatch_capacity(spans_domains=spans_domains)
+    if limit is None or capacity <= limit:
         return
-    index_extent = capacity * num_topk * padded_hidden
-    if index_extent >= DEEPEP_INDEX_LIMIT:
-        raise ValueError(
-            f"DeepEP dispatch exceeds the 32-bit wire-index limit: num_max_tokens_per_rank={capacity} × "
-            f"num_topk={num_topk} × padded_hidden={padded_hidden} = {index_extent:,} ≥ "
-            f"{DEEPEP_INDEX_LIMIT:,}. The dispatch kernel would illegal-access. The buffer is per-rank, "
-            f"so expert_parallel_size does not lower it — reduce the tokens in one MoE forward: "
-            f"per_device_train_batch_size=1, a shorter sequence (max_length), or in env-GRPO fewer "
-            f"generations / shorter trajectories (reasoning effort / max_turns / rollout length). The ceiling here "
-            f"is {DEEPEP_INDEX_LIMIT // (num_topk * padded_hidden):,} tokens/rank."
-        )
     raise ValueError(
         f"Cross-node DeepEP GIN dispatch: num_max_tokens_per_rank={capacity} exceeds the validated "
         f"EFA proxy-GIN ceiling ({GIN_MAX_TOKENS_PER_RANK}). A larger dispatch wedges in transit "

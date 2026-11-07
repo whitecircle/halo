@@ -10,7 +10,6 @@ import torch
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
-    padded_wire_hidden,
     reject_oversized_dispatch,
 )
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -30,10 +29,8 @@ from halo.models.external_tables import EXTERNAL_TABLES_STAMP
 from halo.models.model_classes import is_remote_code_class
 from halo.models.moe.config_fields import (
     has_routed_experts,
-    resolve_dispatch_width,
     resolve_expert_count,
     resolve_expert_ffn_width,
-    resolve_router_topk,
 )
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 
@@ -50,41 +47,27 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
     run can declare, so it cannot switch the gate off."""
     if pc.ep_size <= 1 or pc.ep_rows_per_device <= 0:
         return
-    text = text_config(model_config)
-    width = resolve_dispatch_width(text)
-    num_topk = resolve_router_topk(text)
-    if not width or not num_topk:
-        return
     max_length = pc.ep_declared_max_length or context_window_from_config(model_config)
     if not max_length:
         # max_length: null on a config that states no window leaves nothing to judge against.
         return
-    # CP is the one axis that shrinks a rank's token count; dividing by no other keeps this an upper bound. The rows
-    # are one forward's, so one microbatch's under PP.
-    budget = pc.ep_rows_per_device * max_length
-    tokens_per_rank = budget // pc.cp_size
+    # The rows are one forward's, so one microbatch's under PP. CP never meets a cross-domain group, so it divides
+    # nothing here.
+    tokens_per_rank = pc.ep_rows_per_device * max_length
     capacity = ep_dispatch_capacity(tokens_per_rank)
     try:
-        reject_oversized_dispatch(
-            capacity,
-            num_topk=num_topk,
-            padded_hidden=padded_wire_hidden(width),
-            spans_domains=pc.requires_rdma,
-        )
+        reject_oversized_dispatch(capacity, spans_domains=pc.requires_rdma)
     except ValueError as exc:
-        cp_note = f" ({budget} / context_parallel_size={pc.cp_size})" if pc.cp_size > 1 else ""
         length_note = "" if pc.ep_declared_max_length else " (no length cap → the model's context window)"
         rows_lever = "raise pipeline_microbatches" if pc.pp_size > 1 else "lower per_device_train_batch_size"
         raise ValueError(
             f"Either {rows_lever} or lower the row-length cap (max_length, or "
-            f"max_prompt_length + max_completion_length where those two bound a row) — or, for the "
-            f"cross-node Gin ceiling only, raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's "
+            f"max_prompt_length + max_completion_length where those two bound a row) — or "
+            f"raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's "
             f"declared token budget cannot be dispatched: {pc.ep_rows_per_device} row(s)/forward × "
-            f"{max_length} tokens/row{length_note} gives {tokens_per_rank} tokens/rank"
-            f"{cp_note}, sized to a {capacity}-token DeepEP arena on an EP group of "
-            f"{pc.ep_group_size} rank(s) (ep_scope={pc.ep_scope}, nvlink_domain_size="
-            f"{pc.nvlink_domain_size}, "
-            f"{'cross-domain — Gin/RDMA' if pc.requires_rdma else 'within one NVLink domain'}). "
+            f"{max_length} tokens/row{length_note} gives {tokens_per_rank} tokens/rank, "
+            f"sized to a {capacity}-token DeepEP arena on an EP group of {pc.ep_group_size} rank(s) (ep_scope={pc.ep_scope}, nvlink_domain_size="
+            f"{pc.nvlink_domain_size}, cross-domain — Gin/RDMA). "
             f"{exc}"
         ) from exc
 

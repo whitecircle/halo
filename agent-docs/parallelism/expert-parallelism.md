@@ -242,11 +242,9 @@ fused SR kernel, fp32 params standard in-place AdamW. See
 [DeepEP](../infrastructure/deepep.md) owns installation, buffer sizing, transport and fabric tuning.
 What an EP run has to plan around:
 
-- **Two dispatch ceilings**, both refused at config time off the declared budget and re-checked at buffer
-  sizing, rather than left to fault mid-kernel:
+- **One dispatch ceiling**, refused at config time off the declared budget and re-checked at buffer
+  sizing, rather than left to wedge in transit:
 
-    - The 32-bit wire index caps every topology at `2³¹ / (num_topk × padded_hidden)` ≈ **175k tokens
-      per forward** for GPT-OSS.
     - Cross-node (Gin) dispatch caps at `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (default **8192**, `0`
       disables), above which an EFA proxy-GIN dispatch **wedges instead of erroring**. Intra-node
       NVLink dispatch has no cap of its own, but the default `elastic` backend deadlocks ep8 at ≥~64k
@@ -256,7 +254,7 @@ What an EP run has to plan around:
     The Gin cap is the binding limit on `per_device_train_batch_size` × sequence length for any
     `ep_scope=global` run spanning more than one NVLink domain
     ([AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)). How the config-time
-    budget is derived: [DeepEP → Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
+    budget is derived: [DeepEP → Dispatch token ceiling](../infrastructure/deepep.md#dispatch-token-ceiling).
 
 - **The dispatched count is `per_device_train_batch_size × tokens-per-sequence`**, doubled for DPO,
   SMPO and reward, which forward chosen and rejected together. It does not scale with
