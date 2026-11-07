@@ -322,10 +322,11 @@ def test_the_online_weight_push_runs_outside_the_round_being_binned_and_restores
     monkeypatch.setattr(
         online_module,
         "sync_trainer_weights",
-        lambda trainer, client: seen.append((trainer._bins_round_scoring, client)),
+        lambda trainer, client, **_: seen.append((trainer._bins_round_scoring, client)),
     )
     trainer = types.SimpleNamespace(
         _bins_round_scoring=True,
+        _rollout_weight_precision="bf16",
         first_push_verified=True,
         _phase_timers=PhaseTimers(enabled=False),
         accelerator=types.SimpleNamespace(is_main_process=True),
