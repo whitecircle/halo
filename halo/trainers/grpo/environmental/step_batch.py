@@ -12,6 +12,7 @@ from accelerate.utils import gather
 from trl.trainer.utils import pad
 
 from halo.diagnostics.phase_timers import Phase
+from halo.environments.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
 from halo.runtime.consensus import DeferredRankFailure, rank_max, reject_across_ranks
@@ -37,6 +38,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     narrow_loss_masks,
     record_token_mass,
 )
+from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
 from halo.trainers.token_metrics import effective_loss_mask
 from halo.trainers.world_metrics import world_sums
 
@@ -86,6 +88,8 @@ class StepRows:
     prompt_completion_ids: torch.Tensor
     attention_mask: torch.Tensor
     logits_to_keep: int
+    topk_ids: torch.Tensor | None = None
+    topk_logps: torch.Tensor | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -133,6 +137,20 @@ def _row_on_device(row: TurnRow, device: torch.device) -> TurnRow:
         loss_mask=row.loss_mask.to(device=device, dtype=torch.bool),
         sampling_logps=None if row.sampling_logps is None else row.sampling_logps.to(device),
     )
+
+
+def _stack_candidates(
+    rows: list[TurnRow], width: int, k: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``[rows, width, k]`` candidate ids and log-probs, a row without candidates (a masked or dummy row) all unused."""
+    ids = torch.full((len(rows), width, k), NO_CANDIDATE_ID, dtype=torch.int32)
+    logps = torch.full((len(rows), width, k), NO_CANDIDATE_LOGP, dtype=torch.float32)
+    for i, row in enumerate(rows):
+        if row.candidates is not None:
+            tokens = len(row.candidates.ids)
+            ids[i, :tokens] = torch.from_numpy(row.candidates.ids)
+            logps[i, :tokens] = torch.from_numpy(row.candidates.logps)
+    return ids.to(device), logps.to(device)
 
 
 def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:
@@ -230,6 +248,9 @@ class StepBatchMixin:
         }
         if scores.fused:
             result = self._with_loss_forward_inputs(result, step, scores)
+        if step.topk_ids is not None:
+            # Row-first, so TRL's shuffle and slice and the packed slot view move them with the completion positions.
+            result[TOPK_IDS_KEY], result[TOPK_LOGPS_KEY] = step.topk_ids, step.topk_logps
         if scores.captured_routing is not None:
             rollout_routing = self._rollout_routing = scores.captured_routing
         if rollout_routing is not None:
@@ -243,8 +264,29 @@ class StepBatchMixin:
         per padding trajectory."""
         padding = [single_trajectory_row(self._masked_trajectory_tensors())] * num_padding
         per_trajectory = self._tokenize_step_rows(rollout_results) + padding
-        rows = [_row_on_device(row, device) for turn_rows in per_trajectory for row in turn_rows]
+        host_rows = [row for turn_rows in per_trajectory for row in turn_rows]
+        self._record_rows_without_candidates(host_rows)
+        rows = [_row_on_device(row, device) for row in host_rows]
         return rows, [len(turn_rows) for turn_rows in per_trajectory]
+
+    def _record_rows_without_candidates(self, rows: list[TurnRow]) -> None:
+        """Under ``score_centering_top_k`` a host row that trains any token needs the candidates the engine was asked
+        for, aligned with its sampled tokens: one scored without them would train on another objective than its
+        neighbours, so it is recorded on the fence."""
+        k = self.async_config.score_centering_top_k
+        if not k:
+            return
+        lacking = sum(
+            bool(row.loss_mask.any())
+            and (row.candidates is None or len(row.candidates.ids) != len(row.completion_ids))
+            for row in rows
+        )
+        if lacking:
+            self._batch_errors.record(
+                f"score_centering_top_k={k} but {lacking} of {len(rows)} training rows carry no candidate log-probs "
+                f"aligned with their sampled tokens: a turn whose reply returned none, or a trajectory re-tokenized "
+                f"from its render because its rollout returned no token ids."
+            )
 
     def _pad_rows_across_ranks(
         self, rows: list[TurnRow], engine_logps: list[torch.Tensor | None] | None, device: torch.device
@@ -291,6 +333,9 @@ class StepBatchMixin:
                 padding_side="right",
             )
             has_sampling = torch.tensor([row.sampling_logps is not None for row in rows], device=device)
+        topk_ids = topk_logps = None
+        if k := self.async_config.score_centering_top_k:
+            topk_ids, topk_logps = _stack_candidates(rows, completion_ids.size(1), k, device)
         return StepRows(
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
@@ -303,6 +348,8 @@ class StepBatchMixin:
             prompt_completion_ids=torch.cat([prompt_ids, completion_ids], dim=1),
             attention_mask=torch.cat([prompt_mask, completion_mask], dim=1),
             logits_to_keep=completion_ids.size(1),
+            topk_ids=topk_ids,
+            topk_logps=topk_logps,
         )
 
     def _score_step(

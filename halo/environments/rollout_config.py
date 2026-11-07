@@ -56,6 +56,9 @@ class RolloutConfig:
     """Capture the sampled token ids and the engine's rendered prompt ids, so training uses what the server rendered
     and the model emitted. Off in a hand-built config; ``get_rollout_config`` derives it from
     ``train_on_sampled_tokens``."""
+    capture_candidate_logprobs: int = 0
+    """Candidate log-probs requested per generated token (score centering's ``K``) on SGLang; 0 = none. Needs
+    ``capture_token_ids``, which the candidates align with."""
     capture_routed_experts: bool = False
     """Capture the engine's per-token MoE routing (the raw ``routed_experts`` payload) for R3 routing replay; needs
     ``--enable-return-routed-experts`` and the triton MoE backend the weight sync also needs."""

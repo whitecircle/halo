@@ -28,6 +28,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
     reject_unresolved_forced_closes,
+    reject_unsupported_score_centering,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
@@ -193,6 +194,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
         reject_prefetch_past_retry_budget(resolve_weight_sync_client(cfg.rollout_backend), cfg, self.args)
+        reject_unsupported_score_centering(cfg)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)
         reject_vespo_loss(self.args)

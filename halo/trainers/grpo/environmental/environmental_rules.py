@@ -288,6 +288,25 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
         )
 
 
+def reject_unsupported_score_centering(async_config) -> None:
+    """Score centering reads the candidates the sampler returns beside each sampled token, which SGLang sends as flat
+    arrays."""
+    top_k = async_config.score_centering_top_k
+    if top_k is None:
+        return
+    reasons = []
+    if async_config.rollout_backend != SGLANG_BACKEND:
+        reasons.append(
+            f"rollout_backend: {async_config.rollout_backend!r} (vLLM returns each candidate as one JSON object through "
+            "a single API-server process, measured at 65% of rollout throughput at K=16 and 80% at K=32, where "
+            "SGLang's flat arrays cost nothing beyond run noise; serve the rollouts with SGLang)"
+        )
+    if not async_config.train_on_sampled_tokens:
+        reasons.append("train_on_sampled_tokens: false (the candidates align with the sampled token ids)")
+    if reasons:
+        raise ValueError(f"score_centering_top_k={top_k} is not supported with: {'; '.join(reasons)}.")
+
+
 def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
     """On an engine whose pause aborts turns in flight, a turn aborted ``max_retries + 1`` times fails its episode, and
     a round stays in flight for ``prefetch_depth`` rounds of ``steps_per_generation × num_iterations``

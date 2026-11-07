@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
+from halo.environments.candidate_logprobs import parse_sglang_candidates
 from halo.environments.episode import TurnGeneration, describe_exception
 from halo.environments.rollout_config import (
     SGLANG_BACKEND,
@@ -129,6 +130,12 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
             "count the captured token ids instead (0 when none are captured).",
             config.backend,
         )
+    candidates = None
+    if config.capture_candidate_logprobs and token_ids is not None:
+        # SGLang only: a construction refusal keeps vLLM, which would return none here, off the knob.
+        candidates = parse_sglang_candidates(
+            choice.get("meta_info") or {}, len(token_ids), config.capture_candidate_logprobs
+        )
     routing_mask = None
     if config.capture_routed_experts:
         # vLLM attaches it per choice; SGLang in the echoed ``meta_info`` when asked, else under ``sglext``.
@@ -144,6 +151,7 @@ def turn_from_chat_completion(data: dict[str, Any], config: RolloutConfig) -> Tu
         tokens=tokens,
         token_ids=token_ids,
         token_logprobs=token_logprobs,
+        candidates=candidates,
         routing_mask=routing_mask,
         # The engine's prompt length anchors the mask; the trainer's re-render can differ by a token.
         routing_prompt_tokens=usage.get("prompt_tokens") if routing_mask else None,
@@ -260,6 +268,10 @@ def capture_request_fields(config: RolloutConfig) -> dict[str, Any]:
             # SGLang's OpenAI `logprobs` drops the id; its meta_info keeps it, and prompt ids come back on the choice.
             fields["return_meta_info"] = True
             fields["return_prompt_token_ids"] = True
+            if config.capture_candidate_logprobs:
+                # The candidates ride flat base64 arrays in meta_info instead of one JSON object per token.
+                fields["top_logprobs"] = config.capture_candidate_logprobs
+                fields["return_flat_raw_output_top_logprobs"] = True
     if config.capture_routed_experts and not is_vllm:
         # A per-request opt-in. start_len stays 0 so rows cover the full sequence, as build_rollout_routing expects.
         fields["return_routed_experts"] = True

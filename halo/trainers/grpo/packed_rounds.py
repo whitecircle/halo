@@ -47,7 +47,7 @@ class PackedRoundMixin:
     PACKED_ROWS_REFUSAL: ClassVar[str | None] = None
     # What a filler row holds per round key when it is not zero: one attended prompt token (no NaN) and a fully masked
     # completion, as the rows that pad a round across ranks.
-    PACKED_FILLER_VALUES: ClassVar[dict[str, int]] = {IMPORTANCE_RATIO_KEY: 1}
+    PACKED_FILLER_VALUES: ClassVar[dict[str, float]] = {IMPORTANCE_RATIO_KEY: 1}
 
     _packed_microbatch_tokens: int | None = None
     _packed_dispatch_ceiling: int | None = None

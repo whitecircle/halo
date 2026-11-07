@@ -22,6 +22,7 @@ from halo.configs.grpo import (
     PhaseTimerArguments,
     PromptDatasetArguments,
     RolloutWeightPrecisionArguments,
+    ScoreCenteringArguments,
 )
 from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSamplingArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
@@ -221,6 +222,7 @@ class AsyncRolloutConfig(
     PackedMicrobatchArguments,
     PhaseTimerArguments,
     RolloutWeightPrecisionArguments,
+    ScoreCenteringArguments,
 ):
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""
@@ -644,6 +646,7 @@ class AsyncRolloutConfig(
         return RolloutConfig(
             **mirrored,
             capture_token_ids=self.train_on_sampled_tokens,
+            capture_candidate_logprobs=self.score_centering_top_k or 0,
             capture_routed_experts=self.routing_replay == "rollout",
             stop_token_ids=stop_token_ids,
             reasoning_end_token_id=reasoning_end_token_id,

@@ -12,6 +12,7 @@ from collections import deque
 from datetime import timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import numpy as np
 import torch
 from torch.distributed import TCPStore
 
@@ -25,6 +26,13 @@ from tests.common.repo import REPO_ROOT
 GRAPH_CAPTURE_TOKENS = 512
 # Tells a request's retries apart from new requests.
 CALL_ID_HEADER = "X-Halo-Call-Id"
+
+
+def candidate_distribution(k: int, sampled: int) -> tuple[list[int], list[float]]:
+    """A one-token reply's top ``k`` of a toy vocabulary (probabilities 1/2, 1/4, ... with ``sampled`` the largest), as
+    ids and log-probs, descending."""
+    ids = [sampled] + [sampled + 1 + j for j in range(k - 1)]
+    return ids, [-(j + 1) * float(np.log(2.0)) for j in range(k)]
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -340,6 +348,8 @@ class FakeSGLangServer(FakeEngineServer):
         self.adapters: dict[str, tuple[dict, dict[str, torch.Tensor]]] = {}
         # The ``model`` of every chat completion, in arrival order.
         self.completion_models: list[str] = []
+        # Whether the image answers return_flat_raw_output_top_logprobs; an older one ignores the field.
+        self.flat_top_logprobs = True
         self.generate_lora_paths: list[str | None] = []
         # The launch facts /server_info reports for the frozen base.
         self.served_model_name = "org/policy"
@@ -445,7 +455,19 @@ class FakeSGLangServer(FakeEngineServer):
                     "param": None,
                     "code": 400,
                 }
-            return 200, {"choices": [{"prompt_token_ids": self.render_prompt(body)}]}
+            choice = {"message": {"content": "x"}, "prompt_token_ids": self.render_prompt(body)}
+            if body.get("top_logprobs") and body.get("return_flat_raw_output_top_logprobs") and self.flat_top_logprobs:
+                ids, logps = candidate_distribution(body["top_logprobs"], 7)
+                choice["meta_info"] = {
+                    "output_token_logprobs": [[logps[0], 7, None]],
+                    "output_top_logprobs_val_flat_b64": base64.b64encode(np.asarray(logps, "<f4").tobytes()).decode(),
+                    "output_top_logprobs_idx_flat_b64": base64.b64encode(np.asarray(ids, "<i4").tobytes()).decode(),
+                    "output_top_logprobs_val_flat_b64_dtype": "float32",
+                    "output_top_logprobs_idx_flat_b64_dtype": "int32",
+                    "output_top_logprobs_shape": [1, len(ids)],
+                    "output_top_logprobs_null_prefix": 0,
+                }
+            return 200, {"choices": [choice]}
         if path == "/generate" and body.get("return_logprob"):
             self.generate_lora_paths.append(body.get("lora_path"))
             # [logprob, token_id, text] per input token from logprob_start_len; the window's first entry is its anchor

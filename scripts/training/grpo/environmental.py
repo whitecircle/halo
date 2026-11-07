@@ -80,7 +80,10 @@ from halo.models.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.environmental.environmental_rules import reject_prefetch_past_retry_budget
+from halo.trainers.grpo.environmental.environmental_rules import (
+    reject_prefetch_past_retry_budget,
+    reject_unsupported_score_centering,
+)
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
@@ -160,6 +163,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         reasoning_consumers=tuple(name for name, on in consumers if on),
         sampled_token_ids=async_config.train_on_sampled_tokens,
         weight_precision=async_config.rollout_weight_precision,
+        candidate_logprobs=async_config.score_centering_top_k or 0,
     )
 
 
@@ -309,10 +313,12 @@ def main():
             f"the script also writes into max_completion_length. Set rollout_max_tokens instead and remove "
             f"max_completion_length."
         )
-    # The trainer refuses the same config at construction; checked here, before the model load.
+    # The trainer refuses the same configs at construction; checked here, before the model load and the server
+    # preflights.
     reject_prefetch_past_retry_budget(
         resolve_weight_sync_client(async_config.rollout_backend), async_config, grpo_config
     )
+    reject_unsupported_score_centering(async_config)
 
     # A throwaway env for the startup checks, built before any load so an unknown environment_type or a refused
     # environment_kwargs fails here.

@@ -4,6 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any, NamedTuple
 
+from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.episode_keys import EPISODE_INVALID_KEY
 
 TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
@@ -63,6 +64,7 @@ class Message:
     # Engine captures, dropped by to_dict; ``routing_mask`` stays raw base64, cheap to pickle through Ray.
     token_ids: list[int] | None = None
     token_logprobs: list[float] | None = None
+    candidates: CandidateLogprobs | None = None
     routing_mask: str | None = None
     routing_prompt_tokens: int | None = None
     prompt_token_ids: list[int] | None = None

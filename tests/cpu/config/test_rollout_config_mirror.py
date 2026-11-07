@@ -16,6 +16,7 @@ _FORWARDED = AsyncRolloutConfig.rollout_field_sources()
 # The fields get_rollout_config computes instead of copying, each named with what it computes from.
 _DERIVED = {
     "capture_token_ids": "train_on_sampled_tokens",
+    "capture_candidate_logprobs": "score_centering_top_k",
     "capture_routed_experts": "routing_replay",
     "stop_token_ids": "rollout_stop_tokens, resolved to ids by the trainer",
     "reasoning_end_token_id": "rollout_reasoning_end_token, resolved to an id by the caller that owns the tokenizer",
@@ -76,6 +77,13 @@ def test_capture_token_ids_follows_train_on_sampled_tokens(sampled_tokens):
     """A broken derivation trains env-GRPO on a re-tokenized re-render of every turn, with nothing in the logs."""
     built = AsyncRolloutConfig(train_on_sampled_tokens=sampled_tokens).get_rollout_config()
     assert built.capture_token_ids is sampled_tokens
+
+
+@pytest.mark.parametrize(("top_k", "requested"), [(None, 0), (16, 16)])
+def test_candidate_logprobs_are_requested_as_many_as_score_centering_reads(top_k, requested):
+    """A dropped copy leaves the objective with no candidates to read, or every rollout paying for ones it ignores."""
+    built = AsyncRolloutConfig(score_centering_top_k=top_k).get_rollout_config()
+    assert built.capture_candidate_logprobs == requested
 
 
 def test_reasoning_end_token_id_is_the_id_the_caller_resolved():

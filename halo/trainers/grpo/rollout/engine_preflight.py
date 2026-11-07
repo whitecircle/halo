@@ -13,11 +13,12 @@ from dataclasses import replace
 from functools import partial
 from typing import Any, NamedTuple, TypeVar
 
+import numpy as np
 import requests
 from urllib3.util.retry import Retry
 
 from halo.env import env_positive_int
-from halo.environments.engine_wire import build_payload, capture_generation_tokens
+from halo.environments.engine_wire import build_payload, capture_generation_tokens, turn_from_chat_completion
 from halo.environments.rollout_config import SAMPLER_FILTERS_OFF, RolloutConfig
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
@@ -60,6 +61,8 @@ _PROMPT_LOGPROB_CONFIDENT = -1.0
 # Any servable model all but predicts a counting sequence, while garbage prompt log-probs average 12-22
 # nats: the bound catches a whole sequence that itself prefilled as a graph (a raised capture range).
 _PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL = 4.0
+# Slack on a candidate set's probability mass and on the sampled token's log-prob read twice (float32 arrays, JSON).
+_CANDIDATE_MASS_TOLERANCE = 1e-3
 
 _PER_TOKEN_RATIO_REMEDY = (
     "take the ratio per token: on online GRPO a token_* vllm_importance_sampling_mode with a loss_type other than "
@@ -87,6 +90,8 @@ class ServerRequirements(NamedTuple):
     reasoning_consumers: tuple[str, ...] = ()
     sampled_token_ids: bool = False
     weight_precision: RolloutWeightPrecision = "bf16"
+    candidate_logprobs: int = 0
+    """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -260,7 +265,7 @@ def _verify_server_flags_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], needs: ServerRequirements
 ) -> None:
     readings = _across_servers(partial(_read_server_facts, client_cls, needs=needs), urls)
-    for url, (flags, accepted, sampled) in zip(urls, readings, strict=True):
+    for url, (flags, accepted, sampled, candidates) in zip(urls, readings, strict=True):
         refusals = [] if flags is None else _server_flag_refusals(client_cls, flags, needs)
         if accepted is False:
             refusals.append(_no_tool_parser(client_cls))
@@ -269,6 +274,12 @@ def _verify_server_flags_on_rank0(
                 "train_on_sampled_tokens needs the ids a turn sampled, and its logprobs carry no token_id: "
                 "entries, so every turn would train on a re-tokenized render. Serve with "
                 "--return-tokens-as-token-ids, or set train_on_sampled_tokens: false."
+            )
+        if candidates is False:
+            refusals.append(
+                f"score_centering_top_k={needs.candidate_logprobs} needs {needs.candidate_logprobs} candidate "
+                f"log-probs per generated token, and a one-token probe did not get them back (refused, malformed, or "
+                f"not the sampled token's distribution). {client_cls.IMAGE_REMEDY}"
             )
         if refusals:
             raise ValueError(f"Rollout server {url} cannot serve this run: " + " ".join(refusals))
@@ -388,13 +399,44 @@ def _probe_servers(
     return _across_servers(lambda url: _probe_server(client_cls, url, probe, default, failure), urls)
 
 
+def _probe_candidate_logprobs(client: WeightSyncClientBase, k: int) -> bool:
+    """Whether a one-token greedy turn returns ``k`` candidates, as the rollout requests them: a distribution (its mass
+    at most 1) holding the sampled token at its own log-prob. A 400 is the server refusing ``k``."""
+    config = RolloutConfig(
+        backend=client.BACKEND_KEY,
+        temperature=0.0,
+        top_p=1.0,
+        max_tokens=1,
+        capture_token_ids=True,
+        capture_candidate_logprobs=k,
+        model_name=client.served_model_id(),
+    )
+    payload = build_payload([{"role": "user", "content": "ping"}], config)
+    reply = client.request(
+        "POST", "/v1/chat/completions", retry=True, timeout=_PROBE_TIMEOUT_S, check=False, json=payload
+    )
+    if reply.status_code == 400:
+        return False
+    reply.raise_for_status()
+    turn = turn_from_chat_completion(reply.json(), config)
+    if turn.candidates is None or not turn.token_ids or turn.token_logprobs is None:
+        return False
+    ids, logps = turn.candidates.ids[0], turn.candidates.logps[0]
+    at_sampled = ids == turn.token_ids[0]
+    return bool(
+        np.exp(logps).sum() <= 1.0 + _CANDIDATE_MASS_TOLERANCE
+        and at_sampled.any()
+        and abs(float(logps[at_sampled][0]) - turn.token_logprobs[0]) <= _CANDIDATE_MASS_TOLERANCE
+    )
+
+
 def _read_server_facts(
     client_cls: type[WeightSyncClientBase], url: str, needs: ServerRequirements
-) -> tuple[ServerFlags | None, bool | None, bool | None]:
-    """The launch flags of ``url`` and, where the run needs them, whether it accepts a tool-bearing request and
-    reports the ids it sampled; ``None`` for a probe that did not answer."""
+) -> tuple[ServerFlags | None, bool | None, bool | None, bool | None]:
+    """The launch flags of ``url`` and, where the run needs them, whether it accepts a tool-bearing request, reports
+    the ids it sampled and returns the candidate log-probs; ``None`` for a probe that did not answer."""
     flags = _probe_server(client_cls, url, client_cls.read_server_flags, None, "read the launch flags of")
-    accepted = sampled = None
+    accepted = sampled = candidates = None
     if needs.sends_tools:
         accepted = _probe_server(
             client_cls, url, client_cls.accepts_tool_requests, None, "probe a tool-bearing request on"
@@ -403,7 +445,15 @@ def _read_server_facts(
         sampled = _probe_server(
             client_cls, url, client_cls.reports_sampled_token_ids, None, "probe the sampled-token ids of"
         )
-    return flags, accepted, sampled
+    if needs.candidate_logprobs:
+        candidates = _probe_server(
+            client_cls,
+            url,
+            partial(_probe_candidate_logprobs, k=needs.candidate_logprobs),
+            None,
+            "probe the candidate log-probs of",
+        )
+    return flags, accepted, sampled, candidates
 
 
 def _verify_context_window_on_rank0(

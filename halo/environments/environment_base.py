@@ -267,6 +267,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
                 thinking=ctx.get("reasoning"),
                 token_ids=ctx.get("token_ids"),
                 token_logprobs=ctx.get("token_logprobs"),
+                candidates=ctx.get("candidates"),
                 routing_mask=ctx.get("routing_mask"),
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),

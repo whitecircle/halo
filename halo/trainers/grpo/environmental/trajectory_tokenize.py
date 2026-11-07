@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 import torch
 
+from halo.environments.candidate_logprobs import CandidateLogprobs
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
 from halo.environments.messages import engine_view
@@ -38,6 +39,7 @@ class TurnRow(NamedTuple):
     sampling_logps: torch.Tensor | None
     turn_routing: TurnRouting | None
     negative_only: bool = False
+    candidates: CandidateLogprobs | None = None
 
 
 def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> list[TurnRow]:
@@ -212,6 +214,7 @@ class TrajectoryTokenizeMixin:
             ),
             turn_routing=turn_routing,
             negative_only=message.untrainable,
+            candidates=message.candidates,
         )
 
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

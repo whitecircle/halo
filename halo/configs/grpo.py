@@ -242,6 +242,24 @@ class GRPOEarlyStopArguments(ValidatedConfig):
 
 
 @dataclass
+class ScoreCenteringArguments(ValidatedConfig):
+    """Score centering (arXiv:2609.20807, App. A) of the environmental GRPO objective."""
+
+    score_centering_top_k: int | None = field(
+        default=None,
+        metadata={
+            "help": "Candidate log-probs the SGLang rollout server returns per generated token for score centering; "
+            "unset = none are requested. Needs rollout_backend: sglang and train_on_sampled_tokens; refused at "
+            "construction otherwise."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, **present(score_centering_top_k=self.score_centering_top_k))
+
+
+@dataclass
 class ChunkedLogprobsArguments:
     """Vocab-chunked log-prob computation switch shared by the GRPO trainers (online, environmental, offline)."""
 

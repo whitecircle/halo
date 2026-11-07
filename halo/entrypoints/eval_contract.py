@@ -91,7 +91,12 @@ class TrainingContract:
             reasoning_end_token_id=reasoning_end_token_id,
             in_process_group=False,
         )
-        return replace(rollout, capture_token_ids=reasoning_end_token_id is not None, capture_routed_experts=False)
+        return replace(
+            rollout,
+            capture_token_ids=reasoning_end_token_id is not None,
+            capture_candidate_logprobs=0,
+            capture_routed_experts=False,
+        )
 
 
 def load_training_contract(path: str | None) -> TrainingContract | None:

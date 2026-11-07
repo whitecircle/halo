@@ -61,7 +61,9 @@ def _make_trainer_stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -91,7 +93,9 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
         _tokenizer=fake_tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -268,7 +272,9 @@ def _turns_stub():
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
     )
@@ -292,7 +298,7 @@ def test_old_logps_aligned_1to1_with_sampled_ids():
     rows = _turns_stub()._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
 
     assert len(rows) == 2
-    for (_, comp, mask, old, _routing, _negative_only), ids, lps in zip(
+    for (_, comp, mask, old, _routing, _negative_only, _candidates), ids, lps in zip(
         rows, [[10, 11, 12], [20, 21]], [[-0.1, -0.2, -0.3], [-0.4, -0.5]], strict=True
     ):
         assert comp.tolist() == ids
@@ -335,7 +341,9 @@ def _render_stub(render):
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
         _batch_errors=BatchBuildFence(),
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
         eos_token_id=2,

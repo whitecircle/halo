@@ -61,7 +61,9 @@ def _host():
             layer_indices=EP_LAYER_INDICES,
         ),
         _batch_errors=BatchBuildFence(),
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
         _warned_once=set(),
