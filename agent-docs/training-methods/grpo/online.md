@@ -244,7 +244,7 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
 - `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
 - `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
-- Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, SDPG's teacher forward included) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
+- Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, which TRL counts while it builds the round; SDPG's teacher forward is not counted) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
 - A first-push parity warning in the log when the served model scores a fixed row more than 1 nat per position away from the trainer; `HALO_WEIGHT_SYNC_PARITY_PROBE=raise` stops the run, `off` skips it ([probe](../../infrastructure/rollout-servers.md#first-push-parity-probe)).
 - `advantage/net_token_mass` every round (an early sign of entropy drift) and, under `balance_token_mass`, `advantage/token_mass_scale`; the sign reads as the entropy push only under a token-sum loss such as `dapo`.
 
