@@ -83,7 +83,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     # The MLA loaders fuse this pair from a cache local to one ``load_weights`` call and silently drop a lone half.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     ADAPTER_SYNC_REFUSAL = None
-    FP8_BLOCK_ROLLOUT_REFUSAL = None
     # The engine's answer to a chunk it cannot load is "partially updated", whatever the cause.
     CHUNK_FAILURE_REMEDIES = {
         "partially updated": (

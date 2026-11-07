@@ -185,12 +185,11 @@ def _reject_refused_families(families: list[tuple[str, type[EPMoELayerBase]]], c
             )
 
 
-def _reject_unquantizable_rollout(config, backend: str, client_cls, precision: RolloutWeightPrecision) -> None:
-    """Refuses ``rollout_weight_precision: fp8_block`` on an engine or family no GPU row has validated it for."""
+def _reject_unquantizable_rollout(config, backend: str, precision: RolloutWeightPrecision) -> None:
+    """Refuses ``rollout_weight_precision: fp8_block`` on a family no GPU row has validated it for."""
     if precision == "bf16":
         return
-    reason = client_cls.FP8_BLOCK_ROLLOUT_REFUSAL or fp8_rollout_refusal(config)
-    if reason is not None:
+    if (reason := fp8_rollout_refusal(config)) is not None:
         raise ValueError(
             f"rollout_weight_precision={precision!r} with rollout_backend={backend!r} and model_type "
             f"{sorted(config_model_types(config))} is refused: {reason}. Set rollout_weight_precision: bf16."
@@ -206,7 +205,7 @@ def reject_unsyncable_config(config, backend: str, precision: RolloutWeightPreci
     _reject_unservable_model_types(config, backend, client_cls)
     registry = f"model_type registry for {config.model_type}"
     _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
-    _reject_unquantizable_rollout(config, backend, client_cls, precision)
+    _reject_unquantizable_rollout(config, backend, precision)
 
 
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
@@ -286,7 +285,7 @@ def reject_unsyncable_model(model: torch.nn.Module, backend: str, precision: Rol
     _reject_model_state(model, ep_layers)
     _reject_engine_fit(model, backend, ep_layers)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
-    _reject_unquantizable_rollout(config, backend, resolve_weight_sync_client(backend), precision)
+    _reject_unquantizable_rollout(config, backend, precision)
     _reject_balancing_state(model)
 
 

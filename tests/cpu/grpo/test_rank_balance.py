@@ -24,7 +24,6 @@ from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rank_balance import (
     PROMPT_ROWS,
-    RANK_BALANCE_KNOB,
     SPREAD_AFTER_KEY,
     SPREAD_BEFORE_KEY,
     RankSpread,
@@ -33,7 +32,6 @@ from halo.trainers.grpo.rank_balance import (
     max_over_mean,
     reject_unbalanceable_rank_tokens,
 )
-from halo.trainers.grpo.row_order import reject_trainer_refusal
 from tests.common.gloo import run_gloo_ranks
 from tests.common.length_deal import single_process_accelerator, tiny_llama, with_world_normalizer, world_accelerator
 from tests.common.online_rounds import online_host
@@ -332,21 +330,13 @@ def test_a_setup_the_deal_would_change_or_could_not_use_is_refused(kwargs, match
         _admit(**kwargs)
 
 
-def test_a_trainer_declared_refusal_is_read_before_trls_constructor_and_none_admits_the_trainer():
-    assert (
-        DistributedSDPGTrainer.RANK_BALANCE_REFUSAL is None
-        and DistributedOnlineGRPOTrainer.RANK_BALANCE_REFUSAL is None
-    )
-    with pytest.raises(ValueError, match="DistributedSDPGTrainer"):
-        reject_trainer_refusal(DistributedSDPGTrainer, "a reason", RANK_BALANCE_KNOB)
-    reject_trainer_refusal(DistributedSDPGTrainer, DistributedSDPGTrainer.RANK_BALANCE_REFUSAL, RANK_BALANCE_KNOB)
+def test_the_deal_is_configured_once_trls_constructor_has_run():
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedOnlineGRPOTrainer.__init__)))
     line = {
         (n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id): n.lineno
         for n in ast.walk(init)
         if isinstance(n, ast.Call) and isinstance(n.func, (ast.Attribute, ast.Name))
     }
-    assert line["reject_trainer_refusal"] < line["__init__"], "the refusal must precede TRL's constructor"
     assert line["_configure_rank_balance"] > line["_finish_on_policy_init"]
 
 

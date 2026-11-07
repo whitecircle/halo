@@ -338,7 +338,7 @@ def _step_recompute(rollout_replay: bool, dealt: bool) -> tuple[torch.Tensor, to
     order = host._no_grad_row_order(mask, "train") if dealt else None
     assert order is None or not torch.equal(order, torch.argsort(order)), "the deal should not be self-inverse"
     engine = ragged_routing(_routed_mask(ids.size(0), ids.size(1))) if rollout_replay else None
-    logps, routing = host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order)
+    logps, routing = host._recompute_logps_and_routing(ids, mask, keep, engine, "train", order)
     return logps, None if routing is None else dense_rows(routing), replayed
 
 
@@ -377,8 +377,8 @@ def test_the_dealt_recompute_and_reference_forwards_are_bitwise_the_batch_orders
     assert order is not None and not torch.equal(order, torch.arange(12)), "the round should not deal to itself"
 
     with torch.no_grad():
-        plain, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
-        dealt, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
+        plain, _ = host._recompute_logps_and_routing(ids, mask, keep, None, "train")
+        dealt, _ = host._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
         ref_plain = host._compute_ref_logps(ids, mask, keep)
         ref_dealt = host._compute_ref_logps(ids, mask, keep, order)
     assert torch.equal(dealt, plain)

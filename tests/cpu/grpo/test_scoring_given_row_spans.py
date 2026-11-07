@@ -36,7 +36,7 @@ def _recompute(monkeypatch, injector):
     host._routing_injector = injector
     ids, mask, keep = stacked(_round())
     with torch.no_grad():
-        logps, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
+        logps, _ = host._recompute_logps_and_routing(ids, mask, keep, None, "train")
     return logps, len(calls), mask
 
 

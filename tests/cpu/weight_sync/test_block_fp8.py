@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from halo.checkpoint.tools.fp8_dequant import dequantize_block_fp8
-from halo.kernels.lowp.block_fp8 import BLOCK, FP8_E4M3_MAX, quantize_block_fp8
+from halo.kernels.lowp.block_fp8 import BLOCK, quantize_block_fp8
+from halo.kernels.lowp.quantization import E4M3_MAX
 
 
 def _reference(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -34,8 +35,8 @@ def test_the_quantizer_equals_the_diagnostics_math_bit_for_bit(shape):
 def test_scales_are_exact_powers_of_two_including_at_the_boundary():
     """A block whose maximum is exactly 448 * 2**e keeps scale 2**e: the next power would halve the resolution."""
     weight = torch.zeros(BLOCK, 2 * BLOCK)
-    weight[0, 0] = FP8_E4M3_MAX * 4
-    weight[0, BLOCK] = FP8_E4M3_MAX * 4 * 1.0001
+    weight[0, 0] = E4M3_MAX * 4
+    weight[0, BLOCK] = E4M3_MAX * 4 * 1.0001
     _, scale = quantize_block_fp8(weight)
     assert scale.tolist() == [[4.0, 8.0]]
     assert torch.equal(torch.log2(scale), torch.log2(scale).round())

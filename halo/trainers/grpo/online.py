@@ -40,7 +40,7 @@ from halo.trainers.grpo.online_loss_forward import OnlineLossForwardMixin
 from halo.trainers.grpo.packed_rounds import PackedRoundMixin
 from halo.trainers.grpo.packed_rules import PACKED_KNOB
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
-from halo.trainers.grpo.rank_balance import RANK_BALANCE_KNOB, RankBalancedRoundMixin
+from halo.trainers.grpo.rank_balance import RankBalancedRoundMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
@@ -91,8 +91,6 @@ class DistributedOnlineGRPOTrainer(
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
         if self._packed_microbatch_tokens is not None:
             reject_trainer_refusal(type(self), self.PACKED_ROWS_REFUSAL, PACKED_KNOB)
-        if self._balances_rank_tokens:
-            reject_trainer_refusal(type(self), self.RANK_BALANCE_REFUSAL, RANK_BALANCE_KNOB)
         grpo_args = require_vllm_server_mode(training_args)
         reject_tool_calling_loop(args, kwargs)
         reject_unshared_rollout_func(self.parallelism_config, args, kwargs)

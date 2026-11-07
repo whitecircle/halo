@@ -269,7 +269,7 @@ def timed_no_grad_pass(host, batch: dict, order: torch.Tensor | None, repeats: i
         torch.cuda.synchronize()
         start = time.perf_counter()
         with torch.no_grad():
-            host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
+            host._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
         torch.cuda.synchronize()
         dist.barrier()
         best = min(best, time.perf_counter() - start)

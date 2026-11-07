@@ -356,7 +356,7 @@ _PHASE_HELPERS = (
     "_apply_breaker_and_record_metrics",
 )
 # The helpers those phases call in turn, each holding or gating a collective of its own.
-_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_narrow_corrected_mask_and_record")
+_NESTED_HELPERS = ("_recompute_logps_and_routing", "_apply_is_correction", "_narrow_corrected_mask_and_record")
 _RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
 
 

@@ -174,9 +174,6 @@ class RankBalancedRoundMixin:
     and ends a train round's build in :meth:`_deal_round_across_ranks`, after every stage that reads the round's
     rows and before any stage that arranges them."""
 
-    # Why this trainer cannot have its rows dealt; None admits it. A trainer with the knob on reads it before building
-    # TRL's state, through :func:`reject_trainer_refusal`.
-    RANK_BALANCE_REFUSAL: ClassVar[str | None] = None
     # The prompts a round's rows are scored under, which the deal moves, weighs and trims together with the completion.
     ROUND_PROMPT_ROWS: ClassVar[tuple[tuple[str, str], ...]] = PROMPT_ROWS
 

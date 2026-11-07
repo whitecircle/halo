@@ -14,6 +14,11 @@ from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
 # chunk costs one engine round trip, so a larger budget trades memory for fewer.
 WEIGHT_SYNC_CHUNK_BYTES = env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", PACKED_BUFFER_BYTES >> 20) << 20
 
+# A block-FP8 weight and its scale are one co-load group of two, found by dtype and name, as the engine re-derives a
+# layer's kernel tensors only once both have landed.
+_FP8_PAIR_GROUP = -1
+_FP8_PAIR_SIZE = 2
+
 
 def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], list[str], list[list[int]]]:
     """``(names, dtype names, shapes)`` of one chunk in wire order, as both engines' update requests declare it."""
@@ -21,12 +26,6 @@ def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], li
     dtypes = [str(param.dtype).split(".")[-1] for _, param in chunk]
     shapes = [list(param.shape) for _, param in chunk]
     return names, dtypes, shapes
-
-
-# A block-FP8 weight and its scale are one co-load group of two, found by dtype and name, as the engine re-derives a
-# layer's kernel tensors only once both have landed.
-_FP8_PAIR_GROUP = -1
-_FP8_PAIR_SIZE = 2
 
 
 def _co_load_key(name: str, tensor: torch.Tensor, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:

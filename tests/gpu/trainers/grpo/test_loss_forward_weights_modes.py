@@ -190,7 +190,7 @@ def _check_pass_slot(model, batch, checks: dict) -> None:
         wrapped = host._get_last_hidden_state
         host._get_last_hidden_state = lambda *a, _wrapped=wrapped, **kw: (calls.append(1), _wrapped(*a, **kw))[1]
         with torch.no_grad():
-            host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
+            host._recompute_logps_and_routing(ids, mask, keep, None, "train")
         counts[fused] = len(calls)
     log_all(f"  backbone forwards in the pass slot: fused {counts[True]}, pass {counts[False]}")
     checks["fused_build_runs_no_backbone_forward"] = counts[True] == 0

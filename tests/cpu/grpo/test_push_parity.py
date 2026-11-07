@@ -3,10 +3,12 @@ trainer-versus-engine floor of the trainer's own, once per trainer."""
 
 import contextlib
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import torch
 
+from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.trainers.grpo import online
 from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -181,6 +183,10 @@ def test_the_online_trainer_probes_after_each_push_it_makes(monkeypatch):
     trainer.vllm_generation = SimpleNamespace(vllm_client=(client := object()))
     trainer._distributed_sync_weights()
     assert probed == [client]
+
+
+def test_every_rollout_weight_precision_has_a_parity_bound():
+    assert set(PARITY_MAX_MEAN_GAP_NATS) == set(get_args(RolloutWeightPrecision))
 
 
 if __name__ == "__main__":

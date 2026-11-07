@@ -224,13 +224,13 @@ def run_moe(ctx) -> dict:
         ]
         with torch.no_grad():
             try:
-                _, plain = per_row._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
+                _, plain = per_row._recompute_logps_and_routing(ids, mask, keep, None, "train")
             finally:
                 for hook in hooks:
                     hook.remove()
-            _, captured = packed._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order, plan)
+            _, captured = packed._recompute_logps_and_routing(ids, mask, keep, None, "train", order, plan)
             shifted = ids.roll(1, dims=1)
-            _, misrouted = packed._recompute_logps_and_routing_masks(shifted, mask, keep, None, "train", order, plan)
+            _, misrouted = packed._recompute_logps_and_routing(shifted, mask, keep, None, "train", order, plan)
         plain, captured, misrouted = (dense_rows(r, ctx.device) for r in (plain, captured, misrouted))
         real = plain[..., 0] >= 0
         margins = torch.zeros(plain.shape[:3], device=plain.device)
@@ -257,7 +257,7 @@ def run_moe(ctx) -> dict:
         built._rollout_routing_replay = True
         built._rollout_routing = routing
         with torch.no_grad():
-            logps, _ = built._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order, plan)
+            logps, _ = built._recompute_logps_and_routing(ids, mask, keep, routing, "train", order, plan)
         assert bool(torch.isfinite(logps).all()), "the replayed packed recompute returned non-finite log-probs"
         round_batch = batch | {ROUTING_ROWS_KEY: torch.arange(ROWS, device=ctx.device)}
         built._step, built._buffered_inputs = 0, None

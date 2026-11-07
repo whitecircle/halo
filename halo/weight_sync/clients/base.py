@@ -148,8 +148,6 @@ class WeightSyncClientBase(UpdateStream, ABC):
     SUPPORTS_ENGINE_RESCORE = True
     # Why this engine cannot serve the policy as an adapter beside the frozen base, ``None`` where it can.
     ADAPTER_SYNC_REFUSAL: str | None
-    # Why this engine cannot take a block-FP8 weight push, ``None`` where it can.
-    FP8_BLOCK_ROLLOUT_REFUSAL: str | None
     # Text in an engine's failure of a chunk -> the launch fact that causes it, appended to the raised error.
     CHUNK_FAILURE_REMEDIES: Mapping[str, str] = {}
     # The adapted module names the engine validates and serves.

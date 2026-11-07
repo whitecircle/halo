@@ -156,8 +156,8 @@ def run_dense(ctx) -> dict:
 
     def recompute_is_bitwise():
         with torch.no_grad():
-            plain, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
-            dealt, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
+            plain, _ = host._recompute_logps_and_routing(ids, mask, keep, None, "train")
+            dealt, _ = host._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
         diff = (dealt - plain).abs().max().item()
         metrics["recompute_max_abs_diff"] = diff
         assert torch.equal(dealt, plain), f"dealt recompute differs from batch order by up to {diff}"
@@ -261,9 +261,9 @@ def run_moe(ctx) -> dict:
     def r2_capture_follows_each_row():
         host._rollout_routing_replay = False
         with torch.no_grad():
-            plain_logps, plain = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train")
-            dealt_logps, dealt = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
-            _, floor = host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", floor_order)
+            plain_logps, plain = host._recompute_logps_and_routing(ids, mask, keep, None, "train")
+            dealt_logps, dealt = host._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
+            _, floor = host._recompute_logps_and_routing(ids, mask, keep, None, "train", floor_order)
         plain, dealt, floor = (dense_rows(r, ctx.device) for r in (plain, dealt, floor))
         dealt_layout, dealt_flips = _selection_flips(dealt, plain)
         floor_layout, floor_flips = _selection_flips(floor, plain)
@@ -282,7 +282,7 @@ def run_moe(ctx) -> dict:
         host._rollout_routing_replay = True
         spans, _ = dense_row_spans(mask[order])
         with torch.no_grad(), injector.capture(ROWS, mask.size(1), row_spans=spans) as replayed:
-            logps, _ = host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order)
+            logps, _ = host._recompute_logps_and_routing(ids, mask, keep, routing, "train", order)
         captured = dense_rows(replayed[0], ctx.device)
         wrong = [p for p in range(ROWS) if not torch.equal(captured[p], engine[order[p]])]
         assert bool(torch.isfinite(logps).all()), "the replayed recompute returned non-finite log-probs"

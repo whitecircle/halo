@@ -375,7 +375,7 @@ class StepBatchMixin:
             else torch.tensor(plan.order, dtype=torch.long, device=step.attention_mask.device)
         )
         with self._phase_timers.span(Phase.NO_GRAD):
-            recompute_logps, captured_routing = self._recompute_logps_and_routing_masks(
+            recompute_logps, captured_routing = self._recompute_logps_and_routing(
                 step.prompt_completion_ids,
                 step.attention_mask,
                 step.logits_to_keep,
@@ -413,7 +413,7 @@ class StepBatchMixin:
             fused,
         )
 
-    def _recompute_logps_and_routing_masks(
+    def _recompute_logps_and_routing(
         self,
         prompt_completion_ids: torch.Tensor,
         attention_mask: torch.Tensor,

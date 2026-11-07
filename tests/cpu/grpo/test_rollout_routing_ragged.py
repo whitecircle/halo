@@ -178,7 +178,7 @@ def test_each_micro_batch_arms_the_slice_the_dense_mask_holds_for_its_rows(
     order = torch.tensor([7, 2, 9, 0, 4, 1, 8, 3, 6, 5]) if dealt else None
     calls = _Calls()
     host, _ = _host(calls, monkeypatch, dense_spans=dense_spans)
-    host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", order)
+    host._recompute_logps_and_routing(ids, mask, keep, routing, "train", order)
     forwarded = list(range(_ROWS)) if order is None else order.tolist()
     groups = [range(s, min(s + _BATCH_SIZE, _ROWS)) for s in range(0, _ROWS, _BATCH_SIZE)]
     _check_calls(calls, dense, mask, forwarded, groups, dense_spans)
@@ -193,7 +193,7 @@ def test_each_packed_bin_arms_the_slice_the_dense_mask_holds_for_its_rows(round_
     plan = MicrobatchPlan(bins=((6, 0, 3), (2, 5), (), (1, 4, 9)), rows_per_bin=3, slots=4, round_rows=_ROWS)
     calls = _Calls()
     host, _ = _host(calls, monkeypatch, dense_spans=True)
-    host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", torch.tensor(plan.order), plan)
+    host._recompute_logps_and_routing(ids, mask, keep, routing, "train", torch.tensor(plan.order), plan)
     # The empty bin's inert forward runs paused, with nothing armed.
     assert [all(a is None for a in armed) for armed in calls.armed] == [False, False, True, False]
     real_calls = [armed for armed in calls.armed if armed[0] is not None]
@@ -211,7 +211,7 @@ def test_a_scoring_call_leaves_nothing_armed_and_a_mis_tiled_call_raises(round_r
     ids, mask, keep = _round_tensors()
     calls = _Calls()
     host, injector = _host(calls, monkeypatch, dense_spans=True)
-    host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", None)
+    host._recompute_logps_and_routing(ids, mask, keep, routing, "train", None)
     assert not injector._armed and all(layer._forced_topk_indices is None for layer in injector._layers)
 
     def forward_nothing(_model, ids, mask, keep, compute_entropy=False):
@@ -219,7 +219,7 @@ def test_a_scoring_call_leaves_nothing_armed_and_a_mis_tiled_call_raises(round_r
 
     host._get_per_token_logps_and_entropies = forward_nothing
     with pytest.raises(RuntimeError, match="mis-consumed"):
-        host._recompute_logps_and_routing_masks(ids, mask, keep, routing, "train", None)
+        host._recompute_logps_and_routing(ids, mask, keep, routing, "train", None)
 
 
 @pytest.mark.parametrize("bad", ["repeated", "out_of_range"])

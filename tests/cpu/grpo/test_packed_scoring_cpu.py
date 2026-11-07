@@ -152,8 +152,8 @@ def test_capture_through_packed_bins_equals_capture_through_per_row_forwards():
     per_row = _routing_host(False)
     packed = _routing_host(True)
     with torch.no_grad():
-        _, routing_per_row = per_row._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
-        _, routing_packed = packed._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order, _PLAN)
+        _, routing_per_row = per_row._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
+        _, routing_packed = packed._recompute_logps_and_routing(ids, mask, keep, None, "train", order, _PLAN)
     assert routing_per_row is not None and routing_packed is not None
     routing_packed, routing_per_row = dense_rows(routing_packed), dense_rows(routing_per_row)
     assert torch.equal(routing_packed, routing_per_row)
@@ -168,7 +168,7 @@ def test_replay_across_packed_bins_consumes_exactly_the_armed_routing():
     host = _routing_host(True)
     engine = ragged_routing(distinct_expert_picks((len(_PROMPTS), ids.size(1)), _LAYERS, _TOP_K, 8))
     with torch.no_grad():
-        host._recompute_logps_and_routing_masks(ids, mask, keep, engine, "train", order, _PLAN)
+        host._recompute_logps_and_routing(ids, mask, keep, engine, "train", order, _PLAN)
     assert not host._routing_injector._armed, "the recompute must disarm the mask it armed"
     assert all(layer._forced_topk_indices is None for layer in host._routing_injector._layers)
 
