@@ -20,7 +20,7 @@ from transformers import PreTrainedModel
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.checkpoint_coverage import verify_checkpoint_coverage
 from halo.model_loading.dtype import reject_fp8_tensor
-from halo.model_loading.lazy_safetensors.conversion import Concat
+from halo.model_loading.lazy_safetensors.conversion import Concat, FanIn, Mxfp4Decode
 from halo.models.introspection.param_roles import fp32_pinned_names
 
 logger = logging.getLogger(__name__)
@@ -41,7 +41,7 @@ class WeightPlan:
     shard_dim: int = 0
     shard_start: int = 0
     shard_end: int = 0
-    # Hub-conversion ops applied after the ranged read; a leading ``Concat`` reads its siblings the same way.
+    # Hub-conversion ops applied after the ranged read; a leading fan-in reads its siblings the same way.
     ops: tuple = ()
     # Full extent the model expects along ``shard_dim`` (the config's expert count); 0 is unknown.
     shard_total: int = 0
@@ -49,7 +49,7 @@ class WeightPlan:
     @property
     def disk_keys(self) -> tuple[str, ...]:
         """Every checkpoint key this plan reads: its own, then a fan-in's siblings."""
-        return (self.disk_key, *(sibling for op in self.ops if isinstance(op, Concat) for sibling in op.siblings))
+        return (self.disk_key, *(sibling for op in self.ops if isinstance(op, FanIn) for sibling in op.siblings))
 
 
 def materialize_weight_plan(plan: WeightPlan, read: Callable[[str, WeightPlan], torch.Tensor]) -> torch.Tensor:
@@ -58,6 +58,8 @@ def materialize_weight_plan(plan: WeightPlan, read: Callable[[str, WeightPlan], 
     for op in plan.ops:
         if isinstance(op, Concat):
             tensor = torch.cat([tensor, *(read(sibling, plan) for sibling in op.siblings)], dim=op.dim)
+        elif isinstance(op, Mxfp4Decode):
+            tensor = op.decode(tensor, read(op.siblings[0], plan))
         else:
             tensor = op(tensor)
     return tensor

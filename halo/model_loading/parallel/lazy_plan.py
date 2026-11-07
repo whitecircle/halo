@@ -16,7 +16,7 @@ from halo.checkpoint.reading import has_whole_model_weight_file, read_checkpoint
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import resolve_load_dtype
-from halo.model_loading.lazy_safetensors.conversion import Concat
+from halo.model_loading.lazy_safetensors.conversion import FanIn
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
@@ -45,6 +45,14 @@ _NESTED_EXPERT_KEY_PATTERN = re.compile(rf"\.(?:{_CONTAINER_ALT})\.[A-Za-z_]\w*\
 LAZY_FAMILY_UNVERIFIED = "lazy_family_unverified"
 LAZY_QUANTIZED = "quantized_checkpoint"
 LAZY_NESTED_EXPERT_KEYS = "lazy_incompatible_expert_layout"
+# The one checkpoint-native quantization the lazy loaders decode: gpt-oss's MXFP4 experts (``Mxfp4Decode``).
+_NATIVE_MXFP4 = ("gpt_oss", "mxfp4")
+
+
+def is_native_mxfp4(config: dict) -> bool:
+    """Whether a ``config.json`` describes a native MXFP4 gpt-oss release (``openai/gpt-oss-*``)."""
+    quantization = config.get("quantization_config") or {}
+    return (config.get("model_type"), quantization.get("quant_method")) == _NATIVE_MXFP4
 
 
 class ExpertKeyLayout(Enum):
@@ -65,7 +73,7 @@ class ExpertKeyLayout(Enum):
 def lazy_load_blocker(model_path: str) -> str | None:
     """Why the lazy loaders cannot materialize this checkpoint, ``None`` when they can or neither config nor index
     reads. Checkpoint-native quantization counts, as its scale tensors map to nothing live and the experts would load
-    as garbage unseen."""
+    as garbage unseen, except gpt-oss's MXFP4, which the loaders decode."""
     try:
         config = read_checkpoint_config(model_path, missing_ok=True) or {}
     except (OSError, ValueError):
@@ -73,7 +81,7 @@ def lazy_load_blocker(model_path: str) -> str | None:
     spec = find_moe_family_spec(config.get("model_type"))
     if spec is not None and not spec.supports_lazy_loading:
         return LAZY_FAMILY_UNVERIFIED
-    if config.get("quantization_config"):
+    if config.get("quantization_config") and not is_native_mxfp4(config):
         return LAZY_QUANTIZED
     try:
         weight_map = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint").weight_map
@@ -129,13 +137,13 @@ class WeightPlanner:
         unexpected: list[str] = []
         fanout = fanout or {}
         ignored = [re.compile(pattern) for pattern in ignore_unexpected]
-        # A fan-in's siblings are read by its first source's plan (the leading Concat), never on their own.
+        # A fan-in's siblings are read by its first source's plan (the leading Concat or Mxfp4Decode), never alone.
         consumed = {
             sibling
             for targets in fanout.values()
             for _, ops in targets
             for op in ops
-            if isinstance(op, Concat)
+            if isinstance(op, FanIn)
             for sibling in op.siblings
         }
 
@@ -249,6 +257,13 @@ def lazy_load_prologue(
     dtype = resolve_load_dtype(dtype, config)
     if ep_config is not None and ep_config.num_experts is None:
         ep_config.finalize_expert_assignment(require_expert_count(config))
+    native_mxfp4 = is_native_mxfp4(read_checkpoint_config(model_path, missing_ok=True) or {})
+    if native_mxfp4:
+        # The experts load decoded to bf16. Dropped before the shell, so transformers builds no MXFP4 quantizer
+        # whatever its kernels allow, and the model's config, which every save writes, no longer claims MXFP4.
+        if getattr(config, "quantization_config", None) is not None:
+            del config.quantization_config
+        logger.info(f"[Rank {rank}] Native MXFP4 checkpoint: decoding its experts to bf16 while loading")
 
     checkpoint = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint")
     weight_map, shard_files = checkpoint.weight_map, list(checkpoint.shard_files)
@@ -268,7 +283,7 @@ def lazy_load_prologue(
             ) from e
 
     model_keys = set(model.state_dict().keys())
-    disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()))
+    disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()), native_mxfp4=native_mxfp4)
     plans = WeightPlanner(ep_config).build(
         weight_map,
         disk_to_model,
