@@ -239,7 +239,9 @@ one server and has no such field. The default `per_server` is unchanged. Both en
   host and NCCL environment need image changes. SGLang `single_group` rests on the probe: the GPU row
   `trainers/grpo/test_sglang_membership_probe.py` decides whether it stays. The measured gain over `per_server` waits on the GPU rows of `test_single_group_sync.py` and `test_sync_topology_auto.py` (1, 2, 4 and 8
   servers per engine, cross-node and colocated containers). The `single_group` row bounds the second push of a group,
-  which follows process and communicator warm-up, and reports the first beside it.
+  which follows process and communicator warm-up, and reports the first beside it. It bounds the transfer (the push
+  less a one-tensor push's fixed cost) at 1.5× one server's, and the fixed cost, the pause, begin and end calls and
+  chunk declares each server answers concurrently, at 20 ms per extra server.
 
 ### Served weights stay in checkpoint layout
 
