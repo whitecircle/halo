@@ -8,7 +8,7 @@
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
 chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort level; the stock template has no effort variable
 force_chat_template: true      # the checkpoint ships the stock template; serve with the same file
-attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+attn_implementation: flash_attention_2
 # No output_router_logits: the aux loss is inert under the policy-gradient objective (the trainer warns),
 # and the flag would still record a [tokens, num_experts] router-logit plane per MoE layer on every
 # forward (moe_balancing: none below).
@@ -148,6 +148,7 @@ mask_truncated_completions: false  # `truncated` = the max_turns or output-budge
 
 # --- Training ---
 per_device_train_batch_size: 1
+packed_microbatch_tokens: 12288  # rows packed into one varlen call per 12,288-token bin
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
 eval_rollout_batch_size: 50       # the 400-problem eval split in two one-wave rounds across 4 ranks
 gradient_accumulation_steps: 24 # dp 4 x 24 = 96 episodes/step; the per-rank value must divide by num_generations

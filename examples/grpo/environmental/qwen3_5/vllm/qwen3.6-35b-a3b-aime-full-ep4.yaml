@@ -6,7 +6,7 @@
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
-attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+attn_implementation: flash_attention_2
 model_init_kwargs:
   output_router_logits: true
 moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics
@@ -47,6 +47,8 @@ scale_rewards: batch     # global batch std — never per-group (degenerate-grou
 
 # --- Training ---
 per_device_train_batch_size: 1
+use_chunked_grpo_logprobs: true
+packed_microbatch_tokens: 12288  # rows packed into one varlen call per 12,288-token bin
 gradient_accumulation_steps: 8
 num_train_epochs: 5.0
 learning_rate: 1.0e-06
