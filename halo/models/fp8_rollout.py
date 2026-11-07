@@ -78,7 +78,9 @@ class Fp8RolloutPlan:
         part_rows = bank.shape[1] // len(names)
         joint = part_rows % BLOCK == 0
         groups = (
-            [(bank, names)] if joint else [(half, (name,)) for half, name in zip(bank.chunk(len(names), 1), names, strict=False)]
+            [(bank, names)]
+            if joint
+            else [(half, (name,)) for half, name in zip(bank.chunk(len(names), 1), names, strict=False)]
         )
         step = max(1, _QUANTIZE_ELEMENTS // groups[0][0][0].numel())
         for start in range(0, bank.shape[0], step):
