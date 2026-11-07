@@ -40,9 +40,12 @@ def online_loss_forward_blocker(
     *, runs_pass: bool, num_iterations: int, misaligned_accumulation: bool, balance_token_mass: bool
 ) -> str | None:
     """Why the round's ratio cannot come from the loss forward, or ``None``: every consumer of the trainer's log-probs
-    before the first backward is named."""
+    before the first backward is named. ``runs_pass`` is the vLLM IS correction, the only gate of TRL's old-policy pass;
+    a KL term's reference pass is not the one fused."""
     shared = pass_consumer_blocker(
-        runs_pass=runs_pass, num_iterations=num_iterations, misaligned_accumulation=misaligned_accumulation
+        pass_off=None if runs_pass else "vllm_importance_sampling_correction is off",
+        num_iterations=num_iterations,
+        misaligned_accumulation=misaligned_accumulation,
     )
     if shared is None and balance_token_mass:
         return BALANCE_TOKEN_MASS_BLOCKER
@@ -91,12 +94,6 @@ class OnlineLossForwardMixin(LossForwardSeamMixin):
             yield
         finally:
             self.vllm_importance_sampling_correction = True
-
-    def _loss_forward_written_keys(self) -> frozenset[str]:
-        written = {IMPORTANCE_RATIO_KEY} if self._is_correction else set()
-        if self.beta != 0.0:
-            written.add(REF_LOGPS_KEY)
-        return frozenset(written)
 
     def _weigh_from_loss_forward(self, seam: LossForwardSeam, logps: torch.Tensor) -> None:
         """Write the ratio and the clamped reference into ``seam`` from the loss forward's detached ``logps``, and

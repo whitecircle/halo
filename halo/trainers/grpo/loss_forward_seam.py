@@ -7,6 +7,7 @@ from collections.abc import Mapping
 import torch
 
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.grpo.objective.loss_inputs import IMPORTANCE_RATIO_KEY, REF_LOGPS_KEY
 from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
@@ -18,10 +19,11 @@ BALANCE_TOKEN_MASS_BLOCKER = (
 )
 
 
-def pass_consumer_blocker(*, runs_pass: bool, num_iterations: int, misaligned_accumulation: bool) -> str | None:
-    """Why the round's weight cannot come from the loss forward whatever else reads the log-probs, or ``None``."""
-    if not runs_pass:
-        return "no log-prob pass runs on this config (the IS correction and the KL term are both off), so there is nothing to fuse"
+def pass_consumer_blocker(*, pass_off: str | None, num_iterations: int, misaligned_accumulation: bool) -> str | None:
+    """Why the round's weight cannot come from the loss forward whatever else reads the log-probs, or ``None``.
+    ``pass_off`` is the trainer's reason no log-prob pass runs on the config, ``None`` where one does."""
+    if pass_off is not None:
+        return f"no log-prob pass runs on this config ({pass_off}), so there is nothing to fuse"
     if num_iterations > 1:
         return f"num_iterations={num_iterations} needs the round-start log-probs as the PPO ratio's denominator"
     if misaligned_accumulation:
@@ -76,8 +78,8 @@ class LossForwardSeam(dict):
 
 class LossForwardSeamMixin:
     """Mixed in ahead of ``ProtectedTokenEntropyMixin``, whose scorer override returns through ``super()``, and of
-    ``RowSpanStashMixin``. The host defines :meth:`_loss_forward_written_keys`, :meth:`_weigh_from_loss_forward` and
-    :meth:`_flush_loss_forward_metrics`, and adopts the seam through :meth:`_adopt_loss_forward_weights`."""
+    ``RowSpanStashMixin``. The host provides ``_is_correction`` and ``beta``, defines :meth:`_weigh_from_loss_forward`
+    and :meth:`_flush_loss_forward_metrics`, and adopts the seam through :meth:`_adopt_loss_forward_weights`."""
 
     _skips_logprob_pass = False
     _loss_forward_seam: LossForwardSeam | None = None
@@ -131,3 +133,11 @@ class LossForwardSeamMixin:
             if seam.fired == 1:
                 self._weigh_from_loss_forward(seam, scored[0].detach())
         return scored
+
+    def _loss_forward_written_keys(self) -> frozenset[str]:
+        """The keys the scoring hook writes into a fused batch for TRL's loss to read: the weight under the IS
+        correction, the clamped reference under a KL term."""
+        written = {IMPORTANCE_RATIO_KEY} if self._is_correction else set()
+        if self.beta != 0.0:
+            written.add(REF_LOGPS_KEY)
+        return frozenset(written)

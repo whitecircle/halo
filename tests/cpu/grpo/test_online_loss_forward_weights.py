@@ -103,6 +103,15 @@ def test_true_raises_where_a_consumer_needs_the_pass_and_false_never_does(change
     assert host._skips_logprob_pass is False
 
 
+def test_a_kl_run_without_the_correction_is_refused_for_the_correction_alone():
+    """The KL term's reference pass is not the one fused, so the refusal names the correction, not the KL term."""
+    host = _host(requested=True, beta=0.04)
+    host.vllm_importance_sampling_correction = False
+    with pytest.raises(ValueError, match="vllm_importance_sampling_correction is off") as refused:
+        host._configure_loss_forward_weights()
+    assert "KL term" not in str(refused.value)
+
+
 def test_a_misaligned_window_is_refused_under_true():
     host = _host(requested=True)
     host.args.gradient_accumulation_steps = 6
