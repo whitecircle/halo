@@ -991,9 +991,18 @@ MANIFEST: dict[str, TestSpec] = {
     # Nemotron-H's level drop and per-expert banks.
     "parallelism/ep/test_lazy_load_converted.py": TestSpec(
         nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "nemotron", "step3p7"),
+        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "gptoss", "nemotron", "step3p7"),
         timeout=900,
-        args_matrix=("--family glm5_next", "--family nemotron_h_omni", "--family step3p7"),
+        args_matrix=("--family glm5_next", "--family gpt_oss_mxfp4", "--family nemotron_h_omni", "--family step3p7"),
+    ),
+    # A tiny native MXFP4 gpt-oss through load, train, resume, gathered and sharded save, merge and a stock reload.
+    "parallelism/ep/test_native_mxfp4_roundtrip.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
+    ),
+    # openai/gpt-oss-20b as released (MXFP4) at EP=8: the decoded layers and the loss against a dequantized
+    # from_pretrained on rank 0.
+    "parallelism/ep/test_gptoss_native_mxfp4_ep8.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=2400
     ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(

@@ -10,7 +10,6 @@ Tiny random checkpoints on CPU, EP patching stubbed."""
 
 import json
 import shutil
-from pathlib import Path
 
 import pytest
 import torch
@@ -29,18 +28,9 @@ from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import LAZY_QUANTIZED, lazy_load_blocker
 from halo.models.moe.family_specs import expert_weight_roots
 from tests.common.models import TINY_GPTOSS_CONFIG
+from tests.common.native_mxfp4 import MXFP4_QUANTIZATION_CONFIG, write_native_mxfp4
 
 RUN_DTYPE = torch.bfloat16
-# As the openai/gpt-oss-* releases declare it.
-MXFP4_QUANTIZATION_CONFIG = {
-    "modules_to_not_convert": [
-        "model.layers.*.self_attn",
-        "model.layers.*.mlp.router",
-        "model.embed_tokens",
-        "lm_head",
-    ],
-    "quant_method": "mxfp4",
-}
 
 
 def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
@@ -91,29 +81,12 @@ def test_decode_refuses_mismatched_shapes():
 # ------------------------------------------------------------------------------------------------------ checkpoint
 
 
-def _to_native_mxfp4(path: Path, seed: int = 0) -> None:
-    """Rewrite a bf16 gpt-oss save in the release's layout: each expert tensor ``[E, A, B]`` becomes random
-    ``_blocks`` ``[E, B, A/32, 16]`` and ``_scales`` ``[E, B, A/32]``, and config.json gains the release's
-    ``quantization_config``."""
-    g = torch.Generator().manual_seed(seed)
-    (weights_file,) = path.glob("*.safetensors")
-    state = load_file(weights_file)
-    for key in [k for k in state if k.rpartition(".")[2] in MXFP4_PROJECTIONS]:
-        experts, a, b = state.pop(key).shape
-        state[f"{key}_blocks"] = torch.randint(0, 256, (experts, b, a // 32, 16), dtype=torch.uint8, generator=g)
-        state[f"{key}_scales"] = torch.randint(119, 128, (experts, b, a // 32), dtype=torch.uint8, generator=g)
-    save_file(state, weights_file, metadata={"format": "pt"})
-    config = json.loads((path / "config.json").read_text())
-    config["quantization_config"] = MXFP4_QUANTIZATION_CONFIG
-    (path / "config.json").write_text(json.dumps(config, indent=2))
-
-
 @pytest.fixture(scope="module")
 def checkpoint(tmp_path_factory) -> str:
     torch.manual_seed(0)
     path = tmp_path_factory.mktemp("gpt_oss_native_mxfp4")
     GptOssForCausalLM(GptOssConfig(**TINY_GPTOSS_CONFIG)).to(RUN_DTYPE).save_pretrained(path)
-    _to_native_mxfp4(path)
+    write_native_mxfp4(path)
     return str(path)
 
 

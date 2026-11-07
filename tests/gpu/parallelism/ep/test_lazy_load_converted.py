@@ -1,21 +1,31 @@
 #!/usr/bin/env python
-"""Lazy loading of hub-layout composites (GLM-5 Next, Step-3.7, Nemotron-H) matches a from_pretrained reference, under
-EP=2 and pure ETP.
+"""Lazy loading of hub-layout composites (GLM-5 Next, Step-3.7, Nemotron-H) and of a native MXFP4 gpt-oss matches a
+from_pretrained reference, under EP=2 and pure ETP.
 
-Their layout is bridged only inside ``from_pretrained``, including fan-in Concatenates. A half-read source hands each
-ETP rank the wrong half.
+Their layout is bridged only inside ``from_pretrained``, including fan-in Concatenates and MXFP4's dequantize. A
+half-read source hands each ETP rank the wrong half. The MXFP4 row also compares every EP parameter bitwise against the
+dequantized reference under the same EP patching, and checks the loaded config no longer claims MXFP4.
 """
 
+import copy
 import sys
 
 import torch
-from transformers import AutoConfig, NemotronH_Omni_Reasoning_V3, NemotronH_Omni_Reasoning_V3_Config
+from transformers import (
+    AutoConfig,
+    GptOssConfig,
+    GptOssForCausalLM,
+    Mxfp4Config,
+    NemotronH_Omni_Reasoning_V3,
+    NemotronH_Omni_Reasoning_V3_Config,
+)
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditionalGeneration
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
@@ -26,11 +36,13 @@ from tests.common.memory import cleanup_memory
 from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
+    TINY_GPTOSS_CONFIG,
     TINY_NEMOTRON_H_CONFIG,
     TINY_RADIO_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.native_mxfp4 import write_native_mxfp4
 from tests.common.numerics import tensors_equal_at_narrower_dtype
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
@@ -64,7 +76,15 @@ _FAMILIES = {
         TINY_NEMOTRON_H_CONFIG["layers_block_type"].count("moe"),
         TINY_NEMOTRON_H_CONFIG["vocab_size"],
     ),
+    "gpt_oss_mxfp4": (
+        GptOssForCausalLM,
+        lambda: GptOssConfig(**TINY_GPTOSS_CONFIG),
+        TINY_GPTOSS_CONFIG["num_hidden_layers"],
+        TINY_GPTOSS_CONFIG["vocab_size"],
+    ),
 }
+# Saved in the openai/gpt-oss-* layout, which from_pretrained reads only when asked to dequantize.
+NATIVE_MXFP4_FAMILIES = frozenset({"gpt_oss_mxfp4"})
 
 
 def _checkpoint_dir() -> str:
@@ -75,6 +95,8 @@ def _build_checkpoint(model_class, make_config) -> None:
     torch.manual_seed(SEED)
     model = model_class(make_config()).to(torch.bfloat16)
     model.save_pretrained(_checkpoint_dir())
+    if FAMILY in NATIVE_MXFP4_FAMILIES:
+        write_native_mxfp4(_checkpoint_dir())
     del model
     cleanup_memory()
 
@@ -101,8 +123,32 @@ def _tensors_match(model, reference_sd) -> tuple[bool, str]:
     return compared > 0, "no EP layer compared"
 
 
+def _matches_patched_reference(model, reference, ep_config) -> tuple[bool, str]:
+    """Every tensor of the lazily loaded EP model equals the dequantized reference patched the same way, in whatever
+    layout the family's EP layer stores: gpt-oss keeps ``[E, H, 2M]``, de-interleaved for grouped GEMM and ETP."""
+    patched = apply_ep_layers(copy.deepcopy(reference), ep_config).state_dict()
+    live = model.state_dict()
+    if set(live) != set(patched):
+        return False, f"key sets differ: {sorted(set(live) ^ set(patched))[:4]}"
+    for key, tensor in live.items():
+        if not tensors_equal_at_narrower_dtype(tensor.cpu(), patched[key].cpu()):
+            return False, key
+    return True, ""
+
+
+def _native_mxfp4_checks(model, reference, ep_config, mode: str) -> dict[str, bool]:
+    ok, where = _matches_patched_reference(model, reference, ep_config)
+    if not ok:
+        log(f"{mode} MISMATCH at {where}")
+    return {
+        f"{mode}_tensors_match_dequantized_reference": ok,
+        f"{mode}_config_no_longer_claims_mxfp4": getattr(model.config, "quantization_config", None) is None,
+    }
+
+
 def run(ctx):
     model_class, make_config, num_moe_layers, vocab_size = _FAMILIES[FAMILY]
+    native_mxfp4 = FAMILY in NATIVE_MXFP4_FAMILIES
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     device = ctx.device
@@ -119,19 +165,22 @@ def run(ctx):
 
     checks["lazy_gate_admits_checkpoint"] = is_lazy_loadable(ckpt)
 
-    ref = model_class.from_pretrained(ckpt, dtype=torch.bfloat16, attn_implementation="eager").to(device)
+    dequantize = {"quantization_config": Mxfp4Config(dequantize=True)} if native_mxfp4 else {}
+    ref = model_class.from_pretrained(ckpt, dtype=torch.bfloat16, attn_implementation="eager", **dequantize).to(device)
     ref.train()
     ref_loss = ref(input_ids=input_ids, labels=labels).loss.item()
     reference_sd = {k: v.detach().cpu() for k, v in ref.state_dict().items()}
     log(f"reference loss: {ref_loss:.6f}")
-    del ref
+    if not native_mxfp4:
+        del ref  # The MXFP4 row keeps it to patch for the tensor comparisons.
     cleanup_memory()
     metrics["ref_loss"] = ref_loss
 
     pc = ParallelismConfig(ep_size=ctx.world_size)
+    ep_config = pc.ep_config()
     model = load_ep_model_lazy(
         ckpt,
-        pc.ep_config(),
+        ep_config,
         AutoConfig.from_pretrained(ckpt),
         dtype=torch.bfloat16,
         model_class=model_class,
@@ -139,10 +188,13 @@ def run(ctx):
     )
     ep_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     checks["ep_layers_patched"] = len(ep_layers) == num_moe_layers
-    ok, where = _tensors_match(model, reference_sd)
-    checks["ep2_tensors_match_reference"] = ok
-    if not ok:
-        log(f"MISMATCH at {where}")
+    if native_mxfp4:
+        checks |= _native_mxfp4_checks(model, ref, ep_config, "ep2")
+    else:
+        ok, where = _tensors_match(model, reference_sd)
+        checks["ep2_tensors_match_reference"] = ok
+        if not ok:
+            log(f"MISMATCH at {where}")
     model.train()
     ep_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["ep2_loss"] = ep_loss
@@ -153,9 +205,10 @@ def run(ctx):
 
     # Split on the concatenated halves.
     pc = ParallelismConfig(ep_size=1, expert_tp_size=2)
+    ep_config = pc.ep_config()
     model = load_ep_model_lazy(
         ckpt,
-        pc.ep_config(),
+        ep_config,
         AutoConfig.from_pretrained(ckpt),
         dtype=torch.bfloat16,
         model_class=model_class,
@@ -163,6 +216,8 @@ def run(ctx):
     )
     etp_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     checks["etp_split_glu_storage"] = bool(etp_layers) and all(stores_expert_tp_split_experts(ep) for ep in etp_layers)
+    if native_mxfp4:
+        checks |= _native_mxfp4_checks(model, ref, ep_config, "etp2")
     model.train()
     etp_loss = model(input_ids=input_ids, labels=labels).loss.item()
     metrics["etp_loss"] = etp_loss
