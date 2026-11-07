@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from tests.common import ports
-from tests.common.ports import POOL_FLOOR, ephemeral_floor, free_port, worker_port_block
+from tests.common.ports import free_port, resolve_port_pool, worker_port_block
 from tests.common.repo import REPO_ROOT
 
 _WORKERS = 4
@@ -37,9 +37,8 @@ def _allocate(script: str = _ALLOCATE, **xdist_env: str) -> subprocess.Completed
 
 def _allocate_only(port: int) -> subprocess.CompletedProcess:
     """``free_port()`` from a one-port slice holding exactly ``port``: one worker per pool port."""
-    return _allocate(
-        PYTEST_XDIST_WORKER_COUNT=str(ephemeral_floor() - POOL_FLOOR), PYTEST_XDIST_WORKER=f"gw{port - POOL_FLOOR}"
-    )
+    pool = resolve_port_pool(int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1")))
+    return _allocate(PYTEST_XDIST_WORKER_COUNT=str(len(pool)), PYTEST_XDIST_WORKER=f"gw{port - pool.start}")
 
 
 def _claim_own_port(sock: socket.socket) -> int:
@@ -56,17 +55,22 @@ def _claim_own_port(sock: socket.socket) -> int:
 def test_ports_lie_below_the_ephemeral_range():
     """The kernel picks every ``bind(0)`` port and outbound local port from the ephemeral range."""
     kernel_floor = int(Path("/proc/sys/net/ipv4/ip_local_port_range").read_text().split()[0])
-    outside = [port for port in (free_port() for _ in range(_DRAWS)) if not POOL_FLOOR <= port < kernel_floor]
-    assert not outside, f"ports {outside} fall outside the pool [{POOL_FLOOR}, {kernel_floor})"
+    drawn = [free_port() for _ in range(_DRAWS)]
+    assert len(set(drawn)) == _DRAWS, "a session reissued a port"
+    assert all(1024 <= port < kernel_floor and not 10000 <= port < 20000 for port in drawn), drawn
 
 
-def test_concurrent_xdist_workers_never_share_a_port(monkeypatch):
+@pytest.mark.parametrize("floor", [16000, 32768])
+def test_concurrent_xdist_workers_never_share_a_port(monkeypatch, floor):
+    """Worker slices remain disjoint for both normal and fallback allocation pools."""
+    monkeypatch.setattr(ports, "ephemeral_floor", lambda: floor)
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(_WORKERS))
     slices = []
     for worker in range(_WORKERS):
         monkeypatch.setenv("PYTEST_XDIST_WORKER", f"gw{worker}")
         own = set(worker_port_block())
         drawn = {free_port() for _ in range(_DRAWS)}
+        assert len(drawn) == _DRAWS, "a session reissued a port"
         assert drawn <= own, f"gw{worker} drew {sorted(drawn - own)} outside its own slice"
         slices.append(own)
     overlaps = [(a, b) for a in range(_WORKERS) for b in range(a + 1, _WORKERS) if slices[a] & slices[b]]
@@ -110,11 +114,52 @@ def test_a_port_in_time_wait_is_never_handed_out():
     assert "issued or held" in result.stderr, result.stderr
 
 
-def test_an_ephemeral_range_that_covers_the_pool_names_the_fix(monkeypatch):
-    """A host whose ephemeral range starts at or below the pool has nowhere safe to draw from."""
-    monkeypatch.setattr(ports, "ephemeral_floor", lambda: POOL_FLOOR)
+@pytest.mark.parametrize(
+    ("floor", "workers", "expected"),
+    [
+        (32768, 4, range(20000, 32768)),
+        (16000, 4, range(1024, 10000)),
+        (20000, 4, range(1024, 10000)),
+        (20003, 4, range(1024, 10000)),
+        (10000, 4, range(1024, 10000)),
+        (9000, 4, range(1024, 9000)),
+        (1028, 4, range(1024, 1028)),
+    ],
+)
+def test_pool_selection_respects_ephemeral_and_reserved_ranges(monkeypatch, floor, workers, expected):
+    """The pool must fit every worker while excluding privileged, reserved and ephemeral ranges."""
+    monkeypatch.setattr(ports, "ephemeral_floor", lambda: floor)
+    pool = resolve_port_pool(workers)
+    assert pool == expected
+    assert len(pool) >= workers
+    assert all(1024 <= port < floor and not 10000 <= port < 20000 for port in pool)
+
+
+@pytest.mark.parametrize(("floor", "workers"), [(1024, 1), (1027, 4), (16000, 8977)])
+def test_no_safe_worker_slice_names_the_fix(monkeypatch, floor, workers):
+    monkeypatch.setattr(ports, "ephemeral_floor", lambda: floor)
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(workers))
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw0")
     with pytest.raises(RuntimeError, match=r'ip_local_port_range="32768 60999"'):
         free_port()
+
+
+def test_low_pool_worker_slices_stay_nonempty_at_the_boundary(monkeypatch):
+    """The smallest valid pool gives every worker exactly one usable port."""
+    monkeypatch.setattr(ports, "ephemeral_floor", lambda: 1028)
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "4")
+    blocks = []
+    for worker in range(4):
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", f"gw{worker}")
+        blocks.append(list(worker_port_block()))
+    assert blocks == [[1024], [1025], [1026], [1027]]
+
+
+@pytest.mark.parametrize("workers", [0, -1])
+def test_invalid_worker_count_fails_before_partitioning(monkeypatch, workers):
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(workers))
+    with pytest.raises(ValueError, match="worker count must be positive"):
+        worker_port_block()
 
 
 if __name__ == "__main__":

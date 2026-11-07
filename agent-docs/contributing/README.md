@@ -212,9 +212,10 @@ are enforced by `tests/cpu/conventions/`.
   (`pytest -m "gpu and ep" tests/gpu`). Only the launcher entry points (`LAUNCHER_ENTRYPOINTS`) are
   collected under `tests/gpu/`, so no collection imports a GPU script, and no CPU test or `tests/common`
   helper reaches one (a fixture both tiers need lives in `tests/common/`). The launcher allocates a free
-  `--master_port` per launch from `tests/common/ports.py` (a pool from 20000 to the kernel's ephemeral
-  floor, one slice per xdist worker) and points `TMPDIR` at a per-run dir under pytest's basetemp; never
-  hardcode either.
+  `--master_port` per launch from `tests/common/ports.py`: normally from 20000 to the kernel's ephemeral
+  floor, or from the nonprivileged band below 10000 when that range has no room. Both pools stay below
+  the actual ephemeral range and outside Ray's default worker ports, with one slice per xdist worker.
+  The launcher points `TMPDIR` at a per-run dir under pytest's basetemp; never hardcode either.
 - **Scratch goes through the launcher's `TMPDIR`**: `setup_cache_dirs` for per-rank dirs,
   `shared_scratch_dir` (`tests/common/distributed.py`) for a checkpoint rank 0 writes and the peers read.
   Tagged dirs (`SCRATCH_DIR_TAG`) older than 6 h are removed at session start; checkpoint locations

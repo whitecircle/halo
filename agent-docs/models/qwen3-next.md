@@ -30,7 +30,7 @@ The router is a bare weight with no bias slot. `moe_balancing: auto` resolves to
 
 ## Refused modes
 
-- **CP**: 36 of 48 layers are `linear_attention`, whose conv and recurrent scan run along the sequence axis ([Qwen3.5](qwen3_5.md#why-cp-is-blocked-on-real-checkpoints)).
+- **CP**: 36 of 48 layers are `linear_attention`, whose conv and recurrent scan run along the sequence axis ([Qwen3.5](qwen3_5.md#why-moe-hybrid-cp-is-refused)).
 - **TP**: `Qwen3NextAttention` is not in `TP_SHARDABLE_ATTENTION_CLASSES`, so a TP run would shard no layer and is refused.
 - **PP**: `Qwen3NextModel` has no `PPFamilySpec` and is refused by name.
 

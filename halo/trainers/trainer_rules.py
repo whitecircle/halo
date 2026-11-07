@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from peft.tuners.tuners_utils import BaseTunerLayer
+
 from halo.config_validation import differs_from_default
 from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP
+from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
+from halo.models.attention.layout import has_linear_attention_layers
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.config_access import get_config_field
 from halo.models.external_tables import named_external_tables
+from halo.models.modality import config_declares_multimodality
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.mtp.head import find_mtp_head
@@ -111,6 +117,42 @@ def reject_cp_trainer_args(
             "against the full-length labels, so the two are misaligned. Drop them (eval_loss still "
             "reports), or evaluate from a saved checkpoint without CP."
         )
+
+
+def reject_hybrid_cp_training(model, training_args, config, *, supported: bool, peft_config=None) -> None:
+    """Refuse hybrid CP outside dense, unpacked, adapter-free CP2 SFT; existing attention-only CP is unchanged."""
+    if not config.is_cp_mode:
+        return
+    model_config = getattr(model, "config", None)
+    modules = tuple(model.modules()) if callable(getattr(model, "modules", None)) else ()
+    if not has_linear_attention_layers(model_config) and not any(
+        type(module).__name__ in ULYSSES_GATED_DELTA_MAP for module in modules
+    ):
+        return
+    if not supported:
+        raise CPConfigError(
+            "Hybrid GatedDeltaNet CP is supported by SFT only. Use the SFT trainer, or disable context_parallel_size."
+        )
+    if config_declares_multimodality(model_config):
+        raise CPConfigError(
+            "Hybrid CP supports text-only models. Load the text tower with text_only_model: true, or disable context_parallel_size."
+        )
+    if config.cp_size != 2 or has_routed_experts(model_config):
+        raise CPConfigError(
+            "Hybrid CP supports dense models at context_parallel_size: 2 only. Train other hybrid configurations without CP."
+        )
+    if (
+        peft_config is not None
+        or find_peft_model(model) is not None
+        or any(isinstance(module, BaseTunerLayer) for module in modules)
+        or config.expert_lora
+        or has_packed_quantized_params(model)
+    ):
+        raise CPConfigError(
+            "Hybrid CP supports full fine-tuning only. Disable PEFT/expert LoRA, or train adapters without CP."
+        )
+    if any(getattr(training_args, name, False) for name in ("packing", "padding_free")):
+        raise CPConfigError("Hybrid CP has no document-boundary exchange. Disable packing and padding_free.")
 
 
 def reject_conflicting_optimizer_choice(bf16_optimizer: bool, training_args) -> None:
