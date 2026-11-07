@@ -172,8 +172,9 @@ class RoutingReplayInjector:
         segments: list[torch.Tensor | None] = [None] * rows
         starts = [0] * rows
         offset = 0
+        tokens = torch.stack(flats, dim=1).cpu()  # [real tokens, layers, top_k], one device-to-host copy
         for row, (lo, hi) in zip(targets, spans, strict=True):
-            segments[row] = torch.stack([flat[offset : offset + hi - lo] for flat in flats], dim=1).cpu()
+            segments[row] = tokens[offset : offset + hi - lo]
             starts[row] = lo
             offset += hi - lo
         result.append(RolloutRouting(segments, starts, seq_len, len(flats), flats[0].size(-1)))

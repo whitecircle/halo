@@ -140,6 +140,18 @@ def test_the_capture_holds_only_each_rows_tokens_and_allocates_no_round_sized_te
     assert isinstance(routing, RolloutRouting) and all(s.device.type == "cpu" for s in held)
 
 
+def test_a_capture_copies_to_the_host_once_however_many_rows_it_holds(monkeypatch):
+    spans, order = _CASES["span_trimmed_rows"]
+    copies = []
+    real = torch.Tensor.cpu
+    monkeypatch.setattr(torch.Tensor, "cpu", lambda self: (copies.append(self.numel()), real(self))[1])
+    _, routing, _ = _capture(spans, order, len(_SPANS))
+    tokens = sum(hi - lo for lo, hi in spans)
+    assert copies == [tokens * _LAYERS * _TOP_K]
+    held = [s for s in routing._segments if s is not None]
+    assert len({s.untyped_storage().data_ptr() for s in held}) == 1, "rows should view one host tensor"
+
+
 def test_a_wrong_token_count_still_raises():
     injector = bare_replay_injector(layers=_LAYERS, top_k=_TOP_K)
     with pytest.raises(RuntimeError, match="wrong token count"), injector.capture(2, 4, row_spans=[(0, 4), (1, 3)]):
