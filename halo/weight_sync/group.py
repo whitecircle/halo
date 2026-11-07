@@ -7,7 +7,6 @@ import itertools
 import logging
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import NoReturn
 
@@ -21,7 +20,13 @@ from halo.weight_sync.clients.base import (
     GroupMembershipLost,
     WeightSyncClientBase,
 )
-from halo.weight_sync.clients.server_calls import AsyncCall, announced_wait, wait_announced, wait_for_calls
+from halo.weight_sync.clients.server_calls import (
+    AsyncCall,
+    announced_wait,
+    map_concurrently,
+    wait_announced,
+    wait_for_calls,
+)
 from halo.weight_sync.group_layout import (
     reject_mixed_localities,
     reject_pipeline_stages,
@@ -396,11 +401,7 @@ class WeightSyncGroup(UpdateStream):
             except Exception as e:
                 return None, e
 
-        targets = self._members if members is None else members
-        if not targets:
-            return []
-        with ThreadPoolExecutor(max_workers=len(targets)) as executor:
-            return list(executor.map(run, targets))
+        return map_concurrently(run, self._members if members is None else members)
 
     def _require_all(self, outcomes: Sequence[tuple[object, Exception | None]], what: str) -> list:
         """The results of ``outcomes``, or a raise naming each server that failed to ``what``."""

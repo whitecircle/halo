@@ -1,7 +1,6 @@
 """The HTTP side of adapter sync: the same adapter registered on every rollout server or on none, and retired once
 nothing runs under it. It holds no weight-sync group; the engines' base is pushed through the pool."""
 
-import concurrent.futures
 import logging
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -10,6 +9,7 @@ import requests
 from urllib3.util.retry import Retry
 
 from halo.weight_sync.clients.base import ServedBase, WeightSyncClientBase
+from halo.weight_sync.clients.server_calls import map_concurrently
 
 logger = logging.getLogger(__name__)
 
@@ -41,17 +41,17 @@ class AdapterServers:
         self._unreachable = down
         return holdings
 
-    def lacking(self, name: str) -> list[str]:
-        """The servers that do not hold ``name``: one that restarted since it was loaded lost its registry. Raises where a
-        server does not answer, since the sync could neither load onto it nor tell what it holds."""
+    def require_all_answering(self) -> dict[str, list[str]]:
+        """Each server's adapters; raises where a server does not answer, since the sync could neither load onto it nor
+        tell what it holds."""
         holdings = self.probe()
-        silent = [url for url, names in holdings.items() if names is None]
+        silent = sorted(url for url, names in holdings.items() if names is None)
         if silent:
             raise RuntimeError(
                 f"Rollout server(s) {silent} did not answer the adapter probe (connection refused or timed out): "
                 f"they are down or still restarting. Restart them before the sync."
             )
-        return [url for url, names in holdings.items() if name not in names]
+        return {url: names for url, names in holdings.items() if names is not None}
 
     def served_base(self, url: str) -> ServedBase:
         return self._clients[self._urls.index(url)].served_base()
@@ -121,7 +121,4 @@ class AdapterServers:
 
     @staticmethod
     def _on_each(clients: list[WeightSyncClientBase], call: Callable[[WeightSyncClientBase], Any]) -> list[Any]:
-        if not clients:
-            return []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(clients)) as executor:
-            return list(executor.map(call, clients))
+        return map_concurrently(call, clients)

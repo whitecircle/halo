@@ -5,7 +5,6 @@ adapter is refused here, before the run, with the reason."""
 from __future__ import annotations
 
 import logging
-import math
 import os
 import uuid
 from collections.abc import Callable
@@ -29,6 +28,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.model_loading.tokenizer_setup import vocabulary_grown
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
@@ -251,7 +251,7 @@ def reject_unadaptable_model(model: torch.nn.Module, parallelism_config: Paralle
 def resolve_adapter_serving(model: torch.nn.Module) -> AdapterServing:
     peft_model = find_peft_model(unwrap_framework_wrappers(model))
     config = peft_model.peft_config["default"]
-    scaling = config.lora_alpha / (math.sqrt(config.r) if config.use_rslora else config.r)
+    scaling = ExpertLoraSpec(r=config.r, alpha=config.lora_alpha, use_rslora=config.use_rslora).scaling
     modules = tuple(sorted({name.rsplit(".", 1)[-1] for name in _adapted_modules(peft_model)}))
     return AdapterServing(rank=config.r, scaling=scaling, modules=modules)
 
@@ -356,13 +356,7 @@ class AdapterSync:
         if not self._base_pushed or current is None:
             pool.reconnect_servers()
             return BasePlan(True, {})
-        holdings = self._bound_servers().probe()
-        silent = sorted(url for url, names in holdings.items() if names is None)
-        if silent:
-            raise RuntimeError(
-                f"Rollout server(s) {silent} did not answer the adapter probe (connection refused or timed out): "
-                f"they are down or still restarting. Restart them before the sync."
-            )
+        holdings = self._bound_servers().require_all_answering()
         restarted = [url for url, names in holdings.items() if current not in names]
         if restarted and all(self._serves_trainers_base(url) for url in restarted):
             pool.mark_servers_restarted(restarted)

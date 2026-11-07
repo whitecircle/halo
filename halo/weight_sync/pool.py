@@ -1,7 +1,6 @@
 """Weight-sync clients for several rollout servers, replicas of one policy, kept in step: they share one snapshot
 per parameter and one chunk decision, and either each form a group of their own or all form one."""
 
-import concurrent.futures
 import logging
 import threading
 import time
@@ -13,6 +12,7 @@ import torch
 
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, resolve_sync_device, snapshot_to_sync_device
 from halo.weight_sync.clients.base import WeightSyncClientBase
+from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group import WeightSyncGroup
 from halo.weight_sync.group_eligibility import ServerReading, resolve_sync_topology
 from halo.weight_sync.group_layout import (
@@ -244,10 +244,7 @@ class WeightSyncPool:
     def _read_servers(self, clients: list[WeightSyncClientBase]) -> list[ServerReading]:
         """Every client's answers for the group, concurrently and in server order; a server that fails to answer reads
         as unread, which keeps ``auto`` per server and leaves the refusal to the connect."""
-        if not clients:
-            return []
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(clients)) as executor:
-            return list(executor.map(self._read_server, clients, self.server_configs))
+        return map_concurrently(self._read_server, clients, self.server_configs)
 
     @staticmethod
     def _read_server(client: WeightSyncClientBase, config: dict[str, Any]) -> ServerReading:
@@ -337,12 +334,8 @@ class WeightSyncPool:
                 raise
             return
         run = partial(self._with_recovery, operation, what)
-        if len(self._clients) == 1:
-            errors = [run(0)]
-        else:
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(self._clients)) as executor:
-                errors = list(executor.map(run, range(len(self._clients))))
-        errors = [e for e in errors if e is not None]
+        outcomes = [run(0)] if len(self._clients) == 1 else map_concurrently(run, range(len(self._clients)))
+        errors = [e for e in outcomes if e is not None]
         if errors:
             raise RuntimeError(
                 f"Weight sync ({what}) failed for {len(errors)}/{len(self._clients)} "

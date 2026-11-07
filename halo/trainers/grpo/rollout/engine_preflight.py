@@ -8,7 +8,6 @@ import logging
 import math
 import time
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from functools import partial
 from typing import Any, NamedTuple, TypeVar
@@ -24,6 +23,7 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
 from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
+from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -389,10 +389,7 @@ def _probe_server(
 
 def _across_servers(per_server: Callable[[str], _T], urls: list[str]) -> list[_T]:
     """``per_server(url)`` for every url concurrently, in url order; the first url's failure raises once all finish."""
-    if not urls:
-        return []
-    with ThreadPoolExecutor(max_workers=min(len(urls), _PREFLIGHT_PARALLELISM)) as pool:
-        return list(pool.map(per_server, urls))
+    return map_concurrently(per_server, urls, max_workers=_PREFLIGHT_PARALLELISM)
 
 
 def _probe_servers(

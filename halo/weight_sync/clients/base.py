@@ -282,9 +282,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Raise ``error``, or the engine's own failure on ``declared`` when it recorded one, after the transport was
         left in a state a later close can release."""
 
-    @abstractmethod
     def release_send_buffers(self) -> None:
         """Release the staging the transport holds between syncs, which would pin the sync GPU."""
+        self.release_chunk_staging()
 
     @property
     def layout_read_bound_s(self) -> float:

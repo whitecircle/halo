@@ -3,8 +3,10 @@
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from typing import Any
 
 import requests
 
@@ -15,6 +17,17 @@ _POLL_PERIOD_S = 0.005
 
 
 _TIMEOUTS = (TimeoutError, requests.exceptions.Timeout)
+
+
+def map_concurrently(fn: Callable[..., Any], *iterables: Any, max_workers: int | None = None) -> list[Any]:
+    """``fn`` over ``iterables`` (as :func:`map`), one thread per item up to ``max_workers``, in input
+    order and stopping at the shortest iterable; the first failure raises once all finish."""
+    items = list(zip(*iterables, strict=False))
+    if not items:
+        return []
+    workers = len(items) if max_workers is None else min(len(items), max_workers)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(lambda args: fn(*args), items))
 
 
 @contextmanager

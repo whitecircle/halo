@@ -287,9 +287,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._raise_if_server_failed(error, declared)
         raise error
 
-    def release_send_buffers(self) -> None:
-        self.release_chunk_staging()
-
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:

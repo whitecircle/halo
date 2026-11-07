@@ -136,12 +136,24 @@ def test_a_restarted_server_is_the_one_lacking_the_adapter(servers):
     pool, [fake, other] = servers
     _, payload = _payload()
     pool.load("v0", _CONFIG, payload)
-    assert pool.lacking("v0") == []
+    assert all("v0" in names for names in pool.require_all_answering().values())
 
     other.restart()
 
-    assert pool.lacking("v0") == [other.url]
+    held = pool.require_all_answering()
+    assert [url for url, names in held.items() if "v0" not in names] == [other.url]
     assert list(fake.adapters) == ["v0"]
+
+
+def test_a_silent_server_is_named_instead_of_guessed_at(servers):
+    pool, [fake, other] = servers
+    other.close()
+
+    with pytest.raises(RuntimeError, match=r"did not answer the adapter probe") as raised:
+        pool.require_all_answering()
+
+    assert other.url in str(raised.value)
+    assert fake.url not in str(raised.value)
 
 
 def test_a_score_request_names_the_adapter_it_is_served_through():

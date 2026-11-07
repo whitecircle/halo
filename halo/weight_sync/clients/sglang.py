@@ -583,4 +583,4 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     def release_send_buffers(self) -> None:
         """Held across syncs, the arena would pin the sync GPU."""
         self._settle_inflight(keep=0)
-        self.release_chunk_staging()
+        super().release_send_buffers()
