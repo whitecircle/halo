@@ -22,8 +22,9 @@ RANK_BALANCE_KNOB = "balance_rank_tokens"
 SPREAD_BEFORE_KEY = "rank_balance/tokens_max_over_mean_before"
 SPREAD_AFTER_KEY = "rank_balance/tokens_max_over_mean_after"
 
-# The left-padded prompt tensors.
-_PROMPT_KEYS = ("prompt_ids", "prompt_mask")
+# The left-padded prompt tensors: each ``(ids key, mask key)`` pair is one prompt a row is scored under, whose forward
+# also reads the row's completion. A trainer adding a prompt (SDPG's teacher) declares its pair on ``ROUND_PROMPT_ROWS``.
+PROMPT_ROWS: tuple[tuple[str, str], ...] = (("prompt_ids", "prompt_mask"),)
 # Every other row tensor of a text round is right-padded to the completion width (or one column wide).
 _COMPLETION_KEYS = (
     "completion_ids",
@@ -35,8 +36,6 @@ _COMPLETION_KEYS = (
     "importance_sampling_ratio",
     "tool_mask",
 )
-_ID_KEYS = ("prompt_ids", "completion_ids")
-_ROW_KEYS = _PROMPT_KEYS + _COMPLETION_KEYS
 
 
 @dataclass(frozen=True)
@@ -94,13 +93,16 @@ def _pad_width(value: torch.Tensor, width: int, *, left: bool, fill: float) -> t
     return torch.cat([pad, value] if left else [value, pad], dim=1)
 
 
-def _trim_to_tokens(dealt: dict[str, torch.Tensor]) -> None:
-    """Drop the columns no dealt row attends: leading prompt padding and trailing completion padding, as the rank's own
-    rows would have been padded."""
-    columns = dealt["prompt_mask"].bool().any(dim=0).nonzero()
-    first = int(columns[0]) if columns.numel() else 0
-    for key in _PROMPT_KEYS:
-        dealt[key] = dealt[key][:, first:]
+def _trim_to_tokens(dealt: dict[str, torch.Tensor], prompt_rows: Sequence[tuple[str, str]]) -> None:
+    """Drop the columns no dealt row attends: each prompt's leading padding and the completion's trailing padding, as
+    the rank's own rows would have been padded."""
+    for ids_key, mask_key in prompt_rows:
+        if mask_key not in dealt:
+            continue
+        columns = dealt[mask_key].bool().any(dim=0).nonzero()
+        first = int(columns[0]) if columns.numel() else 0
+        for key in (ids_key, mask_key):
+            dealt[key] = dealt[key][:, first:]
     columns = dealt["completion_mask"].bool().any(dim=0).nonzero()
     width = dealt["completion_mask"].size(1)
     keep = int(columns[-1]) + 1 if columns.numel() else 1
@@ -110,17 +112,23 @@ def _trim_to_tokens(dealt: dict[str, torch.Tensor]) -> None:
             dealt[key] = value[:, :keep]
 
 
-def deal_rows_across_ranks(batch: dict, *, pad_token_id: int) -> tuple[dict, RankSpread]:
+def deal_rows_across_ranks(
+    batch: dict, *, pad_token_id: int, prompt_rows: Sequence[tuple[str, str]] = PROMPT_ROWS
+) -> tuple[dict, RankSpread]:
     """COLLECTIVE over the world. ``batch``'s rows dealt by :func:`deal_order` over every rank's attended tokens, each
-    rank keeping its row count and receiving the rows the deal gives it, with the round's scalars unchanged. A round
-    the deal would not make lighter at its heaviest rank comes back as it is. Raises on every rank when a rank's round
-    carries a per-row value beyond the text-row keys (images, lists), or the ranks' key sets differ."""
-    row_keys = sorted(key for key in _ROW_KEYS if batch.get(key) is not None)
+    rank keeping its row count and receiving the rows the deal gives it, with the round's scalars unchanged. A row's
+    tokens are each prompt it is scored under plus the completion that prompt's forward also reads. A round the deal
+    would not make lighter at its heaviest rank comes back as it is. Raises on every rank when a rank's round carries a
+    per-row value beyond the text-row keys (images, lists), or the ranks' key sets differ."""
+    prompt_keys = {key for pair in prompt_rows for key in pair}
+    id_keys = {ids_key for ids_key, _ in prompt_rows} | {"completion_ids"}
+    known_keys = prompt_keys | set(_COMPLETION_KEYS)
+    row_keys = sorted(key for key in known_keys if batch.get(key) is not None)
     rows = batch["completion_mask"].size(0)
     foreign = sorted(
         key
         for key, value in batch.items()
-        if key not in _ROW_KEYS
+        if key not in known_keys
         and (
             (isinstance(value, torch.Tensor) and value.ndim > 0)
             or (isinstance(value, (list, tuple)) and len(value) == rows)
@@ -135,7 +143,11 @@ def deal_rows_across_ranks(batch: dict, *, pad_token_id: int) -> tuple[dict, Ran
         raise ValueError("The ranks' rounds carry different row tensors, so their rows cannot be dealt across ranks.")
 
     ranks = dist.get_world_size()
-    local_tokens = (batch["prompt_mask"].sum(dim=1) + batch["completion_mask"].sum(dim=1)).long()
+    local_tokens = sum(
+        (batch[mask_key].sum(dim=1) + batch["completion_mask"].sum(dim=1)).long()
+        for _, mask_key in prompt_rows
+        if batch.get(mask_key) is not None
+    )
     tokens = all_gather_cat(local_tokens, 0, None, ranks).tolist()
     order = deal_order(tokens, ranks)
     spread = RankSpread(max_over_mean(tokens, range(len(tokens)), ranks), max_over_mean(tokens, order, ranks))
@@ -148,11 +160,11 @@ def deal_rows_across_ranks(batch: dict, *, pad_token_id: int) -> tuple[dict, Ran
     for key, width in zip(row_keys, widths, strict=True):
         value = batch[key]
         if value.ndim > 1:
-            fill = pad_token_id if key in _ID_KEYS else 1 if key == "importance_sampling_ratio" else 0
-            value = _pad_width(value, width, left=key in _PROMPT_KEYS, fill=fill)
+            fill = pad_token_id if key in id_keys else 1 if key == "importance_sampling_ratio" else 0
+            value = _pad_width(value, width, left=key in prompt_keys, fill=fill)
         gathered = all_gather_cat(value, 0, None, ranks)
         dealt[key] = permute_rows({key: gathered}, mine)[key]
-    _trim_to_tokens(dealt)
+    _trim_to_tokens(dealt, prompt_rows)
     return batch | dealt, spread
 
 
@@ -165,6 +177,8 @@ class RankBalancedRoundMixin:
     # Why this trainer cannot have its rows dealt; None admits it. A trainer with the knob on reads it before building
     # TRL's state, through :func:`reject_trainer_refusal`.
     RANK_BALANCE_REFUSAL: ClassVar[str | None] = None
+    # The prompts a round's rows are scored under, which the deal moves, weighs and trims together with the completion.
+    ROUND_PROMPT_ROWS: ClassVar[tuple[tuple[str, str], ...]] = PROMPT_ROWS
 
     _balances_rank_tokens = False
 
@@ -182,7 +196,9 @@ class RankBalancedRoundMixin:
 
     def _deal_round_across_ranks(self, batch: dict) -> dict:
         """COLLECTIVE. The train round with its rows dealt across ranks."""
-        dealt, spread = deal_rows_across_ranks(batch, pad_token_id=self.pad_token_id)
+        dealt, spread = deal_rows_across_ranks(
+            batch, pad_token_id=self.pad_token_id, prompt_rows=self.ROUND_PROMPT_ROWS
+        )
         self._metrics["train"][SPREAD_BEFORE_KEY].append(spread.before)
         self._metrics["train"][SPREAD_AFTER_KEY].append(spread.after)
         return dealt

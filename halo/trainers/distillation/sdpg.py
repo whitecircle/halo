@@ -12,10 +12,13 @@ from halo.trainers.distillation.divergences import pooled_token_mean, token_dive
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.grpo.rank_balance import PROMPT_ROWS
 from halo.trainers.stored_metrics import StoredMetricsMixin
 from halo.trainers.token_metrics import effective_loss_mask
 
 logger = logging.getLogger(__name__)
+
+TEACHER_PROMPT_ROWS = ("teacher_prompt_ids", "teacher_prompt_mask")
 
 
 def positive_advantage_gate(
@@ -49,10 +52,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         "slot's flattened scorer and filler rows provide"
     )
 
-    RANK_BALANCE_REFUSAL = (
-        "the teacher prompts are built after the round, from the rollout's answers in the rows' original order, which "
-        "a deal across ranks would no longer match"
-    )
+    ROUND_PROMPT_ROWS = (*PROMPT_ROWS, TEACHER_PROMPT_ROWS)
 
     def __init__(
         self,
@@ -86,15 +86,18 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 f"sdpg_beta_base: 0 to drop the term."
             )
 
-    def _generate_and_score_completions(self, inputs):
+    def _build_privileged_rows(self, result, inputs):
+        if self.sdpg.sdpg_beta_base == 0.0:
+            return {}
         # Answers in prompt row order, aligned 1:1 with rollout rows (RepeatSampler already expanded).
         answers = [x.get(self.sdpg_answer_field) for x in inputs]
-        output = super()._generate_and_score_completions(inputs)
-        if self.sdpg.sdpg_beta_base != 0.0:
-            output["teacher_prompt_ids"], output["teacher_prompt_mask"] = self._build_teacher_prompts(
-                output["prompt_ids"], output["prompt_mask"], answers
+        if len(answers) != result["prompt_ids"].size(0):
+            raise RuntimeError(
+                f"SDPG got {len(answers)} answers for {result['prompt_ids'].size(0)} rollout rows, so a teacher "
+                f"prompt would carry another row's answer."
             )
-        return output
+        ids, mask = self._build_teacher_prompts(result["prompt_ids"], result["prompt_mask"], answers)
+        return {"teacher_prompt_ids": ids, "teacher_prompt_mask": mask}
 
     def _build_teacher_prompts(self, prompt_ids, prompt_mask, answers):
         """Left-padded ``[prompt + hint]`` token ids per rollout row."""

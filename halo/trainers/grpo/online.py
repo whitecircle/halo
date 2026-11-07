@@ -238,6 +238,7 @@ class DistributedOnlineGRPOTrainer(
         self._last_rewards_per_func = None
         # After the drop, so the clamp share reads the loss mask the KL term is averaged on.
         self._clamp_kl_reference(result)
+        result |= self._build_privileged_rows(result, inputs)
         if self._balances_rank_tokens and self.model.training:
             result = self._deal_round_across_ranks(result)
             # The scoring passes binned the rows as TRL dealt them.
@@ -246,6 +247,14 @@ class DistributedOnlineGRPOTrainer(
             result = self._lay_out_packed_round(result, self._take_round_plan(result))
 
         return self._with_row_spans(self._broadcast_tensors_from_tp_leader(result))
+
+    def _build_privileged_rows(
+        self, result: dict[str, torch.Tensor | Any], inputs: list[dict[str, torch.Tensor | Any]]
+    ) -> dict[str, torch.Tensor]:
+        """Row tensors a subclass adds to the round from ``inputs``, whose rows are still in the order of ``result``'s:
+        the deal across ranks and the packed layout that follow reorder both together. A pair of left-padded prompt
+        tensors it adds is declared on ``ROUND_PROMPT_ROWS``."""
+        return {}
 
     def _apply_rlrr_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Replace advantages with RLRR ones, recomputed on the full gathered reward set in TRL's group order. Train

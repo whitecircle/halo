@@ -8,6 +8,7 @@ import dataclasses
 import inspect
 import textwrap
 import types
+from unittest import mock
 
 import pytest
 import torch
@@ -15,12 +16,14 @@ import torch.distributed as dist
 from trl import GRPOTrainer
 
 import halo.trainers.grpo.rank_balance as rank_balance
+from halo.configs.distillation import SDPGArguments
 from halo.configs.grpo import RankBalanceArguments
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rank_balance import (
+    PROMPT_ROWS,
     RANK_BALANCE_KNOB,
     SPREAD_AFTER_KEY,
     SPREAD_BEFORE_KEY,
@@ -132,6 +135,96 @@ def test_columns_a_row_gains_from_a_wider_rank_hold_the_pad_token_and_a_unit_rat
     run_gloo_ranks(_fill_worker, 2, 2)
 
 
+_TEACHER_MARK = 500
+
+
+def _teacher_rows(batch: dict) -> dict:
+    """Each row's prompt followed by one token naming its advantage, left-padded as the prompt is."""
+    prompts = [batch["prompt_ids"][i][batch["prompt_mask"][i].bool()].tolist() for i in range(ROWS_PER_RANK)]
+    rows = [p + [_TEACHER_MARK + int(a)] for p, a in zip(prompts, batch["advantages"].tolist(), strict=True)]
+    width = max(map(len, rows))
+    ids = torch.tensor([[0] * (width - len(r)) + r for r in rows])
+    mask = torch.tensor([[0] * (width - len(r)) + [1] * len(r) for r in rows])
+    return {"teacher_prompt_ids": ids, "teacher_prompt_mask": mask}
+
+
+def _teacher_deal_worker(rank: int, nprocs: int) -> None:
+    batch = skewed_round(rank, nprocs)
+    batch |= _teacher_rows(batch)
+    dealt, spread = deal_rows_across_ranks(
+        batch, pad_token_id=0, prompt_rows=(*PROMPT_ROWS, ("teacher_prompt_ids", "teacher_prompt_mask"))
+    )
+    assert spread.after < spread.before
+    for i, advantage in enumerate(dealt["advantages"].tolist()):
+        prompt = dealt["prompt_ids"][i][dealt["prompt_mask"][i].bool()].tolist()
+        teacher = dealt["teacher_prompt_ids"][i][dealt["teacher_prompt_mask"][i].bool()].tolist()
+        assert teacher == prompt + [_TEACHER_MARK + int(advantage)], "a row's teacher prompt left its row"
+    assert dealt["teacher_prompt_mask"][:, 0].any(), "the teacher prompt's leading padding was not trimmed"
+    assert dealt["teacher_prompt_ids"].shape == dealt["teacher_prompt_mask"].shape
+
+
+def test_a_second_prompt_moves_with_its_row_and_is_trimmed_on_its_own_width():
+    run_gloo_ranks(_teacher_deal_worker, 2, 2)
+
+
+def _teacher_weight_worker(rank: int) -> None:
+    batch = skewed_round(rank, 2)
+    batch |= _teacher_rows(batch)
+    pairs = (*PROMPT_ROWS, ("teacher_prompt_ids", "teacher_prompt_mask"))
+    own = (
+        batch["prompt_mask"].sum(1) + batch["teacher_prompt_mask"].sum(1) + 2 * batch["completion_mask"].sum(1)
+    ).tolist()
+    tokens = [t for ranks_tokens in _gathered(own) for t in ranks_tokens]
+    _, spread = deal_rows_across_ranks(dict(batch), pad_token_id=0, prompt_rows=pairs)
+    assert spread.before == pytest.approx(max_over_mean(tokens, range(len(tokens)), 2))
+    plain = {key: value for key, value in batch.items() if not key.startswith("teacher_")}
+    _, student_only = deal_rows_across_ranks(plain, pad_token_id=0, prompt_rows=PROMPT_ROWS)
+    assert student_only.before != pytest.approx(spread.before), "the teacher forward's tokens were not weighed"
+
+
+def test_a_rows_load_counts_each_prompt_it_is_scored_under_with_the_completion_that_forward_reads():
+    run_gloo_ranks(_teacher_weight_worker, 2)
+
+
+class _AnswerTokenizer:
+    """Encodes a hint (the answer alone) to one token naming it."""
+
+    pad_token_id = 0
+
+    @staticmethod
+    def encode(text, add_special_tokens=False):
+        return [_TEACHER_MARK + int(text)]
+
+
+def _sdpg_round_worker(rank: int, nprocs: int) -> None:
+    batch = skewed_round(rank, nprocs)
+    answers = [str(int(a)) for a in batch["advantages"].tolist()]
+    host = online_host(
+        tiny_llama(VOCAB, 0), slots=ROWS_PER_RANK, budget=0, accelerator=world_accelerator(), packed=False
+    )
+    host.__class__ = DistributedSDPGTrainer
+    host.sdpg = SDPGArguments(sdpg_hint_template="{answer}")
+    host.sdpg_answer_field, host.processing_class, host._warned_missing_answer = "answer", _AnswerTokenizer(), set()
+    host._balances_rank_tokens = True
+    host._rlrr_config, host._drop_degenerate_groups = None, False
+    host._scale_rewards_std_floor, host._balance_token_mass = 0.0, False
+    host._last_rewards_per_func, host.beta = None, 0.0
+    batch["old_per_token_logps"] = None
+    with mock.patch.object(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: dict(batch)):
+        built = DistributedSDPGTrainer._generate_and_score_completions(host, [{"answer": a} for a in answers])
+    assert built["advantages"].tolist() != batch["advantages"].tolist(), (
+        "no row moved, so the control compared nothing"
+    )
+    for i, advantage in enumerate(built["advantages"].tolist()):
+        prompt = built["prompt_ids"][i][built["prompt_mask"][i].bool()].tolist()
+        teacher = built["teacher_prompt_ids"][i][built["teacher_prompt_mask"][i].bool()].tolist()
+        assert teacher == prompt + [_TEACHER_MARK + int(advantage)], "a teacher prompt carries another row's answer"
+
+
+def test_after_a_deal_across_ranks_each_rows_teacher_prompt_still_carries_its_own_answer():
+    run_gloo_ranks(_sdpg_round_worker, 2, 2)
+
+
 def _window(batch: dict, loss_type: str) -> tuple[float, list[torch.Tensor]]:
     """One optimizer step on this rank's rows through the online trainer's real loss, summed over the world."""
     host = online_host(
@@ -239,11 +332,14 @@ def test_a_setup_the_deal_would_change_or_could_not_use_is_refused(kwargs, match
         _admit(**kwargs)
 
 
-def test_sdpg_declares_the_refusal_and_the_trainer_reads_it_before_trls_constructor():
-    assert DistributedSDPGTrainer.RANK_BALANCE_REFUSAL and DistributedOnlineGRPOTrainer.RANK_BALANCE_REFUSAL is None
+def test_a_trainer_declared_refusal_is_read_before_trls_constructor_and_none_admits_the_trainer():
+    assert (
+        DistributedSDPGTrainer.RANK_BALANCE_REFUSAL is None
+        and DistributedOnlineGRPOTrainer.RANK_BALANCE_REFUSAL is None
+    )
     with pytest.raises(ValueError, match="DistributedSDPGTrainer"):
-        reject_trainer_refusal(DistributedSDPGTrainer, DistributedSDPGTrainer.RANK_BALANCE_REFUSAL, RANK_BALANCE_KNOB)
-    reject_trainer_refusal(DistributedOnlineGRPOTrainer, None, RANK_BALANCE_KNOB)
+        reject_trainer_refusal(DistributedSDPGTrainer, "a reason", RANK_BALANCE_KNOB)
+    reject_trainer_refusal(DistributedSDPGTrainer, DistributedSDPGTrainer.RANK_BALANCE_REFUSAL, RANK_BALANCE_KNOB)
     init = ast.parse(textwrap.dedent(inspect.getsource(DistributedOnlineGRPOTrainer.__init__)))
     line = {
         (n.func.attr if isinstance(n.func, ast.Attribute) else n.func.id): n.lineno
@@ -281,7 +377,7 @@ def _build_with_deal(monkeypatch, *, packed: bool):
     batch["old_per_token_logps"] = None
     dealt_calls = []
 
-    def reversing(round_tensors, *, pad_token_id):
+    def reversing(round_tensors, *, pad_token_id, prompt_rows):
         dealt_calls.append(round_tensors)
         flipped = {k: v.flip(0) if isinstance(v, torch.Tensor) and v.ndim else v for k, v in round_tensors.items()}
         return flipped, RankSpread(2.0, 1.25)
@@ -347,7 +443,8 @@ def test_the_deal_precedes_the_layout_the_row_spans_and_the_tp_broadcast_in_the_
     line = {
         n.func.attr: n.lineno for n in ast.walk(body) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
     }
-    assert line["_clamp_kl_reference"] < line["_deal_round_across_ranks"] < line["_lay_out_packed_round"]
+    assert line["_clamp_kl_reference"] < line["_build_privileged_rows"] < line["_deal_round_across_ranks"]
+    assert line["_deal_round_across_ranks"] < line["_lay_out_packed_round"]
     assert line["_lay_out_packed_round"] < line["_broadcast_tensors_from_tp_leader"] == line["_with_row_spans"]
 
 
