@@ -102,17 +102,24 @@ def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
 
 
 def _quantization_refusals(flags: ServerFlags, needs: ServerRequirements) -> list[str]:
-    """The server's weight format against the run's ``rollout_weight_precision``. Only the quantization method is on
-    ``/server_info``: the block size and activation scheme come from the served checkpoint's config, which the
-    block-FP8 export tool writes and the first-push parity probe holds to account."""
+    """The server's weight format against the run's ``rollout_weight_precision``; an unreported format passes a bf16
+    run and refuses an fp8 one. Only the quantization method is read: the block size and activation scheme come from
+    the served checkpoint's config, which the block-FP8 export tool writes and the first-push parity probe holds to
+    account."""
     if needs.weight_precision == "fp8_block":
         if flags.quantization == "fp8":
             return []
-        served = "reports no quantization" if flags.quantization is None else f"serves {flags.quantization or 'bf16'}"
+        if flags.quantization is None:
+            return [
+                "rollout_weight_precision is fp8_block and the server reports no weight format: SGLang reports only a "
+                "--quantization launch flag, or the format of a checkpoint whose config this host reads at the "
+                "server's model_path (or in its own hub cache). Launch it with --quantization fp8 on the checkpoint "
+                "written by the block-FP8 export tool (scripts/before_training/export_block_fp8.py)."
+            ]
         return [
-            f"rollout_weight_precision is fp8_block and the server {served}, so the pushed fp8 weights and scales "
-            f"would land in tensors of another format, or be dropped, behind a 200. Serve the checkpoint written by "
-            f"the block-FP8 export tool (scripts/before_training/export_block_fp8.py)."
+            f"rollout_weight_precision is fp8_block and the server serves {flags.quantization or 'bf16'}, so the "
+            f"pushed fp8 weights and scales would land in tensors of another format, or be dropped, behind a 200. "
+            f"Serve the checkpoint written by the block-FP8 export tool (scripts/before_training/export_block_fp8.py)."
         ]
     if flags.quantization:
         return [

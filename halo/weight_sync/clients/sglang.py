@@ -13,6 +13,7 @@ import requests
 import torch
 import torch.distributed as dist
 
+from halo.checkpoint.reading import find_checkpoint_config
 from halo.models.moe.family_specs import STEP3P7
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
@@ -45,6 +46,23 @@ _INFLIGHT_CHUNKS = 2
 _ENGINE_ANSWER_TIMEOUT_S = 30.0
 # A load or unload waits for the scheduler between batches and, for a load, for the adapter's host-to-device copy.
 _ADAPTER_UPDATE_TIMEOUT_S = 120.0
+
+
+def _served_quantization(info: dict) -> str | None:
+    """The weight format the server holds: its ``--quantization`` launch flag, else the method the engine adopts,
+    unreported, from the ``quantization_config`` (or ``compression_config``) of the checkpoint at ``model_path``, a
+    config naming no method being modelopt to it; ``""`` for an unquantized one. ``None`` where the reply carries no
+    such field or this host cannot read that checkpoint's config."""
+    if "quantization" not in info:
+        return None
+    if info["quantization"]:
+        return info["quantization"]
+    config = find_checkpoint_config(info["model_path"]) if info.get("model_path") else None
+    if config is None:
+        return None
+    if config.get("quantization_config"):
+        return config["quantization_config"].get("quant_method") or "modelopt"
+    return "compressed-tensors" if config.get("compression_config") else ""
 
 
 class SGLangWeightSyncClient(WeightSyncClientBase):
@@ -167,7 +185,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             captures_routing=info.get("enable_return_routed_experts"),
             torch_compile=info.get("enable_torch_compile"),
             dtype=info.get("dtype"),
-            quantization=(info["quantization"] or "") if "quantization" in info else None,
+            quantization=_served_quantization(info),
             pipeline_stages=int(info.get("pp_size") or 1),
             extras=pick_launch_facts(info, cls.LAUNCH_FACTS),
         )

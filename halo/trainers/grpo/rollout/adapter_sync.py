@@ -7,7 +7,6 @@ from __future__ import annotations
 import logging
 import math
 import os
-import re
 import uuid
 from collections.abc import Callable
 from functools import partial
@@ -22,6 +21,7 @@ from transformers.core_model_loading import rename_source_key
 
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms
 from halo.checkpoint.parallel.adapters import gather_adapter_state
+from halo.checkpoint.reading import find_hub_snapshot
 from halo.checkpoint.weights_source import weights_read_from
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
@@ -59,9 +59,6 @@ logger = logging.getLogger(__name__)
 # its predecessor left on an engine.
 ADAPTER_NAME_PREFIX = "halo-adapter"
 
-# The cache layout an engine's ``model_path`` takes when it loaded a hub repo: models--<org>--<name>/snapshots/<commit>.
-_HF_SNAPSHOT_PATH = re.compile(r"(?:^|/)models--(?P<repo>[^/]+)/snapshots/(?P<commit>[^/]+)(?:/|$)")
-
 
 class AdapterServing(NamedTuple):
     """What the run's adapters are, as the engine will be asked to serve them."""
@@ -81,12 +78,6 @@ class BasePlan(NamedTuple):
     holdings: dict[str, list[str] | None]
 
 
-def _snapshot_of(path: str) -> tuple[str, str] | None:
-    """The (repo id, commit) a hub-cache snapshot directory names, or ``None`` for any other path."""
-    found = _HF_SNAPSHOT_PATH.search(path)
-    return None if found is None else (found["repo"].replace("--", "/"), found["commit"])
-
-
 def resolve_launch_base(model: torch.nn.Module, async_config: AsyncRolloutConfig) -> ServedBase | None:
     """The base the trainer's frozen weights are, spelled as an engine launched with them reports it: a hub id is
     resolved to its snapshot directory through the cache the trainer loaded from. ``None`` where they are not a
@@ -102,7 +93,7 @@ def resolve_launch_base(model: torch.nn.Module, async_config: AsyncRolloutConfig
         except (LocalEntryNotFoundError, HFValidationError):
             return None
     path = path.rstrip("/")
-    snapshot = _snapshot_of(path)
+    snapshot = find_hub_snapshot(path)
     return ServedBase(
         model_id=async_config.model_name, path=path, revision=snapshot[1] if snapshot is not None else revision
     )
@@ -114,7 +105,7 @@ def serves_launch_base(served: ServedBase, launch: ServedBase) -> bool:
     that is neither is no match, and nor is a revision the server reports that the trainer's does not equal."""
     if served.model_id != launch.model_id or served.path is None or launch.path is None:
         return False
-    served_snapshot, launch_snapshot = _snapshot_of(served.path), _snapshot_of(launch.path)
+    served_snapshot, launch_snapshot = find_hub_snapshot(served.path), find_hub_snapshot(launch.path)
     if served_snapshot is not None and launch_snapshot is not None:
         same = served_snapshot == launch_snapshot
     else:

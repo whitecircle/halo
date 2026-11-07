@@ -4,10 +4,12 @@ those trains silently wrong. Both engines report the facts on ``/server_info``, 
 and a client refuses before forming a group."""
 
 import ast
+import json
 import logging
 import threading
 
 import pytest
+from huggingface_hub import constants
 
 from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_group_servers, verify_server_flags
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
@@ -26,6 +28,16 @@ def engine(request):
     server = server_cls()
     yield server, client_cls
     server.close()
+
+
+def _checkpoint(directory, **config) -> str:
+    """A checkpoint directory holding only ``config`` as its ``config.json``, for a fake server to report serving."""
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "config.json").write_text(json.dumps({"model_type": "qwen3_5_moe", **config}))
+    return str(directory)
+
+
+_FP8_CHECKPOINT = {"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}}
 
 
 def _verify(server, client_cls, **needs) -> None:
@@ -116,14 +128,58 @@ def test_a_bf16_run_names_the_fp8_remedy_when_it_meets_a_quantized_server(engine
 
 
 @_ENGINES_FIXTURE
-def test_an_fp8_run_accepts_an_fp8_server_and_refuses_every_other_format(engine):
+def test_an_fp8_run_accepts_an_fp8_server_and_refuses_every_other_format(engine, tmp_path):
     server, client_cls = engine
+    server.model_path = _checkpoint(tmp_path)
     server.quantization = "fp8"
     _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
     for served, wording in (("", "serves bf16"), ("awq", "serves awq")):
         server.quantization = served
         with pytest.raises(ValueError, match=wording):
             _verify(server, client_cls, is_moe=True, weight_precision="fp8_block")
+
+
+def _sglang_on(model_path: str) -> FakeSGLangServer:
+    """An SGLang server launched without --quantization, which it reports as null, on the checkpoint at
+    ``model_path``."""
+    server = FakeSGLangServer()
+    server.quantization, server.model_path = "", model_path
+    return server
+
+
+def test_sglang_reports_the_format_of_a_quantized_checkpoint_it_was_launched_on_without_the_flag(tmp_path):
+    server = _sglang_on(_checkpoint(tmp_path, **_FP8_CHECKPOINT))
+    try:
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True)
+        _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+    finally:
+        server.close()
+
+
+def test_sglang_finds_the_checkpoint_of_a_snapshot_path_in_this_hosts_hub_cache(tmp_path, monkeypatch):
+    """The server's cache sits elsewhere: the same repo and commit are read from this host's."""
+    commit = "a" * 40
+    _checkpoint(tmp_path / "models--org--policy" / "snapshots" / commit, **_FP8_CHECKPOINT)
+    monkeypatch.setattr(constants, "HF_HUB_CACHE", str(tmp_path))
+    server = _sglang_on(f"/server/hf/hub/models--org--policy/snapshots/{commit}")
+    try:
+        with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True)
+    finally:
+        server.close()
+
+
+def test_an_sglang_format_this_host_cannot_read_passes_a_bf16_run_and_refuses_an_fp8_one_naming_the_flag():
+    server = _sglang_on("/server/only/checkpoint")
+    try:
+        _verify(server, SGLangWeightSyncClient, is_moe=True)
+        with pytest.raises(ValueError, match="Launch it with --quantization fp8"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+        server.quantization = "fp8"
+        _verify(server, SGLangWeightSyncClient, is_moe=True, weight_precision="fp8_block")
+    finally:
+        server.close()
 
 
 @_ENGINES_FIXTURE
@@ -140,10 +196,12 @@ def test_an_fp8_run_still_needs_the_triton_moe_backend(engine):
 )
 @pytest.mark.parametrize("server_cls", [FakeVLLMServer, FakeSGLangServer], ids=["vllm", "sglang"])
 def test_servers_of_one_group_must_agree_on_every_launch_flag_that_changes_how_the_weights_load(
-    server_cls, flag, other
+    server_cls, flag, other, tmp_path
 ):
     servers = [server_cls(), server_cls()]
     try:
+        for server in servers:
+            server.model_path = _checkpoint(tmp_path)
         urls = [server.url for server in servers]
         backend = server_cls.CLIENT_CLASS.BACKEND_KEY
         verify_group_servers(urls, backend=backend, connection_timeout=5.0)
