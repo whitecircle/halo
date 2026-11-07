@@ -320,6 +320,42 @@ def test_a_flush_that_fails_at_the_close_leaves_sglang_paused(monkeypatch):
         server.close()
 
 
+def test_an_sglang_chunk_the_engine_rejects_raises_with_the_deepgemm_remedy_once():
+    """The declare call's own HTTP error is the one raised, so the remedy cannot ride on a separate server error."""
+    server, client = _sglang_with_a_group()
+    try:
+        client.group_name = "g"
+        server.groups.add("g")
+        server.session_open = True
+        server.update_failure = (
+            "Failed to update parameter online: . The full weights of the ModelRunner are partially updated."
+        )
+        declared = client.declare_chunk([("w", torch.zeros(4, dtype=torch.bfloat16))], final=False)
+        with pytest.raises(requests.exceptions.HTTPError) as raised:
+            declared.wait(timeout=10)
+        with pytest.raises(RuntimeError) as failure:
+            client._fail_chunk(raised.value, declared)
+        assert str(failure.value).count("SGLANG_ENABLE_JIT_DEEPGEMM=0") == 1
+        assert "partially updated" in str(failure.value)
+    finally:
+        server.close()
+
+
+def test_an_unrelated_sglang_chunk_failure_is_raised_unchanged():
+    server, client = _sglang_with_a_group()
+    try:
+        client.group_name = "g"
+        server.groups.add("g")
+        server.session_open = True
+        server.update_failure = "CUDA out of memory"
+        declared = client.declare_chunk([("w", torch.zeros(4, dtype=torch.bfloat16))], final=False)
+        with pytest.raises(requests.exceptions.HTTPError, match="CUDA out of memory"):
+            declared.wait(timeout=10)
+            client._fail_chunk(declared.error, declared)
+    finally:
+        server.close()
+
+
 def _single_shot_request(request):
     """The session's status retries would back off ~80 s on a scripted 500."""
 

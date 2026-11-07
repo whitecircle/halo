@@ -329,6 +329,8 @@ class FakeSGLangServer(FakeEngineServer):
         self.tp_size = 1
         self.dp_size = 1
         self.pp_size = 1
+        # The message a weight update answers 400 with, as the engine does when its loader rejects a chunk.
+        self.update_failure: str | None = None
         self.torch_compile = False
         self.groups: set[str] = set()
         self.session_open = False
@@ -426,6 +428,8 @@ class FakeSGLangServer(FakeEngineServer):
                 return 400, {"message": "must run between begin_weight_update() and end_weight_update()"}
             if body["group_name"] not in self.groups:
                 return 400, {"message": f"weight update group {body['group_name']} is not registered"}
+            if self.update_failure is not None:
+                return 400, {"success": False, "message": self.update_failure}
             return 200, {}
         if path == "/flush_cache":
             return 200, {}

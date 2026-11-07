@@ -746,12 +746,19 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """Raise ``error`` naming the server's own failure, which sits on an unjoined thread, when it recorded one."""
         wait_announced(server_call, self.base_url, f"its {server_call.name} call to report", SERVER_ERROR_GRACE_S)
         server_error = server_call.error
+        remedy = self.chunk_failure_remedy([e for e in (server_error, error) if e is not None])
         if server_error is not None and server_error is not error:
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "
                 f"({type(error).__name__}: {error}); the server's {server_call.name} call failed with: "
-                f"{type(server_error).__name__}: {server_error}.{hint}{self.chunk_failure_remedy([server_error])}"
+                f"{type(server_error).__name__}: {server_error}.{hint}{remedy}"
             ) from server_error
+        if remedy:
+            # The declare call's own error is the one being raised, so it would reach the caller without the remedy.
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "
+                f"({type(error).__name__}: {error}).{hint}{remedy}"
+            ) from error
 
     @classmethod
     def chunk_failure_remedy(cls, errors: Sequence[BaseException | str]) -> str:
