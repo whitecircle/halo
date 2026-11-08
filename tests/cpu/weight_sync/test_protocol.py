@@ -97,9 +97,8 @@ def client(server, monkeypatch):
     return handle
 
 
-def _no_op_producer(**kwargs):
-    for _ in kwargs["iterator"]:
-        pass
+def _no_op_producer(buffers, **kwargs):
+    """Consumes the packed buffers without a peer."""
 
 
 def _bind_error(port: int) -> str | None:
@@ -138,7 +137,7 @@ def _run_bounded(fn) -> list:
 def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
     """``mode=abort``, the default, kills the prefetched rollout round and hands each back as a fragment with an
     ordinary stop reason. ``keep`` freezes those requests to resume under the new weights."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
 
     push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
@@ -149,8 +148,9 @@ def test_pause_keeps_in_flight_generations(server, client, monkeypatch):
 def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(server, client, monkeypatch):
     """vLLM replies only once it received the chunk, so a fixed RPC timeout below ``HALO_NCCL_SYNC_TIMEOUT_SECONDS``
     would fail a chunk the knob allows."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
+    monkeypatch.setattr(client_base, "CHUNK_SYNC_TIMEOUT_S", 1234.0)
     deadlines = []
     real_start = client._start_collective_rpc
 
@@ -169,7 +169,7 @@ def test_a_chunk_waits_on_its_update_rpc_for_the_configured_chunk_deadline(serve
 
 
 def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     server.status["/pause"] = 500
 
     with pytest.raises(Exception, match="/pause"):
@@ -183,7 +183,7 @@ def test_lost_pause_reply_still_resumes_the_server(server, client, monkeypatch):
 
 
 def test_pause_left_by_a_failed_sync_is_lifted_on_close(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     server.status["/pause"] = 500
     server.refuse.add("/resume")  # the in-sync resume never lands either; only close() can recover
 
@@ -197,7 +197,7 @@ def test_pause_left_by_a_failed_sync_is_lifted_on_close(server, client, monkeypa
 
 
 def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     server.status["/start_weight_update"] = 500
 
     with pytest.raises(Exception, match="start_weight_update"):
@@ -211,7 +211,7 @@ def test_failed_start_weight_update_is_closed(server, client, monkeypatch):
 
 
 def test_start_weight_update_read_timeout_is_closed(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     real_request = requests.request
 
     def timing_out_request(method, url, *args, **kwargs):
@@ -232,10 +232,10 @@ def test_start_weight_update_read_timeout_is_closed(server, client, monkeypatch)
 def test_producer_failure_surfaces_the_server_rejection(server, client, monkeypatch):
     """The server's ``/update_weights`` error is the root cause; the producer's is the symptom."""
 
-    def failing_producer(**kwargs):
+    def failing_producer(buffers, **kwargs):
         raise RuntimeError("NCCL weight-sync packed weight broadcast did not complete within 600s")
 
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", failing_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", failing_producer)
     server.status["/update_weights"] = 500
 
     with pytest.raises(Exception) as excinfo:
@@ -250,7 +250,7 @@ def test_producer_failure_surfaces_the_server_rejection(server, client, monkeypa
 
 def test_an_update_declares_only_names_dtypes_and_shapes(server, client, monkeypatch):
     """The engine refuses an update carrying any other field; the packed geometry rides the init."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
 
     push(client, [("w", torch.zeros(4, dtype=torch.bfloat16))])
 
@@ -261,7 +261,7 @@ def test_an_update_declares_only_names_dtypes_and_shapes(server, client, monkeyp
 def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(server, client, monkeypatch):
     """The engine holds neither policy, and the layerwise reload materializes a layer straddling the boundary from
     uninitialized storage, waiting for a rest that never arrives. Resuming serves that behind a 200 ``/health``."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):  # 1 KiB each: the second crosses the budget, so the first chunk goes out
@@ -286,7 +286,7 @@ def test_a_mid_stream_abort_leaves_the_engine_paused_and_refuses_the_next_sync(s
 
 def test_a_close_that_fails_after_chunks_landed_leaves_the_engine_paused(server, client, monkeypatch):
     """A reload left unfinished holds the same mixed model as a failed chunk, and a resume serves it."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     server.status["/finish_weight_update"] = 500
     with pytest.raises(requests.exceptions.HTTPError, match="500"):
         push(client, [("a", torch.zeros(4, dtype=torch.bfloat16))])
@@ -320,6 +320,42 @@ def test_a_flush_that_fails_at_the_close_leaves_sglang_paused(monkeypatch):
         server.close()
 
 
+def test_an_sglang_chunk_the_engine_rejects_raises_with_the_deepgemm_remedy_once():
+    """The declare call's own HTTP error is the one raised, so the remedy cannot ride on a separate server error."""
+    server, client = _sglang_with_a_group()
+    try:
+        client.group_name = "g"
+        server.groups.add("g")
+        server.session_open = True
+        server.update_failure = (
+            "Failed to update parameter online: . The full weights of the ModelRunner are partially updated."
+        )
+        declared = client.declare_chunk([("w", torch.zeros(4, dtype=torch.bfloat16))], final=False)
+        with pytest.raises(requests.exceptions.HTTPError) as raised:
+            declared.wait(timeout=10)
+        with pytest.raises(RuntimeError) as failure:
+            client._fail_chunk(raised.value, declared)
+        assert str(failure.value).count("SGLANG_ENABLE_JIT_DEEPGEMM=0") == 1
+        assert "partially updated" in str(failure.value)
+    finally:
+        server.close()
+
+
+def test_an_unrelated_sglang_chunk_failure_is_raised_unchanged():
+    server, client = _sglang_with_a_group()
+    try:
+        client.group_name = "g"
+        server.groups.add("g")
+        server.session_open = True
+        server.update_failure = "CUDA out of memory"
+        declared = client.declare_chunk([("w", torch.zeros(4, dtype=torch.bfloat16))], final=False)
+        with pytest.raises(requests.exceptions.HTTPError, match="CUDA out of memory"):
+            declared.wait(timeout=10)
+            client._fail_chunk(declared.error, declared)
+    finally:
+        server.close()
+
+
 def _single_shot_request(request):
     """The session's status retries would back off ~80 s on a scripted 500."""
 
@@ -332,7 +368,7 @@ def _single_shot_request(request):
 
 def test_a_lost_resume_is_retried_after_a_good_push(server, client, monkeypatch):
     """One failed POST left the engine paused with the push counted as done: the next rollouts queued to their timeout."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr(client_base, "_RESUME_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
     server.replies["/resume"] = deque([500, 500])
 
@@ -342,7 +378,7 @@ def test_a_lost_resume_is_retried_after_a_good_push(server, client, monkeypatch)
 
 
 def test_a_resume_that_never_lands_raises_naming_the_server(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr(client_base, "_RESUME_RETRY_BACKOFF_S", (0.0, 0.0, 0.0))
     server.status["/resume"] = 500
 
@@ -356,7 +392,7 @@ def test_a_resume_that_never_lands_raises_naming_the_server(server, client, monk
 
 def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client, monkeypatch):
     """The close resumes the engine in a ``finally``, so the verdict has to be taken where the chunk fails."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
@@ -377,7 +413,7 @@ def test_a_failed_tail_chunk_after_a_streamed_one_is_not_resumed(server, client,
 def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, client, monkeypatch):
     """With nothing on the wire the engine still holds its weights; left quiesced it refuses every later sync and
     queues every rollout."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
     server.status["/update_weights"] = 500
 
@@ -397,12 +433,12 @@ def test_an_abort_before_any_chunk_still_closes_and_resumes_the_server(server, c
 def test_a_failed_snapshot_completion_still_closes_the_update(server, client, monkeypatch):
     """The completion runs inside the close. Skipping ``/finish_weight_update`` leaves the engine mid-reload while
     ``/health`` answers 200, so every later ``/start_weight_update`` fails and the probe cannot see it."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
 
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "complete_snapshots", sticky_cuda_error)
 
     client.update_named_param("w", torch.zeros(4, dtype=torch.bfloat16))
     with pytest.raises(RuntimeError, match="illegal memory access"):
@@ -416,7 +452,7 @@ def test_a_failed_snapshot_completion_still_closes_the_update(server, client, mo
 def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, monkeypatch):
     """The engine holds the earlier chunks and its old weights for the rest, the same mixed model, so the close must
     not resume it."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     monkeypatch.setattr("halo.weight_sync.clients.base.WEIGHT_SYNC_CHUNK_BYTES", 512)
 
     for name in ("a", "b"):
@@ -426,7 +462,7 @@ def test_a_dropped_tail_after_a_streamed_chunk_is_not_resumed(server, client, mo
     def sticky_cuda_error(self):
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    monkeypatch.setattr(VLLMWeightSyncClient, "_complete_snapshots", sticky_cuda_error)
+    monkeypatch.setattr(VLLMWeightSyncClient, "complete_snapshots", sticky_cuda_error)
     with pytest.raises(RuntimeError, match="illegal memory access"):
         client.finish_weight_update()
 
@@ -452,12 +488,12 @@ def test_the_snapshot_completion_waits_on_the_staged_copies_not_the_device(clien
 
     event = _Event()
     client._snapshot_event = event
-    client._complete_snapshots()
+    client.complete_snapshots()
     assert event.waited == 1, "the flush did not wait for the staged copies"
     assert synchronized == [], "the flush synchronized the whole device instead of the staged copies"
 
     client._snapshot_event = None
-    client._complete_snapshots()
+    client.complete_snapshots()
     assert synchronized == [] and event.waited == 1
 
 
@@ -534,10 +570,10 @@ def test_sglang_replicas_are_refused_while_attention_dp_sizes_the_group_off_its_
     server.tp_size = 4
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
-        assert client._fetch_engine_world_size() == 4
+        assert client.require_engine_world_size() == 4
         server.dp_size = 2
         with pytest.raises(RuntimeError, match="plain --dp-size 2 server") as refused:
-            client._fetch_engine_world_size()
+            client.require_engine_world_size()
     finally:
         server.close()
     assert "--attn-dp-size" in str(refused.value) and "--enable-dp-attention" not in str(refused.value)
@@ -552,7 +588,7 @@ def test_a_paused_sglang_server_is_refused_with_the_route_that_lifts_it(monkeypa
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         with pytest.raises(RuntimeError, match="paused or wedged") as refused:
-            client._fetch_engine_world_size()
+            client.require_engine_world_size()
     finally:
         server.close()
     assert "/continue_generation" in str(refused.value) and "RESTARTED" in str(refused.value)
@@ -578,10 +614,10 @@ def test_a_join_clears_a_dead_trainers_open_session_on_sglang(monkeypatch):
     try:
         client = SGLangWeightSyncClient(base_url=server.url)
         server.session_open = True
-        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2, 1, None)
         call.join(5.0)
         assert server.session_open is False
-        call = client._request_engine_join("127.0.0.1", 1, 2)
+        call = client.request_engine_join("127.0.0.1", 1, 2, 1, None)
         call.join(5.0)
         assert server.count("POST /end_weight_update") == 2
     finally:
@@ -846,7 +882,7 @@ def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):
 
 
 def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, monkeypatch):
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
 
     with pytest.raises(ValueError, match="0-dimensional"):
         push(client, [("scale", torch.zeros((), dtype=torch.bfloat16))])
@@ -857,7 +893,7 @@ def test_zero_dim_param_is_rejected_before_the_server_is_paused(server, client, 
 
 def test_dtensor_param_is_rejected(server, client, tmp_path, monkeypatch):
     """A DTensor's global ``numel()`` against a local ``data_ptr()`` would broadcast out of bounds."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
     try:
         mesh = init_device_mesh("cpu", (1,))
@@ -894,7 +930,7 @@ def test_aborted_communicator_is_refused_by_name(server, client):
 
 def test_a_communicator_aborted_mid_update_keeps_the_engine_out_of_the_next_broadcast(server, client, monkeypatch):
     """The RPC enters the engine's collective, where it would wait on a broadcast that never comes."""
-    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    monkeypatch.setattr(wsc, "broadcast_packed", _no_op_producer)
     client.update_named_param("a", torch.zeros(4, dtype=torch.bfloat16))
     client.flush_chunk()
     assert server.count("POST /update_weights") == 1

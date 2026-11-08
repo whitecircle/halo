@@ -11,7 +11,10 @@ from datetime import timedelta
 
 import pytest
 import torch
+from torch.distributed import distributed_c10d as c10d
 
+from halo.weight_sync.clients import sglang as sglang_module
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.transport import rendezvous
 from halo.weight_sync.transport.c10d_group import build_weight_update_group
 from halo.weight_sync.transport.nccl_library import ncclUniqueId
@@ -23,7 +26,8 @@ GOLDEN = json.loads(GOLDEN_PATH.read_text(encoding="utf-8"))
 VLLM_DOCKERFILE = REPO_ROOT / "Dockerfile.vllm"
 VLLM_VERIFY_SCRIPT = REPO_ROOT / "docker/vllm/verify_image.py"
 SHIM_ROOT = "/opt/nccl_compat"
-SGLANG_GROUP_TIMEOUT_S = 7.0
+SGLANG_STORE_TIMEOUT_S = 7.0
+SGLANG_GROUP_TIMEOUT_S = 700.0
 
 
 class _StoreBuilt(Exception):
@@ -93,7 +97,8 @@ def test_the_sglang_store_does_not_wait_for_the_engine(monkeypatch):
             WORLD_SIZE,
             torch.device("cpu"),
             group_name="weight_update_group_test",
-            timeout_s=SGLANG_GROUP_TIMEOUT_S,
+            store_timeout_s=SGLANG_STORE_TIMEOUT_S,
+            group_timeout_s=SGLANG_GROUP_TIMEOUT_S,
         )
 
     [(kwargs, listen_port)] = built
@@ -103,10 +108,44 @@ def test_the_sglang_store_does_not_wait_for_the_engine(monkeypatch):
         "port": listener.port,
         "world_size": WORLD_SIZE,
         "is_master": True,
-        "timeout": timedelta(seconds=SGLANG_GROUP_TIMEOUT_S),
+        "timeout": timedelta(seconds=SGLANG_STORE_TIMEOUT_S),
         "wait_for_workers": False,
         "master_listen_fd": kwargs["master_listen_fd"],
     }
+
+
+def test_the_sglang_group_outlives_the_formation_wait(monkeypatch):
+    """torch applies a group's timeout to every later work item, so the formation wait must not be the group's."""
+    groups: list[timedelta] = []
+
+    def recording_helper(*args, timeout, **kwargs):
+        groups.append(timeout)
+        raise _StoreBuilt
+
+    monkeypatch.setattr(c10d, "_new_process_group_helper", recording_helper)
+    with RendezvousListener("127.0.0.1", 0) as listener, pytest.raises(_StoreBuilt):
+        build_weight_update_group(
+            "127.0.0.1",
+            listener,
+            WORLD_SIZE,
+            torch.device("cpu"),
+            group_name="weight_update_group_test",
+            store_timeout_s=SGLANG_STORE_TIMEOUT_S,
+            group_timeout_s=SGLANG_GROUP_TIMEOUT_S,
+        )
+    assert groups == [timedelta(seconds=SGLANG_GROUP_TIMEOUT_S)]
+
+
+def test_the_sglang_client_gives_its_group_the_chunk_deadline_and_its_formation_the_formation_deadline(monkeypatch):
+    built: list[dict] = []
+    monkeypatch.setattr(sglang_module, "build_weight_update_group", lambda **kwargs: built.append(kwargs))
+    monkeypatch.setattr(sglang_module, "GROUP_FORMATION_TIMEOUT_S", 11.0)
+    monkeypatch.setattr(sglang_module, "CHUNK_SYNC_TIMEOUT_S", 777.0)
+    client = SGLangWeightSyncClient.__new__(SGLangWeightSyncClient)
+    client.sync_device, client.group_name = torch.device("cpu"), "g"
+    client.prepare_local_formation("127.0.0.1", None, 2)()
+    [kwargs] = built
+    assert (kwargs["store_timeout_s"], kwargs["group_timeout_s"]) == (11.0, 777.0)
 
 
 if __name__ == "__main__":

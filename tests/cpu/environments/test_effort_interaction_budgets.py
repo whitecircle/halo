@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Effort-conditional interaction budgets and the failures-only verdict. ``reasoning_effort_profiles`` binds a level
-to a thinking budget and optional per-episode tool caps, stamped at reset and stated to the model nowhere: a call
-past its cap gets the spent-budget reply, which names no count. Runs against a stub sandbox."""
+to its reasoning budget and price (what the trainer's reasoning terms read, never an engine cap) and optional
+per-episode tool caps, stamped at reset and stated to the model nowhere: a call past its cap gets the spent-budget
+reply, which names no count. Runs against a stub sandbox."""
 
 import json
 import logging
@@ -9,13 +10,17 @@ import re
 
 import pytest
 
-from halo.environments.episode import TurnGeneration, sampled_reasoning_tokens, step_context_from_generation
-from halo.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.reasoning_effort import bind_episode_effort
+from halo.environments.episodes.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.reasoning_effort import bind_episode_effort
 from halo.environments.rollout_config import (
     find_reasoning_end_ids,
     resolve_reasoning_end_ids,
     resolve_reasoning_end_token_id,
+)
+from halo.environments.rollouts.episode_loop import (
+    TurnGeneration,
+    sampled_reasoning_tokens,
+    step_context_from_generation,
 )
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import (
@@ -25,7 +30,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 )
 from halo.environments.tasks.coding.grading import _MAX_FAILURE_DETAILS, run_solution_against_tests
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeToolCall
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
@@ -89,7 +94,6 @@ def test_budgets_stamp_from_context_level_and_enforce_submission_cap():
     env = _make_env()
     traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 6, "submit_solution": 1}
-    assert env.thinking_budget_for_effort("high") == 16384  # interaction-only override keeps default tokens
     assert not retired_budget_phrases(_task_message(traj)), "the task message states no budget"
 
     first = call_tool(env, traj, "submit_solution")
@@ -107,7 +111,7 @@ def test_the_cap_still_ends_the_episode_at_the_last_graded_submission():
     ids, _ = env.reset(["solve it"], [{"reasoning_effort": "low", **_FAILING_ANSWER}])
     first = _step_call(env, ids, SUBMIT_TOOL)
     assert not first.done
-    # A changed program (comments aside): the same one again would be refused as already graded, not graded a second time.
+    # A changed program (comments aside): the same one again would repeat its verdict, not be graded a second time.
     last = _step_call(env, ids, SUBMIT_TOOL, code="attempt = 2\nprint('X')")
     traj = last.trajectory
     assert last.done and traj.info["completed"] and not traj.truncated
@@ -191,7 +195,7 @@ def test_a_refused_over_cap_call_logs_no_traceback(caplog):
     def call(i: int) -> NativeToolCall:
         return NativeToolCall(id=f"c{i}", name="python_repl", arguments={"code": "print(1)"})
 
-    with caplog.at_level(logging.DEBUG, logger="halo.environments.tool_accounting"):
+    with caplog.at_level(logging.DEBUG, logger="halo.environments.tools.accounting"):
         env._execute_tool_calls([call(0), call(1), call(2)], traj)
 
     assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
@@ -212,13 +216,16 @@ def test_level_without_interaction_keys_stamps_class_caps():
     assert not retired_budget_phrases(_task_message(traj))
 
 
-def test_thinking_only_profiles_keep_the_class_caps():
-    env = _make_env(reasoning_effort_profiles={"high": {"thinking_tokens": 24000}})
-    assert env.thinking_budget_for_effort("high") == 24000
-    assert env.thinking_budget_for_effort("low") == 4096
+def test_reasoning_only_profiles_keep_the_class_caps_and_state_no_budget():
+    """A level's reasoning budget and price are the trainer's to read: they bind no interaction budget, the
+    class caps stand, and the task message carries neither the budget nor any count of it."""
+    env = _make_env(reasoning_effort_profiles={"high": {"reasoning_budget": 24000, "reasoning_price": 0.004}})
+    assert env.reasoning_terms_for_effort("high") == (24000, 0.004)
+    assert env.reasoning_terms_for_effort("low") == (None, 0.0), "the class ships no level's reasoning terms"
     traj = reset_episode(env, {"reasoning_effort": "high", **SINGLE_TEST_ANSWER})
     assert traj.info[EPISODE_TOOL_BUDGETS_KEY] == {"python_repl": 5, "submit_solution": 2}, "class caps still bind"
-    assert not retired_budget_phrases(_task_message(traj))
+    task = _task_message(traj)
+    assert not retired_budget_phrases(task) and "24000" not in task and "24,000" not in task
 
 
 def test_effort_level_at_reset_contract():
@@ -263,26 +270,12 @@ def test_tool_descriptions_state_no_budget_whatever_binds_it(knobs):
     assert "the last graded submission is the one that counts" in submit
 
 
-def test_effort_binding_caps_the_reasoning_channel_and_leaves_the_turn_total():
-    """The level's budget caps the reasoning channel, clamped by the run's cap; the turn total stays ``max_tokens``.
-    A budget filling the turn is refused."""
-    env = _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 4096}, "high": {"thinking_tokens": 30000}})
-    bound = bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=20000, max_thinking_tokens=18000)
-    assert (bound.thinking_budget, bound.max_tokens) == (4096, 20000)
-    # Over-budget profiles clamp to the run's cap, else they silently raise the run's CoT cap.
-    over = bind_episode_effort({"reasoning_effort": "high"}, env, max_tokens=40000, max_thinking_tokens=18000)
-    assert (over.thinking_budget, over.max_tokens) == (18000, 40000)
-    no_global = bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=20000)
-    assert (no_global.thinking_budget, no_global.max_tokens) == (4096, 20000)
-    with pytest.raises(
-        ValueError, match=r"'high' level's thinking_tokens \(30000\) must sit below rollout_max_tokens"
-    ):
-        bind_episode_effort({"reasoning_effort": "high"}, env, max_tokens=30000)
-    with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=1024)
-
-
-_PROFILED = {"low": {"thinking_tokens": 4096}, "high": {"thinking_tokens": 30000}}
+# The recipes' shape: an episode's reasoning budget sits past one 30000-token turn, the interaction
+# budgets beside it.
+_PROFILED = {
+    "low": {"reasoning_budget": 40000, "reasoning_price": 0.008, **_PROFILES["low"]},
+    "high": {"reasoning_budget": 60000, "reasoning_price": 0.004, **_PROFILES["high"]},
+}
 # The reasoning-end marker's id: one no reasoning id below carries.
 _END = 151668
 
@@ -298,17 +291,28 @@ def _bind_level(level, max_thinking_tokens=18000, max_episode_tokens=None):
     )
 
 
-def test_every_turn_runs_under_the_levels_cap_whatever_was_generated():
-    """Without an output budget a turn's caps never change: the level's cap clamped to the run's, and
-    the run's turn total, however much the earlier turns sampled; nothing is ever exhausted."""
+def test_a_reasoning_budget_past_the_turn_binds_and_caps_no_turn():
+    """A level's reasoning budget is an episode's, summed over its turns, so a recipe's sits past one turn:
+    it binds, every level runs under the run's cap and turn total, and without a run cap nothing caps the
+    reasoning. A run cap that fills the turn is refused, whatever the levels' budgets."""
+    for level in _PROFILED:
+        bound = _bind_level(level)
+        assert (bound.level, bound.thinking_cap, bound.max_tokens) == (level, 18000, 30000)
+        assert _bind_level(level, max_thinking_tokens=None).thinking_cap is None
+    env = _make_env(reasoning_effort_profiles=_PROFILED)
+    with pytest.raises(ValueError, match=r"must sit in \[1, rollout_max_tokens=18000\)"):
+        bind_episode_effort({"reasoning_effort": "low"}, env, max_tokens=18000, max_thinking_tokens=18000)
+
+
+def test_every_turn_runs_under_the_runs_cap_whatever_was_generated():
+    """Without an output budget a turn's caps never change: the run's reasoning cap and turn total at every
+    level, however much the earlier turns sampled; nothing is ever exhausted."""
     high = _bind_level("high")
-    assert high.thinking_budget == 18000, "the level's budget clamps to the run's per-turn cap"
     assert {tuple(high.turn_caps(generated).items()) for generated in (0, 17000, 40000)} == {
         (("max_tokens", 30000), ("max_thinking_tokens", 18000))
     }
     assert high.turn_caps(10**6) == {"max_tokens": 30000, "max_thinking_tokens": 18000}
-    low = _bind_level("low")
-    assert (low.thinking_budget, low.turn_caps(29000)["max_thinking_tokens"]) == (4096, 4096)
+    assert _bind_level("low").turn_caps(29000) == high.turn_caps(29000)
 
 
 def test_an_output_budget_narrows_a_turns_caps_from_the_reasoning_side_first():
@@ -321,13 +325,6 @@ def test_an_output_budget_narrows_a_turns_caps_from_the_reasoning_side_first():
     assert high.turn_caps(58000) == {"max_tokens": 12000, "max_thinking_tokens": 1}
     assert high.turn_caps(58001) is None
     assert _bind_level("high").episode_tokens is None
-
-
-def test_without_a_run_cap_the_levels_budget_is_the_turns_cap():
-    low = _bind_level("low", max_thinking_tokens=None)
-    assert (low.thinking_budget, low.max_tokens) == (4096, 30000)
-    with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        _bind_level("high", max_thinking_tokens=None)
 
 
 def _gen(token_ids):
@@ -345,8 +342,10 @@ def test_sampled_reasoning_tokens_counts_through_the_marker_and_is_absent_withou
 
 
 def test_a_turns_step_context_carries_its_cap_and_the_reasoning_it_sampled():
-    """The cap the level set and the reasoning sampled, counted as the budget counts it. Without ids or the marker's
-    id the count is absent, since zero reads as under its cap."""
+    """``episode/thinking_cap_turns`` reads the pair off each turn: the cap the turn ran under, and the
+    reasoning the turn sampled, counted as the budget counts it (the close included; a cut turn's every id).
+    Without the ids or the marker's id the count is absent rather than zero, which would read as a turn
+    under its cap."""
     closed = step_context_from_generation(
         None, _gen([11, 12, _END, 14]), thinking_cap=18000, reasoning_end_token_id=_END
     )
@@ -406,8 +405,9 @@ def test_a_reasoning_count_ends_only_at_a_one_token_close_this_tokenizer_writes(
 
 
 def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():
-    """The flag exists only where an output budget was set, and the metric follows it. The level and its per-turn
-    cap are stamped either way."""
+    """The exhaustion flag is the driver's verdict on what the episode generated against its output
+    budget, so it exists only where one was set — and the metric follows the flag, absent rather than
+    0.0 otherwise. The level is stamped either way."""
     env = _make_env(reasoning_effort_profiles=_PROFILED)
 
     def stamped(max_episode_tokens, generated):
@@ -424,7 +424,7 @@ def test_stamp_records_output_budget_exhaustion_only_under_an_output_budget():
     unbounded = stamped(None, 10**6)
     assert OUTPUT_BUDGET_EXHAUSTED_KEY not in unbounded.info
     assert "episode/output_budget_exhausted" not in env.rollout_metrics(unbounded)
-    assert (unbounded.reasoning_effort, unbounded.reasoning_budget) == ("high", 18000)
+    assert unbounded.reasoning_effort == "high"
 
 
 def test_invalid_profiles_raise():
@@ -434,10 +434,13 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"low": {"max_turns": 3}})
     with pytest.raises(ValueError, match="max_submissions must be an integer >= 1"):
         _make_env(reasoning_effort_profiles={"low": {"max_submissions": 0}})
-    with pytest.raises(ValueError, match="thinking_tokens must be an integer >= 1"):
-        _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 0}})
     with pytest.raises(ValueError, match="max_test_calls must be an integer >= 0"):
         _make_env(reasoning_effort_profiles={"low": {"max_test_calls": -1}})
+    # The task's keys join the base's, which a code-contests profile is validated against too.
+    with pytest.raises(ValueError, match="reasoning_budget must be an integer >= 0"):
+        _make_env(reasoning_effort_profiles={"low": {"reasoning_budget": -1, "max_submissions": 1}})
+    with pytest.raises(ValueError, match="sets reasoning_price without reasoning_budget"):
+        _make_env(reasoning_effort_profiles={"low": {"reasoning_price": 0.008, "max_submissions": 1}})
 
 
 @pytest.mark.parametrize(

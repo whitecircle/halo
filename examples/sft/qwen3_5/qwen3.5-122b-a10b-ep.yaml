@@ -26,7 +26,7 @@ fp32_grad_reduce: true                # fp32 grad reduction for many-rank / cros
 # --- Attention & kernels ---
 # FA2 is pinned for packing. Left unset, packed rows take FA2 on Blackwell too (FA3 on Hopper).
 attn_implementation: flash_attention_2
-packing: true                         # fixed-length only — never padding_free (M-RoPE varlen crash)
+packing: true                         # fixed-length rows
 max_length: 16384                     # CP unavailable; single-rank activation ceiling — drop to 8192 if OOM
 
 # --- Training ---

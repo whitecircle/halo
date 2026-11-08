@@ -105,8 +105,8 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 from halo.checkpoint.config_export import restore_model_type
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
-from halo.models.param_roles import fp32_pinned_names
-from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
+from halo.models.introspection.param_roles import fp32_pinned_names
+from halo.models.upstream.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
     BAILING_LING_3_TINY,
@@ -339,6 +339,9 @@ class TinyFamily:
     text_overrides: dict = field(default_factory=dict)
     ulysses_cp: bool = False
     attention_targets: tuple[str, ...] = ()
+
+
+RANDOMIZED_INIT_STD = 0.1
 
 
 def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], PreTrainedModel]:
@@ -692,6 +695,20 @@ TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
 }
 # Past that roster: no window, no softcap, and a head width of its own that the FA4 parity row sets.
 TINY_GEMMA_FAMILY = TinyFamily(_causal(GemmaConfig, GemmaForCausalLM, TINY_QWEN3_CONFIG))
+
+
+def randomized_weights(after: Callable[[PreTrainedModel], None] | None = None) -> Callable[[PreTrainedModel], None]:
+    """A checkpoint ``edit`` that widens every matrix's init, so a document leaking into the next reads well above bf16
+    noise; ``after`` runs on the widened model."""
+
+    def edit(model: PreTrainedModel) -> None:
+        for param in model.parameters():
+            if param.dim() >= 2:
+                torch.nn.init.normal_(param, std=RANDOMIZED_INIT_STD)
+        if after is not None:
+            after(model)
+
+    return edit
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

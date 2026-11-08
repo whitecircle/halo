@@ -8,12 +8,15 @@ from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.messages import task_prompt
-from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.episodes.messages import task_prompt
+from halo.environments.episodes.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, resolve_rollout_stop_token_ids
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.context_window import is_bounded_length
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
+from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
@@ -26,10 +29,14 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
     reject_unresolved_forced_closes,
+    reject_unsupported_score_centering,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
-from halo.trainers.grpo.environmental.importance_sampling import ImportanceSamplingMixin
+from halo.trainers.grpo.environmental.loss.centered_scoring import ScoreCenteringMixin
+from halo.trainers.grpo.environmental.loss.importance_sampling import ImportanceSamplingMixin
+from halo.trainers.grpo.environmental.loss.loss_forward_weights import LossForwardImportanceMixin
+from halo.trainers.grpo.environmental.packed_rounds import PackedMicrobatchMixin
 from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, reasoning_token_counts
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
@@ -40,9 +47,10 @@ from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryToken
 from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
-from halo.trainers.training_args_overrides import keep_all_dataset_columns
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.grpo.row_span_stash import RowSpanStashMixin
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 
@@ -70,6 +78,7 @@ def placeholder_reward_func(prompts, _completions, **_kwargs) -> list[float]:
 class DistributedAsyncEnvironmentalGRPOTrainer(
     OnPolicyGRPOInitMixin,
     StepBatchMixin,
+    PackedMicrobatchMixin,
     LengthOrderedRowsMixin,
     ImportanceSamplingMixin,
     ReasoningBudgetMixin,
@@ -78,13 +87,20 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     RolloutMetricsMixin,
     TrajectoryTokenizeMixin,
     GenerationRoundMixin,
+    LossForwardImportanceMixin,
+    ScoreCenteringMixin,
+    PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
+    RowSpanStashMixin,
     DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
     GRPOTrainer,
 ):
     """Its environment is given as ``environment_config`` or ``environment_cls`` + ``environment_kwargs``."""
+
+    # The batches are built text-only: the build assembles a fixed set of text tensors.
+    _SCORED_BATCHES_CARRY_IMAGES = False
 
     PP_REFUSAL = (
         "inherits online GRPO's cross-stage engine weight-sync and rollout-phase forward blockers, and "
@@ -100,6 +116,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def __init__(self, *args, **kwargs):
         self.async_config = kwargs.pop("async_config", None) or AsyncRolloutConfig()
         self._use_chunked_grpo_logprobs = self.async_config.use_chunked_grpo_logprobs
+        self._log_phase_times = self.async_config.log_phase_times
         _, kwargs = self._begin_on_policy_init(args, kwargs)
         self._environment_spec, self._env_config_dict = _resolve_environment_spec(
             kwargs.pop("environment_config", None),
@@ -119,7 +136,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self.pad_token_id = self._tokenizer.pad_token_id
         self.eos_token_id = self._tokenizer.eos_token_id
         self._batch_errors = BatchBuildFence()
-        self._empty_rollout_steps: int = 0
         # Fail at construction, not mid-training: the tokenize-time overflow check needs a real limit.
         self._context_limit()
         reject_straddling_train_groups(
@@ -133,25 +149,40 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             "non-prompt columns, which pruning would strip); forcing it off. Set it explicitly in your GRPOConfig.",
         )
         reject_answerless_datasets(self._rollout_env, self.train_dataset, self.eval_dataset)
-        reject_inert_reasoning_terms(
-            self.async_config,
-            self._rollout_env,
-            budgeted=has_thinking_budget(self._efforts_by_level()),
-            every_budget_soft=self._every_budget_soft,
-        )
+        reject_inert_reasoning_terms(self.async_config, self._rollout_env, self._level_reasoning_terms)
         self._configure_rollout_state()
         self._configure_importance_sampling()
         reject_unread_grpo_knobs(self.args)
         self._init_async_state()
         self._finish_on_policy_init()
+        self._configure_phase_timers()
+        self._configure_row_span_stash()
+        self._install_adapter_sync()
         # After _configure_distributed_modes (needs the EP layers); eager, so an unsupported setup fails now.
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
         # After the model is placed: the deal reads its attention implementation.
         self._resolve_length_ordered_rows()
+        self._configure_packed_microbatches()
+        self._configure_score_centering()
+        self._configure_loss_forward_weights()
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """``max_train_row_tokens``: a row over it leaves the batch. The turn and episode budgets bound only what the
+        model samples, and the tool and observation tokens of a multi-turn row ride beside it."""
+        return next(
+            (
+                int(cap)
+                for source in sources
+                if is_bounded_length(cap := getattr(source, "max_train_row_tokens", None))
+            ),
+            None,
+        )
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
         self._rollout_backend = cfg.rollout_backend
+        self._rollout_weight_precision = cfg.rollout_weight_precision
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
         reject_open_ended_tool_turns(
             self._rollout_env, unwrap_framework_wrappers(self.model), self._tokenizer, self._rollout_stop_token_ids
@@ -166,6 +197,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
         reject_prefetch_past_retry_budget(resolve_weight_sync_client(cfg.rollout_backend), cfg, self.args)
+        reject_unsupported_score_centering(cfg)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)
         reject_vespo_loss(self.args)
@@ -204,7 +236,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     ) -> dict[str, torch.Tensor | Any]:
         """The TP/ETP leader's batch on every group rank: ranks sample apart, and compute_loss expects
         DTensor-consistent inputs."""
-        return self._broadcast_tensors_from_tp_leader(self._collect_and_score_rollouts(inputs))
+        return self._with_row_spans(self._broadcast_tensors_from_tp_leader(self._collect_and_score_rollouts(inputs)))
 
     def _collect_and_score_rollouts(
         self, inputs: list[dict[str, torch.Tensor | Any]]
@@ -218,32 +250,38 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Before the rollout: an unusable prompt would cost a full round and fail first inside a Ray actor.
         self._batch_errors.reject()
 
-        with profiling_context(self, "rollout_acquire"):
+        # A TP/ETP follower takes the leader's rollouts below, so it neither collects nor prefetches, but joins every
+        # fence the leader joins.
+        collects = not self._is_tp_follower()
+        prefetches = collects and self._prefetch_enabled and mode == "train"
+
+        with profiling_context(self, "rollout_acquire"), self._phase_timers.span(Phase.ROLLOUT, "host"):
             rollout_results = None
-            if self._prefetch_enabled and mode == "train":
+            if prefetches:
                 rollout_results = self._acquire_prefetched_round()
 
             # A wedged prefetch is fenced before the synchronous fallback: peers that hit are already
             # waiting here, and a full fallback round can outlast DIST_NCCL_TIMEOUT_MINUTES.
             self._batch_errors.reject()
-            if rollout_results is None:
+            if collects and rollout_results is None:
                 rollout_results = self._loop.run_until_complete(
                     self._rollout_manager.collect_rollouts(expanded_prompts, expanded_contexts)
                 )
 
         # Popped prefetch_depth steps later, that many steps stale (the IS ratio corrects it); a cold round
         # rolls out twice.
-        if self._prefetch_enabled and mode == "train":
+        if prefetches:
             self._submit_for_prefetch(expanded_prompts, expanded_contexts)
 
-        # Every TP/ETP group rank tokenizes the leader's rollouts, or the in-forward collectives deadlock.
+        # Every TP/ETP group rank tokenizes the leader's rollouts (a follower passes ``None``), or the in-forward
+        # collectives deadlock.
         rollout_results = self._broadcast_object_from_tp_leader(rollout_results)
         if self._tool_call_watch is not None and self._tool_call_watch.armed:
             self._tool_call_watch.observe(rollout_results)
         # Counted once: the reasoning terms price these and the rollout metrics slice them.
         reasoning_tokens = [reasoning_token_counts(self._tokenizer, r.trajectory) for r in rollout_results]
 
-        with profiling_context(self, "build_training_tensors"):
+        with profiling_context(self, "build_training_tensors"), self._phase_timers.span(Phase.BUILD, "host"):
             result = self._build_training_tensors(
                 rollout_results, device, mode, len(inputs) - episodes, reasoning_tokens
             )
@@ -293,7 +331,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """The routing mask stays armed through the backward, whose reentrant-GC recompute reads it;
-        :meth:`training_step` disarms."""
+        :meth:`training_step` disarms. A no-op slot of a packed window returns before arming, as the mask it would arm
+        has no forward to consume it."""
+        if self._is_noop_slot(model, inputs):
+            return self._noop_loss()
         if self._routing_injector is not None and model.training and isinstance(inputs, dict):
             self._arm_loss_forward_replay(inputs)
         return super().compute_loss(
@@ -307,8 +348,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             flip = self._routing_injector.drain_flip_rate()
             if flip is not None:
                 logs["routing/replay_flip_rate"] = flip
-        if self._rollout_manager:
-            logs.update(self.cumulative_rollout_metrics())
+        logs.update(self.cumulative_rollout_metrics())
         if self._prefetch_enabled:
             logs.update(self.prefetch_metrics())
         super().log(logs, start_time)

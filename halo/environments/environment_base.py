@@ -10,7 +10,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from halo.config_validation import present, require_bool, require_int
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     COMPLETED_KEY,
     CONTEXT_KEY,
     OUTPUT_BUDGET_EXHAUSTED_KEY,
@@ -18,16 +18,16 @@ from halo.environments.episode_keys import (
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.episode_scoring import REWARD_PENDING_KEY, EpisodeGrade, EpisodeScoringMixin
-from halo.environments.messages import EnvStep, Message, StepOutcome, Trajectory, engine_view
-from halo.environments.reasoning_effort import EffortProfilesMixin
-from halo.environments.tool_accounting import TOTAL_TOOL_CALLS_KEY, ToolCallAccountingMixin
-from halo.environments.turn_recovery import (
+from halo.environments.episodes.episode_scoring import REWARD_PENDING_KEY, EpisodeGrade, EpisodeScoringMixin
+from halo.environments.episodes.messages import EnvStep, Message, StepOutcome, Trajectory, engine_view
+from halo.environments.episodes.reasoning_effort import EffortProfilesMixin
+from halo.environments.episodes.turn_recovery import (
     EMPTY_TURNS_KEY,
     LENGTH_CUTOFF_IN_CALL_TURNS_KEY,
     LENGTH_CUTOFF_TURNS_KEY,
     TurnRecoveryMixin,
 )
+from halo.environments.tools.accounting import TOTAL_TOOL_CALLS_KEY, ToolCallAccountingMixin
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 from halo.rewards.terms import RewardTerm
@@ -267,6 +267,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
                 thinking=ctx.get("reasoning"),
                 token_ids=ctx.get("token_ids"),
                 token_logprobs=ctx.get("token_logprobs"),
+                candidates=ctx.get("candidates"),
                 routing_mask=ctx.get("routing_mask"),
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),

@@ -34,11 +34,12 @@ from halo.distributed.pipeline_parallel.stage import (
 from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, causal_lm_token_loss
 from halo.env import env_flag
 from halo.kernels.logprobs import loss_token_counts_per_row
-from halo.models.context_window import context_window_from_config
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.context_window import context_window_from_config
+from halo.models.introspection.modality import is_vlm_model
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from halo.trainers.parallelism.pipeline_rules import (
@@ -51,7 +52,6 @@ from halo.trainers.parallelism.pipeline_rules import (
     require_pad_token_id,
     require_pp_stage_model,
 )
-from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from halo.callbacks.parameter_stats import count_model_parameters
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.attention.layout import AttentionLayout, attention_layout
-from halo.models.config_access import get_config_field, text_config
+from halo.models.introspection.config_access import get_config_field, text_config
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from halo.models.moe.family_specs import expert_weight_roots, experts_container_attrs
 from halo.runtime.dtensor import local_numel

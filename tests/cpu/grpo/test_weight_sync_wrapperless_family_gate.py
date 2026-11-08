@@ -101,7 +101,7 @@ def test_a_dense_model_with_a_leftover_expert_count_passes(backend):
 def test_wrapperless_refusal_yields_to_the_sharper_family_and_engine_facts():
     """The loader fact names the remedy (another engine, or none); the wrapper hint would not."""
     with pytest.raises(ValueError, match="does not support weight sync"):
-        reject_unsyncable_model(StockModel("glm5_next"), "vllm")
+        reject_unsyncable_model(StockModel("qwen3_next"), "vllm")
     with pytest.raises(ValueError, match="cannot serve model_type"):
         reject_unsyncable_model(StockModel("zaya"), "sglang")
 

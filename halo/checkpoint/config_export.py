@@ -19,8 +19,12 @@ from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.reading import read_checkpoint_config
 from halo.checkpoint.weights_source import config_schema_source
 from halo.log import info_logger
-from halo.models.config_access import config_export_ready
-from halo.models.model_classes import auto_map_references, remote_code_model_class, transformers_model_class
+from halo.models.introspection.config_access import config_export_ready
+from halo.models.introspection.model_classes import (
+    auto_map_references,
+    remote_code_model_class,
+    transformers_model_class,
+)
 from halo.models.moe.family_specs import find_moe_family_spec
 
 logger = info_logger(__name__)

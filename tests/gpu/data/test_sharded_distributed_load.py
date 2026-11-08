@@ -16,7 +16,7 @@ from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from halo.data.sources.loading import is_sharded_dataset_across_ranks
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log

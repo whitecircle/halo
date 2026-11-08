@@ -77,7 +77,7 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
   rules (`_reject_fsdp_settings`, [Data Parallelism → Limitations](data-parallelism.md#limitations)).
 - **Model shape.** `reject_unsupported_model` reads `config.json` before any weight: `num_experts`
   divisible by `ep_size`, `expert_tp_size` dividing the expert FFN width, head counts divisible by
-  `tp_size`, and the declared per-rank token budget under DeepEP's dispatch ceilings
+  `tp_size`, and the declared per-rank token budget under DeepEP's cross-domain dispatch ceiling
   ([DeepEP backend](expert-parallelism.md#deepep-backend)). Then `reject_unsupported_structure` checks a
   meta-device shell of the model, still before any weight: the Ulysses refusals and CP head counts under CP
   ([Context Parallelism](context-parallelism.md#requirements)), and the zero-shard check under selective TP
@@ -136,7 +136,7 @@ one EP group.
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
-a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/dataloaders.py`. Ranks
+a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/loop/dataloaders.py`. Ranks
 inside a TP, CP or ETP group, and the stages of one pipeline chain, see the **same** batch; they
 shard weights, the sequence or the layers, not the data.
 

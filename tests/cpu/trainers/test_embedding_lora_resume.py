@@ -35,8 +35,8 @@ from transformers import (
 from transformers.trainer_utils import rotate_checkpoints
 
 import halo.checkpoint.parallel.adapters as peft_mod
-import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.embedding.trainer as embedding_module
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.checkpoint.adapters import resume_adapter_dir
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,

@@ -96,6 +96,7 @@ docker run -d --rm --name <job> \
 | DeepEP V2 (commit `af9a040`, built `9.0+PTX`) | Yes | Yes |
 | NCCL `nvidia-nccl-cu13` at `uv.lock`'s exact pin, shared with the rollout images (asserted at build) | Yes | Yes |
 | EFA userspace: rdma-core, AWS libfabric and one pinned `aws-ofi-nccl` build (`docker/efa/install_efa_userspace.sh`), shared with the rollout images | Yes | Yes |
+| cuBLAS `nvidia-cublas` 13.8.0.4 (CUDA 13.4.3), overriding torch's locked 13.1.0.3; asserted at build | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
 | `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
 | `flash-linear-attention` 0.4.2 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
@@ -210,6 +211,14 @@ pin through `docker/nccl_pin.py`, which also owns the DeepEP V2 floor, and its `
 build when a later step re-resolved the wheel or when the `libnccl.so.2` a process resolves is not
 that wheel's (the base's older system copy would otherwise reach the weight-sync communicator).
 
+The runtime cuBLAS is the pip wheel `nvidia-cublas`, pinned by an `override-dependencies` entry in
+`pyproject.toml` because torch's `cuda-toolkit[cublas]` extra locks 13.1.0.3, which drops the trailing
+rows of some bf16 matmuls ([pytorch/pytorch#203481](https://github.com/pytorch/pytorch/issues/203481)).
+13.8.0.4 passes the reproducer cases; 13.7.0.27 was reported to still fail. The wheel's `nvidia-cuda-nvrtc`
+dependency is unpinned and stays at torch's lock. `docker/training/verify_image.py` fails the build when
+the library torch loads is not that wheel. The pin reaches the two training images only: the vLLM and SGLang
+rollout images keep the cuBLAS of their own bases and neither pin nor check it.
+
 ## RDMA networking (InfiniBand and EFA)
 
 Every image is EFA-ready as built. `docker/efa/install_efa_userspace.sh` installs the EFA installer
@@ -244,15 +253,15 @@ docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 ```
 
-Each moving tag has an immutable release pin: `blackwell-1.2.0`, `hopper-1.2.0`, `vllm-0.32.0-1.2.0`,
-`sglang-0.5.22-1.2.0`. There is deliberately no `latest`, which would let a Hopper host pull a
+Each moving tag has an immutable release pin: `blackwell-1.3.0rc1`, `hopper-1.3.0rc1`, `vllm-0.32.0-1.3.0rc1`,
+`sglang-0.5.22-1.3.0rc1`. There is deliberately no `latest`, which would let a Hopper host pull a
 Blackwell image. Pair a trainer with the server images of the same release: the vLLM image unpickles
 the trainer's `ncclUniqueId` through a shim at the trainer's module path. Pin a release by pulling its
 tag and retagging it under the local name the `make` targets use:
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:hopper-1.2.0
-docker tag  public.ecr.aws/whitecircle/halo:hopper-1.2.0 halo:hopper
+docker pull public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1
+docker tag  public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1 halo:hopper
 ```
 
 The compose files take the server images from `VLLM_IMAGE` / `SGLANG_IMAGE` (default: the local

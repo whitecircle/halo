@@ -7,6 +7,7 @@ import json
 import logging
 import os
 from collections.abc import Mapping
+from typing import Literal
 
 import torch
 from safetensors import safe_open
@@ -23,10 +24,12 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.reading import read_checkpoint_config
 from halo.log import KEY_PREVIEW_COUNT
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
 logger = logging.getLogger(__name__)
+
+ExpertAdapterShape = Literal["expert", "mixed"]
 
 # ``peft_type`` markers kept out of PEFT's config mapping, because stock PEFT drops unknown state-dict keys silently:
 # a ``LORA`` label would load the attention half and discard every expert delta, an unknown type makes the load raise.
@@ -116,9 +119,14 @@ def adapter_weight_paths(adapter_dir: str) -> tuple[str, ...]:
     return tuple(os.path.join(adapter_dir, name) for name in ADAPTER_WEIGHT_NAMES)
 
 
+def find_adapter_weight_file(adapter_dir: str) -> str | None:
+    """The first adapter weight file in PEFT's load-preference order, from stats alone; ``None`` when absent."""
+    return next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
+
+
 def has_adapter_weight_file(directory: str) -> bool:
     """Whether a directory holds an adapter weight file, from stats alone."""
-    return any(os.path.isfile(path) for path in adapter_weight_paths(directory))
+    return find_adapter_weight_file(directory) is not None
 
 
 def read_adapter_config(adapter_dir: str, *, missing_ok: bool = False) -> dict | None:
@@ -128,7 +136,7 @@ def read_adapter_config(adapter_dir: str, *, missing_ok: bool = False) -> dict |
 
 def read_adapter_keys(adapter_dir: str) -> list[str]:
     """The tensor names in an adapter's first weight file, read without tensor data; empty when it holds none."""
-    path = next((path for path in adapter_weight_paths(adapter_dir) if os.path.isfile(path)), None)
+    path = find_adapter_weight_file(adapter_dir)
     if path is None:
         return []
     if path.endswith(ADAPTER_SAFETENSORS_FILE):
@@ -238,35 +246,41 @@ def adapter_layout_mismatch(saved: Mapping[str, torch.Tensor], expected: Mapping
     )
 
 
-def reject_expert_lora_adapter(adapter_dir: str) -> None:
-    """Refuse an adapter with native EP expert-LoRA deltas, which ``merge_and_unload`` drops; every merge tool runs
-    this. An absent or unmarked config falls back to a tensor-key scan."""
+def find_expert_lora_adapter_shape(adapter_dir: str) -> ExpertAdapterShape | None:
+    """``"expert"`` for an expert-only native adapter, ``"mixed"`` for one that also carries attention tensors, ``None``
+    for neither. An absent or unmarked config falls back to a tensor-key scan."""
     peft_type = (read_adapter_config(adapter_dir, missing_ok=True) or {}).get("peft_type")
     if peft_type in EXPERT_LORA_PEFT_TYPES:
-        mixed = peft_type == MIXED_EXPERT_LORA_PEFT_TYPE
-    else:
-        keys = read_adapter_keys(adapter_dir)
-        expert_keys = [key for key in keys if is_expert_lora_key(key)]
-        if not expert_keys:
-            return
-        mixed = len(expert_keys) != len(keys)
-    # ``merge_expert_lora_on_save`` folds both shapes; ``mixed`` only selects the wording.
-    if mixed:
-        shape = (
+        return "mixed" if peft_type == MIXED_EXPERT_LORA_PEFT_TYPE else "expert"
+    keys = read_adapter_keys(adapter_dir)
+    expert_keys = [key for key in keys if is_expert_lora_key(key)]
+    if not expert_keys:
+        return None
+    return "mixed" if len(expert_keys) != len(keys) else "expert"
+
+
+def reject_expert_lora_adapter(adapter_dir: str) -> None:
+    """Refuse an adapter with native EP expert-LoRA deltas, which ``merge_and_unload`` drops; the in-memory merge runs
+    this. The streaming merge folds them."""
+    shape = find_expert_lora_adapter_shape(adapter_dir)
+    if shape is None:
+        return
+    # The streaming merge and ``merge_expert_lora_on_save`` fold both shapes; ``mixed`` only selects the wording.
+    if shape == "mixed":
+        described = (
             f"holds a MIXED attention+expert LoRA adapter (peft_type={MIXED_EXPERT_LORA_PEFT_TYPE}): "
             "alongside the stock PEFT attention tensors it carries native EP grouped expert deltas"
         )
-        folds = "the expert deltas inside each family's expert gather, and the attention deltas with them"
     else:
-        shape = (
+        described = (
             f"is a native EP expert-LoRA adapter (peft_type={EXPERT_LORA_PEFT_TYPE}): grouped "
             "*.experts.<attr>.lora_{A,B} tensors"
         )
-        folds = "the expert deltas inside each family's expert gather"
     raise ValueError(
-        f"{adapter_dir} {shape} — which a PEFT merge silently drops, so this adapter only resumes in this toolkit. "
-        f"Set merge_expert_lora_on_save=True from the run's first save: the gathered EP save folds {folds}, "
-        "producing a merged servable HF checkpoint."
+        f"{adapter_dir} {described} — which an in-memory PEFT merge silently drops, so this adapter only resumes in "
+        f"this toolkit. Merge it with the streaming merge (merge_peft_adapters.py --streaming, which "
+        f"folds the expert and attention deltas shard by shard), or set merge_expert_lora_on_save=True so the "
+        f"gathered EP save folds them into a merged servable HF checkpoint."
     )
 
 

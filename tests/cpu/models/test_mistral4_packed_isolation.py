@@ -8,7 +8,7 @@ import transformers.models.mistral4.modeling_mistral4 as m4
 from transformers import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import ALL_ATTENTION_FUNCTIONS, Mistral4ForCausalLM
 
-from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
+from halo.models.families.mistral4 import patch_mistral4_flash_packed_position_ids
 
 SEED = 1234
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 
 # Stamped by load_distributed_model: where the weights were read (None under init_from_scratch).
 LOADED_WEIGHTS_FROM_ATTR = "_loaded_weights_from"

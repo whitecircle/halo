@@ -12,10 +12,10 @@ from typing import ClassVar, Literal, Protocol, get_args, runtime_checkable
 import torch
 
 from halo.log import warn_once
-from halo.models.config_access import set_config_field
+from halo.models.introspection.config_access import set_config_field
+from halo.models.introspection.unwrapping import base_transformers_model, plain_module_name, unwrap_framework_wrappers
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NativeBalancingSlot, find_moe_family_spec_for_config
 from halo.models.moe.router_logits import honors_router_logits_flag
-from halo.models.unwrapping import base_transformers_model, plain_module_name, unwrap_framework_wrappers
 
 logger = logging.getLogger(__name__)
 

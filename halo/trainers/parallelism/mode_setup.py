@@ -15,17 +15,17 @@ from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_for_dp, apply_fs
 from halo.distributed.mesh import tp_local_rank
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from halo.models.introspection.unwrapping import find_peft_model
 from halo.models.mtp.head import frozen_trunk_params
-from halo.models.unwrapping import find_peft_model
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.parallelism.ep_layers import require_ep_config
-from halo.trainers.trainer_rules import (
+from halo.trainers.construction.trainer_rules import (
     reject_cp_trainer_args,
     reject_ep_layers_under_accelerate,
     reject_fsdp_knobs_under_qlora,
 )
+from halo.trainers.parallelism.ep_layers import require_ep_config
 
 logger = logging.getLogger(__name__)
 

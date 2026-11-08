@@ -7,6 +7,7 @@ GPU-dependent packages (DeepEP) verify at runtime with ``--gpus``. Run last, on 
 """
 
 import argparse
+import ctypes
 import importlib.metadata
 
 import accelerate
@@ -43,6 +44,21 @@ def check_flash_attention_3() -> None:
     print(f"  - transformers FA3 detection: {is_flash_attn_3_available()}")
 
 
+def check_cublas_matches_lock() -> None:
+    """The cuBLAS torch loaded is the locked ``nvidia-cublas`` wheel, not the system copy."""
+    torch.zeros(1)
+    library = ctypes.CDLL("libcublas.so.13")
+    loaded = []
+    for property_type in (0, 1, 2):  # MAJOR_VERSION, MINOR_VERSION, PATCH_LEVEL
+        value = ctypes.c_int()
+        library.cublasGetProperty(property_type, ctypes.byref(value))
+        loaded.append(value.value)
+    wheel = importlib.metadata.version("nvidia-cublas")
+    if loaded != [int(part) for part in wheel.split(".")[:3]]:
+        raise SystemExit(f"loaded cuBLAS {loaded} differs from the nvidia-cublas wheel {wheel}")
+    print(f"cuBLAS {wheel}: OK")
+
+
 ATTENTION_CHECKS = {"blackwell": check_flash_attention_4, "hopper": check_flash_attention_3}
 
 
@@ -57,6 +73,7 @@ def main() -> None:
     print(f"Flash Attention 2: {flash_attn.__version__}")
     print("  - FA2 flash_attn_func: OK")
     print("cutlass-dsl import OK:", cutlass.__file__)
+    check_cublas_matches_lock()
     ATTENTION_CHECKS[target_gpu]()
     print("flashoptim OK")
     print("gigatoken OK")

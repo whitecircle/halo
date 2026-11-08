@@ -2,19 +2,24 @@
 
 import contextlib
 import dataclasses
+import functools
 import logging
 import math
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from accelerate.utils import gather
 from trl.trainer.utils import pad
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
+from halo.diagnostics.phase_timers import Phase
+from halo.environments.episodes.candidate_logprobs import NO_CANDIDATE_ID, NO_CANDIDATE_LOGP
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY, solve_verdict
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.runtime.consensus import DeferredRankFailure, rank_max, reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
+from halo.trainers.grpo.environmental.rollout_routing import RolloutRouting, RowsReplay
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages, valid_group_stats
@@ -26,21 +31,30 @@ from halo.trainers.grpo.objective.logratio import (
 )
 from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
+    IMPORTANCE_RATIO_KEY,
+    IS_SAMPLING_LOGPS_KEY,
+    REF_LOGPS_KEY,
     expand_traj_to_rows,
     gathered_num_items,
     narrow_loss_masks,
     record_token_mass,
 )
-from halo.trainers.token_metrics import effective_loss_mask
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.grpo.objective.score_centering import TOPK_IDS_KEY, TOPK_LOGPS_KEY
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan
+from halo.trainers.metrics.token_metrics import effective_loss_mask
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
-ROUTING_MASKS_KEY = "routing_masks"
+# Int64 ``[rows]`` of the round rows whose routing the trainer holds ragged on the host (``-1``: none), riding the
+# batch dict row-aligned so TRL's shuffle and slicing carry the routing with its rows.
+ROUTING_ROWS_KEY = "routing_rows"
 # Consecutive steps with no valid episode anywhere that halt the run: one can be a grader blip, a second
 # means the rollout path is down.
 EMPTY_ROLLOUT_STEP_LIMIT = 2
 ZERO_GRADIENT_ROUND_KEY = "sampling/zero_gradient_round"
+# 1 on a round whose importance weights came from the loss forward, 0 on one a no-grad pass weighed.
+IS_WEIGHTS_FROM_LOSS_FORWARD_KEY = "sampling/is_weights_from_loss_forward"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,21 +90,27 @@ class StepRows:
     prompt_completion_ids: torch.Tensor
     attention_mask: torch.Tensor
     logits_to_keep: int
+    topk_ids: torch.Tensor | None = None
+    topk_logps: torch.Tensor | None = None
 
 
 @dataclasses.dataclass(frozen=True)
 class StepScores:
-    """What the step's no-grad pass scored; ``old_logps`` is the recompute where the loss reads it."""
+    """What the step's no-grad pass scored; ``old_logps`` is the recompute where the loss reads it. A ``fused`` round
+    ran no pass: its ``ratio`` holds only the forced closes' zeros (the loss forward builds the weight), and the
+    reference log-probs come unclamped."""
 
     recompute_logps: torch.Tensor | None
     old_logps: torch.Tensor | None
-    routing_masks: torch.Tensor | None
+    captured_routing: RolloutRouting | None
     ratio: torch.Tensor
     logps_diff: torch.Tensor | None
     corrected_mask: torch.Tensor | None
     traj_row_ids: torch.Tensor | None
     ref_logps: torch.Tensor | None
     kl_clamped: torch.Tensor | None
+    forced_zero: torch.Tensor | None
+    fused: bool
 
 
 class BatchBuildFence(DeferredRankFailure):
@@ -121,6 +141,21 @@ def _row_on_device(row: TurnRow, device: torch.device) -> TurnRow:
     )
 
 
+def _stack_candidates(
+    rows: list[TurnRow], width: int, k: int, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``[rows, width, k]`` candidate ids and log-probs, a row without candidates (a masked or dummy row) all unused.
+    Filled on the host in numpy: a row's arrays arrive read-only from Ray's object store."""
+    ids = np.full((len(rows), width, k), NO_CANDIDATE_ID, dtype=np.int32)
+    logps = np.full((len(rows), width, k), NO_CANDIDATE_LOGP, dtype=np.float32)
+    for i, row in enumerate(rows):
+        if row.candidates is not None:
+            tokens = len(row.candidates.ids)
+            ids[i, :tokens] = row.candidates.ids
+            logps[i, :tokens] = row.candidates.logps
+    return torch.from_numpy(ids).to(device), torch.from_numpy(logps).to(device)
+
+
 def rollout_valid_mask(rollout_results: list[RolloutResult], device: torch.device) -> torch.Tensor:
     return torch.tensor([r.counts_toward_baseline for r in rollout_results], device=device, dtype=torch.bool)
 
@@ -131,8 +166,10 @@ def batch_reward_std(rewards: torch.Tensor) -> float:
 
 
 class StepBatchMixin:
+    # The halting streaks; a checkpoint's sidecar carries them across a resume.
     _zero_gradient_rounds = 0
     _policy_gradient_seen = False
+    _empty_rollout_steps = 0
 
     def _build_training_tensors(
         self,
@@ -159,10 +196,16 @@ class StepBatchMixin:
             rollout_results, turns_per_traj, num_dummy_rows, self.async_config.train_on_sampled_tokens
         )
         step = self._stack_rows(rows, device)
-        rollout_routing_masks = self._assemble_rollout_routing(rows, step, device, mode)
+        rollout_routing = self._assemble_rollout_routing(rows, step, mode)
+        # Config- and mode-gated, so every rank agrees the bin count or none does.
+        plan = (
+            self._plan_round(step.attention_mask, num_dummy_rows)
+            if self._packs_microbatches and mode == "train"
+            else None
+        )
 
         with torch.no_grad():
-            scores = self._score_step(step, batch_rows, rollout_routing_masks, engine_logps, mode)
+            scores = self._score_step(step, batch_rows, rollout_routing, engine_logps, mode, plan)
 
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
         episode_state, traj_advantages, local_advantages = self._step_advantages(
@@ -177,7 +220,7 @@ class StepBatchMixin:
         )
         if scores.kl_clamped is not None:
             self._world_metrics.fraction(KL_CLAMP_FRAC_KEY, *kl_clamp_counts(scores.kl_clamped, loss_mask))
-        if mode == "train":
+        if mode == "train" and not scores.fused:
             local_advantages, traj_advantages = self._apply_token_mass_balance(
                 local_advantages, traj_advantages, loss_mask, scores.ratio, step.negative_only
             )
@@ -202,14 +245,21 @@ class StepBatchMixin:
             "tool_mask": tool_mask,
             "advantages": local_advantages,
             "old_per_token_logps": scores.old_logps,
-            "ref_per_token_logps": scores.ref_logps,
-            "importance_sampling_ratio": scores.ratio,
+            REF_LOGPS_KEY: scores.ref_logps,
+            IMPORTANCE_RATIO_KEY: scores.ratio,
             "num_items_in_batch": num_items_in_batch,
         }
-        if scores.routing_masks is not None:
-            # Rides the batch dict like old_per_token_logps so TRL's shuffle/slice keep it row-aligned.
-            result[ROUTING_MASKS_KEY] = scores.routing_masks
-        return result
+        if scores.fused:
+            result = self._with_loss_forward_inputs(result, step, scores)
+        if step.topk_ids is not None:
+            # Row-first, so TRL's shuffle and slice and the packed slot view move them with the completion positions.
+            result[TOPK_IDS_KEY], result[TOPK_LOGPS_KEY] = step.topk_ids, step.topk_logps
+            result[IS_SAMPLING_LOGPS_KEY] = step.sampling_logps
+        if scores.captured_routing is not None:
+            rollout_routing = self._rollout_routing = scores.captured_routing
+        if rollout_routing is not None:
+            result[ROUTING_ROWS_KEY] = torch.arange(len(rollout_routing), device=device)
+        return result if plan is None else self._lay_out_packed_round(result, plan)
 
     def _rows_for_step(
         self, rollout_results: list[RolloutResult], num_padding: int, device: torch.device
@@ -218,8 +268,29 @@ class StepBatchMixin:
         per padding trajectory."""
         padding = [single_trajectory_row(self._masked_trajectory_tensors())] * num_padding
         per_trajectory = self._tokenize_step_rows(rollout_results) + padding
-        rows = [_row_on_device(row, device) for turn_rows in per_trajectory for row in turn_rows]
+        host_rows = [row for turn_rows in per_trajectory for row in turn_rows]
+        self._record_rows_without_candidates(host_rows)
+        rows = [_row_on_device(row, device) for row in host_rows]
         return rows, [len(turn_rows) for turn_rows in per_trajectory]
+
+    def _record_rows_without_candidates(self, rows: list[TurnRow]) -> None:
+        """Under ``score_centering_top_k`` a host row that trains any token needs the candidates the engine was asked
+        for, aligned with its sampled tokens: one scored without them would train on another objective than its
+        neighbours, so it is recorded on the fence."""
+        k = self.async_config.score_centering_top_k
+        if not k:
+            return
+        lacking = sum(
+            bool(row.loss_mask.any())
+            and (row.candidates is None or len(row.candidates.ids) != len(row.completion_ids))
+            for row in rows
+        )
+        if lacking:
+            self._batch_errors.record(
+                f"score_centering_top_k={k} but {lacking} of {len(rows)} training rows carry no candidate log-probs "
+                f"aligned with their sampled tokens: a turn whose reply returned none, or a trajectory re-tokenized "
+                f"from its render because its rollout returned no token ids."
+            )
 
     def _pad_rows_across_ranks(
         self, rows: list[TurnRow], engine_logps: list[torch.Tensor | None] | None, device: torch.device
@@ -239,7 +310,8 @@ class StepBatchMixin:
         return num_dummy_rows
 
     def _stack_rows(self, rows: list[TurnRow], device: torch.device) -> StepRows:
-        """Sampling log-probs under the IS correction only, a config-derived gate every rank takes alike."""
+        """Sampling log-probs under the IS correction or score centering only, a config-derived gate every rank takes
+        alike."""
         prompt_ids = pad([row.prompt_ids for row in rows], padding_value=self.pad_token_id, padding_side="left")
         completion_ids = pad(
             [row.completion_ids for row in rows], padding_value=self.pad_token_id, padding_side="right"
@@ -252,8 +324,9 @@ class StepBatchMixin:
         tool_mask = pad([row.loss_mask for row in rows], padding_value=0, padding_side="right")
         real = pad([torch.ones_like(row.loss_mask) for row in rows], padding_value=0, padding_side="right")
         completion_mask = real & tool_mask.any(dim=1, keepdim=True)
+        k = self.async_config.score_centering_top_k
         sampling_logps = has_sampling = None
-        if self._is_correction:
+        if self._is_correction or k is not None:
             # A turn missing sampling log-probs keeps ratio ≡ 1 for that row alone: has_sampling masks its zeros.
             sampling_logps = pad(
                 [
@@ -266,6 +339,9 @@ class StepBatchMixin:
                 padding_side="right",
             )
             has_sampling = torch.tensor([row.sampling_logps is not None for row in rows], device=device)
+        topk_ids = topk_logps = None
+        if k is not None:
+            topk_ids, topk_logps = _stack_candidates(rows, completion_ids.size(1), k, device)
         return StepRows(
             prompt_ids=prompt_ids,
             completion_ids=completion_ids,
@@ -278,30 +354,48 @@ class StepBatchMixin:
             prompt_completion_ids=torch.cat([prompt_ids, completion_ids], dim=1),
             attention_mask=torch.cat([prompt_mask, completion_mask], dim=1),
             logits_to_keep=completion_ids.size(1),
+            topk_ids=topk_ids,
+            topk_logps=topk_logps,
         )
 
     def _score_step(
         self,
         step: StepRows,
         rows: TrajectoryRowMap,
-        rollout_routing_masks: torch.Tensor | None,
+        rollout_routing: RolloutRouting | None,
         engine_logps: list[torch.Tensor | None] | None,
         mode: str,
+        plan: MicrobatchPlan | None,
     ) -> StepScores:
         """The policy recompute, the IS weights with forced closes zeroed, and the reference log-probs clamped against
-        the policy's. Both forwards run in the deal's order; scores come back in batch order."""
-        order = self._no_grad_row_order(step.attention_mask, mode)
-        recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
-            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, rollout_routing_masks, mode, order
+        the policy's. Both forwards run in the deal's order, or one scoring call per bin of a packed round; scores
+        come back in batch order. A fused round runs no recompute: the loss forward weighs and clamps."""
+        fused = self._uses_loss_forward_weights(mode)
+        order = (
+            self._no_grad_row_order(step.attention_mask, mode)
+            if plan is None
+            else torch.tensor(plan.order, dtype=torch.long, device=step.attention_mask.device)
         )
+        with self._phase_timers.span(Phase.NO_GRAD):
+            recompute_logps, captured_routing = self._recompute_logps_and_routing(
+                step.prompt_completion_ids,
+                step.attention_mask,
+                step.logits_to_keep,
+                rollout_routing,
+                mode,
+                order,
+                plan,
+            )
         ratio, logps_diff, corrected_mask, traj_row_ids = self._apply_is_correction(
-            recompute_logps, step, rows, engine_logps
+            recompute_logps, step, rows, engine_logps, fused=fused
         )
+        forced_zero = None
         if self._is_correction and self._forced_close_ids is not None:
-            ratio = self._zero_forced_closes(ratio, step)
-        ref_logps = self._compute_ref_logps(
-            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order
-        )
+            ratio, forced_zero = self._zero_forced_closes(ratio, step)
+        with self._phase_timers.span(Phase.NO_GRAD_REF):
+            ref_logps = self._compute_ref_logps(
+                step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order, plan
+            )
         kl_clamped = None
         if ref_logps is not None and recompute_logps is not None:
             ref_logps, kl_clamped = clamp_ref_logps(ref_logps, recompute_logps)
@@ -310,61 +404,66 @@ class StepBatchMixin:
         return StepScores(
             recompute_logps,
             old_logps,
-            routing_masks,
+            captured_routing,
             ratio,
             logps_diff,
             corrected_mask,
             traj_row_ids,
             ref_logps,
             kl_clamped,
+            forced_zero,
+            fused,
         )
 
-    def _recompute_logps_and_routing_masks(
+    def _recompute_logps_and_routing(
         self,
         prompt_completion_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         logits_to_keep: int,
-        rollout_routing_masks: torch.Tensor | None,
+        rollout_routing: RolloutRouting | None,
         mode: str,
         order: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """Both in batch order. The gate is config-derived, so the forward and its EP dispatch are entered by every
-        rank or by none."""
-        # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
+        plan: MicrobatchPlan | None = None,
+    ) -> tuple[torch.Tensor | None, RolloutRouting | None]:
+        """The log-probs in batch order and, under R2, the ragged routing the pass captured. Under R3 each scoring call
+        replays the engine's routing of its own rows. The gate is config- and mode-derived, so the forward and its EP
+        dispatch are entered by every rank or by none."""
         recompute_logps = None
-        routing_masks = rollout_routing_masks
-        if self._runs_logprob_recompute:
+        captured_routing = None
+        if self._runs_logprob_recompute and not self._uses_loss_forward_weights(mode):
             ids, mask = prompt_completion_ids, attention_mask
             if order is not None:
                 ids, mask = ids[order], mask[order]
-            # Capture is scoped to this call: the ref-logps forward that follows is a different policy.
-            replay_spans = (
-                dense_row_spans(mask)[0]
+            # Capture is scoped to this call: the ref-logps forward that follows is a different policy. The scorer
+            # takes the spans read here, as it reads the same mask whole when no plan splits it into bins.
+            read_spans = (
+                dense_row_spans(mask, logits_to_keep)
                 if self._routing_injector is not None and self._replay_row_spans and mode == "train"
                 else None
             )
+            replay_spans = None if read_spans is None else read_spans[0]
+            replay = None
+            if rollout_routing is not None:
+                # The recompute must run under the same routing the update pass replays, or
+                # the ratio comes from a different token distribution than the policy trains on.
+                forwarded = list(range(ids.size(0))) if order is None else order.tolist()
+                replay = RowsReplay(rollout_routing, forwarded, replay_spans)
             with contextlib.ExitStack() as capture_stack:
+                if read_spans is not None and plan is None and replay is None:
+                    capture_stack.enter_context(self._scoring_with_row_spans(read_spans))
                 captured = (
                     capture_stack.enter_context(
                         self._routing_injector.capture(
-                            ids.size(0), ids.size(1), row_spans=replay_spans, row_order=order
+                            attention_mask.size(0), ids.size(1), row_spans=replay_spans, row_order=order
                         )
                     )
                     if self._routing_injector is not None and mode == "train" and not self._rollout_routing_replay
                     else None
                 )
-                if rollout_routing_masks is not None:
-                    # The recompute must run under the same routing the update pass replays, or
-                    # the ratio comes from a different token distribution than the policy trains on.
-                    self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans, row_order=order)
-                try:
-                    recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order)
-                finally:
-                    if rollout_routing_masks is not None:
-                        self._routing_injector.disarm()
+                recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order, plan, replay)
             if captured:
-                routing_masks = captured[0]
-        return recompute_logps, routing_masks
+                captured_routing = captured[0]
+        return recompute_logps, captured_routing
 
     def _compute_ref_logps(
         self,
@@ -372,13 +471,14 @@ class StepBatchMixin:
         attention_mask: torch.Tensor,
         logits_to_keep: int,
         order: torch.Tensor | None = None,
+        plan: MicrobatchPlan | None = None,
     ) -> torch.Tensor | None:
         if self.beta == 0.0:
             return None
         if order is not None:
             prompt_completion_ids, attention_mask = prompt_completion_ids[order], attention_mask[order]
         with self._reference_policy() as model:
-            return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order)
+            return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order, plan)
 
     def _scored_rows(
         self,
@@ -387,11 +487,30 @@ class StepBatchMixin:
         attention_mask: torch.Tensor,
         logits_to_keep: int,
         order: torch.Tensor | None,
+        plan: MicrobatchPlan | None = None,
+        replay: RowsReplay | None = None,
     ) -> torch.Tensor:
-        """``model``'s per-token log-probs of rows already taken in ``order``, put back in batch order."""
-        logps, _, _ = self._get_per_token_logps_and_entropies(
-            model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
-        )
+        """``model``'s per-token log-probs of rows already taken in ``order``, put back in batch order. Under a ``plan``
+        one scoring call per bin runs, an empty bin an inert row, and the rows no bin holds score 0. Under a ``replay``
+        the calls are one micro-batch of rows each, so the padded routing a call arms is never wider than that."""
+        if plan is None and replay is None:
+            logps, _, _ = self._get_per_token_logps_and_entropies(
+                model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
+            )
+            return logps if order is None else logps[torch.argsort(order)]
+        bin_context = None if replay is None else functools.partial(self._replaying_forwards, replay)
+        if plan is not None:
+            return self._score_bins(model, input_ids, attention_mask, logits_to_keep, plan, bin_context)
+        chunk = self.args.per_device_train_batch_size
+        scored = []
+        for start in range(0, input_ids.size(0), chunk):
+            rows = slice(start, start + chunk)
+            with bin_context(rows, attention_mask[rows]):
+                logps, _, _ = self._get_per_token_logps_and_entropies(
+                    model, input_ids[rows], attention_mask[rows], logits_to_keep, compute_entropy=False
+                )
+            scored.append(logps)
+        logps = torch.cat(scored)
         return logps if order is None else logps[torch.argsort(order)]
 
     def _step_advantages(
@@ -508,7 +627,7 @@ class StepBatchMixin:
             negative_only=negative_only,
         )
         if balance is not None:
-            local_advantages = balance.apply(local_advantages, negative_only)
+            local_advantages = balance.apply(local_advantages)
             traj_advantages = balance.apply(traj_advantages)
         return local_advantages, traj_advantages
 
@@ -531,8 +650,11 @@ class StepBatchMixin:
         episodes = gathered_state >= 0
         self._log_headline_rewards(gathered_rewards[episodes], gathered_state[episodes] == 1, num_generations, mode)
         self._metrics[mode]["sampling/is_correction_active"].append(float(self._is_correction))
+        self._metrics[mode][IS_WEIGHTS_FROM_LOSS_FORWARD_KEY].append(float(scores.fused))
         if scores.corrected_mask is not None:
-            eff_corrected = self._narrow_corrected_mask_and_record(scores.ratio, scores.corrected_mask, loss_mask)
+            eff_corrected = self._narrow_corrected_mask_and_record(
+                scores.ratio, scores.corrected_mask, loss_mask, fused=scores.fused
+            )
             if self._update_breaker_tripped(
                 scores.ratio, eff_corrected, scores.traj_row_ids, len(rollout_results), mode
             ):

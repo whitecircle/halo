@@ -6,8 +6,12 @@ from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
+    PackedMicrobatchArguments,
+    PhaseTimerArguments,
     PromptDatasetArguments,
+    RankBalanceArguments,
     RLRRArguments,
+    RolloutWeightPrecisionArguments,
 )
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from halo.environments.rollout_config import ReasoningEffortChoice
@@ -19,6 +23,10 @@ from halo.rewards.terms import RewardTerm, parse_reward_terms, read_context_file
 class OnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
+    PackedMicrobatchArguments,
+    RankBalanceArguments,
+    RolloutWeightPrecisionArguments,
+    PhaseTimerArguments,
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     RLRRArguments,
@@ -49,6 +57,19 @@ class OnlineGRPOScriptArguments(
             "help": "Chat-template reasoning-effort steer (low/medium/high) or 'random' (sampled per prompt); "
             "unset = no steer. Passed via chat_template_kwargs, so it needs a template that reads reasoning_effort, "
             "like gpt-oss harmony."
+        },
+    )
+    loss_forward_importance_weights: bool = field(
+        default=False,
+        metadata={
+            "help": "Build the vLLM importance-sampling ratio (and the KL tail clamp) from the loss forward's own "
+            "detached log-probs in place of TRL's separate no-grad old-policy pass over the round's rows, one forward "
+            "less per round. Needs vllm_importance_sampling_correction. The ratio is the same function of the same "
+            "weights on an aligned one-step round, built from a different forward program, so values differ by the "
+            "forward's log-prob noise. Raises at construction where a consumer needs the round's log-probs before "
+            "its first backward (balance_token_mass, num_iterations above 1, misaligned accumulation) or no pass "
+            "would run. With early_stop_logratio_gap set, the logged gap reads loss-mask tokens only. "
+            "See agent-docs/training-methods/async-grpo/performance.md#weight-from-the-loss-forward."
         },
     )
     rewards: list[dict[str, Any]] = field(

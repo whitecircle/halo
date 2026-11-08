@@ -80,7 +80,7 @@ The episode reward is the sum of its `reward/*` components:
 - `reward/<name>`: each environment shaping term (code contests: `submission`, `resubmission`) and each external term.
 - `reward/objective`: `weight × grade ^ exponent` from the `environment` term.
 
-The trainer adds its length charges, `reward/reasoning_floor` and `reward/reasoning_price` (each only while its knob is on), outside these components ([Reasoning length reward](../../async-grpo/reasoning.md#reasoning-length-reward)). Components and rationales are saved with each completion ([Saved trajectories](../../async-grpo/monitoring.md#saved-trajectories)).
+The trainer adds its length charges, `reward/reasoning_price` and `reward/reasoning_floor` (each logged while its term is on), outside these components ([Reasoning length reward](../../async-grpo/reasoning.md#reasoning-length-reward)). Components and rationales are saved with each completion ([Saved trajectories](../../async-grpo/monitoring.md#saved-trajectories)).
 
 - `rewards` defaults to `[{source: environment}]` and reaches the environment constructor as `reward_terms`.
 - `turn_shaping` and the class's `SHAPING_COMPONENTS` names (unioned over the hierarchy) are reserved; no reward term may take one.

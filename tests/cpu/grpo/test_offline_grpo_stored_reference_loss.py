@@ -8,7 +8,7 @@ from torch import nn
 
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 
 class _Policy(nn.Module):

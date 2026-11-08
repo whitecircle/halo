@@ -4,15 +4,16 @@ Both are silent when broken: a typo in the bases tuple drops a method, and a bas
 
 import pytest
 
-from halo.trainers.accelerator import AcceleratorMixin
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.construction.accelerator import AcceleratorMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
 
 # name -> the sub-mixin that must own it, so an owner change stays MRO-visible from the composed class.
 _OWNERSHIP = {
@@ -212,6 +213,12 @@ def test_super_calls_reach_the_base_trainer():
                 f"super().{name}() from {mixin.__name__} resolves to {owner.__name__}, not the base Trainer — "
                 f"a sibling mixin now intercepts it."
             )
+
+
+def test_step_guard_timing_seam_is_carried_by_the_trainer_mixin():
+    """The guard's ``get_batch_samples`` calls ``time_batch_fetches``, which only the token-metrics mixin owns."""
+    assert _owner(DistributedTrainerMixin, "time_batch_fetches") is TokenMetricsMixin
+    assert _owner(DistributedTrainerMixin, "get_batch_samples") is NonFiniteStepGuardMixin
 
 
 def test_sibling_mixins_declare_no_overlapping_methods():

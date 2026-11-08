@@ -32,7 +32,7 @@ from halo.distributed.pipeline_parallel.partition import (
 )
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from halo.model_loading.parallel.pp import _load_stage_lazy
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import NEMOTRON_H_RELEASE_BLOCKS, NEMOTRON_H_RELEASE_LAYOUT, NEMOTRON_H_RELEASE_TEXT_CONFIG

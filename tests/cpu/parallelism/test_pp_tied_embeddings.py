@@ -10,7 +10,7 @@ from transformers import AutoConfig, AutoModelForSequenceClassification, Qwen3Co
 
 from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
 from halo.model_loading.parallel.pp import _load_stage_lazy
-from halo.models.config_access import tie_flag_configs
+from halo.models.introspection.config_access import tie_flag_configs
 from tests.common.models import TINY_QWEN3_CONFIG
 
 PP_SIZE = 2

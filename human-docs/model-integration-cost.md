@@ -52,7 +52,7 @@ upstream ships the model.
 
 No model is vendored. The only model classes Halo adds are the
 sequence-classification heads transformers doesn't ship, for Gemma 4 and
-Qwen3.5/3.6 MoE (`halo/models/seq_cls_heads.py`).
+Qwen3.5/3.6 MoE (`halo/models/upstream/seq_cls_heads.py`).
 
 The step-by-step procedure for each mode is in
 [Adding a Model](../agent-docs/models/adding-a-model.md) ↗.

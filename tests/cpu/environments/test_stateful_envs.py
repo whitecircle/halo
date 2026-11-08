@@ -10,7 +10,7 @@ import unittest
 
 import pytest
 
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.swe import SweEnvironment

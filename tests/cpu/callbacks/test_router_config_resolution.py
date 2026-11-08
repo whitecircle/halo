@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from halo.callbacks.balancing import apply_balancing_mode
-from halo.models.config_access import get_config_field, set_config_field
+from halo.models.introspection.config_access import get_config_field, set_config_field
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from halo.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 

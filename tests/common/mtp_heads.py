@@ -15,11 +15,11 @@ from torch import nn
 from halo.checkpoint.reading import iter_checkpoint_tensors
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.liger.cross_entropy import head_token_ce_sum
-from halo.models.config_access import text_config
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import backbone_with_layers
+from halo.models.introspection.param_roles import declared_fp32_pins, fp32_pin_matches
 from halo.models.mtp.head import MtpForwardTerm, attach_mtp_head_module, build_mtp_head, mtp_head_path
 from halo.models.mtp.spec import MtpObjective, require_mtp_head_spec
-from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches
 from tests.common.models import QWEN3_0_6B
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT

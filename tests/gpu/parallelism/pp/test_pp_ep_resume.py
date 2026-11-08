@@ -17,7 +17,7 @@ from trl import SFTConfig
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.harness import gpu_test_main

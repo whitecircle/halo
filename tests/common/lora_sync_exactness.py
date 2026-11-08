@@ -19,8 +19,8 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_exp
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.peft_adapters import lora_fold_targets
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.trainers.grpo.rollout.weight_push import (
     gather_and_send_weights,
@@ -63,6 +63,10 @@ LEARNING_RATE = 5e-3
 # each fold at 1.5 sizes, and held bytes never move; keeping every folded tensor adds the whole LoRA'd shard (1.1-1.5
 # MiB).
 FOLD_PEAK_BOUND = 2
+# Rows whose release dims leave one layer holding nearly every LoRA'd byte (GLM-5 Next's single DSA layer carries a 48 MiB
+# q_b_proj), so the LoRA'd shard stays under the bound and the memory check discriminates nothing. Three DSA layers
+# put the shard over it.
+PREMISE_OVERRIDES = {"glm5_next": {"layer_types": ["linear_attention", *["indexed_attention"] * 3]}}
 # The same sequence on every rank, so an EP forward's dispatch collectives stay aligned.
 PROBE_TEXT = "The capital of France is Paris. " * 8
 MODES = {
@@ -156,11 +160,11 @@ def _recording_folds(record: list[tuple[int, int]]) -> Iterator[None]:
     grows along the walk."""
     fold = peft_adapters.lora_folded
 
-    def recorded(param, layers):
+    def recorded(param, layers, **kwargs):
         torch.cuda.synchronize()
         start = _requested_bytes("current")
         torch.cuda.reset_peak_memory_stats()
-        folded = fold(param, layers)
+        folded = fold(param, layers, **kwargs)
         torch.cuda.synchronize()
         record.append((start, _requested_bytes("peak") - start))
         return folded
@@ -314,10 +318,16 @@ def run_lora_sync_exactness(ctx, *, family: str, mode: str, adapters: str) -> di
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
     dense = family in TINY_DENSE_FAMILIES
     tiny = TINY_DENSE_FAMILIES[family] if dense else TINY_MOE_FAMILIES[family]
-    base_dir = shared_tiny_family_checkpoint(ctx, tiny, f"lora_sync_exactness_{family}", tokenizer, SEED)
+    base_dir = shared_tiny_family_checkpoint(
+        ctx, tiny, f"lora_sync_exactness_{family}", tokenizer, SEED, overrides=PREMISE_OVERRIDES.get(family)
+    )
     # Off the module tree, since MLA, fused QKV, gated and linear attention spell them differently. The logical expert
     # names become native expert LoRA on a MoE; on a dense model they are its MLP, which stock PEFT adapts.
-    leaves = broadcast_from_rank0(mixer_linear_leaves(tiny_family_model(tiny, tokenizer)) if ctx.rank == 0 else None)
+    leaves = broadcast_from_rank0(
+        mixer_linear_leaves(tiny_family_model(tiny, tokenizer, overrides=PREMISE_OVERRIDES.get(family)))
+        if ctx.rank == 0
+        else None
+    )
     targets = mixed_targets(leaves) if dense or adapters == "mixed" else leaves
 
     parallelism_config = ParallelismConfig(**MODES[mode])

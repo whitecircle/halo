@@ -5,9 +5,9 @@ prompt plus ``max_tokens`` past the window, so a shipped 131k window at 30k per 
 
 import pytest
 
-from halo.environments import ray_actors
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_ERROR_KEY
+from halo.environments.episodes.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_ERROR_KEY
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts import ray_actors
 from tests.cpu.environments.test_effort_binding import _actor_text_turn, _actor_tool_turn, _PlainEnv
 
 _OVERFLOW = ray_actors.RolloutHTTPError(
@@ -22,9 +22,7 @@ async def _run(turns: list) -> ray_actors.RolloutResult:
     actor.__init__(actor_id=0, env_type=(_PlainEnv, {}), env_config={})
     served = iter(turns)
 
-    async def fake_generate(
-        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
-    ):
+    async def fake_generate(client, url, messages, config, reasoning_effort=None):
         turn = next(served)
         if isinstance(turn, Exception):
             raise turn

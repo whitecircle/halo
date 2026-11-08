@@ -3,6 +3,8 @@
 import math
 from dataclasses import dataclass, field
 
+import torch
+
 # The ``lora_target_modules`` vocabulary derives from this; a family adding a weight root is CI-guarded into it.
 LORA_PROJECTION_COVERAGE: dict[str, frozenset[str]] = {
     "gate_up_proj": frozenset({"gate", "up"}),
@@ -49,6 +51,12 @@ class ExpertLoraSpec:
             if value != honoured:
                 conflicts.append(f"{field_name}={value!r} has no grouped-expert implementation")
         return conflicts
+
+
+def expert_lora_delta(lora_a: torch.Tensor, lora_b: torch.Tensor, scaling: float) -> torch.Tensor:
+    """The fp32 per-expert delta ``scaling * A @ B`` of one weight's grouped adapters, ``[E, K, r]`` by ``[E, r, N]``,
+    which a merge adds to the weight in its matmul convention."""
+    return scaling * torch.bmm(lora_a.float(), lora_b.float())
 
 
 def expert_target_projections(target: str) -> frozenset[str] | None:

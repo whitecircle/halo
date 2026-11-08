@@ -42,7 +42,7 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 A turn header (`full` and `digest`) notes a reasoning cap hit, an engine cut, an empty turn, or calls all unknown or refused.
 
-A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a thinking budget, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an identical resubmission, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
+A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a reasoning cap, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
 
 ### The length cut
 

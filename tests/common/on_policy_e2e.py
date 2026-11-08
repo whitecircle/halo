@@ -16,9 +16,9 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
+from halo.models.introspection.unwrapping import strip_peft_adapter_segment
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.models.unwrapping import strip_peft_adapter_segment
 from tests.common.adapters import (
     LORA_ALPHA,
     LORA_R,

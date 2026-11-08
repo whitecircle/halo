@@ -19,7 +19,7 @@ from transformers.models.gemma4.configuration_gemma4 import Gemma4Config, Gemma4
 from transformers.models.qwen3_5_moe import Qwen3_5MoeConfig, Qwen3_5MoeTextConfig
 
 # Importing is the registration under test.
-from halo.models.seq_cls_heads import (
+from halo.models.upstream.seq_cls_heads import (
     Gemma4ForSequenceClassification,
     Gemma4TextForSequenceClassification,
     Qwen3_5MoeForSequenceClassification,

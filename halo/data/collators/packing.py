@@ -128,9 +128,8 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             warnings.warn(
                 "DataCollatorWithPacking received rows without `seq_lengths`: each row collates as "
                 "ONE document, so any concatenated documents inside it attend across each other. "
-                "This is what `packing_strategy: wrapped` produces (pack_dataset emits no "
-                "boundaries there); use `bfd`/`bfd_split` for document isolation, or ignore this "
-                "if cross-document attention is intended.",
+                "Pack with `bfd`, `bfd_split` or `wrapped`, which all emit the document lengths, "
+                "or ignore this if cross-document attention is intended.",
                 stacklevel=2,
             )
 
@@ -153,8 +152,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             # by every other route.
             batch["labels"][batch["position_ids"] == 0] = LABEL_IGNORE_INDEX
             batch = self._mask_packed_labels(batch, examples)
+            row_lengths = self._real_row_lengths(batch, examples)
             if self.flatten_to_single_row:
-                batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
+                batch = flatten_packed_batch(batch, row_lengths)
+            else:
+                # Rows keep their padding and carry no mask, so the real tokens count off the lengths.
+                batch["row_lengths"] = torch.tensor(row_lengths, dtype=torch.long)
             # The varlen set is only defined on the flattened [1, total] row; PP keeps its rows.
             varlen = self.emit_varlen_always or (
                 self.emit_varlen_on_flash_restart and positions_restart(batch["position_ids"])

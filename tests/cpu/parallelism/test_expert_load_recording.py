@@ -15,8 +15,8 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.gradient_checkpointing import scoped_checkpoint_func
 from halo.models.moe.balancing import expert_load_token_weights
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.world_metrics import WorldMetrics
 from tests.common.ep_reference import random_token_batch
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model

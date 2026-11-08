@@ -11,7 +11,7 @@ from transformers import PretrainedConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.trainers.trainer_rules import reject_unreloadable_best_model
+from halo.trainers.construction.trainer_rules import reject_unreloadable_best_model
 
 # A real PretrainedConfig: get_peft_model reads it through ``to_dict()``, and the guard reads the expert count off it.
 MOE_CONFIG = PretrainedConfig(num_local_experts=8)

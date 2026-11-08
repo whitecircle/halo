@@ -241,6 +241,23 @@ def test_cli_override_unknown_arg_raises():
         os.unlink(path)
 
 
+@pytest.mark.parametrize("via", ["yaml", "cli"])
+def test_the_per_rank_worker_count_key_fails_with_its_remedy(via):
+    """``num_rollout_workers`` read per rank and now names a per-node budget; an old config must not parse into 8x
+    fewer actors."""
+    parser = HaloArgumentParser((AsyncRolloutConfig,))
+    path = _write_yaml("num_rollout_workers: 16\n" if via == "yaml" else "rollout_actor_budget: 128\n")
+    try:
+        with pytest.raises(
+            ValueError,
+            match=r"num_rollout_workers.*retired.*rollout_actor_budget.*times the node's.*ray_address.*keep it",
+        ):
+            parser.parse_dict(parser.load_values([path] + (["--num_rollout_workers=16"] if via == "cli" else [])))
+    finally:
+        os.unlink(path)
+    assert parser.parse_dict({"rollout_actor_budget": 128})[0].rollout_actor_budget == 128
+
+
 def test_cli_override_shared_field_sets_on_both_dataclasses():
     """A field two dataclasses own (pad_token on SFTScriptArguments + SFTConfig) is set on both; token sync relies
     on this."""

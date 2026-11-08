@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from halo.models.row_documents import RowDocument, row_documents
-from halo.models.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import verify_upstream_parameters
 
 CPU = torch.device("cpu")
 

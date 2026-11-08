@@ -12,7 +12,8 @@ from halo.data.collators.padded import (
     DataCollatorForCompletionOnlyLM,
     DataCollatorForLanguageModelingWithVarlen,
 )
-from halo.data.turn_markers import resolve_eos_token_ids
+from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, reject_untrainable_completions
+from halo.data.turn_markers import TEXT_PROBE_CONVERSATIONS, resolve_eos_token_ids
 from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.segment_markers import segment_markers_for
 from halo.runtime.ranks import is_global_main_process
@@ -65,6 +66,16 @@ def select_data_collator(
         "train_on_last_assistant_only": train_on_last_assistant_only,
         "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
     }
+    if train_on_completions_only and getattr(tokenizer, "chat_template", None):
+        reject_untrainable_completions(
+            lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
+            TEXT_PROBE_CONVERSATIONS,
+            tokenizer,
+            assistant_message_template,
+            completion_kwargs["eos_token_ids"],
+            PACKED_SPAN_POLICY if packing or padding_free else PADDED_SPAN_POLICY,
+            "select_data_collator",
+        )
     last_only = ", last-only" if train_on_last_assistant_only else ""
     one_document = (
         emit_varlen_one_document and not keeps_packed_rows and supports_one_document_varlen_set(model_config)

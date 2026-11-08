@@ -119,13 +119,13 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
   no document markers, so leave it unset. `text_only_model: true` builds transformers' class either way.
 - Pipeline parallelism takes the text tower only and passes tiny-model GPU tests only.
 - `save_sharded_ep` and `merge-ep-shards` are refused. Gathered saves stream one layer at a time.
-- `merge-peft-adapters` refuses expert adapters, which fold through `merge_expert_lora_on_save`.
+- `merge-peft-adapters` streams the merge of expert adapters; `merge_expert_lora_on_save` folds them at training time instead.
 
 ## Export and serve
 
 Smoke-test a text-only export with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
-transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so it scores 0.05–0.09 nats
-worse on real text than the run did. To serve the export, rebuild the composite, which also streams back the
+transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so its loss on real text reads
+0.05–0.09 nats higher than under the run's limit. To serve the export, rebuild the composite, which also streams back the
 vision tower and, unless the run trained one with `mtp_loss_weight`, the `mtp.*` head at the release's weights:
 
 ```bash

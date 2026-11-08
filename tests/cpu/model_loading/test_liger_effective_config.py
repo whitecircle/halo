@@ -24,7 +24,12 @@ from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR, SinksPolicy
 from halo.models.attention.selection import select_supported_attn_implementation
-from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_model_types, config_sources, get_config_field
+from halo.models.introspection.config_access import (
+    TOOLKIT_STAMP_PREFIX,
+    config_model_types,
+    config_sources,
+    get_config_field,
+)
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.liger_appliers import liger_applier
 from tests.common.prefix_lm import tiny_paligemma_config, tiny_paligemma_processor

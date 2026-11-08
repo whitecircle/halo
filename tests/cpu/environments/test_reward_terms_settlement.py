@@ -10,18 +10,18 @@ import pytest
 from halo.configs.grpo_environmental import EnvironmentConfig
 from halo.environments import environment_base as base_module
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from halo.environments.episode import EpisodeDispatcher, TurnGeneration, step_context_from_generation
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_ERROR_KEY,
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
 )
-from halo.environments.episode_scoring import REWARD_ERRORS_KEY, REWARD_PENDING_KEY, EpisodeGrade
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_scoring import REWARD_ERRORS_KEY, REWARD_PENDING_KEY, EpisodeGrade
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.episode_loop import EpisodeDispatcher, TurnGeneration, step_context_from_generation
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
 from halo.environments.tools.definitions import NativeToolRegistry

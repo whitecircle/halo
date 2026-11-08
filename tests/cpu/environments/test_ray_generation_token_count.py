@@ -7,9 +7,9 @@ from types import SimpleNamespace
 
 import pytest
 
-import halo.environments.engine_wire as engine_wire
-from halo.environments.ray_actors import EnvironmentActor
+import halo.environments.rollouts.engine_wire as engine_wire
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 
 
 class _Session:

@@ -3,7 +3,7 @@
 follows the checkpoint, the data path the run.
 
 A multimodal run needs a multimodal sequence-classification head: transformers ships few, and
-halo/models/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6; any other is refused before the load. CP is not
+halo/models/upstream/seq_cls_heads.py registers Gemma 4 and MoE Qwen3.5/3.6; any other is refused before the load. CP is not
 supported (the score head pools the complete sequence). PP admits a multimodal checkpoint only without images."""
 
 from transformers import AutoModelForSequenceClassification

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from halo.models.config_access import config_sources, get_config_field
+from halo.models.introspection.config_access import config_sources, get_config_field
 from halo.models.moe.router_logits import has_discard_expert_slot
 
 # First non-zero wins, so the unambiguous fields precede bare ``top_k``, which is also a generation parameter.
@@ -31,9 +31,6 @@ EXPERT_FFN_WIDTH_FIELDS: tuple[str, ...] = (
     "moe_ffn_hidden_size",
     "intermediate_size",  # GptOss: the expert FFN is the only FFN, so this is the expert width
 )
-# What a MoE layer dispatches between its ranks: the latent of a block projecting into one around its experts, else the
-# hidden state.
-_DISPATCH_WIDTH_FIELDS: tuple[str, ...] = ("moe_latent_size", "hidden_size")
 
 
 def _first_router_field(cfg, fields: tuple[str, ...], default=None, *, per_layer_reduce=None):
@@ -66,10 +63,6 @@ def require_expert_count(cfg) -> int:
 def resolve_expert_ffn_width(cfg, *, per_layer_reduce=None) -> int | None:
     value = _first_router_field(cfg, EXPERT_FFN_WIDTH_FIELDS, per_layer_reduce=per_layer_reduce)
     return int(value) if value else None
-
-
-def resolve_dispatch_width(cfg) -> int:
-    return int(_first_router_field(cfg, _DISPATCH_WIDTH_FIELDS, 0))
 
 
 def require_router_aux_loss_coef(cfg) -> float:

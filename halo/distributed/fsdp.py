@@ -25,16 +25,16 @@ from torch.distributed.utils import _apply_to_tensors
 from transformers.modeling_utils import PreTrainedModel
 
 from halo.distributed.mesh import MeshDim, build_dp_mesh, mesh_dim_names
-from halo.models.modality import config_declares_multimodality
-from halo.models.module_tree import (
+from halo.models.introspection.modality import config_declares_multimodality
+from halo.models.introspection.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
     decoder_layers,
     input_embedding_backbone,
 )
+from halo.models.introspection.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.mtp.head import find_mtp_head
-from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.dtensor import to_local
 from halo.runtime.ranks import is_global_main_process

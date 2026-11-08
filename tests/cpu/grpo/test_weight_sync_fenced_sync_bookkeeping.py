@@ -8,8 +8,8 @@ from unittest.mock import Mock
 
 import pytest
 
-from halo.environments.ray_actors import RolloutManager
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import RolloutManager
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 
 _SYNC_S = 0.05
@@ -34,7 +34,12 @@ class _Trainer(AsyncRolloutMixin):
 
 def _manager() -> RolloutManager:
     return RolloutManager(
-        num_workers=1, env_type="native_math", env_config={}, server_urls=["http://x"], rollout_config=RolloutConfig()
+        num_workers=1,
+        env_type="native_math",
+        env_config={},
+        server_urls=["http://x"],
+        rollout_config=RolloutConfig(),
+        max_concurrent_rollouts=1,
     )
 
 

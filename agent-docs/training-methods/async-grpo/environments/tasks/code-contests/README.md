@@ -22,10 +22,10 @@ environment_kwargs:
   timeout_per_test: 5
   max_grading_seconds: 150
   reasoning_effort: random
-  reasoning_effort_profiles:   # thinking_tokens: the level's per-turn reasoning budget
-    low: {thinking_tokens: 8192, enforce_thinking_cap: false, max_submissions: 1, max_test_calls: 2}
-    medium: {thinking_tokens: 12288, enforce_thinking_cap: false, max_submissions: 2, max_test_calls: 4}
-    high: {thinking_tokens: 16384, enforce_thinking_cap: false, max_submissions: 3, max_test_calls: 6}
+  reasoning_effort_profiles:   # reasoning_budget: an episode's free reasoning tokens; reasoning_price: per 1,000 past it
+    low: {reasoning_budget: 40000, reasoning_price: 0.008, max_submissions: 1, max_test_calls: 2}
+    medium: {reasoning_budget: 50000, reasoning_price: 0.006, max_submissions: 2, max_test_calls: 4}
+    high: {reasoning_budget: 60000, reasoning_price: 0.004, max_submissions: 3, max_test_calls: 6}
 rewards:
   - source: environment
   - source: judge            # the audit veto
@@ -55,16 +55,11 @@ grader run on. A backend that does not confine the program, `local` included, wa
 
 ## Reasoning effort
 
-`reasoning_effort` defaults to `medium` here. The class ladder sets only `thinking_tokens`, the level's per-turn
-[reasoning budget](../../../reasoning.md#reasoning-budget): low 4096, medium 8192, high 16384. It is enforced
-unless the profile sets `enforce_thinking_cap: false`.
+`reasoning_effort` defaults to `medium` here. The class sets no per-level defaults: a profile's `reasoning_budget`
+and `reasoning_price` are the [reasoning length terms](../../../reasoning.md#reasoning-length-reward), and the chat
+template states the level alone ([Effort templates](../../../reasoning.md#effort-templates)).
 
-- `reasoning_effort_profiles` merges per level over the ladder, so a profile naming only tool budgets keeps the
-  class budget.
-- The chat template states the level to the model. The Qwen3.6 and Gemma 4 recipes pin the shipped
-  [effort template](../../../reasoning.md#effort-templates), which also states the budget; gpt-oss's harmony template does not.
-
-Two profile keys make a higher level buy iteration, not only longer reasoning: `max_submissions` (int ≥ 1, graded
+Two profile keys make a higher level buy iteration, not only reasoning: `max_submissions` (int ≥ 1, graded
 `submit_solution` calls) and `max_test_calls` (int ≥ 0, scratchpad runs).
 
 - Both are bound at reset and enforced per call; where the level is undetermined at reset, the constructor's
@@ -79,15 +74,14 @@ curriculum recipes are the three Qwen3.6 vLLM stages
 
 | Setting | Value |
 |---|---|
-| [Per-turn reasoning budget](../../../reasoning.md#reasoning-budget) | `thinking_tokens` low 8192, medium 12288, high 16384, all soft (`enforce_thinking_cap: false`): an enforced cap cuts reasoning mid-thought and teaches a policy to stop well short of the budget |
+| [`reasoning_budget` / `reasoning_price`](../../../reasoning.md#reasoning-length-reward) | low 40000 / 0.008, medium 50000 / 0.006, high 60000 / 0.004 per 1,000 tokens past the budget; budgets 100000 / 135000 / 170000 in stage 3 |
+| [`reasoning_price_cap` / `reasoning_floor`](../../../reasoning.md#sizing) | 0.28 / 0.25 |
 | [`max_submissions` / `max_test_calls`](#reasoning-effort) | low 1 / 2, medium 2 / 4, high 3 / 6; curriculum 1 / 6, 2 / 8, 3 / 8 |
 | [`max_turns`](../../../episodes.md#trajectory-length) | 16; 18 in the curriculum recipes |
 | [`rollout_max_tokens`](../../../episodes.md#trajectory-length) | 30000 per turn; 38192 in the curriculum recipes |
 | [`rollout_max_answer_tokens`](../../../reasoning.md#answer-room) | 8192 on vLLM, so the engine closes a turn's reasoning at 21,808 tokens (30,000 in the curriculum recipes); unset on SGLang |
-| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 128000 on gpt-oss, so the prompt and tool schema fit its 131072 window; 160000 in the curriculum recipes |
-| [`rollout_stop_tokens`](../../../episodes.md#tool-calls) | `<\|im_start\|>` on the Qwen3.6 vLLM recipes, so a model past a forced close cannot open a chat turn whose `<think>` starts a fresh budget; `<\|call\|>` on the gpt-oss recipes (the harmony tool-call terminator) |
-| [`reasoning_floor`](../../../reasoning.md#reasoning-length-reward) | 0.10 on the Qwen3.6 vLLM recipes, 0.05 elsewhere |
-| [`reasoning_price`](../../../reasoning.md#price-past-the-budget) with `reasoning_price_past_budget: true` | low 0.008, medium 0.006, high 0.004 per 1,000 tokens a turn reasons past its level's budget; `reasoning_price_cap: 0.28` an episode, which one turn at the ceiling stays under |
+| [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 128000 on gpt-oss, so the prompt and tool schema fit its 131072 window; 160000 in the curriculum recipes, 200000 in stage 3 |
+| [`rollout_stop_tokens`](../../../episodes.md#tool-calls) | `<\|im_start\|>` on the Qwen3.6 vLLM recipes, so a model past a forced close cannot open a chat turn whose `<think>` restarts the reasoning cap; `<\|call\|>` on the gpt-oss recipes (the harmony tool-call terminator) |
 | [`judge` term `audit`](reward.md#audit-judge) | `openai/gpt-6-luna`, `view: full`, `max_view_chars: 900000`, nine checks (six vetoes), `weight: -0.7`, `on_error: invalid` |
 | [Shaping](reward.md#reward-ladder) (`environment_kwargs`) | `submission_reward` 0.1, `resubmission_penalty` 0.2, `no_tool_use_penalty` 0.2, `turn_overflow_penalty` 0.35, `length_cutoff_penalty` 0.08 with `max_length_cutoff_recoveries: 2`, `tool_error_penalty` 0.05 |
 | [`language`](tools.md#languages) | `python`; `[python, cpp]` in the curriculum recipes |

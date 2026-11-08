@@ -171,22 +171,23 @@ def test_with_the_balance_off_the_net_mass_is_still_logged():
     assert TOKEN_MASS_SCALE_KEY not in metrics
 
 
-def test_the_balance_nets_the_trainable_rows_to_zero_and_leaves_a_negative_only_row_raw():
-    """The 4-token failing row is a cut turn. Weighed in, its 2 of mass would shrink every negative and leave the other
-    rows a net push up. Left out, the solve's 2 against the other failure's 4 halves the trainable negatives; the cut
-    turn keeps -0.5, and its 2 is the round's whole net push, a third of the 6 trained."""
+def test_the_balance_weighs_a_negative_only_row_and_nets_the_whole_round_to_zero():
+    """The 4-token failing row is a cut turn, trained on its negative advantage only. Left out of the balance, its 2 of
+    mass would stay the round's whole net push once the solve's 2 cancelled the other failure's 4. Weighed in, the
+    solve's 2 against all 6 negative shrinks every negative to a third, the cut turn's too, and the whole round nets to
+    zero. The logged net stays the trainable rows'."""
     advantages, loss_mask, ratio = _env_round()
     metrics = defaultdict(list)
     balance = record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=_CUT_TURN)
     assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx((2 - 4) / 6)]
-    assert metrics[TOKEN_MASS_SCALE_KEY] == [pytest.approx(1 / 2)]
-    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(1 / 3)]
+    assert metrics[TOKEN_MASS_SCALE_KEY] == [pytest.approx(1 / 3)]
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx((2 / 3) / 4)]
 
-    balanced = balance.apply(advantages, _CUT_TURN)
-    assert torch.equal(balanced, torch.tensor([1.0, -0.25, -0.5, -0.25]))
+    balanced = balance.apply(advantages)
+    assert torch.allclose(balanced, torch.tensor([1.0, -0.5 / 3, -0.5 / 3, -0.5 / 3]))
     weights = (loss_mask * ratio).sum(dim=1)
-    assert _net(balanced[~_CUT_TURN], weights[~_CUT_TURN]) == pytest.approx(0.0, abs=1e-6)
-    assert float((balanced * weights).sum()) == pytest.approx(-2.0), "the net push is the cut turn's own mass"
+    assert float((balanced * weights).sum()) == pytest.approx(0.0, abs=1e-6), "the whole round nets to zero"
+    assert _net(balanced[~_CUT_TURN], weights[~_CUT_TURN]) > 0, "the trainable rows alone keep a push up"
 
 
 def test_with_the_balance_off_the_net_mass_is_the_trainable_rows_and_the_share_is_plain():
@@ -204,18 +205,51 @@ def test_with_the_balance_off_the_net_mass_is_the_trainable_rows_and_the_share_i
     assert NEGATIVE_ONLY_MASS_KEY not in metrics, "a trainer with no negative-only rows logs no share"
 
 
-def test_a_round_one_sided_on_its_trainable_rows_trains_only_its_negative_only_rows():
-    """The balance trains nothing on trainable rows with no positive mass; the cut turn, outside it, keeps its full
-    negative advantage and carries the whole trained mass."""
+def test_a_round_with_no_positive_mass_trains_nothing_under_the_balance():
+    """With no positive mass to cancel it, every negative, the cut turn's included, shrinks to zero."""
     _, loss_mask, ratio = _env_round()
     advantages = torch.tensor([0.0, -0.5, -0.5, -0.5])  # the solve's positive advantage gone
     metrics = defaultdict(list)
     balance = record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=True, negative_only=_CUT_TURN)
-    assert metrics[TOKEN_MASS_SCALE_KEY] == [0.0] and metrics[NEGATIVE_ONLY_MASS_KEY] == [1.0]
-    assert torch.equal(balance.apply(advantages, _CUT_TURN), torch.tensor([0.0, 0.0, -0.5, 0.0]))
+    assert metrics[TOKEN_MASS_SCALE_KEY] == [0.0] and metrics[NEGATIVE_ONLY_MASS_KEY] == [0.0]
+    assert torch.equal(balance.apply(advantages), torch.zeros(4))
     metrics = defaultdict(list)
     record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=_CUT_TURN)
     assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 6)]
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_on_any_round_the_balance_nets_the_whole_trained_mass_to_zero_and_the_logs_add_up(seed):
+    """Random rows, lengths, IS ratios and cut turns. Balanced, the round's whole push (each row's advantage times its
+    IS-weighted tokens, a cut turn's negative advantage only) is zero, no sign flips, nothing grows; off, the logged net
+    and share give that push as ``(1 - s) * net - s``."""
+    generator = torch.Generator().manual_seed(seed)
+    rows = 12
+    advantages = torch.randn(rows, generator=generator)
+    loss_mask = (torch.rand(rows, 16, generator=generator) < torch.rand(rows, 1, generator=generator)).float()
+    ratio = torch.rand(rows, 16, generator=generator) * 2
+    negative_only = torch.rand(rows, generator=generator) < 0.3
+    trained = ~negative_only | (advantages < 0)  # a cut turn trains on a negative advantage only
+    weights = (loss_mask * ratio).sum(dim=1) * trained
+
+    def push(values):
+        return float((values * weights).sum() / (values.abs() * weights).sum())
+
+    metrics = defaultdict(list)
+    record_token_mass(advantages, loss_mask, ratio, _local, metrics, enabled=False, negative_only=negative_only)
+    net, share = metrics[NET_TOKEN_MASS_KEY][0], metrics[NEGATIVE_ONLY_MASS_KEY][0]
+    assert (1 - share) * net - share == pytest.approx(push(advantages), abs=1e-5)
+
+    balance = record_token_mass(advantages, loss_mask, ratio, _local, defaultdict(list), True, negative_only)
+    balanced = balance.apply(advantages)
+    assert float((balanced * weights).sum()) == pytest.approx(0.0, abs=1e-4)
+    assert torch.all((torch.sign(balanced) == torch.sign(advantages)) | (balanced == 0))
+    assert torch.all(balanced.abs() <= advantages.abs() + 1e-7)
+    assert (
+        min(balance.positive_scale, balance.negative_scale)
+        <= 1.0
+        == max(balance.positive_scale, balance.negative_scale)
+    )
 
 
 def _grpo_args(loss_type="dapo", top_entropy_quantile=1.0, off_policy_mask_threshold=None):
@@ -251,6 +285,7 @@ def test_the_token_sum_losses_take_the_balance(loss_type):
 def _online_host(balance: bool, training: bool = True):
     host = types.SimpleNamespace(
         _balance_token_mass=balance,
+        _fuses_round=False,
         model=types.SimpleNamespace(training=training),
         accelerator=types.SimpleNamespace(gather=_local, process_index=0),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},

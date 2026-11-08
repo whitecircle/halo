@@ -52,6 +52,12 @@ Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first: rank 0 waits only `roll
 120 s, 180 in the code-contests recipes) for a server still loading. Parsers, `--moe-backend triton` and the rest:
 [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
 
+## Candidate log-probs
+
+`score_centering_top_k` reads candidate log-probs from an SGLang server of the toolkit's image, which returns them as flat
+arrays; vLLM is refused, and a startup probe refuses a server that does not return them
+([Candidate log-probs](../../infrastructure/rollout-servers.md#candidate-log-probs)).
+
 ## Launching the trainer
 
 ```bash
@@ -81,7 +87,8 @@ rejected at config time: `ep4` on 4 trainer GPUs passes, on 8 it does not
 - `beta > 0` without PEFT holds a frozen reference: the script loads it like the policy (run dtype, `model_revision`,
   attention, `reset_sinks`), from `model_name_or_path` and never a resume checkpoint, and hands it to TRL in place of
   TRL's fp32 copy ([Online GRPO](../grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an unsharded dense
-  replica per rank, warned about under EP, ETP and TP. Use `beta: 0`, or `use_peft: true` with an attention target
+  replica per rank, refused before it loads when it exceeds half the free GPU memory or 80% of the node's available host RAM
+  across its ranks ([sizing](../grpo/online.md#grpo-objective-for-verifiable-rewards)). Use `beta: 0`, or `use_peft: true` with an attention target
   off TP (which refuses adapters), to hold none.
 
 ## Weight synchronization
@@ -94,7 +101,7 @@ round's generation.
   steps.
 - `rollout_group_port` (default `51216`, either backend) is bound on the **trainer** host, one listener per server, so
   two servers sharing a port collide even on distinct hosts. With several servers it is the base: an entry with no
-  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0`. TRL's `vllm_group_port` is refused here; Online GRPO reads it.
+  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0` (under `single_group` it is the one port of the one group). TRL's `vllm_group_port` is refused here; Online GRPO reads it.
 - Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
   syncs is the exception: the client reconnects and re-sends, with a warning
   ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
@@ -116,6 +123,14 @@ rollout_server_configs:
   - {url: "http://localhost:8001", group_port: 51217}
 ```
 
+- `rollout_sync_topology: single_group` forms one weight-sync group over every server and broadcasts each chunk once,
+  where the default `per_server` sends each chunk to each server over its own group; `auto` picks `single_group` for
+  two or more servers that report one model and one set of weight-loading flags
+  ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)). `single_group` takes one
+  `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.
+- `rollout_adapter_sync: true` (SGLang, LoRA) sends the adapter alone after one base push and pauses nothing: a round
+  in flight finishes on the adapter version it started with, and rounds drawn later name the newest
+  ([Adapter sync](../../infrastructure/rollout-servers.md#adapter-sync)).
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
   rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
   and the actors re-issue them, losing the decode they had done.
@@ -134,17 +149,18 @@ rollout_server_configs:
   construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
   `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with
   `(1 + max_retries) × request_timeout` still within `episode_timeout`.
-- `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
+- `rollout_actor_budget` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
   `1` is refused where prefetch is off, naming `enable_prefetch: false` or the opt-in a one-server run left unset.
 
 `async/prefetch_hit_rate` shows which phase bounds the step, not server health. On a short single-turn environment it
-should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `num_rollout_workers`. On a multi-turn
+should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `rollout_actor_budget`. On a multi-turn
 one the round outlasts the update, so it sits near 0 at `prefetch_depth: 1`; a deeper pipeline raises it.
 
 ### Prefetch across a resume
 
 A checkpoint stores each rank's submitted-but-untrained rounds, oldest first (`prefetch_pending-<rank>-of-<world>.pt`),
 and a resume resubmits them in order before its first round.
+The same file carries the run's halting counters, so a resume at another world size, or from a checkpoint that has no file, restarts their patience at zero and logs it.
 
 - A save on a generation boundary (every save by default, since `steps_per_generation` equals the accumulation
   steps) resumes onto the batches an uninterrupted run trains. A save inside a round that feeds several optimizer
@@ -153,8 +169,10 @@ and a resume resubmits them in order before its first round.
   are not trained. Under a larger one it opens with cold rounds until the pipeline is full.
 - No file for this world size, or one drawn under another group size, round size or DP slice, resumes with cold
   rounds: those batches are skipped and the next ones train twice.
+- Under TP or ETP only each group's leader prefetches: a follower's file holds no rounds, and a resume gives it none to
+  resubmit, whatever the checkpoint's file held.
 - A file present on some ranks only (a non-shared filesystem under another rank-to-node placement, or a torn copy)
-  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds.
+  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds, which also resets the halting counters the files carry.
 
 ![One rollout server (compose default, prefetch unset): the push pauses the engine, so step time is sync + round + update](../../assets/diagrams/environmental_grpo_single_server.png)
 
@@ -169,8 +187,8 @@ address differs per server.
 - Use resolvable host names. A loopback URL in a run spanning several nodes is refused at startup: it reaches a
   different engine, or none, per node, and only the forwarding rank's node takes weight pushes. A launch on one node
   with a `ray_address` head on it keeps its loopback URL.
-- `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
-  divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
+- `rollout_actor_budget` is a per-node budget on a local Ray, split over the node's rollout ranks, and the cluster-wide
+  total on a shared one, split over every rollout rank; actors are soft-pinned to the rank's node ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route
   to each server; set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST` where the server cannot dial that back (NAT, asymmetric
   routing) ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).

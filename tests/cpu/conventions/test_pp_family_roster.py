@@ -8,7 +8,7 @@ import shlex
 import pytest
 
 from halo.distributed.pipeline_parallel.families import PP_FAMILY_SPECS
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 from tests.gpu.manifest import MANIFEST
 

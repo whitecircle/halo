@@ -13,7 +13,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
 )
 
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NEMOTRON_H
 from halo.models.mtp.spec import (
     MTP_HEAD_SPECS,

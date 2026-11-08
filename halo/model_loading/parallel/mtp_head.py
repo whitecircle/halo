@@ -24,7 +24,7 @@ from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, LazyLoadPlan, WeightPlanner
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from halo.model_loading.parallel.whole_model import cast_loaded_parameters
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.mtp.head import (
     MtpForwardTerm,

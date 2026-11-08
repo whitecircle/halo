@@ -35,16 +35,17 @@ from halo.model_loading.parallel.frozen_models import (
     warn_unparallelized_reference,
 )
 from halo.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     ROUTER_AUX_FIELDS,
     SPECIAL_TOKEN_ID_FIELDS,
     restore_config_fields,
     set_config_field_run_scoped,
     snapshot_config_fields,
 )
+from halo.models.introspection.context_window import bounded_row_length
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.moe.config_fields import resolve_active_router_aux_loss_coef
 from halo.models.moe.router_logits import mark_router_logits_forced_off
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.optimizers.registry import (
     NAMED_OPTIMIZER_BUILDERS,
     optim_name,
@@ -55,12 +56,30 @@ from halo.runtime.ranks import (
     get_global_rank,
     is_global_main_process,
 )
-from halo.trainers.accelerator import AcceleratorMixin, accelerate_manages_ddp, accelerate_manages_fsdp
-from halo.trainers.checkpointing import CheckpointingMixin
-from halo.trainers.ctor_slots import get_ctor_model_and_config
-from halo.trainers.dataloaders import DataParallelLoaderMixin
-from halo.trainers.evaluation import EvaluationMixin
-from halo.trainers.optimizer_selection import build_optimizer, resolve_bf16_optimizer
+from halo.trainers.construction.accelerator import AcceleratorMixin, accelerate_manages_ddp, accelerate_manages_fsdp
+from halo.trainers.construction.ctor_slots import get_ctor_model_and_config
+from halo.trainers.construction.optimizer_selection import build_optimizer, resolve_bf16_optimizer
+from halo.trainers.construction.trainer_rules import (
+    INERT_AUX_LOSS_DETAIL,
+    reject_inert_aux_loss_balancing,
+    reject_reference_sinks_mismatch,
+    reject_stock_adamw_on_mixed_params,
+    reject_sync_ref_model_on_sharded_policy,
+    reject_trainer_router_aux_loss_coef,
+    reject_unreachable_mtp_term,
+    reject_unreloadable_best_model,
+    reject_unsaveable_external_tables,
+)
+from halo.trainers.construction.training_args_overrides import (
+    align_save_on_each_node,
+    disable_trl_liger,
+    uses_evaluation,
+)
+from halo.trainers.loop.checkpointing import CheckpointingMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.parallelism.adapter_rules import (
     reject_expert_lora_peft_conflicts,
     reject_lora_under_tp,
@@ -76,20 +95,6 @@ from halo.trainers.parallelism.mode_setup import ModeSetupMixin, reject_unsynced
 from halo.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
-from halo.trainers.token_metrics import TokenMetricsMixin
-from halo.trainers.trainer_rules import (
-    INERT_AUX_LOSS_DETAIL,
-    reject_inert_aux_loss_balancing,
-    reject_reference_sinks_mismatch,
-    reject_stock_adamw_on_mixed_params,
-    reject_sync_ref_model_on_sharded_policy,
-    reject_trainer_router_aux_loss_coef,
-    reject_unreachable_mtp_term,
-    reject_unreloadable_best_model,
-    reject_unsaveable_external_tables,
-)
-from halo.trainers.training_args_overrides import align_save_on_each_node, disable_trl_liger, uses_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +198,9 @@ class DistributedTrainerMixin(
     SUPPORTS_LOWP_PRECISION: ClassVar[bool] = False
     # Sequence rows one model call carries per dataset example; the EP dispatch gate multiplies by it.
     FORWARD_ROWS_PER_EXAMPLE: ClassVar[int] = 1
+    # Rows come from generation, so the config has no ``max_length``: the bound is :meth:`declared_row_length`, and an
+    # unbounded one is judged only where the Gin ceiling applies.
+    GENERATION_SHAPED_ROWS: ClassVar[bool] = False
     # The loss runs outside the forward with no labels (the GRPO family): no router aux term, no Liger CE.
     POLICY_GRADIENT_LOSS: ClassVar[bool] = False
     SYNCS_TO_EXTERNAL_GENERATOR: ClassVar[bool] = False
@@ -202,6 +210,12 @@ class DistributedTrainerMixin(
     LOSS_IS_OWN_MEAN: ClassVar[bool] = False
     # A trainer's way around holding a frozen reference, named by every reference warning and refusal.
     REFERENCE_ALTERNATIVES: ClassVar[ReferenceAlternatives] = PREFERENCE_REFERENCE_ALTERNATIVES
+
+    @classmethod
+    def declared_row_length(cls, training_config, *sources) -> int | None:
+        """The longest row one forward carries as the config bounds it, or ``None`` where it does not (the model's
+        context window then bounds it); ``sources`` are further objects that carry the bound."""
+        return bounded_row_length(training_config, *sources)
 
     @classmethod
     def reject_undeclared_axes(cls, *, cp_size: int, pp_size: int) -> None:
@@ -395,6 +409,7 @@ class DistributedTrainerMixin(
         self._warn_on_zeroed_lora_dropout()
         self._configure_wrapped_model()
 
+        self._verify_save_disk_space()
         # Setup varies per rank (TP materialization, EP patching), so ranks re-align before the first step.
         barrier()
 

@@ -31,6 +31,8 @@ def stub_frozen_loader():
 
     with (
         patch.object(frozen_loader, "resolve_build_config") as build_config,
+        # Sizing builds a config-only shell, which no stubbed config supports.
+        patch.object(frozen_loader, "estimate_reference_bytes", return_value=1),
         patch.object(frozen_loader, "resolve_attn_implementation", fake_resolve),
         patch.object(frozen_loader, "auto_load_model") as auto_load,
         patch.object(frozen_loader, "resolve_model_source") as fetch_scope,

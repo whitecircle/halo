@@ -16,10 +16,11 @@ from trl import GRPOConfig
 
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
+from halo.diagnostics.phase_timers import UNACCOUNTED
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_flag, env_int, env_str
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -58,6 +59,7 @@ from tests.common.on_policy_e2e import (
     sink_round,
 )
 from tests.common.rank_log import log
+from tests.common.routing import dense_rows
 from tests.common.thinking_budget import (
     ReasoningTurnRecorder,
     record_budget_acceptance,
@@ -77,6 +79,13 @@ LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").
 LEARNING_RATE = 1e-4
 # Steps a prefetch row runs past its prefetch_depth cold rounds.
 PREFETCH_POPPED_STEPS = 2
+# The phase times a --phase-times row finds at every logged step, and those only some steps run: the push (not the first
+# step), the log (read at the next log).
+EVERY_STEP_PHASES = ("micro_step", "loss_forward", "post_backward_finish", "reduce", "optimizer")
+SOME_STEP_PHASES = ("rollout", "sync", "build", "log_emit")
+# Of the logged steps' wall time, what no phase may hold.
+MAX_UNACCOUNTED_FRACTION = 0.02
+PHASE_TIME_TOLERANCE_S = 1e-6
 MAX_TURNS = 2
 # The task every policy trains on: one call of the draw tool, then the number it returned as the answer.
 DRAW_TOOL = "draw_number"
@@ -215,6 +224,7 @@ def _async_config(
     prefetch_depth: int | None,
     chunked: bool,
     length_ordered: bool | None,
+    phase_times: bool,
     stop_tokens: list[str],
 ) -> AsyncRolloutConfig:
     return AsyncRolloutConfig(
@@ -226,7 +236,7 @@ def _async_config(
         ),
         rollout_group_port=group_port,
         rollout_connection_timeout=180.0,
-        num_rollout_workers=2,
+        rollout_actor_budget=2,
         max_concurrent_rollouts=2,
         rollout_max_tokens=128,
         rollout_stop_tokens=stop_tokens,
@@ -236,6 +246,7 @@ def _async_config(
         prefetch_depth=prefetch_depth or 1,
         use_chunked_grpo_logprobs=chunked,
         length_ordered_microbatches=length_ordered,
+        log_phase_times=phase_times,
         sync_weights_every_n_steps=1,
         model_name=model_name,
         # Train the ids the engine sampled, not a re-tokenization of the text it rendered.
@@ -253,7 +264,7 @@ def capture_routing(trainer, ids: torch.Tensor) -> torch.Tensor:
     with trainer._routing_injector.capture(ids.size(0), ids.size(1)) as captured, torch.no_grad():
         trainer.model(input_ids=ids)
     reshard_fsdp2_modules(unwrap(trainer.model))
-    return captured[0]
+    return dense_rows(captured[0], ids.device)
 
 
 @contextlib.contextmanager
@@ -394,6 +405,32 @@ def record_prefetch_acquisitions(trainer) -> list[bool]:
     return acquired
 
 
+def record_rollout_pool_starts(trainer) -> list[None]:
+    """One entry per Ray pool this rank starts."""
+    starts: list[None] = []
+    start = trainer._start_rollout_pool
+
+    def recording():
+        starts.append(None)
+        start()
+
+    trainer._start_rollout_pool = recording
+    return starts
+
+
+def record_follower_skips_rollouts(trainer, checks: dict[str, bool], pool_starts: list[None], acquired: list[bool]):
+    """A TP/ETP follower takes its leader's rollouts: it starts no pool and acquires, submits and counts no prefetch
+    round, where the leader starts one pool."""
+    follower = trainer._is_tp_follower()
+    checks["rollout_pool_started_only_by_group_leaders"] = len(pool_starts) == (0 if follower else 1)
+    if follower:
+        checks["follower_acquired_and_submitted_no_prefetch_round"] = (
+            acquired == []
+            and (trainer._prefetch_hits, trainer._prefetch_misses, trainer._prefetch_input_skips) == (0, 0, 0)
+            and trainer._prefetch_input_queue.empty()
+        )
+
+
 def record_prefetch(trainer, checks: dict[str, bool], metrics: dict[str, float], acquired: list[bool], depth: int):
     """The first ``depth`` steps collected their own prompts, later ones popped earlier rounds, and the IS log-ratio is
     finite on every step. A liveness check: at this ``LEARNING_RATE`` no fixed limit separates a stale round from a
@@ -436,6 +473,44 @@ def record_first_step_gradient(trainer, checks: dict[str, bool], metrics: dict[s
     log(f"  step 1: reward within-group std {spread}, grad norm {norm}")
 
 
+def record_row_spans(trainer, layout: PolicyLayout, checks: dict[str, bool]) -> None:
+    """A chunked row at batch size 1 stashes its round's spans except under TP/ETP, and every window's tally was read
+    and cleared."""
+    checks["row_spans_stashed_as_resolved"] = trainer._stashes_row_spans is (
+        layout.tp_size == 1 and layout.expert_tp_size == 1
+    )
+    checks["row_span_tally_read_and_cleared"] = trainer._row_span_mismatches is None
+
+
+def record_phase_times(trainer, checks: dict[str, bool], metrics: dict[str, float]) -> None:
+    """The phases every step runs are logged at each logged step, the others at some, the slowest rank is never faster
+    than the mean, and what no phase holds stays under :data:`MAX_UNACCOUNTED_FRACTION` of the steps' wall time."""
+    logged = [entry for entry in trainer.state.log_history if f"phase_time/{UNACCOUNTED}_s" in entry]
+    checks["phase_times_logged"] = bool(logged)
+    for phase in EVERY_STEP_PHASES:
+        checks[f"phase_time_{phase}_logged_every_step"] = bool(logged) and all(
+            f"phase_time/{phase}_s" in e for e in logged
+        )
+    for phase in SOME_STEP_PHASES:
+        checks[f"phase_time_{phase}_logged"] = any(f"phase_time/{phase}_s" in e for e in logged)
+    checks["phase_time_slowest_rank_at_least_the_mean"] = bool(logged) and all(
+        entry[key.removesuffix("_s") + "_max_s"] >= entry[key] - PHASE_TIME_TOLERANCE_S
+        for entry in logged
+        for key in entry
+        if _is_phase_seconds(key)
+    )
+    wall = sum(value for entry in logged for key, value in entry.items() if _is_phase_seconds(key))
+    unaccounted = sum(entry[f"phase_time/{UNACCOUNTED}_s"] for entry in logged)
+    metrics["phase_time_unaccounted_fraction"] = abs(unaccounted) / wall if wall else math.nan
+    checks["phase_time_unaccounted_within_the_bar"] = (
+        bool(wall) and abs(unaccounted) <= MAX_UNACCOUNTED_FRACTION * wall
+    )
+
+
+def _is_phase_seconds(key: str) -> bool:
+    return key.startswith("phase_time/") and key.endswith("_s") and not key.endswith("_max_s")
+
+
 def run_env_grpo_e2e(
     ctx,
     *,
@@ -453,6 +528,7 @@ def run_env_grpo_e2e(
     prefetch_depth: int | None = None,
     chunked: bool = False,
     length_ordered: bool | None = None,
+    phase_times: bool = False,
 ) -> dict:
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed. ``model_name`` must
     already be served. ``layout`` is the policy's parallel shape, and :class:`DrawNumberEnvironment` guarantees a step
@@ -498,6 +574,7 @@ def run_env_grpo_e2e(
         prefetch_depth=prefetch_depth,
         chunked=chunked,
         length_ordered=length_ordered,
+        phase_times=phase_times,
         stop_tokens=[HARMONY_CALL_TOKEN] if HARMONY_CALL_TOKEN in tokenizer.get_vocab() else [],
     )
     grpo_config = _grpo_config(output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft, chunked=chunked)
@@ -580,6 +657,7 @@ def run_env_grpo_e2e(
         # The deal resolves at construction; only false turns it off on a chunked row.
         checks["rows_dealt_by_length_as_set"] = trainer._orders_rows_by_length is (length_ordered is not False)
     acquired = record_prefetch_acquisitions(trainer) if prefetch_depth is not None else []
+    pool_starts = record_rollout_pool_starts(trainer) if hasattr(trainer, "_start_rollout_pool") else None
     if routing_replay != "none":
         # The probe row as the checkpoint routes it; the trained policy disagreeing with it is a real weight mismatch.
         probe_ids = routing_probe_ids(tokenizer, ctx.device)
@@ -593,12 +671,17 @@ def run_env_grpo_e2e(
     losses, trained = record_step_losses(trainer, checks)
     metrics["steps_logged"] = float(len(losses))
     metrics["training_had_a_gradient"] = float(trained)
-    if prefetch_depth is not None:
+    if pool_starts is not None:
+        record_follower_skips_rollouts(trainer, checks, pool_starts, acquired)
+    if prefetch_depth is not None and not trainer._is_tp_follower():
         record_prefetch(trainer, checks, metrics, acquired, prefetch_depth)
     if environment_type is None:
         record_first_step_gradient(trainer, checks, metrics)
     if chunked:
         record_grad_norms(trainer, checks, metrics)
+        record_row_spans(trainer, layout, checks)
+    if phase_times:
+        record_phase_times(trainer, checks, metrics)
     record_dp_layout(ctx, trainer, layout, checks)
     # Before the perturbation rounds move the weights off the trained policy.
     probe = routing_probe_round(trainer, probe_ids, routing_before_training) if routing_replay != "none" else {}

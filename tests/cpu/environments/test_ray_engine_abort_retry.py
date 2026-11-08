@@ -5,9 +5,9 @@ the episode errors into a masked row."""
 
 import pytest
 
-from halo.environments.episode import TurnGeneration
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.episode_loop import TurnGeneration
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.inference.response import FINISH_REASON_ABORT
 
 _OBSERVATION = [{"role": "user", "content": "2+2?"}]
@@ -24,9 +24,7 @@ def _scripted(actor, finish_reasons: list[str | None]):
     """Make the actor's engine call answer ``finish_reasons`` in order; ``None`` is a completed turn."""
     served: list[list[dict]] = []
 
-    async def _generate(
-        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
-    ):
+    async def _generate(client, url, messages, config, reasoning_effort=None):
         served.append(messages)
         reason = finish_reasons[len(served) - 1]
         if reason == FINISH_REASON_ABORT:

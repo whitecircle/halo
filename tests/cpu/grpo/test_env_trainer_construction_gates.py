@@ -16,9 +16,9 @@ from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
-from halo.environments.reasoning_effort import has_thinking_budget
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
+from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.grpo.environmental import reasoning
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
@@ -36,7 +36,6 @@ from halo.trainers.grpo.environmental.environmental_rules import (
 )
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.logratio import compute_is_ratio, zero_engine_forced_closes
-from halo.trainers.training_args_overrides import keep_all_dataset_columns
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
@@ -67,6 +66,8 @@ _INIT_GATES = (
     "_arm_update_breaker",
     "reject_unread_grpo_knobs",
     "reject_prefetch_past_retry_budget",
+    "reject_unsupported_score_centering",
+    "reject_unsupported_score_centering_loss",
 )
 
 
@@ -81,7 +82,7 @@ def _called_names(fn: ast.FunctionDef) -> set[str]:
     return names
 
 
-_INIT_PHASES = ("__init__", "_configure_rollout_state", "_configure_importance_sampling")
+_INIT_PHASES = ("__init__", "_configure_rollout_state", "_configure_importance_sampling", "_configure_score_centering")
 
 
 def _method_source(name: str) -> ast.FunctionDef:
@@ -259,40 +260,42 @@ def test_a_non_grading_environment_accepts_an_answer_less_dataset():
     _check_answers("native_math", {}, _dataset(), eval_dataset=_dataset())
 
 
-def _level_host(budgets: dict, effort: str | None = "random", **config):
+# The code-contests recipes' per-level episode budgets: each past the turn they run under.
+_BUDGETS = {
+    "low": {"reasoning_budget": 40000},
+    "medium": {"reasoning_budget": 50000},
+    "high": {"reasoning_budget": 60000},
+}
+
+
+def _budgeted_env(effort: str | None = "random"):
+    profiles = _BUDGETS if effort is not None else None
+    return build_environment("native_math", {"reasoning_effort": effort, "reasoning_effort_profiles": profiles})
+
+
+def _level_host(effort: str | None = "random", **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncRolloutConfig(**config)
-    host._rollout_env = types.SimpleNamespace(
-        reasoning_effort=effort, thinking_budget_for_effort=budgets.get, thinking_budget_enforced=lambda level: True
-    )
+    host._rollout_env = _budgeted_env(effort)
     return host
 
 
-def _check_reasoning_terms(host) -> None:
-    reject_inert_reasoning_terms(
-        host.async_config,
-        host._rollout_env,
-        budgeted=has_thinking_budget(host._efforts_by_level()),
-        every_budget_soft=host._every_budget_soft,
+def _thinking_caps(host) -> dict[str | None, int | None]:
+    return {level: effort.thinking_cap for level, effort in host._efforts_by_level().items()}
+
+
+def test_a_levels_budget_never_caps_the_engine():
+    """A level's ``reasoning_budget`` is summed over an episode's turns and read only by the reward, so a budget past
+    ``rollout_max_tokens`` refuses nothing and every drawn level binds the run's one reasoning cap: the turn less its
+    answer room, ``rollout_max_thinking_tokens``, or none."""
+    room = _level_host(rollout_max_tokens=30000, rollout_max_answer_tokens=8192, reasoning_floor=0.25)
+    reject_inert_reasoning_terms(room.async_config, room._rollout_env, room._level_reasoning_terms)
+    assert _thinking_caps(room) == dict.fromkeys(_BUDGETS, 30000 - 8192)
+    assert _thinking_caps(_level_host(rollout_max_tokens=30000, rollout_max_thinking_tokens=12000)) == dict.fromkeys(
+        _BUDGETS, 12000
     )
-
-
-_EVERY_LEVEL = {"low": 8192, "medium": 12288, "high": 16384}
-
-
-def test_a_drawable_levels_budget_must_sit_below_the_turn_cap():
-    """Each turn of such a level is cut mid-reasoning and trains as a length-cut turn forever. Only levels the
-    environment can draw are checked, since a budget elsewhere binds no episode."""
-    turn = {"rollout_max_tokens": 16384}
-    with pytest.raises(
-        ValueError, match=r"'high' level's thinking_tokens \(16384\) must sit below rollout_max_tokens"
-    ):
-        _check_reasoning_terms(_level_host(_EVERY_LEVEL, **turn))
-    with pytest.raises(ValueError, match="'high' level's thinking_tokens"):
-        _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort="high", **turn))
-    _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort="low", **turn))
-    _check_reasoning_terms(_level_host(_EVERY_LEVEL, effort=None, **turn))
-    _check_reasoning_terms(_level_host(_EVERY_LEVEL, rollout_max_tokens=16385))
+    assert _thinking_caps(_level_host(effort="high", rollout_max_tokens=30000)) == {"high": None}
+    assert _thinking_caps(_level_host(effort=None, rollout_max_tokens=30000)) == {None: None}
 
 
 def test_column_pruning_is_forced_off(tmp_path):
@@ -302,7 +305,7 @@ def test_column_pruning_is_forced_off(tmp_path):
     assert args.remove_unused_columns is False
 
 
-def test_an_enforced_thinking_budget_needs_the_is_correction():
+def test_an_enforced_reasoning_cap_needs_the_is_correction():
     """Forced reasoning closes are neutralized through the IS ratio; with the correction off they would train
     with the episode's advantage and teach the model to stop closing its reasoning."""
     with pytest.raises(ValueError, match="importance-sampling correction is off"):
@@ -333,14 +336,10 @@ class _Tokenizer:
         return list(self._encodings[text])
 
 
-def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), model_config=None, **config):
+def _close_host(knows_close: bool = True, model_config=None, **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncRolloutConfig(**config)
-    host._rollout_env = types.SimpleNamespace(
-        reasoning_effort="random",
-        thinking_budget_for_effort=budgets.get,
-        thinking_budget_enforced=lambda level: level not in soft,
-    )
+    host._rollout_env = _budgeted_env()
     host._tokenizer = _Tokenizer(knows_close)
     host.model = torch.nn.Module()
     if model_config is not None:
@@ -353,46 +352,42 @@ def _forced_close_ids(host) -> tuple[int, ...] | None:
     return host._resolve_forced_close_ids(host._reasoning_end_ids)
 
 
-def test_a_vllm_thinking_budget_resolves_the_close_the_engine_forces():
-    """A level's ``thinking_tokens`` or the run's ceiling each enforce a budget; the loss finds forced closes by id."""
-    assert _forced_close_ids(_close_host({"high": 16384})) == (_CLOSE_ID,)
-    assert _forced_close_ids(_close_host({}, rollout_max_thinking_tokens=8192)) == (_CLOSE_ID,)
+# The run-wide reasoning caps a vLLM run can bind: its own, or the turn less its answer room.
+_THINKING_CAP = {"rollout_max_tokens": 30000, "rollout_max_thinking_tokens": 21808}
+_ANSWER_ROOM = {"rollout_max_tokens": 30000, "rollout_max_answer_tokens": 8192}
+
+
+def test_a_vllm_reasoning_cap_resolves_the_close_the_engine_forces():
+    """``rollout_max_thinking_tokens`` or the answer room it leaves each cap the reasoning, and either way the loss
+    needs the marker's ids to find the closes the engine forced."""
+    assert _forced_close_ids(_close_host(**_THINKING_CAP)) == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host(**_ANSWER_ROOM)) == (_CLOSE_ID,)
 
 
 def test_a_multi_token_close_resolves_to_its_whole_sequence():
-    """gpt-oss's budget forces a five-token opener; the loss needs every id of it, in the engine's order."""
-    host = _close_host({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER)
+    """gpt-oss's cap forces a five-token opener; the loss needs every id of it, in the engine's order."""
+    host = _close_host(knows_close=False, rollout_reasoning_end_token=_OPENER, **_ANSWER_ROOM)
     assert _forced_close_ids(host) == _OPENER_IDS
 
 
-def test_no_forced_close_where_no_budget_can_be_enforced():
-    """SGLang enforces no thinking budget and an unbudgeted run caps nothing. A resolved marker would demand the IS
-    correction of a run that needs none, and zero the ratio at a close the model itself emitted with certainty."""
-    assert _forced_close_ids(_close_host({"high": 16384}, rollout_backend=SGLANG_BACKEND)) is None
-    assert _forced_close_ids(_close_host({})) is None
+def test_no_forced_close_where_no_cap_can_be_enforced():
+    """SGLang enforces no reasoning cap and an uncapped run caps nothing, the levels' episode budgets included, so
+    neither forces a close: a resolved marker would demand the IS correction of a run that needs none, and zero the
+    ratio at a close the model itself emitted with certainty."""
+    assert _forced_close_ids(_close_host(rollout_backend=SGLANG_BACKEND, **_ANSWER_ROOM)) is None
+    assert _forced_close_ids(_close_host(rollout_max_tokens=30000)) is None
 
 
-def test_a_soft_budget_forces_a_close_only_where_a_ceiling_caps_it():
-    """A soft budget forces no close of its own; its ceiling does (the turn's answer room, or the run's cap)."""
-    every = {"low": 8192, "medium": 12288, "high": 16384}
-    soft = ("low", "medium", "high")
-    room = _close_host(every, soft=soft, rollout_max_tokens=30000, rollout_max_answer_tokens=8192)
-    assert _forced_close_ids(room) == (_CLOSE_ID,)
-    assert _forced_close_ids(_close_host(every, soft=soft, rollout_max_thinking_tokens=21800)) == (_CLOSE_ID,)
-    assert _forced_close_ids(_close_host(every, soft=soft)) is None, "no ceiling: no cap can bind"
-    assert _forced_close_ids(_close_host(every, soft=("low",))) == (_CLOSE_ID,), "an enforced level still binds"
-
-
-def test_a_vllm_budget_on_a_mistral_common_served_model_is_refused():
+def test_a_vllm_cap_on_a_mistral_common_served_model_is_refused():
     """vLLM encodes Mistral 4's [THINK]/[/THINK] markers as plain text while the model writes control tokens, so the
-    budget it accepts never counts. The wrapper's own model_type is mistral3; the text tower's spelling must match."""
+    cap it accepts never counts. The wrapper's own model_type is mistral3; the text tower's spelling must match."""
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
     with pytest.raises(ValueError, match=r"cannot enforce a thinking budget for model_type \['mistral4'\]"):
-        _close_host({"high": 16384}, model_config=mistral_small_4)
-    sglang = _close_host({"high": 16384}, model_config=mistral_small_4, rollout_backend=SGLANG_BACKEND)
+        _close_host(model_config=mistral_small_4, **_ANSWER_ROOM)
+    sglang = _close_host(model_config=mistral_small_4, rollout_backend=SGLANG_BACKEND, **_ANSWER_ROOM)
     assert _forced_close_ids(sglang) is None
-    assert _forced_close_ids(_close_host({}, model_config=mistral_small_4)) is None
-    assert _forced_close_ids(_close_host({"high": 16384}, model_config=CONFIG_MAPPING["mistral3"]())) == (_CLOSE_ID,)
+    assert _forced_close_ids(_close_host(model_config=mistral_small_4, rollout_max_tokens=30000)) is None
+    assert _forced_close_ids(_close_host(model_config=CONFIG_MAPPING["mistral3"](), **_ANSWER_ROOM)) == (_CLOSE_ID,)
 
 
 _CALL_ID = 200012
@@ -450,26 +445,26 @@ def test_a_cap_whose_close_the_tokenizer_does_not_write_is_refused():
     [
         (True, (_CLOSE_ID,), VLLM_BACKEND),
         (False, None, VLLM_BACKEND),
-        # A profile's cap reaches no request field on SGLang, which forces nothing.
+        # The cap reaches no request field on SGLang, which forces nothing.
         (True, None, SGLANG_BACKEND),
     ],
-    ids=["the-close-resolves", "soft-budgets-force-nothing", "sglang"],
+    ids=["the-close-resolves", "no-cap-forces-nothing", "sglang"],
 )
 def test_the_refusal_holds_only_where_an_unfindable_close_can_be_forced(capped, end_ids, backend):
     reject_unresolved_forced_closes(capped, end_ids, backend, AsyncRolloutConfig.rollout_reasoning_end_token)
 
 
 @pytest.mark.parametrize(
-    ("budgets", "soft", "config", "capped"),
+    ("config", "capped"),
     [
-        ({"high": 16384}, (), {}, True),
-        ({}, (), {"rollout_max_thinking_tokens": 8192}, True),
-        ({"high": 16384}, ("high",), {}, False),
+        (_THINKING_CAP, True),
+        (_ANSWER_ROOM, True),
+        ({"rollout_max_tokens": 30000}, False),
     ],
-    ids=["a-levels-budget", "the-runs-ceiling", "a-soft-budget-with-no-ceiling"],
+    ids=["the-runs-cap", "the-answer-room", "no-cap-whatever-a-levels-budget"],
 )
-def test_the_refusal_reads_whether_a_cap_can_bind(budgets, soft, config, capped):
-    assert _close_host(budgets, knows_close=False, soft=soft, **config)._any_episode_capped is capped
+def test_the_refusal_reads_whether_a_cap_can_bind(config, capped):
+    assert _close_host(knows_close=False, **config)._any_episode_capped is capped
 
 
 def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainers_name(caplog, monkeypatch):
@@ -477,25 +472,25 @@ def test_the_marker_warning_is_logged_once_by_the_main_process_under_the_trainer
         monkeypatch.setattr(reasoning, "is_global_main_process", lambda is_main=is_main: is_main)
         caplog.clear()
         with caplog.at_level(logging.WARNING):
-            assert _forced_close_ids(_close_host({"high": 16384}, knows_close=False)) is None
+            assert _forced_close_ids(_close_host(knows_close=False, **_THINKING_CAP)) is None
         warnings = [r.name for r in caplog.records if r.levelno == logging.WARNING]
         assert warnings == ["halo.trainers.grpo.environmental.reasoning"] * expected, (is_main, warnings)
 
 
-def _count_end_id(budgets: dict, knows_close: bool = True, **config) -> int | None:
-    return resolve_reasoning_end_token_id(_close_host(budgets, knows_close, **config)._reasoning_end_ids)
+def _count_end_id(knows_close: bool = True, **config) -> int | None:
+    return resolve_reasoning_end_token_id(_close_host(knows_close, **config)._reasoning_end_ids)
 
 
-def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_budgeted_vllm_run():
-    """A turn's reasoning is counted up to the marker wherever a vLLM run's episodes carry a budget: a soft one forces
-    no close, but the model still writes its own. A marker spanning several tokens (gpt-oss's opener) has no one id."""
-    assert _count_end_id({"high": 16384}) == _CLOSE_ID
-    assert _count_end_id({}, rollout_max_thinking_tokens=8192) == _CLOSE_ID
-    assert _count_end_id({"high": 16384}, soft=("high",)) == _CLOSE_ID
-    assert _count_end_id({}) is None
-    assert _count_end_id({"high": 16384}, rollout_backend=SGLANG_BACKEND) is None
-    assert _count_end_id({"high": 16384}, knows_close=False) is None
-    assert _count_end_id({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER) is None
+def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_capped_vllm_run():
+    """A turn's reasoning is counted up to the marker wherever a vLLM run caps its episodes' reasoning: an uncapped run
+    and SGLang resolve none, as does a marker the tokenizer does not write or one spanning several tokens (gpt-oss's
+    opener), which no one id marks."""
+    assert _count_end_id(**_THINKING_CAP) == _CLOSE_ID
+    assert _count_end_id(**_ANSWER_ROOM) == _CLOSE_ID
+    assert _count_end_id(rollout_max_tokens=30000) is None
+    assert _count_end_id(rollout_backend=SGLANG_BACKEND, **_ANSWER_ROOM) is None
+    assert _count_end_id(knows_close=False, **_THINKING_CAP) is None
+    assert _count_end_id(knows_close=False, rollout_reasoning_end_token=_OPENER, **_THINKING_CAP) is None
 
 
 _VETO = ISRMaskConfig(veto_min=0.1)

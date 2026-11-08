@@ -65,6 +65,14 @@ Serve bf16 weights, not a quantized checkpoint: a weight update cannot reach the
 transformed tensors a quantized engine stores. For GPT-OSS that means a bf16
 conversion of the release, not the stock MXFP4 one.
 
+The one exception is `rollout_weight_precision: fp8_block`, for a validated family.
+Export the server's checkpoint with `scripts/before_training/export_block_fp8.py`,
+serve it with the triton MoE backend, and on SGLang also export
+`SGLANG_ENABLE_JIT_DEEPGEMM=0` before `docker compose up`. Each sync then pushes
+block-FP8 weights. It saves engine memory and speeds up SGLang decode, but the sync
+itself is slower than bf16
+([FP8 rollouts](../agent-docs/infrastructure/rollout-servers.md#fp8-rollouts) ↗).
+
 The trainers send every sampling field with each request, so the run config, not
 the checkpoint's `generation_config.json`, decides how rollouts sample.
 
@@ -154,7 +162,10 @@ index) and `vllm_group_port` for online GRPO
 ([fields and defaults](../agent-docs/reference/configuration-reference.md#asyncrolloutconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
-  all of them bind on the trainer.
+  all of them bind on the trainer. `rollout_sync_topology: single_group` instead
+  forms one group over every server, sends each chunk once, and takes the one
+  `rollout_group_port`
+  ([how it fails](../agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server) ↗).
 - **Name the trainer's address** when the server cannot dial back to the one on
   the route to it (asymmetric routing on a multi-homed host): `VLLM_GROUP_HOST`
   (or `SGLANG_GROUP_HOST`) in the trainer's environment, or a `group_host` entry
@@ -171,6 +182,12 @@ engine over NCCL: no restart, no checkpoint on disk. Every server pauses for the
 push. vLLM freezes in-flight requests and resumes them; SGLang drops them and the
 rollout actor re-issues the turn.
 
+A LoRA run on SGLang can send only the adapter instead: `rollout_adapter_sync: true`
+pushes the frozen base once, then loads the small adapter after each step without
+pausing the server. Launch the server with `SGLANG_LORA_MAX_RANK` set to at least
+`lora_r`; the trainer refuses a model or server it cannot serve this way and names
+the reason ([Adapter sync](../agent-docs/infrastructure/rollout-servers.md#adapter-sync)).
+
 MoE models must be served with `--moe-backend triton` (`--moe-runner-backend
 triton` on SGLang), the compose default. The backends the engine picks on its
 own repack expert weights after loading, so an update would write into the wrong
@@ -180,7 +197,7 @@ layout with no error. The trainer refuses a server that reports one of them.
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
+| 400 on every rollout, zero tokens back | The server cannot take a reasoning cap. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
 | `… the server parsed no call` by the second round | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser is refused at startup. If the parser is right and the model only writes malformed calls so far, raise `tool_parser_watch_rounds` or set it to `null`. |
 | `No token carried a policy gradient …` | Every group tied or dropped: read the shares in the message. A launch that has not trained yet stops at `zero_gradient_round_limit` rounds in a row, so raise it for a very sparse reward; past its first trained round a streak only warns. |
 | `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server. Serve from this repo's image and restate the flags the message names. |

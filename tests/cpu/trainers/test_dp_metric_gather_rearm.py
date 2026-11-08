@@ -87,8 +87,8 @@ class _PerSplitTrainer(DistributedTrainerMixin, _PerSplitEvaluate):
 def test_each_split_of_a_dict_takes_its_own_escape_hatch_verdict(monkeypatch):
     """The dict itself is never measured, so an even split's metrics stay global beside a ragged one's rank-0 metrics,
     and the ragged split's hatch is lifted before the next split runs."""
-    monkeypatch.setattr("halo.trainers.evaluation.has_process_group", lambda: True)
-    monkeypatch.setattr("halo.trainers.evaluation.barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr("halo.trainers.loop.evaluation.has_process_group", lambda: True)
+    monkeypatch.setattr("halo.trainers.loop.evaluation.barrier", lambda *args, **kwargs: None)
     trainer = _PerSplitTrainer([True, False])
 
     trainer.evaluate({"ragged": "ragged split", "even": "even split"})

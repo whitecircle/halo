@@ -81,6 +81,7 @@ def _spine_host(model, backend: str, ran: list[str]):
         **{step: (lambda step=step: ran.append(step)) for step in _SPINE_STEPS},
         model=model,
         _rollout_backend=backend,
+        _rollout_weight_precision="bf16",
         _loss_logits_width=lambda: 7,
         _verify_full_logits_fit=lambda width: ran.append(f"_verify_full_logits_fit({width})"),
     )

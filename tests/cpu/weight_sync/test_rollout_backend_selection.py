@@ -8,11 +8,11 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-import halo.environments.engine_wire as engine_wire
+import halo.environments.rollouts.engine_wire as engine_wire
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import capture_generation_tokens, turn_from_chat_completion
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
@@ -200,8 +200,9 @@ def test_vllm_payload_still_carries_them():
 
 
 def test_dropped_thinking_budget_is_announced_once(caplog):
-    """The budget here came from ``reasoning_effort_profiles``, since ``rollout_max_thinking_tokens`` is rejected for
-    SGLang. The template still renders it, so dropping it silently leaves a cap nothing enforces."""
+    """The cap here is the turn less its answer room (``rollout_max_answer_tokens``), since
+    ``rollout_max_thinking_tokens`` is rejected for SGLang. Dropping it silently would leave a cap the config states
+    and nothing enforces."""
     engine_wire._thinking_budget_unenforced_warned.discard("sglang")
     try:
         with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):

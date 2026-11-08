@@ -6,7 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from halo.models.config_access import SPECIAL_TOKEN_ID_FIELDS, restore_config_fields, snapshot_config_fields
+from halo.models.introspection.config_access import (
+    SPECIAL_TOKEN_ID_FIELDS,
+    restore_config_fields,
+    snapshot_config_fields,
+)
 
 
 class _Config(SimpleNamespace):

@@ -33,7 +33,7 @@ Add the family predicate beside the existing ones and wire it into whichever sea
 
 ## Correct the conversion mapping
 
-transformers' `conversion_mapping` both spells a checkpoint's keys at load and reverts them at save, so a wrong entry shows up as randomly initialized weights or an export no engine reads. A family corrects it with one `ConversionOverride` in `CONVERSION_OVERRIDES` (`halo/models/conversion_overrides.py`), never inside `apply_family_patches`, which a merge tool or stock `from_pretrained` never calls. The leaf registers at import, and `checkpoint_keys.py` and `checkpoint_coverage.py` both import it, so every load, revert and tool reads the corrected mapping.
+transformers' `conversion_mapping` both spells a checkpoint's keys at load and reverts them at save, so a wrong entry shows up as randomly initialized weights or an export no engine reads. A family corrects it with one `ConversionOverride` in `CONVERSION_OVERRIDES` (`halo/models/upstream/conversion_overrides.py`), never inside `apply_family_patches`, which a merge tool or stock `from_pretrained` never calls. The leaf registers at import, and `checkpoint_keys.py` and `checkpoint_coverage.py` both import it, so every load, revert and tool reads the corrected mapping.
 
 An entry names `key` (a `model_type` or class name), `upstream` (transformers' own entries as `(sources, targets)`, empty where it ships none) and `rewrite` (from those entries to the ones to register). When transformers' entries stop matching `upstream`, the import raises: a rewrite of moved entries would misplace weights with no other symptom, and it is cheapest to catch at the pin bump.
 
@@ -49,7 +49,7 @@ A family that also declares `exports_source_config_schema` keeps transformers' o
 
 ## Replacing an upstream forward
 
-Guard each upstream signature a replacement is written for with `verify_upstream_parameters` (`halo/models/upstream_guard.py`), so a release that moved it fails at load. Where the forward calls a module-level helper, replace the helper instead of copying the forward, as `halo/models/nemotron_h.py` does for the Mamba scan. A forward walking a packed row reads `row_documents` (`halo/models/row_documents.py`), which gives each document's span and its unpadded tokens.
+Guard each upstream signature a replacement is written for with `verify_upstream_parameters` (`halo/models/upstream/upstream_guard.py`), so a release that moved it fails at load. Where the forward calls a module-level helper, replace the helper instead of copying the forward, as `halo/models/families/nemotron_h.py` does for the Mamba scan. A forward walking a packed row reads `row_documents` (`halo/models/row_documents.py`), which gives each document's span and its unpadded tokens.
 
 ## Declare the head transform
 
@@ -172,19 +172,19 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `HF_MODULE_NAMES` — the HF MoE block class name(s) this EP layer replaces. The sole registration point.
 - The expert count is not declared: the base `detect_num_experts()` reads it off the expert container, a per-expert `nn.ModuleList`'s length or else its `num_experts`, so a container carrying neither raises at the first build.
 
-    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` / `resolve_expert_ffn_width` / `resolve_dispatch_width` (the hidden state, or the latent of a block projecting into one around its experts) in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
+    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` / `resolve_expert_ffn_width` in `halo/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
 
 - `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`halo/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
 
     | Kind | Hub layout | Families |
     |---|---|---|
     | `FUSED` (default) | fused `experts.gate_up_proj` / `down_proj`, `F.linear` convention; `key_prefix=""` drops `experts.` where the EP layer replaces the container itself | Cohere2 MoE, DeepSeek-V4, GLM-5 Next, Qwen3.5/3.6, Qwen3.8-Flash-Next, Mistral4, Inkling, Step-3.7, Zaya; Gemma4 bare |
-    | `FUSED_SPLIT_PER_EXPERT` | the fused bank split into `experts.{i}.<gate\|up\|down>.weight` | GLM-4, Laguna, Qwen3-Next, LFM-2 (`w1`/`w3`/`w2`) |
+    | `FUSED_SPLIT_PER_EXPERT` | the fused bank split into `experts.{i}.<gate\|up\|down>.weight` | GLM-4, GLM-5 Next, Laguna, Qwen3-Next, LFM-2 (`w1`/`w3`/`w2`) |
     | `SEPARATE_GLU` | gate/up/down stored apart, written per expert | Qwen3, Bailing |
     | `SEPARATE_MLP` | up and down of a gateless expert, written per expert under those names | Nemotron-H |
     | `INTERLEAVED_GLU` | GPT-OSS's interleaved `[g0, u0, ...]` pair with biases, matmul convention | GPT-OSS |
 
-    `per_expert_keys` names the `(gate, up, down)` per-expert spelling. A `FUSED` family declares it where transformers also loads that spelling — its hub's for DeepSeek-V4, Cohere2 MoE and GLM-5 Next, the one `unfuse_moe_experts.py` writes for Qwen3.5/3.6 and Qwen3.8-Flash-Next; a family without one is what that tool refuses, `SEPARATE_MLP` included, whose saves are per expert already. A runtime tensor a layout has no branch for raises rather than dropping out of the export.
+    `per_expert_keys` names the `(gate, up, down)` per-expert spelling. A `FUSED` family declares it where transformers also loads that spelling — its hub's for DeepSeek-V4 and Cohere2 MoE, the one `unfuse_moe_experts.py` writes for Qwen3.5/3.6 and Qwen3.8-Flash-Next; a family without one is what that tool refuses, `SEPARATE_MLP` included, whose saves are per expert already. A runtime tensor a layout has no branch for raises rather than dropping out of the export.
 
 - **Rollout-engine support is not a family declaration.** Both pinned engines read the layout the family's `ExpertLayout` writes, so nothing here is per engine.
 
@@ -280,7 +280,7 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
     AutoModelForCausalLM.register(YourConfig, YourForCausalLM)
     ```
 
-3. **Trigger registration** by adding a module-level side-effect import of that module to `halo/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `halo/models/seq_cls_heads.py` register).
+3. **Trigger registration** by adding a module-level side-effect import of that module to `halo/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `halo/models/upstream/seq_cls_heads.py` register).
 
     `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy list-form tied-weight keys, which convert to the v5 dict form; `reject_untieable_list_ties` refuses a tied config that carried one, since `{}` ties nothing.
 

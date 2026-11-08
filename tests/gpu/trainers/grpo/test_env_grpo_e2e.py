@@ -50,6 +50,9 @@ parser.add_argument("--prefetch-depth", type=int, default=None)
 # for the replay flip-rate comparison.
 parser.add_argument("--chunked", action="store_true")
 parser.add_argument("--length-ordered", choices=("unset", "false"), default="unset")
+# Logs phase_time/* and checks them: every phase present, the slowest rank never under the mean, and what no phase
+# holds a small share of the step.
+parser.add_argument("--phase-times", action="store_true")
 parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
 parser.add_argument("--unsharded-ep1-experts", action="store_true", help="fsdp_shard_ep1_experts=False")
 parser.add_argument("--world", type=int, default=None, help="ranks, a multiple of the expert group and of TP")
@@ -112,6 +115,7 @@ def run(ctx):
         prefetch_depth=ARGS.prefetch_depth,
         chunked=ARGS.chunked,
         length_ordered=None if ARGS.length_ordered == "unset" else False,
+        phase_times=ARGS.phase_times,
         model_name=MODEL,
     )
 

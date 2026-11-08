@@ -8,8 +8,8 @@ import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
@@ -75,12 +75,14 @@ def batch_host(
         balance_token_mass=balance_token_mass,
         scale_rewards_std_floor=std_floor,
     )
+    # An environment that draws no effort level: no level prices reasoning, so the reward build charges no term.
+    host._level_reasoning_terms = {None: (None, 0.0)}
     host._carry_reasoning = False
     host._is_correction = is_correction
     host._forced_close_ids = forced_close_ids
     host._isr_mask_config = isr_mask_config or ISRMaskConfig()
     host._breaker_tripped_this_step = False
-    host._empty_rollout_steps = 0
+    host.callback_handler = types.SimpleNamespace(callbacks=[])
     host._routing_injector = None
     host._batch_errors = BatchBuildFence()
     host.vllm_importance_sampling_clip_max = 2.0
@@ -90,7 +92,7 @@ def batch_host(
     host.pad_token_id, host.eos_token_id = 0, 2
     host._tokenize_step_rows = lambda results: [[r] for r in rows]
     host._get_per_token_logps_and_entropies = lambda model, ids, mask, keep, compute_entropy: (policy, None, None)
-    host._compute_ref_logps = lambda ids, mask, keep, order: reference
+    host._compute_ref_logps = lambda ids, mask, keep, order, plan=None: reference
     host._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     host._save_completions, host.log_completions = save_completions, False
     host._logs = unbounded_completion_logs()

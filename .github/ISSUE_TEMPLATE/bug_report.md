@@ -16,7 +16,7 @@ labels: bug
 ## Environment
 
 - GPU(s): <!-- e.g. 8x B300 / 8x H200 -->
-- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.2.0 -->
+- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.3.0rc1 -->
 - Halo version / commit: <!-- git rev-parse --short HEAD, or the release tag -->
 - Parallelism: <!-- FSDP / EP=? / CP=? / TP=? / ETP=? / PP=? -->
 - Model + config: <!-- HF id + the YAML / command -->

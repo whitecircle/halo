@@ -15,7 +15,8 @@ import halo.callbacks.balancing as balancing
 import halo.callbacks.factory as factory
 import halo.models.moe.balancing as moe_balancing
 from halo.callbacks.balancing import apply_balancing_mode
-from halo.models.config_access import (
+from halo.models.families.zaya import patch_zaya_router_load_recording
+from halo.models.introspection.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
@@ -27,7 +28,6 @@ from halo.models.moe.balancing import (
 from halo.models.moe.config_fields import resolve_moe_routing
 from halo.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
 from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
-from halo.models.zaya import patch_zaya_router_load_recording
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 

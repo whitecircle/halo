@@ -47,8 +47,8 @@ lora_target_modules:
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> a servable checkpoint
                                       #   (~360 GB, ~100 GB of it the n-gram table, hard-linked from the previous
-                                      #   save); without it the mixed adapter resumes here but
-                                      #   merge_peft_adapters.py refuses it
+                                      #   save); without it the adapter stays mixed and
+                                      #   merge_peft_adapters.py streams the merge instead
 
 # --- Attention & sequence ---
 # Packed rows keep their documents apart in every mixer: QSA and the PLE n-gram history and conv read seq_idx, the

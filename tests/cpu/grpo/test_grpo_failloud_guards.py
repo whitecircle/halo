@@ -154,6 +154,7 @@ def test_a_prompt_with_no_user_turn_raises_before_any_rollout_is_submitted():
     host.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
     host.model = types.SimpleNamespace(training=True)
     host._prefetch_enabled = False
+    host._is_tp_follower = lambda: False
     host._rollout_manager = _NoRollouts()
     convo = [{"role": "system", "content": "sys only"}]
 

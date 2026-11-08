@@ -21,9 +21,10 @@ from halo.checkpoint.parallel.adapters import read_adapter_across_ranks
 from halo.checkpoint.parallel.resume_weights import built_from_checkpoint_across_ranks
 from halo.checkpoint.parallel.writing import chunked_saveable_tensors
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.models.param_roles import persistent_buffers
-from halo.models.peft_adapters import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
-from halo.models.unwrapping import strip_base_layer_segment
+from halo.distributed.lora_fold import lora_folded_data
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import strip_base_layer_segment
+from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor
 from halo.runtime.ranks import is_global_main_process

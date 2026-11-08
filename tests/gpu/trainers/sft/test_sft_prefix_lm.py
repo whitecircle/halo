@@ -39,7 +39,7 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.prefix_lm import prefix_lm_token_type_ids
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.gradient_checkpointing import in_backward_pass
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main

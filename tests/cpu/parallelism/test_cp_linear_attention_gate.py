@@ -10,7 +10,7 @@ from transformers import CONFIG_MAPPING
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.models.attention.layout import has_linear_attention_layers
-from halo.models.config_access import get_config_field
+from halo.models.introspection.config_access import get_config_field
 
 COMPOSITE_RELEASES = ("qwen3_5", "qwen3_5_moe", "glm5_next", "qwen4_exp")
 

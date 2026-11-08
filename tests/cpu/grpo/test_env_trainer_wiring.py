@@ -16,9 +16,10 @@ from trl import GRPOConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig, ISRMaskConfig
 from halo.environments.environment_base import EnvironmentBase
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
-from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
+from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental import trainer as env_trainer
-from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.loss import importance_sampling
+from halo.trainers.grpo.environmental.loss.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import (
     DistributedAsyncEnvironmentalGRPOTrainer,
@@ -44,13 +45,13 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     trainer.use_vllm = False
     trainer._rollout_env = SimpleNamespace(
         reasoning_effort=None,
-        thinking_budget_for_effort=lambda level: None,
-        thinking_budget_enforced=lambda level: True,
+        reasoning_terms_for_effort=lambda level: (None, 0.0),
         get_tools_schema=lambda: None,
         TOOLS_ARRIVE_ON_RESET=False,
     )
     trainer._tokenizer = word_level_tokenizer([_STOP])
     trainer.model = torch.nn.Module()
+    trainer.parallelism_config = SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     trainer.callback_handler = CallbackHandler([], trainer.model, trainer._tokenizer, None, None)
     return trainer
 

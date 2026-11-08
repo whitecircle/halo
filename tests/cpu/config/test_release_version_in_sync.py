@@ -24,15 +24,20 @@ FIXED_STATEMENTS: dict[str, re.Pattern[str]] = {
     "uv.lock": re.compile(r'^name = "halo"\nversion = "(?P<version>[^"]+)"$', re.MULTILINE),
 }
 
+# A release version, with its release-candidate suffix where it has one (``1.3.0rc1``).
+RELEASE_VERSION = r"\d+(?:\.\d+)+(?:rc\d+)?"
+
 # The README feed is newest first, so only its first release entry states the current release.
-RELEASE_ENTRY = re.compile(r"^- \*\*(?P<date>\d{4}-\d{2}-\d{2}) — Halo (?P<version>\d+(?:\.\d+)+)\.\*\*", re.MULTILINE)
+RELEASE_ENTRY = re.compile(
+    rf"^- \*\*(?P<date>\d{{4}}-\d{{2}}-\d{{2}}) — Halo (?P<version>{RELEASE_VERSION})\.\*\*", re.MULTILINE
+)
 DATE_RELEASED = re.compile(r'^date-released:\s*"?(?P<date>\d{4}-\d{2}-\d{2})"?\s*$', re.MULTILINE)
 
 # A published pin: ``blackwell-X.Y.Z`` / ``hopper-X.Y.Z``, or a rollout image's
 # ``vllm-<engine>-X.Y.Z``, whose engine version may carry a ``.post1`` / ``rc1`` / ``.dev0`` suffix.
 # A bare engine tag (``sglang-<engine>``) names no Halo release.
 IMAGE_PIN = re.compile(
-    r"\b(?:blackwell|hopper|(?:vllm|sglang)-\d+(?:\.\d+)+(?:\.?(?:post|rc|dev)\d+)?)-(?P<version>\d+(?:\.\d+)+)\b"
+    rf"\b(?:blackwell|hopper|(?:vllm|sglang)-\d+(?:\.\d+)+(?:\.?(?:post|rc|dev)\d+)?)-(?P<version>{RELEASE_VERSION})\b"
 )
 
 PIN_TREES = (
@@ -120,7 +125,11 @@ def disagreements(texts: Mapping[str, str]) -> list[str]:
     return reported
 
 
-def _next_patch(version: str) -> str:
+def _next_version(version: str) -> str:
+    """The next release candidate of a candidate, else the next patch: a different version of the same shape."""
+    final, candidate, number = version.partition("rc")
+    if candidate:
+        return f"{final}rc{int(number) + 1}"
     head, _, patch = version.rpartition(".")
     return f"{head}.{int(patch) + 1}"
 
@@ -140,7 +149,7 @@ def test_every_statement_of_the_release_agrees(texts):
 
 def test_a_mismatch_in_any_one_statement_is_reported_alone(texts):
     """Rewrite each statement in an in-memory copy: the gate names exactly that one, at its line."""
-    bumped = _next_patch(declared_version(texts))
+    bumped = _next_version(declared_version(texts))
     for statement in release_statements(texts):
         original = texts[statement.path]
         planted = {**texts, statement.path: original[: statement.start] + bumped + original[statement.end :]}
@@ -149,7 +158,7 @@ def test_a_mismatch_in_any_one_statement_is_reported_alone(texts):
 
 def test_a_bump_that_stops_at_pyproject_is_reported_everywhere_else(texts):
     declared = declared_version(texts)
-    bumped = _next_patch(declared)
+    bumped = _next_version(declared)
     pyproject = re.sub(
         rf'^version = "{re.escape(declared)}"$',
         f'version = "{bumped}"',
@@ -164,7 +173,7 @@ def test_a_bump_that_stops_at_pyproject_is_reported_everywhere_else(texts):
 
 def test_both_pin_shapes_are_read_and_a_bare_engine_tag_is_not(texts):
     """Planted in memory, so each pin shape is proven whether or not a doc writes it."""
-    bumped, engine = _next_patch(declared_version(texts)), "1.2.3"
+    bumped, engine = _next_version(declared_version(texts)), "1.2.3"
     doc = (
         f"docker pull public.ecr.aws/whitecircle/halo:hopper-{bumped}\n"
         f"docker pull public.ecr.aws/whitecircle/halo:vllm-{engine}-{bumped}\n"
@@ -201,6 +210,21 @@ def test_the_pin_scan_reads_every_documented_area(texts):
     pinned = {path for path, text in texts.items() if IMAGE_PIN.search(text)}
     silent = [area for area in DOCUMENTED_PIN_AREAS if not any(path.startswith(area) for path in pinned)]
     assert not silent, f"the scan read no image pin under {silent}; the gate certifies nothing there"
+
+
+def test_a_release_candidate_is_read_with_its_suffix(texts):
+    """Read without its suffix, ``9.9.9rc1`` would pass as the final ``9.9.9``."""
+    candidate = "9.9.9" + "rc1"  # Built, so this file states no pin of its own.
+    readme = texts["README.md"]
+    start = _newest_release_entry(readme).start()
+    planted = {
+        **texts,
+        "README.md": readme[:start] + f"- **2099-01-01 — Halo {candidate}.** Planted.\n" + readme[start:],
+        "human-docs/planted.md": f"docker pull public.ecr.aws/whitecircle/halo:blackwell-{candidate}\n",
+    }
+    reported = disagreements(planted)
+    assert f"README.md:{readme.count(chr(10), 0, start) + 1} states {candidate}" in reported, reported
+    assert f"human-docs/planted.md:1 states {candidate}" in reported, reported
 
 
 if __name__ == "__main__":

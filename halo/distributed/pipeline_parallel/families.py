@@ -13,9 +13,9 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.masking_utils import create_recurrent_attention_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, MoeModelOutputWithPast
 
-from halo.models.config_access import text_config
-from halo.models.module_tree import find_attr_name
-from halo.models.qwen4_exp.forwards import document_forwards_installed, document_padding_mask
+from halo.models.families.qwen4_exp.forwards import document_forwards_installed, document_padding_mask
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import find_attr_name
 
 
 @dataclass(frozen=True)

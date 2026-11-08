@@ -12,9 +12,9 @@ from transformers import Trainer
 from trl.trainer.utils import entropy_from_logits
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.trainers import world_metrics
+from halo.trainers.metrics import world_metrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import fake_world, rank_states
 
 CP_SIZE = 2

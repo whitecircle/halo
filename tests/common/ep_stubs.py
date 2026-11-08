@@ -14,6 +14,7 @@ from torch import nn
 from halo.distributed.expert_parallel import config as ep_config_module
 from halo.distributed.expert_parallel.deepep.backends import DeepEPBackend
 from halo.distributed.expert_parallel.moe_layer import layer as layer_module
+from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
 from tests.common.parallelism import stubbed_rank_ep_config
@@ -50,6 +51,23 @@ class LoopbackBackend(DeepEPBackend):
     def combine_backward(self, grad_combined_x, handle):
         self._log.append(("combine_backward", self._d, handle))
         return grad_combined_x.clone()
+
+
+class ReadyGather:
+    """An issued expert gather whose result is already in hand."""
+
+    def __init__(self, tensors: dict):
+        self._tensors = tensors
+
+    def finish(self) -> dict:
+        return self._tensors
+
+
+class ReadyGatherMixin:
+    """The weight sync's issue-then-finish seam for a stub that defines only ``gather_expert_state_dict``."""
+
+    def start_gather_expert_state_dict(self, *, device="cpu", merge_lora=False, retain=True, dst=None, stream=None):
+        return ReadyGather(self.gather_expert_state_dict(device=device, merge_lora=merge_lora, retain=retain))
 
 
 class StubEPLayerBase(EPMoELayerBase):
@@ -114,3 +132,47 @@ def stubbed_rank_ep_layer(
         patch.object(ep_config_module, "supports_grouped_mm", return_value=grouped),
     ):
         return layer_cls(block, config, weights_already_sharded=weights_already_sharded)
+
+
+def signed_zero_nan(values: torch.Tensor) -> torch.Tensor:
+    """``values`` with a negative zero and a NaN payload in front, cast to bf16: bytes a float sum would change."""
+    values.view(-1)[0] = -0.0
+    values.view(-1)[1] = float("nan")
+    return values.to(torch.bfloat16)
+
+
+class GatherStubLayer(EPGatherMixin, nn.Module):
+    """A fused-layout expert layer holding the given frozen ``gate_up_proj`` and ``down_proj`` shards."""
+
+    has_expert_lora = False
+
+    def __init__(
+        self, family: MoEFamilySpec, gate_up_proj, down_proj, *, process_group, dispatch_ep_group, ep_size: int
+    ):
+        nn.Module.__init__(self)
+        self.FAMILY = family
+        self.ep_config = SimpleNamespace(
+            process_group=process_group, dispatch_ep_group=dispatch_ep_group, ep_size=ep_size
+        )
+        self.expert_tp_group, self.expert_tp_size = None, 1
+        self.expert_lora_scaling, self._expert_lora_attrs = 1.0, frozenset()
+        self.gate_up_proj = nn.Parameter(gate_up_proj, requires_grad=False)
+        self.down_proj = nn.Parameter(down_proj, requires_grad=False)
+
+    def _base_expert_named_params(self):
+        return [("gate_up_proj", self.gate_up_proj), ("down_proj", self.down_proj)]
+
+    expert_named_params = _base_expert_named_params
+
+
+class RecordingForwarder:
+    """Keeps a clone of every tensor sent to it."""
+
+    def __init__(self):
+        self.sent: dict[str, torch.Tensor] = {}
+
+    def send(self, name: str, tensor: torch.Tensor, *, bounded: bool = True) -> None:
+        self.sent[name] = tensor.clone()
+
+    def flush(self) -> None:
+        pass

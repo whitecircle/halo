@@ -22,7 +22,7 @@ from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import resolve_training_dtype
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.consensus import (
     DeferredRankFailure,
     rank_consensus,
@@ -32,7 +32,6 @@ from halo.runtime.consensus import (
 )
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import get_global_rank, is_global_main_process
-from halo.trainers.dataloaders import dp_representative_ranks
 from halo.trainers.grpo.offline.reference_cache import (
     REFERENCE_BUFFER_VALUES,
     MappedReferenceScores,
@@ -41,6 +40,7 @@ from halo.trainers.grpo.offline.reference_cache import (
     mapped_reference_scores,
     reference_payload_mismatch,
 )
+from halo.trainers.loop.dataloaders import dp_representative_ranks
 from halo.trainers.reference_logps import (
     LOGPROB_PRECISION_KEY,
     PREVIOUS_CHECKPOINT_RECOVERY,

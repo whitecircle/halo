@@ -44,8 +44,8 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.tokenizer_setup import vocabulary_grown
-from halo.models.param_roles import persistent_buffers
-from halo.models.unwrapping import (
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
     base_transformers_model,
     find_peft_model,

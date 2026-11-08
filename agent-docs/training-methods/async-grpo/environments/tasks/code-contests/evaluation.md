@@ -13,7 +13,7 @@ files and re-grading shared by every environment are on [Evaluation](../../../ev
 | `leaderboard` | `max_submissions: 1`, `max_test_calls: 0` | One graded program per sample, scratchpad closed. The prompt, tool-call format and grader stay this environment's, so its numbers are not a benchmark's published ones |
 
 - A configured value that contradicts a pin raises at construction. An effort profile's tool budgets are
-  validated, then give way to the pins (logged); the level keeps its `thinking_tokens`.
+  validated, then give way to the pins (logged).
 - Under `leaderboard` the model learns the scratchpad is closed only from its reply, a
   [budget-0 call](tools.md#refused-calls) that is not a refusal.
 
@@ -55,17 +55,16 @@ mean-over-samples pass@1 ([Running an evaluation](../../../evaluation.md#running
 
 - `--reasoning_effort` defaults to the training config's level, where `reasoning_effort: null` is `none`. A
   config without the key, or no config, takes `medium`, as training does.
-- `--max_tokens` defaults to the training config's `rollout_max_tokens`. Without one it follows the level:
-  enforced, the level's `thinking_tokens` (profile overrides in `--env_kwargs` included) plus 4096, which the
-  served context window must exceed; soft, 32768 or that sum where larger; `none`, 32768.
-- Any thinking cap needs a [reasoning parser](../../../reasoning.md#reasoning-budget) on the vLLM server, which
+- `--max_tokens` defaults to the training config's `rollout_max_tokens`, else 32768. The level never changes it.
+- Without `--training_config` no reasoning cap is sent. A training config's cap needs a
+  [reasoning parser](../../../reasoning.md#reasoning-cap) on the vLLM server, which
   otherwise rejects the request.
 - Evaluate a non-thinking model with `--reasoning_effort none`; a think-tag parser reads its whole answer as
   reasoning. `none` does not switch a thinking model's reasoning off: the request carries no `reasoning_effort`, so
   the template keeps its own default. Qwen3/3.5/3.6 still think, and stop only on `enable_thinking: false` (the
   server's `--default-chat-template-kwargs`, or `rollout_chat_template_kwargs` under `--training_config`).
 - The eval treats the server as SGLang only when `--training_config` names `rollout_backend: sglang`, and then
-  drops the budget as training does.
+  drops the reasoning cap as training does.
 
 ## LiveCodeBench window
 

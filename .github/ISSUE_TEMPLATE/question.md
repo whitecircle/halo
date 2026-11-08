@@ -20,5 +20,5 @@ labels: question
 ## Environment (if relevant)
 
 - GPU(s): <!-- e.g. 8x B300 / 8x H200 -->
-- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.2.0 -->
+- Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.3.0rc1 -->
 - Model + parallelism: <!-- HF id + FSDP / EP=? / CP=? / TP=? / ETP=? / PP=? -->

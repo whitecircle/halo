@@ -15,7 +15,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
 )
 
-import halo.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
+import halo.models.upstream.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
 from halo.checkpoint.model_card import HUB_TAGS
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified, reject_adapter_directory
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
@@ -36,14 +36,14 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
+from halo.models.families.mistral4 import patch_mistral4_flash_packed_position_ids
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.qwen4_exp.forwards import apply_qwen4_exp_patches
+from halo.models.families.zaya import apply_zaya_patches
 from halo.models.hyper_connections import apply_hyper_connection_patches
-from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
-from halo.models.model_classes import auto_map_references, mapped_model_class
+from halo.models.introspection.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
+from halo.models.introspection.model_classes import auto_map_references, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
-from halo.models.nemotron_h import apply_nemotron_h_patches
-from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
-from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

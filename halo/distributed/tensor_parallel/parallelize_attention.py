@@ -14,8 +14,8 @@ from halo.distributed.grad_reduce import SumGradAcrossGroup
 from halo.distributed.mesh import tp_submesh
 from halo.distributed.tensor_parallel.local_linears import shard_linear
 from halo.distributed.tensor_parallel.plain_params import register_hand_sliced, register_per_head_norm_params
-from halo.models.config_access import get_config_field
-from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
+from halo.models.introspection.config_access import get_config_field
+from halo.models.introspection.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
 
 logger = logging.getLogger(__name__)
 

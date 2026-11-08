@@ -27,7 +27,7 @@ fp32_non_ep_params: true
 
 # --- Attention & kernels ---
 attn_implementation: flash_attention_2
-packing: true                         # fixed-length only — never padding_free (M-RoPE varlen crash)
+packing: true                         # fixed-length rows
 max_length: 33000
 
 # --- Training ---

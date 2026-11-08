@@ -37,7 +37,7 @@ from halo.models.attention.selection import (
     select_supported_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     TOOLKIT_STAMP_PREFIX,
     config_export_ready,
     set_config_field_run_scoped,

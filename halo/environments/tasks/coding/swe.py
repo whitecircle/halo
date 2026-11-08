@@ -8,9 +8,9 @@ from contextvars import ContextVar
 from typing import Any
 
 from halo.config_validation import present, require_callable, require_finite
-from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated

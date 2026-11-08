@@ -24,7 +24,7 @@ from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
 from halo.data.vlm_render import VLM_OUTPUT_FEATURES, extract_conversation_images
 from halo.model_loading.parallel import model_source
 from halo.model_loading.parallel.model_source import probe_checkpoint
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.modality import is_vlm_model
 from tests.common.models import QWEN2_5_VL_3B, QWEN3_5_MOE_35B
 from tests.common.tokenizers import load_cached_processor
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer

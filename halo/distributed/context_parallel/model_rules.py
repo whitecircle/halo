@@ -11,7 +11,7 @@ from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from halo.models.attention.layout import LINEAR_ATTENTION_LAYER_TYPE, has_linear_attention_layers
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
-from halo.models.config_access import get_config_field, text_config
+from halo.models.introspection.config_access import get_config_field, text_config
 
 logger = logging.getLogger(__name__)
 

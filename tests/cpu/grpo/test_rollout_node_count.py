@@ -7,6 +7,7 @@ import types
 
 import pytest
 
+from halo.environments.rollouts.rollout_pool import RolloutPoolPlan
 from halo.trainers.grpo.environmental import async_rollouts
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 
@@ -61,23 +62,49 @@ def test_each_rank_starts_its_round_robin_at_its_data_parallel_rank(monkeypatch)
     monkeypatch.setattr(async_rollouts, "RolloutManager", build)
     monkeypatch.setattr(async_rollouts, "ray", types.SimpleNamespace(is_initialized=lambda: True))
     host = types.SimpleNamespace(
+        _adapter_versions=None,
+        _adapter_routes=None,
         async_config=types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=1,
+            rollout_actor_budget=1,
             max_concurrent_rollouts=1,
             get_server_urls=lambda: ["http://10.0.0.1:8000"],
             get_rollout_config=lambda **kwargs: None,
         ),
         accelerator=types.SimpleNamespace(num_processes=8),
         parallelism_config=types.SimpleNamespace(get_data_parallel_rank=lambda: 5),
+        _resolve_rollout_pool=lambda: RolloutPoolPlan(actors_per_rank=1, max_concurrent=1, warnings=()),
         _environment_spec="env",
         _env_config_dict={},
         _rollout_stop_token_ids=None,
         _reasoning_end_ids=None,
     )
     with pytest.raises(_Built):
-        AsyncRolloutMixin._start_rank_rollout_components(host)
+        AsyncRolloutMixin._start_rollout_pool(host)
     assert captured["first_server"] == 5
+
+
+@pytest.mark.parametrize(
+    ("group_size", "local_world", "global_world", "ray_address", "workers", "actors"),
+    [(1, 8, 8, None, 256, 32), (2, 8, 8, None, 256, 64), (8, 8, 16, None, 256, 256), (2, 8, 16, "ray://h:1", 256, 32)],
+    ids=["no-group", "tp2", "etp8-one-leader", "shared-cluster-counts-leaders"],
+)
+def test_a_local_pool_is_split_over_the_leaders_of_the_node_alone(
+    monkeypatch, group_size, local_world, global_world, ray_address, workers, actors
+):
+    monkeypatch.setattr(async_rollouts, "get_local_world_size", lambda: local_world)
+    monkeypatch.setattr(async_rollouts, "get_global_world_size", lambda: global_world)
+    host = types.SimpleNamespace(
+        async_config=types.SimpleNamespace(
+            ray_address=ray_address,
+            rollout_actor_budget=workers,
+            eval_rollout_batch_size=None,
+            max_concurrent_rollouts=None,
+        ),
+        _get_tp_or_etp_group_size=lambda: group_size,
+        _train_loader_batch_size=lambda: 8,
+    )
+    assert AsyncRolloutMixin._resolve_rollout_pool(host).actors_per_rank == actors
 
 
 if __name__ == "__main__":

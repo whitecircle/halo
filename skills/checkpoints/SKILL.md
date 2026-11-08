@@ -47,7 +47,7 @@ Read the script's `--help` before running it — don't guess the flags.
 | Trained with | Gathered save (default) | If you used the sharded option | To get one HF checkpoint |
 |---|---|---|---|
 | Dense FSDP2 / DDP | loadable | — | use directly |
-| LoRA / QLoRA | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
+| LoRA / QLoRA | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); a native EP expert-LoRA adapter merges automatically through its streaming mode (or train with `merge_expert_lora_on_save: true`) |
 | Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each family's `MoEFamilySpec.model_types` in `halo/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |

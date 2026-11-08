@@ -1,36 +1,28 @@
 #!/usr/bin/env python
-"""The declared per-rank token budget against DeepEP's dispatch ceilings at config time. The dispatcher refuses the
-same capacities only after the whole load, or at the step whose batch first reaches ``max_length``."""
+"""The declared per-rank token budget against the cross-domain Gin dispatch ceiling at config time. The dispatcher
+refuses the same capacities only after the whole load, or at the step whose batch first reaches ``max_length``. A
+dispatch within one NVLink domain has no ceiling."""
 
 from __future__ import annotations
 
 import pytest
-from transformers import NemotronHConfig
 
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
-from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.runner import resolve_microbatch_count
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.config_access import text_config
-from halo.models.moe.config_fields import resolve_dispatch_width
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG
 from tests.common.parallelism import make_parallelism_config, simulated_world
 from tests.common.rosters import distributed_trainer_classes
-from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
-# Hidden 8192 x top-8 puts the 32-bit index ceiling at 2**31 / (8 x 8192) = 32768 tokens/rank, a budget a long-context
-# run can declare.
-_WIDE_HIDDEN = 8192
-_WIDE_TOPK = 8
-_WIDE_INDEX_CEILING = 2**31 // (_WIDE_TOPK * _WIDE_HIDDEN)
+# Past 2**31 wire elements at hidden 7168 x top-8 (37,449 tokens/rank), where a 32-bit offset would wrap.
+_LONG_BUDGET = 262_144
 # gpt-oss shaped: hidden 2880 pads to 3072 on the wire, top-4.
 _GPTOSS = {"hidden_size": 2880, "num_experts_per_tok": 4}
+_CROSS_NODE = {"world_size": 32, "gpus_per_node": 8, "ep_size": 32, "ep_scope": "global"}
 
 
 class _Cfg:
@@ -38,10 +30,6 @@ class _Cfg:
         self.num_experts = num_experts
         for name, value in fields.items():
             setattr(self, name, value)
-
-
-def _wide(num_experts: int = 128, **fields) -> _Cfg:
-    return _Cfg(num_experts, hidden_size=_WIDE_HIDDEN, num_experts_per_tok=_WIDE_TOPK, **fields)
 
 
 def _config(*, budget: int | None = None, **kwargs) -> ParallelismConfig:
@@ -56,48 +44,40 @@ def _reject_unsupported_model(config: ParallelismConfig, model_config) -> None:
     reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
 
 
-def test_a_budget_over_the_wire_index_ceiling_is_refused_with_its_numbers():
-    """32768 tokens/rank x top-8 x hidden 8192 reaches 2**31 exactly."""
-    config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING)
+@pytest.mark.parametrize("hidden", [2048, 7168])
+def test_a_long_budget_within_a_domain_is_accepted(hidden):
+    """No wire-offset ceiling bounds a single-domain dispatch, at any hidden width."""
+    model = _Cfg(128, hidden_size=hidden, num_experts_per_tok=8)
+    _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=_LONG_BUDGET), model)
+
+
+def test_a_budget_over_the_gin_ceiling_is_refused_with_its_numbers():
+    config = _config(**_CROSS_NODE, budget=GIN_MAX_TOKENS_PER_RANK + 1)
     with pytest.raises(ValueError) as err:
-        _reject_unsupported_model(config, _wide())
+        _reject_unsupported_model(config, _Cfg(128, **_GPTOSS))
     text = str(err.value)
-    assert "32-bit wire-index limit" in text, text
-    assert f"{_WIDE_INDEX_CEILING} tokens/rank" in text, "the refusal must name the budget it computed"
-    assert "EP group of 8" in text, "and the group the budget was judged on"
+    assert "proxy-GIN ceiling" in text, text
+    assert f"{GIN_MAX_TOKENS_PER_RANK + 1} tokens/rank" in text, "the refusal must name the budget it computed"
+    assert "EP group of 32" in text, "and the group the budget was judged on"
 
 
 def test_the_refusal_leads_with_the_escape_hatches():
-    """An operator reads the head of a config-time raise, and the override lifts only the Gin ceiling, not the
-    32-bit wire index."""
-    config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING)
+    """An operator reads the head of a config-time raise."""
+    config = _config(**_CROSS_NODE, budget=2 * GIN_MAX_TOKENS_PER_RANK)
     with pytest.raises(ValueError) as err:
-        _reject_unsupported_model(config, _wide())
+        _reject_unsupported_model(config, _Cfg(128, **_GPTOSS))
     first_sentence = str(err.value).split(". ")[0]
     assert "max_length" in first_sentence, first_sentence
     assert "HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK" in first_sentence, first_sentence
-    assert "cross-node Gin ceiling only" in first_sentence, "the override must not be offered for both ceilings"
-
-
-def test_a_budget_under_the_ceiling_passes():
-    _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING // 2), _wide()
-    )
 
 
 def test_the_gate_aligns_the_budget_the_way_the_dispatcher_does():
-    """``_WIDE_INDEX_CEILING - 255`` fits the wire index as declared and not as sized."""
-    budget = _WIDE_INDEX_CEILING - 255
-    assert ep_dispatch_capacity(budget) == _WIDE_INDEX_CEILING, "precondition: the alignment is what bites"
-    config = _config(world_size=8, gpus_per_node=8, ep_size=8, budget=budget)
-    with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        _reject_unsupported_model(config, _wide())
-
-
-def test_context_parallelism_divides_the_per_rank_budget():
-    """A CP rank holds one sequence chunk, so cp2 halves what its MoE layers present."""
-    config = _config(world_size=8, gpus_per_node=8, ep_size=8, cp_size=2, budget=_WIDE_INDEX_CEILING)
-    _reject_unsupported_model(config, _wide())
+    """One token past the ceiling is sized to the next arena block, so the gate judges the block."""
+    under = GIN_MAX_TOKENS_PER_RANK - 255
+    assert ep_dispatch_capacity(under) == GIN_MAX_TOKENS_PER_RANK, "precondition: the alignment rounds up"
+    _reject_unsupported_model(_config(**_CROSS_NODE, budget=under), _Cfg(128, **_GPTOSS))
+    with pytest.raises(ValueError, match=f"{ep_dispatch_capacity(GIN_MAX_TOKENS_PER_RANK + 1)}-token DeepEP arena"):
+        _reject_unsupported_model(_config(**_CROSS_NODE, budget=GIN_MAX_TOKENS_PER_RANK + 1), _Cfg(128, **_GPTOSS))
 
 
 def test_nvl72_rack_wide_ep_is_not_bound_by_the_cross_node_ceiling():
@@ -145,60 +125,57 @@ def test_cross_node_ep_at_the_validated_ceiling_passes():
 
 
 def test_a_512_gpu_job_is_judged_on_the_same_per_rank_budget():
-    """The DeepEP arena is per-rank, so 64 nodes of node-local ep8 buy no headroom over one node."""
+    """The DeepEP arena is per-rank, so 64 nodes of node-local ep8 are judged as one node is."""
     shape = {"world_size": 512, "gpus_per_node": 8, "ep_size": 8}
-    _reject_unsupported_model(_config(**shape, budget=_WIDE_INDEX_CEILING // 2), _wide())
-    with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        _reject_unsupported_model(_config(**shape, budget=_WIDE_INDEX_CEILING), _wide())
+    _reject_unsupported_model(_config(**shape, budget=_LONG_BUDGET), _Cfg(128, **_GPTOSS))
 
 
-def test_an_undeclared_budget_leaves_the_ceilings_to_the_dispatcher():
-    """The config states a 32768-token window, the budget the wire-index test refuses, so a resolved window here
-    would be a false raise."""
+def test_an_undeclared_budget_leaves_the_ceiling_to_the_dispatcher():
+    """A resolved window here would be a false raise."""
     _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=0),
-        _wide(max_position_embeddings=_WIDE_INDEX_CEILING),
+        _config(**_CROSS_NODE, ep_rows_per_device=0),
+        _Cfg(128, max_position_embeddings=4 * GIN_MAX_TOKENS_PER_RANK, **_GPTOSS),
     )
 
 
 def test_pure_expert_tp_never_reaches_the_transport():
     _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, expert_tp_size=8, budget=8 * _WIDE_INDEX_CEILING), _wide(num_experts=8)
+        _config(world_size=8, gpus_per_node=8, expert_tp_size=8, budget=8 * _LONG_BUDGET), _Cfg(8, **_GPTOSS)
     )
 
 
 def test_a_null_max_length_is_judged_against_the_models_own_context_window():
-    """Left unresolved, the product is 0 and switches the gate off for the spelling that reaches the ceilings first."""
-    config = _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0)
+    """Left unresolved, the product is 0 and switches the gate off for the spelling that reaches the ceiling first."""
+    window = 2 * GIN_MAX_TOKENS_PER_RANK
+    config = _config(**_CROSS_NODE, ep_rows_per_device=1, ep_declared_max_length=0)
     with pytest.raises(ValueError) as err:
-        _reject_unsupported_model(config, _wide(max_position_embeddings=_WIDE_INDEX_CEILING))
+        _reject_unsupported_model(config, _Cfg(128, max_position_embeddings=window, **_GPTOSS))
     text = str(err.value)
-    assert "32-bit wire-index limit" in text, text
-    assert f"{_WIDE_INDEX_CEILING} tokens/row" in text, "the refusal must name the length it resolved"
+    assert "proxy-GIN ceiling" in text, text
+    assert f"{window} tokens/row" in text, "the refusal must name the length it resolved"
     assert "no length cap" in text, "and say the number came from the model, not from the config"
 
 
 def test_a_null_max_length_under_the_ceiling_still_passes():
     """Anti-over-rejection: a gate that refused every null budget would fail here."""
     _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0),
-        _wide(max_position_embeddings=_WIDE_INDEX_CEILING // 2),
+        _config(**_CROSS_NODE, ep_rows_per_device=1, ep_declared_max_length=0),
+        _Cfg(128, max_position_embeddings=GIN_MAX_TOKENS_PER_RANK // 2, **_GPTOSS),
     )
 
 
 def test_a_null_max_length_on_a_config_stating_no_window_is_not_guessed_at():
     """The dispatcher's runtime backstop owns that run."""
     _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, ep_size=8, ep_rows_per_device=1, ep_declared_max_length=0), _wide()
+        _config(**_CROSS_NODE, ep_rows_per_device=1, ep_declared_max_length=0), _Cfg(128, **_GPTOSS)
     )
 
 
 def test_the_paired_row_count_multiplies_the_resolved_window_too():
-    shape = {"world_size": 8, "gpus_per_node": 8, "ep_size": 8}
-    model = _wide(max_position_embeddings=_WIDE_INDEX_CEILING // 2)
-    _reject_unsupported_model(_config(**shape, ep_rows_per_device=1, ep_declared_max_length=0), model)
-    with pytest.raises(ValueError, match="32-bit wire-index limit"):
-        _reject_unsupported_model(_config(**shape, ep_rows_per_device=2, ep_declared_max_length=0), model)
+    model = _Cfg(128, max_position_embeddings=GIN_MAX_TOKENS_PER_RANK * 3 // 4, **_GPTOSS)
+    _reject_unsupported_model(_config(**_CROSS_NODE, ep_rows_per_device=1, ep_declared_max_length=0), model)
+    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
+        _reject_unsupported_model(_config(**_CROSS_NODE, ep_rows_per_device=2, ep_declared_max_length=0), model)
 
 
 class _PairedTrainer(DistributedTrainerMixin):
@@ -261,17 +238,17 @@ def test_the_prologue_separates_a_null_max_length_from_an_absent_one():
 
 
 def _pp_built(batch_size: int, *, microbatches: int = 0, accumulation: int = 1, schedule: str = "1f1b"):
-    """pp2 × ep8 on two 8-GPU nodes at 16384 tokens/row, through the real builder."""
-    with simulated_world(16, 8):
+    """pp2 × cross-node ep16 on four 8-GPU nodes at half the Gin ceiling per row, through the real builder."""
+    with simulated_world(32, 8):
         return parallelism_config_from_args(
             ParallelismArguments(
                 pipeline_parallel_size=2,
-                expert_parallel_size=8,
+                expert_parallel_size=16,
                 pipeline_microbatches=microbatches,
                 pipeline_schedule=schedule,
                 nvlink_domain_size=8,
             ),
-            training_config=_TrainingConfig(batch_size, _WIDE_INDEX_CEILING // 2, accumulation),
+            training_config=_TrainingConfig(batch_size, GIN_MAX_TOKENS_PER_RANK // 2, accumulation),
             trainer_cls=DistributedSFTTrainer,
         )
 
@@ -295,14 +272,14 @@ def test_pipeline_rows_are_one_microbatch_as_the_schedule_resolves_it(microbatch
 
 
 def test_a_pipeline_is_judged_on_one_microbatch_not_the_whole_batch():
-    """8 × 16384 tokens over-runs the wire index as one forward; split into 8 microbatches each one fits."""
-    _reject_unsupported_model(_pp_built(8, microbatches=8), _wide())
+    """8 rows of half the ceiling over-run it as one forward; split into 8 microbatches each one fits."""
+    _reject_unsupported_model(_pp_built(8, microbatches=8), _Cfg(128, **_GPTOSS))
 
 
 def test_a_microbatch_over_the_ceiling_is_still_refused_and_names_the_pipeline_lever():
-    """4 rows × 16384 is twice the ceiling: the gate still binds, and more microbatches is what clears it."""
+    """4 rows of half the ceiling is twice it: the gate still binds, and more microbatches is what clears it."""
     with pytest.raises(ValueError) as err:
-        _reject_unsupported_model(_pp_built(8, microbatches=2), _wide())
+        _reject_unsupported_model(_pp_built(8, microbatches=2), _Cfg(128, **_GPTOSS))
     assert "raise pipeline_microbatches" in str(err.value).split(". ")[0]
     assert "4 row(s)/forward" in str(err.value)
 
@@ -350,38 +327,10 @@ def test_every_trainer_states_the_rows_its_forward_carries(trainer):
     assert expected == trainer.FORWARD_ROWS_PER_EXAMPLE
 
 
-def test_a_latent_block_is_judged_on_the_latent_it_dispatches():
-    """Nemotron-H routes the hidden state and sends its 1024-wide latent, so the ceiling is 2**31 / (22 x 1024) tokens a
-    rank: sized off the 4096-wide hidden state, the gate would refuse every row past a quarter of that."""
-    config = NemotronHConfig(**NEMOTRON_H_RELEASE_TEXT_CONFIG)
-    assert config.moe_latent_size < config.hidden_size, "premise: the wire is narrower than the hidden state"
-    ceiling = 2**31 // (config.num_experts_per_tok * config.moe_latent_size)
-    aligned = ep_dispatch_capacity(ceiling) - 256
-    _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=aligned), config)
-    with pytest.raises(ValueError, match=f"padded_hidden={config.moe_latent_size} "):
-        _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=ceiling + 256), config)
-
-
-@pytest.mark.parametrize("name", sorted({**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}))
-def test_the_gate_reads_the_width_each_family_s_layer_sizes_its_wire_at(name):
-    """The gate knows only the config, and the dispatcher sizes its arena off the live block, so they must agree."""
-    model = tiny_family_model({**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}[name])
-    blocks = dict(ep_claimed_blocks(model)).values()
-    assert blocks, f"{name} wraps nothing, so the gate is held to nothing"
-    wires = set()
-    for block in blocks:
-        layer_cls = MOE_LAYER_MAP[type(block).__name__]
-        wires.add(
-            layer_cls._detect_hidden_dim(layer_cls._declared_router(block), layer_cls._find_experts_container(block))
-        )
-    assert wires == {resolve_dispatch_width(text_config(model.config))}
-
-
-def test_a_config_that_declares_no_router_width_is_not_guessed_at():
-    _reject_unsupported_model(
-        _config(world_size=8, gpus_per_node=8, ep_size=8, budget=_WIDE_INDEX_CEILING),
-        _Cfg(128, hidden_size=_WIDE_HIDDEN),
-    )
+def test_a_config_that_declares_no_router_width_is_still_judged():
+    """The ceiling depends on tokens alone, so a config naming no hidden size or top-k is judged like any other."""
+    with pytest.raises(ValueError, match="proxy-GIN ceiling"):
+        _reject_unsupported_model(_config(**_CROSS_NODE, budget=2 * GIN_MAX_TOKENS_PER_RANK), _Cfg(128))
 
 
 if __name__ == "__main__":

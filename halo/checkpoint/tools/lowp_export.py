@@ -29,7 +29,7 @@ from halo.checkpoint.writing import remove_stale_checkpoint_files, write_merged_
 from halo.kernels.lowp.linear import DENSE_CONTRACTION_AXIS
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, kept_block_indices
-from halo.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
+from halo.models.introspection.module_tree import decoder_layer_index, decoder_layer_stack_prefix
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_layouts
 

@@ -10,7 +10,7 @@ rollout_chat_template_kwargs:
   enable_thinking: false
 environment_kwargs:
   no_tool_use_penalty: 0.5
-num_rollout_workers: 2
+rollout_actor_budget: 2
 rollout_max_tokens: 128
 rollout_connection_timeout: 180.0
 enable_prefetch: false

@@ -4,7 +4,12 @@ Slots are literals off TRL 1.14.2; recomputing ``params.index(...)`` would test 
 
 import pytest
 
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, get_ctor_model_and_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import (
+    get_ctor_arg,
+    get_ctor_config,
+    get_ctor_model_and_config,
+    resolve_ctor_positions,
+)
 from halo.trainers.grpo.on_policy import GRPO_CTOR_POSITIONS
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer

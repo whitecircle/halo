@@ -10,7 +10,7 @@ import torch
 from halo.distributed.pipeline_parallel import stage as stage_module
 from halo.distributed.pipeline_parallel.families import STOCK_FORWARD_PP
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_PP_SPLIT_OVERRIDES, tiny_family_model
 
 PP_SIZE = 2

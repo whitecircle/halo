@@ -3,7 +3,7 @@
 import fnmatch
 
 from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
-from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.introspection.module_tree import DECODER_LAYER_LIST_ATTRS
 from halo.runtime.consensus import reject_across_ranks
 
 

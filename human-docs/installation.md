@@ -46,12 +46,12 @@ Don't skip the retag: this guide, the `make` targets and the compose files use
 the local name. They default to `halo:blackwell`. On Hopper, pass
 `IMAGE=halo:hopper` to `make` and set `TRAIN_IMAGE=halo:hopper` for compose.
 
-- `:blackwell` and `:hopper` track the latest release. `:blackwell-1.2.0` and
-  `:hopper-1.2.0` pin it.
+- `:blackwell` and `:hopper` track the latest release. `:blackwell-1.3.0rc1` and
+  `:hopper-1.3.0rc1` pin it.
 - There is no `latest` tag, so a Hopper host can't pull a Blackwell image by
   mistake.
 - The RL rollout servers are in the same repository, as `:vllm-0.32.0` and
-  `:sglang-0.5.22`, pinned as `:vllm-0.32.0-1.2.0` and `:sglang-0.5.22-1.2.0`.
+  `:sglang-0.5.22`, pinned as `:vllm-0.32.0-1.3.0rc1` and `:sglang-0.5.22-1.3.0rc1`.
 
 To build from source instead (no token or registry login):
 

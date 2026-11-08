@@ -34,7 +34,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.hardware import available_host_ram_bytes
 from halo.log import KEY_PREVIEW_COUNT
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import (
     DeferredRankFailure,

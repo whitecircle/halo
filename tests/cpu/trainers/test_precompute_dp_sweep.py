@@ -12,7 +12,7 @@ from torch.utils.data import DataLoader, SequentialSampler
 PartialState()
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import TRAINERS

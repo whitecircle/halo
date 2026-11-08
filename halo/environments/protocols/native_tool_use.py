@@ -8,10 +8,16 @@ from typing import Any
 
 from halo.config_validation import require_finite, require_int
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
-from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, EPISODE_ERROR_KEY, LAST_TURN_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import StepOutcome, Trajectory
-from halo.environments.tool_accounting import (
+from halo.environments.episodes.episode_keys import (
+    ANSWER_KEY,
+    COMPLETED_KEY,
+    CONTEXT_KEY,
+    EPISODE_ERROR_KEY,
+    LAST_TURN_KEY,
+)
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import StepOutcome, Trajectory
+from halo.environments.tools.accounting import (
     MAGNITUDE_WHY,
     TOTAL_TOOL_CALLS_KEY,
     initial_tool_counters,

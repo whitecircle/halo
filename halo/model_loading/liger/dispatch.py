@@ -17,8 +17,8 @@ from halo.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.config_access import set_config_field_run_scoped, text_config
-from halo.models.model_classes import is_remote_code_class
+from halo.models.introspection.config_access import set_config_field_run_scoped, text_config
+from halo.models.introspection.model_classes import is_remote_code_class
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.runtime.ranks import is_global_main_process

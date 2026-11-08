@@ -1,7 +1,59 @@
 """A blocking server call run on a background thread, joined later, and the wait over several at once."""
 
+import logging
 import threading
 import time
+from collections.abc import Callable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from typing import Any
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+# A group's chunk waits on its declares and its send, so the poll's period is added to every chunk of every sync.
+_POLL_PERIOD_S = 0.005
+
+
+_TIMEOUTS = (TimeoutError, requests.exceptions.Timeout)
+
+
+def map_concurrently(fn: Callable[..., Any], *iterables: Any, max_workers: int | None = None) -> list[Any]:
+    """``fn`` over ``iterables`` (as :func:`map`), one thread per item up to ``max_workers``, in input
+    order and stopping at the shortest iterable; the first failure raises once all finish."""
+    items = list(zip(*iterables, strict=False))
+    if not items:
+        return []
+    workers = len(items) if max_workers is None else min(len(items), max_workers)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        return list(executor.map(lambda args: fn(*args), items))
+
+
+@contextmanager
+def announced_wait(server: str, what: str, bound_s: float) -> Iterator[None]:
+    """Say which server a bounded wait is on, for what and for how long, once at its start, and once more if the
+    block ends in a timeout; a wait that ends early says nothing further. The timeout is re-raised."""
+    logger.info(f"Waiting on {server} for {what}, for at most {bound_s:.0f}s")
+    try:
+        yield
+    except _TIMEOUTS:
+        logger.warning(f"Gave up waiting on {server} for {what} after {bound_s:.0f}s")
+        raise
+
+
+def wait_announced(call: "AsyncCall", server: str, what: str, bound_s: float) -> None:
+    """Join ``call`` for at most ``bound_s`` under :func:`announced_wait`. A call still running after the join or
+    ended in a timeout has expired and is logged once; it is left running, and no error is raised."""
+    try:
+        with announced_wait(server, what, bound_s):
+            call.join(bound_s)
+            if call.is_alive():
+                raise TimeoutError(what)
+            if isinstance(call.error, _TIMEOUTS):
+                raise call.error
+    except _TIMEOUTS:
+        pass
 
 
 class AsyncCall:
@@ -49,4 +101,4 @@ def wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
         if time.monotonic() > deadline:
             blocked = ", ".join(call.name for call in calls if call.is_alive())
             raise TimeoutError(f"Weight-transfer setup still blocked after {timeout:.0f}s: {blocked}")
-        time.sleep(0.1)
+        time.sleep(_POLL_PERIOD_S)

@@ -13,10 +13,16 @@ import torch
 from peft import PeftConfig, PeftModel
 from transformers import PreTrainedModel
 
-from halo.checkpoint.adapters import adapter_module_paths, read_adapter_config, reject_expert_lora_adapter
+from halo.checkpoint.adapters import (
+    adapter_module_paths,
+    find_expert_lora_adapter_shape,
+    read_adapter_config,
+    reject_expert_lora_adapter,
+)
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MERGED_ADAPTER_CONFIG_DIR, PROCESSOR_FILES
 from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
+from halo.checkpoint.tools.adapter_stream_merge import merge_adapter_streaming
 from halo.checkpoint.tools.offline_export import (
     cast_norms_to_fp32,
     load_task_model,
@@ -266,6 +272,22 @@ def load_task_base_model(
     )
 
 
+def reject_in_memory_options(*, task: str, device_map: str | None, fp32_norms: bool) -> None:
+    """Refuse what only a loaded model can honour, for a streaming merge."""
+    refused = []
+    if task != "causal_lm":
+        refused.append(f"--task {task}")
+    if device_map:
+        refused.append(f"--device_map {device_map}")
+    if fp32_norms:
+        refused.append("--fp32_norms")
+    if refused:
+        raise ValueError(
+            f"The streaming merge loads no model, so it cannot honour {', '.join(refused)}. Drop them, or merge a "
+            f"dense adapter in memory (without --streaming)."
+        )
+
+
 def merge_peft_adapter(
     adapter_dir: str,
     output_dir: str,
@@ -276,13 +298,29 @@ def merge_peft_adapter(
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     trust_remote_code: bool | None = None,
     fp32_norms: bool = False,
+    streaming: bool = False,
     verbose: bool = True,
 ):
     """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32, and an
-    unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`)."""
+    unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`). ``streaming``, and any adapter holding
+    native expert LoRA, folds shard by shard with no model loaded (:func:`merge_adapter_streaming`), which keeps the
+    base's stored dtypes and so ignores ``dtype`` and refuses ``device_map``, ``fp32_norms`` and a classification
+    head."""
+    trust_remote_code = adapter_base_trust(adapter_dir, trust_remote_code)
+    if streaming or find_expert_lora_adapter_shape(adapter_dir) is not None:
+        reject_in_memory_options(task=task, device_map=device_map, fp32_norms=fp32_norms)
+        if verbose:
+            logger.info("Streaming merge: tensors keep the base's stored dtype, so --dtype is not applied")
+        merge_adapter_streaming(
+            adapter_dir,
+            output_dir,
+            max_shard_size=max_shard_size,
+            trust_remote_code=trust_remote_code,
+            verbose=verbose,
+        )
+        return
     if verbose:
         logger.info(f"Task: {task}, dtype: {dtype}")
-    trust_remote_code = adapter_base_trust(adapter_dir, trust_remote_code)
 
     def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
         return load_task_base_model(

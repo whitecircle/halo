@@ -1,72 +1,52 @@
 #!/usr/bin/env python
-"""The template variables a rollout's requests carry and the trainer's renders reproduce must agree, or the trainer
-scores log-probs against a prompt the engine never rendered."""
+"""CPU tests: the template variables a rollout's requests carry and the trainer's renders reproduce.
+
+``generation_control_fields`` (the request side) and ``rollout_template_kwargs`` (the trainer's render
+side) must agree on the per-episode variable — the level, as the top-level ``reasoning_effort`` field —
+or the trainer scores log-probs against a prompt the engine never rendered. The engine's reasoning cap
+rides its own request field and never reaches the template: the model is told its level, no token count.
+
+Run: python tests/cpu/grpo/test_rollout_template_kwargs.py  (or pytest)
+"""
 
 from dataclasses import replace
 
 import pytest
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.engine_wire import generation_control_fields
-from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
-    RolloutConfig,
-)
+from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import generation_control_fields
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 
 
-def test_request_and_render_agree_on_the_episode_variables():
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_request_and_render_agree_on_the_episode_variables(backend):
+    """vLLM merges the top-level level into the template's variables and SGLang reads the nested copy; either
+    way the template sees the run's kwargs plus the level, which is what the trainer renders under."""
     run_kwargs = {"preserve_thinking": True}
-    config = RolloutConfig(max_tokens=20000, max_thinking_tokens=12288, chat_template_kwargs=run_kwargs)
-    fields = generation_control_fields(config, "medium", 12288)
+    config = RolloutConfig(backend=backend, max_tokens=20000, chat_template_kwargs=run_kwargs)
+    fields = generation_control_fields(config, "medium")
     assert fields["reasoning_effort"] == "medium"
-    assert fields["chat_template_kwargs"] == {"preserve_thinking": True, REASONING_BUDGET_TEMPLATE_VAR: 12288}
-    render_kwargs = rollout_template_kwargs(run_kwargs, "medium", 12288)
-    assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "medium"}
+    render_kwargs = rollout_template_kwargs(run_kwargs, "medium")
+    assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": fields["reasoning_effort"]}
+    assert render_kwargs == {"preserve_thinking": True, "reasoning_effort": "medium"}
     assert run_kwargs == {"preserve_thinking": True}, "the run's kwargs are never mutated"
 
 
-def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns():
-    """Under an output budget the engine enforces this turn's narrowed cap, while the template states the level's whole
-    cap, the one value the trajectory carries and every trainer-side render reproduces."""
+def test_the_engine_enforces_the_turns_cap_and_the_template_is_told_no_count():
+    """Under an output budget the engine enforces the narrowed cap of this turn; the template states the level
+    alone, on the request and in every trainer-side render, so no turn's cap leaks into the prompt."""
     run = AsyncRolloutConfig(
         rollout_max_thinking_tokens=4000, rollout_chat_template_kwargs={"preserve_thinking": True}
     )
-    # What the drivers send on a turn the output budget narrowed to 2500 of the level's 4000.
     turn = replace(run.get_rollout_config(), max_thinking_tokens=2500)
-    fields = generation_control_fields(turn, "high", 4000)
+    fields = generation_control_fields(turn, "high")
     assert fields["thinking_token_budget"] == 2500
-    assert fields["chat_template_kwargs"] == {"preserve_thinking": True, REASONING_BUDGET_TEMPLATE_VAR: 4000}
-    render_kwargs = rollout_template_kwargs(run.rollout_chat_template_kwargs, "high", 4000)
-    assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "high"}
-    omitted = generation_control_fields(RolloutConfig(max_tokens=20000, max_thinking_tokens=12288), "high")
-    assert omitted["thinking_token_budget"] == 12288
-    assert REASONING_BUDGET_TEMPLATE_VAR not in omitted.get("chat_template_kwargs", {}), (
-        "nothing stands in for the level's budget"
-    )
-
-
-def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
-    """A soft budget rides with its flag so the template states a target; the engine enforces only the run ceiling."""
-    run = AsyncRolloutConfig(rollout_max_thinking_tokens=21800, rollout_max_tokens=30000)
-    fields = generation_control_fields(run.get_rollout_config(), "high", 16384, budget_soft=True)
-    assert fields["thinking_token_budget"] == 21800
-    assert fields["chat_template_kwargs"] == {
-        REASONING_BUDGET_TEMPLATE_VAR: 16384,
-        REASONING_BUDGET_SOFT_TEMPLATE_VAR: True,
+    assert fields["chat_template_kwargs"] == {"preserve_thinking": True}
+    assert rollout_template_kwargs(run.rollout_chat_template_kwargs, "high") == {
+        "preserve_thinking": True,
+        "reasoning_effort": "high",
     }
-    render_kwargs = rollout_template_kwargs({}, "high", 16384, budget_soft=True)
-    assert render_kwargs == {**fields["chat_template_kwargs"], "reasoning_effort": "high"}
-    # SGLang enforces no cap, so the flag is the whole of what tells its template the budget is a target.
-    sglang = generation_control_fields(
-        RolloutConfig(backend="sglang", max_tokens=30000), "high", 16384, budget_soft=True
-    )
-    assert "thinking_token_budget" not in sglang
-    assert sglang["chat_template_kwargs"] == render_kwargs
-    enforced = generation_control_fields(RolloutConfig(max_tokens=20000, max_thinking_tokens=4000), "high", 4000)
-    assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in enforced["chat_template_kwargs"]
-    assert REASONING_BUDGET_SOFT_TEMPLATE_VAR not in rollout_template_kwargs({}, "high", None, budget_soft=True)
 
 
 def test_the_control_fields_never_ask_for_the_sampled_ids():
@@ -75,7 +55,7 @@ def test_the_control_fields_never_ask_for_the_sampled_ids():
         RolloutConfig(max_tokens=20000, max_thinking_tokens=4000, reasoning_end_token_id=5),
         RolloutConfig(backend="sglang", max_tokens=20000),
     ):
-        assert "return_token_ids" not in generation_control_fields(config, "high", 4000)
+        assert "return_token_ids" not in generation_control_fields(config, "high")
 
 
 def test_sglang_also_nests_the_level_for_its_template():
@@ -86,20 +66,16 @@ def test_sglang_also_nests_the_level_for_its_template():
     assert "chat_template_kwargs" not in generation_control_fields(RolloutConfig(max_tokens=20000), "high")
 
 
-def test_episodes_without_a_level_or_budget_carry_neither_variable():
+def test_episodes_without_a_level_carry_no_variable():
     fields = generation_control_fields(RolloutConfig(max_tokens=20000), None)
     assert "reasoning_effort" not in fields and "chat_template_kwargs" not in fields
-    assert rollout_template_kwargs({}, None, None) == {}
-    assert rollout_template_kwargs({}, "low", None) == {"reasoning_effort": "low"}
+    assert rollout_template_kwargs({}, None) == {}
+    assert rollout_template_kwargs({}, "low") == {"reasoning_effort": "low"}
 
 
-def test_run_wide_template_kwargs_refuse_the_per_episode_variables():
-    with pytest.raises(ValueError, match="reasoning_budget"):
-        AsyncRolloutConfig(rollout_chat_template_kwargs={REASONING_BUDGET_TEMPLATE_VAR: 8192})
-    with pytest.raises(ValueError, match="reasoning_effort"):
+def test_run_wide_template_kwargs_refuse_the_per_episode_level():
+    with pytest.raises(ValueError, match="must not carry 'reasoning_effort'"):
         AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
-    with pytest.raises(ValueError, match="reasoning_budget_soft"):
-        AsyncRolloutConfig(rollout_chat_template_kwargs={REASONING_BUDGET_SOFT_TEMPLATE_VAR: True})
 
 
 def test_run_wide_template_kwargs_must_be_a_mapping():

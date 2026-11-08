@@ -54,7 +54,7 @@ from halo.models.attention.selection import (
     select_supported_attn_implementation,
     supports_fa4_backward,
 )
-from halo.models.config_access import apply_config_overrides, text_config
+from halo.models.introspection.config_access import apply_config_overrides, text_config
 from halo.models.moe import family_specs
 from halo.models.mtp.spec import MtpHeadRequest
 from halo.runtime.load_coordination import joined_node_load

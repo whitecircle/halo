@@ -10,7 +10,7 @@ from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
 from halo.environments.registry import build_environment
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from halo.environments.tool_accounting import TOOL_REWARD_PAID_KEY
+from halo.environments.tools.accounting import TOOL_REWARD_PAID_KEY
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
 

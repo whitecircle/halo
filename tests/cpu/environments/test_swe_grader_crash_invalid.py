@@ -4,8 +4,8 @@ episode carries ``EPISODE_INVALID_KEY``. A real pass or fail does not."""
 
 import pytest
 
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.swe import SweEnvironment

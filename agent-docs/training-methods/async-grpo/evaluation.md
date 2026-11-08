@@ -23,7 +23,7 @@ For exact means, make `len(split) × num_generations_eval` a multiple of `eval_r
 
 ## Running an evaluation
 
-Two CLIs drive training's own episode loop (`play_episode`, through `halo/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `eval_env.py` for generic environments, `eval_code_contests.py` for code contests; their runs are `halo/entrypoints/generic_env_eval.py` and `halo/entrypoints/code_contests_eval.py`. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
+Two CLIs drive training's own episode loop (`play_episode`, through `halo/environments/rollouts/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `eval_env.py` for generic environments, `eval_code_contests.py` for code contests; their runs are `halo/entrypoints/generic_env_eval.py` and `halo/entrypoints/code_contests_eval.py`. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
 
 ```bash
 python scripts/environments/inference/eval_env.py --env_type qa_search \
@@ -54,9 +54,9 @@ A message-list `prompt` reaches the environment as its last `user` turn, as in t
 
 ### Grading under a training config
 
-`--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/eval_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
+`--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/eval_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, reasoning cap and episode output budget, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
 
-- It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a thinking budget the served model type cannot enforce (Mistral 4), from the run-wide cap or any effort level the environment can draw (`reject_unenforceable_thinking_budget`).
+- It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a reasoning cap the served model type cannot enforce (Mistral 4; `reject_unenforceable_thinking_budget`).
 - The YAML's dataset keys (`dataset`, `prompt_field`, `answer_field`, `context_fields`) are not read: pass the matching flags.
 - A relative path in the YAML, a judge's `context_file` included, resolves against the cwd: run from the repo root, where `halo launch` runs training.
 - The eval joins no process group, so a recipe whose `episode_timeout` needs a raised `DIST_NCCL_TIMEOUT_MINUTES` in training evaluates without it.
@@ -94,12 +94,12 @@ A score left with no sample reads `nan`.
 
 Line 1 is a `meta` record of the run's contract: model, env type, dataset/config/split, effective `max_turns`, `rollout`, `training_config`, `system_prompt`, tool schemas, and for coding the adapter, contest `selection`, language, `eval_protocol`, effort and `env_grading`.
 
-Each later line is an `episode` addressed by `index` and `id`: `reward`, `success`, `generation_error`, `stats`, the messages, `reasoning_effort` / `reasoning_budget` / `reasoning_budget_soft` and `info`.
+Each later line is an `episode` addressed by `index` and `id`: `reward`, `success`, `generation_error`, `stats`, the messages, `reasoning_effort` and `info`.
 
 - `context`, the `_`-prefixed `info` fields (code contests' hidden tests and checker) and assistant chain-of-thought are stripped; other `info` keys stay (`exam_qa` keeps `expected_answer`).
 - Messages keep their `tool_calls`, which the re-grader replays; a call the engine cut stays as unrun `cut_tool_calls`, which it skips, its arguments decoded as training decodes them ([Cut tool calls](monitoring.md#cut-tool-calls)).
-- Each assistant turn under a reasoning cap keeps its `thinking_cap`, the cap it ran under ([Thinking-cap metric](reasoning.md#thinking-cap-metric)).
-- A turn counted under a resolved single-token reasoning close (a vLLM `--training_config` run with a thinking budget, against a server started with `--return-tokens-as-token-ids`) also records `reasoning_tokens`, the reasoning it sampled.
+- Each assistant turn under a reasoning cap keeps its `thinking_cap`, the run's cap (recorded on SGLang too, which does not enforce it; [Thinking-cap metric](reasoning.md#thinking-cap-metric)).
+- A turn counted under a resolved single-token reasoning close (a vLLM `--training_config` run with a reasoning cap, against a server started with `--return-tokens-as-token-ids`) also records `reasoning_tokens`, the reasoning it sampled.
 
 ## Re-grading recorded trajectories
 

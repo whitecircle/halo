@@ -57,7 +57,7 @@ card_row(
         ("RolloutManager", ["one episode per row", "round-robin: actors × URLs", "max_concurrent_rollouts"], TEAL),
         (
             "Ray environment actors",
-            ["num_rollout_workers / rank", "one environment each", "tools · sandbox · grader"],
+            ["rollout actors / rank", "one environment each", "tools · sandbox · grader"],
             TEAL,
         ),
         ("vLLM or SGLang", ["POST /v1/chat/completions", "messages + tool schema", "tokenizes server-side"], VIOLET),

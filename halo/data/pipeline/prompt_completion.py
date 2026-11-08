@@ -7,7 +7,7 @@ from transformers import PreTrainedTokenizerBase
 
 from halo.data.chat_render import lacks_emitted_bos
 from halo.data.turn_markers import lacks_terminator
-from halo.models.context_window import is_bounded_length
+from halo.models.introspection.context_window import is_bounded_length
 
 
 def render_prompt_completions(

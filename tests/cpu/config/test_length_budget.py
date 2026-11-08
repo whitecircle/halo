@@ -11,7 +11,7 @@ from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import SMPOConfig
 from halo.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
-from halo.models.context_window import resolve_length_to_context, resolve_model_context_window
+from halo.models.introspection.context_window import resolve_length_to_context, resolve_model_context_window
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.offline.offline_rules import resolve_pp_max_length
 

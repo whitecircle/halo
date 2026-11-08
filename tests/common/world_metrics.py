@@ -7,8 +7,8 @@ from unittest.mock import patch
 
 import torch
 
-from halo.trainers import world_metrics
-from halo.trainers.world_metrics import MismatchErrorFactory, Records, State, WorldMetrics
+from halo.trainers.metrics import world_metrics
+from halo.trainers.metrics.world_metrics import MismatchErrorFactory, Records, State, WorldMetrics
 
 
 def attach_world_metrics(host):

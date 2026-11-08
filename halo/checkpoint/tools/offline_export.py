@@ -45,9 +45,10 @@ from halo.checkpoint.reading import (
 )
 from halo.checkpoint.weights_source import config_schema_source
 from halo.checkpoint.writing import sweep_after_full_save
-from halo.hardware import available_host_ram_bytes
+from halo.hardware import available_host_ram_bytes, free_disk_bytes, nearest_existing_path
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.models.introspection.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.mtp.head import mtp_head_path
 from halo.models.mtp.spec import (
@@ -58,7 +59,6 @@ from halo.models.mtp.spec import (
     tail_load_patterns,
     unbuilt_tail_keys,
 )
-from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 
 logger = logging.getLogger(__name__)
 
@@ -367,19 +367,11 @@ def reject_sibling_adapter(input_dir: str) -> None:
         )
 
 
-def _nearest_existing_path(path: str) -> str:
-    """``path`` resolved, or its nearest existing ancestor, whose volume a directory yet to be created lands on."""
-    target = os.path.realpath(path)
-    while not os.path.exists(target):
-        target = os.path.dirname(target)
-    return target
-
-
 def cross_device_bytes(paths: Iterable[str], output_dir: str) -> int:
     """Estimated bytes of ``paths`` that :func:`~halo.checkpoint.atomic.link_or_copy_file` copies rather than links:
     those on another filesystem. Undercounts where the output's filesystem refuses a link anyway (a second bind mount,
     a protected hard link, a project-quota boundary)."""
-    device = os.stat(_nearest_existing_path(output_dir)).st_dev
+    device = os.stat(nearest_existing_path(output_dir)).st_dev
     return sum(status.st_size for status in map(os.stat, paths) if status.st_dev != device)
 
 
@@ -394,7 +386,7 @@ def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | 
                 f"free host memory or run on a larger host. Continuing — this is an estimate."
             )
     if disk_bytes:
-        free = shutil.disk_usage(_nearest_existing_path(output_dir)).free
+        free = free_disk_bytes(output_dir)
         if disk_bytes > free:
             logger.warning(
                 f"{tool}: the output volume for {output_dir} has ~{free / 1e9:.1f} GB free but "

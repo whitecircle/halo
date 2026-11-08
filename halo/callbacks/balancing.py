@@ -7,7 +7,7 @@ import torch.distributed as dist
 
 from halo.callbacks.moe_metrics import MoELoadMetricsBase, compute_moe_load_metrics
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     config_model_types,
     get_config_field,
     set_config_field,

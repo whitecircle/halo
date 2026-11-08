@@ -12,7 +12,7 @@ from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
 from halo.model_loading.dtype import is_packed_4bit_parameter
 from halo.model_loading.lazy_safetensors.conversion import ConvertTargets, lazy_key_mapping
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.moe.family_specs import find_moe_family_spec
 
 

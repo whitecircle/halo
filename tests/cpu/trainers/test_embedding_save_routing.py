@@ -16,7 +16,7 @@ from sentence_transformers import SentenceTransformerTrainer
 
 import halo.checkpoint.writing as writing_mod
 import halo.models.peft_adapters as peft_adapters
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.checkpoint.parallel.writing import conversion_chunk_key
 from halo.checkpoint.reading import load_full_state_dict
 from halo.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
@@ -106,7 +106,7 @@ class _TokenizerStub:
 
 def _context(host, monkeypatch):
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: host._is_save_rank)
-    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
+    monkeypatch.setattr("halo.trainers.loop.checkpointing.is_fs_save_rank", lambda: host._is_save_rank)
     return EmbeddingTrainer._checkpoint_context(host)
 
 
@@ -267,7 +267,7 @@ def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatc
 
     monkeypatch.setattr(checkpointing_mod, "pristine_model_max_length", _pristine)
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
-    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.loop.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",
@@ -286,7 +286,7 @@ def _record_save_steps(host, monkeypatch) -> list[str]:
     for module in (embedding_module, checkpointing_mod):
         monkeypatch.setattr(module, "reshard_fsdp2_modules", lambda _model: calls.append("reshard"))
     monkeypatch.setattr(embedding_module, "is_fs_save_rank", lambda: True)
-    monkeypatch.setattr("halo.trainers.checkpointing.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("halo.trainers.loop.checkpointing.is_fs_save_rank", lambda: True)
     monkeypatch.setattr(
         EmbeddingTrainer,
         "_save_distributed_embedding_model",

@@ -112,6 +112,7 @@ TRL sends `top_k`, `min_p` and `repetition_penalty` on every request, so the mod
 - **MoE balancing is off:** `aux_loss` is inert under a policy-gradient loss, and both bias-update modes downgrade to `none` ([Callbacks](../callbacks.md#balancingbiascallback)).
 - **TRL's `use_liger_kernel` is off:** it routes the log-probs through TRL's chunked LM head, past the family's head transform. Model-level Liger kernels still apply.
 - **`text_only_model` is refused** by the script: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would miss a multimodal server's `model.language_model.layers.*`.
+- **Token budget refused at load:** `reject_unsupported_model` sizes `per_device_train_batch_size × (max_prompt_length + max_completion_length)` against the proxy-GIN ceiling on a group spanning NVLink domains (cross-node EP) before any weight is read ([Dispatch token ceiling](../../infrastructure/deepep.md#dispatch-token-ceiling)).
 - **Refused at construction** (online and async GRPO): `use_adaptive_entropy` (a sharded resume does not restore its coefficient), a non-zero `entropy_coef` with `use_chunked_grpo_logprobs` (the chunked sweep returns a detached entropy), and an `IterableDataset` on the DP-sharded loader that TP, ETP and pre-sharded datasets use.
 
 ## GRPO objective for verifiable rewards
@@ -131,7 +132,7 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 `beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
 
 - The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `halo/model_loading/parallel/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
-- It is a dense replica on every rank, warned about under EP, ETP and TP. A resume loads it from `model_name_or_path`, never the checkpoint.
+- It is an unsharded dense replica on every rank. Before it loads, the script sizes it from a config-only meta shell at the run dtype and refuses, on every rank, a reference over half the GPU memory free beside the loaded policy or whose copies across the node's ranks (each stages its own in host memory) exceed 80% of the available host RAM; the error names `beta: 0`, an attention LoRA target and offline GRPO's precomputed reference. This covers plain FSDP2 as much as EP, ETP and TP. The check runs twice: before the policy loads, against the free memory then (a run it refuses would fail the later check too), and again after it, against the memory the loaded policy leaves. The half is a heuristic: optimizer state, gradients and activations are not budgeted, so a reference that passes can still run out of memory at the first step. A reference that fits is warned about under EP, ETP and TP when the trainer is built. A resume loads it from `model_name_or_path`, never the checkpoint.
 - A trainer constructed with `beta != 0` and no `ref_model` raises, as does a `ref_model` the run never reads (`beta: 0`, or a PEFT policy, whose reference is the policy with its adapter disabled), both before the rollout client connects.
 - A reference whose sinks differ from the policy's is rejected in every mode, since the KL would be biased on every token. The script's reference takes the policy's `reset_sinks`, so live sinks (`reset_sinks: false`) score on both sides.
 
@@ -142,6 +143,18 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 ## Chunked log-probs
 
 `use_chunked_grpo_logprobs: true` (default off) replaces the full `[B, T, vocab]` logits with a vocab-chunked softmax, for large vocabularies with long completions ([Offline GRPO](offline.md#memory-chunked-log-probs), [limits](../async-grpo/performance.md#chunked-log-probs)). Here a multimodal batch falls back to the full path, and a PEFT adapter on `lm_head` raises.
+
+## Packed micro-batches
+
+`packed_microbatch_tokens` (default off) groups each rank's rows into token-budget bins that run as one flattened varlen call each, in TRL's old-policy and reference passes and in the loss forward, instead of one call per row at `per_device_train_batch_size: 1`. It needs `use_chunked_grpo_logprobs: true` and is refused with SDPG; mechanism, objective and the other refusals are on [Packed micro-batches](../async-grpo/performance.md#packed-micro-batches).
+
+## Importance ratio from the loss forward
+
+`loss_forward_importance_weights` (default off) drops TRL's no-grad old-policy pass, one forward over the round's rows, and builds the vLLM importance-sampling ratio and the KL tail clamp from the loss forward's detached log-probs. Refusals, mechanism and metrics: [Weight from the loss forward](../async-grpo/performance.md#weight-from-the-loss-forward).
+
+## Rank balance
+
+`balance_rank_tokens` (default off) deals each round's rows across ranks so every rank trains a similar token total; the objective is unchanged. Refusals and mechanism: [Rank balance](../async-grpo/performance.md#rank-balance).
 
 ## Server mode only
 
@@ -161,7 +174,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 
 ### Weight sync
 
-Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). The script refuses a family no engine sync reaches right after init (`reject_unsyncable_config`), and `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
+Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). The script refuses a family no engine sync reaches right after init (`reject_unsyncable_config`), and `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)). The first push is checked against the trainer's own log-probs ([first-push parity probe](../../infrastructure/rollout-servers.md#first-push-parity-probe)). `rollout_weight_precision: fp8_block` pushes block-FP8 weights to a server booted from the export tool's checkpoint ([FP8 rollouts](../../infrastructure/rollout-servers.md#fp8-rollouts)).
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 
@@ -203,7 +216,7 @@ The weight sync folds each adapter, native expert-LoRA included, into its base w
 
 ## Data flow and batch construction
 
-Each row becomes a group of `num_generations` completions. Under TP and ETP every rank takes its group leader's completions; TRL's `rollout_func` is refused there. The collator is TRL's row collator (left-padded prompts, right-padded completions, never packed), hence no CP.
+Each row becomes a group of `num_generations` completions. Under TP and ETP every rank takes its group leader's completions; TRL's `rollout_func` is refused there. The collator is TRL's row collator (left-padded prompts, right-padded completions), hence no CP. Rows stay padded; `packed_microbatch_tokens` packs them into flattened bins as a separate step ([Packed micro-batches](#packed-micro-batches)).
 
 **Counting.** Rollouts per optimizer step = `per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`. `per_device_train_batch_size` counts completions, not prompts; with the completion length, it sets per-forward memory.
 
@@ -229,6 +242,10 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
+- `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
+- `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
+- Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, which TRL counts while it builds the round; SDPG's teacher forward is not counted) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
+- A first-push parity warning in the log when the served model's log-probs on a fixed row stray past the probe's bound from the trainer's; `HALO_WEIGHT_SYNC_PARITY_PROBE=raise` stops the run, `off` skips it ([probe](../../infrastructure/rollout-servers.md#first-push-parity-probe)).
 - `advantage/net_token_mass` every round (an early sign of entropy drift) and, under `balance_token_mass`, `advantage/token_mass_scale`; the sign reads as the entropy push only under a token-sum loss such as `dapo`.
 
 `early_stop_entropy_band` and `early_stop_logratio_gap` work as on [Async GRPO](../async-grpo/monitoring.md#early-stop); the gap needs `vllm_importance_sampling_correction` and reads TRL's `sampling/sampling_logp_difference/mean` (a mean absolute difference), so a threshold read off an Async GRPO run does not carry over. `save_completions` (default on) writes `<output_dir>/completions/completions_<step>.parquet` (step zero-padded to five digits, `_eval` suffix for evaluation).

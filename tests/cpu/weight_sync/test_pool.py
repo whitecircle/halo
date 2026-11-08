@@ -4,6 +4,7 @@ param, failure isolation, and which failures reconnect."""
 
 from __future__ import annotations
 
+import time
 import weakref
 
 import pytest
@@ -13,6 +14,7 @@ from halo.weight_sync.chunking import declared_co_load_groups, resolve_sync_devi
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from halo.weight_sync.pool import WeightSyncPool
+from halo.weight_sync.staging import PackedChunkStager
 from tests.common.weight_sync import ServerlessSGLangClient, Wire, offline_client
 
 _BUDGET = 4096
@@ -108,9 +110,13 @@ def test_pool_stages_shared_snapshots_on_its_normalized_device(monkeypatch):
 
     class _StubClient:
         BACKEND_NAME = "stub"
+        CHUNK_STAGER = PackedChunkStager
 
         def __init__(self, base_url, group_port, connection_timeout, group_host=None):
             self._param_buffer: list = []
+
+        def share_stager(self, stager):
+            pass
 
         def init_communicator(self, device):
             joined.append(device)
@@ -282,7 +288,7 @@ def test_a_later_sync_that_fails_before_opening_is_still_retried(monkeypatch):
     def sticky_cuda_error():
         raise RuntimeError("CUDA error: an illegal memory access was encountered")
 
-    clients[0]._complete_snapshots = sticky_cuda_error
+    clients[0].complete_snapshots = sticky_cuda_error
     with pytest.raises(RuntimeError, match="reconnect retry failed"):
         push_past_the_budget()
 
@@ -290,11 +296,40 @@ def test_a_later_sync_that_fails_before_opening_is_still_retried(monkeypatch):
     assert wire.opened == 1, "the failure comes before the second sync opens the engine"
 
 
+def test_reconnect_servers_replaces_only_the_named_servers(monkeypatch):
+    pool, _ = _bare_pool(3)
+    reconnects = []
+    monkeypatch.setattr(
+        WeightSyncPool, "_reconnect", lambda self, index, peer_gone: reconnects.append((index, peer_gone))
+    )
+
+    pool.reconnect_servers(["http://server2:8000", "http://server0:8000"])
+
+    assert reconnects == [(0, True), (2, True)]
+
+
+def test_reconnect_servers_leaves_a_single_group_to_re_form_itself(monkeypatch):
+    pool, _ = _bare_pool(2)
+    pool._topology = "single_group"
+    monkeypatch.setattr(
+        WeightSyncPool,
+        "_reconnect",
+        lambda self, index, peer_gone: pytest.fail("a group member was reconnected alone"),
+    )
+
+    pool.reconnect_servers(["http://server0:8000"])
+
+
 def test_reconnect_retires_the_old_client_before_probing_the_replacement():
     """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed first times out."""
     order: list[str] = []
 
     class RecordingClient:
+        CHUNK_STAGER = PackedChunkStager
+
+        def share_stager(self, stager):
+            pass
+
         def __init__(self, **kwargs):
             self.base_url = kwargs["base_url"]
             self.group_port = kwargs.get("group_port")
@@ -400,6 +435,122 @@ def test_a_reconnected_client_is_built_like_the_first_connect():
     for client in (first, replacement):
         assert (client.group_port, client.group_host, client.sync_device) == (52000, "10.0.0.7", torch.device("cpu"))
     assert replacement._co_load_groups == scoped, "the replacement lost the scope the push gave the pool"
+
+
+def _reconnect_probe():
+    closed: list[str] = []
+
+    class Old:
+        def drain_param_buffer(self):
+            return []
+
+        def close_communicator(self):
+            closed.append("graceful")
+
+        def close_communicator_of_restarted_server(self):
+            closed.append("local")
+
+    class New:
+        def __init__(self, **kwargs):
+            pass
+
+        CHUNK_STAGER = PackedChunkStager
+
+        def share_stager(self, stager):
+            pass
+
+        def init_communicator(self, device):
+            pass
+
+    pool = WeightSyncPool(
+        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
+        connection_timeout=0.0,
+        client_cls=New,
+        base_group_port=51216,
+    )
+    pool._clients = [Old()]
+    pool._device = torch.device("cpu")
+    return pool, closed
+
+
+def test_a_known_restart_drops_the_old_client_locally():
+    pool, closed = _reconnect_probe()
+
+    pool.reconnect_servers(["http://server0:8000"])
+
+    assert closed == ["local"]
+
+
+def test_a_failure_triggered_reconnect_still_closes_the_old_client_gracefully():
+    pool, closed = _reconnect_probe()
+
+    pool._reconnect(0)
+
+    assert closed == ["graceful"]
+
+
+def _blocking_pool(*, marked: bool):
+    """One server whose client's graceful close and abort would block; the restart release records instead."""
+    calls: list[str] = []
+
+    class Client:
+        def close_communicator(self):
+            calls.append("graceful")
+            time.sleep(0 if not marked else 5)
+
+        def abort_weight_update(self):
+            calls.append("abort")
+            time.sleep(0 if not marked else 5)
+
+        def close_communicator_of_restarted_server(self):
+            calls.append("local")
+
+    pool = WeightSyncPool(
+        server_configs=[{"url": "http://server0:8000", "group_port": 51216}],
+        connection_timeout=0.0,
+        client_cls=ServerlessSGLangClient,
+        base_group_port=51216,
+    )
+    pool._clients = [Client()]
+    if marked:
+        pool.mark_servers_restarted(["http://server0:8000"])
+    return pool, calls
+
+
+def test_closing_the_pool_releases_a_client_marked_restarted_without_its_peer():
+    pool, calls = _blocking_pool(marked=True)
+
+    started = time.monotonic()
+    pool.close_communicator()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["local"]
+
+
+def test_aborting_an_update_releases_a_client_marked_restarted_without_its_peer():
+    pool, calls = _blocking_pool(marked=True)
+
+    started = time.monotonic()
+    pool.abort_weight_update()
+
+    assert time.monotonic() - started < 1.0
+    assert calls == ["local"]
+
+
+def test_closing_the_pool_still_closes_an_unmarked_client_gracefully():
+    pool, calls = _blocking_pool(marked=False)
+    pool.close_communicator()
+
+    assert calls == ["graceful"]
+
+
+def test_a_reconnect_clears_the_restart_mark():
+    pool, closed = _reconnect_probe()
+    pool.mark_servers_restarted(["http://server0:8000"])
+
+    pool.reconnect_servers()
+
+    assert closed == ["local"] and not pool._restarted_urls
 
 
 if __name__ == "__main__":

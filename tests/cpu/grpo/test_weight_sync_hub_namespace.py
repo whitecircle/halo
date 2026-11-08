@@ -17,11 +17,12 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGe
 
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.grpo.rollout import weight_push
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.checkpoint_io import safetensors_state_dict
+from tests.common.ep_stubs import ReadyGather
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.repo import REPO_ROOT
 
@@ -51,12 +52,12 @@ def _ep_stub(block: nn.Module) -> EPStep3p7MoELayer:
     layer.shared_experts = block.shared_experts
     layer.forward = lambda hidden_states, **kwargs: hidden_states  # pragma: no cover - never called
     layer.expert_named_params = lambda: [("gate_up_proj", layer.gate_up_proj), ("down_proj", layer.down_proj)]
-    layer.gather_expert_state_dict = lambda device="cpu", merge_lora=False, retain=True: (
+    layer.start_gather_expert_state_dict = lambda **kwargs: ReadyGather(
         {
             "experts.gate_up_proj": layer.gate_up_proj.detach(),
             "experts.down_proj": layer.down_proj.detach(),
         }
-        if retain
+        if kwargs["retain"]
         else {}
     )
     return layer

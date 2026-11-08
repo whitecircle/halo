@@ -57,6 +57,8 @@ rows left out.
 
 The episode budget leaves tool output between turns unbounded, so it does not replace this cap.
 
+On an EP group spanning NVLink domains the cap is also the row length the load-time dispatch gate sizes, with `per_device_train_batch_size` rows (and `per_device_eval_batch_size` where an evaluation runs): unset, the gate judges the context window and refuses above the cross-node 8,192 tokens per rank ([DeepEP](../../infrastructure/deepep.md#dispatch-token-ceiling)).
+
 ## Tool calls
 
 Native-tool environments send their `tools` schema, so the server needs the matching
@@ -95,7 +97,7 @@ What follows:
 - Their rows train only under a negative advantage ([Untrainable turns](objective.md#untrainable-turns)).
 
 The next turn runs under the same caps as any other. Under [carried reasoning](#carried-reasoning) a retry thinks on
-from where the cut stopped, so a per-turn budget binds only once cuts are priced.
+from where the cut stopped, so a per-turn cap binds only once cuts are priced.
 
 ### Engine aborts
 
@@ -105,7 +107,7 @@ then the episode errors into a masked row.
 ## Carried reasoning
 
 `carry_reasoning: true` (default off) sends the latest assistant turn's reasoning back, so the next turn continues
-that thought. Earlier turns stay visible text, so a request grows by at most one reasoning budget.
+that thought. Earlier turns stay visible text, so a request grows by at most one turn's reasoning.
 
 - The trainer refuses it under `rollout_backend: sglang` (unverified there).
 - A step whose turns carry no reasoning while carried reasoning or a reasoning term is on warns once: the server most
@@ -136,5 +138,4 @@ it, and no `--chat-template` on the server, the two sides diverge silently. The 
 per-turn rows take the engine's ids and cannot drift.
 
 `rollout_chat_template_kwargs` applies template variables to every request **and** the trainer's own renders. It
-refuses `reasoning_effort`, `reasoning_budget` and `reasoning_budget_soft`, which are per episode
-([Effort templates](reasoning.md#effort-templates)).
+refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)).

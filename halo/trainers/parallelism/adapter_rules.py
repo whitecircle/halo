@@ -7,8 +7,8 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_exp
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.tokenizer_setup import vocabulary_grown
+from halo.models.introspection.unwrapping import find_peft_model
 from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
-from halo.models.unwrapping import find_peft_model
 
 
 def reject_peft_lora_in_ep_layers(model) -> None:

@@ -35,7 +35,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.attention.gpt_oss_sinks import neutralized_sink_value
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.runtime import dtensor
 from halo.trainers.parallelism.pipeline_trainer import stash_wrapper_state
 from tests.common.checkpoint_io import load_context, safetensors_state_dict, save_context

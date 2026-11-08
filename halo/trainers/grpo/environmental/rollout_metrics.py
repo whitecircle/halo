@@ -7,19 +7,19 @@ from collections.abc import Mapping, Sequence
 
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_SLICES_KEY,
     REWARD_COMPONENTS_KEY,
     REWARD_DETAILS_KEY,
     SOLVE_RATE_KEY,
 )
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.samples import CUT_CALL_NOTE
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +53,8 @@ class RolloutMetricsMixin:
     _total_generation_tokens = 0
     _completion_logs_mode: str | None = None
     _truncation_alarmed: frozenset[str] = frozenset()
+    # Train rounds in a row over episode_error_rate_limit; resumed from the checkpoint's sidecar.
+    _episode_error_rounds = 0
 
     def _populate_completion_logs(
         self,
@@ -117,6 +119,8 @@ class RolloutMetricsMixin:
         self._total_rollout_latency += world.pop("async/total_rollout_latency")
         self._total_generation_tokens += int(world.pop("async/total_generation_tokens"))
         self._sound_truncation_alarm(world["episode/truncation_rate"], mode)
+        if mode == "train":
+            self._track_episode_error_round(world["episode/error_rate"], results)
         for key, value in world.items():
             self._metrics[mode][key].append(value)
 
@@ -194,6 +198,33 @@ class RolloutMetricsMixin:
                 f"the rate has dropped back under the threshold."
             )
         self._truncation_alarmed = self._truncation_alarmed | {mode} if alarmed else self._truncation_alarmed - {mode}
+
+    def _track_episode_error_round(self, error_rate: float, results: list[RolloutResult]) -> None:
+        """Raise on the ``episode_error_round_limit``-th train round in a row whose world-wide error rate is over
+        ``episode_error_rate_limit``. Errored episodes train as masked rows, so a run that times out its slow episodes
+        keeps training on the fast ones. Every rank reads the same world value, so all raise together."""
+        cfg = self.async_config
+        limit = cfg.episode_error_rate_limit
+        if limit is None:
+            return
+        if error_rate <= limit:
+            self._episode_error_rounds = 0
+            return
+        self._episode_error_rounds += 1
+        sample = next((r.error for r in results if r.error), "no error on this rank")
+        detail = (
+            f"{error_rate:.0%} of this train round's episodes errored or timed out, over episode_error_rate_limit="
+            f"{limit} for {self._episode_error_rounds} round(s) in a row (an example: {sample})"
+        )
+        if self._episode_error_rounds >= cfg.episode_error_round_limit:
+            raise RuntimeError(
+                f"{detail}. The batch is the episodes that finished, biased toward short answers, or the rollout "
+                f"path is down. A timeout means a turn outran request_timeout={cfg.request_timeout:g}s at "
+                f"rollout_max_tokens={cfg.rollout_max_tokens}: raise request_timeout or lower rollout_max_tokens. "
+                f"Raise episode_error_rate_limit or set it to null to train through it."
+            )
+        if self._episode_error_rounds == 1 and is_global_main_process():
+            logger.warning(f"{detail}; halting after {cfg.episode_error_round_limit}.")
 
     def cumulative_rollout_metrics(self) -> dict[str, float]:
         return {

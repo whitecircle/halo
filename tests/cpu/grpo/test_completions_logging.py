@@ -16,8 +16,8 @@ import torch
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
 import halo.trainers.grpo.rollout.completions_logging as cl
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY, REWARD_DETAILS_KEY
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.rewards.samples import CUT_CALL_NOTE
 from halo.runtime import consensus, filesystem, ranks
 from halo.trainers.distributed_trainer import DistributedTrainerMixin

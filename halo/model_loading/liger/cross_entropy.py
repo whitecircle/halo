@@ -16,9 +16,9 @@ from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutpu
 from transformers.loss import loss_utils
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, chunked_token_sum, cross_entropy_sum, logit_chunk_rows
-from halo.models.config_access import get_config_field
 from halo.models.head_transform import HeadTransform, resolve_head_transform, resolve_head_transform_spec
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.config_access import get_config_field
+from halo.models.introspection.unwrapping import base_transformers_model
 
 # Captured before any patch so the CPU / unsupported-kwarg fallback below cannot recurse.
 _TORCH_CROSS_ENTROPY = F.cross_entropy

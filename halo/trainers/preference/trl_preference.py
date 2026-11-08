@@ -24,7 +24,8 @@ from trl.trainer.utils import (
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.kernels.logprobs import selective_logprobs
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.training_args_overrides import disable_trl_liger
 from halo.trainers.preference.preference_rules import reject_policy_from_checkpoint_without_resume
 from halo.trainers.reference_logps import (
     LOGPROB_PRECISION_KEY,
@@ -34,7 +35,6 @@ from halo.trainers.reference_logps import (
     reference_regeneration_steps,
     token_digest,
 )
-from halo.trainers.training_args_overrides import disable_trl_liger
 
 logger = logging.getLogger(__name__)
 

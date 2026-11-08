@@ -20,8 +20,8 @@ from halo.checkpoint.parallel.adapters import (
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.models.param_roles import persistent_buffers
-from halo.models.unwrapping import plain_adapter_key
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import plain_adapter_key
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 

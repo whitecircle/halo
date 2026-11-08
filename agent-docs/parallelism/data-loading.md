@@ -36,7 +36,7 @@ dispatch rank process the same batch.
 
 ## How the DataLoader is built
 
-`DataParallelLoaderMixin` (`halo/trainers/dataloaders.py`, composed into
+`DataParallelLoaderMixin` (`halo/trainers/loop/dataloaders.py`, composed into
 `DistributedTrainerMixin`) takes the custom path when `uses_dp_sharded_loader` sees
 `non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP, ETP or PP) or a
 pre-sharded dataset; otherwise (DDP / EP-only / HSDP, not presharded) it uses the base Trainer flow.

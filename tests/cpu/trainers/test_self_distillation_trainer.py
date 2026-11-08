@@ -14,11 +14,11 @@ from torch.nn.functional import cross_entropy
 import halo.kernels.logprobs as logprob_kernels
 from halo.configs.distillation import SDPGArguments
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.trainers import world_metrics
 from halo.trainers.distillation.divergences import reverse_kl_loss, unnormalized_kl_loss
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.metrics import world_metrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.world_metrics import WorldMetrics
 
 VOCAB = 13
 EOS = 2

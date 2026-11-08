@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
-from halo.trainers.trainer_rules import (
+from halo.trainers.construction.trainer_rules import (
     reject_conflicting_optimizer_choice,
     reject_ep_layers_under_accelerate,
     reject_sync_ref_model_on_sharded_policy,

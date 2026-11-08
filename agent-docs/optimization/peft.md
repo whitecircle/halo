@@ -330,21 +330,26 @@ On online / async GRPO, where no adapter wraps the model — a full fine-tune, o
 run, which builds no `PeftModel` — `beta != 0` holds a frozen reference: the script loads the base the
 way the policy loads and the trainer hands it to TRL in place of the fp32 copy TRL would build
 ([Online GRPO](../training-methods/grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an
-unparallelized replica per rank, warned about under EP and TP. Add an attention LoRA target (it wraps the
+unparallelized replica per rank, refused before it loads when it exceeds half the free GPU memory or 80% of the node's
+available host RAM across its ranks. Add an attention LoRA target (it wraps the
 model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
 ## Online RL — rollout-server weight sync
 
 Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
-([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter**.
+([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter** unless
+`rollout_adapter_sync` serves the policy as one on SGLang ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
 
-Each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
+Otherwise each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
 (PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
 un-adapted base.
 
 The fold is out of place, one tensor at a time as the sync sends it (`lora_folded` in
-`halo/models/peft_adapters.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
-for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A fold
+`halo/models/peft_adapters.py`, `lora_folded_data` in `halo/distributed/lora_fold.py`): the value PEFT's `merge_adapter` would write on the same placement, bit
+for bit, on Linear, Embedding, Conv and `target_parameters` layers, with `lora_bias` and DoRA. A Conv
+adapter on an FSDP2 shard folds on whole tensors (a DTensor convolution would run on each rank's slice of the
+adapter rank) and reshards the result, which holds the whole base and adapter tensors on every rank, so it suits
+the small convolutions of a patch embedding. A fold
 on FSDP2 shards can differ from a single-device merge by rounding, since the delta's contraction is
 summed across shards. The frozen base is never written: PEFT's in-place merge followed by its unmerge
 would not give it back, since in bf16 `(w + d) - d` misses `w` by a rounding step wherever the two
@@ -438,9 +443,10 @@ The mixed label keeps every `LoraConfig` field beside it, plus an `ep_expert_lor
 half's `r`/`lora_alpha`/`lora_dropout`/`use_rslora`/`expert_projections`; resume reads the tensors directly
 and the file only for its scaling check (below).
 
-The repo's merge and convert scripts check those markers (`reject_expert_lora_adapter`) and fall through
+The in-memory merge and convert paths check those markers (`reject_expert_lora_adapter`) and fall through
 to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
-holding `.experts.<attr>.lora_{A,B}` keys is refused too.
+holding `.experts.<attr>.lora_{A,B}` keys is refused too; `merge_peft_adapters.py` routes such an adapter to the
+[streaming merge](#streaming-merge).
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
@@ -496,15 +502,15 @@ The merge re-applies the run's training sidecars to the merged model and copies 
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the
 family's native routing-bias slots, so the merged model routes on the trained bias.
 
-The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
+The in-memory merge **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
 `LORA_WITH_EP_EXPERT_LORA`, or tensor keys ending at `.experts.<attr>.lora_{A,B}`), because
-`PeftModel.merge_and_unload` silently drops the grouped expert deltas. A stock PEFT adapter on a per-expert
-`nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight` and merges normally; only the grouped
-namespace is refused.
+`PeftModel.merge_and_unload` silently drops the grouped expert deltas; `convert_to_bf16.py --peft` shares that
+refusal. A stock PEFT adapter on a per-expert `nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight`
+and merges normally; only the grouped namespace is refused.
 
-`merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for
-expert-only **and** mixed runs alike. Set it from the first save: a mixed adapter saved without it resumes here,
-and `merge_peft_adapters` refuses it. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
+`merge_peft_adapters.py` folds such an adapter after the fact through its [streaming merge](#streaming-merge),
+automatically for expert-only and mixed adapters. `merge_expert_lora_on_save: true` produces the merged servable
+checkpoint at training time instead, for expert-only **and** mixed runs alike. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
 base, so the run continues from its trained adapters rather than the fold
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
@@ -517,6 +523,25 @@ deltas out of place into each tensor as it is written, with the weight sync's fo
 unchanged. The fold happens
 in the gathered EP save under mixin-managed FSDP2 (torchrun); it is rejected under accelerate-managed FSDP
 and with `save_sharded_ep: true`.
+
+
+### Streaming merge
+
+`merge_peft_adapters.py --streaming` (automatic for an adapter holding native expert LoRA, whose in-memory merge is
+refused) loads no model: it reads each tensor of the base's safetensors shards, folds the adapter into the ones it
+targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
+fp32 expert deltas of the layer being folded and the writer's parts: about one expert layer's fp32 delta times a small
+factor (the preflight budgets 3x), which at 397B scale is tens of GB per layer. Linear LoRA (rslora,
+rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
+merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
+arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
+the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` is ignored (logged) and `--device_map`,
+`--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
+first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
+a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
+grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
+those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
+the adapter config lands in `original_adapter_config/`.
 
 ## Tests and benchmarks
 

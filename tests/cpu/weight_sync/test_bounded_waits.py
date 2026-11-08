@@ -11,11 +11,12 @@ import torch
 
 from halo.weight_sync.transport import bounded_waits, packed_broadcast, pynccl
 from halo.weight_sync.transport.nccl_library import ncclComm_t, ncclUniqueId
-from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
+from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, broadcast_packed
 from halo.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.repo import probe_findings
 
 _DRAIN_MARKER = "DRAIN_DEADLINE:"
+_FORMATION_MARKER = "FORMATION_DEADLINE:"
 _COMM_HANDLE = 0x5EED
 
 
@@ -138,6 +139,20 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
     assert float(deadline) == expected
 
 
+@pytest.mark.parametrize(("value", "expected"), [(None, 120.0), ("900", 900.0), ("0", 120.0), ("soon", 120.0)])
+def test_the_formation_deadline_is_read_once_from_the_env(monkeypatch, value, expected):
+    if value is None:
+        monkeypatch.delenv("HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS", raising=False)
+    else:
+        monkeypatch.setenv("HALO_WEIGHT_SYNC_FORMATION_TIMEOUT_SECONDS", value)
+    script = (
+        "from halo.weight_sync.clients import base; "
+        f"print({_FORMATION_MARKER!r} + repr(base.GROUP_FORMATION_TIMEOUT_S))"
+    )
+    [deadline] = probe_findings(script, _FORMATION_MARKER)
+    assert float(deadline) == expected
+
+
 def test_a_refused_drain_deadline_warns_with_the_value_it_uses(monkeypatch):
     monkeypatch.setenv("HALO_NCCL_SYNC_TIMEOUT_SECONDS", "0")
     script = (
@@ -173,13 +188,9 @@ def test_a_packed_drain_that_passes_its_deadline_aborts_the_communicator(monkeyp
     monkeypatch.setattr(packed_broadcast, "CHUNK_SYNC_TIMEOUT_S", 0.0)
     monkeypatch.setattr(torch.cuda, "Event", _PendingEvent)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda device=None: _Stream())
-    real_empty = torch.empty
-    # The producer's placeholder buffers name the CUDA device, which a CPU run does not have.
-    monkeypatch.setattr(torch, "empty", lambda *args, device=None, **kwargs: real_empty(*args, **kwargs))
-
     with pytest.raises(RuntimeError, match="packed weight broadcast did not complete"):
-        packed_broadcast_producer(
-            iter([("w", torch.ones(4))]), communicator, streams=[_Stream() for _ in range(PACKED_NUM_BUFFERS)]
+        broadcast_packed(
+            [torch.ones(4)], communicator, streams=[_Stream() for _ in range(PACKED_NUM_BUFFERS)], ready=None
         )
     assert communicator.aborted, "the drain deadline did not abort the communicator its broadcasts run on"
 

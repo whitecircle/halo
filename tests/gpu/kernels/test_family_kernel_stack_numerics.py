@@ -20,10 +20,11 @@ Two comparisons, both against the stock Hugging Face model built from the same w
 * fp32 against fp32: the stack must match to fp32 round-off (reduction order, fused-kernel accumulation);
   torch's TF32 is off on both sides (``fla``'s Triton dots keep Triton's TF32 default on both). How far
   round-off moves each gradient is measured, not assumed: the stock model is rerun with every parameter
-  nudged one ulp, and a parameter's bound widens to a multiple of the median move those nudges cause
-  where that is looser than the fixed bound. The median, because a nudge that flips a discrete choice
+  nudged one ulp, and a parameter's bound widens to a multiple of the upper-quartile move those nudges cause
+  where that is looser than the fixed bound. The upper quartile, because a nudge that flips a discrete choice
   (GLM-5 Next's indexer top-k below) moves many gradients wholesale, which the stack at this seed does
-  not. A gated-delta-rule layer with a steep decay needs the widening (Qwen3.5's first layer at this
+  not, while a median of eight draws from the decay gradient's heavy spread moved 3.5x between two cuBLAS
+  builds. A gated-delta-rule layer with a steep decay needs the widening (Qwen3.5's first layer at this
   seed, log-decay down to -25 per token): an fp32 chunked backward gets its decay gradient to ~1e-2
   only (``fla``'s and transformers' torch path alike), ``fla`` re-draws that error under any round-off
   change of its inputs, and the parameters reached only through the decay (``A_log``, ``dt_bias``,
@@ -41,7 +42,7 @@ applies is process-wide, so every model below runs under it.
 
 GLM-5 Next's sparse-attention indexer picks KV blocks by a top-k (``index_topk``) that fp32
 reduction-order noise flips on some inputs, which moves a few gradients wholesale. The fixed seed below
-sits near such a tie: two of the eight one-ulp nudges of the stock model flip it (the median spread
+sits near such a tie: a quarter of the one-ulp nudges of the stock model flip it (the upper-quartile spread
 absorbs them), while the stack's own reduction order does not.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_family_kernel_stack_numerics.py --family qwen3_moe
@@ -62,7 +63,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
@@ -79,13 +80,14 @@ BATCH, SEQ = 2, 96
 FP32_LOSS_RTOL = 1e-4
 FP32_GRAD_COS_MIN = 0.9999
 FP32_GRAD_NORM_RTOL = 2e-2
-# The stock model's own round-off spread, the median over this many one-ulp nudges; a bound widens to this multiple of
-# it, within the floor and ceiling below. On the steep-decay GDN layer the stack's deviation measured 0.87x the spread,
-# 1.2e-3 in 1 - cos; on GLM-5 Next two nudges in eight flip the indexer top-k.
-ROUNDOFF_PROBES = 8
-ROUNDOFF_SPREAD_MULTIPLE = 4.0
+# The stock model's own round-off spread, the upper quartile over this many one-ulp nudges (absorbing a quarter of them
+# flipping); a bound widens to this multiple of it, within the floor and ceiling below. On the steep-decay GDN layer the
+# 16 nudges of Qwen3.5's first layer move the A_log norm by 2e-4 to 6e-2 and the stack by 3e-2 to 5e-2, inside that
+# range, so the ceiling sits above it; on GLM-5 Next a quarter of the nudges flip the indexer top-k.
+ROUNDOFF_PROBES = 16
+ROUNDOFF_SPREAD_MULTIPLE = 2.0
 ROUNDOFF_GRAD_COS_FLOOR = 0.99
-ROUNDOFF_GRAD_NORM_RTOL_CEILING = 5e-2
+ROUNDOFF_GRAD_NORM_RTOL_CEILING = 1e-1
 # The stack's error against the fp32 stock model, relative to the stock model's own bf16 error, median across seeds: a
 # single seed is noisy, a wrong precision or a dropped fp32 accumulation is not.
 BF16_LOSS_ERROR_RATIO_MAX = 3.0
@@ -139,8 +141,13 @@ def _round_off_probe(model_cls: type, config, state: dict, probe: int):
     return model
 
 
+def _upper_quartile(values: list[float]) -> float:
+    return sorted(values)[len(values) * 3 // 4 - 1]
+
+
 def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads: dict) -> dict:
-    """Per parameter, the median ``1 - cos`` and relative norm change under :data:`ROUNDOFF_PROBES` one-ulp nudges."""
+    """Per parameter, the upper quartile of ``1 - cos`` and of the relative norm change under :data:`ROUNDOFF_PROBES`
+    one-ulp nudges."""
     moves = {name: [] for name in ref_grads}
     for probe in range(ROUNDOFF_PROBES):
         _, grads = _loss_and_grads(_round_off_probe(model_cls, config, state, probe), input_ids)
@@ -149,8 +156,8 @@ def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads
             moves[name].append((1 - cos, _norm_rel(grads[name], want)))
     return {
         name: {
-            "one_minus_cos": statistics.median(cos_move for cos_move, _ in pairs),
-            "norm_rel": statistics.median(norm_move for _, norm_move in pairs),
+            "one_minus_cos": _upper_quartile([cos_move for cos_move, _ in pairs]),
+            "norm_rel": _upper_quartile([norm_move for _, norm_move in pairs]),
         }
         for name, pairs in moves.items()
     }

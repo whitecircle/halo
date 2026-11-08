@@ -13,8 +13,8 @@ import torch
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, WeightRenaming, dot_natural_key, rename_source_key
 
-from halo.models.conversion_overrides import verify_conversion_overrides_intact
-from halo.models.model_classes import transformers_model_class
+from halo.models.introspection.model_classes import transformers_model_class
+from halo.models.upstream.conversion_overrides import verify_conversion_overrides_intact
 
 # A conversion source addressing one tensor per module-list index (``…experts.*.w1.weight``).
 _PER_INDEX_SOURCE = re.compile(r"\.\*\.")

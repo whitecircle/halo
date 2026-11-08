@@ -81,7 +81,6 @@ EP surface. The table is pinned against the specs and classes by
 | Zaya | routing replay | `FAMILY.supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
-| GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | RL weight sync — both pinned engines serve the release, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | training the composite through the release's modeling file — its forward hands the text tower no `seq_idx` and reads no `image_grid_hw` | `FAMILY.remote_composite_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
@@ -243,11 +242,9 @@ fused SR kernel, fp32 params standard in-place AdamW. See
 [DeepEP](../infrastructure/deepep.md) owns installation, buffer sizing, transport and fabric tuning.
 What an EP run has to plan around:
 
-- **Two dispatch ceilings**, both refused at config time off the declared budget and re-checked at buffer
-  sizing, rather than left to fault mid-kernel:
+- **One dispatch ceiling**, refused at config time off the declared budget and re-checked at buffer
+  sizing, rather than left to wedge in transit:
 
-    - The 32-bit wire index caps every topology at `2³¹ / (num_topk × padded_hidden)` ≈ **175k tokens
-      per forward** for GPT-OSS.
     - Cross-node (Gin) dispatch caps at `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (default **8192**, `0`
       disables), above which an EFA proxy-GIN dispatch **wedges instead of erroring**. Intra-node
       NVLink dispatch has no cap of its own, but the default `elastic` backend deadlocks ep8 at ≥~64k
@@ -257,7 +254,7 @@ What an EP run has to plan around:
     The Gin cap is the binding limit on `per_device_train_batch_size` × sequence length for any
     `ep_scope=global` run spanning more than one NVLink domain
     ([AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)). How the config-time
-    budget is derived: [DeepEP → Dispatch wire-index limit](../infrastructure/deepep.md#dispatch-wire-index-limit).
+    budget is derived: [DeepEP → Dispatch token ceiling](../infrastructure/deepep.md#dispatch-token-ceiling).
 
 - **The dispatched count is `per_device_train_batch_size × tokens-per-sequence`**, doubled for DPO,
   SMPO and reward, which forward chosen and rejected together. It does not scale with
@@ -320,6 +317,8 @@ each forward.
 norms batch-`all_reduce(SUM)`ed via `._local_tensor` → expert norms `all_reduce(SUM)`ed over the
 expert-TP group, then the **dispatch** group → `sqrt(expert² + non_expert² + tp_shard²)`. Replicas
 across EP groups need no reduce: the clip runs the deferred sweep first, which leaves them identical.
+The [striped checkpoint save](../reference/checkpoints.md) relies on it: its writers take layers from different EP groups, so a
+change to the sweep's cadence that leaves the groups unequal at a save writes a mixed checkpoint.
 
 ## Determinism
 
@@ -515,7 +514,8 @@ next collective.
 | **Sharded** (`save_sharded_ep`) | every rank, in parallel | Per-rank files | `merge_ep_shards.py` first |
 
 **Gathered:** experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
-the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
+the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise. The RL weight sync instead delivers each
+layer to the forwarding rank alone ([Rollout Servers](../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 `retain` reaches inside the expert gather, so a non-writing rank joins every collective and returns
 `{}` without running the layout assembly (per-expert split, re-interleave, transpose + `contiguous`,
@@ -526,7 +526,8 @@ The save streams into a `StreamingShardWriter` one chunk at a time, the non-expe
 then one EP layer per chunk, and finalizes with `close_as_hf_checkpoint()`. Its host RAM holds the
 current chunk, the part it is filling and one part per background write thread
 (`save_max_shard_size`, default `5GB`; `HALO_CHECKPOINT_WRITE_THREADS`, default `0`), not the whole
-checkpoint. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
+checkpoint. A multi-node shared-filesystem save stripes the layers over each node's first rank
+([Checkpoints](../reference/checkpoints.md)), so each writer holds its own current layer and parts. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
 (`ep8`) and about 21 GB at Qwen3.5-397B-A17B (`ep64`); each write thread adds up to one part.
 
 The plain FSDP2, CP and TP gathered saves stream through the same writer

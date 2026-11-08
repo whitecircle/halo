@@ -10,7 +10,7 @@ from transformers.models.gpt_oss.modeling_gpt_oss import GptOssAttention
 
 from halo.distributed.context_parallel.families import GptOssUlyssesAttention
 from halo.models.attention.gpt_oss_sinks import _reset_gpt_oss_sinks, neutralized_gpt_oss_sinks
-from halo.models.unwrapping import strip_cp_attention_level
+from halo.models.introspection.unwrapping import strip_cp_attention_level
 
 LIVE_SINK_VALUE = 0.75
 

@@ -23,14 +23,14 @@ from halo.model_loading.parallel.loader import resolve_policy_attn_implementatio
 from halo.models import segment_markers
 from halo.models.attention import selection
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
-from halo.models.modality import is_vlm_model
+from halo.models.attention.layout import has_gated_delta_net_layers
+from halo.models.introspection.modality import is_vlm_model
 from tests.common.repo import load_script_module
 
 # The families the default moves to FA2: GatedDeltaNet decoders on FA4's head_dim-256 kernel, every spelling,
 # wrappers included.
 _GDN_MODEL_TYPES = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next")
-# The ones whose decoder rotates by M-RoPE, text-only towers included: ``padding_free`` keeps them off FA2.
+# The ones whose decoder rotates by M-RoPE, text-only towers included.
 _MROPE_GDN_MODEL_TYPES = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text")
 # Near misses: GLM-4.7-Flash runs the same kernel but has no GatedDeltaNet layers (its FA2 packing is unvalidated);
 # the rest keep FA4 and must never see the default.
@@ -95,14 +95,8 @@ def _default(model_type: str, arch: str, *, padding_free: bool, pinned: str | No
 @pytest.mark.parametrize("model_type", _GDN_MODEL_TYPES + _OTHER_MODEL_TYPES)
 def test_the_default_per_family_collator_and_arch(model_type, padding_free, arch):
     """FA2 exactly where the GPU's own pick is FA4 and the family is a GatedDeltaNet one on FA4's head_dim-256
-    kernel, deterministic or not; ``padding_free`` additionally leaves out every M-RoPE decoder."""
-    expected = (
-        "flash_attention_2"
-        if arch in _FA4_ARCHS
-        and model_type in _GDN_MODEL_TYPES
-        and not (padding_free and model_type in _MROPE_GDN_MODEL_TYPES)
-        else None
-    )
+    kernel, deterministic or not, packed or padding-free."""
+    expected = "flash_attention_2" if arch in _FA4_ARCHS and model_type in _GDN_MODEL_TYPES else None
     assert _default(model_type, arch, padding_free=padding_free) == expected
 
 
@@ -139,52 +133,13 @@ def test_a_gated_delta_net_decoder_off_the_head_dim_256_kernel_keeps_the_loader_
     assert _default_for(config, "b300", padding_free=padding_free) is None
 
 
-@pytest.mark.parametrize(
-    ("model_type", "mrope"),
-    [(t, True) for t in _MROPE_GDN_MODEL_TYPES + ("qwen3_vl", "qwen2_5_vl")]
-    + [(t, False) for t in ("qwen3_next", "qwen3", "gpt_oss", "llama", "glm4_moe_lite")],
-)
-def test_mrope_is_read_off_the_decoder_not_the_checkpoint_modality(model_type, mrope):
-    """A text-only Qwen3.5 tower runs the same M-RoPE rotary as the multimodal wrapper, with no ``mrope_section`` in
-    its ``rope_parameters``."""
-    config = CONFIG_MAPPING[model_type]()
-    assert has_mrope_rotary(config) is mrope
-
-
 @pytest.mark.parametrize("model_type", _MROPE_GDN_MODEL_TYPES)
-def test_padding_free_on_a_qwen35_decoder_stays_on_sdpa(model_type):
-    """The Qwen3.5 decoder's M-RoPE varlen path faults FA2 under ``padding_free``, so the default stays off and the
-    refusal names the M-RoPE rotary no backend serves."""
+def test_padding_free_on_a_qwen35_decoder_loads_fa2_and_passes_collator_selection(model_type):
+    """The M-RoPE decoder takes the same FA2 default and the same collator rules as any GatedDeltaNet decoder."""
     config = CONFIG_MAPPING[model_type]()
-    assert _default(model_type, "b300", padding_free=True) is None
-    with mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"):
-        resolved = selection.resolve_attn_implementation(
-            config, None, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
-        )
-    assert resolved == "sdpa"
-    with pytest.raises(ValueError, match="rotates by M-RoPE"):
-        reject_unsupported_collator_options(
-            types.SimpleNamespace(),
-            padding_free=True,
-            packing=False,
-            train_on_completions_only=False,
-            assistant_message_template=None,
-            use_context_parallel=False,
-            train_on_last_assistant_only=False,
-            model_config=config,
-            per_device_train_batch_size=1,
-            keeps_packed_rows=False,
-        )
-
-
-@pytest.mark.parametrize("model_type", _MROPE_GDN_MODEL_TYPES)
-def test_padding_free_on_a_qwen35_decoder_on_fa4_stops_at_collator_selection(model_type, monkeypatch):
-    """Outside a deterministic run the decoder resolves FA4, a varlen kernel the dense-backend refusal accepts; the
-    M-RoPE refusal keeps its flattened row off the varlen path."""
-    monkeypatch.delenv(_DETERMINISTIC_ENV)
-    config = CONFIG_MAPPING[model_type]()
-    config._attn_implementation = "flash_attention_4"
-    with pytest.raises(ValueError, match="M-RoPE"):
+    assert _default(model_type, "b300", padding_free=True) == "flash_attention_2"
+    config._attn_implementation = "flash_attention_2"
+    with mock.patch.object(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _SEGMENT_AWARE_KERNELS_PRESENT):
         reject_unsupported_collator_options(
             types.SimpleNamespace(),
             padding_free=True,
@@ -259,7 +214,7 @@ _GEMMA2_27B = {"hidden_size": 4608, "num_attention_heads": 32, "num_key_value_he
             CONFIG_MAPPING["gemma2"](**_GEMMA2_27B, num_hidden_layers=2),
             {"packed": "flash_attention_2", "padding_free": "flash_attention_2", "padded": "flash_attention_2"},
         ),
-        (CONFIG_MAPPING["qwen3_5_moe"](), {"packed": "flash_attention_2"}),
+        (CONFIG_MAPPING["qwen3_5_moe"](), {"packed": "flash_attention_2", "padding_free": "flash_attention_2"}),
         (CONFIG_MAPPING["qwen3_next"](), {"packed": "flash_attention_2", "padding_free": "flash_attention_2"}),
         (CONFIG_MAPPING["qwen3"](), {}),
     ],
@@ -297,14 +252,13 @@ _KERNEL_CLASSES = {
 
 
 def _expected_backend(kernel_class: str, rows: str, deterministic: bool, pinned: str | None) -> str:
-    """The backend a B300 run loads: multi-document rows (but ``padding_free`` on M-RoPE, which collator selection
-    refuses) take FA2 off a deterministic run's FA4 demotion, pinned or not, and off an unpinned FA4 on a
-    GatedDeltaNet family; rows of one document keep the demotion to SDPA."""
+    """The backend a B300 run loads: multi-document rows take FA2 off a deterministic run's FA4 demotion, pinned or
+    not, and off an unpinned FA4 on a GatedDeltaNet family; rows of one document keep the demotion to SDPA."""
     if kernel_class == "general":
         return "flash_attention_4"
     if kernel_class == "hd256_refused":
         return "flash_attention_2"
-    multi_document = rows == "packed" or (rows == "padding_free" and kernel_class != "gated_delta_net_hd256_mrope")
+    multi_document = rows in ("packed", "padding_free")
     if multi_document and (deterministic or (pinned is None and kernel_class.startswith("gated_delta_net"))):
         return "flash_attention_2"
     return "sdpa" if deterministic else "flash_attention_4"
@@ -500,6 +454,7 @@ def _run_sft_main(
     [
         ("qwen3_5_moe", "packing: true\n", None, "flash_attention_2"),
         ("qwen3_next", "padding_free: true\n", None, "flash_attention_2"),
+        ("qwen3_5_moe", "padding_free: true\n", None, "flash_attention_2"),
         ("qwen3_5_moe", "", None, None),
         ("qwen3_5_moe", "packing: true\nattn_implementation: sdpa\n", None, "sdpa"),
         ("glm4_moe_lite", "packing: true\n", None, None),
@@ -510,6 +465,7 @@ def _run_sft_main(
     ids=[
         "packing",
         "padding_free_qwen3_next",
+        "padding_free_qwen3_5_moe",
         "padded_rows",
         "pinned",
         "glm4_moe_lite",
@@ -522,15 +478,6 @@ def test_sft_main_hands_the_policy_load_the_default(tmp_path, model_type, yaml_b
     """A pre-processed corpus by how it was baked, a raw one by ``packing`` / ``padding_free``."""
     captured = _run_sft_main(tmp_path, model_type, yaml_body, preprocessed_packed=preprocessed_packed)
     assert captured["load_attn"] == expected
-
-
-@pytest.mark.usefixtures("determinism")
-@pytest.mark.parametrize("model_type", ["qwen3_5_moe", "qwen3_5_moe_text"])
-def test_sft_main_refuses_padding_free_on_an_mrope_decoder_before_the_load(tmp_path, model_type):
-    """Refused for the M-RoPE rotary, not for the SDPA a deterministic run demotes FA4 to, which the dense-kernel
-    check would name instead."""
-    with pytest.raises(ValueError, match="rotates by M-RoPE"):
-        _run_sft_main(tmp_path, model_type, "padding_free: true\n")
 
 
 @pytest.mark.parametrize("model_type", ["qwen3_5_moe", "qwen3_next"])
@@ -649,10 +596,10 @@ def test_full_determinism_set_in_the_config_moves_packed_rows_to_fa2(tmp_path, m
     assert (captured["planned_attn"], captured["load_attn"], captured["loaded_attn"]) == ("flash_attention_2",) * 3
 
 
-def _refused_before_the_load(rule: str, rows: str, pinned: str | None) -> bool:
-    """The runs ``main()`` refuses before any weight loads, each held by its own test: ``padding_free`` on an M-RoPE
-    decoder, and a pinned FA4 on the softcap its varlen kernels are not validated with."""
-    return (rule == "gated_delta_net_hd256_mrope" and rows == "padding_free") or (rule == "softcap" and pinned)
+def _refused_before_the_load(rule: str, pinned: str | None) -> bool:
+    """The runs ``main()`` refuses before any weight loads, held by their own test: a pinned FA4 on the softcap its
+    varlen kernels are not validated with."""
+    return rule == "softcap" and bool(pinned)
 
 
 @pytest.mark.parametrize(
@@ -669,7 +616,7 @@ def _refused_before_the_load(rule: str, rows: str, pinned: str | None) -> bool:
         for rows in sorted(_ROWS_YAML)
         for pinned in (None, "flash_attention_4")
         for full_determinism in (True, False)
-        if not _refused_before_the_load(rule, rows, pinned)
+        if not _refused_before_the_load(rule, pinned)
     ],
 )
 def test_the_row_plan_and_the_load_resolve_one_backend(tmp_path, monkeypatch, rule, rows, pinned, full_determinism):

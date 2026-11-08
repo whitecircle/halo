@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Qwen3Config, Qwen3ForSequenceClassification
 
-import halo.trainers.token_metrics as token_metrics
+import halo.trainers.metrics.token_metrics as token_metrics
 from halo.configs.classification import ClassificationConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.parallelism.pipeline_loss_adapter import decode_pooling_plane, pooled_logits

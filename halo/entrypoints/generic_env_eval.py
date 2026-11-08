@@ -17,10 +17,10 @@ from halo.entrypoints.eval_contract import (
     rollout_config_from_args,
     write_eval_outputs,
 )
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import collect_results, reject_answerless_examples, report
+from halo.environments.episodes.episode_keys import ANSWER_KEY
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.eval_runner import collect_results, reject_answerless_examples, report
 from halo.inference.openai_client import build_openai_client
 
 logger = logging.getLogger(__name__)
@@ -86,13 +86,7 @@ def run_generic_env_eval(args: argparse.Namespace) -> None:
     # The training run's env config first, the flags over it: an eval under a contract grades as the run did.
     env = build_environment(env_type, {**trained_env, **turns_override, **env_kwargs})
     try:
-        rollout = rollout_config_from_args(
-            args,
-            contract,
-            env,
-            default_temperature=RolloutConfig.temperature,
-            default_max_tokens=RolloutConfig.max_tokens,
-        )
+        rollout = rollout_config_from_args(args, contract, env, default_temperature=RolloutConfig.temperature)
         # A judge or reward-model term is probed before any episode runs, as the trainer does at launch.
         env.verify_backend()
         examples = build_column_examples(args)

@@ -15,8 +15,8 @@ from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import fake_server_class
 
 _MESSAGES = [{"role": "user", "content": "Probe."}]
-_LOW = SimpleNamespace(level="low", thinking_budget=1000, budget_soft=False)
-_HIGH = SimpleNamespace(level="high", thinking_budget=4000, budget_soft=True)
+_LOW = SimpleNamespace(level="low")
+_HIGH = SimpleNamespace(level="high")
 _LEVEL_IDS = {"low": 11, "high": 12, None: 13}
 
 
@@ -66,7 +66,9 @@ def test_the_probe_sends_each_contract_and_no_tools(engine):
     assert not any("tools" in body or "return_routed_experts" in body for body in bodies)
     assert not any("thinking_token_budget" in body for body in bodies)
     assert bodies[0]["max_tokens"] == 1
-    assert bodies[0]["chat_template_kwargs"]["reasoning_budget"] == 1000
+    assert all("reasoning_budget" not in body.get("chat_template_kwargs", {}) for body in bodies), (
+        "the template is told the level alone"
+    )
 
 
 def test_a_matching_server_passes_with_no_warning(engine, caplog):

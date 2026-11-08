@@ -181,6 +181,37 @@ def test_submitted_solutions_skip_a_program_the_environment_refused_for_its_lang
     assert code_contests_regrade.submitted_solutions(episode, env) == [(cpp, "cpp")]
 
 
+def test_submitted_solutions_take_admission_from_each_call_s_recorded_reply():
+    """A record re-grades under the rules it ran under: a call whose recorded reply starts ``Error:`` was refused
+    unrun and takes no slot (an identical resubmission a run refused before such a resend counted), any other reply
+    was a graded slot, a program today's tool would refuse to bind included."""
+
+    def submit(call_id, code):
+        return {"id": call_id, "function": {"name": "submit_solution", "arguments": json.dumps({"code": code})}}
+
+    def reply(call_id, content):
+        return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+    leaked = "print(2)\n</code>"
+    episode = {
+        "messages": [
+            {"role": "assistant", "tool_calls": [submit("a", "print(1)")]},
+            reply("a", "Passed 1/3 tests."),
+            {"role": "assistant", "tool_calls": [submit("b", "print(1)")]},
+            reply("b", "Error: Not graded: this program is identical to one already graded."),
+            {"role": "assistant", "tool_calls": [submit("c", "print(1)"), submit("d", leaked)]},
+            reply("c", "Identical to submission 1, already graded: its verdict is repeated.\nPassed 1/3 tests."),
+            reply("d", "Passed 3/3 tests."),
+        ]
+    }
+    env = CodeContestsEnvironment(language="python", sandbox_backend="local")
+    assert code_contests_regrade.submitted_solutions(episode, env) == [
+        ("print(1)", None),
+        ("print(1)", None),
+        (leaked, None),
+    ]
+
+
 def test_an_episode_s_statement_sets_the_tolerance_it_is_re_graded_under():
     stated = {
         "messages": [
@@ -209,7 +240,9 @@ def test_episode_submission_budget_reads_the_stamped_tool_budget():
 def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_writes():
     """A leaderboard run re-grades at one submission even where an episode stamped no budget; a meta line naming no
     protocol ran the harness."""
-    profiles = {"high": {"thinking_tokens": 16384, "max_submissions": 3, "max_test_calls": 6}}
+    profiles = {
+        "high": {"reasoning_budget": 60000, "reasoning_price": 0.004, "max_submissions": 3, "max_test_calls": 6}
+    }
     env = CodeContestsEnvironment(
         language="python", sandbox_backend="local", eval_protocol="leaderboard", reasoning_effort_profiles=profiles
     )
@@ -221,6 +254,28 @@ def test_the_regrader_rebuilds_the_run_s_protocol_from_the_meta_line_the_eval_wr
     assert code_contests_regrade.episode_submission_budget({"info": {}}, rebuilt) == 1
     unnamed = {key: value for key, value in meta.items() if key != "eval_protocol"}
     assert code_contests_regrade.rebuild_environment(unnamed).eval_protocol == "harness"
+
+
+def test_a_meta_line_carrying_profile_keys_the_environment_no_longer_admits_still_re_grades(caplog):
+    """Grading reads a profile's interaction budgets only: keys a later schema retired are dropped, said so, and the
+    budgets they sat beside still bind."""
+    meta = {
+        "env_type": "codeforces",
+        "language": "python",
+        "reasoning_effort": "high",
+        "env_kwargs": {
+            "sandbox_backend": "local",
+            "reasoning_effort_profiles": {
+                "high": {"thinking_tokens": 16384, "enforce_thinking_cap": False, "max_submissions": 3}
+            },
+        },
+    }
+    with caplog.at_level(logging.INFO, logger=code_contests_regrade.logger.name):
+        rebuilt = code_contests_regrade.rebuild_environment(meta)
+    assert rebuilt.reasoning_effort_profiles["high"] == {"max_submissions": 3}
+    assert "dropping ['enforce_thinking_cap', 'thinking_tokens']" in caplog.text
+    with pytest.raises(ValueError, match="unknown keys"):
+        CodeContestsEnvironment(language="python", **meta["env_kwargs"])
 
 
 def _submission(code: str) -> dict:

@@ -8,6 +8,7 @@ import pytest
 import torch.nn as nn
 
 from halo.trainers import distributed_trainer
+from halo.trainers.construction.trainer_rules import reject_unreachable_mtp_term
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -15,7 +16,6 @@ from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironment
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.trainer_rules import reject_unreachable_mtp_term
 from tests.common.mtp_heads import tiny_model_with_head
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

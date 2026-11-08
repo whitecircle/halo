@@ -17,7 +17,7 @@ writes its own copy.
 | **PEFT adapters** | `save_peft_adapters` — adapter weights only ([PEFT saving](#peft-lora-saving)) | Save rank | `full_tensor()` of DTensor adapters |
 | **[PP / PP+EP](../parallelism/pipeline-parallelism.md)** | `save_pp_checkpoint` — each stage writes its own complete tensors | one writer per stage (`stage_local_rank == 0`; per node on a non-shared FS) | world-wide index exchange |
 | **Expert LoRA** (adapter-only) | `save_expert_lora_adapters` — the gathered grouped adapters | Save rank | EP all-gather |
-| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_gathered_checkpoint` | Save rank | EP all-gather (+ `full_tensor()` under TP) |
+| **EP** (incl. ETP, EP+CP, EP+TP) | `save_ep_gathered_checkpoint` | Save rank, plus a node's first rank per node on a shared FS (striped, see below the table) | EP all-gather (+ `full_tensor()` under TP) |
 | **EP sharded** | `save_ep_sharded_checkpoint` — each rank writes its expert shard | All ranks | `combine_across_ranks` (gather to rank 0, broadcast back) |
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
 | **CP** | `save_cp_checkpoint` — remap Ulysses wrapper keys to HF paths | Save rank | `full_tensor()` |
@@ -47,6 +47,18 @@ line; opting in with a positive count writes the finished parts on that many thr
 gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
 one failing while the save is already raising another error is logged beside it.
+
+**Striped writers.** After an EP layer's all-gather every rank of the EP group holds the whole layer, and `retain`
+only decides who pays the host copy, so the write is striped without a new collective. On a shared output filesystem
+`WriterStripe` (`halo/checkpoint/parallel/writing.py`) names the first rank of each node a writer (more per node with
+`HALO_CHECKPOINT_WRITERS_PER_NODE`); the save rank owns chunk 0 (the non-expert tensors, tied embeddings, MTP trunk
+copies, external tables) and every later layer goes round-robin. Each writer gets its own part prefix
+(`stripe_writer_part_prefix`), closes its parts, and the save rank joins the fragments (`merge_streamed_parts`, which
+refuses a key two writers claim), renames all parts to HF's names and writes the index last, so `trainer_state.json` still
+commits after every part. A striped checkpoint holds the same tensors and loads the same as a
+single-writer one; only part boundaries differ (one trailing short part per writer). It assumes every EP group holds
+equal copies, which training keeps. Per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) keeps the one writer per node, and `HALO_CHECKPOINT_WRITERS_PER_NODE=0` keeps the save rank the only writer.
+The FSDP2, CP, TP and PP savers keep their single writer (PP already writes one shard per stage).
 
 The tokenizer is written once per save, before the weights (`save_tokenizer`), so a save stopped after
 its index names the weight files is already loadable with its tokenizer. A failed tokenizer write raises
@@ -104,7 +116,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
 | `reference_logps.pt` | Yes | Yes | Frozen per-split reference scores: DPO/KTO `precompute_ref_log_probs` columns and offline GRPO raw completion-token log-probs. Resume validates token digests, row counts and reference settings before attaching them ([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run), [Offline GRPO](../training-methods/grpo/offline.md#reference-model)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
-| `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Async GRPO with prefetch only: the rounds a rank submitted but had not trained and the layout they were drawn under, submitted again first on a resume under that layout ([Multiple servers and prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)) |
+| `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Every async environmental GRPO rank: the layout, the rounds it submitted but had not trained (empty without prefetch or on a TP/ETP follower), submitted again first on a resume under that layout, and the halting counters (zero-gradient, empty-rollout and episode-error rounds, early-stop streaks) ([Multiple servers and prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)) |
 | `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` and embedding LoRA only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 | `training_provenance.json` | Yes | Yes | GptOss adapter saves only: whether the attention sinks were live or neutralized ([PEFT saving](#peft-lora-saving)) |
 
@@ -280,8 +292,10 @@ Qwen3.5/3.6, Qwen3.8-Flash-Next and Zaya ship the fused pair. Writers without an
 base-Trainer save write the layout the model was loaded from (a model with no record reverts through the
 family's mapping — per-expert for Qwen3.5/3.6); an EP-gathered save writes the layout the family spec
 declares (`MoEFamilySpec.expert_layout`, `halo/models/moe/family_specs.py`): the fused pair under the
-default `FUSED` layout, which DeepSeek-V4, Cohere2 MoE and GLM-5 Next keep although their hubs are
-per-expert. A reload into a built model maps any of
+default `FUSED` layout, which DeepSeek-V4 and Cohere2 MoE keep although their hubs are
+per-expert. GLM-5 Next writes the hub's per-expert layout (`FUSED_SPLIT_PER_EXPERT`), so its gathered saves, sharded
+saves merged by `merge_ep_shards.py` and weight sync need no rewrite; a checkpoint an earlier release saved with the fused
+pair still loads and un-fuses with `unfuse_moe_experts.py`. A reload into a built model maps any of
 these back ([Resuming training](#resuming-training)). Rewrite such a checkpoint only for a
 per-expert-only serving loader, with `scripts/after_training/unfuse_moe_experts.py`; Step-3.7 Flash needs
 no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` namespace,
@@ -292,14 +306,14 @@ no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` na
 | vLLM 0.32.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
 | vLLM 0.32.0 `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | loaded directly, the n-gram table included ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#checkpoints-and-serving)) |
 | vLLM 0.32.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
-| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next and DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
+| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises on a fused export), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next's own gathered saves are per-expert already; DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
 | vLLM 0.32.0 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |
 | vLLM 0.32.0 — no model class | Mistral4, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
 | vLLM 0.32.0 — no native class | Zaya | resolves through vLLM's generic transformers backend; unvalidated ([Zaya](../models/zaya.md)) |
 | vLLM 0.32.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
 
 SGLang 0.5.22 reads each family's hub layout through its own per-family loader, so the same un-fuse rule
-applies, Cohere2 MoE, DeepSeek-V4 and GLM-5 Next included (their loaders drop the fused pair without an
+applies, Cohere2 MoE and DeepSeek-V4 included (their loaders drop the fused pair without an
 error; a DeepSeek-V4 export is unverified there even after the rewrite), except that its LFM-2 loader also
 takes the fused pair; it registers no class for
 Mistral4 or Ring's architecture, and its Zaya loader reads a per-expert layout the gathered export does
@@ -705,6 +719,17 @@ does not fire; the shards its peers wrote stay behind without the `optimizer_met
 optimizer whose `state_dict` refuses the live sharding (FlashAdamW on unevenly-sharded DTensors).
 `save_only_model: true` is the explicit opt-in for weights-only checkpoints.
 
+**Disk check.** Rotation runs after the new save, so `save_total_limit` + 1 checkpoints coexist at the peak (one
+more save when no limit is set, since nothing is then deleted). The `checkpoint-N` directories already in
+`output_dir` (a resume) hold part of that peak, so only the rest is billed, and never less than the next save. At trainer construction each filesystem's save rank
+(`verify_checkpoint_disk_space`, `halo/checkpoint/parallel/disk_budget.py`) estimates one checkpoint (the model at
+the run dtype, sized from a config-only meta shell so sharded layouts need no gather; the adapters alone where a PEFT
+or native expert-LoRA save writes only those; plus two moments per trainable parameter unless `save_only_model`) and
+compares the peak with the free space of `output_dir`'s nearest existing parent. Below 1.1x it warns, below 1.0x it
+raises on every rank. Per-rank optimizer shards divide over the nodes of a node-local filesystem; a sharded EP
+save there is counted whole, an upper bound. `save_strategy: "no"` skips the check, and a model the shell cannot
+build warns that it went unsized.
+
 #### Interrupted saves
 
 `trainer_state.json` is what resume detection takes a checkpoint by, so it is published last:
@@ -745,10 +770,12 @@ off, since every node's local rank 0 would otherwise write and rotate the same f
 forces it on, all nodes must hold equivalent checkpoint dirs at the same path, and each node's local rank 0
 creates the directory before a barrier.
 
-A known limit there: transformers' `save_pretrained` writes weights and config on global rank 0 only
-(`should_save_on_this_rank`), so a save that goes through it for a plain model (DDP, or the embedding trainer's
-sentence-transformers path) leaves the other nodes' copies without weights, with no error. The toolkit's own savers
-and PEFT adapter saves are not gated this way.
+transformers' `save_pretrained` writes weights and config only where `is_main_process` holds and the process is global
+rank 0, so the toolkit's two plain-model calls (the trainer's base save for a DDP or single-process model, and the
+embedding trainer's sentence-transformers backbone save) run inside `save_pretrained_on_save_rank`
+(`halo/checkpoint/parallel/writing.py`): the filesystem-aware save rank, each node's local rank 0 on a per-node output
+filesystem, writes the weights there, and global rank 0 alone on a shared one. The toolkit's own savers and PEFT
+adapter saves write on that rank without it.
 
 A gathered save holds the non-writers in the next chunk's gather while the writer flushes a part, so
 `DIST_NCCL_TIMEOUT_MINUTES` must cover one part (`save_max_shard_size`) at the filesystem's write speed;

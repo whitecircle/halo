@@ -19,9 +19,10 @@ from trl import SFTConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin, is_clipping_enabled
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
 from tests.common.offline_grpo import OFFLINE_VOCAB, make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.step_guard import Guarded, guarded, guarded_step
@@ -344,8 +345,9 @@ class _Rows(torch.utils.data.Dataset):
         return {"x": self.x[i], "y": self.y[i]}
 
 
-class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, Trainer):
-    """``DistributedTrainerMixin.create_optimizer``'s install, behind the clipping mixin as the spine composes them."""
+class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, TokenMetricsMixin, Trainer):
+    """``DistributedTrainerMixin.create_optimizer``'s install, behind the clipping mixin as the spine composes them; the guard's
+    batch fetch is timed through the token-metrics mixin."""
 
     def create_optimizer(self, model=None):
         super().create_optimizer(model)

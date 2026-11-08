@@ -24,7 +24,7 @@ The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP
 
 Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is under 90 lines for every family but GPT-OSS, at 168 ([Model Integration Cost](human-docs/model-integration-cost.md)).
 
-On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of stock TRL (3.2× at 25% less peak memory when both sides shard ZeRO-3), and Halo 1.2.0 runs 1.11–2.07× as fast as 1.1.0 on the twelve shapes benchmarked against it.
+On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.10–1.12× Megatron Bridge, 1.47× TRL 1.17.1 and 1.9–2.0× NeMo AutoModel 0.7.0, and Qwen3.5-122B-A10B at 1.50× TRL and 1.7–1.9× NeMo; it trails a tuned Megatron by 11.5% on dense Qwen3.5-9B at 64k ([Benchmarks](#benchmarks)). It runs 1.11–2.07× as fast as Halo 1.1.0 on the twelve shapes benchmarked against it.
 
 `Pre- & Post-Training` · `EP / CP / TP / ETP / PP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
@@ -55,6 +55,15 @@ On 8× B300, Halo 1.1.0 trained gpt-oss-20b at up to 3.5× the throughput of sto
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
+- **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
+  Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
+  ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
+  - **Faster GRPO:** rows pack into token-budget micro-batches, importance weights can come from the loss forward,
+    and weight sync can run one group across servers.
+  - **New in RL:** score centering on SGLang, FP8-weight rollouts for Qwen3.5/3.6 MoE, adapter-only sync to
+    SGLang, and GLM-5.3-Flash under GRPO.
+  - **Scale:** gathered EP saves striped over several writers, adapter merges with no model load, and startup
+    checks for setups that used to fail hours into a run.
 - **2026-11-04 — Halo 1.2.0.** Training steps are faster than in 1.1.0 on all twelve shapes benchmarked
   against it, from 1.11× to 2.07×, and GLM-5.3-Flash more than doubles its LoRA throughput with two new kernels.
   Halo also gains pipeline parallelism and three more model families ([benchmarks](human-docs/performance.md)).
@@ -91,9 +100,9 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell
 docker pull public.ecr.aws/whitecircle/halo:hopper
 ```
 
-Versioned tags (`:blackwell-1.2.0`, `:hopper-1.2.0`) pin the release. There is no `latest` tag, since
+Versioned tags (`:blackwell-1.3.0rc1`, `:hopper-1.3.0rc1`) pin the release. There is no `latest` tag, since
 the images are architecture-specific. The RL inference images are published alongside them
-(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.2.0` and `:sglang-0.5.22-1.2.0`.
+(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc1` and `:sglang-0.5.22-1.3.0rc1`.
 
 To build locally instead:
 ```bash
@@ -226,27 +235,64 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 
 ## Benchmarks
 
-All rows ran on 8× B300 with the Blackwell image unless a row says otherwise. Rows marked 1.2.0 ran on
-Halo 1.2.0, the others on 1.1.0 or earlier. Rates are tokens/s per GPU on a warm kernel cache. A fresh Triton cache costs the
-first steps: Qwen3.5-35B-A3B's first ~20 run at about 40% of the steady rate.
+All rows ran on 8× B300 with the Blackwell image unless a row says otherwise. Rates are tokens/s per GPU on a warm
+kernel cache; a fresh Triton cache costs the first steps (Qwen3.5-35B-A3B's first ~20 run at about 40% of the steady
+rate).
 
-The stock TRL baseline is `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, using the same model,
-data, bf16 precision, FlashAttention 4, Liger kernels, and grouped GEMM.
+### Against other frameworks
 
-| Result | Release | Configuration |
-|---|---|---|
-| **1.11–2.07× Halo 1.1.0** | 1.2.0 | Twelve SFT shapes, none slower: TP2 1.82×, EP4+ETP2 2.07×, EP 1.12–1.29×, CP2 1.15×, FSDP2 1.11×. Qwen3-8B, gpt-oss-20b and Qwen3.5-35B-A3B at batch 1, GC on. |
-| **2.2–2.7× on GLM-5.3-Flash LoRA** | 1.2.0 | EP8, real text: 2,840 vs 1,282 at 8k, 2,390 vs 893 at 15.5k. Same peak memory. The baseline is 1.2.0 without the two new kernels. |
-| **1.65–2.3× on GLM-5.3-Flash full fine-tune** | 1.2.0 | Two 8-GPU machines: EP16 1,504 vs 913, PP2 + EP8 2,423 vs about 1,060. EP8 with DP runs out of memory. |
-| **PP across two machines** | 1.2.0 | gpt-oss-20b PP2 + EP8 at 8k: 15,715, 15.9% below EP8 with DP. Qwen3-8B PP2 at 4k: 17,608, 4.0% below DP16. Qwen3.5-35B-A3B PP2 + EP8 reaches 0.97× EP8 with DP, at 126.7 GiB on the first stage and 62.7 on the last, against 148.7 (GC off, packed rows of 8k). |
-| **13.8× DP16 on plain TCP sockets** | 1.2.0 | Machines forced onto plain TCP sockets: Qwen3-8B PP2 holds 15,414 while DP16 falls to 1,117. |
-| **2.6–3.5× stock TRL throughput** | 1.1.0 | gpt-oss-20b, 4k–16k; EP2 / dense EP1 (EP8: 1.7–2.8×). Loss matches the baseline to within 0.8% by step 100. |
-| **28,700 tok/s/GPU** | 1.1.0 | gpt-oss-20b, dense EP1, 4k, batch 4, GC off: ~230k tok/s across 8 GPUs. |
-| **16,447 tok/s/GPU at 1,908 TFLOPS** | 1.1.0 | Qwen3.5-35B-A3B, 4k, batch 4, EP2: the highest achieved TFLOPS of any EP>1 run benchmarked. |
-| **Up to 256k context** | 1.1.0 | gpt-oss-20b; dense EP1 is 2.1× faster than TRL at 64k and 1.28× at 256k. EP8+CP8 and dense CP-only use about half TRL's per-GPU memory or less. |
-| **25–76 GiB/GPU on the same 16k workload** | 1.1.0 | EP8+CP8: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
-| **2.45× Grouped GEMM** | 1.1.0 | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.10× at batch 1. |
-| **3.6–3.9× FA4 kernel throughput** | 1.1.0 | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
+Full-parameter SFT on UltraChat 200k packed into rows of exactly 64k or 128k tokens with documents isolated, the same rows
+for every framework. Each cell is tok/s/GPU (peak GiB); † is an nvidia-smi peak, which reads higher than the others.
+
+| Model, tokens per row | Halo 1.2.0 | Megatron Bridge | TRL 1.17.1 | NeMo AutoModel 0.7.0 |
+|---|---:|---:|---:|---:|
+| Qwen3.5-9B, 64k | 17,206 (54.3) | **19,431** (245.5†) | 14,735 (56.0) | 10,360 (99.3) |
+| Qwen3.5-9B, 128k | 17,093 (82.1) | **17,348** (241.1†) | 14,601 (86.8) | 9,451 (166.4) |
+| Qwen3.6-35B-A3B, 64k | **23,637** (139.1) | 21,559 (224.6†) | 16,126 (138.8) | 12,340 (99.1) |
+| Qwen3.6-35B-A3B, 128k | **23,647** (139.1) | 21,109 (244.2†) | 16,112 (138.8) | 12,026 (139.3) |
+| Qwen3.5-122B-A10B, 64k | **8,933** (188.7) | 4,781 (254.0†) | 5,936 (194.5) | 5,397 (219.3) |
+| Qwen3.5-122B-A10B, 128k | **8,943** (188.7) | does not fit | 5,951 (194.5) | 4,683 (227.1) |
+
+Megatron Bridge is a 0.7.0 release-candidate commit with Megatron Core 0.20.0. How to read the table:
+
+- Optimizer regimes differ: Halo trains bf16 parameters with stochastic rounding, TRL and NeMo bf16 parameters with bf16 Adam
+  state, Megatron fp32 main parameters (fp16 master on the 122B).
+- Megatron's peaks are nvidia-smi samples; the others are torch allocated peaks. Do not compare them directly.
+- Each Halo row is the median of 3 runs of a chosen setup; the others are single runs of their best layouts.
+
+Rates per parallelism layout, the 16k and 4k tables, and the other conditions: [Throughput Benchmarks](agent-docs/optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison);
+the TRL side: [Halo vs stock TRL](agent-docs/optimization/halo-vs-stock-trl.md).
+
+### GRPO against Miles
+
+GRPO on Qwen3.5-35B-A3B (GSM8K, 32 prompts × 8 samples, one 8× B300 node training and one serving SGLang
+rollouts, same prompts on both sides): on-policy, Halo takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176, 22% less,
+with a 14.0 s step against 18.6 s and 63 against 109 GiB on the trainer node. With rollouts overlapped it takes 0.102
+against 0.111, 8% less. Layouts and conditions:
+[GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles).
+
+### Halo 1.2.0 against 1.1.0
+
+| Result | Configuration |
+|---|---|
+| **1.11–2.07× Halo 1.1.0** | Twelve SFT shapes, none slower: TP2 1.82×, EP4+ETP2 2.07×, EP 1.12–1.29×, CP2 1.15×, FSDP2 1.11×. Qwen3-8B, gpt-oss-20b and Qwen3.5-35B-A3B at batch 1, GC on. |
+| **2.2–2.7× on GLM-5.3-Flash LoRA** | EP8, real text: 2,840 vs 1,282 at 8k, 2,390 vs 893 at 16,384. Same peak memory. The baseline is 1.2.0 without the two new kernels. |
+| **1.65–2.3× on GLM-5.3-Flash full fine-tune** | Two 8-GPU machines: EP16 1,504 vs 913, PP2 + EP8 2,423 vs about 1,060. EP8 with DP runs out of memory. |
+| **PP across two machines** | gpt-oss-20b PP2 + EP8 at 8k: 15,715, 15.9% below EP8 with DP. Qwen3-8B PP2 at 4k: 17,608, 4.0% below DP16. Qwen3.5-35B-A3B PP2 + EP8 reaches 0.97× EP8 with DP, at 126.7 GiB on the first stage and 62.7 on the last, against 148.7 (GC off, packed rows of 8k). |
+| **13.8× DP16 on plain TCP sockets** | Machines forced onto plain TCP sockets: Qwen3-8B PP2 holds 15,414 while DP16 falls to 1,117. |
+
+### Kernels and memory (Halo 1.1.0, not rerun on 1.2.0)
+
+These rows have no 1.2.0 measurement; read each as a 1.1.0 number.
+
+| Result | Configuration |
+|---|---|
+| **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off: ~230k tok/s across 8 GPUs. |
+| **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2, SDPA: the highest achieved TFLOPS of any EP>1 run benchmarked on 1.1.0. |
+| **25–76 GiB/GPU on the same 16k workload** | EP8+CP8: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
+| **256k context** | gpt-oss-20b, dense EP1 ZeRO-3 with fused linear cross-entropy: 5,728 tok/s/GPU at 112 GiB (measured on Halo 1.0.0). |
+| **2.45× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.10× at batch 1. |
+| **3.6–3.9× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
 
 Full results and methodology: [Performance](human-docs/performance.md)
 

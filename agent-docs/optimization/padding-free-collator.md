@@ -48,12 +48,6 @@ Lightning Attention-2) refuses packing and `padding_free` on every backend, flas
 and GLM-5 Next's flat rows stay refused either way
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
-`padding_free` is also rejected on an M-RoPE decoder (Qwen3.5/3.6, text towers included, and the Qwen-VL text
-models) on every backend, by the SFT script before the model load, the SFT collator factory, the SFT trainer (for
-a collator handed to it) and the SMPO trainer alike (`reject_mrope_padding_free`): the flattened M-RoPE row faults
-the flash varlen kernels. Turn `padding_free` off there; under SFT, `packing` serves the same rows (SMPO has no
-`packing` field and pads instead).
-
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
 isolating mask is per-family, and the exceptions are tabulated in
 [Document isolation under packing](../data/collators.md#document-isolation-under-packing). Where it does, the

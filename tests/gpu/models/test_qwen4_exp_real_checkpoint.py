@@ -26,9 +26,9 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_str
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.config_access import text_config
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_tables
-from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward, select_qsa_keys
+from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, select_qsa_keys
+from halo.models.introspection.config_access import text_config
 from tests.common.checkpoint_io import loading_problems
 from tests.common.datasets import repository_text_rows
 from tests.common.distributed import shared_output_dir

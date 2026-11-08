@@ -7,14 +7,14 @@ import json
 
 import pytest
 
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE
 from halo.environments.tasks.coding.submission_record import FAILED_WITH_NO_RUNS_LEFT, SUBMISSION_PASS_FRACS_KEY
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox, retired_budget_phrases

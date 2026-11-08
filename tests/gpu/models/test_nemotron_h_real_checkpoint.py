@@ -30,9 +30,9 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.selection import effective_attn_implementation
-from halo.models.config_access import text_config
+from halo.models.families.nemotron_h import _document_chunk_scan
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from halo.models.nemotron_h import _document_chunk_scan
+from halo.models.introspection.config_access import text_config
 from halo.models.segment_markers import SegmentMarkers, segment_marker_kwargs
 from tests.common.checkpoint_io import loading_problems
 from tests.common.datasets import repository_text_rows

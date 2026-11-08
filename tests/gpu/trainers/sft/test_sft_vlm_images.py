@@ -33,7 +33,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.data_setup import apply_vision_options, prepare_raw_vlm_split
 from halo.entrypoints.model_setup import install_resolved_tokenizer, load_policy_model
 from halo.models.attention.selection import effective_attn_implementation
-from halo.models.module_tree import embedding_module, media_module_names
+from halo.models.introspection.module_tree import embedding_module, media_module_names
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main

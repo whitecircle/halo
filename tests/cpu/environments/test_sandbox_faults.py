@@ -21,16 +21,16 @@ import time
 import pytest
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.episode_scoring import REWARD_PENDING_KEY
+from halo.environments.episodes.episode_scoring import REWARD_PENDING_KEY
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.local import (
     LOCAL_FSIZE_LIMIT,

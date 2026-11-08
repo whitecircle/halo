@@ -12,7 +12,7 @@ from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 import halo.trainers.grpo.logprob_scoring as logprob_scoring
 from halo.kernels import head_logprobs
 from halo.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
-from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform
+from halo.models.head_transform import HeadTransform
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -23,6 +23,7 @@ from halo.trainers.grpo.logprob_scoring import (
 )
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.chunked_logprobs import EmbeddingBackboneHarness
 
 # Spans several chunk tiles to exercise the online-softmax accumulation across them.
 VOCAB = VOCAB_TILE * 2 + 137
@@ -170,31 +171,6 @@ def test_dense_real_row_values_unchanged_by_fix():
     torch.testing.assert_close(real[1], expected_real)
 
 
-class _EmbeddingBackboneHarness(ChunkedGRPOLogprobsMixin):
-    """Position-free embedding backbone, so a trimmed row and its padded twin agree exactly on every real completion
-    position. Records each backbone call's input shape and whether it ran mask-free."""
-
-    temperature = 1.0
-
-    def __init__(self, attn_impl: str, vocab: int = 40, hidden: int = 8):
-        torch.manual_seed(0)
-        self.embed = torch.nn.Embedding(vocab, hidden)
-        self.model = torch.nn.Module()
-        self.model.lm_head = torch.nn.Linear(hidden, vocab, bias=False)
-        self.model.config = PretrainedConfig()
-        self.model.config._attn_implementation = attn_impl
-        self.model.get_output_embeddings = lambda: self.model.lm_head
-        self.forward_calls: list[tuple[tuple[int, ...], bool]] = []
-
-    def _head_transform(self, unwrapped_model) -> HeadTransform:
-        return IDENTITY_HEAD_TRANSFORM
-
-    def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
-        self.forward_calls.append((tuple(input_ids.shape), attention_mask is None))
-        full = self.embed(input_ids)[:, :-1, :]
-        return full[:, -logits_to_keep:, :]
-
-
 def _ragged_batch():
     # row 0: prompt 3 + completion 4, no padding; row 1: left-pad 1 + prompt 2 + completion 2 + right-pad 2.
     input_ids = torch.tensor([[11, 12, 13, 21, 22, 23, 24], [0, 14, 15, 25, 26, 0, 0]])
@@ -204,8 +180,8 @@ def _ragged_batch():
 
 
 def test_rows_forward_densely_on_every_attention_path_at_batch_size_one():
-    sdpa = _EmbeddingBackboneHarness("sdpa").model
-    fa4 = _EmbeddingBackboneHarness("flash_attention_4").model
+    sdpa = EmbeddingBackboneHarness("sdpa").model
+    fa4 = EmbeddingBackboneHarness("flash_attention_4").model
     assert rows_forward_densely(sdpa, 1) and not rows_forward_densely(sdpa, 2)
     assert rows_forward_densely(fa4, 1) and rows_forward_densely(fa4, 4)
 
@@ -213,11 +189,11 @@ def test_rows_forward_densely_on_every_attention_path_at_batch_size_one():
 def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
     # At batch size 1 the SDPA path forwards each row trimmed and mask-free.
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
-    padded = _EmbeddingBackboneHarness("sdpa")
+    padded = EmbeddingBackboneHarness("sdpa")
     logps_pad, ent_pad = padded._chunked_logps_impl(padded.model, input_ids, attention_mask, ltk, 2, True)
     assert padded.forward_calls == [((2, 7), False)]
 
-    dense = _EmbeddingBackboneHarness("sdpa")
+    dense = EmbeddingBackboneHarness("sdpa")
     logps_dense, ent_dense = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 1, True)
     assert dense.forward_calls == [((1, 7), True), ((1, 4), True)]
 
@@ -242,12 +218,12 @@ def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch)
 
     monkeypatch.setattr(logprob_scoring, "chunked_head_logprobs", counting_sweep)
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
-    dense = _EmbeddingBackboneHarness("flash_attention_4")
+    dense = EmbeddingBackboneHarness("flash_attention_4")
     logps, entropies = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 2, True)
     assert dense.forward_calls == [((1, 7), True), ((1, 4), True)], "one dense backbone call per row"
     assert sweeps == [(6, 8)], f"one head sweep over 4 + 2 real completion tokens, got {sweeps}"
 
-    reference = _EmbeddingBackboneHarness("flash_attention_4")
+    reference = EmbeddingBackboneHarness("flash_attention_4")
     hidden, widths = reference._dense_last_hidden_state(reference.model, input_ids, attention_mask, ltk)
     weight = reference.model.lm_head.weight
     reference_loss = 0.0
@@ -269,7 +245,7 @@ def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch)
 def test_an_armed_sweep_hands_back_the_heads_completion_logits(attn_impl):
     """SDPG's OPD term reads these logits; they come from the hidden states the sweep scored and carry their graph."""
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
-    harness = _EmbeddingBackboneHarness(attn_impl)
+    harness = EmbeddingBackboneHarness(attn_impl)
     harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
     assert harness._completion_logits_sink is None
 

@@ -3,7 +3,7 @@ recompute see identical text. An unbounded output would make the per-turn re-ren
 
 import pytest
 
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolCall
 

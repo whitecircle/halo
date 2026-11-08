@@ -24,7 +24,7 @@ from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.mesh import has_tp_dim
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 

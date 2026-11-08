@@ -21,7 +21,7 @@ from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.checkpoint_coverage import verify_checkpoint_coverage
 from halo.model_loading.dtype import reject_fp8_tensor
 from halo.model_loading.lazy_safetensors.conversion import Concat
-from halo.models.param_roles import fp32_pinned_names
+from halo.models.introspection.param_roles import fp32_pinned_names
 
 logger = logging.getLogger(__name__)
 

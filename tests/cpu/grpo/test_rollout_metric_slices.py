@@ -7,13 +7,13 @@ from collections import defaultdict
 
 import pytest
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_SLICES_KEY
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import EPISODE_SLICES_KEY
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.rewards.terms import REWARD_COMPONENT_PREFIX
-from halo.trainers import world_metrics
 from halo.trainers.grpo.environmental import rollout_metrics
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.metrics import world_metrics
 from tests.common.world_metrics import pooled_states, rank_states
 
 
@@ -23,7 +23,7 @@ def _host():
     host._total_rollouts = 0
     host._total_rollout_latency = 0.0
     host._total_generation_tokens = 0
-    host.async_config = types.SimpleNamespace(truncation_alarm_rate=None)
+    host.async_config = types.SimpleNamespace(truncation_alarm_rate=None, episode_error_rate_limit=None)
     return host
 
 

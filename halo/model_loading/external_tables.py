@@ -10,9 +10,9 @@ from collections.abc import Callable
 
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
-from halo.models.config_access import set_config_field_run_scoped
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_tables
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.config_access import set_config_field_run_scoped
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.runtime.ranks import is_local_main_process
 
 

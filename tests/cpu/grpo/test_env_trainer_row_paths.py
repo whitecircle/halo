@@ -10,10 +10,10 @@ import pytest
 import torch
 from trl.trainer.utils import pad
 
-from halo.environments.engine_wire import capture_generation_tokens
-from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.engine_wire import capture_generation_tokens
+from halo.environments.rollouts.episode_loop import RolloutResult, TurnGeneration, step_context_from_generation
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap, rollout_valid_mask
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer

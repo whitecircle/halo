@@ -33,8 +33,8 @@ lora_target_modules:
 - gate_up_proj                        # routed experts (gate+up) — native EP grouped-LoRA
 - down_proj                           # routed experts (down) — native EP grouped-LoRA
 # Set merge_expert_lora_on_save: true for a fully-merged, servable HF checkpoint (expert deltas in the
-# family gather, attention deltas via merge_adapter). Left off, the run writes a mixed adapter this
-# toolkit resumes but merge_peft_adapters.py refuses — a PEFT merge would drop every expert delta.
+# family gather, attention deltas via merge_adapter). Left off, the run writes a mixed adapter that
+# merge_peft_adapters.py folds through its streaming merge.
 
 # --- Training ---
 per_device_train_batch_size: 1

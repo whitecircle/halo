@@ -31,20 +31,49 @@ _FAILURE_RECORD_SEP = "\n"
 _T = TypeVar("_T")
 
 
-def run_on_rank0_raising_everywhere(
-    step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
+def _run_on_rank0_raising_everywhere(
+    step: Callable[[], Any],
+    describe: Callable[[Exception], str],
+    exc_type: type[Exception],
+    exchange: Callable[[str | None], str | None],
 ) -> None:
-    """COLLECTIVE: run ``step`` on global rank 0 and raise its failure on every rank as ``exc_type``."""
     failure: str | None = None
     cause: Exception | None = None
     if is_global_main_process():
         try:
             step()
         except Exception as e:  # every failure must reach the peers
-            cause, failure = e, describe(e)
-    failure = broadcast_from_rank0(failure)
+            cause, failure = e, describe(e) or type(e).__name__
+    failure = exchange(failure)
     if failure is not None:
         raise exc_type(failure) from cause
+
+
+def run_on_rank0_raising_everywhere(
+    step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
+) -> None:
+    """COLLECTIVE: run ``step`` on global rank 0 and raise its failure on every rank as ``exc_type``."""
+    _run_on_rank0_raising_everywhere(step, describe, exc_type, broadcast_from_rank0)
+
+
+def store_run_on_rank0_raising_everywhere(
+    tag: str, step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
+) -> None:
+    """COLLECTIVE over the c10d store (same tag, same order on every rank): :func:`run_on_rank0_raising_everywhere`
+    bounded by ``DIST_STORE_TIMEOUT_HOURS`` instead of the NCCL watchdog, for a ``step`` that waits on servers."""
+
+    def join_verdict(failure: str | None) -> str | None:
+        if not is_multi_rank_run():
+            return failure
+        rank, world = get_global_rank(), get_global_world_size()
+        phase = StorePhase(f"verdict/{tag}", "world", rank, world, store_timeout())
+        try:
+            records = phase.arrive_and_wait(failure)
+        finally:
+            phase.finish([])
+        return records[0] if records else None
+
+    _run_on_rank0_raising_everywhere(step, describe, exc_type, join_verdict)
 
 
 def refusal_text(error: Exception) -> str:

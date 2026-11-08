@@ -6,8 +6,8 @@ import types
 
 import pytest
 
-from halo.models import mistral4
 from halo.models.attention import backend_setup, packed_position_ids
+from halo.models.families import mistral4
 
 
 def _attention_class() -> type:
