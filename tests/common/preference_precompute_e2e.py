@@ -294,9 +294,12 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         checks["control_reference_misses_the_base_run"] = (
             metrics["control_reference_max_logp_delta"] > CONTROL_MIN_LOGP_DELTA
         )
-        checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
-            control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
-        )
+        # KTO's KL baseline moves with the rewards under a stale reference, so its first-step loss barely shifts;
+        # the reference-column control above is its proof.
+        if (kind, kto_loss) != ("kto", "kto"):
+            checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
+                control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
+            )
     else:
         checks["control_sweep_of_the_base_reproduces_the_base_run"] = _columns_equal(control_columns, base_columns)
 

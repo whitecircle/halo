@@ -817,6 +817,7 @@ MANIFEST: dict[str, TestSpec] = {
                     ("dense", "hsdp", 4, ("gpu", "full", "4gpu", "hsdp", "qwen3")),
                     ("dense", "tp2dp2", 4, ("gpu", "full", "4gpu", "tp", "qwen3")),
                     ("qwen3_moe", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+                    ("qwen4_exp_text", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep1_unsharded", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2dp2", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2x2dom", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
@@ -1300,6 +1301,14 @@ MANIFEST: dict[str, TestSpec] = {
                 )
                 for family in _REENTRANT_SWEEP_FAMILIES
                 for layout, nproc in (("ep1", 2), ("ep_multi", 4))
+            ),
+            # The PLE layer recomputes from the first pass's n-gram rows, which ZeRO-3's reshard and an adapter run reach.
+            *(
+                Row(
+                    f"--family qwen4_exp_text --layout ep1 {flags}",
+                    markers=("gpu", "full", "2gpu", "ep", "moe", "lora", "qwen3"),
+                )
+                for flags in ("--adapter full --reshard-after-forward", "--adapter lora")
             ),
             *(
                 Row(
