@@ -98,6 +98,11 @@ def _compute_selection(
 ) -> QSASelection:
     batch, length, _ = hidden_states.shape
     head_dim, ratio, block_topk = indexer.index_head_dim, indexer.compress_ratio, indexer.block_topk
+    if indexer.index_kv_heads != 1:
+        raise ValueError(
+            f"QSA pools one indexer key head per block, got indexer_kv_heads={indexer.index_kv_heads}: the config "
+            f"must set indexer_kv_heads=1."
+        )
     cos, sin = position_embeddings
     queries, keys = torch.split(
         indexer.index_qk_proj(hidden_states),
@@ -106,7 +111,7 @@ def _compute_selection(
     )
     queries = indexer.q_layernorm(queries.reshape(batch, length, -1, head_dim))
     queries = qwen4_exp_modeling.apply_rotary_pos_emb(queries, cos=cos, sin=sin, unsqueeze_dim=2)
-    keys = keys.reshape(batch, length, -1, head_dim).squeeze(2)
+    keys = keys.reshape(batch, length, head_dim)
 
     documents = row_documents(seq_idx, attention_mask, batch, length, hidden_states.device)
     most_blocks = max((doc.key_stop - doc.key_start) // ratio for doc in documents)

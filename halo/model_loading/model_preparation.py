@@ -38,7 +38,7 @@ from halo.models.attention.selection import (
 )
 from halo.models.families.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.families.nemotron_h import apply_nemotron_h_patches
-from halo.models.families.qwen4_exp.forwards import apply_qwen4_exp_patches
+from halo.models.families.qwen4_exp.forwards import apply_qwen4_exp_patches, verify_qwen4_exp_patched
 from halo.models.families.zaya import apply_zaya_patches
 from halo.models.hyper_connections import apply_hyper_connection_patches
 from halo.models.introspection.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
@@ -224,12 +224,14 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
 def apply_run_model_policies(
     model, model_config, *, sinks_policy: SinksPolicy, attn_implementation: str, sinks_pretrained: bool = True
 ) -> None:
-    """The run policies every loaded model takes: Hub tags, generation config, prefix-LM causal default, sinks policy.
+    """The run policies every loaded model takes: Hub tags, generation config, prefix-LM causal default, family patches
+    present, sinks policy.
     ``sinks_pretrained=False`` skips only a neutralized policy, with no pretrained sinks to neutralize. A sink-dropping
     backend over live sinks raises."""
     model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
     apply_prefix_lm_causal_decoder(model, model_config)
+    verify_qwen4_exp_patched(model)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)
     verify_live_sinks_carried(model)
