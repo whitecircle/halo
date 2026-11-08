@@ -188,7 +188,7 @@ def test_an_unknown_kernel_mode_raises(monkeypatch):
 
 def test_the_kernel_mode_defaults_to_the_documented_constant(monkeypatch):
     monkeypatch.delenv("HALO_QSA_KERNEL", raising=False)
-    assert qsa_kernel_mode() == "off"
+    assert qsa_kernel_mode() == "auto"
 
 
 def _resolve(**overrides):

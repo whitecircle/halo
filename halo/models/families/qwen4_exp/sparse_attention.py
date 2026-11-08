@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 QUERY_TILE = 128
 _SELECTION_SLOT = "qsa_selection"
 QSAKernelMode = Literal["auto", "on", "off"]
-_QSA_KERNEL_DEFAULT: QSAKernelMode = "off"
+_QSA_KERNEL_DEFAULT: QSAKernelMode = "auto"
 _logged_tiled_reasons: set[str] = set()
 # Layouts whose kernels failed to build at warm-up under ``auto``, with the error: they run the tiled path.
 _failed_warmups: dict[tuple, str] = {}

@@ -30,7 +30,7 @@ _warned_fallbacks: set[str] = set()
 
 def uses_gated_residual_kernels() -> bool:
     """Read per call, so a test or an A/B toggles without reinstalling."""
-    return env_flag("HALO_GATED_RESIDUAL_KERNELS", False)
+    return env_flag("HALO_GATED_RESIDUAL_KERNELS", True)
 
 
 def _is_fusable_dtype(x: torch.Tensor) -> bool:
@@ -74,7 +74,7 @@ def _log_fallback(reason: str) -> None:
             logger,
             _warned_fallbacks,
             reason,
-            "HALO_GATED_RESIDUAL_KERNELS=1 runs upstream's gated residual where its modules have %s.",
+            "Qwen3.8-Flash-Next's gated residual runs upstream's forward where its modules have %s.",
             reason,
         )
 

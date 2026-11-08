@@ -37,7 +37,7 @@ Every output and gradient matches upstream's autograd within the rounding of bot
 
 Qwen3.8-Flash-Next's hyper-connection (`Qwen4ExpTextGatedResidual`, two per decoder layer) is a different block: no Sinkhorn matrix, projection or collapse. It norms each of the four streams on its own, mixes them into the block input through a low-rank gate (`down` → `silu(·/N)` → `up` → sigmoid, then the mean over streams of gate × normed), and returns injection gates `2·sigmoid(inject(normed)/N)`; the block's output re-enters every stream as `x + out·gate`. Only that injection is the mHC mix at `comb = I`.
 
-`HALO_GATED_RESIDUAL_KERNELS=1` runs it on four small Triton kernels, with cuBLAS and autograd doing every linear (`halo/kernels/gated_residual.py`, `inject_streams` in `halo/kernels/hyper_connection.py`, patched over upstream's forward by `halo/models/families/qwen4_exp/gated_residual.py`). The knob is off by default until the A/B below is measured; `HALO_HC_KERNELS` keeps meaning GLM-5 Next and DeepSeek-V4.
+It runs on four small Triton kernels, with cuBLAS and autograd doing every linear (`halo/kernels/gated_residual.py`, `inject_streams` in `halo/kernels/hyper_connection.py`, patched over upstream's forward by `halo/models/families/qwen4_exp/gated_residual.py`). `HALO_GATED_RESIDUAL_KERNELS` is on by default, and `0` restores upstream's forward; `HALO_HC_KERNELS` keeps meaning GLM-5 Next and DeepSeek-V4.
 
 | Step | Kernel | Backward |
 |---|---|---|
@@ -53,7 +53,7 @@ The layer is local, so EP, ETP, FSDP2 (the layer's pre-forward hook hands it pla
 
 `inject_streams` equals `mix_streams` at an identity `comb` except for that rounding, which is why it has its own kernels; a GPU test pins the two in fp32. The injection rounds the product and the sum to the streams' dtype, as upstream does, so the forward matches upstream's bit for bit apart from the norm's and the mix's reduction order. Tests hold every output and gradient to the larger of a dtype floor and 1.5× upstream's own error against fp64 (`tests/gpu/kernels/test_gated_residual_kernels.py`).
 
-## Numbers
+## Flash-Next gated residual numbers
 
 One B300, `hidden_size` 2560, four streams, `hc_lowrank` 320, bf16, one gated residual plus its injection per call, 8192 tokens, upstream's forward against the kernels (`tests/gpu/profiling/benchmark_gated_residual.py`):
 
@@ -61,4 +61,6 @@ One B300, `hidden_size` 2560, four streams, `hc_lowrank` 320, bf16, one gated re
 - **Trained weights:** the backward takes 3.61 ms upstream and 2.21 ms here, the norm weight's gradient and the two matmuls for the mix's costing the difference; the graph 1010 MiB against 205 MiB.
 - **16384 tokens:** 3.00 ms and 6.00 ms upstream, 0.92 ms and 1.77 ms here (frozen); trained backward 6.67 ms against 3.84 ms.
 
-The release runs 96 of these per step (two on each of 48 layers), so the frozen numbers are about 0.3 s of an 8192-token step. No whole-step time, no 20-step loss parity on the full 48 layers and no fused-combine variant (the injection folded into the next block's norm, one stream pass fewer per layer) has been measured; these decide the default of `HALO_GATED_RESIDUAL_KERNELS`, which is one literal in `uses_gated_residual_kernels`.
+The release runs 96 of these per step (two on each of 48 layers), so the frozen numbers are about 0.3 s of an 8192-token step.
+
+On the real checkpoint the gated residual alone takes the LoRA step at 16k packed tokens from 28.95 s to 23.66 s (1.22×) and the peak from 98.71 to 96.52 GB, on the same loss trajectory ([Flash-Next kernel defaults](../models/qwen4_exp.md#kernel-defaults)).

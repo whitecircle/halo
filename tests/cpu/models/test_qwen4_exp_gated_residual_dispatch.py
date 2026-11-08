@@ -41,9 +41,9 @@ def _stream(rows: int = 5, dtype=torch.float32) -> torch.Tensor:
     return torch.randn(2, rows, STREAMS * HIDDEN, generator=torch.Generator().manual_seed(1), dtype=dtype)
 
 
-def test_the_knob_is_off_by_default_and_read_per_call(monkeypatch):
+def test_the_knob_is_on_by_default_and_read_per_call(monkeypatch):
     monkeypatch.delenv(KNOB, raising=False)
-    assert not uses_gated_residual_kernels()
+    assert uses_gated_residual_kernels()
     for value, expected in (("1", True), ("0", False), ("true", True), ("off", False)):
         monkeypatch.setenv(KNOB, value)
         assert uses_gated_residual_kernels() is expected
