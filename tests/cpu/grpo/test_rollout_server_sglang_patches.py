@@ -132,6 +132,27 @@ BUILD_SERVER_INFO = """    result = server_args.resolved_dict()
 """
 
 
+# sglang 0.5.22 srt/layers/hyperconnection.py, GatedResidual.__init__ (excerpt).
+HYPERCONNECTION = """            self.input_mix_weight_up = nn.Linear(
+                self.config.hc_lowrank,
+                self.hc_count * self.hidden_size,
+                bias=False,
+                dtype=config.params_dtype,
+            )
+            self._mix_up_weight_padded = None
+
+        self._gate_stream = None
+        if use_combine:
+            self.block_inject_weight = nn.Linear(
+            return (R + injection).flatten(-2)
+
+        self._mix_compute = torch.compile(_mix_compute)
+        self._combine_compute = torch.compile(_combine_compute)
+
+    def mix(
+"""
+
+
 def _patched(text, path):
     for edit in patches.EDITS:
         if edit.path == path:
@@ -179,10 +200,23 @@ def test_the_glm47_parser_builds_no_full_assistant_grammar():
 def test_server_info_names_the_image_for_the_trainer_to_read():
     """The client refuses a server without this key, as upstream takes the same routes with none of these edits."""
     patched = _patched(BUILD_SERVER_INFO, patches._SERVER_INFO_FILE)
-    assert 'result["halo_patches"] = True' in patched
+    assert f'result["halo_patches"] = {list(patches.PATCH_NAMES)!r}' in patched
     _verify(patched, patches._SERVER_INFO_FILE)
     with pytest.raises(SystemExit, match="server_info image identity: the post-image is not in place"):
         _verify(BUILD_SERVER_INFO, patches._SERVER_INFO_FILE)
+
+
+def test_the_mix_up_weight_loader_rewrites_the_padded_copy_in_place():
+    """Captured graphs bake the copy's pointer, so the loader must copy into it, never rebind it."""
+    patched = _patched(HYPERCONNECTION, patches._HYPERCONNECTION_FILE)
+    assert "self.input_mix_weight_up.weight.weight_loader = self._load_mix_up_weight" in patched
+    loader = patched.split("def _load_mix_up_weight")[1].split("def mix")[0]
+    assert "param.data.copy_(loaded_weight)" in loader
+    assert "self._mix_up_weight_padded.copy_(permute_pad_up_weight(param, self.hc_count))" in loader
+    assert "self._mix_up_weight_padded =" not in loader
+    _verify(patched, patches._HYPERCONNECTION_FILE)
+    with pytest.raises(SystemExit, match="hyper-connection mix-up loader hook: the post-image is not in place"):
+        _verify(HYPERCONNECTION, patches._HYPERCONNECTION_FILE)
 
 
 def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():

@@ -20,7 +20,6 @@ EXPECTED_UNSUPPORTED = {
     "EPInklingMoELayer",
     "EPNemotronHMoELayer",
     "EPQwen3NextMoELayer",
-    "EPQwen4ExpMoELayer",
 }
 
 

@@ -21,6 +21,7 @@ from transformers import AutoTokenizer
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_flag, env_str
 from halo.models.introspection.config_access import config_model_types
 from halo.models.moe.balancing import is_balancing_state_key
@@ -39,21 +40,39 @@ from tests.common.models import (
     QWEN3_0_6B,
     QWEN3_5_MOE_35B,
     QWEN3_6_MOE_35B,
+    QWEN3_8_FLASH_NEXT,
     QWEN3_30B_A3B,
 )
 from tests.common.on_policy_e2e import PolicyLayout, load_policy
 from tests.common.rank_log import log
-from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint
+from tests.common.resume_export import save_gathered_ep
+from tests.common.tiny_models import (
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    build_tiny_family_checkpoint,
+    randomized_weights,
+    shared_tiny_family_checkpoint,
+)
 from tests.common.weight_sync import SGLANG_SERVER_URL, weight_transfer_port
 
 WORLD_SIZE = 2
 # The families served from a tiny checkpoint the row writes (``--write-checkpoint``) or the Step-3.7 suite does
 # (tests/gpu/trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py), each named by the env var holding its directory.
-TINY_CHECKPOINT_KNOBS = {"glm5_next": "HALO_TEST_GLM5_NEXT_MODEL", "step3p7": "HALO_TEST_STEP3P7_MODEL"}
+TINY_CHECKPOINT_KNOBS = {
+    "glm5_next": "HALO_TEST_GLM5_NEXT_MODEL",
+    "qwen4_exp_text": "HALO_TEST_QWEN4_EXP_MODEL",
+    "step3p7": "HALO_TEST_STEP3P7_MODEL",
+}
 # Where a written tiny checkpoint takes its tokenizer, chat template and image-processor files: the served architecture
 # builds its multimodal processor from the checkpoint.
-_TINY_CHECKPOINT_HUB = {"glm5_next": "zai-org/GLM-5.3-Flash"}
+_TINY_CHECKPOINT_HUB = {"glm5_next": "zai-org/GLM-5.3-Flash", "qwen4_exp_text": QWEN3_8_FLASH_NEXT}
 _TINY_CHECKPOINT_HUB_FILES = ("tokenizer*", "special_tokens_map.json", "chat_template*", "*processor*.json")
+# The families whose served layout is the trainer's own gathered save, not transformers': Flash-Next's composite, with
+# the release's output gate and an indexer budget its server's top-k kernel takes (k = budget / compress ratio is
+# 512, 1024 or 2048), whose tiny roster config has neither.
+_GATHERED_TINY_CHECKPOINTS = {
+    "qwen4_exp_text": (TINY_MOE_VLM_FAMILIES["qwen4_exp"], {"output_gate_type": "sigmoid", "indexer_budget": 2048})
+}
 # Every serving family plus Qwen3.6, a second release of Qwen3.5's block.
 CHECKPOINTS: dict[str, str | None] = {
     "bailing_moe": BAILING_MOE_LING_MINI,
@@ -69,7 +88,10 @@ CHECKPOINTS: dict[str, str | None] = {
     **{family: env_str(knob) for family, knob in TINY_CHECKPOINT_KNOBS.items()},
 }
 # That checkpoint's auto_map exists for the server's config parse; the trainer takes the native class, as its suite does.
-_TRAINER_LOAD_OVERRIDES = {"step3p7": {"trust_remote_code": False, "attn_implementation": "sdpa"}}
+_TRAINER_LOAD_OVERRIDES = {
+    "qwen4_exp_text": {"trust_remote_code": False, "attn_implementation": "sdpa"},
+    "step3p7": {"trust_remote_code": False, "attn_implementation": "sdpa"},
+}
 # Prose, code and a second language, so the rows reach many experts.
 _TEXT = (
     "The river bends twice before it reaches the old mill, where the water slows and turns green. Farmers along its "
@@ -89,12 +111,15 @@ _BAR_FLOOR = 1e-5
 _CONTROL_SCALE = 1.01
 # A text attention weight past the first layer, whichever layer type the family starts with.
 _CONTROL_TENSOR = re.compile(r"layers\.\d*[1-9]\.(self_attn|attention)\.")
-_NO_TEXT_ROW_REACHES = re.compile(r"vision|visual|audio|mtp")
+# A DSA or QSA indexer weight only ranks keys, and scaling it leaves the ranking where it was.
+_NO_TEXT_ROW_REACHES = re.compile(r"vision|visual|audio|mtp|indexer")
 _LAYER_INDEX = re.compile(r"\.\d+(?=\.)")
 # What a push without a family's declared buffers does: vLLM's reload rebuilds the module they sit on from
 # uninitialized storage, while SGLang's loader copies name by name.
 _LEAVING_THEM_OUT_MOVES_THE_SERVER = {"vllm": True, "sglang": False}
 _REAL_STEP_LEARNING_RATE = 2e-4
+# Flash-Next's router flips make its trainer-to-server floor large, so its step has to move the trainer past twice that.
+_REAL_STEP_LEARNING_RATES = {"qwen4_exp_text": 1e-3}
 _REAL_STEP_ROW = 3  # 256 tokens, inside every server window
 # The clone and Adam's two moments of every parameter do not fit beside ep1's copies on a 60 GB checkpoint.
 _REAL_STEP_STRIDE = 4
@@ -127,6 +152,8 @@ def write_tiny_checkpoint_if_asked(row: argparse.Namespace) -> None:
     """Rank 0 writes the row's seeded tiny checkpoint under the release's tokenizer and processor files, then exits."""
     if row.write_checkpoint is None:
         return
+    if row.family in _GATHERED_TINY_CHECKPOINTS:
+        return
     if row.family not in _TINY_CHECKPOINT_HUB:
         sys.exit(f"--write-checkpoint covers {sorted(_TINY_CHECKPOINT_HUB)}, not {row.family}")
     snapshot_download(
@@ -138,6 +165,27 @@ def write_tiny_checkpoint_if_asked(row: argparse.Namespace) -> None:
     build_tiny_family_checkpoint(TINY_MOE_FAMILIES[row.family], str(row.write_checkpoint), tokenizer)
     log(f"wrote {row.family}'s tiny checkpoint to {row.write_checkpoint}")
     sys.exit(0)
+
+
+def write_gathered_tiny_checkpoint(ctx: Ctx, row: argparse.Namespace) -> dict:
+    """COLLECTIVE. The row's seeded tiny model, written by the trainer's own gathered save under the release's tokenizer
+    and processor files: the layout the release's server reads (fused experts, the n-gram table in table-only files)."""
+    family, overrides = _GATHERED_TINY_CHECKPOINTS[row.family]
+    target = str(row.write_checkpoint)
+    if ctx.rank == 0:
+        snapshot_download(
+            _TINY_CHECKPOINT_HUB[row.family], allow_patterns=list(_TINY_CHECKPOINT_HUB_FILES), local_dir=target
+        )
+    ctx.barrier()
+    tokenizer = AutoTokenizer.from_pretrained(target)
+    source = shared_tiny_family_checkpoint(
+        ctx, family, f"{row.family}_push_exact", tokenizer, 0, edit=randomized_weights(), overrides=overrides
+    )
+    parallelism = ParallelismConfig(ep_size=ctx.world_size)
+    model, _ = load_policy(source, parallelism, None, **_TRAINER_LOAD_OVERRIDES[row.family])
+    save_gathered_ep(ctx, model, parallelism, tokenizer, target)
+    ctx.barrier()
+    return {"checks": {"checkpoint_written": True}, "metrics": {}}
 
 
 def _server_url(backend: str) -> str:
@@ -211,9 +259,11 @@ def _trainer_scores(model, rows: list[list[int]], device) -> list[float]:
     return scores
 
 
-def _take_one_real_step(model, stepped: list[tuple[str, torch.nn.Parameter]], row: list[int], device) -> None:
+def _take_one_real_step(
+    model, stepped: list[tuple[str, torch.nn.Parameter]], row: list[int], device, learning_rate: float
+) -> None:
     """COLLECTIVE. Cross-entropy off the logits, as a family's ``labels`` path may want training-only inputs."""
-    optimizer = AdamWBF16(stepped, lr=_REAL_STEP_LEARNING_RATE, weight_decay=0.0)
+    optimizer = AdamWBF16(stepped, lr=learning_rate, weight_decay=0.0)
     ids = torch.tensor([row], device=device)
     F.cross_entropy(model(input_ids=ids, use_cache=False).logits[0, :-1].float(), ids[0, 1:]).backward()
     reshard_fsdp2_modules(model)
@@ -396,7 +446,13 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             trainable = [(name, param) for name, param in model.named_parameters() if param.requires_grad]
             stepped = trainable[::_REAL_STEP_STRIDE]
             saved = [(param, param.detach().clone()) for _, param in stepped]
-            _take_one_real_step(model, stepped, rows[_REAL_STEP_ROW], ctx.device)
+            _take_one_real_step(
+                model,
+                stepped,
+                rows[_REAL_STEP_ROW],
+                ctx.device,
+                _REAL_STEP_LEARNING_RATES.get(row.family, _REAL_STEP_LEARNING_RATE),
+            )
             after_step = _trainer_scores(model, rows, ctx.device)
             moved, _ = pushed("after_a_real_step")
             if ctx.rank == 0:

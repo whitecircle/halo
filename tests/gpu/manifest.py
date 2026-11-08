@@ -211,10 +211,11 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
     "laguna",
     "lfm2_moe",
     "qwen3_5_moe_text",
+    "qwen4_exp_text",
     "step3p7",
 )
 
-# Row family → its marker, on both engines but for the two SGLang refuses; each needs a fresh server on the family's
+# Row family → its marker, on both engines but for the ones SGLang refuses; each needs a fresh server on the family's
 # checkpoint (tests/common/weight_push_exact.py), so a tier pass on another checkpoint skips them.
 # Qwen3.6's text tower is past the tiny roster, on Qwen3.5's layer.
 _PUSH_EXACT_MOE_FAMILY_MARKERS = {
@@ -230,6 +231,7 @@ _PUSH_EXACT_MOE_FAMILY_MARKERS = {
         "qwen3_5_moe_text",
         "qwen3_6_moe_text",
         "qwen3_moe",
+        "qwen4_exp_text",
         "step3p7",
     )
 }
@@ -251,7 +253,13 @@ _PUSH_EXACT_REACH_ROWS = tuple(
         markers=("gpu", "full", "2gpu", "ep", "moe", _PUSH_EXACT_MOE_FAMILY_MARKERS[family], f"{backend}_server"),
         timeout=3600,
     )
-    for family, backend in (("laguna", "vllm"), ("gemma4_text", "vllm"), ("gemma4_text", "sglang"))
+    for family, backend in (
+        ("laguna", "vllm"),
+        ("gemma4_text", "vllm"),
+        ("gemma4_text", "sglang"),
+        ("qwen4_exp_text", "vllm"),
+        ("qwen4_exp_text", "sglang"),
+    )
 )
 _PUSH_EXACT_DENSE_ROWS = tuple(
     Row(
