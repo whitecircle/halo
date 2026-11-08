@@ -35,6 +35,7 @@ from halo.model_loading.parallel.frozen_models import (
     warn_unparallelized_reference,
 )
 from halo.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
+from halo.models.families.qwen4_exp.forwards import verify_qwen4_exp_patched
 from halo.models.introspection.config_access import (
     ROUTER_AUX_FIELDS,
     SPECIAL_TOKEN_ID_FIELDS,
@@ -380,6 +381,7 @@ class DistributedTrainerMixin(
             rows_per_forward=self.args.per_device_train_batch_size,
             eval_rows_per_forward=self.args.per_device_eval_batch_size if uses_evaluation(self.args) else 1,
         )
+        verify_qwen4_exp_patched(self._top_level_model())
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp

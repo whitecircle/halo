@@ -2,6 +2,10 @@
 """A Qwen3.8-Flash-Next model built without the family patches is refused at the run policies: it would train its n-gram
 table as a parameter and run transformers' per-query QSA loop and [T, T] masks."""
 
+import ast
+import inspect
+import textwrap
+
 import pytest
 from torch import nn
 from transformers import AutoModelForCausalLM
@@ -10,6 +14,7 @@ from halo.model_loading.model_preparation import apply_family_patches, apply_run
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.families.qwen4_exp.forwards import verify_qwen4_exp_patched
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.qwen4_exp import NGRAM_TABLE_PATH, tiny_qwen4_exp_text_config, transformers_forwards
 
 REMEDY = "apply_family_patches"
@@ -59,6 +64,17 @@ def test_a_stamped_config_without_split_ngram_parts_is_refused():
     object.__setattr__(config, "split_ngram_parts", None)  # the strict config class refuses None on assignment
     with pytest.raises(ValueError, match="sets no split_ngram_parts"):
         AutoModelForCausalLM.from_config(config)
+
+
+def test_trainer_construction_checks_a_model_handed_in_already_built():
+    """A model passed to a trainer built skips the loaders' run policies, so trainer construction runs the guard."""
+    source = textwrap.dedent(inspect.getsource(DistributedTrainerMixin._configure_distributed_modes))
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "verify_qwen4_exp_patched"
+    ]
+    assert [ast.unparse(call.args[0]) for call in calls] == ["self._top_level_model()"]
 
 
 def test_a_model_without_flash_next_modules_is_not_checked():
