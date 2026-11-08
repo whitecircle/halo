@@ -116,13 +116,13 @@ A non-finite reward or advantage fails the step on every rank.
 
 A group's advantages sum to zero, but their token-weighted sum does not: where failures run longer than solves, each round pushes down the sampled tokens and, without a KL anchor, entropy climbs; where solves run longer, it sharpens the policy and entropy falls.
 
-- The balance sums the trainable rows' positive and negative mass, `P` and `N` (advantage × IS-weighted trained tokens), over every rank. It shrinks the heavier sign by their ratio, never up, keeping every row's sign and within-sign order.
-- [Untrainable-turn](#untrainable-turns) rows stay out of both sums with their raw advantage, so their mass is the round's whole net push.
+- The balance sums the trainable rows' positive and negative mass, `P` and `N` (advantage × IS-weighted trained tokens), and the [untrainable-turn](#untrainable-turns) rows' negative mass `U`, over every rank. It shrinks the heavier side, `P` or `N + U`, by their ratio, never up, keeping every row's sign and within-sign order, so the whole round nets to zero.
+- Where cut turns carry much of the negative mass, the balance shrinks their negative advantage with the rest, and the trainable rows alone keep a push up.
 - The scale falls continuously to 0 as the lighter side empties, so a one-sign round trains nothing on those advantages. Balanced rows pull at `1 - |net|` of their unbalanced strength.
 
 | Metric | Meaning |
 |---|---|
-| `advantage/net_token_mass` | `(P - N) / (P + N)` before balancing; logged with the knob off too. Under a token-sum loss, staying negative pushes entropy up, staying positive pulls it down |
+| `advantage/net_token_mass` | `(P - N) / (P + N)` before balancing, the trainable rows only; logged with the knob off too. With the knob off and `s` the `negative_only_mass`, the whole round's push is `(1 - s) × net - s`. Under a token-sum loss, a negative push raises entropy, a positive one lowers it |
 | `advantage/token_mass_scale` | The applied factor |
 | `advantage/negative_only_mass` | The untrainable rows' share of the trained mass |
 

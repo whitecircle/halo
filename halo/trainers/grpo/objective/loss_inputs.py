@@ -33,7 +33,8 @@ TOKEN_SUM_LOSS_TYPES = ("cispo", "dapo", "dr_grpo")
 @dataclass(frozen=True)
 class TokenMassBalance:
     """``net`` is ``(P - N) / (P + N)`` before balancing, over the summed positive and negative ``advantage x token
-    weight`` of the round's trainable rows."""
+    weight`` of the round's trainable rows. The scales net the whole trained mass to zero, the negative-only rows'
+    included: their negative advantage pushes the sampled tokens down like any other."""
 
     net: float
     positive_scale: float = 1.0
@@ -44,12 +45,9 @@ class TokenMassBalance:
         """The factor the heavier sign takes (1.0 when nothing is balanced)."""
         return min(self.positive_scale, self.negative_scale)
 
-    def apply(self, advantages: torch.Tensor, negative_only: torch.Tensor | None = None) -> torch.Tensor:
-        """``advantages`` with each sign scaled; the ``negative_only`` rows, outside the balance, keep theirs."""
-        scaled = torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
-        if negative_only is None:
-            return scaled
-        return torch.where(negative_only.to(advantages.device), advantages, scaled)
+    def apply(self, advantages: torch.Tensor) -> torch.Tensor:
+        """``advantages`` with each sign scaled."""
+        return torch.where(advantages > 0, advantages * self.positive_scale, advantages * self.negative_scale)
 
 
 def _signed_masses(advantages: torch.Tensor, token_weights: torch.Tensor) -> torch.Tensor:
@@ -68,14 +66,15 @@ def _check_finite_masses(masses: list[float]) -> None:
         )
 
 
-def _balance(positive: float, negative: float) -> TokenMassBalance:
-    total = positive + negative
-    if total <= 0:
-        return TokenMassBalance(net=0.0)
-    net = (positive - negative) / total
-    if negative > positive:
-        return TokenMassBalance(net=net, negative_scale=positive / negative)
-    return TokenMassBalance(net=net, positive_scale=negative / positive)
+def _balance(positive: float, negative: float, negative_only: float) -> TokenMassBalance:
+    trainable = positive + negative
+    net = (positive - negative) / trainable if trainable > 0 else 0.0
+    pushed_down = negative + negative_only
+    if positive + pushed_down <= 0:
+        return TokenMassBalance(net=net)
+    if pushed_down > positive:
+        return TokenMassBalance(net=net, negative_scale=positive / pushed_down)
+    return TokenMassBalance(net=net, positive_scale=pushed_down / positive)
 
 
 def token_mass_sums(
@@ -84,8 +83,8 @@ def token_mass_sums(
     importance_ratio: torch.Tensor | None,
     negative_only: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """This rank's additive token-weighted masses: ``[positive, negative]``, and with ``negative_only`` rows (outside
-    the balance) a third, theirs."""
+    """This rank's additive token-weighted masses: ``[positive, negative]`` of the trainable rows, and with
+    ``negative_only`` rows a third, their negative mass."""
     weights = (loss_mask if importance_ratio is None else loss_mask * importance_ratio).sum(dim=1)
     if negative_only is None:
         return _signed_masses(advantages, weights)
@@ -100,12 +99,14 @@ def record_world_token_mass(
     """The world's summed ``masses`` of :func:`token_mass_sums` as metrics, and the balance when ``enabled``. Raises on
     a non-finite mass."""
     _check_finite_masses(masses)
-    result = _balance(masses[0], masses[1])
+    negative_only = masses[2] if with_negative_only else 0.0
+    result = _balance(masses[0], masses[1], negative_only)
     metrics[NET_TOKEN_MASS_KEY].append(result.net)
     if with_negative_only:
         scales = result if enabled else TokenMassBalance(net=result.net)
-        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale + masses[2]
-        metrics[NEGATIVE_ONLY_MASS_KEY].append(masses[2] / trained if trained > 0 else 0.0)
+        negative_only_trained = negative_only * scales.negative_scale
+        trained = masses[0] * scales.positive_scale + masses[1] * scales.negative_scale + negative_only_trained
+        metrics[NEGATIVE_ONLY_MASS_KEY].append(negative_only_trained / trained if trained > 0 else 0.0)
     if not enabled:
         return None
     metrics[TOKEN_MASS_SCALE_KEY].append(result.scale)
@@ -122,8 +123,8 @@ def record_token_mass(
     negative_only: torch.Tensor | None = None,
 ) -> TokenMassBalance | None:
     """COLLECTIVE. A group's advantages sum to zero but their token-weighted sum does not: longer failures push down
-    the tokens the policy sampled (entropy rises), longer solves sharpen it. ``negative_only`` rows are neither weighed
-    nor scaled; pass them to :meth:`TokenMassBalance.apply` too."""
+    the tokens the policy sampled (entropy rises), longer solves sharpen it. ``negative_only`` rows' negative mass
+    weighs with the trainable negatives and the balance scales it with them."""
     local = token_mass_sums(advantages, loss_mask, importance_ratio, negative_only)
     masses = gather_fn(local.unsqueeze(0)).sum(dim=0).tolist()
     return record_world_token_mass(masses, metrics, enabled, negative_only is not None)

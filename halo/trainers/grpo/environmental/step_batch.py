@@ -627,7 +627,7 @@ class StepBatchMixin:
             negative_only=negative_only,
         )
         if balance is not None:
-            local_advantages = balance.apply(local_advantages, negative_only)
+            local_advantages = balance.apply(local_advantages)
             traj_advantages = balance.apply(traj_advantages)
         return local_advantages, traj_advantages
 

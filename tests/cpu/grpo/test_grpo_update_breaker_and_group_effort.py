@@ -284,9 +284,9 @@ def test_the_token_mass_balance_weighs_the_corrected_ratio_and_reaches_both_adva
     assert list(host._logs["advantages"]) == pytest.approx(expected.tolist())
 
 
-def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_trainable_rows():
-    """The balance weighs the solve's 1/2 against the failure's trainable 1 and halves the negatives there; the cut
-    turn keeps its raw -1/2 and its 2 of mass is the round's net push."""
+def test_the_token_mass_balance_weighs_a_negative_only_row_and_records_the_trainable_rows():
+    """The balance weighs the solve's 1/2 against the failure's trainable 1 plus the cut turn's 2 and shrinks every
+    negative, the cut turn's too, to a sixth, so the round nets to zero; the logged net stays the trainable rows'."""
     solve, failure, cut = row([6]), row([7, 8]), row([9, 10, 11, 12], negative_only=True)
     host = batch_host(
         [solve, failure, cut],
@@ -299,11 +299,11 @@ def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_t
     host.async_config.train_on_sampled_tokens = True
     host._tokenize_step_rows = lambda results: [[solve], [failure, cut]]
     batch = build(host, [episode(1.0), episode(0.0)])
-    assert batch["advantages"].tolist() == pytest.approx([0.5, -0.25, -0.5])
-    assert list(host._logs["advantages"]) == pytest.approx([0.5, -0.25])
+    assert batch["advantages"].tolist() == pytest.approx([0.5, -1 / 12, -1 / 12])
+    assert list(host._logs["advantages"]) == pytest.approx([0.5, -1 / 12])
     metrics = host._metrics["train"]
     assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx((0.5 - 1) / 1.5)]
-    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 3)]
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx((2 / 6) / 1.0)]
 
 
 def test_an_eval_round_is_never_balanced():
