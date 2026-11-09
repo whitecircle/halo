@@ -207,7 +207,7 @@ def test_server_info_names_the_image_for_the_trainer_to_read():
 
 
 def test_the_mix_up_weight_loader_rewrites_the_padded_copy_in_place():
-    """Captured graphs bake the copy's pointer, so the loader must copy into it, never rebind it."""
+    """The padded copy is built once and never rebuilt, so the loader rewrites it in place, never rebinds it."""
     patched = _patched(HYPERCONNECTION, patches._HYPERCONNECTION_FILE)
     assert "self.input_mix_weight_up.weight.weight_loader = self._load_mix_up_weight" in patched
     loader = patched.split("def _load_mix_up_weight")[1].split("def mix")[0]

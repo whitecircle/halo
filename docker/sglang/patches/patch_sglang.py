@@ -89,7 +89,7 @@ _MIX_BEFORE = """        self._mix_compute = torch.compile(_mix_compute)
 _MIX_LOADER = """    def _load_mix_up_weight(self, param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
         assert param.size() == loaded_weight.size()
         param.data.copy_(loaded_weight)
-        # The small-batch kernel reads a padded, permuted copy built at its first use and baked into captured graphs:
+        # The small-batch kernel reads a padded, permuted copy built at its first use and never rebuilt:
         # rewrite it in place, or an update never reaches it.
         if self._mix_up_weight_padded is not None:
             from sglang.kernels.ops.elementwise.hc_mix import permute_pad_up_weight
