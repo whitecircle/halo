@@ -772,6 +772,7 @@ their recipes serve without a parser.
 |---|---|
 | Qwen3, the 2507 releases included; most others | `hermes` (JSON inside `<tool_call>` tags) |
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
+| Qwen3.8-Flash-Next | `qwen3_xml`, with `--reasoning-parser qwen3` (same `<tool_call>` around `<function=…>`/`<parameter=…>` XML; the template opens `<think>` in the generation prompt) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4.7-Flash | `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) also `VLLM_REASONING_PARSER=gemma4` |
@@ -860,8 +861,8 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 
 ### Tool parsers on SGLang
 
-`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5 and
-Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
+`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5,
+Qwen3.6 and Qwen3.8-Flash-Next (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
 template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
 tool-call parser.`) and serves with no parser, which `/server_info` reports and the
 [preflight](#startup-preflight) refuses on a native-tool environment. Qwen3-30B-A3B-Instruct-2507 and

@@ -1,0 +1,88 @@
+# Environmental GRPO — Qwen3.8-Flash-Next (qwen4_exp, 180B) on WebInstruct-verified (exam QA), closed-book by default
+# (open_book enables search), full fine-tuning at EP=8 on one 8-GPU trainer node, one vLLM server on a second node.
+# The trainer holds ~125 GB per GPU of expert weights, gradients and moments (SFT recipe: examples/sft/qwen4_exp), so
+# the server cannot share its GPUs. Both need the composite: text_only_model is refused for weight sync. See
+# agent-docs/models/qwen4_exp.md#rl-weight-sync.
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton --return-tokens-as-token-ids
+#   --weight-transfer-config '{"backend":"nccl"}' on halo:vllm-0.32.0, tensor parallel 8 (the checkpoint's own chat
+#   template, whose <tool_call><function=…> calls hermes does not parse). SGLang takes the toolkit's refreshed image only.
+# Launch: DIST_NCCL_TIMEOUT_MINUTES=60 torchrun --nproc_per_node=8 scripts/training/grpo/environmental.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.8-Flash-Next
+attn_implementation: sdpa     # the class declares no flash support; the sparse (QSA) layers run the block-sparse kernel
+moe_balancing: none           # the router has no bias slot, and explicit aux_loss is REJECTED on a GRPO trainer
+
+# --- Parallelism (EP=8: one dispatch group on the 8 train GPUs, DP=8) ---
+expert_parallel_size: 8       # 512 routed experts -> 64/rank
+fp32_router: true
+fp32_grad_reduce: true
+
+# --- Environment ---
+environment_type: exam_qa
+max_turns: 5
+# environment_kwargs:
+#   open_book: true           # search tools on
+#   search_backend: duckduckgo
+
+# --- Ray Workers ---
+rollout_actor_budget: 64
+
+# --- vLLM Server ---
+rollout_server_configs:
+- url: "http://inference-node:8000"   # the server node's resolvable name: a loopback URL is refused in a multi-node run
+  group_port: 51216
+request_timeout: 1200.0
+
+# --- Rollout Generation ---
+rollout_temperature: 1.0
+rollout_max_tokens: 8192
+
+# --- Prefetch ---
+enable_prefetch: false    # one server, so each round rolls out, then trains on-policy
+
+# --- Dataset ---
+# Exact-match grading is clean for Integer/Float/Multiple-Choice answer_type rows;
+# Expression-type answers under-credit — filter on answer_type offline if that matters.
+dataset:
+- TIGER-Lab/WebInstruct-verified
+test_size: 0.01
+prompt_field: question
+
+# --- Sequence Lengths ---
+max_prompt_length: null  # prompt filter (drop over-long rows), not a truncation length; null = keep all
+
+# --- GRPO ---
+num_generations: 8
+beta: 0.0  # KL-free: under use_peft: false a non-zero beta loads a second full 180B reference model
+num_iterations: 1
+epsilon: 0.2
+scale_rewards: batch     # global batch std — never per-group (degenerate-group noise inflation)
+
+# --- Training ---
+per_device_train_batch_size: 1
+use_chunked_grpo_logprobs: true   # ~248k vocab
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+learning_rate: 1.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 20
+
+# --- Optimization ---
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # a MoE runs reentrant GC (the trainer force-promotes false)
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-qwen3.8-flash-next-exam-qa-full-ep8
+save_steps: 100
+save_total_limit: 1       # each save is ~360 GB
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+log_completions: true
+num_completions_to_print: 3
+
+# --- PEFT ---
+use_peft: false
