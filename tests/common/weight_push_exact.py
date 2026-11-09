@@ -68,10 +68,14 @@ TINY_CHECKPOINT_KNOBS = {
 _TINY_CHECKPOINT_HUB = {"glm5_next": "zai-org/GLM-5.3-Flash", "qwen4_exp_text": QWEN3_8_FLASH_NEXT}
 _TINY_CHECKPOINT_HUB_FILES = ("tokenizer*", "special_tokens_map.json", "chat_template*", "*processor*.json")
 # The families whose served layout is the trainer's own gathered save, not transformers': Flash-Next's composite, with
-# the release's output gate and an indexer budget its server's top-k kernel takes (k = budget / compress ratio is
-# 512, 1024 or 2048), whose tiny roster config has neither.
+# the release's output gate, an indexer budget its server's top-k kernel takes (k = budget / compress ratio is 512,
+# 1024 or 2048) and a width at which the server's hyper-connection mix runs its padded kernel (hc_count * hidden a
+# multiple of 2048), whose tiny roster config has none of the three.
 _GATHERED_TINY_CHECKPOINTS = {
-    "qwen4_exp_text": (TINY_MOE_VLM_FAMILIES["qwen4_exp"], {"output_gate_type": "sigmoid", "indexer_budget": 2048})
+    "qwen4_exp_text": (
+        TINY_MOE_VLM_FAMILIES["qwen4_exp"],
+        {"output_gate_type": "sigmoid", "indexer_budget": 2048, "hidden_size": 512},
+    )
 }
 # Every serving family plus Qwen3.6, a second release of Qwen3.5's block.
 CHECKPOINTS: dict[str, str | None] = {
@@ -103,7 +107,10 @@ _TEXT = (
     "coule sous le pont, et les enfants comptent les bateaux. "
 )
 _TEXT_REPEATS = 40
-_ROW_LENGTHS = (32, 64, 128, 256, 512, 1024)
+# The first row is short enough for a server's small-batch paths (SGLang's hyper-connection mix reads its own copy of
+# a weight at 24 tokens or fewer).
+_SHORT_ROW_LENGTH = 16
+_ROW_LENGTHS = (_SHORT_ROW_LENGTH, 32, 64, 128, 256, 512, 1024)
 _ROW_STRIDE = 7
 _BASELINE_RUNS = 3
 _NOISE_MARGIN = 2
@@ -120,7 +127,7 @@ _LEAVING_THEM_OUT_MOVES_THE_SERVER = {"vllm": True, "sglang": False}
 _REAL_STEP_LEARNING_RATE = 2e-4
 # Flash-Next's router flips make its trainer-to-server floor large, so its step has to move the trainer past twice that.
 _REAL_STEP_LEARNING_RATES = {"qwen4_exp_text": 1e-3}
-_REAL_STEP_ROW = 3  # 256 tokens, inside every server window
+_REAL_STEP_ROW = 4  # 256 tokens, inside every server window
 # The clone and Adam's two moments of every parameter do not fit beside ep1's copies on a 60 GB checkpoint.
 _REAL_STEP_STRIDE = 4
 _TRAINER_GAP_MARGIN = 2
@@ -384,7 +391,10 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
         ctx.barrier()
         if ctx.rank != 0:
             return {}, None
-        moved = _difference(baseline, _score(client, rows))
+        scored = _score(client, rows)
+        moved = _difference(baseline, scored)
+        short = slice(0, len(rows[0]) - 1)
+        moved["short_max"] = _difference(baseline[short], scored[short])["max"]
         metrics.update({f"{label}/{key}": value for key, value in moved.items()})
         metrics[f"{label}/forwarded"] = sender.forwarded
         log(f"  {label}: {moved} over {sender.forwarded} forwarded tensors, scaled {sender.scaled}")
@@ -424,19 +434,24 @@ def run_push_exactness(ctx: Ctx, row: argparse.Namespace) -> dict:
             patterns = broadcast_from_rank0(
                 _reach_patterns(forwarded_patterns, client, model_types) if ctx.rank == 0 else None
             )
-            unreached = []
+            unreached, unreached_short = [], []
             for pattern in patterns:
                 leave_out = (pattern,) if pattern == row.reach_leave_out else ()
                 moved, _ = pushed(f"reach/{pattern}", scale_pattern=pattern, leave_out_patterns=leave_out)
                 if ctx.rank == 0 and stays(moved):
                     unreached.append(pattern)
+                elif ctx.rank == 0 and moved["short_max"] <= bar:
+                    unreached_short.append(pattern)
             moved, _ = pushed("restored_after_reach")
             if ctx.rank == 0:
                 log(
                     f"  reach: {len(patterns) - len(unreached)} of {len(patterns)} names moved the server: {unreached}"
+                    f"; not the {_SHORT_ROW_LENGTH}-token row: {unreached_short}"
                 )
                 metrics["reach/patterns"] = len(patterns)
                 checks["every_forwarded_name_reaches_the_served_model"] = not unreached
+                # A server's small-batch path can read a copy a push never refreshes; only a row that short shows it.
+                checks["every_forwarded_name_reaches_the_short_row"] = not unreached_short
                 checks["unchanged_push_restores_the_reach_rounds"] = stays(moved)
 
         # TP's replicated parameters take the trainer's gradient sweep, which this one step does not run.
