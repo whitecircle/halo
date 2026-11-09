@@ -3,6 +3,7 @@ compiles mid-run."""
 
 from collections.abc import Callable
 
+import torch
 from torch import nn
 
 KernelWarmup = Callable[[nn.Module], None]
@@ -18,5 +19,8 @@ def register_kernel_warmup(warmup: KernelWarmup) -> None:
 
 
 def warm_registered_kernels(model: nn.Module) -> None:
-    for warmup in _warmups:
-        warmup(model)
+    """Runs every registered warm-up with autograd on and inference mode off: a warm-up compiles the backward by
+    running it, which a model loaded under ``no_grad`` or ``inference_mode`` would otherwise forbid."""
+    with torch.inference_mode(False), torch.enable_grad():
+        for warmup in _warmups:
+            warmup(model)

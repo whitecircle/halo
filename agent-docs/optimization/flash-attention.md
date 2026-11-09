@@ -133,7 +133,7 @@ Qwen3.5's partial-rotary `torch.cat` leaves q/k head-major before the flash tran
 
 **DeepSeek-V4 (`deepseek_v4`)**: eager-only. `head_dim=512` exceeds every FlashAttention kernel's 256 cap, SDPA drops the learnable sink column, and the CSA/HCA compressors concatenate KV entries after the mask is built (no BlockMask resize), so transformers marks all non-eager backends unsupported. `resolve_attn_implementation` forces `attn_implementation="eager"` for any requested backend (the family spec's `eager_only_attention`). There is no varlen path under eager, so the collator factory rejects `padding_free` (see [Padding-Free Collator](padding-free-collator.md)). See [DeepSeek-V4](../models/deepseek-v4.md).
 
-**Qwen3.8-Flash-Next (`qwen4_exp`)**: the class declares no flash or flex support, so the load takes SDPA. Its sparse (QSA) layers run Halo's tiled kernel, masked SDPA per 128-query tile with memory linear in the row ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)).
+**Qwen3.8-Flash-Next (`qwen4_exp`)**: the class declares no flash or flex support, so the load takes SDPA. Its sparse (QSA) layers run Halo's [block-sparse kernel](#block-sparse-attention-qwen38-flash-next) under the default `HALO_QSA_KERNEL=auto` where it can run, and the tiled path (masked SDPA per 128-query tile, memory linear in the row) elsewhere, always under `full_determinism` ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)).
 
 **PaliGemma / PaliGemma 2 (prefix LM)**: image and prompt tokens attend bidirectionally and the trained tokens causally, a mask transformers builds from `token_type_ids` (0 prefix, 1 suffix). transformers also sets the text config's `use_bidirectional_attention` whenever a checkpoint leaves it unset, as every published one does, so each decoder attention module is built non-causal and attends to every token wherever no mask is materialized. No flash kernel reads `token_type_ids`, so the resolver never selects one for the family (`has_prefix_lm_attention` in `declares_flash_attention`), auto-detected or pinned: PaliGemma takes **SDPA**, PaliGemma 2's softcap rules SDPA out and it takes **`flex_attention`**; a pinned flex or eager stands. The VLM collators write the `token_type_ids` that put each row's trained tokens in the causal suffix ([SFT → Vision-language models](../training-methods/sft.md#vision-language-models)), and every training load makes the decoder causal where no mask overrides it (`apply_prefix_lm_causal_decoder`), so a batch without them scores causally.
 
@@ -249,7 +249,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Inkling | → SDPA (upstream declares no flash support) |
 | Step-3.7 Flash | → SDPA (upstream declares no flash support), built as `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers and on the full layers' packed or padded rows |
-| Qwen3.8-Flash-Next | → SDPA (upstream declares no flash support); its sparse layers run the tiled QSA |
+| Qwen3.8-Flash-Next | → SDPA (upstream declares no flash support); its sparse layers run the block-sparse kernel (`HALO_QSA_KERNEL=auto`) where it can run, the tiled QSA elsewhere (`full_determinism`, non-CUDA, unsupported dtype or shape) |
 | PaliGemma · PaliGemma 2 | → SDPA · → `flex_attention` (prefix LM: no flash kernel reads its `token_type_ids` mask, [above](#model-specific-handling)) |
 | Context Parallelism | FA3 on Hopper, FA4 on Blackwell — FA2 for GLM-4.7-Flash |
 

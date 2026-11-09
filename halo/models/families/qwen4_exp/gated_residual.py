@@ -52,8 +52,11 @@ def _unfusable_reason(module: nn.Module, hyper_input: torch.Tensor) -> str | Non
         return f"hc_norm.group_size={norm.group_size} off hidden_size={module.hidden_size}"
     if any(type(linear) is not nn.Linear or linear.bias is not None for linear in present):
         return "a mix projection that is not a bias-free nn.Linear"
-    if any(m._forward_hooks or m._forward_pre_hooks for m in (norm, *present)):
-        return "a forward hook on the hyper-connection modules"
+    if any(
+        m._forward_hooks or m._forward_pre_hooks or m._backward_hooks or m._backward_pre_hooks
+        for m in (norm, *present)
+    ):
+        return "a forward or backward hook on the hyper-connection modules"
     # A DTensor parameter is a subclass of Tensor, which this layer cannot import to test for.
     if any(type(p) is not nn.Parameter for m in (norm, *present) for p in m.parameters()):
         return "hyper-connection parameters that are not plain tensors, as sharded DTensors are"
@@ -81,9 +84,9 @@ def _log_fallback(reason: str) -> None:
 
 def is_gated_residual_fusable(module: nn.Module, hyper_input: torch.Tensor) -> bool:
     """Whether ``module`` runs on the kernels for ``hyper_input``: the knob is on, the streams are CUDA bf16, fp16 or
-    fp32 (the active autocast's dtype under autocast), and the norm and mix projections are plain, hook-free, bias-free
-    and in the streams' dtype. Frozen and trained weights both run on the kernels. A module that the knob would take but
-    that cannot run logs its reason once on rank 0."""
+    fp32 (the active autocast's dtype under autocast), and the norm and mix projections are plain, free of forward and
+    backward hooks, bias-free and in the streams' dtype. Frozen and trained weights both run on the kernels. A module
+    that the knob would take but that cannot run logs its reason once on rank 0."""
     if not uses_gated_residual_kernels():
         return False
     reason = _unfusable_reason(module, hyper_input)

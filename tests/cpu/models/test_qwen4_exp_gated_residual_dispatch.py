@@ -57,6 +57,14 @@ def _prehooked(module):
     module.hc_norm.register_forward_pre_hook(lambda *_: None)
 
 
+def _backward_hooked(module):
+    module.input_mix_weight_down.register_full_backward_hook(lambda *_: None)
+
+
+def _backward_prehooked(module):
+    module.hc_norm.register_full_backward_pre_hook(lambda *_: None)
+
+
 def _biased(module):
     module.block_inject_weight.bias = torch.nn.Parameter(torch.zeros(STREAMS))
 
@@ -75,14 +83,25 @@ def _subclassed(module):
 @pytest.mark.parametrize(
     ("mutate", "reason"),
     [
-        (_hooked, "a forward hook"),
-        (_prehooked, "a forward hook"),
+        (_hooked, "forward or backward hook"),
+        (_prehooked, "forward or backward hook"),
+        (_backward_hooked, "backward hook"),
+        (_backward_prehooked, "backward hook"),
         (_biased, "not a bias-free nn.Linear"),
         (_grouped_off_hidden, "hc_norm.group_size"),
         (_subclassed, "not a bias-free nn.Linear"),
         (lambda module: None, "off CUDA"),
     ],
-    ids=["hook", "pre-hook", "bias", "group-size", "linear-subclass", "cpu-input"],
+    ids=[
+        "hook",
+        "pre-hook",
+        "backward-hook",
+        "backward-pre-hook",
+        "bias",
+        "group-size",
+        "linear-subclass",
+        "cpu-input",
+    ],
 )
 def test_every_unservable_module_names_its_reason(module, mutate, reason):
     mutate(module)

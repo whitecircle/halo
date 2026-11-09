@@ -147,5 +147,18 @@ def test_the_gated_residual_knob_off_or_no_residual_warms_nothing(residual_warme
     assert residual_warmed == []
 
 
+@pytest.mark.parametrize("mode", [torch.no_grad, torch.inference_mode])
+def test_registered_warmups_run_with_autograd_on_and_inference_mode_off(mode):
+    seen = []
+
+    def probe(model):
+        seen.append((torch.is_grad_enabled(), torch.is_inference_mode_enabled()))
+
+    kernel_warmups.register_kernel_warmup(probe)
+    with mode():
+        kernel_warmups.warm_registered_kernels(torch.nn.Linear(1, 1))
+    assert seen[-1] == (True, False)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
