@@ -2,9 +2,8 @@
 """A Qwen3.8-Flash-Next model built without the family patches is refused at the run policies: it would train its n-gram
 table as a parameter and run transformers' per-query QSA loop and [T, T] masks."""
 
-import ast
-import inspect
-import textwrap
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 from torch import nn
@@ -15,6 +14,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.families.qwen4_exp.forwards import verify_qwen4_exp_patched
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from tests.common.parallelism import make_parallelism_config
 from tests.common.qwen4_exp import NGRAM_TABLE_PATH, tiny_qwen4_exp_text_config, transformers_forwards
 
 REMEDY = "apply_family_patches"
@@ -66,15 +66,49 @@ def test_a_stamped_config_without_split_ngram_parts_is_refused():
         AutoModelForCausalLM.from_config(config)
 
 
-def test_trainer_construction_checks_a_model_handed_in_already_built():
+class _PastTheGuard(Exception):
+    """Carries control out of the trainer's mode setup once the guard has passed."""
+
+
+class _ModeSetupHost(DistributedTrainerMixin):
+    """The real ``_configure_distributed_modes`` on one rank, stopped right after the Flash-Next guard."""
+
+    _deferred_liger_kernel = False
+    _accelerate_manages_fsdp = False
+    label_smoother = None
+    compute_loss_func = None
+
+    def __init__(self, model):
+        self.model = model
+        self.parallelism_config = make_parallelism_config(world_size=1, gpus_per_node=1)
+        self.args = SimpleNamespace(
+            load_best_model_at_end=False,
+            optim="adamw_torch",
+            per_device_train_batch_size=1,
+            eval_strategy="no",
+            eval_on_start=False,
+        )
+        self._bf16_optimizer = False
+        self._ep_config = None
+
+    def _cast_peft_params_to_compute_dtype(self):
+        raise _PastTheGuard
+
+
+def _configure_modes(model):
+    with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"):
+        DistributedTrainerMixin._configure_distributed_modes(_ModeSetupHost(model))
+
+
+def test_trainer_construction_refuses_a_model_handed_in_already_built():
     """A model passed to a trainer built skips the loaders' run policies, so trainer construction runs the guard."""
-    source = textwrap.dedent(inspect.getsource(DistributedTrainerMixin._configure_distributed_modes))
-    calls = [
-        node
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "verify_qwen4_exp_patched"
-    ]
-    assert [ast.unparse(call.args[0]) for call in calls] == ["self._top_level_model()"]
+    with pytest.raises(RuntimeError, match=REMEDY):
+        _configure_modes(_unpatched_build())
+
+
+def test_trainer_construction_passes_a_patched_model():
+    with pytest.raises(_PastTheGuard):
+        _configure_modes(_patched_build())
 
 
 def test_a_model_without_flash_next_modules_is_not_checked():
