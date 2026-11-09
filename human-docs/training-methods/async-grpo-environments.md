@@ -191,7 +191,8 @@ the same loop: set `eval_strategy`, and `num_generations_eval: 1` for a fast pas
   `sampling/degenerate_group_frac` counts them.
 - `sampling/logratio_mean` drifting steadily negative means the weight sync is broken and the policy
   trains on stale rollouts. If `advantage/net_token_mass` also stays negative and `entropy` climbs, a
-  KL-free run is drifting instead: turn on `balance_token_mass` and the early stop.
+  KL-free run is drifting instead: arm the early stop (`balance_token_mass` cancels the net push, whose measured
+  entropy effect is small).
 - `episode/reward_scored` below 1 means a judge or reward model is failing; `<source>/<name>/scored`
   names which one. Under `on_error: invalid` those episodes also leave training, and
   `sampling/invalid_episode_frac` rises.

@@ -635,8 +635,8 @@ Four SGLang 0.5.22 loader facts shape its image and client:
 - **A copy of the hyper-connection mix-up weight.** On SM100-family GPUs (B200, B300) each
   Qwen3.8-Flash-Next `GatedResidual` builds a padded, permuted copy of `input_mix_weight_up` at its first mix of at
   most 24 tokens (the CUDA-graph capture) and never rebuilds it, so an update does not reach it. The image gives the
-  weight a loader that writes it and rewrites the copy in place, since captured graphs bake the copy's pointer, and
-  reports `hyperconnection_mix_up` among the `halo_patches` names on `/server_info`. The family's
+  weight a loader that writes it and rewrites the copy in place, since the copy is built at first use and never
+  rebuilt, and reports `hyperconnection_mix_up` among the `halo_patches` names on `/server_info`. The family's
   `REQUIRED_PATCHES` entry makes the [startup preflight](#startup-preflight) refuse an image that lacks the name.
 - **Fused a-projection halves.** The MLA loaders (GLM-4 MoE Lite) concatenate `q_a_proj` and
   `kv_a_proj_with_mqa` from a cache local to one `load_weights` call and drop a half that arrives alone.
@@ -772,7 +772,7 @@ their recipes serve without a parser.
 |---|---|
 | Qwen3, the 2507 releases included; most others | `hermes` (JSON inside `<tool_call>` tags) |
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
-| Qwen3.8-Flash-Next | `qwen3_xml`, with `--reasoning-parser qwen3` (same `<tool_call>` around `<function=…>`/`<parameter=…>` XML; the template opens `<think>` in the generation prompt) |
+| Qwen3.8-Flash-Next | `qwen3_xml`, with `--reasoning-parser qwen3`; `qwen3_xml` and `qwen3_coder` are one parser class in 0.32.0 (same `<tool_call>` around `<function=…>`/`<parameter=…>` XML; the template opens `<think>` in the generation prompt) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4.7-Flash | `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) also `VLLM_REASONING_PARSER=gemma4` |
@@ -867,6 +867,8 @@ template no rule matches it logs one warning (`could not detect tool-call parser
 tool-call parser.`) and serves with no parser, which `/server_info` reports and the
 [preflight](#startup-preflight) refuses on a native-tool environment. Qwen3-30B-A3B-Instruct-2507 and
 Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
+Qwen3.8-Flash-Next also needs `--reasoning-parser qwen3` so its reasoning separates from the content: its template
+opens `<think>` in the generation prompt, and a parser that starts outside reasoning leaves `</think>` in the content.
 
 Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
 as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
@@ -1042,9 +1044,9 @@ What passed against a live server on this release, on one node with each server 
 A dash is a shape the code admits with no row on that engine.
 
 **Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
-log-prob bit-identical, on 2,010 positions (987 on Step-3.7's tiny checkpoint): dense Qwen3-0.6B plain and at TP=2;
+log-prob bit-identical: dense Qwen3-0.6B plain and at TP=2;
 gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2 (2,010 positions).
+family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.

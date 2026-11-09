@@ -7,7 +7,8 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.8-Flash-Next
 text_only_model: true                 # Qwen4ExpForCausalLM: no vision tower or MTP head, and the fused loss applies
-# The class declares no flash support; the sparse (QSA) layers run the toolkit's tiled kernel on SDPA.
+# The class declares no flash support; the sparse (QSA) layers run the toolkit's block-sparse kernel on SDPA where it
+# can (HALO_QSA_KERNEL=auto), the tiled kernel elsewhere.
 attn_implementation: sdpa
 # The router stays frozen under these targets, so nothing balances; auto would warn its way to none under the
 # fused loss.

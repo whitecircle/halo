@@ -1,7 +1,8 @@
+# Config-checked only: no GPU run has trained this recipe.
 # Environmental GRPO — Qwen3.8-Flash-Next (qwen4_exp, 180B) on WebInstruct-verified (exam QA), closed-book by default
 # (open_book enables search), full fine-tuning at EP=8 on one 8-GPU trainer node, one vLLM server on a second node.
-# The trainer holds ~125 GB per GPU of expert weights, gradients and moments (SFT recipe: examples/sft/qwen4_exp), so
-# the server cannot share its GPUs. Both need the composite: text_only_model is refused for weight sync. See
+# The SFT full recipe (examples/sft/qwen4_exp) peaks at about 154 GB per GPU at 8k on 8 B300, so the server runs on its
+# own node. Both need the composite: text_only_model is refused for weight sync. See
 # agent-docs/models/qwen4_exp.md#rl-weight-sync.
 # Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --moe-backend triton --return-tokens-as-token-ids
 #   --weight-transfer-config '{"backend":"nccl"}' on halo:vllm-0.32.0, tensor parallel 8 (the checkpoint's own chat
