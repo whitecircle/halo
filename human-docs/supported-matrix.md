@@ -170,7 +170,7 @@ GRPO column states what the code admits. A family's own limits from
 | --- | :---: | :---: | :---: |
 | Resume | Ran | Ran | Ran |
 | Several servers | No, one server | Ran | Ran |
-| Prefetch | No | Ran (depth 1, 2) | Ran (depth 1); `max_retries` must cover the syncs a round spans |
+| Prefetch | No | Ran (depth 1, 2) | Ran (depth 1) |
 | `routing_replay: rollout` | No | Ran | Ran |
 | `routing_replay: recompute` | No | Ran | Ran |
 | `rollout_max_thinking_tokens` | No | Ran (GPT-OSS, Qwen3.6) | No |
