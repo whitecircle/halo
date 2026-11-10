@@ -107,6 +107,9 @@ def run(ctx) -> dict:
         attn_implementation="eager",
         use_liger_kernel=False,
         trust_remote_code=True,
+        # The reference below is the release as transformers loads it, sinks live; the loader neutralizes them by
+        # default, and eager is the one backend that carries live ones.
+        reset_sinks=False,
     )
     peak_gb = _peak_host_rss_gb()
     log_all(f"host RAM high-water mark: {baseline_gb:.2f} GB before the load, {peak_gb:.2f} GB after")
