@@ -35,6 +35,10 @@ from tests.common.tolerances import TOL
 
 EP_SIZE = 8
 SEQ_LEN = 128
+# EP reorders the bf16 expert sum, and later routers score that reordered output, flipping near-tied top-4-of-32 picks
+# with no bug: the bound test_ep_modes_vs_reference.py holds gpt-oss to. On 8x H200 the release and its BF16 mirror
+# both load to an EP8 loss of 4.158315 on this batch, 0.058 from stock transformers at 4.216044.
+LOSS_TOL = TOL.router_pick_flip_loss_abs
 
 
 def _peak_host_rss_gb() -> float:
@@ -121,6 +125,8 @@ def run(ctx) -> dict:
     batch = fixed_chat_batch(tokenizer, SEQ_LEN, ctx.device, broadcast=True)
     ep_loss = _loss(model, batch)
     metrics["ep8_loss"] = ep_loss
+    # Pure EP repeats bit for bit, so a difference means state survived between the two forwards.
+    checks["repeated_forward_is_deterministic"] = _loss(model, batch) == ep_loss
 
     release = _Release(local_dir) if ctx.rank == 0 else None
     mismatches: list[str] = []
@@ -154,7 +160,7 @@ def run(ctx) -> dict:
     metrics["reference_loss"] = float(ref_loss.item())
     delta = abs(ep_loss - metrics["reference_loss"])
     log(f"EP8 loss {ep_loss:.6f} vs dequantized from_pretrained {metrics['reference_loss']:.6f} (|Δ|={delta:.2e})")
-    checks["ep8_loss_matches_dequantized_reference"] = delta < TOL.parallel_vs_baseline_loss_abs
+    checks["ep8_loss_matches_dequantized_reference"] = delta < LOSS_TOL
     checks = {name: world_all(ok, ctx.device) for name, ok in checks.items()}
     return {"checks": checks, "metrics": metrics}
 
