@@ -10,7 +10,8 @@ Modes: the GPT-OSS row of the [Supported Matrix](../supported-matrix.md#model-fa
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `unsloth/gpt-oss-20b-BF16` (32 experts, top-4) and `unsloth/gpt-oss-120b-BF16` (128
-  experts, top-4).
+  experts, top-4). The 20B SFT recipes under EP or PP load OpenAI's own `openai/gpt-oss-20b`: its MXFP4
+  experts are decoded to bf16 at load, so no mirror is needed there.
 - **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B recipe is a two-node EP16 layout
   (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`, [Clusters](../clusters.md)), which H100 or H200
   need. At EP8 on eight B300s it last ran on code before 1.2.0.
