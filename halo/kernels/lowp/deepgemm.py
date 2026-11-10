@@ -22,6 +22,7 @@ DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = ("mxfp8", "mxfp4")
 
 _ALIGN = 128  # the contiguous layout pads each expert's row (M) segment to this
 _FP4_K_ALIGN = 256  # the fp4 kernel's contraction (K) multiple, two e2m1 per byte
+_CAST_CHUNK_BYTES = 256 << 20  # the fp32 temporaries of one weight-cast call, which are the size of its input
 
 _weight_cache = WeightVersionCache()  # w -> (data, scales), re-quantized once per optimizer step
 
@@ -76,6 +77,37 @@ def use_deepgemm(quant_format: QuantFormat) -> bool:
     return True
 
 
+def _cast_experts(b: torch.Tensor, cast, align, block_scaled: bool):
+    """``(data, scales)`` of ``b`` ``[E, N, K]``, cast over chunks of experts that stay under ``_CAST_CHUNK_BYTES``.
+
+    The MXFP4 cast scales row by row, so experts flatten as they are. The FP8 weight cast scales ``_ALIGN`` x ``_ALIGN``
+    blocks, so each expert's N is zero-padded to a block boundary first: a block then never spans two experts, and the
+    padding is the zeros the per-expert cast would add itself. Outputs are allocated dense and filled by copy, as
+    DeepGEMM asserts the weight's expert stride is ``N * K``, which a slice of the padded layout does not keep at E=1."""
+    E, N, K = b.shape
+    n_cast = align(N, _ALIGN) if block_scaled else N
+    step = max(1, _CAST_CHUNK_BYTES // (4 * n_cast * K))
+
+    def cast_chunk(start: int):
+        chunk = b[start : start + step]
+        count = chunk.shape[0]
+        if n_cast != N:
+            chunk = F.pad(chunk, (0, 0, 0, n_cast - N))
+        data_c, sf_c = cast(chunk.reshape(count * n_cast, K))
+        return data_c.reshape(count, n_cast, *data_c.shape[1:])[:, :N], sf_c.reshape(count, -1, *sf_c.shape[1:])
+
+    data_c, sf_c = cast_chunk(0)
+    data = data_c.new_empty((E, N, *data_c.shape[2:]))
+    sf = sf_c.new_empty((E, *sf_c.shape[1:]))
+    for start in range(0, E, step):
+        if start:
+            data_c, sf_c = cast_chunk(start)
+        data[start : start + len(data_c)] = data_c
+        sf[start : start + len(sf_c)] = sf_c
+        del data_c, sf_c  # the next cast starts with no chunk of the quantized weight held beside the full outputs
+    return data, sf
+
+
 def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool = True):
     """Cached per optimizer step unless ``cacheable`` is False, as FSDP2's pinned version counter would serve the
     step-0 quantization forever."""
@@ -99,13 +131,7 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool
         if fmt == "mxfp4"
         else (lambda t: dg_utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=_ALIGN))
     )
-    data0, sf0 = cast(b[0])
-    data = b.new_empty((b.shape[0], *data0.shape), dtype=data0.dtype)
-    sf = sf0.new_empty((b.shape[0], *sf0.shape))
-    data[0], sf[0] = data0, sf0
-    for i in range(1, b.shape[0]):
-        data[i], sf[i] = cast(b[i])
-    operand = (data, sf)
+    operand = _cast_experts(b, cast, dg_utils.align, block_scaled=fmt == "mxfp8")
     if cacheable:
         _weight_cache.put(w, fingerprint, operand)
     return operand
