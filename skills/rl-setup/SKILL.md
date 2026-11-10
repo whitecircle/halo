@@ -90,8 +90,7 @@ all servers together. It is on by default with 2+ `rollout_server_configs`; a
 single server runs serial, training each round on rollouts of the current weights, unless
 `enable_prefetch: true`, which trains each round on samples one round old (IS-corrected). `prefetch_depth: N` (default 1)
 collects N rounds ahead at once, so the servers stay full at a round's tail; above
-1 it is refused where prefetch is off. On SGLang each sync aborts in-flight turns,
-so a prefetched round spanning more syncs than `max_retries` is refused.
+1 it is refused where prefetch is off.
 
 ## Sources of truth
 

@@ -132,12 +132,12 @@ pauses all servers together
 - **vLLM** is paused with `/pause?mode=keep`: in-flight generations (the prefetched rounds) freeze and
   resume under the new weights, the staleness the sampling-logprob IS ratio corrects. vLLM's
   default `abort` would hand every in-flight request back as a fragment with an ordinary stop reason.
-- **SGLang** is paused with `{"mode": "abort"}` (its post-update cache flush refuses while a request is
-  running), so in-flight generations drop. The rollout actor re-issues an aborted turn
-  (`finish_reason: abort`) against the same observation, up to `max_retries` times; an abort is never
-  charged as a length cut. A prefetch whose rounds span more syncs than `max_retries` is refused
-  ([Prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)). The refusal
-  reads the client's `PAUSE_ABORTS_IN_FLIGHT`, true only on SGLang's client.
+- **SGLang** is paused with `{"mode": "retract"}`: in-flight requests return to its queue with the
+  tokens they hold and resume with their KV rebuilt under the new weights; the post-update cache flush
+  skips that queue while paused. `abort` would drop them, and re-issuing them from scratch keeps the
+  turns that finished before the push, the short ones: on Qwen3-0.6B, one push per round left the mean
+  completion 5% shorter. A turn the engine aborts for any other reason is re-issued
+  ([Engine aborts](../training-methods/async-grpo/episodes.md#engine-aborts)).
 
 The paused window is charged to neither the episode nor the request: every rank credits the push to
 its in-flight episodes' `episode_timeout` and, through the Ray actors' clock, to their requests'

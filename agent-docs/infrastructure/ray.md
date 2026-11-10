@@ -76,7 +76,7 @@ context, the truncated close, the effort stamp and the cleanup. Both read replie
 (backoff, engine-abort re-issue). The actor keeps its own aiohttp transport and retryable-4xx rule, and
 turns a fault anywhere in the episode into a masked row.
 
-A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
+A turn the engine **aborts** is re-issued for the
 same observation, up to `max_retries` times (default `3`), rather than stepped as a length cut; past
 that the episode errors into a masked row.
 

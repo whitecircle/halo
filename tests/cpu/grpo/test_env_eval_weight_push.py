@@ -6,13 +6,9 @@ import contextlib
 from types import SimpleNamespace
 
 import pytest
-from trl import GRPOConfig
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.grpo.environmental.environmental_rules import reject_prefetch_past_retry_budget
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 
 
 def _trainer(monkeypatch, *, every: int = 1, step: int = 0):
@@ -91,38 +87,6 @@ def test_the_real_cadence_gate_records_what_the_engines_hold(monkeypatch):
     trainer.state.global_step = 8
     assert trainer._sync_weights_to_engine() is True
     assert trainer._last_pushed_step == 8
-
-
-def _budget(tmp_path, *, every: int, eval_strategy: str, retries: int) -> None:
-    args = GRPOConfig(
-        output_dir=str(tmp_path),
-        bf16=False,
-        use_cpu=True,
-        report_to=[],
-        eval_strategy=eval_strategy,
-        eval_steps=10 if eval_strategy == "steps" else None,
-    )
-    config = AsyncRolloutConfig(
-        rollout_backend="sglang",
-        enable_prefetch=True,
-        prefetch_depth=1,
-        sync_weights_every_n_steps=every,
-        max_retries=retries,
-    )
-    reject_prefetch_past_retry_budget(SGLangWeightSyncClient, config, args)
-
-
-def test_an_off_cadence_eval_counts_in_the_abort_budget(tmp_path):
-    """Each SGLang push aborts the turns in flight, so an eval's push can cost a turn one retry."""
-    _budget(tmp_path, every=2, eval_strategy="no", retries=1)
-    with pytest.raises(ValueError, match="one for an eval"):
-        _budget(tmp_path, every=2, eval_strategy="steps", retries=1)
-    _budget(tmp_path, every=2, eval_strategy="steps", retries=2)
-
-
-def test_at_every_step_cadence_an_eval_costs_no_retry(tmp_path):
-    """Every shipped SGLang recipe runs here at one retry, and raising it past their episode timeout is no option."""
-    _budget(tmp_path, every=1, eval_strategy="steps", retries=1)
 
 
 if __name__ == "__main__":
