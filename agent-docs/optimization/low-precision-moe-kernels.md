@@ -137,7 +137,7 @@ In the cache-hit steady state both fp4 formats are bounded by the eager activati
 
 Published end-to-end gains over bf16: MXFP8 1.13× on DeepSeek-V3 (256 GB300, Megatron Bridge), 1.22× on DeepSeek-V3 671B (TorchAO #4798) and 1.22× on GPT-OSS 120B (64 B300, across containers); MXFP8 on the attention projections alone 1.19× on DeepSeek-V3 671B (64 GB300, TorchTitan). NVFP4 adds about 3% over MXFP8 on Nemotron 3 Super and reaches 1.34–1.37× on DeepSeek-V3 with MXFP8 attention projections. NVFP4 pretraining keeps about the last 15% of blocks in bf16 ([arXiv 2509.25149](https://arxiv.org/abs/2509.25149)).
 
-The gpt-oss release stores its experts in MXFP4; Halo fine-tunes from the BF16 mirror (`unsloth/gpt-oss-*-BF16`). bf16 with stochastic-rounding master weights is the floor — see [BF16 Optimizer](bf16-optimizer.md).
+The gpt-oss release stores its experts in MXFP4; Halo decodes them to bf16 at load, in the lazy EP and PP loaders, or fine-tunes from the BF16 mirror (`unsloth/gpt-oss-*-BF16`) ([GPT-OSS](../models/gpt-oss.md#configs)). bf16 with stochastic-rounding master weights is the floor — see [BF16 Optimizer](bf16-optimizer.md).
 
 ## QAT → low-precision inference
 

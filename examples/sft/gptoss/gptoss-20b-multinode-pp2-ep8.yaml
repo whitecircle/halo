@@ -10,8 +10,9 @@
 # before from_pretrained. A shared filesystem needs no merge.
 
 # --- Model ---
-# Must be a BF16 (dequantized) gpt-oss checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-20b.
-model_name_or_path: unsloth/gpt-oss-20b-BF16
+# The release as OpenAI ships it: the lazy EP and PP loaders decode its MXFP4 experts to bf16 while reading, and every
+# save is plain bf16. The BF16 mirror unsloth/gpt-oss-20b-BF16 loads too, at about three times the download.
+model_name_or_path: openai/gpt-oss-20b
 
 # --- Dataset ---
 dataset:
