@@ -2,7 +2,7 @@
 
 [GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's open-weight MoE in two sizes, 20B and
 120B. Its attention adds a learned per-head "sink" logit, and its experts store gate and up projections
-interleaved. Halo trains the BF16 mirrors of the release.
+interleaved. Halo trains the 20B from OpenAI's release under EP or PP, and the BF16 mirrors elsewhere.
 
 ## Support
 
@@ -115,8 +115,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 
 ## Limits
 
-- The MXFP4 release (`openai/gpt-oss-*`) fails at load under EP. Train the BF16 mirror. A weight sync into
-  an MXFP4 server also drops every expert weight without an error, so RL serves the BF16 mirror too.
+- The 120B recipes, RL, and runs with a frozen reference or teacher keep the BF16 mirror: none was run from
+  the MXFP4 release (`openai/gpt-oss-*`). A weight sync into an MXFP4 server drops every expert weight
+  without an error, so an RL rollout server serves the BF16 mirror whatever the trainer loaded.
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
