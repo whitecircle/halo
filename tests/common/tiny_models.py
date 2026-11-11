@@ -558,7 +558,13 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "qwen4_exp": TinyFamily(
         lambda overrides: _with_live_ple_convs(
             _composite(
-                Qwen4ExpConfig, Qwen4ExpForConditionalGeneration, TINY_QWEN4_EXP_CONFIG, TINY_QWEN4_EXP_VISION_CONFIG
+                Qwen4ExpConfig,
+                Qwen4ExpForConditionalGeneration,
+                TINY_QWEN4_EXP_CONFIG,
+                {
+                    **TINY_QWEN4_EXP_VISION_CONFIG,
+                    "out_hidden_size": overrides.get("hidden_size", TINY_QWEN4_EXP_CONFIG["hidden_size"]),
+                },
             )(overrides)
         ),
         load_class=AutoModelForImageTextToText,

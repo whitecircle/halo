@@ -337,6 +337,8 @@ class FakeSGLangServer(FakeEngineServer):
         self.tp_size = 1
         self.dp_size = 1
         self.pp_size = 1
+        # The patch names the image reports beside its identity.
+        self.image_patches: object = ["hyperconnection_mix_up"]
         # The message a weight update answers 400 with, as the engine does when its loader rejects a chunk.
         self.update_failure: str | None = None
         self.torch_compile = False
@@ -409,7 +411,7 @@ class FakeSGLangServer(FakeEngineServer):
                 "revision": self.revision,
             }
             if self.toolkit_image:
-                info["halo_patches"] = True
+                info["halo_patches"] = self.image_patches
             if self.lora is not None:
                 info.update(enable_lora=True, **self.lora)
             return 200, info

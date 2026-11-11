@@ -50,7 +50,7 @@ def _projection_columns(tokens, in_token, start, width, lane, in_lane, COLUMNS: 
     )
 
 
-def _require_shape(tensor: torch.Tensor, expected: tuple[int, ...], name: str) -> None:
+def require_shape(tensor: torch.Tensor, expected: tuple[int, ...], name: str) -> None:
     """The kernels address every input off the streams' shape, so a mismatch would read and write out of bounds."""
     if tensor.shape != expected:
         raise ValueError(f"{name} of shape {tuple(tensor.shape)} where the streams take {tuple(expected)}")
@@ -166,7 +166,7 @@ def _projection_launch(fn: torch.Tensor) -> dict:
 class _StreamProjection(torch.autograd.Function):
     @staticmethod
     def forward(ctx, stream: torch.Tensor, fn: torch.Tensor, norm_eps: float) -> torch.Tensor:
-        _require_shape(fn, (fn.shape[0], stream.shape[-2] * stream.shape[-1]), "fn")
+        require_shape(fn, (fn.shape[0], stream.shape[-2] * stream.shape[-1]), "fn")
         # A launch takes address 0 as a valid pointer, so this would otherwise fault later and asynchronously.
         if fn.numel() and not fn.data_ptr():
             raise RuntimeError("fn holds no local data, as a sharded DTensor or a meta tensor does: unshard it first")
@@ -424,7 +424,7 @@ def _collapse_bwd_kernel(
 class _StreamCollapse(torch.autograd.Function):
     @staticmethod
     def forward(ctx, stream: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        _require_shape(weight, stream.shape[:-1], "weight")
+        require_shape(weight, stream.shape[:-1], "weight")
         stream, weight = stream.contiguous(), weight.contiguous()
         grid, tile = _stream_launch(stream)
         out = torch.empty((*stream.shape[:-2], stream.shape[-1]), device=stream.device, dtype=stream.dtype)
@@ -515,9 +515,9 @@ class _StreamMix(torch.autograd.Function):
     def forward(
         ctx, block: torch.Tensor, residual: torch.Tensor, post: torch.Tensor, comb: torch.Tensor
     ) -> torch.Tensor:
-        _require_shape(block, (*residual.shape[:-2], residual.shape[-1]), "block")
-        _require_shape(post, residual.shape[:-1], "post")
-        _require_shape(comb, (*residual.shape[:-1], residual.shape[-2]), "comb")
+        require_shape(block, (*residual.shape[:-2], residual.shape[-1]), "block")
+        require_shape(post, residual.shape[:-1], "post")
+        require_shape(comb, (*residual.shape[:-1], residual.shape[-2]), "comb")
         block, residual, post, comb = (t.contiguous() for t in (block, residual, post, comb))
         grid, tile = _stream_launch(residual)
         out = torch.empty_like(
@@ -544,3 +544,88 @@ def mix_streams(block: torch.Tensor, residual: torch.Tensor, post: torch.Tensor,
     """``post.unsqueeze(-1) * block.unsqueeze(-2) + comb.transpose(-1, -2) @ residual``, for ``[..., H]`` ``block``,
     ``[..., N, H]`` ``residual``, ``[..., N]`` ``post`` and ``[..., N, N]`` ``comb``."""
     return _StreamMix.apply(block, residual, post, comb)
+
+
+@triton.jit
+def _inject_fwd_kernel(
+    block_ptr,
+    residual_ptr,
+    gate_ptr,
+    out_ptr,
+    width,
+    N: tl.constexpr,
+    N_PAD: tl.constexpr,
+    COLUMNS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    lane, in_lane, gate_cells, _ = _lane_cells(token, N, N_PAD)
+    gate = tl.load(gate_ptr + gate_cells, mask=in_lane, other=0.0).to(tl.float32)
+    dtype = out_ptr.dtype.element_ty
+    for start in range(0, width, COLUMNS):
+        block_cells, in_col, stream_cells, in_stream = _stream_cells(token, start, width, lane, in_lane, N, COLUMNS)
+        block = tl.load(block_ptr + block_cells, mask=in_col, other=0.0).to(tl.float32)
+        residual = tl.load(residual_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32)
+        # Both roundings of the eager form: the product to the streams' dtype, then the sum.
+        injection = (gate[:, None] * block[None, :]).to(dtype).to(tl.float32)
+        tl.store(out_ptr + stream_cells, residual + injection, mask=in_stream)
+
+
+@triton.jit
+def _inject_bwd_kernel(
+    grad_ptr,
+    block_ptr,
+    gate_ptr,
+    dblock_ptr,
+    dgate_ptr,
+    width,
+    N: tl.constexpr,
+    N_PAD: tl.constexpr,
+    COLUMNS: tl.constexpr,
+):
+    token = tl.program_id(0).to(tl.int64)
+    lane, in_lane, gate_cells, _ = _lane_cells(token, N, N_PAD)
+    gate = tl.load(gate_ptr + gate_cells, mask=in_lane, other=0.0).to(tl.float32)
+    # Per column across the passes and reduced once at the token's end, as in ``_collapse_bwd_kernel``.
+    dgate = tl.zeros((N_PAD, COLUMNS), dtype=tl.float32)
+    for start in range(0, width, COLUMNS):
+        block_cells, in_col, stream_cells, in_stream = _stream_cells(token, start, width, lane, in_lane, N, COLUMNS)
+        grad = tl.load(grad_ptr + stream_cells, mask=in_stream, other=0.0).to(tl.float32)
+        tl.store(dblock_ptr + block_cells, tl.sum(gate[:, None] * grad, axis=0), mask=in_col)
+        dgate += grad * tl.load(block_ptr + block_cells, mask=in_col, other=0.0).to(tl.float32)[None, :]
+    tl.store(dgate_ptr + gate_cells, tl.sum(dgate, axis=1), mask=in_lane)
+
+
+class _StreamInject(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, block: torch.Tensor, residual: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+        require_shape(block, (*residual.shape[:-2], residual.shape[-1]), "block")
+        require_shape(gate, residual.shape[:-1], "gate")
+        block, residual, gate = (t.contiguous() for t in (block, residual, gate))
+        grid, tile = _stream_launch(residual)
+        out = torch.empty_like(
+            residual,
+            dtype=torch.promote_types(block.dtype, residual.dtype),
+            memory_format=torch.contiguous_format,
+        )
+        _inject_fwd_kernel[grid](block, residual, gate, out, residual.shape[-1], **tile)
+        ctx.save_for_backward(block, gate)
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, grad_out: torch.Tensor):
+        block, gate = ctx.saved_tensors
+        grad_out = grad_out.contiguous()
+        grid, tile = _stream_launch(grad_out)
+        dblock, dgate = _empty_grads(block, gate)
+        _inject_bwd_kernel[grid](grad_out, block, gate, dblock, dgate, grad_out.shape[-1], **tile)
+        return _requested(ctx, (dblock, grad_out, dgate))
+
+
+@torch.compiler.disable
+def inject_streams(block: torch.Tensor, residual: torch.Tensor, gate: torch.Tensor) -> torch.Tensor:
+    """``residual + gate.unsqueeze(-1) * block.unsqueeze(-2)``, for ``[..., H]`` ``block``, ``[..., N, H]`` ``residual``
+    and ``[..., N]`` ``gate``. Equal to ``mix_streams`` at ``comb = I`` and ``post = gate`` except that the product is
+    rounded to the streams' dtype before the sum, as the eager form does, which is why it keeps its own kernels
+    (``tests/gpu/kernels/test_gated_residual_kernels.py`` pins the two together in fp32)."""
+    return _StreamInject.apply(block, residual, gate)

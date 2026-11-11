@@ -76,6 +76,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.introspection.config_access import config_model_types
 from halo.models.introspection.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
@@ -156,6 +157,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         ("carry_reasoning", environment.carry_reasoning),
         ("a thinking cap", capped),
     )
+    required_patches = resolve_weight_sync_client(async_config.rollout_backend).REQUIRED_PATCHES
     return ServerRequirements(
         is_moe=has_routed_experts(model.config),
         sends_tools=bool(environment.get_tools_schema()) or environment.TOOLS_ARRIVE_ON_RESET,
@@ -164,6 +166,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         sampled_token_ids=async_config.train_on_sampled_tokens,
         weight_precision=async_config.rollout_weight_precision,
         candidate_logprobs=async_config.score_centering_top_k or 0,
+        patches=frozenset(required_patches[t] for t in config_model_types(model.config) if t in required_patches),
     )
 
 

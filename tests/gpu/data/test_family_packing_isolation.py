@@ -278,7 +278,9 @@ def run(ctx) -> dict:
     with kernel_calls() as calls:
         isolated = [_doc_b_logits(model, batch, doc_a_length, ctx.device, isolated=True) for batch in batches]
     log(f"  packed row's attention kernels: {dict(calls)}")
-    checks["packed_row_runs_on_that_backend"] = world_all(set(calls) == {label})
+    # Under HALO_QSA_KERNEL the QSA layers attend on the block-sparse kernel in place of the configured one.
+    backend = {"qsa_block_sparse"} if "qsa_block_sparse" in calls else {label}
+    checks["packed_row_runs_on_that_backend"] = world_all(set(calls) == backend)
     metrics["drift_rel"] = world_max((isolated[0] - isolated[1]).abs().max().item() / scale)
     log(f"  doc B drift when doc A changes: {metrics['drift_rel']:.3e}")
     if row.isolates:

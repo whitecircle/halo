@@ -27,7 +27,7 @@ of them are MoE.
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only; LoRA fits one 8-GPU machine, a full fine-tune takes two |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
 | [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
-| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: text tower under EP, ETP and PP; 95 GiB n-gram table in host memory; no online RL; offline GRPO CPU-checked only |
+| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: text tower under EP, ETP and PP; 95 GiB n-gram table in host memory; online and async GRPO on vLLM, and on SGLang from the toolkit's image; offline GRPO CPU-checked only |
 | [Qwen3.8-27B](../agent-docs/models/qwen3_5.md#qwen38-27b) ↗ | `Qwen/Qwen3.8-27B` | dense | the Qwen3.5 dense path; no recipe and no GPU run |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family |
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |

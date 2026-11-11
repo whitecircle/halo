@@ -8,18 +8,22 @@ small gradients past the bars.
 
 import argparse
 import copy
+import os
 from unittest import mock
 
 import torch
 import torch.distributed as dist
+import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel import stage as stage_module
+from halo.kernels.block_sparse_attention import compiled_variants
+from halo.models.families.qwen4_exp import gated_residual, sparse_attention
 from halo.models.segment_markers import segment_marker_kwargs, segment_markers_for
 from tests.common import pp_equivalence as ppeq
-from tests.common.distributed import shared_output_dir, world_all
+from tests.common.distributed import shared_output_dir, world_all, world_any, world_max
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.qwen4_exp import build_tiny_qwen4_exp_checkpoint, load_host_table_model
@@ -48,10 +52,28 @@ MODES = {
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=sorted(MODES), required=True)
 parser.add_argument("--family", choices=sorted(SPLITS), default="qwen4_exp_text")
+parser.add_argument(
+    "--gated-residual",
+    action="store_true",
+    help="run the stages and the reference on HALO_GATED_RESIDUAL_KERNELS, warmed at load",
+)
+parser.add_argument(
+    "--qsa-kernel",
+    action="store_true",
+    help="run the stages on HALO_QSA_KERNEL=on, warmed at load, against the tiled-path reference (bf16 modes)",
+)
 ARGS = parser.parse_args()
+if ARGS.qsa_kernel:
+    os.environ["HALO_QSA_KERNEL"] = "on"
+if ARGS.gated_residual:
+    os.environ["HALO_GATED_RESIDUAL_KERNELS"] = "1"
+if ARGS.gated_residual and ARGS.family != "qwen4_exp_text":
+    parser.error("--gated-residual is Flash-Next's")
 if ARGS.family != "qwen4_exp_text" and ARGS.mode != "packed":
     parser.error("--family qwen3_5_moe_text runs the packed mode only; its other rows are test_pp_family_vs_reference")
 FP32 = ARGS.mode in ("etp2", "packed")
+if ARGS.qsa_kernel and (FP32 or ARGS.family != "qwen4_exp_text"):
+    parser.error("--qsa-kernel is Flash-Next's and runs the bf16 modes (ep2, gc): the kernel takes bf16 or fp16")
 DTYPE = torch.float32 if FP32 else torch.bfloat16
 
 
@@ -65,7 +87,7 @@ def _base_model(ctx):
     if ctx.rank == 0:
         build_tiny_qwen4_exp_checkpoint(directory, seed=SEED, overrides=QWEN4_OVERRIDES)
     dist.barrier()
-    return load_host_table_model(directory, dtype=DTYPE)
+    return load_host_table_model(directory, dtype=DTYPE, device=ctx.device)
 
 
 def _packed_batches(rows: torch.Tensor, labels: torch.Tensor, dp_rank: int, model_config):
@@ -108,7 +130,11 @@ def run(ctx):
     ppeq.pin_unfused_expert_sum(ctx)
     pin_fla_autotune_first_fit(ctx)
     twin = ppeq.apply_single_process_ep1(copy.deepcopy(base), ctx.rank, use_grouped_gemm=not FP32).to(ctx.device)
+    if ARGS.qsa_kernel:
+        os.environ["HALO_QSA_KERNEL"] = "off"  # The reference is the tiled path.
     reference = ppeq.run_unsplit_reference(twin, rows, labels, ctx.device, dp_size, row_kwargs=row_kwargs)
+    if ARGS.qsa_kernel:
+        os.environ["HALO_QSA_KERNEL"] = "on"
     del twin
 
     trainer = ppeq.build_pp_sft_trainer(
@@ -132,7 +158,27 @@ def run(ctx):
         checks["stage_holds_a_ple_layer"] = any(layer.ple is not None for layer in stage.model.layers)
     calls = ppeq.count_checkpoint_calls(stage) if ARGS.mode == "gc" else None
 
-    loss = trainer.training_step(trainer.model, dict(batch))
+    variants_before = compiled_variants()
+    with (
+        mock.patch.object(gated_residual, "grouped_rms_norm", wraps=gated_residual.grouped_rms_norm) as norm,
+        mock.patch.object(
+            sparse_attention, "block_sparse_attention", wraps=sparse_attention.block_sparse_attention
+        ) as attend,
+    ):
+        loss = trainer.training_step(trainer.model, dict(batch))
+    if ARGS.gated_residual:
+        checks["gated_residual_kernels_ran"] = world_all(norm.call_count > 0)
+    if ARGS.qsa_kernel:
+        # Stage 0 holds only linear-attention layers, so the kernel launches on the stages that hold QSA attention.
+        holds_attention = any(isinstance(m, qwen4_exp_modeling.Qwen4ExpTextAttention) for m in stage.modules())
+        checks["a_stage_holds_qsa_attention"] = world_any(holds_attention)
+        checks["qsa_kernel_ran_on_every_stage_holding_attention"] = world_all(
+            (attend.call_count > 0) == holds_attention
+        )
+        checks["qsa_kernel_compiled_nothing_in_the_step"] = world_all(compiled_variants() == variants_before)
+        most_launches = int(world_max(attend.call_count))
+        checks["qsa_kernel_launched"] = most_launches > 0
+        metrics["qsa_kernel_launches_max_per_rank"] = most_launches
     trainer.accelerator.clip_grad_norm_(trainer.model.parameters(), 1e6)  # Runs the deferred sweep, no scaling.
     c, m = ppeq.check_loss_vs_reference(loss, reference, dp_rank)
     checks.update(c)

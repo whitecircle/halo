@@ -211,10 +211,11 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
     "laguna",
     "lfm2_moe",
     "qwen3_5_moe_text",
+    "qwen4_exp_text",
     "step3p7",
 )
 
-# Row family → its marker, on both engines but for the two SGLang refuses; each needs a fresh server on the family's
+# Row family → its marker, on both engines but for the ones SGLang refuses; each needs a fresh server on the family's
 # checkpoint (tests/common/weight_push_exact.py), so a tier pass on another checkpoint skips them.
 # Qwen3.6's text tower is past the tiny roster, on Qwen3.5's layer.
 _PUSH_EXACT_MOE_FAMILY_MARKERS = {
@@ -230,6 +231,7 @@ _PUSH_EXACT_MOE_FAMILY_MARKERS = {
         "qwen3_5_moe_text",
         "qwen3_6_moe_text",
         "qwen3_moe",
+        "qwen4_exp_text",
         "step3p7",
     )
 }
@@ -251,7 +253,13 @@ _PUSH_EXACT_REACH_ROWS = tuple(
         markers=("gpu", "full", "2gpu", "ep", "moe", _PUSH_EXACT_MOE_FAMILY_MARKERS[family], f"{backend}_server"),
         timeout=3600,
     )
-    for family, backend in (("laguna", "vllm"), ("gemma4_text", "vllm"), ("gemma4_text", "sglang"))
+    for family, backend in (
+        ("laguna", "vllm"),
+        ("gemma4_text", "vllm"),
+        ("gemma4_text", "sglang"),
+        ("qwen4_exp_text", "vllm"),
+        ("qwen4_exp_text", "sglang"),
+    )
 )
 _PUSH_EXACT_DENSE_ROWS = tuple(
     Row(
@@ -525,6 +533,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_masked_matmul_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
     ),
+    "kernels/test_block_sparse_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_gated_residual_kernels.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
+    "kernels/test_fla_l2norm_constant_nb.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
     "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_reward_scorer_flex_sliding.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "gemma4"), timeout=900
@@ -814,6 +825,7 @@ MANIFEST: dict[str, TestSpec] = {
                     ("dense", "hsdp", 4, ("gpu", "full", "4gpu", "hsdp", "qwen3")),
                     ("dense", "tp2dp2", 4, ("gpu", "full", "4gpu", "tp", "qwen3")),
                     ("qwen3_moe", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+                    ("qwen4_exp_text", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep1_unsharded", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2dp2", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2x2dom", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
@@ -1219,6 +1231,12 @@ MANIFEST: dict[str, TestSpec] = {
             "--mode packed",
             "--mode gc",
             "--family qwen3_5_moe_text --mode packed",
+            "--mode ep2 --gated-residual",
+            "--mode etp2 --gated-residual",
+            "--mode packed --gated-residual",
+            "--mode gc --gated-residual",
+            "--mode ep2 --qsa-kernel",
+            "--mode gc --qsa-kernel --gated-residual",
         ),
     ),
     "parallelism/pp/test_pp_qwen4_exp_resume.py": TestSpec(
@@ -1291,6 +1309,14 @@ MANIFEST: dict[str, TestSpec] = {
                 )
                 for family in _REENTRANT_SWEEP_FAMILIES
                 for layout, nproc in (("ep1", 2), ("ep_multi", 4))
+            ),
+            # The PLE layer recomputes from the first pass's n-gram rows, which ZeRO-3's reshard and an adapter run reach.
+            *(
+                Row(
+                    f"--family qwen4_exp_text --layout ep1 {flags}",
+                    markers=("gpu", "full", "2gpu", "ep", "moe", "lora", "qwen3"),
+                )
+                for flags in ("--adapter full --reshard-after-forward", "--adapter lora")
             ),
             *(
                 Row(
@@ -2836,6 +2862,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_attention_implementations.py",
     "profiling/benchmark_collators.py",
     "profiling/benchmark_convergence.py",
+    "profiling/benchmark_gated_residual.py",
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",

@@ -92,6 +92,8 @@ class ServerRequirements(NamedTuple):
     weight_precision: RolloutWeightPrecision = "bf16"
     candidate_logprobs: int = 0
     """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
+    patches: frozenset[str] = frozenset()
+    """Image patches the served model's updates need (``WeightSyncClientBase.REQUIRED_PATCHES``)."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -139,6 +141,11 @@ def _server_flag_refusals(
         refusals.append(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
             f"{client_cls.IMAGE_REMEDY}"
+        )
+    if missing := sorted(needs.patches - flags.patches):
+        refusals.append(
+            f"its image lacks the {', '.join(missing)} patch, which the served model's updates need: without it a "
+            f"push is acknowledged and part of the model keeps serving launch weights. {client_cls.IMAGE_REMEDY}"
         )
     refusals.extend(_quantization_refusals(flags, needs))
     if needs.is_moe and flags.moe_backend not in (None, "triton"):

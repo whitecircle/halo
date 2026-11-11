@@ -263,9 +263,10 @@ class ScoreCenteringArguments(ValidatedConfig):
         default=None,
         metadata={
             "help": "Candidates the SGLang rollout server returns per generated token for score centering, which "
-            "subtracts their score-function mean from each token's gradient, so on a constant reward most of the "
-            "drift a sampler-vs-trainer mismatch causes cancels at 16 to 32 candidates (all of it at the full "
-            "vocabulary). Unset = off; 16 to 32 suits most runs. Refused at construction beside the settings it "
+            "subtracts their score-function mean from each token's gradient, so on a constant reward the drift a "
+            "sampler-vs-trainer mismatch causes cancels where the candidates hold nearly all of the sampler's mass "
+            "on the mismatched tokens (all of it at the full vocabulary). Unset = off; raise it until "
+            "score_centering/sampler_head_mass_mean is near 1. Refused at construction beside the settings it "
             "cannot run with, each named; see agent-docs/training-methods/async-grpo/objective.md#score-centering."
         },
     )

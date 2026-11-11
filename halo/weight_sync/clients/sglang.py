@@ -14,7 +14,7 @@ import torch
 import torch.distributed as dist
 
 from halo.checkpoint.reading import find_checkpoint_config
-from halo.models.moe.family_specs import STEP3P7
+from halo.models.moe.family_specs import QWEN4_EXP, STEP3P7
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
@@ -98,6 +98,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             "fused pair, and no end-to-end sync has been validated for the family"
         ),
     }
+    REQUIRED_PATCHES = dict.fromkeys(QWEN4_EXP.model_types, "hyperconnection_mix_up")
     # The MLA loaders fuse this pair from a cache local to one ``load_weights`` call and silently drop a lone half.
     CO_LOADED_PARAM_GROUPS = (("self_attn.q_a_proj.weight", "self_attn.kv_a_proj_with_mqa.weight"),)
     ADAPTER_SYNC_REFUSAL = None
@@ -187,6 +188,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             dtype=info.get("dtype"),
             quantization=_served_quantization(info),
             pipeline_stages=int(info.get("pp_size") or 1),
+            patches=frozenset(info["halo_patches"]) if isinstance(info.get("halo_patches"), list) else frozenset(),
             extras=pick_launch_facts(info, cls.LAUNCH_FACTS),
         )
 

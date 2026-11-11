@@ -11,6 +11,7 @@ import threading
 import pytest
 from huggingface_hub import constants
 
+from halo.models.moe.family_specs import QWEN4_EXP
 from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_group_servers, verify_server_flags
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import _IDENTITY_KEY, VLLMWeightSyncClient
@@ -79,6 +80,34 @@ def test_an_upstream_server_is_refused_by_the_preflight_and_by_group_formation(e
     client = client_cls(base_url=server.url)
     with pytest.raises(RuntimeError, match="toolkit's image"):
         client.require_engine_world_size()
+
+
+@pytest.mark.parametrize("reported", [["gemma4_router_scale"], True], ids=["other-patches", "bare-flag"])
+def test_an_sglang_image_without_the_mix_up_patch_is_refused_for_a_family_that_needs_it(reported):
+    """An older image reports only its identity: its first mix caches the weight, so a push never reaches it."""
+    server = FakeSGLangServer()
+    try:
+        server.image_patches = reported
+        _verify(server, SGLangWeightSyncClient, is_moe=True)
+        with pytest.raises(ValueError, match="lacks the hyperconnection_mix_up patch"):
+            _verify(server, SGLangWeightSyncClient, is_moe=True, patches=frozenset({"hyperconnection_mix_up"}))
+    finally:
+        server.close()
+
+
+def test_an_sglang_image_with_the_mix_up_patch_passes_for_a_family_that_needs_it():
+    server = FakeSGLangServer()
+    try:
+        _verify(server, SGLangWeightSyncClient, is_moe=True, patches=frozenset({"hyperconnection_mix_up"}))
+    finally:
+        server.close()
+
+
+def test_flash_next_needs_exactly_the_patch_the_image_names():
+    """The client's requirement must be a name the image's patch table reports."""
+    patch_names = load_script_module("docker/sglang/patches/patch_sglang.py").PATCH_NAMES
+    assert set(SGLangWeightSyncClient.REQUIRED_PATCHES) == set(QWEN4_EXP.model_types)
+    assert set(SGLangWeightSyncClient.REQUIRED_PATCHES.values()) <= set(patch_names)
 
 
 def test_a_report_that_cannot_be_read_does_not_stop_a_vllm_group_forming(caplog):
@@ -302,6 +331,16 @@ def test_each_script_runs_the_flag_preflight(script):
         if isinstance(node, ast.Call) and ast.unparse(node.func) == "verify_server_flags"
     ]
     assert len(calls) == 1
+
+
+def test_the_environmental_script_hands_the_preflight_the_patches_the_model_needs():
+    """A script that drops the keyword leaves an image without a family's patch unrefused."""
+    requirements = [
+        {k.arg: ast.unparse(k.value) for k in node.keywords}
+        for node in ast.walk(ast.parse(_ENV_SCRIPT.read_text()))
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "ServerRequirements"
+    ]
+    assert any("required_patches" in r.get("patches", "") for r in requirements)
 
 
 _LAUNCH_FACTS = {

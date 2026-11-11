@@ -504,9 +504,7 @@ model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
-  Inkling (no engine run has validated its sync), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
-  SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
-  [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)), Nemotron-H (no engine run has validated its sync)
+  Inkling (no engine run has validated its sync), Qwen3-Next, Nemotron-H (no engine run has validated its sync)
   and Cohere2 MoE carry on both engines.
 - **A stock module tree no engine layout covers**, in three cases. A family with an EP layer but no live
   one (`use_grouped_gemm: false` at `ep_size: 1`): the experts ship in the layout the EP layer's gather
@@ -546,7 +544,8 @@ server that does not answer is logged as unread.
 
 | Refused | Because |
 |---|---|
-| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` names on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A server whose image lacks a patch the served family needs (`REQUIRED_PATCHES` on the client against the `halo_patches` names; an image that reports only its identity has none) | A push is acknowledged and part of the model keeps serving launch weights |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
 | A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
 | Servers of a `single_group` run that serve different models or launch flags | One broadcast reaches all of them, and each would load it differently |
@@ -613,10 +612,10 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
+Inkling, Qwen3-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
 family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
-GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server
+GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE; Qwen3.8-Flash-Next ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)); on SGLang only through an image carrying the mix-up patch below. A MoE with no family spec is refused on both. Per-family server
 flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving), [GLM-5 Next](../models/glm5-next.md#rl-weight-sync).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
@@ -626,13 +625,19 @@ gpt-oss, Bailing, LFM-2): they `continue` before their `not found in params_dict
 update returns `200 OK`, so the engine keeps its launch experts under a synced router. The server
 tier's expert-only round catches it; the construction gate is the whole guard.
 
-Three SGLang 0.5.22 loader facts shape its image and client:
+Four SGLang 0.5.22 loader facts shape its image and client:
 
 - **Routers that cache a derived form.** Upstream, the Gemma 4 router folds `scale` into its norm once,
   behind a latch, so a synced `scale` never reaches routing. `docker/sglang/patches/patch_sglang.py`
   makes a load of `scale` release the latch, and asserts that the GLM-4 gates still read their fp32
   weight live. It checks its pre- and post-images at build and stays in the image (`/opt/halo/`) for
   `--verify`.
+- **A copy of the hyper-connection mix-up weight.** On SM100-family GPUs (B200, B300) each
+  Qwen3.8-Flash-Next `GatedResidual` builds a padded, permuted copy of `input_mix_weight_up` at its first mix of at
+  most 24 tokens (the CUDA-graph capture) and never rebuilds it, so an update does not reach it. The image gives the
+  weight a loader that writes it and rewrites the copy in place, since the copy is built at first use and never
+  rebuilt, and reports `hyperconnection_mix_up` among the `halo_patches` names on `/server_info`. The family's
+  `REQUIRED_PATCHES` entry makes the [startup preflight](#startup-preflight) refuse an image that lacks the name.
 - **Fused a-projection halves.** The MLA loaders (GLM-4 MoE Lite) concatenate `q_a_proj` and
   `kv_a_proj_with_mqa` from a cache local to one `load_weights` call and drop a half that arrives alone.
   The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps it in one chunk; a
@@ -767,6 +772,7 @@ their recipes serve without a parser.
 |---|---|
 | Qwen3, the 2507 releases included; most others | `hermes` (JSON inside `<tool_call>` tags) |
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
+| Qwen3.8-Flash-Next | `qwen3_xml`, with `--reasoning-parser qwen3`; `qwen3_xml` and `qwen3_coder` are one parser class in 0.32.0 (same `<tool_call>` around `<function=…>`/`<parameter=…>` XML; the template opens `<think>` in the generation prompt) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4.7-Flash | `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) also `VLLM_REASONING_PARSER=gemma4` |
@@ -855,12 +861,14 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 
 ### Tool parsers on SGLang
 
-`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5 and
-Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
+`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5,
+Qwen3.6 and Qwen3.8-Flash-Next (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
 template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
 tool-call parser.`) and serves with no parser, which `/server_info` reports and the
 [preflight](#startup-preflight) refuses on a native-tool environment. Qwen3-30B-A3B-Instruct-2507 and
 Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
+Qwen3.8-Flash-Next also needs `--reasoning-parser qwen3` so its reasoning separates from the content: its template
+opens `<think>` in the generation prompt, and a parser that starts outside reasoning leaves `</think>` in the content.
 
 Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
 as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
@@ -1036,9 +1044,9 @@ What passed against a live server on this release, on one node with each server 
 A dash is a shape the code admits with no row on that engine.
 
 **Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
-log-prob bit-identical, on 2,010 positions (987 on Step-3.7's tiny checkpoint): dense Qwen3-0.6B plain and at TP=2;
+log-prob bit-identical: dense Qwen3-0.6B plain and at TP=2;
 gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2 (2,010 positions).
+family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.

@@ -290,11 +290,6 @@ QWEN4_EXP = MoEFamilySpec(
     model_types=("qwen4_exp", "qwen4_exp_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
-    weight_sync_refusal=(
-        "no online update into either pinned rollout engine has been validated end to end; on SGLang, each "
-        "hyper-connection GatedResidual also caches a padded copy of its mix-up weight on SM100-family GPUs that an "
-        "update leaves stale (agent-docs/models/qwen4_exp.md#rl-weight-sync)"
-    ),
 )
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),
