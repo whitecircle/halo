@@ -35,14 +35,27 @@ _NVFP4_GLOBAL_SCALE_DIVISOR = E4M3_MAX * E2M1_MAX
 
 # Elements per shared scale; the checkpoint exporter sizes its contraction axis from this.
 FORMAT_BLOCK_SIZE: dict[QuantFormat, int] = {"mxfp8": 32, "mxfp4": 32, "nvfp4": 16}
-# Formats with a fused Triton round trip, bit-identical to eager, and the element maximum it scales to. NVFP4's
-# tensor-wide global scale needs a pass over the whole tensor first, so it stays eager.
-_FUSED_FAKE_QUANT: dict[QuantFormat, tuple[Callable[..., torch.Tensor], float]] = {
-    "mxfp8": (fake_quant_mxfp8_triton, E4M3_MAX),
-    "mxfp4": (fake_quant_mxfp4_triton, E2M1_MAX),
-}
 # e8m0 power-of-two block scales (MX) or e4m3 ones (NVFP4).
 _POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": False}
+
+
+@dataclass(frozen=True)
+class _FusedFakeQuant:
+    """A fused Triton round trip, bit-identical to eager: the kernel, the element maximum it scales to, and the
+    oldest compute capability whose Triton backend compiles it."""
+
+    kernel: Callable[..., torch.Tensor]
+    format_max: float
+    min_capability: tuple[int, int] = (0, 0)
+
+
+# One entry per power-of-two-scale format (test_lowp_spec.py holds the two tables together). NVFP4's tensor-wide
+# global scale needs a pass over the whole tensor first, so it stays eager. Triton lowers its fp8 type only on
+# SM 8.9 and newer, so older GPUs keep the eager mxfp8 path.
+_FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
+    "mxfp8": _FusedFakeQuant(fake_quant_mxfp8_triton, E4M3_MAX, min_capability=(8, 9)),
+    "mxfp4": _FusedFakeQuant(fake_quant_mxfp4_triton, E2M1_MAX),
+}
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
 # the eager checkpoint quantizer, so it stays eager.
 _COMPILABLE = tuple(fmt for fmt, pow2 in _POW2_SCALE.items() if pow2)
@@ -72,9 +85,9 @@ def _device_constant(values: tuple[float, ...], device: torch.device, dtype: tor
 
 
 @functools.cache
-def _fp8_triton_supported(device_index: int) -> bool:
-    """Triton lowers its fp8 type only on SM 8.9 and newer, so older GPUs keep the eager mxfp8 path."""
-    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+def _device_capability(device_index: int) -> tuple[int, int]:
+    """Cached, as ``fake_quant`` asks on every call."""
+    return torch.cuda.get_device_capability(device_index)
 
 
 def _constant_tensor(values: tuple[float, ...], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -271,10 +284,9 @@ class _FakeQuant(torch.autograd.Function):
             and not t.is_complex()  # Triton has no complex type
             and axis in (-1, t.ndim - 1)
             and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
-            and (fmt != "mxfp8" or _fp8_triton_supported(t.device.index))
+            and _device_capability(t.device.index) >= fused.min_capability
         ):
-            kernel, format_max = fused
-            return kernel(t, FORMAT_BLOCK_SIZE[fmt], format_max, _AMAX_FLOOR)
+            return fused.kernel(t, FORMAT_BLOCK_SIZE[fmt], fused.format_max, _AMAX_FLOOR)
         # Eager, as activation shapes vary and a compiled form would recompile constantly.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 

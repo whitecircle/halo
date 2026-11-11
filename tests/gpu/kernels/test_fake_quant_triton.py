@@ -12,21 +12,16 @@
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
 """
 
+import dataclasses
+
 import torch
 import triton
 
 import halo.kernels.lowp.quantization as q
-from halo.kernels.lowp.fake_quant_triton import (
-    _launch,
-    _mxfp4_fake_quant_kernel,
-    _mxfp8_fake_quant_kernel,
-    fake_quant_mxfp4_triton,
-    fake_quant_mxfp8_triton,
-)
+from halo.kernels.lowp.fake_quant_triton import _launch, _mxfp4_fake_quant_kernel, _mxfp8_fake_quant_kernel
 from halo.kernels.lowp.quantization import (
     _AMAX_FLOOR,
     E2M1_MAX,
-    E4M3_MAX,
     FORMAT_BLOCK_SIZE,
     _block_round_trip,
     fake_quant,
@@ -35,8 +30,8 @@ from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
 K = 2880
-# Format → (fused kernel, the element maximum its scale targets).
-FUSED = {"mxfp8": (fake_quant_mxfp8_triton, E4M3_MAX), "mxfp4": (fake_quant_mxfp4_triton, E2M1_MAX)}
+# The table ``fake_quant`` dispatches on: format → kernel, element maximum, oldest capability that compiles it.
+FUSED = q._FUSED_FAKE_QUANT
 
 
 def _e2m1_grid() -> torch.Tensor:
@@ -51,7 +46,7 @@ def _e2m1_grid() -> torch.Tensor:
 
 
 def _cases(fmt: str):
-    format_max = FUSED[fmt][1]
+    format_max = FUSED[fmt].format_max
     g = torch.Generator(device=DEV).manual_seed(0)
     bf = torch.bfloat16
     for shape in [(4096, K), (16384, K), (32, K, K), (7, 32), (1, 64)]:
@@ -106,7 +101,8 @@ def _assert_bits_equal(out, ref, name):
 
 
 def _kernel_supported() -> bool:
-    """Read from the device, not from ``_fp8_triton_supported``, so a wrong guard on SM 8.9+ fails the tests."""
+    """Stated here and read from the device, not from the table's ``min_capability``, so a wrong entry or a wrong
+    guard on SM 8.9+ fails the tests."""
     return torch.cuda.get_device_capability() >= (8, 9)
 
 
@@ -115,33 +111,34 @@ class _Spy:
     ``_FakeQuant`` reads at call time."""
 
     def __init__(self):
-        self.calls = {fmt: 0 for fmt in q._FUSED_FAKE_QUANT}
-        self._orig = dict(q._FUSED_FAKE_QUANT)
+        self.calls = {fmt: 0 for fmt in FUSED}
+        self._orig = dict(FUSED)
 
     def __enter__(self):
-        for fmt, (kernel, format_max) in self._orig.items():
+        for fmt, fused in self._orig.items():
 
-            def spy(t, *a, _fmt=fmt, _kernel=kernel, **k):
+            def spy(t, *a, _fmt=fmt, _kernel=fused.kernel, **k):
                 self.calls[_fmt] += 1
                 return _kernel(t, *a, **k)
 
-            q._FUSED_FAKE_QUANT[fmt] = (spy, format_max)
+            FUSED[fmt] = dataclasses.replace(fused, kernel=spy)
         return self
 
     def __exit__(self, *_):
-        q._FUSED_FAKE_QUANT.update(self._orig)
+        FUSED.update(self._orig)
 
 
 def test_bit_exact_against_eager():
     """Each kernel reproduces the eager quantizer bit-for-bit, NaN blocks and signed zeros included."""
-    for fmt, (kernel, format_max) in FUSED.items():
+    for fmt, fused in FUSED.items():
         if fmt == "mxfp8" and not _kernel_supported():
             print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
             continue
         n = 0
         for name, t in _cases(fmt):
             ref = _block_round_trip(t, fmt, -1).to(t.dtype)
-            _assert_bits_equal(kernel(t, FORMAT_BLOCK_SIZE[fmt], format_max, _AMAX_FLOOR), ref, f"{fmt}/{name}")
+            out = fused.kernel(t, FORMAT_BLOCK_SIZE[fmt], fused.format_max, _AMAX_FLOOR)
+            _assert_bits_equal(out, ref, f"{fmt}/{name}")
             n += 1
         print(f"  {fmt}: {n} cases bit-exact — OK")
 
@@ -176,7 +173,7 @@ def test_pre_sm89_falls_back():
     and keeps its kernel."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
     orig = torch.cuda.get_device_capability
-    q._fp8_triton_supported.cache_clear()
+    q._device_capability.cache_clear()
     torch.cuda.get_device_capability = lambda *_: (8, 0)
     try:
         with _Spy() as s:
@@ -186,7 +183,7 @@ def test_pre_sm89_falls_back():
             assert s.calls["mxfp4"] == 1, "SM 8.0 dropped the mxfp4 kernel"
     finally:
         torch.cuda.get_device_capability = orig
-        q._fp8_triton_supported.cache_clear()
+        q._device_capability.cache_clear()
     print("  pre-SM 8.9 eager fallback — OK")
 
 
@@ -196,6 +193,7 @@ def test_no_recompile_across_token_counts():
     on a fresh copy of the kernel with the same ``do_not_specialize``, so variants that earlier tests compiled
     cannot hide a new one."""
     kernels = {"mxfp8": _mxfp8_fake_quant_kernel, "mxfp4": _mxfp4_fake_quant_kernel}
+    assert set(kernels) == set(FUSED), "a fused format has no recompile check"
     for fmt, kernel in kernels.items():
         if fmt == "mxfp8" and not _kernel_supported():
             print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
@@ -213,7 +211,7 @@ def test_no_recompile_across_token_counts():
         try:
             for shape in [(64, K), (7, K), (1, 32)]:  # n_blocks 5760 (divisible by 16), 630, 1
                 t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
-                _launch(fresh, t, FORMAT_BLOCK_SIZE[fmt], FUSED[fmt][1], _AMAX_FLOOR)
+                _launch(fresh, t, FORMAT_BLOCK_SIZE[fmt], FUSED[fmt].format_max, _AMAX_FLOOR)
         finally:
             triton.knobs.runtime.jit_cache_hook = prev
         assert len(compiled) == 1, f"{fmt}: 3 token counts compiled {len(compiled)} kernel variants, expected 1"
