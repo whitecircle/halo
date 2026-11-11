@@ -4,6 +4,7 @@ cast that hides it."""
 
 import re
 import types
+import weakref
 
 import pytest
 import torch
@@ -43,10 +44,28 @@ def _identity_cast(tensor: torch.Tensor, **_) -> tuple[torch.Tensor, torch.Tenso
     return tensor, tensor.new_zeros(1)
 
 
+def _block_cast(tensor: torch.Tensor, *, gran_k: int, **_) -> tuple[torch.Tensor, torch.Tensor]:
+    """DeepGEMM's FP8 weight cast in miniature: one amax scale per ``gran_k`` x ``gran_k`` block, so a flatten that
+    lets a block span two experts changes the result."""
+    m, n = tensor.shape
+    rows, cols = _align(m, gran_k), _align(n, gran_k)
+    padded = tensor.new_zeros(rows, cols)
+    padded[:m, :n] = tensor
+    scales = padded.float().abs().reshape(rows // gran_k, gran_k, cols // gran_k, gran_k).amax((1, 3))
+    return (tensor.float() * 10).clamp(-127, 127).to(torch.int8), scales
+
+
+def _row_cast(tensor: torch.Tensor, *, gran_k: int, **_) -> tuple[torch.Tensor, torch.Tensor]:
+    """DeepGEMM's MXFP4 weight cast in miniature: one amax scale per row and ``gran_k`` of K, two values per byte."""
+    scales = tensor.float().abs().reshape(tensor.shape[0], -1, gran_k).amax(-1)
+    return (tensor[:, ::2].float() * 10).clamp(-127, 127).to(torch.int8), scales
+
+
 @pytest.fixture
 def native(monkeypatch):
     """The flag on, over kernels that record their calls, and a spy on the simulated path's matmul (``F.grouped_mm``
-    does not run on CPU). Casts are identities unless a test swaps in the real utils."""
+    does not run on CPU). The activation cast is an identity and the weight casts are stand-ins with DeepGEMM's scale
+    layouts, unless a test swaps in the real utils."""
     kernel_calls: list[dict] = []
     simulated_calls: list[torch.Tensor] = []
 
@@ -60,8 +79,8 @@ def native(monkeypatch):
     utils = types.SimpleNamespace(
         align=_align,
         per_token_cast_to_fp8=_identity_cast,
-        per_block_cast_to_fp8=_identity_cast,
-        per_token_cast_to_fp4=_identity_cast,
+        per_block_cast_to_fp8=_block_cast,
+        per_token_cast_to_fp4=_row_cast,
     )
 
     def simulated(mat_a, mat_b, *, offs=None):
@@ -333,6 +352,108 @@ def test_the_weight_cache_requantizes_after_the_write_and_only_then(real_casts, 
     for served, recast in zip(second, fresh, strict=True):
         assert torch.equal(served, recast)
     assert not torch.equal(second[1], first[1])
+
+
+_WEIGHT_K = 256  # a multiple of the fp8 block (128) and of the fp4 packing (256)
+# N aligned and not to the 128-row block, and E=1, where a slice of the padded layout would keep the padded stride.
+_WEIGHT_CASES = pytest.mark.parametrize(
+    ("fmt", "experts", "n"),
+    [("mxfp8", 4, 256), ("mxfp8", 4, 100), ("mxfp8", 1, 100), ("mxfp4", 4, 100), ("mxfp4", 1, 100)],
+)
+_CHUNK_BYTES = pytest.mark.parametrize("chunk_bytes", [256 << 20, 0], ids=["one-chunk", "chunk-per-expert"])
+
+
+def _per_expert_loop(w: torch.Tensor, fmt: str, utils) -> tuple[torch.Tensor, torch.Tensor]:
+    """One cast per expert into dense preallocated outputs, which the batched cast must reproduce."""
+    cast = (
+        (lambda t: utils.per_token_cast_to_fp4(t, use_ue8m0=True, gran_k=32))
+        if fmt == "mxfp4"
+        else (lambda t: utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=128))
+    )
+    b = w.transpose(-2, -1).contiguous()
+    data0, sf0 = cast(b[0])
+    data = b.new_empty((b.shape[0], *data0.shape), dtype=data0.dtype)
+    sf = sf0.new_empty((b.shape[0], *sf0.shape))
+    data[0], sf[0] = data0, sf0
+    for i in range(1, b.shape[0]):
+        data[i], sf[i] = cast(b[i])
+    return data, sf
+
+
+def _bits(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.view(torch.uint8) if tensor.element_size() == 1 else tensor
+
+
+def _assert_same_operand(batched, reference) -> None:
+    for got, expected in zip(batched, reference, strict=True):
+        assert got.shape == expected.shape and got.dtype == expected.dtype
+        assert torch.equal(_bits(got), _bits(expected))
+    assert batched[0].stride() == reference[0].stride(), "DeepGEMM asserts the weight's expert stride is N * K"
+
+
+@_CHUNK_BYTES
+@_WEIGHT_CASES
+def test_the_batched_weight_cast_is_bitwise_the_per_expert_loop(real_casts, monkeypatch, fmt, experts, n, chunk_bytes):
+    """Over DeepGEMM's own casts, as a per-row stand-in cannot show that the FP8 cast scales 128 x 128 blocks, which an
+    unpadded flatten mixes across experts whenever N is not a multiple of 128."""
+    monkeypatch.setattr(deepgemm, "_CAST_CHUNK_BYTES", chunk_bytes)
+    torch.manual_seed(0)
+    w = torch.randn(experts, _WEIGHT_K, n, dtype=torch.bfloat16)
+    _assert_same_operand(
+        deepgemm._quant_weight(w, fmt, _WEIGHT_K, cacheable=False), _per_expert_loop(w, fmt, real_casts.utils)
+    )
+
+
+def _recording(cast, rows: list[int]):
+    def recorded(tensor, **kwargs):
+        rows.append(tensor.shape[0])
+        return cast(tensor, **kwargs)
+
+    return recorded
+
+
+@_CHUNK_BYTES
+@_WEIGHT_CASES
+def test_the_batched_cast_pads_chunks_and_copies_back_without_deep_gemm(
+    native, monkeypatch, fmt, experts, n, chunk_bytes
+):
+    """The pad, chunk and copy-back bookkeeping over scale-faithful stand-ins, on the Hopper image too."""
+    rows: list[int] = []
+    for name in ("per_block_cast_to_fp8", "per_token_cast_to_fp4"):
+        monkeypatch.setattr(native.utils, name, _recording(getattr(native.utils, name), rows))
+    monkeypatch.setattr(deepgemm, "_CAST_CHUNK_BYTES", chunk_bytes)
+    torch.manual_seed(0)
+    w = torch.randn(experts, _WEIGHT_K, n, dtype=torch.bfloat16)
+
+    batched = deepgemm._quant_weight(w, fmt, _WEIGHT_K, cacheable=False)
+    batched_rows, rows[:] = list(rows), []
+    _assert_same_operand(batched, _per_expert_loop(w, fmt, native.utils))
+
+    n_cast = _align(n, 128) if fmt == "mxfp8" else n
+    experts_per_call = 1 if chunk_bytes == 0 else experts
+    assert batched_rows == [experts_per_call * n_cast] * (experts // experts_per_call)
+
+
+@pytest.mark.parametrize("fmt", deepgemm.DEEPGEMM_FORMATS)
+def test_a_chunk_is_copied_out_and_freed_before_the_next_is_cast(native, monkeypatch, fmt):
+    """Holding every chunk beside the full outputs would peak at two copies of the quantized weight."""
+    monkeypatch.setattr(deepgemm, "_CAST_CHUNK_BYTES", 0)
+    casts: list[weakref.ref] = []
+    live_at_each_cast: list[int] = []
+
+    def recording(cast):
+        def recorded(tensor, **kwargs):
+            live_at_each_cast.append(sum(cast_out() is not None for cast_out in casts))
+            data, scales = cast(tensor, **kwargs)
+            casts.append(weakref.ref(data))
+            return data, scales
+
+        return recorded
+
+    for name in ("per_block_cast_to_fp8", "per_token_cast_to_fp4"):
+        monkeypatch.setattr(native.utils, name, recording(getattr(native.utils, name)))
+    deepgemm._quant_weight(torch.randn(4, _WEIGHT_K, 100, dtype=torch.bfloat16), fmt, _WEIGHT_K, cacheable=False)
+    assert live_at_each_cast == [0, 0, 0, 0]
 
 
 if __name__ == "__main__":
