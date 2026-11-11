@@ -5,7 +5,7 @@
   midpoints, an fp32 one-ulp scale edge, a near-subnormal scale, and for mxfp4 every e2m1 level and
   midpoint of both signs at forty scales,
 - ``fake_quant`` routes CUDA / contiguous / last-axis / MX through them and everything else to eager,
-  and mxfp8 to eager on GPUs older than SM 8.9,
+  and to eager on GPUs too old for a kernel's types (mxfp8 below SM 8.9, mxfp4 below SM 8.0),
 - a new token count never compiles a new kernel variant, which under EP would stall the other ranks,
 - the straight-through backward is unchanged.
 
@@ -169,18 +169,21 @@ def test_routing():
 
 
 def test_pre_sm89_falls_back():
-    """A GPU below SM 8.9 cannot compile the fp8 kernel, so mxfp8 runs eager there. mxfp4 uses no fp8 type
-    and keeps its kernel."""
+    """A GPU below SM 8.9 cannot compile Triton's fp8 type, so mxfp8 runs eager there. mxfp4 uses no fp8 type and
+    keeps its kernel down to SM 8.0, the oldest with a bf16 conversion. The capability is faked, so this checks the
+    routing, not what Triton does on those GPUs."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
     orig = torch.cuda.get_device_capability
-    q._device_capability.cache_clear()
-    torch.cuda.get_device_capability = lambda *_: (8, 0)
     try:
-        with _Spy() as s:
-            _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), "sm80")
-            assert s.calls["mxfp8"] == 0, "SM 8.0 took the fp8 Triton path"
-            _assert_bits_equal(fake_quant(t, "mxfp4"), _block_round_trip(t, "mxfp4", -1), "sm80 mxfp4")
-            assert s.calls["mxfp4"] == 1, "SM 8.0 dropped the mxfp4 kernel"
+        for capability, mxfp4_calls in [((8, 0), 1), ((7, 5), 0)]:
+            q._device_capability.cache_clear()
+            torch.cuda.get_device_capability = lambda *_, _c=capability: _c
+            sm = f"SM {capability[0]}.{capability[1]}"
+            with _Spy() as s:
+                _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), f"{sm} mxfp8")
+                assert s.calls["mxfp8"] == 0, f"{sm} took the fp8 Triton path"
+                _assert_bits_equal(fake_quant(t, "mxfp4"), _block_round_trip(t, "mxfp4", -1), f"{sm} mxfp4")
+                assert s.calls["mxfp4"] == mxfp4_calls, f"{sm}: {s.calls['mxfp4']} mxfp4 kernel calls"
     finally:
         torch.cuda.get_device_capability = orig
         q._device_capability.cache_clear()

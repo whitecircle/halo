@@ -50,11 +50,12 @@ class _FusedFakeQuant:
 
 
 # One entry per power-of-two-scale format (test_lowp_spec.py holds the two tables together). NVFP4's tensor-wide
-# global scale needs a pass over the whole tensor first, so it stays eager. Triton lowers its fp8 type only on
-# SM 8.9 and newer, so older GPUs keep the eager mxfp8 path.
+# global scale needs a pass over the whole tensor first, so it stays eager. The mxfp8 kernel rounds through Triton's
+# fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX converts
+# to from SM 8.0. Older GPUs keep the eager path.
 _FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
     "mxfp8": _FusedFakeQuant(fake_quant_mxfp8_triton, E4M3_MAX, min_capability=(8, 9)),
-    "mxfp4": _FusedFakeQuant(fake_quant_mxfp4_triton, E2M1_MAX),
+    "mxfp4": _FusedFakeQuant(fake_quant_mxfp4_triton, E2M1_MAX, min_capability=(8, 0)),
 }
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
 # the eager checkpoint quantizer, so it stays eager.
