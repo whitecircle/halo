@@ -6,6 +6,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.extra import libdevice
+from triton.runtime.jit import JITFunction
 
 # Blocks per program: fastest on 4 of 5 weight and activation shapes in a 16–256 sweep on B300 (SM103)
 _BPP = 128
@@ -92,7 +93,9 @@ def _mxfp4_fake_quant_kernel(
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
 
-def _launch(kernel, t: torch.Tensor, block_size: int, format_max: float, amax_floor: float) -> torch.Tensor:
+def _launch(
+    kernel: JITFunction, t: torch.Tensor, block_size: int, format_max: float, amax_floor: float
+) -> torch.Tensor:
     """Run ``kernel`` over ``t`` in blocks of ``block_size`` into a new tensor of the same shape and dtype."""
     if t.numel() == 0:
         return torch.empty_like(t)
