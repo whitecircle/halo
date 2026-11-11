@@ -782,6 +782,13 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--trainer dpo", "--trainer kto"),
         timeout=420,
     ),
+    # Before the fix the fp32 arm raised in the constructor's sweep at DeepEP's combine, so the arms are the assertion.
+    "parallelism/ep/test_ep_preference_reference_sweep_dtype.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--arm fp32_non_ep", "--arm bf16", "--arm no_precompute"),
+        timeout=420,
+    ),
     # The refusal phase raises on every rank together, so a rank-local raise surfaces as a hang against the timeout.
     "parallelism/ep/test_ep_preference_precompute_resume.py": TestSpec(
         nproc=2,
