@@ -24,7 +24,6 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
     reject_open_ended_tool_turns,
-    reject_prefetch_past_retry_budget,
     reject_straddling_eval_groups,
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
@@ -51,7 +50,6 @@ from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
 from halo.trainers.grpo.row_span_stash import RowSpanStashMixin
 from halo.trainers.metrics.world_metrics import WorldMetrics
-from halo.weight_sync.registry import resolve_weight_sync_client
 
 
 def _resolve_environment_spec(environment_config, environment_cls, environment_kwargs) -> tuple[Any, dict]:
@@ -196,7 +194,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
-        reject_prefetch_past_retry_budget(resolve_weight_sync_client(cfg.rollout_backend), cfg, self.args)
         reject_unsupported_score_centering(cfg)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)

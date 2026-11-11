@@ -185,6 +185,7 @@ DeepEP or the base image.
 | `PYTHONPATH` | `/workspace` | Lets `python tests/.../foo.py` resolve the `tests` package. |
 | `TOKENIZERS_PARALLELISM` | `false` | — |
 | `HF_XET_HIGH_PERFORMANCE` | `1` | High-throughput Hub transfers (supersedes `HF_HUB_ENABLE_HF_TRANSFER`). |
+| `HF_HUB_DISABLE_TELEMETRY` | `1` | Stops the Hub usage pings, such as the one TRL's trainers send from rank 0 at construction. Export `0` to send them. |
 | `TRANSFORMERS_NO_ADVISORY_WARNINGS` | `1` | Silences transformers' advisory warnings. |
 
 `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked: the toolkit points each at

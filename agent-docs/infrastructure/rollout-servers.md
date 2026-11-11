@@ -132,12 +132,12 @@ pauses all servers together
 - **vLLM** is paused with `/pause?mode=keep`: in-flight generations (the prefetched rounds) freeze and
   resume under the new weights, the staleness the sampling-logprob IS ratio corrects. vLLM's
   default `abort` would hand every in-flight request back as a fragment with an ordinary stop reason.
-- **SGLang** is paused with `{"mode": "abort"}` (its post-update cache flush refuses while a request is
-  running), so in-flight generations drop. The rollout actor re-issues an aborted turn
-  (`finish_reason: abort`) against the same observation, up to `max_retries` times; an abort is never
-  charged as a length cut. A prefetch whose rounds span more syncs than `max_retries` is refused
-  ([Prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)). The refusal
-  reads the client's `PAUSE_ABORTS_IN_FLIGHT`, true only on SGLang's client.
+- **SGLang** is paused with `{"mode": "retract"}`: in-flight requests return to its queue with the
+  tokens they hold and resume with their KV rebuilt under the new weights; the post-update cache flush
+  skips that queue while paused. `abort` would drop them, and re-issuing them from scratch keeps the
+  turns that finished before the push, the short ones: on Qwen3-0.6B, one push per round left the mean
+  completion 5% shorter. A turn the engine aborts for any other reason is re-issued
+  ([Engine aborts](../training-methods/async-grpo/episodes.md#engine-aborts)).
 
 The paused window is charged to neither the episode nor the request: every rank credits the push to
 its in-flight episodes' `episode_timeout` and, through the Ray actors' clock, to their requests'
@@ -553,6 +553,7 @@ server that does not answer is logged as unread.
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
+| An SGLang server launched with `--max-queued-requests` or `--disaggregation-mode` | A push pauses by re-queuing every running request, which a full queue aborts with a `503`; a disaggregated prefill server keeps its chunked request through the pause, and the cache flush after the update fails |
 | No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM reasoning cap | A cap answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
 | `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
 | `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |

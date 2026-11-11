@@ -262,6 +262,22 @@ def test_routing_replay_under_torch_compile_is_refused():
         server.close()
 
 
+def test_a_queue_cap_or_disaggregation_on_sglang_is_refused():
+    """A weight push pauses SGLang by re-queuing every running request, which a full --max-queued-requests queue
+    aborts; a disaggregated prefill server keeps its chunked request through the pause and fails the cache flush."""
+    server = FakeSGLangServer()
+    try:
+        _verify(server, SGLangWeightSyncClient, is_moe=False)
+        server.max_queued_requests = 64
+        with pytest.raises(ValueError, match="caps its waiting queue at 64"):
+            _verify(server, SGLangWeightSyncClient, is_moe=False)
+        server.max_queued_requests, server.disaggregation_mode = None, "prefill"
+        with pytest.raises(ValueError, match="disaggregated as prefill"):
+            _verify(server, SGLangWeightSyncClient, is_moe=False)
+    finally:
+        server.close()
+
+
 def test_a_vllm_server_without_token_ids_is_refused_under_train_on_sampled_tokens():
     server = FakeVLLMServer()
     try:

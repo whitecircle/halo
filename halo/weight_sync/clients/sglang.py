@@ -114,9 +114,10 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     # trainer's split names.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     PAUSE_ENDPOINT = "/pause_generation"
-    # The post-update flush needs an idle scheduler, so in-flight requests are aborted.
-    PAUSE_REQUEST = {"json": {"mode": "abort"}}
-    PAUSE_ABORTS_IN_FLIGHT = True
+    # retract hands in-flight requests back to the queue with their tokens and rebuilds their KV under the new weights,
+    # and the post-update flush skips that queue while paused. abort would drop them: re-issued from scratch, the
+    # turns a push lands on are disproportionately the long ones.
+    PAUSE_REQUEST = {"json": {"mode": "retract"}}
     RESUME_ENDPOINT = "/continue_generation"
     # The endpoint takes a request dataclass and rejects an empty body.
     RESUME_REQUEST = {"json": {}}
@@ -187,6 +188,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             dtype=info.get("dtype"),
             quantization=_served_quantization(info),
             pipeline_stages=int(info.get("pp_size") or 1),
+            queued_request_cap=info.get("max_queued_requests"),
+            disaggregation_mode=info.get("disaggregation_mode"),
             extras=pick_launch_facts(info, cls.LAUNCH_FACTS),
         )
 
