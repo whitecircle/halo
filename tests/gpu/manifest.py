@@ -999,6 +999,17 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_native_mxfp4_roundtrip.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
     ),
+    # The same life under the layouts with a load and save path of their own.
+    "parallelism/ep/test_native_mxfp4_layouts.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"),
+        timeout=1200,
+        args_matrix=(
+            Row("--layout pp2", nproc=4, markers=("gpu", "full", "4gpu", "pp", "moe", "gptoss")),
+            Row("--layout ep2_etp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss")),
+            Row("--layout ep1", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss")),
+        ),
+    ),
     # openai/gpt-oss-20b as released (MXFP4) at EP=8: the decoded layers and the loss against a dequantized
     # from_pretrained on rank 0.
     "parallelism/ep/test_gptoss_native_mxfp4_ep8.py": TestSpec(
