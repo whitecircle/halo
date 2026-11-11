@@ -188,6 +188,8 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             dtype=info.get("dtype"),
             quantization=_served_quantization(info),
             pipeline_stages=int(info.get("pp_size") or 1),
+            queued_request_cap=info.get("max_queued_requests"),
+            disaggregation_mode=info.get("disaggregation_mode"),
             extras=pick_launch_facts(info, cls.LAUNCH_FACTS),
         )
 

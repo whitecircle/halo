@@ -553,6 +553,7 @@ server that does not answer is logged as unread.
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
+| An SGLang server launched with `--max-queued-requests` or `--disaggregation-mode` | A push pauses by re-queuing every running request, which a full queue aborts with a `503`; a disaggregated prefill server keeps its chunked request through the pause, and the cache flush after the update fails |
 | No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM reasoning cap | A cap answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
 | `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
 | `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |

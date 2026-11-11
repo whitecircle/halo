@@ -78,6 +78,10 @@ class ServerFlags(NamedTuple):
     instance_id: str | None = None
     # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
     pipeline_stages: int | None = None
+    # A cap on the engine's waiting queue, which a pause that re-queues running requests can overflow.
+    queued_request_cap: int | None = None
+    # The engine's prefill/decode disaggregation role; "null" where it serves both.
+    disaggregation_mode: str | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
     extras: Mapping[str, object] = MappingProxyType({})
 

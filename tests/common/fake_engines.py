@@ -340,6 +340,9 @@ class FakeSGLangServer(FakeEngineServer):
         # The message a weight update answers 400 with, as the engine does when its loader rejects a chunk.
         self.update_failure: str | None = None
         self.torch_compile = False
+        # --max-queued-requests and --disaggregation-mode as /server_info reports them, unset by default.
+        self.max_queued_requests: int | None = None
+        self.disaggregation_mode = "null"
         self.groups: set[str] = set()
         self.session_open = False
         # Set to launch the server with --enable-lora; the facts /server_info then reports.
@@ -400,6 +403,8 @@ class FakeSGLangServer(FakeEngineServer):
                 "tool_call_parser": self.tool_call_parser or None,
                 "enable_return_routed_experts": self.captures_routing,
                 "enable_torch_compile": self.torch_compile,
+                "max_queued_requests": self.max_queued_requests,
+                "disaggregation_mode": self.disaggregation_mode,
                 "dtype": self.dtype,
                 "quantization": self.quantization or None,
                 "max_running_requests": 256,
