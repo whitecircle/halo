@@ -107,6 +107,8 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
     CTOR_POSITIONS: ClassVar[dict[str, int]]
     # TRL's loss adds the router aux term itself and neither trainer overrides it.
     ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
+    # The (split name, batch size) TRL's constructor asked to sweep, until the model is wrapped; None once swept.
+    _deferred_reference_splits: list[tuple[str, int]] | None = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -120,12 +122,14 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
         self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=self.CTOR_POSITIONS)
         self._validate_reference_model(get_ctor_arg(args, kwargs, "ref_model", self.CTOR_POSITIONS))
+        self._deferred_reference_splits = []
         with self._trl_reference_hash_skipped():
             super().__init__(*args, **kwargs)
         # TRL builds its own reference inside __init__ when none is passed, the model is not PEFT-wrapped and
         # precompute_ref_log_probs is off.
         self._validate_held_reference_model()
         self._configure_distributed_modes()
+        self._sweep_deferred_reference_splits()
 
     def compute_ref_log_probs(self, model, inputs):
         trl_compute_ref_log_probs = super().compute_ref_log_probs
@@ -162,21 +166,40 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
     def _reference_columns(self) -> tuple[str, ...]:
         return self.REFERENCE_COLUMNS
 
+    def _sweep_deferred_reference_splits(self) -> None:
+        """COLLECTIVE. Runs the sweeps TRL's constructor asked for, in TRL's order, once the model is wrapped: the
+        sweep then computes at the training forward's dtype, where fp32 masters reach an unwrapped forward as fp32
+        and DeepEP's combine rejects them."""
+        recorded = self._deferred_reference_splits
+        self._deferred_reference_splits = None
+        if not recorded:
+            return
+        splits = iter(recorded)
+
+        def sweep(dataset):
+            name, batch_size = next(splits)
+            return self._precompute_ref_logps(dataset, name, batch_size)
+
+        self.train_dataset = sweep(self.train_dataset)
+        if isinstance(self.eval_dataset, dict):
+            self.eval_dataset = {name: sweep(dataset) for name, dataset in self.eval_dataset.items()}
+        elif self.eval_dataset is not None:
+            self.eval_dataset = sweep(self.eval_dataset)
+
     def _precompute_ref_logps(self, dataset, name, batch_size):
         needed = self._reference_columns()
-        if all(column in (dataset.column_names or []) for column in needed):
+        carries_columns = all(column in (dataset.column_names or []) for column in needed)
+        if self._deferred_reference_splits is not None:
+            # Refused before the model is wrapped, as TRL's own constructor-time sweep refused it.
+            if not carries_columns:
+                self._reject_presharded_sweep()
+            self._deferred_reference_splits.append((name, batch_size))
+            return dataset
+        if carries_columns:
             if is_global_main_process():
                 logger.info(f"Dataset '{name}' already carries {needed}; skipping the reference sweep.")
             return dataset
-        if self._dataset_presharded:
-            raise ValueError(
-                "precompute_ref_log_probs=True is not supported with a pre-sharded dataset: each "
-                "rank holds a DIFFERENT shard, but the sweep gathers one set of reference log-probs "
-                "in dataset order and every rank attaches it to its own rows — so every non-zero "
-                "data-parallel rank would train on rank 0's log-probs. Load the dataset unsharded, or "
-                "precompute the ref_chosen_logps/ref_rejected_logps (ref_logps for KTO) columns into "
-                "the dataset before sharding it."
-            )
+        self._reject_presharded_sweep()
         if name in self._reference_logps_by_split:
             raise ValueError(
                 f"Two precomputed datasets share the name '{name}' (an eval_dataset key 'train'?), so "
@@ -193,6 +216,17 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
         attached = _attach_reference_columns(dataset, columns)
         self._remember_reference_split(name, identity, {"columns": columns}, attached)
         return attached
+
+    def _reject_presharded_sweep(self) -> None:
+        if self._dataset_presharded:
+            raise ValueError(
+                "precompute_ref_log_probs=True is not supported with a pre-sharded dataset: each "
+                "rank holds a DIFFERENT shard, but the sweep gathers one set of reference log-probs "
+                "in dataset order and every rank attaches it to its own rows — so every non-zero "
+                "data-parallel rank would train on rank 0's log-probs. Load the dataset unsharded, or "
+                "precompute the ref_chosen_logps/ref_rejected_logps (ref_logps for KTO) columns into "
+                "the dataset before sharding it."
+            )
 
     def _sweep_reference_logps(self, dataset, name: str, batch_size: int, needed) -> dict[str, torch.Tensor]:
         """TRL's sweep, gathering reference outputs into ordered rows on the DP axis."""
