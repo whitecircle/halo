@@ -86,8 +86,9 @@ class Mxfp4Decode:
     """Fan-in of a native MXFP4 expert tensor: leads the ``<proj>_blocks`` pipeline (uint8 ``[E, R, G, 16]``, two e2m1
     codes per byte, the low nibble the even element), with ``siblings`` its ``<proj>_scales`` key (uint8 e8m0
     ``[E, R, G]``). Decodes as transformers' ``convert_moe_packed_tensors``, value × ``2^(scale - 127)`` then dims 1
-    and 2 swapped to gpt-oss's matmul layout, but one expert at a time, so a rank holds one expert's codes at once and
-    its ranged read of the expert dim stands."""
+    and 2 swapped to gpt-oss's matmul layout. The ranged read of the expert dim stands, and it brings in the packed
+    blocks and scales of every expert the rank owns. Only the decode goes one expert at a time, so the unpacked codes
+    and values of a single expert are live at once."""
 
     siblings: tuple[str, ...]
 
