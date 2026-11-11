@@ -124,6 +124,27 @@ def test_an_eval_split_named_train_is_refused(kind, construct):
         construct(eval_dataset={"train": token_rows(kind)})
 
 
+@pytest.mark.parametrize("carrier", ["train", "eval"])
+def test_only_the_splits_without_columns_sweep(kind, construct, carrier):
+    carried = {name: [-1.0] * len(token_rows(kind)) for name in REFERENCE_COLUMNS[kind]}
+    with_columns = concatenate_datasets([token_rows(kind), Dataset.from_dict(carried)], axis=1)
+    train, eval_dataset = (with_columns, token_rows(kind)) if carrier == "train" else (None, with_columns)
+
+    _, events = construct(train=train, eval_dataset=eval_dataset)
+
+    swept = "eval" if carrier == "train" else "train"
+    batch = EVAL_BATCH if swept == "eval" else TRAIN_BATCH
+    assert events == ["trl_init", "wrapped", ("sweep", swept, batch)]
+
+
+def test_splits_trl_recorded_out_of_the_held_order_are_refused(kind, construct):
+    trainer, _ = construct(precompute=False, eval_dataset=token_rows(kind))
+    trainer._deferred_reference_splits = [("eval", EVAL_BATCH), ("train", TRAIN_BATCH)]
+
+    with pytest.raises(RuntimeError, match="Re-audit TRLPreferenceMixin"):
+        trainer._sweep_deferred_reference_splits()
+
+
 def test_a_presharded_dataset_is_refused_before_the_wrap(kind, construct, monkeypatch):
     seen: list = []
     monkeypatch.setattr(TRAINERS[kind][0], "_configure_distributed_modes", lambda self: seen.append("wrapped"))

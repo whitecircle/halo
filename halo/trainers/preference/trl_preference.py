@@ -174,6 +174,16 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
         self._deferred_reference_splits = None
         if not recorded:
             return
+        if isinstance(self.eval_dataset, dict):
+            held = ["train", *self.eval_dataset]
+        else:
+            held = ["train"] if self.eval_dataset is None else ["train", "eval"]
+        if [name for name, _ in recorded] != held:
+            raise RuntimeError(
+                f"TRL's constructor asked to sweep {[name for name, _ in recorded]}, not the splits {held} the "
+                f"trainer holds, so the deferred sweep cannot pair them. Re-audit TRLPreferenceMixin against the "
+                f"installed TRL."
+            )
         splits = iter(recorded)
 
         def sweep(dataset):
@@ -190,7 +200,7 @@ class TRLPreferenceMixin(ReferenceLogpsMixin):
         needed = self._reference_columns()
         carries_columns = all(column in (dataset.column_names or []) for column in needed)
         if self._deferred_reference_splits is not None:
-            # Refused before the model is wrapped, as TRL's own constructor-time sweep refused it.
+            # Refused before the model is wrapped.
             if not carries_columns:
                 self._reject_presharded_sweep()
             self._deferred_reference_splits.append((name, batch_size))
