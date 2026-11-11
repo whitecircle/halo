@@ -7,7 +7,7 @@ import pytest
 from halo.checkpoint.tools.lowp_export import _VERIFY_RELERR_TOL
 from halo.hardware import GPU_PEAK_FLOPS
 from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
-from halo.kernels.lowp.quantization import _POW2_SCALE, FORMAT_BLOCK_SIZE, QUANTIZERS
+from halo.kernels.lowp.quantization import _FUSED_FAKE_QUANT, _POW2_SCALE, FORMAT_BLOCK_SIZE, QUANTIZERS
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantFormat
 
 
@@ -26,6 +26,12 @@ def test_the_kernel_tables_are_keyed_on_the_quant_formats():
     assert set(QUANTIZERS) == set(get_args(QuantFormat))
     assert set(_POW2_SCALE) == set(get_args(QuantFormat))
     assert set(_VERIFY_RELERR_TOL) == set(get_args(QuantFormat))
+
+
+def test_the_fused_fake_quant_table_covers_the_pow2_scale_formats():
+    """A power-of-two block scale is what lets one kernel pass reproduce eager bit for bit, so each such format has
+    a fused round trip and no other format does."""
+    assert set(_FUSED_FAKE_QUANT) == {fmt for fmt, pow2 in _POW2_SCALE.items() if pow2}
     assert set(DEEPGEMM_FORMATS) <= set(get_args(QuantFormat))
 
 
