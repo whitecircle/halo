@@ -28,7 +28,7 @@ secrets:
 envs:
   HALO_BUCKET: <your-bucket>     # sky launch --env HALO_BUCKET=... retargets the S3 mount
   CONFIG_PATH: examples/sft/gptoss/gptoss-120b-multinode-ep.yaml
-  MODEL: unsloth/gpt-oss-120b-BF16      # override to train from a local mirror or a previous run's output_dir
+  MODEL: openai/gpt-oss-120b            # override to train from a local mirror or a previous run's output_dir
   EXPERT_PARALLEL_SIZE: "16"
   EXPERT_PARALLEL_SCOPE: "global"
   # Cross-node dispatch is capped at 8192 tokens/rank (HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK); a larger
