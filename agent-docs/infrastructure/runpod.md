@@ -68,7 +68,7 @@ python -c "from flash_attn_interface import flash_attn_func; print('FA3 OK')"
 # Optional: pre-fetch the model on every pod (with DIST_SHARED_FILESYSTEM=0 each pod's local rank 0
 # fetches it at load otherwise)
 export HF_HOME=/workspace/hf_cache
-python -c "from huggingface_hub import snapshot_download; snapshot_download('unsloth/gpt-oss-20b-BF16')"
+python -c "from huggingface_hub import snapshot_download; snapshot_download('openai/gpt-oss-20b', ignore_patterns=['*/*'])"
 ```
 
 ## EP topologies (2 nodes × 8 GPUs)

@@ -5,6 +5,7 @@ translation."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 from transformers.core_model_loading import (
@@ -15,6 +16,7 @@ from transformers.core_model_loading import (
     WeightConverter,
     rename_source_key,
 )
+from transformers.integrations.mxfp4 import Mxfp4Dequantize
 
 from halo.model_loading.checkpoint_keys import CheckpointKeyPlan, ConversionGroup, is_expert_bank_merge
 
@@ -71,7 +73,69 @@ class Concat:
     siblings: tuple[str, ...]
 
 
+# e2m1 code → value, the sign in bit 3, as transformers' ``FP4_VALUES``. Every value times a power of two in e8m0's
+# range is exact in bf16 or overflows to inf, so the decode has nothing to round.
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+_E8M0_BIAS = 127
+# The projections a native MXFP4 gpt-oss checkpoint stores as ``<proj>_blocks`` and ``<proj>_scales``.
+MXFP4_PROJECTIONS = ("gate_up_proj", "down_proj")
+
+
+@dataclass(frozen=True)
+class Mxfp4Decode:
+    """Fan-in of a native MXFP4 expert tensor: leads the ``<proj>_blocks`` pipeline (uint8 ``[E, R, G, 16]``, two e2m1
+    codes per byte, the low nibble the even element), with ``siblings`` its ``<proj>_scales`` key (uint8 e8m0
+    ``[E, R, G]``). Decodes as transformers' ``convert_moe_packed_tensors``, value × ``2^(scale - 127)`` then dims 1
+    and 2 swapped to gpt-oss's matmul layout. The ranged read of the expert dim stands, and it brings in the packed
+    blocks and scales of every expert the rank owns. Only the decode goes one expert at a time, so the unpacked codes
+    and values of a single expert are live at once."""
+
+    siblings: tuple[str, ...]
+
+    @property
+    def dim(self) -> int:
+        """The first dim it changes. It never touches the expert dim 0."""
+        return 1
+
+    def decode(self, blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+        if blocks.dtype != torch.uint8 or scales.dtype != torch.uint8 or blocks.shape[:-1] != scales.shape:
+            raise ValueError(
+                f"MXFP4 expert tensor {self.siblings[0]!r}: expected uint8 blocks [E, R, G, 16] and uint8 scales "
+                f"[E, R, G], got {blocks.dtype} {tuple(blocks.shape)} and {scales.dtype} {tuple(scales.shape)}."
+            )
+        experts, rows, groups, width = blocks.shape
+        lut = torch.tensor(_E2M1_VALUES, dtype=torch.bfloat16, device=blocks.device)
+        out = torch.empty(experts, groups * 2 * width, rows, dtype=torch.bfloat16, device=blocks.device)
+        for e in range(experts):
+            codes = torch.stack([blocks[e] & 0x0F, blocks[e] >> 4], dim=-1).reshape(rows, groups, 2 * width)
+            values = torch.empty(rows, groups, 2 * width, dtype=torch.bfloat16, device=blocks.device)
+            # As transformers: ldexp into bf16, so an overflowing scale gives inf the same way.
+            torch.ldexp(lut[codes.int()], scales[e].int().unsqueeze(-1) - _E8M0_BIAS, out=values)
+            out[e] = values.reshape(rows, -1).t()
+        return out
+
+
+def is_mxfp4_dequantize(entry) -> bool:
+    """Whether ``entry`` is transformers' MXFP4 dequantize: ``<proj>_blocks`` and ``<proj>_scales`` into ``<proj>``."""
+    return isinstance(entry, WeightConverter) and any(isinstance(op, Mxfp4Dequantize) for op in entry.operations)
+
+
+def mxfp4_dequantize_conversions() -> list[WeightConverter]:
+    """The entries ``from_pretrained`` plans a native MXFP4 checkpoint with under ``Mxfp4Config(dequantize=True)``, as
+    transformers' quantizer declares them. The op is a marker here: the lazy loaders decode with :class:`Mxfp4Decode`."""
+    return [
+        WeightConverter(
+            source_patterns=[f"{proj}_blocks", f"{proj}_scales"],
+            target_patterns=rf"{proj}$",
+            operations=[Mxfp4Dequantize(None)],
+        )
+        for proj in MXFP4_PROJECTIONS
+    ]
+
+
 _TensorOp = Deinterleave | TakeChunk | PermuteRope
+# Ops that lead a multi-source pipeline and read their ``siblings`` with the first source's read.
+FanIn = Concat | Mxfp4Decode
 # A converted disk key's targets: (canonical key, op pipeline) per target.
 ConvertTargets = tuple[tuple[str, tuple[Concat | _TensorOp, ...]], ...]
 
@@ -144,10 +208,14 @@ def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tupl
 
 def _group_targets(group: ConversionGroup, config) -> dict[str, ConvertTargets]:
     """The disk keys of one live converter group → their targets with ops; a fan-in's on its first source."""
-    pipelines, concat_dim = translate_converter(group.converter, config)
-    if concat_dim is None:
-        targets = tuple(zip(group.targets, pipelines, strict=True))
-        return {key: targets for key, _ in group.parts}
+    if is_mxfp4_dequantize(group.converter):
+        fan_in = Mxfp4Decode
+    else:
+        pipelines, concat_dim = translate_converter(group.converter, config)
+        if concat_dim is None:
+            targets = tuple(zip(group.targets, pipelines, strict=True))
+            return {key: targets for key, _ in group.parts}
+        fan_in = partial(Concat, concat_dim)
     sources = group.converter.source_patterns
     by_source: dict[str, str] = {}
     for key, pattern in group.parts:
@@ -161,10 +229,10 @@ def _group_targets(group: ConversionGroup, config) -> dict[str, ConvertTargets]:
         raise ValueError(
             f"Multi-source conversion entry {sources} → {group.targets[0]!r}: the checkpoint carries "
             f"source(s) {sorted(map(sources.index, by_source))} of {list(range(len(sources)))}, so the "
-            f"concatenation would materialize a truncated tensor."
+            f"fan-in would materialize a truncated tensor, or for MXFP4 one it cannot decode."
         )
     first, *siblings = (by_source[pattern] for pattern in sources)
-    return {first: ((group.targets[0], (Concat(concat_dim, tuple(siblings)),)),)}
+    return {first: ((group.targets[0], (fan_in(tuple(siblings)),)),)}
 
 
 def lazy_key_mapping(plan: CheckpointKeyPlan, config) -> tuple[dict[str, str], dict[str, ConvertTargets]]:

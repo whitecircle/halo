@@ -2,7 +2,7 @@
 
 [GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's open-weight MoE in two sizes, 20B and
 120B. Its attention adds a learned per-head "sink" logit, and its experts store gate and up projections
-interleaved. Halo trains the BF16 mirrors of the release.
+interleaved. Halo's SFT recipes load both sizes from OpenAI's release, and the BF16 mirrors elsewhere.
 
 ## Support
 
@@ -10,7 +10,9 @@ Modes: the GPT-OSS row of the [Supported Matrix](../supported-matrix.md#model-fa
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `unsloth/gpt-oss-20b-BF16` (32 experts, top-4) and `unsloth/gpt-oss-120b-BF16` (128
-  experts, top-4).
+  experts, top-4). The SFT recipes load OpenAI's own `openai/gpt-oss-20b` (EP or PP) and
+  `openai/gpt-oss-120b` (EP): the MXFP4 experts are decoded to bf16 at load, so no mirror is needed
+  there.
 - **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B recipe is a two-node EP16 layout
   (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`, [Clusters](../clusters.md)), which H100 or H200
   need. At EP8 on eight B300s it last ran on code before 1.2.0.
@@ -114,8 +116,10 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 
 ## Limits
 
-- The MXFP4 release (`openai/gpt-oss-*`) fails at load under EP. Train the BF16 mirror. A weight sync into
-  an MXFP4 server also drops every expert weight without an error, so RL serves the BF16 mirror too.
+- RL and runs with a frozen reference or teacher keep the BF16 mirror: neither was run from the MXFP4
+  release (`openai/gpt-oss-*`). The 120B release was loaded at EP4 on 4× H200 and matched its mirror, with
+  no training step run from it. A weight sync into an MXFP4 server drops every expert weight
+  without an error, so an RL rollout server serves the BF16 mirror whatever the trainer loaded.
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
