@@ -3,8 +3,10 @@
 EP=2 round trip (``test_native_mxfp4_roundtrip.py``) does not reach: pipeline stages, EP x ETP, and ep1 with its
 experts sharded by FSDP2.
 
-Each lazy load decodes the experts under its own layout, and each layout saves through its own path: PP writes one
-shard per stage, ETP unfolds its column halves and ep1 gathers DTensors. The run trains with a checkpoint, resumes
+pp2 and ep2 x etp2 decode the experts in the lazy loaders. ep1 has no EP group, so it is a whole-model load:
+``from_pretrained`` hands the release to transformers, which dequantizes it to bf16 in the Halo images (they ship no
+``kernels`` package). Each layout saves through its own path: PP writes one shard per stage, ETP unfolds its column
+halves and ep1 gathers DTensors. The run trains with a checkpoint, resumes
 from it and saves. A save taken before the first step must hold every tensor of the dequantized ``from_pretrained``
 reference bit for bit, the decoded experts included and the attention sinks apart, which the load resets by default.
 The weights are bf16 from the load on, so no save may carry the release's ``quantization_config``, and a stock
