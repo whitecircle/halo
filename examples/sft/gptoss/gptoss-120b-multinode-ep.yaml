@@ -5,8 +5,9 @@
 #     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
 
 # --- Model ---
-# Must be a BF16 (dequantized) checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-120b.
-model_name_or_path: unsloth/gpt-oss-120b-BF16
+# The release as OpenAI ships it: the lazy EP loader decodes its MXFP4 experts to bf16 while reading, and every
+# save is plain bf16. The BF16 mirror unsloth/gpt-oss-120b-BF16 loads too, at about 3.6 times the download.
+model_name_or_path: openai/gpt-oss-120b
 model_init_kwargs:
   output_router_logits: true          # moe_balancing auto resolves to aux_loss, which sets this too
   router_aux_loss_coef: 0.001         # the hub config ships 0.9, which would dominate the loss
