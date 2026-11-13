@@ -1,6 +1,6 @@
-"""Native DeepGEMM's guards and its one decision per run: ``offs`` must cover ``T``, the flag reaches every grouped call
-whatever its shape, a kernel rejection raises, the 4-bit route casts MXFP4 and a non-finite weight never reaches the
-cast that hides it."""
+"""Native DeepGEMM's guards and its one decision per run: ``offs`` must cover ``T``, ``native`` reaches every grouped
+call whatever its shape, a kernel rejection raises, the 4-bit route casts MXFP4, a non-finite weight never reaches the
+cast that hides it, and the FP8 backward runs dgrad on the forward's weight and wgrad on 128-token tiles."""
 
 import re
 import types
@@ -23,21 +23,16 @@ def _align(value: int, alignment: int) -> int:
     return -(-value // alignment) * alignment
 
 
-def _stub_resolver(monkeypatch):
-    """Only ``utils.align`` is reached before the ``offs`` guard."""
-    utils = types.SimpleNamespace(align=_align)
-    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (None, utils))
+def _layout(ends: list[int]):
+    return deepgemm._row_layout(torch.tensor(ends, dtype=torch.int32), T, E)
 
 
-def _forward(monkeypatch, ends: list[int]):
-    _stub_resolver(monkeypatch)
-    return deepgemm._deepgemm_forward(
-        torch.zeros(T, K),
-        torch.zeros(E, K, N),
-        torch.tensor(ends, dtype=torch.int32),
-        "mxfp8",
-        False,
-    )
+def _gathered(x: torch.Tensor, src: torch.Tensor, width: int) -> torch.Tensor:
+    """The operand the Triton casts read through their row map, which the GPU test pins them bitwise against."""
+    out = x.new_zeros(src.numel(), width)
+    live = src >= 0
+    out[live, : x.shape[1]] = x[src[live].long()]
+    return out
 
 
 def _identity_cast(tensor: torch.Tensor, **_) -> tuple[torch.Tensor, torch.Tensor]:
@@ -67,18 +62,26 @@ def native(monkeypatch):
     does not run on CPU). The activation cast is an identity and the weight casts are stand-ins with DeepGEMM's scale
     layouts, unless a test swaps in the real utils."""
     kernel_calls: list[dict] = []
+    wgrad_calls: list[dict] = []
     simulated_calls: list[torch.Tensor] = []
 
     def kernel(a, b, d, m_indices, **kwargs):
         kernel_calls.append({"a": a, "b": b, "m_indices": m_indices, **kwargs})
         d.zero_()
 
+    def wgrad(a, b, d, ks, ks_dev, c, **kwargs):
+        wgrad_calls.append({"a": a, "b": b, "d": d, "ks": ks, "ks_dev": ks_dev, "c": c, **kwargs})
+
     kernels = types.SimpleNamespace(
-        m_grouped_fp8_gemm_nt_contiguous=kernel, m_grouped_fp8_fp4_gemm_nt_contiguous=kernel
+        m_grouped_fp8_gemm_nt_contiguous=kernel,
+        m_grouped_fp8_fp4_gemm_nt_contiguous=kernel,
+        m_grouped_fp8_gemm_nn_contiguous=kernel,
+        k_grouped_fp8_gemm_tn_contiguous=wgrad,
     )
     utils = types.SimpleNamespace(
         align=_align,
         per_token_cast_to_fp8=_identity_cast,
+        per_channel_cast_to_fp8=_identity_cast,
         per_block_cast_to_fp8=_block_cast,
         per_token_cast_to_fp4=_row_cast,
     )
@@ -87,10 +90,22 @@ def native(monkeypatch):
         simulated_calls.append(mat_b)
         return mat_a.new_zeros(mat_a.shape[0], mat_b.shape[2])
 
-    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", "1")
+    state = types.SimpleNamespace(
+        kernels=kernels, utils=utils, kernel_calls=kernel_calls, wgrad_calls=wgrad_calls, simulated=simulated_calls
+    )
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (kernels, utils))
     monkeypatch.setattr(expert_gemm_module, "grouped_mm", simulated)
-    return types.SimpleNamespace(kernels=kernels, utils=utils, kernel_calls=kernel_calls, simulated=simulated_calls)
+    monkeypatch.setattr(
+        deepgemm,
+        "cast_rows_to_fp8",
+        lambda x, src, width: state.utils.per_token_cast_to_fp8(_gathered(x, src, width), use_ue8m0=True, gran_k=128),
+    )
+    monkeypatch.setattr(
+        deepgemm,
+        "cast_tiles_to_fp8",
+        lambda x, src: state.utils.per_channel_cast_to_fp8(_gathered(x, src, x.shape[1]), use_ue8m0=True, gran_k=128),
+    )
+    return state
 
 
 @pytest.fixture
@@ -117,16 +132,16 @@ def _spread_weight(experts: int, k: int, n: int) -> torch.Tensor:
     return (torch.randn(experts, k, n) * 0.02 * spread).to(torch.bfloat16)
 
 
-def test_offs_that_stops_short_of_t_is_rejected(monkeypatch):
+def test_offs_that_stops_short_of_t_is_rejected():
     """The tail rows of ``out`` are never written."""
     with pytest.raises(ValueError, match="ending at T="):
-        _forward(monkeypatch, [10, 20, 30, T - 1])
+        _layout([10, 20, 30, T - 1])
 
 
-def test_offs_overrunning_t_is_rejected(monkeypatch):
+def test_offs_overrunning_t_is_rejected():
     """A cumulative count past ``T`` slices the input out of range."""
     with pytest.raises(ValueError, match="ending at T="):
-        _forward(monkeypatch, [10, 20, 30, T + 1])
+        _layout([10, 20, 30, T + 1])
 
 
 @pytest.mark.parametrize(
@@ -138,31 +153,37 @@ def test_offs_overrunning_t_is_rejected(monkeypatch):
     ],
     ids=["short", "backwards", "negative"],
 )
-def test_length_ordering_and_negative_offsets_still_rejected(monkeypatch, ends):
+def test_length_ordering_and_negative_offsets_still_rejected(ends):
     """The guard raises one message naming every invariant, so the echoed offs pin which input was rejected."""
     with pytest.raises(ValueError, match=re.escape(f"got {ends}")):
-        _forward(monkeypatch, ends)
+        _layout(ends)
 
 
-def test_full_coverage_passes_the_guard(monkeypatch):
-    """The stub then fails on its own."""
-    with pytest.raises(AttributeError):  # The stub resolver has no per_token_cast_to_fp8.
-        _forward(monkeypatch, [10, 20, 30, T])
+def test_the_layout_puts_each_expert_at_the_start_of_its_128_row_segment():
+    """An empty expert keeps a zero-length segment, so the next one starts where it would have."""
+    layout = _layout([10, 10, 30, T])
+    assert layout.segments == [128, 0, 128, 128] and layout.rows == 384
+    starts = [0] * 10 + [128] * 20 + [256] * 10
+    within = [*range(10), *range(20), *range(10)]
+    assert layout.dst.tolist() == [s + i for s, i in zip(starts, within, strict=True)]
+    expected = torch.full((384,), -1, dtype=torch.int32)
+    expected[:10], expected[128:148], expected[256:266] = 0, 2, 3
+    assert torch.equal(layout.m_indices, expected)
+    assert layout.segments_dev.tolist() == layout.segments
 
 
 def _forward_on_a_kernel_raising(monkeypatch, error: Exception):
     def kernel(*args, **kwargs):
         raise error
 
-    utils = types.SimpleNamespace(
-        align=lambda value, alignment: -(-value // alignment) * alignment, per_token_cast_to_fp8=lambda x, **kw: x
-    )
+    utils = types.SimpleNamespace(align=_align, per_token_cast_to_fp8=lambda x, **kw: x)
     monkeypatch.setattr(
         deepgemm, "_deep_gemm", lambda: (types.SimpleNamespace(m_grouped_fp8_gemm_nt_contiguous=kernel), utils)
     )
     monkeypatch.setattr(deepgemm, "_quant_weight", lambda *args, **kwargs: None)
+    monkeypatch.setattr(deepgemm, "cast_rows_to_fp8", lambda x, src, width: (x, None))
     return deepgemm._deepgemm_forward(
-        torch.zeros(T, K), torch.zeros(E, K, N), torch.tensor([10, 20, 30, T]), "mxfp8", False
+        torch.zeros(T, K), torch.zeros(E, K, N), _layout([10, 20, 30, T]), "mxfp8", False
     )
 
 
@@ -185,7 +206,7 @@ def test_a_direct_call_without_offs_raises(native):
     """The kernel's ``m_indices`` are built from the group ends; ``F.grouped_mm`` alone can run without them."""
     x, w, _ = _operands(8, 64, 64)
     with pytest.raises(ValueError, match="needs offs"):
-        expert_gemm(x, w, quant_format="mxfp8")
+        expert_gemm(x, w, quant_format="mxfp8", native=True)
 
 
 @pytest.mark.parametrize(
@@ -194,44 +215,37 @@ def test_a_direct_call_without_offs_raises(native):
     ids=["tiny", "wide-few-rows", "narrow-many-rows", "wide-many-rows"],
 )
 @pytest.mark.parametrize("quant_format", ["mxfp8", "mxfp4"])
-def test_opt_in_runs_every_shape_native(native, quant_format, rows_per_expert, n):
+def test_native_runs_every_shape_native(native, quant_format, rows_per_expert, n):
     """A gate on tokens per expert or width flips one expert's numerics between forwards as routing moves."""
     x, w, offs = _operands(rows_per_expert, 64, n)
-    out = expert_gemm(x, w, offs=offs, quant_format=quant_format)
+    out = expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True)
     assert out.shape == (x.shape[0], n)
     assert len(native.kernel_calls) == 1
     assert not native.simulated
 
 
-def test_the_flag_off_runs_simulated_at_a_shape_the_opt_in_would_take(native, monkeypatch):
-    monkeypatch.delenv("HALO_DEEPGEMM_NATIVE")
+def test_simulated_runs_at_a_shape_native_would_take(native):
     x, w, offs = _operands(1024, 64, 4096)
     expert_gemm(x, w, offs=offs, quant_format="mxfp8")
     assert not native.kernel_calls
     assert len(native.simulated) == 1
 
 
-def test_nvfp4_stays_simulated_under_the_flag_and_says_so(native, caplog):
-    """No kernel takes its e4m3 weight scales."""
-    deepgemm._warn_no_native_format_once.cache_clear()
+def test_nvfp4_has_no_native_kernel(native):
+    """No kernel takes its e4m3 weight scales; ``LowpSpec.validate`` refuses the config before this."""
     x, w, offs = _operands(8, 64, 64)
-    with caplog.at_level("WARNING", logger=deepgemm.__name__):
-        for _ in range(2):
-            expert_gemm(x, w, offs=offs, quant_format="nvfp4")
+    with pytest.raises(ValueError, match="nvfp4 is simulated-only"):
+        expert_gemm(x, w, offs=offs, quant_format="nvfp4", native=True)
     assert not native.kernel_calls
-    assert len(native.simulated) == 2
-    assert len([r for r in caplog.records if "no kernel for nvfp4" in r.getMessage()]) == 1
 
 
-def test_an_absent_package_leaves_the_opt_in_simulated_and_says_so(native, monkeypatch, caplog):
+def test_an_absent_package_raises_rather_than_run_simulated(native, monkeypatch):
     """The Hopper image ships no ``deep_gemm``."""
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
-    deepgemm._warn_absent_once.cache_clear()
     x, w, offs = _operands(8, 64, 64)
-    with caplog.at_level("WARNING", logger=deepgemm.__name__):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp8")
-    assert len(native.simulated) == 1
-    assert [r for r in caplog.records if "deep_gemm package is not importable" in r.getMessage()]
+    with pytest.raises(ImportError, match="deep_gemm"):
+        expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
+    assert not native.simulated
 
 
 @pytest.mark.parametrize("quant_format", ["mxfp8", "mxfp4"])
@@ -245,7 +259,7 @@ def test_a_kernel_rejection_raises_naming_the_shape(native, quant_format):
     native.kernels.m_grouped_fp8_fp4_gemm_nt_contiguous = reject
     x, w, offs = _operands(8, 64, 32)
     with pytest.raises(RuntimeError, match=rf"{quant_format} grouped GEMM on M=256 N=32 K=64 E=2: narrow N"):
-        expert_gemm(x, w, offs=offs, quant_format=quant_format)
+        expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True)
     assert not native.simulated
 
 
@@ -255,7 +269,7 @@ def test_the_4bit_route_casts_mxfp4_and_not_nvfp4(real_casts):
     experts, k, n = 2, 2880, 64
     w = _spread_weight(experts, k, n)
     x, _, offs = _operands(8, k, n)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp4")
+    expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True)
 
     assert len(real_casts.kernel_calls) == 1
     call = real_casts.kernel_calls[0]
@@ -281,7 +295,7 @@ def test_the_4bit_route_casts_mxfp4_and_not_nvfp4(real_casts):
 def test_the_8bit_route_keeps_128_by_128_weight_blocks(real_casts):
     x, _, offs = _operands(8, 256, 256)
     w = _spread_weight(2, 256, 256)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8")
+    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
     data, scales = real_casts.kernel_calls[0]["b"]
     assert data.dtype == torch.float8_e4m3fn
     assert scales.shape == (2, 2, 2), "one scale per 128x128 block of each expert's weight"
@@ -296,7 +310,7 @@ def test_a_non_finite_weight_raises_before_the_mxfp4_cast(native, poison, weight
     x, w, offs = _operands(8, 64, 64)
     w[1, 3, 5] = poison
     with pytest.raises(ValueError, match="Non-finite expert weight"):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp4", weight_cacheable=weight_cacheable)
+        expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True, weight_cacheable=weight_cacheable)
     assert not native.kernel_calls
 
 
@@ -314,7 +328,7 @@ def test_the_fp8_route_needs_no_guard_as_its_cast_keeps_nan(real_casts):
     w = _spread_weight(2, 128, 128)
     w[0, 0, 0] = float("nan")
     x, _, offs = _operands(8, 128, 128)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8")
+    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
     assert real_casts.kernel_calls[0]["b"][0].float().isnan().any()
 
 
@@ -327,7 +341,7 @@ def test_an_fsdp2_managed_weight_never_reads_the_cache(native, quant_format):
     def weights_the_kernel_saw(weight_cacheable: bool) -> tuple:
         native.kernel_calls.clear()
         for _ in range(2):
-            expert_gemm(x, w, offs=offs, quant_format=quant_format, weight_cacheable=weight_cacheable)
+            expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True, weight_cacheable=weight_cacheable)
         return tuple(call["b"] for call in native.kernel_calls)
 
     first, second = weights_the_kernel_saw(True)
@@ -454,6 +468,43 @@ def test_a_chunk_is_copied_out_and_freed_before_the_next_is_cast(native, monkeyp
         monkeypatch.setattr(native.utils, name, recording(getattr(native.utils, name)))
     deepgemm._quant_weight(torch.randn(4, _WEIGHT_K, 100, dtype=torch.bfloat16), fmt, _WEIGHT_K, cacheable=False)
     assert live_at_each_cast == [0, 0, 0, 0]
+
+
+def _fp8_backward(native, x, w, offs):
+    x.requires_grad_(True)
+    w.requires_grad_(True)
+    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True, fp8_backward=True).sum().backward()
+
+
+def test_the_fp8_dgrad_runs_on_the_forward_weight_operand(native):
+    """A second cast of the weight per backward would cost what the forward's cast costs."""
+    x, w, offs = _operands(8, 128, 256)
+    _fp8_backward(native, x, w, offs)
+    forward, dgrad = native.kernel_calls
+    assert [t.data_ptr() for t in dgrad["b"]] == [t.data_ptr() for t in forward["b"]]
+    assert torch.equal(dgrad["m_indices"], forward["m_indices"])
+    assert dgrad["a"][0].shape == (256, 256), "the gradient enters in the forward's padded row layout"
+    assert x.grad.shape == x.shape and w.grad.shape == w.shape and w.grad.dtype == w.dtype
+
+
+def test_the_fp8_wgrad_takes_128_experts_per_call_on_whole_token_tiles(native):
+    """The kernel's scale transform asserts at most 128 groups, and each group's tokens must fill whole 128-row tiles."""
+    experts = 130
+    x, w, offs = _operands(3, 64, 32, experts=experts)
+    _fp8_backward(native, x, w, offs)
+    first, second = native.wgrad_calls
+    assert (first["ks"], second["ks"]) == ([128] * 128, [128] * 2)
+    assert (first["a"][0].shape[0], second["a"][0].shape[0]) == (128 * 128, 2 * 128)
+    assert first["d"].shape == (128, 64, 32) and first["d"].dtype == w.dtype, "written in the weight's own layout"
+    assert first["c"].data_ptr() == first["d"].data_ptr(), "the kernel accumulates into its zeroed output"
+    assert first["recipe"] == (1, 1, 128)
+    assert w.grad.shape == (experts, 64, 32)
+
+
+def test_the_fp8_backward_needs_an_fp8_forward_weight(native):
+    x, w, offs = _operands(8, 64, 64)
+    with pytest.raises(ValueError, match="reuses the forward's fp8 weight"):
+        expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True, fp8_backward=True)
 
 
 if __name__ == "__main__":

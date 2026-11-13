@@ -12,7 +12,7 @@ _BPP = 128
 
 
 @triton.jit
-def _mul_rn(a, b):
+def mul_rn(a, b):
     """IEEE fp32 multiply with subnormals preserved. Triton compiles arithmetic/libdevice with
     flush-to-zero; PyTorch's CUDA kernels don't, so the scaling path must be explicit PTX."""
     return tl.inline_asm_elementwise(
@@ -47,10 +47,10 @@ def _mxfp8_fake_quant_kernel(
     se = tl.minimum(tl.maximum(se, -127.0), 127.0)
     se_i = se.to(tl.int32)
 
-    v = _mul_rn(x, _pow2(-se_i)[:, None])
+    v = mul_rn(x, _pow2(-se_i)[:, None])
     v = tl.minimum(tl.maximum(v, -FMAX), FMAX)
     q = v.to(tl.float8e4nv).to(tl.float32)
-    out = _mul_rn(q, _pow2(se_i)[:, None])
+    out = mul_rn(q, _pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 

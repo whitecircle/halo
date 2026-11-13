@@ -18,6 +18,7 @@ from halo.distributed.expert_parallel import config as ep_config_module
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.moe_layer import layer as layer_module
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -146,10 +147,37 @@ def test_a_misaligned_whole_axis_is_refused_without_the_expert_tp_remedy(family,
 
 
 @pytest.mark.parametrize("family", list(FAMILIES))
+def test_native_without_deep_gemm_is_refused_at_load(family, monkeypatch):
+    """The Hopper image ships no ``deep_gemm``; a simulated run in its place would train other numerics silently."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    model = _Model(_layer(family, ALIGNED_M, grouped=True))
+    with pytest.raises(RuntimeError, match="needs the deep_gemm package"):
+        apply_lowp_compute(
+            model, LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False), expert_weight_cacheable=False
+        )
+    assert not model.layers[0].mlp._lowp_native
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
+@pytest.mark.parametrize("backward", ["bf16", "fp8"])
+def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatch):
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (object(), object()))
+    model = _Model(_layer(family, ALIGNED_M, grouped=True))
+    lowp = LowpSpec(precision="fp8", backend="native", backward_precision=backward, apply_dense_mlp=False)
+    assert apply_lowp_compute(model, lowp, expert_weight_cacheable=False)["moe_layers"] == 1
+    layer = model.layers[0].mlp
+    assert (layer._lowp_quant_format, layer._lowp_native, layer._lowp_fp8_backward) == (
+        "mxfp8",
+        True,
+        backward == "fp8",
+    )
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
 def test_the_refusal_guards_a_forward_that_fails(family):
     """The premise: past the load, the first grouped forward fails inside the quantizer."""
     layer = _layer(family, MISALIGNED_M, grouped=True)
-    assert layer.set_lowp_compute("mxfp8", weight_cacheable=False)
+    assert layer.set_lowp_compute(LowpSpec(precision="fp8"), weight_cacheable=False)
     with pytest.raises(ValueError, match="not divisible by block_size 32"):
         _run_experts(layer)
 

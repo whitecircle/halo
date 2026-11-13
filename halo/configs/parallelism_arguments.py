@@ -8,7 +8,7 @@ from halo.config_validation import ValidatedConfig, present, require_int
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
-from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
+from halo.kernels.lowp.spec import LowpBackend, LowpBackwardPrecision, LowpPrecision, LowpSpec
 
 if TYPE_CHECKING:
     from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -101,10 +101,25 @@ class ParallelismArguments(ValidatedConfig):
     lowp_precision: LowpPrecision = field(
         default=LowpSpec.precision,
         metadata={
-            "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
-            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only; "
-            "Halo's paths measured slower than bf16. "
+            "help": "Low-precision forward GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
+            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only. "
             "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
+        },
+    )
+    lowp_backend: LowpBackend = field(
+        default=LowpSpec.backend,
+        metadata={
+            "help": "'simulated' (the block-scaled fake-quant QAT oracle, any GPU) or 'native' (the MoE experts on "
+            "DeepGEMM's fp8 kernels: FP8 x FP8 for 'fp8', FP8 activations x MXFP4 weights for 'mxfp4'; Blackwell "
+            "image, lowp_apply_dense_mlp false). "
+            "See agent-docs/optimization/low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path."
+        },
+    )
+    lowp_backward_precision: LowpBackwardPrecision = field(
+        default=LowpSpec.backward_precision,
+        metadata={
+            "help": "Precision of the expert backward GEMMs (dgrad and wgrad): 'bf16' or 'fp8' (e4m3, 1x128 "
+            "gradient tiles; lowp_backend 'native' only)."
         },
     )
     lowp_apply_dense_mlp: bool = field(
@@ -116,11 +131,7 @@ class ParallelismArguments(ValidatedConfig):
     )
     lowp_apply_moe_experts: bool = field(
         default=LowpSpec.apply_moe_experts,
-        metadata={
-            "help": "Apply lowp_precision to MoE expert grouped GEMMs; false keeps the experts in bf16. DeepGEMM's "
-            "native kernel is opt-in through HALO_DEEPGEMM_NATIVE=1 and never auto-routed. "
-            "See agent-docs/optimization/low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path."
-        },
+        metadata={"help": "Apply lowp_precision to MoE expert grouped GEMMs; false keeps the experts in bf16."},
     )
     lowp_keep_first_blocks: int = field(
         default=LowpSpec.keep_first_blocks,

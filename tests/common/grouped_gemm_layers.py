@@ -17,6 +17,7 @@ from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.ep_reference import dispatched_receive_counts
 from tests.common.ep_stubs import stubbed_rank_ep_layer
@@ -71,7 +72,7 @@ def gemm_layer(family: str, layout: str, variant: str, device: torch.device | st
         layer_cls, block.to(torch.bfloat16), world_size, ep_size, 0, grouped=True, **GEMM_VARIANTS[variant]
     ).to(device)
     if variant == "mxfp8":
-        layer.set_lowp_compute("mxfp8", weight_cacheable=True)
+        layer.set_lowp_compute(LowpSpec(precision="fp8"), weight_cacheable=True)
     return layer
 
 

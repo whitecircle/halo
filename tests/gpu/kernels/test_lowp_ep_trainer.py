@@ -43,7 +43,10 @@ LOSS_RTOL = 1e-3
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--precision", choices=tuple(LOWP_RECIPES), required=True)
-parser.add_argument("--native", action="store_true", help="Train with HALO_DEEPGEMM_NATIVE=1")
+parser.add_argument("--native", action="store_true", help="Train with lowp_backend: native")
+parser.add_argument(
+    "--backward", choices=("bf16", "fp8"), default="bf16", help="lowp_backward_precision under --native"
+)
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -104,10 +107,10 @@ def _count_calls(module, name: str) -> list[int]:
 
 
 def _train(
-    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current
+    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None
 ) -> tuple[list[float], _ExpertVersions, bool]:
     """The run's losses, the expert version counters and weight-cache checks it saw, and whether AdamWBF16 stepped it."""
-    pc = ParallelismConfig(ep_size=2, lowp=LowpSpec(precision=ARGS.precision))
+    pc = ParallelismConfig(ep_size=2, lowp=lowp or LowpSpec(precision=ARGS.precision))
     model, _ = load_distributed_model(
         checkpoint, pc, torch.bfloat16, trust_remote_code=False, attn_implementation="eager", use_liger_kernel=False
     )
@@ -185,28 +188,39 @@ def _run_simulated(ctx, checkpoint: str, tokenizer) -> dict:
 
 
 def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
-    available = deepgemm.deepgemm_available()
-    native_calls = _count_calls(deepgemm, "_deepgemm_forward")
-    simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
-    os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
-    entry_is_current = _native_entry_is_current if available else _simulated_entry_is_current
-    losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, os.path.join(ctx.output_dir, "native"), entry_is_current
+    lowp = LowpSpec(
+        precision=ARGS.precision, backend="native", backward_precision=ARGS.backward, apply_dense_mlp=False
     )
-    del os.environ["HALO_DEEPGEMM_NATIVE"]
+    output_dir = os.path.join(ctx.output_dir, f"native_{ARGS.backward}")
+    if not deepgemm.deepgemm_available():
+        try:
+            _train(ctx, checkpoint, tokenizer, output_dir, None, lowp)
+        except RuntimeError as exc:
+            refused = "needs the deep_gemm package" in str(exc)
+        else:
+            refused = False
+        log(f"  {ARGS.precision} native without deep_gemm: refused at load={refused}")
+        return {"checks": {"refused_without_deep_gemm": world_all(refused)}, "metrics": {}}
+
+    native_calls = _count_calls(deepgemm, "_deepgemm_forward")
+    wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
+    simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
+    losses, versions, adamw_bf16 = _train(ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp)
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
-    took_the_kernel = native_calls[0] > 0 and simulated_calls[0] == 0
-    stayed_simulated = native_calls[0] == 0 and simulated_calls[0] > 0
-    checks["one_route_for_the_whole_run"] = world_all(took_the_kernel if available else stayed_simulated)
+    checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
+    checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > 0) == (ARGS.backward == "fp8"))
     log(
-        f"  {ARGS.precision} native (available={available}): {losses}; {native_calls[0]} kernel, {simulated_calls[0]} simulated"
+        f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "
+        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated"
     )
-    return {"checks": checks, "metrics": {"native_calls": native_calls[0], "simulated_calls": simulated_calls[0]}}
+    return {"checks": checks, "metrics": {"native_calls": native_calls[0], "fp8_wgrad_calls": wgrad_calls[0]}}
 
 
-@gpu_test_main(exact_world_size=2, prefix=f"lowp_ep_trainer_{ARGS.precision}{'_native' if ARGS.native else ''}")
+@gpu_test_main(
+    exact_world_size=2, prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}"
+)
 def run(ctx):
     torch.cuda.set_device(ctx.device)
     pin_deterministic_ep_dispatch()

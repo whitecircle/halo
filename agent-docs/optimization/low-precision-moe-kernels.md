@@ -12,7 +12,7 @@ Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp
 |------|-----------|-------|-----------|
 | **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | Baseline | Default; all production training |
 | **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Whole step 0.10–0.45× bf16 (fp8, mxfp4) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
-| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Whole step 0.37–0.54× bf16 | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
+| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Whole step 0.37–0.54× bf16 (fp8 forward, bf16 backward) | `lowp_backend: native`; never auto-selected |
 
 The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores its native path against; the EP layers, the dense linear and the export tool all read it.
 
@@ -60,7 +60,7 @@ Forward time, bf16 ÷ adapter fp8, at 8 local experts on uniform routing, from t
 | 4096 · 16384 | — | — | — | — | 0.85× | 0.93× | 1.02× |
 | 2880 · 2880 (gpt-oss) | 0.15× | 0.14× | 0.17× | 0.18× | 0.20× | — | — |
 
-These ratios measure Halo's adapter: it casts with DeepGEMM's Python utilities, passes float32 scales (a transform kernel per call) and copies rows in Python loops.
+These ratios measure Halo's adapter: it casts with DeepGEMM's Python utilities and passes float32 scales (a transform kernel per call).
 
 The adapter clears the bar only at K4096 N16384, wider than the three models above: forward 1.05× at 16384 rows per expert on skewed routing, forward with both gradients 1.03–1.08× at 8192. At gpt-oss-20b ep8 b4's own shape its forward reads 0.24×.
 
@@ -95,19 +95,19 @@ The simulated path is a convergence-validation tool — run a few hundred steps 
 
 ## DeepGEMM: the native fp8/fp4 path
 
-Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). The cost sits around the kernel: at 256 rows per expert and K=N=2880 the adapter's forward takes 520 µs, the kernel 73 µs and the activation cast 180 µs.
+Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). The activation, gradient and FP8 weight casts are Triton kernels (`halo/kernels/lowp/deepgemm_cast_triton.py`), bitwise DeepGEMM's reference casts: the token casts read through the 128-row expert layout, so no padded bf16 copy is built, and the weight cast reads the `[E, K, N]` bank in place (0.52 ms for 16 experts at K=N=2880, 4.6× the eager cast on a DeepSeek-V3 bank). One grouped GEMM's forward and both gradients at K=N=2880 and 16 local experts (`tests/gpu/profiling/benchmark_lowp_kernels.py`, one B300, weight cast cached) run at 0.91× bf16 at 4,096 rows per expert with the bf16 backward and 0.85× with the fp8 one, and at 1.02× and 1.06× at 16,384, with the weight cast cached.
 
-It is never auto-selected. With `HALO_DEEPGEMM_NATIVE=1`, every grouped expert GEMM runs native, and a shape the kernel rejects raises.
+It is never auto-selected. With `lowp_backend: native`, every grouped expert GEMM runs native, and a shape the kernel rejects raises. Dense MLP projections have no native kernel, so the config must set `lowp_apply_dense_mlp: false`.
 
-`fp8` and `mxfp4` have a native path; `fp4` (nvfp4) stays simulated, with a one-time warning under the flag. What it gives, opted in:
+`fp8` and `mxfp4` have a native path; `fp4` (nvfp4) has none and is refused at config time. What it gives:
 
 - **fp8** — DeepGEMM's fp8 grouped kernel, DeepSeek's UE8M0 recipe: 1×128 groups for the activation, 128×128 blocks for the weight (forward rel ≈ 0.038 vs bf16).
 - **mxfp4** — FP8 activation (1×128) × MXFP4 weight (1×32, UE8M0) (forward rel ≈ 0.12 vs bf16). Simulated `mxfp4` is 4-bit on both operands, so the two backends are different numerics. The adapter zero-pads K to ÷256 (K=2880 → 3072; matmul unchanged).
-- **backward is always bf16** (Wgrad-in-HP via `F.grouped_mm`, measured bf16-exact); the master dtype (bf16 or fp32) is preserved.
+- **backward** — bf16 by default (`F.grouped_mm`, bf16-exact). `lowp_backward_precision: fp8` (with `fp8`) runs both gradients on DeepGEMM: dgrad on the forward's 128×128 FP8 weight (`m_grouped_fp8_gemm_nn_contiguous`, no second cast) over 1×128 gradient tiles, wgrad on 128×1 token tiles of the gradient and the activation (`k_grouped_fp8_gemm_tn_contiguous`, fp32 accumulation, at most 128 experts per call). Each gradient lands within rel ≈ 0.038 of bf16. The master dtype (bf16 or fp32) is preserved.
 
-    DeepGEMM ships fp8 weight-gradient kernels (`k_grouped_fp8_gemm_*`) but the adapter keeps the backward in bf16: the 4-bit-training literature finds gradients are the precision-sensitive path (NVFP4 applies stochastic rounding to gradients only, [arXiv 2509.25149](https://arxiv.org/abs/2509.25149)).
+    Gradients are the precision-sensitive path in the low-bit training literature (NVFP4 applies stochastic rounding to gradients only, [arXiv 2509.25149](https://arxiv.org/abs/2509.25149)), so the fp8 backward is opt-in. Both kernels take e4m3 only; DeepGEMM has no e5m2 operand.
 
-The native path requires the `deep_gemm` wheel, built into the **Blackwell** image only (its kernels are the SM100 block-scaled grouped ones). On Hopper `HALO_DEEPGEMM_NATIVE=1` cannot be honored; `use_deepgemm` says so once and the simulated path runs. DeepGEMM officially targets SM90 (Hopper) and SM100 (B200/GB200); on **B300 (sm_103a)** it runs through JIT sm_100f forward-compat (no sm_103-specific path).
+The native path requires the `deep_gemm` wheel, built into the **Blackwell** image only (its kernels are the SM100 block-scaled grouped ones). On Hopper `lowp_backend: native` is refused at load. DeepGEMM officially targets SM90 (Hopper) and SM100 (B200/GB200); on **B300 (sm_103a)** it runs through JIT sm_100f forward-compat (no sm_103-specific path).
 
 ## Formats — MX vs NV
 
@@ -198,9 +198,15 @@ lowp_apply_dense_mlp: true     # convert dense MLP gate/up/down (attention/embed
 lowp_apply_moe_experts: true   # low precision on MoE expert grouped GEMMs
 lowp_keep_first_blocks: 0      # keep the first/last N blocks bf16 (NVFP4 recipe — precision-sensitive ends)
 lowp_keep_last_blocks: 0
+
+# Native DeepGEMM on the MoE experts (Blackwell image), fp8 forward and backward:
+lowp_precision: fp8            # or mxfp4 (FP8 activations x MXFP4 weights)
+lowp_backend: native
+lowp_backward_precision: fp8   # bf16 (default) keeps the backward on F.grouped_mm
+lowp_apply_dense_mlp: false
 ```
 
-Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1`. `HALO_LOWP_WEIGHT_CACHE=0` disables the simulated path's per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
+Low precision is the fake-quant oracle by default. `HALO_LOWP_WEIGHT_CACHE=0` disables the simulated path's per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
 
 Rejected at config/load time, loudly: any trainer but SFT; a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing; and pipeline parallelism, whose stages re-base block indices so the `lowp_keep_*` windows would land on each stage's own ends ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
 

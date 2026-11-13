@@ -41,6 +41,20 @@ def test_every_peak_flops_key_is_a_peak_table_precision():
         (LowpSpec(precision="int4"), "lowp_precision must be one of 'bf16', 'fp8', 'fp4', 'mxfp4'"),
         (LowpSpec(keep_last_blocks=-1), "lowp_keep_first_blocks / lowp_keep_last_blocks must be >= 0"),
         (LowpSpec(precision="fp8", apply_dense_mlp=False, apply_moe_experts=False), "would apply to nothing"),
+        (LowpSpec(backend="deepgemm"), "lowp_backend must be one of 'simulated', 'native'"),
+        (LowpSpec(backward_precision="e5m2"), "lowp_backward_precision must be one of 'bf16', 'fp8'"),
+        (LowpSpec(precision="fp4", backend="native", apply_dense_mlp=False), "no kernel for lowp_precision='fp4'"),
+        (LowpSpec(precision="fp8", backend="native"), "set lowp_apply_dense_mlp: false"),
+        (
+            LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False, apply_moe_experts=False),
+            "set lowp_apply_dense_mlp: false and keep lowp_apply_moe_experts: true",
+        ),
+        (LowpSpec(precision="fp8", backward_precision="fp8"), "needs lowp_backend='native'"),
+        (
+            LowpSpec(precision="mxfp4", backend="native", backward_precision="fp8", apply_dense_mlp=False),
+            "reuses the forward's FP8 weight",
+        ),
+        (LowpSpec(backward_precision="fp8"), "reuses the forward's FP8 weight"),
     ],
 )
 def test_validate_refuses(spec, message):
@@ -53,12 +67,22 @@ def test_validate_accepts_an_off_spec_with_shape_fields_set():
     LowpSpec(apply_dense_mlp=False, apply_moe_experts=False).validate()
 
 
+def test_native_formats_are_the_deepgemm_formats():
+    assert DEEPGEMM_FORMATS == ("mxfp8", "mxfp4")
+
+
+def test_a_bf16_spec_is_never_native():
+    """``backend`` alone turns nothing on, so a default-precision run with it set stays bf16."""
+    assert not LowpSpec(backend="native").native
+
+
 def test_non_default_shape_fields_name_the_yaml_keys():
     assert LowpSpec(precision="fp8").non_default_shape_fields() == []
     assert LowpSpec(apply_moe_experts=False, keep_first_blocks=2).non_default_shape_fields() == [
         "lowp_apply_moe_experts",
         "lowp_keep_first_blocks",
     ]
+    assert LowpSpec(backend="native").non_default_shape_fields() == ["lowp_backend"], "refused outside SFT"
 
 
 if __name__ == "__main__":

@@ -19,7 +19,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from halo.env import env_flag
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.grouped_mm import grouped_mm, grouped_mm_grads
 from halo.kernels.lowp import deepgemm
@@ -129,8 +128,10 @@ def _simulated(quant_format: str, *, cacheable: bool = True) -> Callable:
     )
 
 
-def _adapter(quant_format: str) -> Callable:
-    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(x, w, offs=ops.offs, quant_format=quant_format)
+def _adapter(quant_format: str, *, fp8_backward: bool = False) -> Callable:
+    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(
+        x, w, offs=ops.offs, quant_format=quant_format, fp8_backward=fp8_backward
+    )
 
 
 def _torchao():
@@ -317,6 +318,7 @@ GROUPED_ARMS: dict[str, Callable[[Operands], Callable]] = {
     "simulated_mxfp8_uncached_forward": lambda ops: _no_grad_forward(_simulated("mxfp8", cacheable=False)(ops), ops),
     **_forward_and_step("adapter_mxfp8", _adapter("mxfp8")),
     **_forward_and_step("adapter_mxfp4", _adapter("mxfp4")),
+    "adapter_mxfp8_fp8_backward_step": lambda ops: _with_backward(_adapter("mxfp8", fp8_backward=True)(ops), ops),
     **_forward_and_step("ao_mxfp8", _ao_mxfp8(wgrad_with_hp=False)),
     "ao_mxfp8_wgrad_with_hp_step": lambda ops: _with_backward(_ao_mxfp8(wgrad_with_hp=True)(ops), ops),
     "torch_scaled_mxfp4_forward": _torch_scaled(
@@ -366,8 +368,6 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10, help="Untimed iterations per arm, past any JIT compile")
     parser.add_argument("--output", required=True, help="JSON-lines file, appended to as each arm finishes")
     args = parser.parse_args()
-    if env_flag("HALO_DEEPGEMM_NATIVE"):
-        parser.error("HALO_DEEPGEMM_NATIVE=1 would run the simulated arms native; the adapter arms need no flag")
 
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)

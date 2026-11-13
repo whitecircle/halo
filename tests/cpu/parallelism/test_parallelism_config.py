@@ -380,14 +380,24 @@ def test_guard_lowp_negative_keep_blocks():
 
 
 def test_lowp_valid_combos_accepted():
-    # No backend knob; the native DeepGEMM kernel is opt-in via HALO_DEEPGEMM_NATIVE.
     for lowp in (
         LowpSpec(precision="fp8"),
         LowpSpec(precision="fp4"),
         LowpSpec(precision="fp8", apply_moe_experts=False),
+        LowpSpec(precision="mxfp4", backend="native", apply_dense_mlp=False),
+        LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False),
     ):
         cfg = create_config(world_size=8, gpus_per_node=8, lowp=lowp)
-        assert cfg.lowp.precision in ("fp8", "fp4")
+        assert cfg.lowp == lowp
+
+
+def test_guard_lowp_native_fp8_backward_on_the_simulated_backend():
+    _expect_reject(
+        "needs lowp_backend='native'",
+        lowp=LowpSpec(precision="fp8", backward_precision="fp8"),
+        world_size=8,
+        gpus_per_node=8,
+    )
 
 
 def test_mode_string_ep():

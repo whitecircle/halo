@@ -102,7 +102,7 @@ Compute–comm overlap has little left to hide, since dispatch is 9–13% of the
 
 ## Low precision
 
-This is the bf16 path, the MoE production default. Halo's fp8/fp4 paths and the opt-in DeepGEMM adapter (`HALO_DEEPGEMM_NATIVE=1`) measured slower than bf16; see [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`halo/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
+This is the bf16 path, the MoE production default. Halo's fp8/fp4 paths and the DeepGEMM adapter (`lowp_backend: native`) measured slower than bf16; see [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`halo/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
 
 ## Requirements and compatibility
 

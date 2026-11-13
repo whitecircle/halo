@@ -82,12 +82,21 @@ def _config_kwargs_built_by_builder() -> set[str]:
     return keys | {axis.size_field for axis in AXES} | _SAME_NAME_FIELDS
 
 
+# The settings a knob is valid only beside: the native backend leaves dense projections to nothing, and an fp8 backward
+# runs on it alone.
+_LOWP_COMPANIONS = {
+    "lowp_backend": {"lowp_apply_dense_mlp": False},
+    "lowp_backward_precision": {"lowp_backend": "native", "lowp_apply_dense_mlp": False},
+}
+
+
 @pytest.mark.parametrize(("arg_field", "spec_field"), sorted(_LOWP_ARG_FIELDS.items()))
 def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
     """A ``lowp_*`` knob set away from its default reaches ``ParallelismConfig.lowp`` on the SFT path."""
     requested = _non_default_value(arg_field)
     # Under an enabled mode, so a shape knob is not the bf16 no-op.
-    dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
+    companions = _LOWP_COMPANIONS.get(arg_field, {})
+    dist_args = ParallelismArguments(**{"lowp_precision": "fp8", **companions, arg_field: requested})
 
     config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
 

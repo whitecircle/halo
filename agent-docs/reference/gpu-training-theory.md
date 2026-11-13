@@ -269,7 +269,7 @@ Compute rows per expert for your shape ([Grouped GEMM](../optimization/grouped-g
 
 An isolated block-scaled nvfp4 grouped kernel does beat bf16 — but only with the group layout known ahead of time. MoE routing is dynamic, so each group's size and offset change every step and the fixed-layout CuTe grouped API has to rebuild its per-expert pointer arrays and swizzle metadata on the CPU every call, leaving the GPU idle behind a host wall.
 
-DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it runs whole steps at 0.37–0.54× bf16 at ep8; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it runs whole steps at 0.37–0.54× bf16 at ep8; it casts with Python utilities. It stays opt-in (`lowp_backend: native`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
 
 ### bf16 numerics (what stays fp32)
 

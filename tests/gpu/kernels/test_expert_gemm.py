@@ -1,9 +1,8 @@
 #!/usr/bin/env python
 """Grouped-GEMM dispatch: bf16 matches a per-expert loop, every format takes the simulated fake-quant path by default,
-and ``HALO_DEEPGEMM_NATIVE=1`` takes mxfp8 / mxfp4 native at every shape."""
+and ``native=True`` takes mxfp8 / mxfp4 native at every shape."""
 
-import os
-
+import pytest
 import torch
 
 from halo.kernels.expert_gemm import expert_gemm
@@ -95,17 +94,17 @@ def test_dispatch_contract():
             out = expert_gemm(x, w, offs=offs, quant_format=prec)
             assert out.shape == (E * M, N), f"{prec} wrong shape"
         assert not native_calls, f"the default ran native: {native_calls}"
-
-        os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
-        for prec in ("mxfp8", "mxfp4", "nvfp4"):
-            out = expert_gemm(x, w, offs=offs, quant_format=prec)
-            assert out.shape == (E * M, N), f"opted-in {prec} wrong shape"
+        if deepgemm_available():
+            for prec in ("mxfp8", "mxfp4"):
+                out = expert_gemm(x, w, offs=offs, quant_format=prec, native=True)
+                assert out.shape == (E * M, N), f"native {prec} wrong shape"
+            with pytest.raises(ValueError, match="nvfp4 is simulated-only"):
+                expert_gemm(x, w, offs=offs, quant_format="nvfp4", native=True)
     finally:
-        os.environ.pop("HALO_DEEPGEMM_NATIVE", None)
         deepgemm._deepgemm_forward = real_forward
     expected = ["mxfp8", "mxfp4"] if deepgemm_available() else []
-    assert native_calls == expected, f"opted in, native ran {native_calls}, expected {expected}"
-    print(f"  dispatch contract PASS (deepgemm_available={deepgemm_available()}; opted-in native {native_calls})")
+    assert native_calls == expected, f"native ran {native_calls}, expected {expected}"
+    print(f"  dispatch contract PASS (deepgemm_available={deepgemm_available()}; native {native_calls})")
 
 
 @gpu_test_main(exact_world_size=1, prefix="grouped_gemm", partial_state=False)

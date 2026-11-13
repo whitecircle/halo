@@ -101,7 +101,7 @@ docker run -d --rm --name <job> \
 | `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
 | `flash-linear-attention` 0.4.2 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
-| DeepGEMM (commit `559d79f`, native fp8/fp4 grouped MoE GEMM behind `HALO_DEEPGEMM_NATIVE=1`; JIT-compiles at runtime) | No | Yes |
+| DeepGEMM (commit `559d79f`, native fp8/fp4 grouped MoE GEMM behind `lowp_backend: native`; JIT-compiles at runtime) | No | Yes |
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |
 | uv 0.10.x, AWS CLI v2, bubblewrap (Claude Code via `INSTALL_CLAUDE_CODE=1`, off by default) | Yes | Yes |
 
