@@ -282,7 +282,14 @@ replay and the family's shared expert stay on Halo's path.
 - **Families** declare it (`SUPPORTS_MOK`): Qwen3 MoE and Qwen3.5/3.6 MoE. Any other EP layer is refused at load, as are
   experts whose hidden or intermediate size is not a multiple of 256 or whose activation is not SiLU.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
-  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, and a run that declares no token budget.
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, a run that declares no token budget, and any low precision but
+  MoK's MXFP8 recipe below.
+- **MXFP8.** `lowp_precision: fp8`, `lowp_backend: native`, `lowp_backward_precision: fp8` (and
+  `lowp_apply_dense_mlp: false`) run MoK's MXFP8 kernels for the forward, dgrad and wgrad: e4m3 with an e8m0 scale per
+  32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. The expert banks are cast once
+  per optimizer step where Halo owns them (`ep_size > 1`) and every call where FSDP2 does. Any other low-precision
+  setting is refused. Measured as above: 5.72 ms at 16,384 tokens per GPU (0.98× MoK bf16 on these shapes; 1.39× on
+  DeepSeek-V3's, 57.3 against 79.4 ms at 32,768).
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to `per_device_train_batch_size × max_length` rounded up to 256 (at least 512). Padding rows carry zero router weight
   and move no output or gradient; a forward past the budget raises.

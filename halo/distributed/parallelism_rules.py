@@ -442,8 +442,13 @@ def _reject_mok(pc: ParallelismConfig) -> None:
         refusals.append("expert LoRA adapters, which MoK's kernels do not apply")
     if pc.ep_fp32_experts:
         refusals.append("fp32_experts, as MoK's kernels take bf16 expert weights")
-    if pc.lowp.enabled:
-        refusals.append(f"lowp_precision={pc.lowp.precision!r}, as MoK runs its own kernels on the experts")
+    lowp = pc.lowp
+    if lowp.enabled and (lowp.precision, lowp.backend, lowp.backward_precision) != ("fp8", "native", "fp8"):
+        refusals.append(
+            f"lowp_precision={lowp.precision!r} lowp_backend={lowp.backend!r} lowp_backward_precision="
+            f"{lowp.backward_precision!r}, as MoK's only low-precision recipe is MXFP8 forward and backward "
+            f"(lowp_precision fp8, lowp_backend native, lowp_backward_precision fp8)"
+        )
     if pc.ep_rows_per_device <= 0 or pc.ep_declared_max_length <= 0:
         refusals.append("no declared token budget (per_device_train_batch_size and max_length) to size its buffers")
     if refusals:

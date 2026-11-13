@@ -13,6 +13,7 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
+from halo.kernels.lowp.deepgemm import deepgemm_available
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
@@ -43,6 +44,7 @@ class EPExpertComputeMixin:
     _lowp_quant_format: QuantFormat | None
     _lowp_native: bool = False
     _lowp_fp8_backward: bool = False
+    _mok_backend: bool
     _lowp_weight_cacheable: bool
     _expert_lora_attrs: frozenset[str]
     _expert_adapters_enabled: bool
@@ -53,13 +55,19 @@ class EPExpertComputeMixin:
     _fused_glu_mul: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
 
     def set_lowp_compute(self, lowp: LowpSpec, *, weight_cacheable: bool) -> bool:
-        """Set this layer's expert-compute precision from ``lowp``; return whether it applies, False on the
-        per-expert loop, where the grouped kernels and their fake-quant never run."""
+        """Set this layer's expert-compute precision from ``lowp``; return whether it applies: False on the DeepEP
+        per-expert loop, where the grouped kernels and their fake-quant never run. Native compute needs ``deep_gemm``
+        unless MoK's own kernels run it."""
+        if lowp.native and not self._mok_backend and not deepgemm_available():
+            raise RuntimeError(
+                "lowp_backend='native' needs the deep_gemm package, built into the Blackwell image only (its kernels "
+                "are SM100 block-scaled). Run on that image, or set lowp_backend='simulated'."
+            )
         self._lowp_quant_format = LOWP_RECIPES[lowp.precision].quant_format
         self._lowp_native = lowp.native
         self._lowp_fp8_backward = lowp.backward_precision == "fp8"
         self._lowp_weight_cacheable = weight_cacheable
-        return self._use_grouped_mm
+        return self._use_grouped_mm or self._mok_backend
 
     def _resolve_activation(self, source: nn.Module, *, original_layer: nn.Module) -> None:
         """Set ``act_fn`` from ``source``, else by name off ``original_layer`` or its config, and latch the fused combine

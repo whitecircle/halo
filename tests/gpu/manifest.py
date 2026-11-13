@@ -1002,7 +1002,7 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_mok_backend.py": TestSpec(
         nproc=4,
         markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3"),
-        args_matrix=("--family qwen3", "--family qwen3_5"),
+        args_matrix=("--family qwen3", "--family qwen3_5", "--family qwen3 --mxfp8", "--family qwen3_5 --mxfp8"),
         timeout=900,
     ),
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(

@@ -352,6 +352,8 @@ class EPMoELayerBase(
                     capacity=self.ep_config.mok_token_capacity,
                     group=self.ep_config.dispatch_ep_group,
                     num_experts=self.num_experts,
+                    mxfp8=self._lowp_native,
+                    weight_cacheable=self._lowp_weight_cacheable,
                 )
 
         # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
