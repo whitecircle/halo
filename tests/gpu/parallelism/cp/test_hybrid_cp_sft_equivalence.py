@@ -24,7 +24,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.selection import flash_kernel, preferred_flash_impl
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir, world_mean

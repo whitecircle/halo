@@ -17,11 +17,11 @@ from halo.distributed.context_parallel.config import CPConfig, CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP, Qwen3_5UlyssesGatedDelta
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.models.unwrapping import find_peft_model, strip_cp_attention_level
+from halo.models.introspection.unwrapping import find_peft_model, strip_cp_attention_level
+from halo.trainers.construction.trainer_rules import reject_hybrid_cp_training
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.trainer_rules import reject_hybrid_cp_training
 from tests.common.equivalence.cp_equivalence import reference_flash_attn
 from tests.common.gloo import run_gloo_ranks
 from tests.common.hybrid_cp import (

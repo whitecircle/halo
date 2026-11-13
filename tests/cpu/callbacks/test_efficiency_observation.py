@@ -10,6 +10,7 @@ import torch
 
 from halo.callbacks import efficiency
 from halo.callbacks.efficiency import EfficiencyCallback
+from halo.diagnostics import phase_timers
 from halo.diagnostics.profiling import CudaMemoryGiB
 from tests.common.efficiency_observation import ObservedEfficiencyCallback
 from tests.common.parallelism import make_parallelism_config
@@ -37,7 +38,7 @@ class _Hardware:
 def hardware(monkeypatch):
     device = _Hardware()
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=device.perf_counter))
+    monkeypatch.setattr(phase_timers, "time", SimpleNamespace(perf_counter=device.perf_counter))
     monkeypatch.setattr(efficiency, "read_cuda_memory", device.read_memory)
     return device
 
