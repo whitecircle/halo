@@ -470,10 +470,10 @@ def test_a_chunk_is_copied_out_and_freed_before_the_next_is_cast(native, monkeyp
     assert live_at_each_cast == [0, 0, 0, 0]
 
 
-def _fp8_backward(native, x, w, offs):
+def _fp8_backward(native, x, w, offs, quant_format="mxfp8"):
     x.requires_grad_(True)
     w.requires_grad_(True)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True, fp8_backward=True).sum().backward()
+    expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True, fp8_backward=True).sum().backward()
 
 
 def test_the_fp8_dgrad_runs_on_the_forward_weight_operand(native):
@@ -501,10 +501,20 @@ def test_the_fp8_wgrad_takes_128_experts_per_call_on_whole_token_tiles(native):
     assert w.grad.shape == (experts, 64, 32)
 
 
-def test_the_fp8_backward_needs_an_fp8_forward_weight(native):
-    x, w, offs = _operands(8, 64, 64)
-    with pytest.raises(ValueError, match="reuses the forward's fp8 weight"):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True, fp8_backward=True)
+def test_the_mxfp4_dgrad_runs_on_an_fp8_block_cast_kept_beside_the_forward_cast(native):
+    """FP8 x FP4 issues at the FP8 rate, so an FP8 weight costs the dgrad nothing over a transposed FP4 cast and is the
+    finer of the two. Each format keeps its own cache entry, or every microbatch would evict the other's."""
+    x, w, offs = _operands(8, 256, 256)
+    w = nn.Parameter(_spread_weight(2, 256, 256))
+    for _ in range(2):
+        native.kernel_calls.clear()
+        _fp8_backward(native, x, w, offs, quant_format="mxfp4")
+        forward, dgrad = native.kernel_calls
+        assert forward["recipe_b"] == (1, 32) and forward["b"][0].shape == (2, 256, 128), "MXFP4, two e2m1 per byte"
+        assert dgrad["b"][0].shape == (2, 256, 256) and dgrad["b"][1].shape == (2, 2, 2), "FP8 in 128x128 blocks"
+        assert dgrad["b"] is deepgemm._weight_caches["mxfp8"].get(w, (w._version, "mxfp8"))
+        assert forward["b"] is deepgemm._weight_caches["mxfp4"].get(w, (w._version, "mxfp4"))
+    assert w.grad.shape == w.shape
 
 
 if __name__ == "__main__":

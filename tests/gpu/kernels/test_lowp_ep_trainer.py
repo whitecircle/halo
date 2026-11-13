@@ -61,7 +61,7 @@ def _simulated_entry_is_current(weight: torch.Tensor) -> bool | None:
 
 
 def _native_entry_is_current(weight: torch.Tensor) -> bool | None:
-    entry = deepgemm._weight_cache.get(weight, (weight._version, QUANT_FORMAT))
+    entry = deepgemm._weight_caches[QUANT_FORMAT].get(weight, (weight._version, QUANT_FORMAT))
     if entry is None:
         return None
     k_pad = entry[0].shape[-1] * 2 if QUANT_FORMAT == "mxfp4" else weight.shape[CONTRACTION_AXIS]

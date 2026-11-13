@@ -319,6 +319,7 @@ GROUPED_ARMS: dict[str, Callable[[Operands], Callable]] = {
     **_forward_and_step("adapter_mxfp8", _adapter("mxfp8")),
     **_forward_and_step("adapter_mxfp4", _adapter("mxfp4")),
     "adapter_mxfp8_fp8_backward_step": lambda ops: _with_backward(_adapter("mxfp8", fp8_backward=True)(ops), ops),
+    "adapter_mxfp4_fp8_backward_step": lambda ops: _with_backward(_adapter("mxfp4", fp8_backward=True)(ops), ops),
     **_forward_and_step("ao_mxfp8", _ao_mxfp8(wgrad_with_hp=False)),
     "ao_mxfp8_wgrad_with_hp_step": lambda ops: _with_backward(_ao_mxfp8(wgrad_with_hp=True)(ops), ops),
     "torch_scaled_mxfp4_forward": _torch_scaled(

@@ -7,6 +7,7 @@ both kernel checks vanish while the node exits 0. mxfp4 also exercises the K-not
 """
 
 import importlib
+import itertools
 import sys
 
 import torch
@@ -79,27 +80,29 @@ def test_deepgemm_forward_backward():
 
 
 def test_deepgemm_fp8_backward():
-    """Both gradients within fp8's band of the bf16 ones; the lower bound fails a silent bf16 backward."""
+    """Both gradients within fp8's band of the bf16 ones, for either forward weight format, as the MXFP4 forward's
+    dgrad runs on an FP8 weight too; the lower bound fails a silent bf16 backward."""
     torch.manual_seed(0)
     lo, hi = _FP8_GRAD_BAND
     # An fp32 master takes its gradient in fp32, which the kernel accumulates into directly.
-    for name, E, K, N, counts, w_dtype in [(*s, torch.bfloat16) for s in _SHAPES] + [(*_SHAPES[1], torch.float32)]:
+    cases = [(*s, torch.bfloat16) for s in _SHAPES] + [(*_SHAPES[1], torch.float32)]
+    for precision, (name, E, K, N, counts, w_dtype) in itertools.product(DEEPGEMM_FORMATS, cases):
         T = sum(counts)
         x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=w_dtype) * (K**-0.5)).requires_grad_(True)
         offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
         g = torch.randn(T, N, device=DEV, dtype=torch.bfloat16)
-        deepgemm_grouped_gemm(x, w, offs=offs, quant_format="mxfp8", fp8_backward=True).backward(g)
+        deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision, fp8_backward=True).backward(g)
         gx_ref = F.grouped_mm(g, w.detach().to(torch.bfloat16).transpose(-2, -1), offs=offs)
         gw_ref = F.grouped_mm(x.detach().transpose(-2, -1), g, offs=offs)
         assert w.grad.shape == w.shape and w.grad.dtype == w.dtype
         rels = {"grad_x": fro_rel_err(x.grad, gx_ref), "grad_w": fro_rel_err(w.grad, gw_ref)}
         for grad, rel in rels.items():
-            assert lo < rel < hi, f"fp8 {name}: {grad} rel-vs-bf16 {rel:.4f} outside band {lo}-{hi}"
+            assert lo < rel < hi, f"{precision} {name}: {grad} rel-vs-bf16 {rel:.4f} outside band {lo}-{hi}"
         empty = [e for e, c in enumerate(counts) if c == 0]
-        assert not w.grad[empty].any(), f"fp8 {name}: an expert routed no token got a weight gradient"
+        assert not w.grad[empty].any(), f"{precision} {name}: an expert routed no token got a weight gradient"
         print(
-            f"  fp8 backward {name:14s} {str(w_dtype)[6:]:8s} T={T:5d} grad_x {rels['grad_x']:.4f} grad_w {rels['grad_w']:.4f} — OK"
+            f"  {precision} fp8 backward {name:14s} {str(w_dtype)[6:]:8s} T={T:5d} grad_x {rels['grad_x']:.4f} grad_w {rels['grad_w']:.4f} — OK"
         )
 
 
@@ -122,7 +125,7 @@ def test_weight_cache_across_steps():
         for step in range(3):
             x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
             out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision)
-            served = deepgemm._weight_cache.get(w, (w._version, precision))
+            served = deepgemm._weight_caches[precision].get(w, (w._version, precision))
             assert served is not None, f"{precision} step {step}: the forward left no entry for this version"
             with torch.no_grad():
                 fresh = deepgemm._quant_weight(w, precision, K, cacheable=False)
