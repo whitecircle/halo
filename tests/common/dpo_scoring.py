@@ -2,7 +2,8 @@
 
 import json
 import math
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
+from copy import copy
 from types import MethodType
 
 import torch
@@ -190,6 +191,46 @@ def _local_snapshot(trainer, *, gradients: bool, host: bool = True) -> dict[str,
     return result
 
 
+@contextmanager
+def same_state_dpo_oracle(oracle, policy):
+    """Temporarily copy same-layout policy shards into the oracle; restore its weights/state and discard probe grads."""
+    if oracle.model is policy.model:
+        raise AssertionError("DPO same-state oracle requires two distinct model trajectories")
+    for trainer in (policy, oracle):
+        reshard_fsdp2_modules(trainer.model)
+    source = dict(policy.model.named_parameters())
+    target = dict(oracle.model.named_parameters())
+    if not source or source.keys() != target.keys():
+        raise AssertionError("DPO same-state oracle requires matching nonempty parameter names")
+    for name, parameter in target.items():
+        current, supplied = to_local(parameter), to_local(source[name])
+        if (
+            parameter.shape != source[name].shape
+            or current.shape != supplied.shape
+            or current.dtype != supplied.dtype
+            or current.device != supplied.device
+        ):
+            raise AssertionError(f"DPO same-state oracle requires matching parameter shards: {name}")
+    original = {name: to_local(parameter).detach().clone() for name, parameter in target.items()}
+    state = oracle.state
+    try:
+        with torch.no_grad():
+            for name, parameter in target.items():
+                to_local(parameter).copy_(to_local(source[name]))
+        # Sweep markers include TrainerState identity; the probe must not consume the real step's sync.
+        oracle.state = copy(state)
+        yield
+    finally:
+        try:
+            reshard_fsdp2_modules(oracle.model)
+            with torch.no_grad():
+                for name, parameter in oracle.model.named_parameters():
+                    to_local(parameter).copy_(original[name])
+        finally:
+            oracle.state = state
+            oracle.optimizer.zero_grad(set_to_none=True)
+
+
 def _batch(rank: int, device):
     rows = [
         {"prompt_ids": [2, 4 + rank], "chosen_ids": [6, 7, 8, 9, 1], "rejected_ids": [10, 1]},
@@ -288,45 +329,55 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
         bounded._finish_fsdp2_backward(bounded.model)
         got_norm = bounded._get_grad_norm(bounded.model)
         gradients = _local_snapshot(bounded, gradients=True)
-        replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
-        with replay as routes, full.compute_loss_context_manager():
-            want_loss = full.compute_loss(full.model, batch)
-        assert_dpo_loss_matches(got_loss, want_loss)
-        if ep:
-            assert (
-                picks
-                and routes
-                and all(route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes)
+        with same_state_dpo_oracle(full, bounded):
+            replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
+            with replay as routes, full.compute_loss_context_manager():
+                want_loss = full.compute_loss(full.model, batch)
+            assert_dpo_loss_matches(got_loss, want_loss)
+            if ep:
+                assert (
+                    picks
+                    and routes
+                    and all(
+                        route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes
+                    )
+                )
+            full.accelerator.backward(want_loss)
+            full._finish_fsdp2_backward(full.model)
+            want_norm = full._get_grad_norm(full.model)
+            expected_gradients = _local_snapshot(full, gradients=True)
+            if diagnosis:
+                report = diagnosis.report(gradients, expected_gradients)
+                report.update(
+                    rank=bounded.accelerator.process_index,
+                    bounded_loss=float(got_loss.detach()),
+                    full_loss=float(want_loss.detach()),
+                )
+                print(
+                    "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
+                    flush=True,
+                )
+            worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16, family=family)
+            torch.testing.assert_close(
+                torch.as_tensor(got_norm),
+                torch.as_tensor(want_norm),
+                atol=1e-8,
+                rtol=resolve_dpo_gradient_tolerance(family=family, bf16=bf16),
             )
-        full.accelerator.backward(want_loss)
-        full._finish_fsdp2_backward(full.model)
-        want_norm = full._get_grad_norm(full.model)
-        expected_gradients = _local_snapshot(full, gradients=True)
-        if diagnosis:
-            report = diagnosis.report(gradients, expected_gradients)
-            report.update(
-                rank=bounded.accelerator.process_index,
-                bounded_loss=float(got_loss.detach()),
-                full_loss=float(want_loss.detach()),
-            )
-            print(
-                "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
-                flush=True,
-            )
-        worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16, family=family)
     if ep:
         expert_ids = bounded._get_sharded_expert_param_ids()
         names = {name for name, parameter in bounded.model.named_parameters() if id(parameter) in expert_ids}
         assert names and any(gradients[name].count_nonzero() for name in names), (
             "no local expert gradient was exercised"
         )
-    torch.testing.assert_close(
-        torch.as_tensor(got_norm),
-        torch.as_tensor(want_norm),
-        atol=1e-8,
-        rtol=resolve_dpo_gradient_tolerance(family=family, bf16=bf16),
-    )
-    return got_loss, worst
+    with full.compute_loss_context_manager():
+        independent_loss = full.compute_loss(full.model, batch)
+    if not bool(independent_loss.isfinite().all()):
+        raise AssertionError("The independent full-head trajectory produced a nonfinite loss")
+    full.accelerator.backward(independent_loss)
+    full._finish_fsdp2_backward(full.model)
+    full._get_grad_norm(full.model)
+    return got_loss, worst, independent_loss
 
 
 def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
@@ -335,7 +386,8 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
     Native BF16 backward rounds dlogits before its GEMMs; the oracle does not.
     Gradient limits of 2.2% dense / 1.9% MoE give the measured 2.03% / 1.72% a small margin;
     each BF16-compute weight step adds only actual gradient disagreement and one storage quantum
-    to its inherited divergence. FP32 comparison bounds stay unchanged.
+    to its inherited divergence. Strict scorer parity uses identical current weights, while both
+    trajectories step independently; FP32 comparison bounds stay unchanged.
     """
     if family not in ("dense", "qwen3_moe") or dtype_name not in ("float32", "bfloat16"):
         raise ValueError("DPO scoring equivalence accepts dense/Qwen3-MoE and float32/bfloat16")
@@ -397,7 +449,7 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
             trainer.model.train()
             trainer.state.global_step = step
             trainer.optimizer.zero_grad(set_to_none=True)
-        got_loss, error = _compare_backward(
+        got_loss, error, independent_loss = _compare_backward(
             bounded, full, batch, family=family, bf16=bf16, diagnose=bf16 and step == 0
         )
         if step == 0:
@@ -438,8 +490,13 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
         if not bf16:
             for name, value in actual.items():
                 torch.testing.assert_close(value, expected[name], atol=2e-5, rtol=2e-4, msg=name)
-        checks[f"step{step + 1}_loss_all_gradients_norm_and_update_match"] = True
+        checks[f"step{step + 1}_same_state_loss_all_gradients_and_norm_match"] = True
+        checks[f"step{step + 1}_independent_updates_meet_native_sgd_and_weight_bounds"] = True
         metrics[f"step{step + 1}_loss"] = float(got_loss.detach())
+        metrics[f"step{step + 1}_independent_full_loss"] = float(independent_loss.detach())
+        metrics[f"step{step + 1}_independent_loss_drift"] = float(
+            (got_loss.detach() - independent_loss.detach()).abs()
+        )
     moved = any(not torch.equal(value, initial[name]) for name, value in actual.items())
     reference_moved = any(not torch.equal(value, initial_full[name]) for name, value in expected.items())
     checks["optimizer_really_changed_weights"] = world_all(moved and reference_moved, ctx.device)
@@ -450,11 +507,11 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
     for trainer in (bounded, full):
         trainer.state.global_step = STEPS
         trainer.optimizer.zero_grad(set_to_none=True)
-    _, error = _compare_backward(bounded, full, empty_rank, family=family, bf16=bf16)
+    _, error, _ = _compare_backward(bounded, full, empty_rank, family=family, bf16=bf16)
     worst_gradient = max(worst_gradient, error)
-    checks["zero_target_rank_backward_matches_reference"] = True
+    checks["zero_target_rank_same_state_backward_matches_reference"] = True
     checks["actual_backbone_compute_dtype_matches_row"] = all(
         values and values[-1] == dtype for values in (bounded_dtypes, full_dtypes)
     )
-    metrics["worst_parameter_gradient_relative_l2"] = worst_gradient
+    metrics["worst_same_state_parameter_gradient_relative_l2"] = worst_gradient
     return {"checks": checks, "metrics": metrics}

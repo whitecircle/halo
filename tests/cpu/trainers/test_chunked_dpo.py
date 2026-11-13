@@ -3,7 +3,7 @@
 import ast
 import inspect
 from collections import defaultdict
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from types import SimpleNamespace
 
 import pytest
@@ -32,6 +32,7 @@ import tests.common.preference_precompute_e2e as precompute_e2e
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.preference.chunked_dpo import CHUNKED_DPO_SCORER, DPO_SCORER_KEY, reject_chunked_dpo_options
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.dpo_head_gradients import PinnedHeadGradients, full_head_derivative
@@ -41,6 +42,7 @@ from tests.common.dpo_scoring import (
     assert_dpo_weight_steps_match,
     assert_sgd_deltas_match,
     assert_sgd_update,
+    same_state_dpo_oracle,
 )
 from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import column, precompute_trainer, token_rows
@@ -763,6 +765,224 @@ def test_weight_step_bound_refuses_nonfinite_native_predictions():
     gradient = -before.clone()
     with pytest.raises(AssertionError, match="prediction is nonfinite"):
         assert_dpo_weight_steps_match((before, gradient, before), (before, gradient, before), 2.0)
+
+
+@pytest.mark.parametrize("fail", [False, True], ids=["normal", "exception"])
+def test_same_state_oracle_restores_bit_exact_weights_state_and_optimizer_references(fail):
+    """A parity probe cannot change either independent trajectory or leave its gradients for the optimizer."""
+    policy = SimpleNamespace(model=torch.nn.Linear(4, 3))
+    model = torch.nn.Linear(4, 3)
+    oracle = SimpleNamespace(
+        model=model, state=SimpleNamespace(global_step=1), optimizer=torch.optim.SGD(model.parameters(), lr=0.05)
+    )
+    original = {name: value.detach().clone() for name, value in model.named_parameters()}
+    source = {name: value.detach().clone() for name, value in policy.model.named_parameters()}
+    parameters = tuple(model.parameters())
+    optimizer_parameters = tuple(oracle.optimizer.param_groups[0]["params"])
+    state = oracle.state
+    with pytest.raises(RuntimeError, match="probe failed") if fail else nullcontext():
+        with same_state_dpo_oracle(oracle, policy):
+            assert oracle.state is not state and oracle.state.global_step == state.global_step
+            assert all(actual is expected for actual, expected in zip(model.parameters(), parameters, strict=True))
+            for name, value in model.named_parameters():
+                torch.testing.assert_close(value, source[name], rtol=0, atol=0)
+            sum(value.square().sum() for value in model.parameters()).backward()
+            if fail:
+                raise RuntimeError("probe failed")
+    assert oracle.state is state
+    assert all(actual is expected for actual, expected in zip(model.parameters(), parameters, strict=True))
+    assert all(
+        actual is expected
+        for actual, expected in zip(oracle.optimizer.param_groups[0]["params"], optimizer_parameters, strict=True)
+    )
+    for name, value in model.named_parameters():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+        assert value.grad is None
+    for name, value in policy.model.named_parameters():
+        torch.testing.assert_close(value, source[name], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("fault", ["names", "shape", "dtype", "aliased"])
+def test_same_state_oracle_refuses_incompatible_parameters_before_mutation(fault):
+    model = torch.nn.Linear(4, 3)
+    source = torch.nn.Linear(4, 3, bias=fault != "names")
+    if fault == "shape":
+        source = torch.nn.Linear(5, 3)
+    elif fault == "dtype":
+        source.bfloat16()
+    elif fault == "aliased":
+        source = model
+    oracle = SimpleNamespace(
+        model=model, state=SimpleNamespace(global_step=1), optimizer=torch.optim.SGD(model.parameters(), lr=0.05)
+    )
+    original = {name: value.detach().clone() for name, value in model.named_parameters()}
+    state = oracle.state
+    with pytest.raises(AssertionError, match="DPO same-state oracle requires"):
+        with same_state_dpo_oracle(oracle, SimpleNamespace(model=source)):
+            pytest.fail("incompatible parameters entered a same-state probe")
+    assert oracle.state is state
+    for name, value in model.named_parameters():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+
+
+def test_same_state_oracle_matches_actual_loss_and_gradients_without_overwriting_its_trajectory():
+    """Strict parity compares one current state; independent SGD trajectories may have different losses."""
+    policy, oracle_model = _model(), _model()
+    with torch.no_grad():
+        policy.lm_head.weight.mul_(2)
+    bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle_model, bounded=False)
+    full.state = SimpleNamespace(global_step=1)
+    full.optimizer = torch.optim.SGD(oracle_model.parameters(), lr=0.05)
+    batch = _reference_batch(full, oracle_model)
+    independent = full.compute_loss(oracle_model, batch)
+    got = bounded.compute_loss(policy, batch)
+    got.backward()
+    with pytest.raises(AssertionError):
+        assert_dpo_loss_matches(got, independent)
+    original = {name: value.detach().clone() for name, value in oracle_model.named_parameters()}
+    with same_state_dpo_oracle(full, bounded):
+        observed = full.compute_loss(oracle_model, batch)
+        assert_dpo_loss_matches(got, observed)
+        observed.backward()
+        assert_dpo_gradients_match(
+            {name: value.grad for name, value in policy.named_parameters()},
+            {name: value.grad for name, value in oracle_model.named_parameters()},
+            bf16=False,
+        )
+    own = full.compute_loss(oracle_model, batch)
+    torch.testing.assert_close(own, independent, rtol=0, atol=0)
+    own.backward()
+    gradients = {name: value.grad.detach().clone() for name, value in oracle_model.named_parameters()}
+    full.optimizer.step()
+    for name, value in oracle_model.named_parameters():
+        assert_sgd_update(original[name], gradients[name], value.detach(), 0.05)
+
+
+def test_same_state_oracle_wrong_copied_weights_still_fail_the_strict_loss_gate():
+    policy, oracle_model = _model(), _model()
+    bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle_model, bounded=False)
+    full.state = SimpleNamespace(global_step=1)
+    full.optimizer = torch.optim.SGD(oracle_model.parameters(), lr=0.05)
+    batch = _reference_batch(full, oracle_model)
+    expected = bounded.compute_loss(policy, batch)
+    with same_state_dpo_oracle(full, bounded):
+        with torch.no_grad():
+            oracle_model.lm_head.weight.zero_()
+        with pytest.raises(AssertionError):
+            assert_dpo_loss_matches(expected, full.compute_loss(oracle_model, batch))
+
+
+def test_same_state_oracle_gives_probe_and_real_step_separate_deferred_ep_sweeps():
+    """Both backwards divide their own expert gradients once, even at the same numerical global step."""
+    model = torch.nn.Linear(4, 3)
+    full = SimpleNamespace(
+        model=model, state=SimpleNamespace(global_step=1), optimizer=torch.optim.SGD(model.parameters(), lr=0.05)
+    )
+    full._ep_config = SimpleNamespace(
+        runs_post_backward_sweep=True,
+        expert_replica_group=None,
+        stage_world_size=2,
+        expert_tp_size=1,
+        fp32_grad_reduce=False,
+        sweep_reduces_across_replicas=False,
+    )
+    full._classify_deferred_params = lambda config: (list(model.parameters()), [], [])
+    full._deferred_sweep_last_step = (full.state, 0)
+    state = full.state
+    with same_state_dpo_oracle(full, SimpleNamespace(model=torch.nn.Linear(4, 3))):
+        for parameter in model.parameters():
+            parameter.grad = torch.full_like(parameter, 8)
+        GradientSyncMixin._run_deferred_grad_sweep(full)
+        for parameter in model.parameters():
+            torch.testing.assert_close(parameter.grad, torch.full_like(parameter, 4), rtol=0, atol=0)
+        with pytest.raises(RuntimeError, match="ran twice"):
+            GradientSyncMixin._run_deferred_grad_sweep(full)
+    assert full.state is state
+    for parameter in model.parameters():
+        parameter.grad = torch.full_like(parameter, 8)
+    GradientSyncMixin._run_deferred_grad_sweep(full)
+    for parameter in model.parameters():
+        torch.testing.assert_close(parameter.grad, torch.full_like(parameter, 4), rtol=0, atol=0)
+    assert full._deferred_sweep_last_step[0] is state and full._deferred_sweep_last_step[1] == 1
+
+
+@pytest.mark.parametrize("fault", [None, "stale", "wrong", "nonfinite_own"])
+def test_same_state_backward_preserves_strict_parity_and_independent_full_gradients(monkeypatch, fault):
+    """The full comparison uses current policy weights, then restores its own state for the actual update."""
+    policy, oracle_model = _model(), _model()
+    with torch.no_grad():
+        policy.lm_head.weight.mul_(2)
+    bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle_model, bounded=False)
+    norm_states, full_backwards = [], []
+    for trainer in (bounded, full):
+        trainer.state = SimpleNamespace(global_step=1)
+        trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.05)
+        trainer.compute_loss_context_manager = nullcontext
+        trainer._finish_fsdp2_backward = lambda model: None
+        trainer._get_sharded_expert_param_ids = lambda: set()
+        trainer.accelerator.backward = lambda loss: loss.backward()
+        trainer._get_grad_norm = lambda model: torch.cat(
+            [parameter.grad.detach().reshape(-1) for parameter in model.parameters() if parameter.grad is not None]
+        ).norm()
+    norm = full._get_grad_norm
+
+    def full_norm(model):
+        norm_states.append(full.state)
+        return norm(model)
+
+    def full_backward(loss):
+        full_backwards.append(full.state)
+        loss.backward()
+
+    full._get_grad_norm = full_norm
+    full.accelerator.backward = full_backward
+    original_state = full.state
+    original = {name: value.detach().clone() for name, value in oracle_model.named_parameters()}
+    batch = _reference_batch(full, oracle_model)
+    own = full.compute_loss(oracle_model, batch)
+    own_gradients = torch.autograd.grad(own, tuple(oracle_model.parameters()))
+    scope = dpo_scoring.same_state_dpo_oracle
+
+    @contextmanager
+    def corrupt_scope(oracle, source):
+        with scope(oracle, source):
+            with torch.no_grad():
+                oracle.model.lm_head.weight.zero_()
+            yield
+
+    if fault == "stale":
+        monkeypatch.setattr(dpo_scoring, "same_state_dpo_oracle", lambda oracle, source: nullcontext())
+    elif fault == "wrong":
+        monkeypatch.setattr(dpo_scoring, "same_state_dpo_oracle", corrupt_scope)
+    elif fault == "nonfinite_own":
+        compute = full.compute_loss
+        calls = []
+
+        def corrupt_own_loss(*args):
+            calls.append(None)
+            value = compute(*args)
+            return value * float("nan") if len(calls) == 2 else value
+
+        monkeypatch.setattr(full, "compute_loss", corrupt_own_loss)
+    with pytest.raises(AssertionError) if fault else nullcontext():
+        bounded_loss, relative, independent_loss = dpo_scoring._compare_backward(
+            bounded, full, batch, family="dense", bf16=False
+        )
+    assert full.state is original_state
+    for name, value in oracle_model.named_parameters():
+        torch.testing.assert_close(value, original[name], rtol=0, atol=0)
+    if fault == "nonfinite_own":
+        assert len(full_backwards) == 1
+    elif fault is None:
+        assert len(norm_states) == len(full_backwards) == 2
+        assert norm_states[0] is not original_state and norm_states[1] is original_state
+        assert full_backwards[0] is not original_state and full_backwards[1] is original_state
+        assert relative < dpo_scoring.FP32_GRAD_REL_L2
+        torch.testing.assert_close(independent_loss, own, rtol=0, atol=0)
+        with pytest.raises(AssertionError):
+            assert_dpo_loss_matches(bounded_loss, independent_loss)
+        for actual, expected in zip(oracle_model.parameters(), own_gradients, strict=True):
+            torch.testing.assert_close(actual.grad, expected, rtol=0, atol=0)
 
 
 def test_fp32_objective_gate_rejects_constant_offset_even_when_gradients_match():
