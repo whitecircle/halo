@@ -999,6 +999,12 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--family glm5_next", "--family nemotron_h_omni", "--family step3p7"),
     ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
+    "parallelism/ep/test_mok_backend.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--family qwen3", "--family qwen3_5"),
+        timeout=900,
+    ),
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),

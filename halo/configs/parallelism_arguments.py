@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING
 
 from halo.config_validation import ValidatedConfig, present, require_int
-from halo.distributed.expert_parallel.config import EPBufferBackend
+from halo.distributed.expert_parallel.config import EPBufferBackend, MoEBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
 from halo.kernels.lowp.spec import LowpBackend, LowpBackwardPrecision, LowpPrecision, LowpSpec
@@ -173,6 +173,15 @@ class ParallelismArguments(ValidatedConfig):
             "See agent-docs/infrastructure/deepep.md#transport-backend."
         },
     )
+    moe_backend: MoEBackend = field(
+        default=ParallelismConfig.moe_backend,
+        metadata={
+            "help": "Routed-expert path: 'deepep' (DeepEP dispatch, grouped GEMMs, combine) or 'mok' (Mixture-of-Kittens' "
+            "fused dispatch + SwiGLU experts + combine megakernels over NVLink; Blackwell image, families that "
+            "declare it, ep_size 1/4/8/16/32/64 in one NVLink domain, a declared max_length). "
+            "See agent-docs/parallelism/expert-parallelism.md#mixture-of-kittens-backend."
+        },
+    )
     context_parallel_size: int = field(
         default=ParallelismConfig.cp_size,
         metadata={
@@ -335,15 +344,18 @@ def _reject_lowp_outside_sft(lowp: LowpSpec) -> None:
         )
 
 
-def _declared_forward_budget(trainer_cls, training_config, row_sources: tuple) -> tuple[int, int]:
+def _declared_forward_budget(
+    trainer_cls, training_config, row_sources: tuple, *, every_forward: bool = False
+) -> tuple[int, int]:
     """``(rows per forward, row length)`` the run declares to the EP dispatch gate; ``(0, 0)`` for a config with no
     ``max_length`` field unless the trainer's rows are generation-shaped. Length 0 is unbounded: the gate then judges
-    the model's context window. A generation-shaped run also sizes the rows of an evaluation it runs."""
+    the model's context window. A generation-shaped run, or one whose MoE buffers must hold ``every_forward``, also
+    sizes the rows of an evaluation it runs."""
     generation_shaped = trainer_cls.GENERATION_SHAPED_ROWS
     if not (generation_shaped or hasattr(training_config, "max_length")):
         return 0, 0
     batch_sizes = [int(getattr(training_config, "per_device_train_batch_size", 0) or 0)]
-    if generation_shaped and (
+    if (generation_shaped or every_forward) and (
         getattr(training_config, "eval_strategy", "no") not in ("no", None)
         or getattr(training_config, "eval_on_start", False)
     ):
@@ -383,7 +395,10 @@ def parallelism_config_from_args(
         cp_size=dist_args.context_parallel_size, pp_size=dist_args.pipeline_parallel_size
     )
 
-    rows_per_forward, row_length = _declared_forward_budget(trainer_cls, training_config, row_sources)
+    # MoK sizes its buffers once, so an evaluation forward must fit them too.
+    rows_per_forward, row_length = _declared_forward_budget(
+        trainer_cls, training_config, row_sources, every_forward=dist_args.moe_backend == "mok"
+    )
 
     # Fields both dataclasses spell identically forward themselves; only renames and derivations stay explicit.
     kwargs = {

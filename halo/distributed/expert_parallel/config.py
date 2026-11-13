@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 # The DeepEP buffer backend: "elastic" (V2 ElasticBuffer, what "auto" resolves to) or "legacy" (V1, intranode).
 EPBufferBackend = Literal["auto", "elastic", "legacy"]
+# The routed-expert path: DeepEP dispatch, grouped GEMMs and combine, or Mixture-of-Kittens' fused megakernels.
+MoEBackend = Literal["deepep", "mok"]
 
 
 def _build_member_group(rank_lists: list[list[int]], rank: int, what: str) -> dist.ProcessGroup:
@@ -45,11 +47,13 @@ class EPConfig:
         expert_lora: ExpertLoraSpec | None = None,
         experts_fsdp_managed: bool,
         ep_buffer_backend: EPBufferBackend = "auto",
+        moe_backend: MoEBackend = "deepep",
+        mok_token_capacity: int = 0,
     ):
         """``ep_size`` distributes the experts; ``ep_size * expert_tp_size`` ranks form the full EP process group. Layout
         math runs in stage-local ranks: ``stage_world_size`` is a pipeline stage's width (the
         world without PP), ``stage_base_rank`` its first global rank. ``experts_fsdp_managed``: FSDP2's reduce-scatter
-        is the replicated experts' only sync."""
+        is the replicated experts' only sync. ``mok_token_capacity``: the padded per-rank tokens of every MoK forward."""
         self.ep_size = ep_size
         self.expert_tp_size = expert_tp_size
         self.ep_group_size = ep_size * expert_tp_size
@@ -61,6 +65,8 @@ class EPConfig:
         self.expert_lora = expert_lora
         self.experts_fsdp_managed = experts_fsdp_managed
         self.ep_buffer_backend = ep_buffer_backend
+        self.moe_backend = moe_backend
+        self.mok_token_capacity = mok_token_capacity
         if stage_base_rank % stage_world_size != 0:
             raise ValueError(
                 f"stage_base_rank ({stage_base_rank}) must be a multiple of stage_world_size "
@@ -230,9 +236,10 @@ class EPConfig:
         self.num_ep_groups = layout.num_groups
         self.ep_rank, self.ep_group_idx = layout.rank_and_group(global_rank - self.stage_base_rank)
 
-        if self.ep_group_size == 1:
+        if self.ep_group_size == 1 and self.moe_backend != "mok":
             # One EP group per rank: singletons carry no collective and the dispatcher is a no-op (``ep_size <= 1``).
-            # Creating them costs world_size rendezvous nothing can use, on the default grouped-GEMM MoE path.
+            # Creating them costs world_size rendezvous nothing can use, on the default grouped-GEMM MoE path; MoK's
+            # workspace is built on a group even alone.
             self._my_ep_group_ranks = [global_rank]
         else:
             ep_groups = job_group_lists(layout, get_global_world_size(), self.stage_world_size)

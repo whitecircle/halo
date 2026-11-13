@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
 from halo.distributed.expert_parallel.deepep.capacity import reject_legacy_backend_topology
+from halo.distributed.expert_parallel.mok import MOK_EP_SIZES
 from halo.distributed.group_layout import (
     CrossNodeLayout,
     reject_cross_node_ep_group,
@@ -426,6 +427,31 @@ def _reject_ep_buffer_backend(pc: ParallelismConfig) -> None:
     )
 
 
+def _reject_mok(pc: ParallelismConfig) -> None:
+    """MoK runs pure EP over NVLink symmetric memory with bf16 experts, on buffers sized once from the token budget."""
+    if pc.moe_backend != "mok":
+        return
+    refusals = []
+    if pc.ep_size not in MOK_EP_SIZES:
+        refusals.append(f"expert_parallel_size={pc.ep_size} is not one of MoK's {MOK_EP_SIZES}")
+    if pc.ep_size > 1 and pc.ep_scope != "node":
+        refusals.append("the EP group spans NVLink domains, which MoK's symmetric-memory exchange cannot reach")
+    sizes = {"tensor": pc.tp_size, "expert_tensor": pc.expert_tp_size, "context": pc.cp_size, "pipeline": pc.pp_size}
+    refusals += [f"{axis}_parallel_size={size}" for axis, size in sizes.items() if size > 1]
+    if pc.expert_lora is not None:
+        refusals.append("expert LoRA adapters, which MoK's kernels do not apply")
+    if pc.ep_fp32_experts:
+        refusals.append("fp32_experts, as MoK's kernels take bf16 expert weights")
+    if pc.lowp.enabled:
+        refusals.append(f"lowp_precision={pc.lowp.precision!r}, as MoK runs its own kernels on the experts")
+    if pc.ep_rows_per_device <= 0 or pc.ep_declared_max_length <= 0:
+        refusals.append("no declared token budget (per_device_train_batch_size and max_length) to size its buffers")
+    if refusals:
+        raise ValueError(
+            "moe_backend='mok' cannot run this configuration: " + "; ".join(refusals) + ". Use moe_backend='deepep'."
+        )
+
+
 def _reject_hsdp(pc: ParallelismConfig) -> None:
     if not pc.use_hsdp:
         return
@@ -524,6 +550,7 @@ def reject_invalid_composition(pc: ParallelismConfig) -> None:
     _reject_ep_cp(pc)
     _reject_single_domain_multigroup_ep(pc)
     _reject_ep_buffer_backend(pc)
+    _reject_mok(pc)
     _reject_hsdp(pc)
     _reject_fsdp_settings(pc)
 

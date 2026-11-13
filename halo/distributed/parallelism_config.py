@@ -7,7 +7,8 @@ from typing import Optional, get_args
 
 from halo.distributed import group_layout
 from halo.distributed.context_parallel.config import CPConfig
-from halo.distributed.expert_parallel.config import EPBufferBackend, EPConfig
+from halo.distributed.expert_parallel.config import EPBufferBackend, EPConfig, MoEBackend
+from halo.distributed.expert_parallel.mok import mok_token_capacity
 from halo.distributed.nvlink import (
     requested_nvlink_domain_size,
     validate_nvlink_domain_against_fabric,
@@ -63,6 +64,7 @@ class ParallelismConfig:
     max_concurrent_loading: int | None = None  # per node; None = half the node width capped at 4, 0 = all
     ep_lazy_loading: bool = True  # every EP path; TP-only MoE ignores it, PP always loads stage-lazily
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
+    moe_backend: MoEBackend = "deepep"
 
     # The rows one MoE forward carries per device and the max_length the dispatch-ceiling gate checks;
     # 0 rows = no budget, 0 length = context window.
@@ -155,6 +157,8 @@ class ParallelismConfig:
             raise ValueError(
                 f"ep_buffer_backend must be one of {get_args(EPBufferBackend)}, got {self.ep_buffer_backend!r}"
             )
+        if self.moe_backend not in get_args(MoEBackend):
+            raise ValueError(f"moe_backend must be one of {get_args(MoEBackend)}, got {self.moe_backend!r}")
         if self.max_concurrent_loading is not None and self.max_concurrent_loading < 0:
             raise ValueError(
                 f"max_concurrent_loading must be >= 0 (0 = all ranks in parallel, null = derive from "
@@ -415,6 +419,8 @@ class ParallelismConfig:
                 expert_lora=self.expert_lora,
                 experts_fsdp_managed=self.experts_fsdp_managed,
                 ep_buffer_backend=self.ep_buffer_backend,
+                moe_backend=self.moe_backend,
+                mok_token_capacity=mok_token_capacity(self.ep_rows_per_device * self.ep_declared_max_length),
             )
         return self._ep_config
 

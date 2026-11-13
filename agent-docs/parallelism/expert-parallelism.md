@@ -272,6 +272,28 @@ What an EP run has to plan around:
   intranode only. It is rejected at config time for a cross-node group, a dispatch width above 8
   NVLink peers or above `gpus_per_node`, or a rank count DeepEP ships no tuned `Config` for.
 
+## Mixture-of-Kittens backend
+
+`moe_backend: mok` replaces DeepEP and the grouped GEMMs with [Mixture-of-Kittens](https://github.com/cursor/mixture-of-kittens)
+(commit `f3a8bd2`): one megakernel per direction runs the routing exchange, every routed SwiGLU expert and the weighted
+combine over NVLink symmetric memory (`halo/distributed/expert_parallel/mok.py`). The router, bias balancing, routing
+replay and the family's shared expert stay on Halo's path.
+
+- **Families** declare it (`SUPPORTS_MOK`): Qwen3 MoE and Qwen3.5/3.6 MoE. Any other EP layer is refused at load, as are
+  experts whose hidden or intermediate size is not a multiple of 256 or whose activation is not SiLU.
+- **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, and a run that declares no token budget.
+- **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
+  to `per_device_train_batch_size × max_length` rounded up to 256 (at least 512). Padding rows carry zero router weight
+  and move no output or gradient; a forward past the budget raises.
+- **Costs Halo adds:** MoK always runs a shared expert, which Halo gives zero weights (about 1/top-k more expert FLOPs);
+  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`).
+- **Measured** in MoK's own NCCL harness, one MoE layer forward and backward at EP4 on B300 with Qwen3-30B-A3B shapes:
+  5.62 ms at 16,384 tokens per GPU against 9.59 ms for `F.grouped_mm` and 9.98 ms for DeepGEMM's bf16 kernels.
+- **Install.** The images do not ship it yet: its build requires nvcc to match torch's CUDA (13.0). In a Blackwell
+  container with that toolkit, `pip install --no-build-isolation --no-deps .` from a recursive clone at `f3a8bd2`;
+  without `--no-deps` it replaces the locked NCCL with torch's metadata pin, which DeepEP's build does not link against.
+
 ## Gradient synchronization
 
 Hybrid sync, with one EP group:
