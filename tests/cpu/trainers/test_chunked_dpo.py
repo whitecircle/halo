@@ -38,6 +38,7 @@ from tests.common.dpo_head_gradients import PinnedHeadGradients, full_head_deriv
 from tests.common.dpo_scoring import (
     assert_dpo_gradients_match,
     assert_dpo_loss_matches,
+    assert_dpo_weight_steps_match,
     assert_sgd_deltas_match,
     assert_sgd_update,
 )
@@ -623,6 +624,145 @@ def test_fp32_distributed_gradient_comparison_rejects_diluted_sparse_error():
     assert (changed - expected["head.weight"]).norm() / expected["head.weight"].norm() < 5e-4
     with pytest.raises(AssertionError):
         assert_dpo_gradients_match({"head.weight": changed}, expected, bf16=False)
+
+
+@pytest.mark.parametrize("family,limit", [("dense", 2.2e-2), ("qwen3_moe", 1.9e-2)])
+def test_bf16_whole_model_gradient_comparison_pins_each_family_boundary(family, limit):
+    expected = {"backbone.weight": torch.ones(8, dtype=torch.float64)}
+    inside = {"backbone.weight": expected["backbone.weight"] * (1 + limit - 1e-4)}
+    outside = {"backbone.weight": expected["backbone.weight"] * (1 + limit + 1e-4)}
+    assert dpo_scoring.resolve_dpo_gradient_tolerance(family=family, bf16=True) == limit
+    assert assert_dpo_gradients_match(inside, expected, bf16=True, family=family) == pytest.approx(limit - 1e-4)
+    with pytest.raises(AssertionError, match="relative L2"):
+        assert_dpo_gradients_match(outside, expected, bf16=True, family=family)
+    with pytest.raises(AssertionError, match="relative L2"):
+        assert_dpo_gradients_match(inside, expected, bf16=False, family=family)
+
+
+def test_bf16_family_bounds_do_not_relax_fp32_comparison():
+    assert dpo_scoring.FP32_GRAD_REL_L2 == 5e-4
+    for family in ("dense", "qwen3_moe"):
+        assert dpo_scoring.resolve_dpo_gradient_tolerance(family=family, bf16=False) == 5e-4
+    with pytest.raises(ValueError, match="dense or qwen3_moe"):
+        dpo_scoring.resolve_dpo_gradient_tolerance(family="unknown", bf16=True)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_weight_step_bound_keeps_prior_divergence_on_the_second_update(dtype):
+    """The second step must inherit the first step's error rather than spend a fresh absolute tolerance."""
+    before = torch.tensor([0.25, -0.75], dtype=dtype)
+    other = before.clone()
+    gradients = (torch.tensor([0.3, -0.1], dtype=dtype), torch.tensor([0.31, -0.11], dtype=dtype))
+    for _ in range(2):
+        after = before.clone().add_(gradients[0], alpha=-0.05)
+        other_after = other.clone().add_(gradients[1], alpha=-0.05)
+        assert_sgd_update(before, gradients[0], after, 0.05)
+        assert_sgd_update(other, gradients[1], other_after, 0.05)
+        assert_dpo_weight_steps_match((before, gradients[0], after), (other, gradients[1], other_after), 0.05)
+        before, other = after, other_after
+    assert not torch.equal(before, other)
+    unchanged = torch.zeros_like(before)
+    assert_dpo_weight_steps_match((before, unchanged, before), (other, unchanged, other), 0.05)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("sign", [-1, 1])
+def test_weight_step_bound_uses_both_spacing_directions_at_a_power_of_two(dtype, sign):
+    """Adjacent storage gaps differ at powers of two; the larger gap is the one-quantum ceiling."""
+    before = torch.tensor([sign], dtype=dtype)
+    zero = torch.zeros_like(before)
+    away = torch.full_like(before, sign * float("inf"))
+    one = torch.nextafter(before, away)
+    two = torch.nextafter(one, away)
+    assert_dpo_weight_steps_match((before, zero, one), (before, zero, before), 0.05)
+    with pytest.raises(AssertionError, match="elementwise"):
+        assert_dpo_weight_steps_match((before, zero, two), (before, zero, before), 0.05)
+    with pytest.raises(AssertionError):
+        assert_sgd_update(before, zero, one, 0.05)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_weight_step_budget_cannot_grow_with_a_corrupt_post_update_exponent(dtype):
+    """Predict the quantum from the native SGD result, not a corrupted weight across a binade boundary."""
+    changed = torch.ones(1, dtype=dtype)
+    zero = torch.zeros_like(changed)
+    before = torch.nextafter(torch.nextafter(changed, zero), zero)
+    with pytest.raises(AssertionError, match="elementwise"):
+        assert_dpo_weight_steps_match((before, zero, changed), (before, zero, before), 0.05)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("subnormal", [False, True], ids=["zero", "subnormal"])
+def test_weight_step_bound_has_no_absolute_floor_at_zero_or_subnormal_weights(dtype, subnormal):
+    """A small parameter gets its own representable spacing, not a normal-scale epsilon or absolute floor."""
+    zero = torch.zeros(1, dtype=dtype)
+    quantum = torch.nextafter(zero, torch.full_like(zero, float("inf")))
+    before = quantum if subnormal else zero
+    one = torch.nextafter(before, torch.full_like(before, float("inf")))
+    two = torch.nextafter(one, torch.full_like(one, float("inf")))
+    assert_dpo_weight_steps_match((before, zero, one), (before, zero, before), 0.05)
+    with pytest.raises(AssertionError, match="elementwise"):
+        assert_dpo_weight_steps_match((before, zero, two), (before, zero, before), 0.05)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_weight_step_bound_stays_finite_at_the_largest_stored_value(dtype):
+    """An infinite adjacent representable value must not turn a finite weight's budget infinite."""
+    before = torch.full((1,), torch.finfo(dtype).max, dtype=dtype)
+    zero = torch.zeros_like(before)
+    one = torch.nextafter(before, zero)
+    two = torch.nextafter(one, zero)
+    assert_dpo_weight_steps_match((before, zero, before), (before, zero, before), 0.05)
+    with pytest.raises(AssertionError, match="elementwise"):
+        assert_dpo_weight_steps_match((before, zero, two), (before, zero, before), 0.05)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_weight_step_bound_rejects_one_corrupt_element_without_norm_dilution(dtype):
+    """A single invalid weight remains visible among thousands of otherwise matching elements."""
+    before = torch.ones(4096, dtype=dtype)
+    gradient = torch.full_like(before, 0.01)
+    expected = before.clone().add_(gradient, alpha=-0.05)
+    changed = expected.clone()
+    changed[0] += 0.1
+    with pytest.raises(AssertionError, match="elementwise"):
+        assert_dpo_weight_steps_match((before, gradient, changed), (before, gradient, expected), 0.05)
+
+
+@pytest.mark.parametrize("arm", [0, 1])
+@pytest.mark.parametrize("slot", [0, 1, 2], ids=["before", "gradient", "after"])
+@pytest.mark.parametrize("value", [float("nan"), float("inf")])
+def test_weight_step_bound_refuses_nonfinite_snapshots(arm, slot, value):
+    tensors = [torch.ones(2), torch.zeros(2), torch.ones(2)]
+    first, second = [tensor.clone() for tensor in tensors], [tensor.clone() for tensor in tensors]
+    (first if arm == 0 else second)[slot][0] = value
+    with pytest.raises(AssertionError, match="finite matching"):
+        assert_dpo_weight_steps_match(first, second, 0.05)
+
+
+@pytest.mark.parametrize("arm", [0, 1])
+@pytest.mark.parametrize("slot", [0, 1, 2], ids=["before", "gradient", "after"])
+@pytest.mark.parametrize("fault", ["shape", "dtype"])
+def test_weight_step_bound_refuses_broadcasting_or_mixed_storage(arm, slot, fault):
+    first, second = [torch.ones(2), torch.zeros(2), torch.ones(2)], [torch.ones(2), torch.zeros(2), torch.ones(2)]
+    target = first if arm == 0 else second
+    target[slot] = target[slot][:1] if fault == "shape" else target[slot].bfloat16()
+    with pytest.raises(AssertionError, match="finite matching"):
+        assert_dpo_weight_steps_match(first, second, 0.05)
+
+
+@pytest.mark.parametrize("learning_rate", [0.0, -0.05, float("nan"), float("inf")])
+def test_weight_step_bound_refuses_invalid_learning_rates(learning_rate):
+    snapshot = (torch.ones(2), torch.zeros(2), torch.ones(2))
+    with pytest.raises(AssertionError, match="finite positive"):
+        assert_dpo_weight_steps_match(snapshot, snapshot, learning_rate)
+
+
+def test_weight_step_bound_refuses_nonfinite_native_predictions():
+    before = torch.full((1,), torch.finfo(torch.float32).max)
+    gradient = -before.clone()
+    with pytest.raises(AssertionError, match="prediction is nonfinite"):
+        assert_dpo_weight_steps_match((before, gradient, before), (before, gradient, before), 2.0)
 
 
 def test_fp32_objective_gate_rejects_constant_offset_even_when_gradients_match():
