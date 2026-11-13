@@ -17,7 +17,9 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.module_tree import hidden_state_backbone
 from halo.models.unwrapping import base_transformers_model
+from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import to_local
+from halo.runtime.ranks import get_global_rank
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.dpo_head_gradients import PinnedHeadGradients
@@ -145,6 +147,23 @@ def assert_dpo_weight_steps_match(first, second, learning_rate):
     )
     if bool(((after.double() - other_after.double()).abs() > budget).any()):
         raise AssertionError("DPO stored weight differs beyond its elementwise gradient and storage-quantum budget")
+
+
+def assert_dpo_updates_match(before, gradients, updated, *, bf16: bool) -> None:
+    """COLLECTIVE. Join local native-SGD, raw-delta and stored-weight checks before the next forward."""
+    with barrier_on_exit("DPO independent SGD and stored-weight checks"):
+        names = before[0].keys()
+        assert names and all(snapshot.keys() == names for snapshot in (*before, *gradients, *updated))
+        for name in names:
+            for arm in (0, 1):
+                assert_sgd_update(before[arm][name], gradients[arm][name], updated[arm][name], LEARNING_RATE)
+            first = (before[0][name], gradients[0][name], updated[0][name])
+            second = (before[1][name], gradients[1][name], updated[1][name])
+            assert_sgd_deltas_match(first, second, LEARNING_RATE)
+            if bf16:
+                assert_dpo_weight_steps_match(first, second, LEARNING_RATE)
+            else:
+                torch.testing.assert_close(updated[0][name], updated[1][name], atol=2e-5, rtol=2e-4, msg=name)
 
 
 def verify_dpo_numerical_storage(trainer, *, family: str) -> None:
@@ -320,60 +339,72 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
 
 def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose: bool = False):
     ep = family == "qwen3_moe"
+    phase = {"rank": get_global_rank(), "step": bounded.state.global_step}
     with ExitStack() as scope:
         diagnosis = scope.enter_context(PinnedHeadGradients().record(full)) if diagnose else None
         capture = captured_picks(bounded.model) if ep else nullcontext([])
+        print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="bounded forward/backward")), flush=True)
         with capture as picks, bounded.compute_loss_context_manager():
             got_loss = bounded.compute_loss(bounded.model, batch)
         bounded.accelerator.backward(got_loss)
         bounded._finish_fsdp2_backward(bounded.model)
         got_norm = bounded._get_grad_norm(bounded.model)
-        gradients = _local_snapshot(bounded, gradients=True)
+        with barrier_on_exit("DPO bounded gradient snapshot"):
+            gradients = _local_snapshot(bounded, gradients=True)
         with same_state_dpo_oracle(full, bounded):
             replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
+            print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="same-state oracle forward")), flush=True)
             with replay as routes, full.compute_loss_context_manager():
                 want_loss = full.compute_loss(full.model, batch)
-            assert_dpo_loss_matches(got_loss, want_loss)
-            if ep:
-                assert (
-                    picks
-                    and routes
-                    and all(
-                        route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes
+            with barrier_on_exit("DPO same-state loss and routing checks"):
+                assert_dpo_loss_matches(got_loss, want_loss)
+                if ep:
+                    assert (
+                        picks
+                        and routes
+                        and all(
+                            route.duplicated == 0 and route.regret <= TOL.router_near_tie_logit_abs for route in routes
+                        )
                     )
-                )
+            print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="same-state oracle backward")), flush=True)
             full.accelerator.backward(want_loss)
             full._finish_fsdp2_backward(full.model)
             want_norm = full._get_grad_norm(full.model)
-            expected_gradients = _local_snapshot(full, gradients=True)
-            if diagnosis:
-                report = diagnosis.report(gradients, expected_gradients)
-                report.update(
-                    rank=bounded.accelerator.process_index,
-                    bounded_loss=float(got_loss.detach()),
-                    full_loss=float(want_loss.detach()),
+            with barrier_on_exit("DPO same-state gradients, norm and expert-activity checks"):
+                expected_gradients = _local_snapshot(full, gradients=True)
+                if diagnosis:
+                    report = diagnosis.report(gradients, expected_gradients)
+                    report.update(
+                        rank=bounded.accelerator.process_index,
+                        bounded_loss=float(got_loss.detach()),
+                        full_loss=float(want_loss.detach()),
+                    )
+                    print(
+                        "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
+                        flush=True,
+                    )
+                worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16, family=family)
+                torch.testing.assert_close(
+                    torch.as_tensor(got_norm),
+                    torch.as_tensor(want_norm),
+                    atol=1e-8,
+                    rtol=resolve_dpo_gradient_tolerance(family=family, bf16=bf16),
                 )
-                print(
-                    "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
-                    flush=True,
-                )
-            worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16, family=family)
-            torch.testing.assert_close(
-                torch.as_tensor(got_norm),
-                torch.as_tensor(want_norm),
-                atol=1e-8,
-                rtol=resolve_dpo_gradient_tolerance(family=family, bf16=bf16),
-            )
-    if ep:
-        expert_ids = bounded._get_sharded_expert_param_ids()
-        names = {name for name, parameter in bounded.model.named_parameters() if id(parameter) in expert_ids}
-        assert names and any(gradients[name].count_nonzero() for name in names), (
-            "no local expert gradient was exercised"
-        )
+                if ep:
+                    expert_ids = bounded._get_sharded_expert_param_ids()
+                    names = {
+                        name for name, parameter in bounded.model.named_parameters() if id(parameter) in expert_ids
+                    }
+                    assert names and any(gradients[name].count_nonzero() for name in names), (
+                        "no local expert gradient was exercised"
+                    )
+    print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="independent full forward")), flush=True)
     with full.compute_loss_context_manager():
         independent_loss = full.compute_loss(full.model, batch)
-    if not bool(independent_loss.isfinite().all()):
-        raise AssertionError("The independent full-head trajectory produced a nonfinite loss")
+    with barrier_on_exit("DPO independent full-head loss check"):
+        if not bool(independent_loss.isfinite().all()):
+            raise AssertionError("The independent full-head trajectory produced a nonfinite loss")
+    print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="independent full backward")), flush=True)
     full.accelerator.backward(independent_loss)
     full._finish_fsdp2_backward(full.model)
     full._get_grad_norm(full.model)
@@ -452,44 +483,32 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
         got_loss, error, independent_loss = _compare_backward(
             bounded, full, batch, family=family, bf16=bf16, diagnose=bf16 and step == 0
         )
-        if step == 0:
-            assert_dpo_loss_matches(got_loss, parity)
         worst_gradient = max(worst_gradient, error)
-        before = [_local_snapshot(trainer, gradients=False, host=False) for trainer in (bounded, full)]
-        gradients = [_local_snapshot(trainer, gradients=True, host=False) for trainer in (bounded, full)]
-        for trainer in (bounded, full):
-            assert all(
-                group.get("momentum", 0) == group.get("weight_decay", 0) == 0 and not group.get("maximize", False)
-                for group in trainer.optimizer.param_groups
-            )
-            trainer.optimizer.step()
-        updated = [_local_snapshot(trainer, gradients=False, host=False) for trainer in (bounded, full)]
-        for name in before[0]:
-            for arm in (0, 1):
-                assert_sgd_update(before[arm][name], gradients[arm][name], updated[arm][name], LEARNING_RATE)
-            assert_sgd_deltas_match(
-                (before[0][name], gradients[0][name], updated[0][name]),
-                (before[1][name], gradients[1][name], updated[1][name]),
-                LEARNING_RATE,
-            )
-            if bf16:
-                assert_dpo_weight_steps_match(
-                    (before[0][name], gradients[0][name], updated[0][name]),
-                    (before[1][name], gradients[1][name], updated[1][name]),
-                    LEARNING_RATE,
+        with barrier_on_exit("DPO pre-step snapshots and optimizer checks"):
+            if step == 0:
+                assert_dpo_loss_matches(got_loss, parity)
+            before = [_local_snapshot(trainer, gradients=False, host=False) for trainer in (bounded, full)]
+            gradients = [_local_snapshot(trainer, gradients=True, host=False) for trainer in (bounded, full)]
+            for trainer in (bounded, full):
+                assert all(
+                    group.get("momentum", 0) == group.get("weight_decay", 0) == 0 and not group.get("maximize", False)
+                    for group in trainer.optimizer.param_groups
                 )
-        if expert_names:
-            counts = [
-                sum(not torch.equal(before[arm][name], updated[arm][name]) for name in expert_names) for arm in (0, 1)
-            ]
-            assert all(counts), "the DPO SGD step did not move any local expert parameter"
-            checks[f"step{step + 1}_local_expert_weights_really_moved"] = True
-            metrics[f"step{step + 1}_local_expert_tensors_updated"] = min(counts)
-        actual, expected = (_local_snapshot(trainer, gradients=False) for trainer in (bounded, full))
-        assert actual.keys() == expected.keys()
-        if not bf16:
-            for name, value in actual.items():
-                torch.testing.assert_close(value, expected[name], atol=2e-5, rtol=2e-4, msg=name)
+        for trainer in (bounded, full):
+            trainer.optimizer.step()
+        with barrier_on_exit("DPO updated parameter snapshots"):
+            updated = [_local_snapshot(trainer, gradients=False, host=False) for trainer in (bounded, full)]
+        assert_dpo_updates_match(before, gradients, updated, bf16=bf16)
+        with barrier_on_exit("DPO local expert-weight movement checks"):
+            if expert_names:
+                counts = [
+                    sum(not torch.equal(before[arm][name], updated[arm][name]) for name in expert_names)
+                    for arm in (0, 1)
+                ]
+                assert all(counts), "the DPO SGD step did not move any local expert parameter"
+                checks[f"step{step + 1}_local_expert_weights_really_moved"] = True
+                metrics[f"step{step + 1}_local_expert_tensors_updated"] = min(counts)
+            actual, expected = (_local_snapshot(trainer, gradients=False) for trainer in (bounded, full))
         checks[f"step{step + 1}_same_state_loss_all_gradients_and_norm_match"] = True
         checks[f"step{step + 1}_independent_updates_meet_native_sgd_and_weight_bounds"] = True
         metrics[f"step{step + 1}_loss"] = float(got_loss.detach())

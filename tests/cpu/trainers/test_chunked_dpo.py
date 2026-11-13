@@ -4,10 +4,12 @@ import ast
 import inspect
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from datetime import timedelta
 from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from datasets import Dataset
 from peft import LoraConfig
@@ -39,11 +41,13 @@ from tests.common.dpo_head_gradients import PinnedHeadGradients, full_head_deriv
 from tests.common.dpo_scoring import (
     assert_dpo_gradients_match,
     assert_dpo_loss_matches,
+    assert_dpo_updates_match,
     assert_dpo_weight_steps_match,
     assert_sgd_deltas_match,
     assert_sgd_update,
     same_state_dpo_oracle,
 )
+from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
 from tests.common.preference_precompute import column, precompute_trainer, token_rows
 
@@ -119,6 +123,18 @@ def _reference_batch(trainer, model):
         ref_chosen_logps=chosen - torch.tensor([0.3, -0.8]), ref_rejected_logps=rejected + torch.tensor([0.4, 0.1])
     )
     return batch
+
+
+def _configure_cpu_backward(trainer):
+    trainer.state = SimpleNamespace(global_step=1)
+    trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.05)
+    trainer.compute_loss_context_manager = nullcontext
+    trainer._finish_fsdp2_backward = lambda model: None
+    trainer._get_sharded_expert_param_ids = lambda: set()
+    trainer.accelerator.backward = lambda loss: loss.backward()
+    trainer._get_grad_norm = lambda model: torch.cat(
+        [parameter.grad.detach().reshape(-1) for parameter in model.parameters() if parameter.grad is not None]
+    ).norm()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
@@ -915,15 +931,7 @@ def test_same_state_backward_preserves_strict_parity_and_independent_full_gradie
     bounded, full = _loss_trainer(policy, bounded=True), _loss_trainer(oracle_model, bounded=False)
     norm_states, full_backwards = [], []
     for trainer in (bounded, full):
-        trainer.state = SimpleNamespace(global_step=1)
-        trainer.optimizer = torch.optim.SGD(trainer.model.parameters(), lr=0.05)
-        trainer.compute_loss_context_manager = nullcontext
-        trainer._finish_fsdp2_backward = lambda model: None
-        trainer._get_sharded_expert_param_ids = lambda: set()
-        trainer.accelerator.backward = lambda loss: loss.backward()
-        trainer._get_grad_norm = lambda model: torch.cat(
-            [parameter.grad.detach().reshape(-1) for parameter in model.parameters() if parameter.grad is not None]
-        ).norm()
+        _configure_cpu_backward(trainer)
     norm = full._get_grad_norm
 
     def full_norm(model):
@@ -983,6 +991,107 @@ def test_same_state_backward_preserves_strict_parity_and_independent_full_gradie
             assert_dpo_loss_matches(bounded_loss, independent_loss)
         for actual, expected in zip(oracle_model.parameters(), own_gradients, strict=True):
             torch.testing.assert_close(actual.grad, expected, rtol=0, atol=0)
+
+
+def _dpo_validation_failure_worker(rank):
+    for fault, fence in (
+        (None, None),
+        ("loss", "DPO same-state loss and routing checks"),
+        ("gradient", "DPO same-state gradients, norm and expert-activity checks"),
+        ("nonfinite_own", "DPO independent full-head loss check"),
+        ("update", "DPO independent SGD and stored-weight checks"),
+    ):
+        bounded, full = _loss_trainer(_model(), bounded=True), _loss_trainer(_model(), bounded=False)
+        for trainer in (bounded, full):
+            _configure_cpu_backward(trainer)
+        batch = _reference_batch(full, full.model)
+        depth = 0
+        barrier = dpo_scoring.barrier_on_exit
+
+        @contextmanager
+        def local_checks(what):
+            nonlocal depth
+            with barrier(what):
+                depth += 1
+                try:
+                    yield
+                finally:
+                    depth -= 1
+
+        def outside_validation(operation):
+            def checked(*args, **kwargs):
+                assert depth == 0, "A collective operation entered a local-validation fence"
+                return operation(*args, **kwargs)
+
+            return checked
+
+        def injected_assertion(check):
+            def checked(*args, **kwargs):
+                result = check(*args, **kwargs)
+                if rank == 1:
+                    raise AssertionError(f"injected {fault} validation failure")
+                return result
+
+            return checked
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(dpo_scoring, "barrier_on_exit", local_checks)
+            for trainer in (bounded, full):
+                for name in ("compute_loss", "_finish_fsdp2_backward", "_get_grad_norm"):
+                    patch.setattr(trainer, name, outside_validation(getattr(trainer, name)))
+                patch.setattr(trainer.accelerator, "backward", outside_validation(trainer.accelerator.backward))
+            if fault in ("loss", "gradient"):
+                name = "assert_dpo_loss_matches" if fault == "loss" else "assert_dpo_gradients_match"
+                patch.setattr(dpo_scoring, name, injected_assertion(getattr(dpo_scoring, name)))
+            elif fault == "nonfinite_own":
+                compute, calls = full.compute_loss, 0
+
+                def corrupt_own_loss(*args):
+                    nonlocal calls
+                    calls += 1
+                    value = compute(*args)
+                    return value * float("nan") if calls == 2 and rank == 1 else value
+
+                patch.setattr(full, "compute_loss", corrupt_own_loss)
+            error, entered = None, False
+            try:
+                dpo_scoring._compare_backward(bounded, full, batch, family="dense", bf16=False)
+                before = [
+                    {name: value.detach().clone() for name, value in trainer.model.named_parameters()}
+                    for trainer in (bounded, full)
+                ]
+                gradients = [
+                    {name: value.grad.detach().clone() for name, value in trainer.model.named_parameters()}
+                    for trainer in (bounded, full)
+                ]
+                for trainer in (bounded, full):
+                    trainer.optimizer.step()
+                updated = [
+                    {name: value.detach().clone() for name, value in trainer.model.named_parameters()}
+                    for trainer in (bounded, full)
+                ]
+                if fault == "update" and rank == 1:
+                    next(iter(updated[1].values())).reshape(-1)[0] += 0.25
+                assert_dpo_updates_match(before, gradients, updated, bf16=False)
+                entered = True
+                marker = torch.ones(1)
+                dist.all_reduce(marker)
+                assert marker.item() == 2
+            except (AssertionError, RuntimeError) as exc:
+                error = f"{type(exc).__name__}: {exc}"
+        outcomes = [None, None]
+        dist.all_gather_object(outcomes, (error, entered))
+        if fault is None:
+            assert outcomes == [(None, True), (None, True)], outcomes
+        else:
+            assert all(error and not entered for error, entered in outcomes), outcomes
+            assert outcomes[1][0].startswith("AssertionError:"), outcomes
+            assert outcomes[0][0].startswith("RuntimeError:") and fence in outcomes[0][0], outcomes
+
+
+def test_dpo_local_validation_failures_stop_both_ranks_before_the_next_collective():
+    """Real loss, gradient, independent-loss and SGD faults must fail both ranks without fencing collective work."""
+    run_gloo_ranks(_dpo_validation_failure_worker, 2, pg_timeout=timedelta(seconds=30))
 
 
 def test_fp32_objective_gate_rejects_constant_offset_even_when_gradients_match():
