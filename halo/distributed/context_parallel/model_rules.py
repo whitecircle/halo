@@ -1,5 +1,4 @@
-"""Which models Ulysses CP can run: a wrapped attention class, a flash attention label, head counts ``cp_size``
-divides, and no layer that carries state along the sequence axis."""
+"""Which sequence layers, attention backends and head geometries Ulysses CP can run."""
 
 from __future__ import annotations
 
@@ -8,10 +7,12 @@ import logging
 import torch.nn as nn
 
 from halo.distributed.context_parallel.config import CPConfigError
-from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, ULYSSES_GATED_DELTA_MAP
 from halo.models.attention.layout import LINEAR_ATTENTION_LAYER_TYPE, has_linear_attention_layers
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from halo.models.introspection.config_access import get_config_field, text_config
+from halo.models.introspection.modality import config_declares_multimodality
+from halo.models.moe.config_fields import has_routed_experts
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,6 @@ _UNSUPPORTED_SEQUENCE_AXIS_LAYERS: dict[str, str] = {
         "Train Zaya without Context Parallelism (agent-docs/models/zaya.md).",
     ),
     "Qwen3_5MoeGatedDeltaNet": _GATED_DELTANET_DETAIL,
-    "Qwen3_5GatedDeltaNet": _GATED_DELTANET_DETAIL,
     "DeepseekV4CSACompressor": _DEEPSEEK_V4_DETAIL,
     "DeepseekV4HCACompressor": _DEEPSEEK_V4_DETAIL,
     "DeepseekV4Indexer": _DEEPSEEK_V4_DETAIL,
@@ -71,15 +71,26 @@ _UNSUPPORTED_SEQUENCE_AXIS_LAYERS: dict[str, str] = {
 
 
 def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
-    """Raise :class:`CPConfigError` unless Ulysses CP can run ``model``: no layer carrying sequence-axis state, a
-    wrapped attention class, a flash label where it describes the forward, and head counts ``cp_size`` divides."""
+    """Raise :class:`CPConfigError` unless every sequence-state layer has a CP implementation, attention has a wrapper
+    and flash label where required, and head counts divide ``cp_size``."""
     config = model.config
     model_type = getattr(config, "model_type", "unknown")
     effective_config = text_config(config)
 
     # Before the supported-attention scan, so a linear-attention model gets the precise message.
+    hybrid_layers = 0
     for module in model.modules():
         class_name = module.__class__.__name__
+        hybrid_wrapper = ULYSSES_GATED_DELTA_MAP.get(class_name)
+        if hybrid_wrapper is not None:
+            if config_declares_multimodality(config):
+                raise CPConfigError(
+                    "Hybrid CP supports text-only models. Load the text tower with text_only_model: true, or disable context_parallel_size."
+                )
+            if has_routed_experts(config):
+                raise CPConfigError("Hybrid CP supports dense models only. Train MoE hybrids without CP.")
+            hybrid_wrapper.reject_unsupported_geometry(module, cp_size)
+            hybrid_layers += 1
         detail = _UNSUPPORTED_SEQUENCE_AXIS_LAYERS.get(class_name)
         if detail is not None:
             raise CPConfigError(f"Ulysses CP cannot run on a model that instantiates {class_name!r}: {detail}")
@@ -88,10 +99,11 @@ def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
     if has_linear_attention_layers(config):
         layer_types = get_config_field(config, "layer_types")
         num_linear = sum(layer_type == LINEAR_ATTENTION_LAYER_TYPE for layer_type in layer_types)
-        raise CPConfigError(
-            f"Ulysses CP cannot run on {model_type!r} because {num_linear} of {len(layer_types)} "
-            f"layers are ``linear_attention``: {_LINEAR_ATTENTION_DETAIL}"
-        )
+        if hybrid_layers != num_linear:
+            raise CPConfigError(
+                f"Ulysses CP cannot run on {model_type!r} because {num_linear} of {len(layer_types)} "
+                f"layers are ``linear_attention``: {_LINEAR_ATTENTION_DETAIL}"
+            )
 
     attention_module = next((m for m in model.modules() if m.__class__.__name__ in ULYSSES_ATTENTION_MAP), None)
     if attention_module is None:

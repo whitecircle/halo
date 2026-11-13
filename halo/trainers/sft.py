@@ -91,6 +91,7 @@ def _record_loss_metrics(
 
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     SUPPORTS_CP = True
+    SUPPORTS_HYBRID_CP = True
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _split_pipeline_stage.
     PP_REFUSAL = None
     SUPPORTS_LOWP_PRECISION = True

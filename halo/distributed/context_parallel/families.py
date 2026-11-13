@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from transformers.models.cohere2_moe.modeling_cohere2_moe import rotate_half as rotate_interleaved_pairs
 from transformers.models.mistral4.modeling_mistral4 import get_llama_4_attn_scale
+from transformers.models.qwen3_5 import modeling_qwen3_5
 
+from halo.distributed.context_parallel.all_to_all import UlyssesAllToAll, heads_to_sequence
+from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention, UlyssesAttention
 from halo.models.attention.gpt_oss_sinks import neutralized_sink_floor
 from halo.subclass_registry import build_class_claim_map
@@ -212,7 +218,7 @@ class Qwen3MoeUlyssesAttention(UlyssesAttention):
 
 class Qwen3_5MoeUlyssesAttention(Qwen3MoeUlyssesAttention):
     """Qwen3.5 / Qwen3.6 full-attention layers: a double-width ``q_proj`` splits into Q and a sigmoid gate, applied
-    after the all-to-all. GatedDeltaNet layers are refused by ``reject_unsupported_ulysses_model``."""
+    after the all-to-all. Dense GatedDeltaNet has a separate CP2 wrapper; MoE GatedDeltaNet is refused."""
 
     HF_MODULE_NAMES = ("Qwen3_5MoeAttention", "Qwen3_5Attention")
 
@@ -230,4 +236,109 @@ class Qwen3_5MoeUlyssesAttention(Qwen3MoeUlyssesAttention):
         return attn_output * torch.sigmoid(gate)
 
 
+class Qwen3_5UlyssesGatedDelta(nn.Module):
+    """Dense Qwen3.5/3.6 GatedDeltaNet on full sequences for a rank's key/value-head groups."""
+
+    HF_MODULE_NAMES = ("Qwen3_5GatedDeltaNet",)
+
+    def __init__(self, original_attention: nn.Module, cp_group: dist.ProcessGroup, cp_size: int):
+        super().__init__()
+        self.reject_unsupported_geometry(original_attention, cp_size)
+        self.original_attention = original_attention
+        self.cp_group = cp_group
+        self.cp_size = cp_size
+        self.cp_rank = dist.get_rank(cp_group)
+
+    @staticmethod
+    def reject_unsupported_geometry(module: nn.Module, cp_size: int) -> None:
+        """Refuse any geometry outside dense hybrid CP2, without normalizing the module."""
+        if cp_size != 2:
+            raise CPConfigError(
+                "Hybrid GatedDeltaNet supports context_parallel_size: 2 only. Use CP2, or train without CP."
+            )
+        for label, heads in (("key", module.num_k_heads), ("value", module.num_v_heads)):
+            if heads < 1 or heads % cp_size:
+                raise CPConfigError(
+                    f"GatedDeltaNet {label} heads ({heads}) must be divisible by context_parallel_size ({cp_size})."
+                )
+        if module.num_v_heads % module.num_k_heads:
+            raise CPConfigError(
+                "GatedDeltaNet value heads must form complete groups of key heads. Use the native model configuration."
+            )
+        if module.conv1d.bias is not None:
+            raise CPConfigError(
+                "Hybrid CP requires the native bias-free GatedDeltaNet convolution. Use the unmodified model, or train without CP."
+            )
+
+    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
+        """COLLECTIVE over the CP group: return this rank's sequence chunk, refusing caches and packed rows."""
+        if (
+            cache_params is not None
+            or any(kwargs.get(key) is not None for key in ("past_key_value", "past_key_values"))
+            or kwargs.get("use_cache") not in (None, False)
+        ):
+            raise CPConfigError("Hybrid CP has no inference-state exchange. Set use_cache=False and pass no cache.")
+        if attention_mask is not None:
+            raise CPConfigError(
+                "Dense hybrid CP expects no layer attention_mask. Use UlyssesModel with right-padded rows."
+            )
+        if any(
+            kwargs.get(key) is not None
+            for key in ("seq_idx", "cu_seq_lens_q", "cu_seq_lens_k", "cu_seqlens", "cu_seqlens_cpu")
+        ):
+            raise CPConfigError("Hybrid CP does not support packed documents. Disable packing and padding_free.")
+        kwargs.pop("use_cache", None)
+        kwargs.pop("cu_seq_lens_q", None)
+        attn = self.original_attention
+        batch, local_length, _ = hidden_states.shape
+        q, k, v = attn.in_proj_qkv(hidden_states).split((attn.key_dim, attn.key_dim, attn.value_dim), dim=-1)
+        q = q.reshape(batch, local_length, attn.num_k_heads, attn.head_k_dim)
+        k = k.reshape(batch, local_length, attn.num_k_heads, attn.head_k_dim)
+        v = v.reshape(batch, local_length, attn.num_v_heads, attn.head_v_dim)
+        a, b = attn.in_proj_a(hidden_states), attn.in_proj_b(hidden_states)
+        q, k, v, a, b = UlyssesAllToAll.apply(self.cp_group, True, q, k, v, a[..., None], b[..., None])
+        mixed = torch.cat((q.flatten(-2), k.flatten(-2), v.flatten(-2)), dim=-1).transpose(1, 2)
+        local_keys, local_values = attn.num_k_heads // self.cp_size, attn.num_v_heads // self.cp_size
+        key_width, value_width = local_keys * attn.head_k_dim, local_values * attn.head_v_dim
+        key_start, value_start = self.cp_rank * key_width, self.cp_rank * value_width
+        weight = attn.conv1d.weight.squeeze(1)
+        weight = torch.cat(
+            (
+                weight[key_start : key_start + key_width],
+                weight[attn.key_dim + key_start : attn.key_dim + key_start + key_width],
+                weight[2 * attn.key_dim + value_start : 2 * attn.key_dim + value_start + value_width],
+            )
+        )
+        mixed = modeling_qwen3_5.causal_conv1d_fn(mixed, weight, None, activation=attn.activation, **kwargs).transpose(
+            1, 2
+        )
+        length = local_length * self.cp_size
+        q, k, v = mixed.split((key_width, key_width, value_width), dim=-1)
+        repeat = local_values // local_keys
+        q = q.reshape(batch, length, local_keys, attn.head_k_dim).repeat_interleave(repeat, dim=2)
+        k = k.reshape(batch, length, local_keys, attn.head_k_dim).repeat_interleave(repeat, dim=2)
+        v = v.reshape(batch, length, local_values, attn.head_v_dim)
+        heads = slice(self.cp_rank * local_values, (self.cp_rank + 1) * local_values)
+        beta = b.squeeze(-1).sigmoid()
+        g = -attn.A_log[heads].float().exp() * F.softplus(a.squeeze(-1).float() + attn.dt_bias[heads])
+        core, _ = modeling_qwen3_5.torch_chunk_gated_delta_rule(
+            q,
+            k,
+            v,
+            g=g,
+            beta=beta,
+            initial_state=None,
+            output_final_state=False,
+            use_qk_l2norm_in_kernel=True,
+            **kwargs,
+        )
+        core = heads_to_sequence(core, self.cp_group)
+        z = attn.in_proj_z(hidden_states).reshape(-1, attn.head_v_dim)
+        output = attn.norm(core.reshape(-1, attn.head_v_dim), z)
+        return attn.out_proj(output.reshape(batch, local_length, attn.value_dim))
+
+
 ULYSSES_ATTENTION_MAP = build_class_claim_map(UlyssesAttention, "HF attention class name")
+ULYSSES_GATED_DELTA_MAP = MappingProxyType(
+    {name: Qwen3_5UlyssesGatedDelta for name in Qwen3_5UlyssesGatedDelta.HF_MODULE_NAMES}
+)
