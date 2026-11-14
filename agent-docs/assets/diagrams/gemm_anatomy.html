@@ -3,58 +3,10 @@
 <head>
 <meta charset="utf-8">
 <title>GEMM anatomy</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
-  :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
 
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
@@ -151,13 +103,6 @@
     pointer-events: none;
   }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -178,6 +123,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // Side lengths in px, drawn to one scale so X, W and Y share their edges.
   const SIDE = { M: 410, K: 264, N: 342 };
@@ -199,30 +145,6 @@
   /** Clear space between a dimension letter and the line segment on each side of it. */
   const DIM_GAP = 10;
   const CAPTION_GAP = 38;
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    return node;
-  }
 
   const stage = document.getElementById("stage");
   const wires = document.getElementById("wires");

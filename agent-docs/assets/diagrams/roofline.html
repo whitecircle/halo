@@ -3,58 +3,10 @@
 <head>
 <meta charset="utf-8">
 <title>B300 roofline</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
-  :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
 
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
@@ -74,7 +26,6 @@
 
   svg .axis { font-size: 23px; fill: var(--body); }
 
-
   svg .why { font-size: 22px; fill: var(--secondary); }
 
   svg .mark { font-size: 23px; fill: var(--body); }
@@ -82,15 +33,6 @@
   svg .point { font-size: 22px; fill: var(--text); }
 
   svg .ridge { font-size: 25px; fill: var(--text); }
-
-
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 
   /* The key names the two regions in a column left of the plot. */
   .figure {
@@ -152,6 +94,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   const PEAK = 1818; // TFLOP/s, best dense bf16 8192³ GEMM on an unloaded B300
   const BW = 6.6; // TB/s, so TFLOP/s per FLOP/byte
@@ -187,20 +130,6 @@
   const TICK = 8;
   /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
   const PAD = { l: 124, r: 0, t: 0, b: 84 };
-
-  function svgEl(tag, attrs, text) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
 
   if (REGIONS.length !== 2) {
     throw new Error("The ridge splits the plot in two: the key takes exactly two regions.");

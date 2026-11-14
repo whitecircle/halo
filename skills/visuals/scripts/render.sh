@@ -1,8 +1,8 @@
 #!/bin/zsh
 # Render a social image page to a 2x PNG with headless Chrome, then optimize it losslessly with OptiPNG.
 # Usage: render.sh page.html out.png [width height]   (CSS px; default: the size the page's body rule fixes)
-# The brand fonts are installed system fonts. A page with a logo references assets/logos/…, and
-# when it has no assets folder of its own it borrows this skill's.
+# The brand fonts are installed system fonts. A page links the skill's kit/ and any logo in its assets/ by a
+# path relative to the page.
 set -euo pipefail
 
 if (( $# != 2 && $# != 4 )); then
@@ -12,7 +12,6 @@ fi
 
 page=${1:A}
 out=${2:A}
-skill_dir=${0:A:h:h}
 
 if (( $# == 4 )); then
   width=$3
@@ -83,19 +82,11 @@ if [[ -n "${probe#FONTS-MISSING:}" ]]; then
   exit 1
 fi
 
-target=$page
-
-# Only a page that shows a logo it lacks runs from a copy, since a copy breaks the page's own relative paths.
-if grep -q 'assets/logos/' "$page" && [[ ! -e "${page:h}/assets/logos" ]]; then
-  cp "$page" "$work/page.html"
-  ln -s "$skill_dir/assets" "$work/assets"
-  target="$work/page.html"
-fi
-
-# The virtual time budget lets the page's script build the chart before the shot.
+# The page renders where it sits, so its relative links (the kit, a logo, a data file) resolve. The virtual time
+# budget lets the page's script build the chart before the shot.
 "$chrome" --headless=new --disable-gpu --hide-scrollbars --allow-file-access-from-files \
   --force-device-scale-factor=2 --window-size="$width,$height" --virtual-time-budget=4000 \
-  --screenshot="$out" "file://$target" >/dev/null 2>&1
+  --screenshot="$out" "file://$page" >/dev/null 2>&1
 
 if [[ ! -s "$out" ]]; then
   echo "Chrome did not write $out." >&2

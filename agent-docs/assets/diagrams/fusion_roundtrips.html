@@ -3,58 +3,10 @@
 <head>
 <meta charset="utf-8">
 <title>Fusion round trips</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
-  :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
 
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
@@ -163,13 +115,6 @@
     pointer-events: none;
   }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -190,6 +135,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   const PASS = "var(--halo-blue)";
   const INTERMEDIATE = "var(--halo-violet)";
@@ -213,30 +159,6 @@
       why: { hue: PASS, text: "Only a, b and y cross HBM, at the same FLOPs" },
     },
   ];
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    return node;
-  }
 
   const passes = (column) => column.kernels.reduce(
     (sum, k) => ({ reads: sum.reads + k.reads.length, writes: sum.writes + k.writes.length }),
@@ -283,14 +205,6 @@
   };
   const color = (token) => getComputedStyle(document.documentElement).getPropertyValue(token.slice(4, -1)).trim();
 
-  /** A straight vertical line from y1 to y2 at x, ending in a small head. */
-  function arrow(x, y1, y2, hue) {
-    const len = 8;
-    const half = 5;
-    const dir = Math.sign(y2 - y1);
-    wires.append(svgEl("line", { x1: x, y1, x2: x, y2, stroke: hue, "stroke-width": 2 }));
-    wires.append(svgEl("polyline", { points: `${x - half},${y2 - dir * len} ${x},${y2} ${x + half},${y2 - dir * len}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
-  }
 
   // Reads run down from HBM into a kernel, writes run back up, spread evenly across the kernel's top.
   for (const { column, hbm, cards } of built) {
@@ -304,7 +218,7 @@
         const x = card.l + ((card.r - card.l) * (j + 1)) / (flows.length + 1);
         const hue = THROWAWAY.has(tensor) ? INTERMEDIATE : PASS;
         const [from, to] = way === "read" ? [top + 1, card.t - 3] : [card.t - 1, top + 3];
-        arrow(x, from, to, color(hue));
+        arrow(wires, x, from, x, to, color(hue));
         const label = el("div", "tensor", tensor);
         label.style.cssText = `left:${x + 12}px; top:${(top + card.t) / 2}px; color:${hue}`;
         figure.append(label);

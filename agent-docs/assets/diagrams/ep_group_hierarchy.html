@@ -3,58 +3,10 @@
 <head>
 <meta charset="utf-8">
 <title>EP group hierarchy</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
-  :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
 
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-  }
-
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
@@ -165,13 +117,6 @@
     pointer-events: none;
   }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -196,6 +141,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   /** Every number on the canvas is drawn from these. */
   const SETUP = { gpus: 4, epSize: 2, experts: 32 };
@@ -236,46 +182,7 @@
     }),
   }));
 
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    return node;
-  }
-
-  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
-  function fillValues() {
-    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
-
-    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
-      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
-        if (!(name in VALUES)) {
-          throw new Error(`no value named ${name}`);
-        }
-
-        return VALUES[name];
-      });
-    }
-  }
-
-  fillValues();
+  fillValues(VALUES);
 
   const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 
@@ -316,23 +223,6 @@
   };
 
   /** A straight 2px line with a small head at its end, and at its start too when `both`. */
-  function arrow(x1, y1, x2, y2, hue, both) {
-    const angle = Math.atan2(y2 - y1, x2 - x1);
-    const len = 8;
-    const half = 5;
-    const head = (x, y, a) => {
-      const bx = x - len * Math.cos(a);
-      const by = y - len * Math.sin(a);
-      const px = half * Math.sin(a);
-      const py = -half * Math.cos(a);
-      wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x},${y} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
-
-      return [x, y];
-    };
-    const [ex, ey] = head(x2, y2, angle);
-    const [sx, sy] = both ? head(x1, y1, angle + Math.PI) : [x1, y1];
-    wires.append(svgEl("line", { x1: sx, y1: sy, x2: ex, y2: ey, stroke: hue, "stroke-width": 2 }));
-  }
 
   /** Right edge of `from` to left edge of `to`, or bottom to top when `down`. */
   function connect(from, to, hue, { both = false, down = false } = {}) {
@@ -341,10 +231,10 @@
 
     if (down) {
       const x = (a.l + a.r) / 2;
-      arrow(x, a.b + 1, x, z.t - 1, hue, both);
+      arrow(wires, x, a.b + 1, x, z.t - 1, hue, both);
     } else {
       const y = (a.t + a.b) / 2;
-      arrow(a.r + 1, y, z.l - 1, y, hue, both);
+      arrow(wires, a.r + 1, y, z.l - 1, y, hue, both);
     }
   }
 

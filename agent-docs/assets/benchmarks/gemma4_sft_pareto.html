@@ -3,69 +3,15 @@
 <head>
 <meta charset="utf-8">
 <title>Gemma 4 SFT frameworks</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-    --danger: #ff73c9;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --y-col: 56px;
     --panel-gap: 64px;
     --plot-h: 440px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
-  .subtitle {
-    margin-top: 16px;
-    font-size: 27px;
-    line-height: 1.35;
-    color: var(--secondary);
-  }
+  body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
@@ -152,13 +98,6 @@
 
   .xticks span { top: 0; }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -181,6 +120,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // A summary that fails to load would leave the panels empty: put the error on the canvas instead.
   window.addEventListener("error", (event) => {
@@ -242,7 +182,7 @@
   const round = (value) => Number(value.toPrecision(12));
 
   /** Ticks at the multiples, from min to max, of the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six. */
-  function niceTicks(min, max) {
+  function rangeTicks(min, max) {
     const e = Math.floor(Math.log10(max - min)) - 1;
     const count = (step) => Math.floor(max / step + 1e-9) - Math.ceil(min / step - 1e-9) + 1;
     const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
@@ -259,7 +199,7 @@
    * AXIS_GROWTH of the data's span, so the last call leaves the marks placed on the axis returned.
    */
   function fitAxis(lo, hi, overflow = () => undefined) {
-    const axis = (min, max) => ({ min, max, ticks: niceTicks(min, max) });
+    const axis = (min, max) => ({ min, max, ticks: rangeTicks(min, max) });
     const growth = AXIS_GROWTH * (hi - lo);
     let fitted = axis(lo, hi);
 
@@ -272,30 +212,6 @@
     }
 
     return fitted;
-  }
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    return node;
   }
 
   const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();

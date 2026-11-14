@@ -105,7 +105,8 @@ every shape at about the same width, so a 1600px horizontal canvas needs everyth
 
 ## Colour
 
-Define every colour as a CSS variable on `:root` and use only those.
+Use only the colour variables below. The kit (`kit/figure.css`) defines them, so a page adds none of its own
+except a tint built from them.
 
 | Token | Dark (default) | Light | Role |
 | --- | --- | --- | --- |
@@ -157,8 +158,8 @@ data does not make.
 
 - **No logo by default.** It takes space from the content, so the title opens the canvas. Add a
   logo or lockup only when the user asks for one.
-- When asked, the full White Circle logo sits at the top left, full white on dark (`assets/logos/
-  whitecircle-logo-white.svg`) or full black on light (`whitecircle-logo-black.svg`), about 21px
+- When asked, the full White Circle logo sits at the top left, full white on dark (`<skill>/assets/
+  logos/whitecircle-logo-white.svg`) or full black on light (`whitecircle-logo-black.svg`), about 21px
   tall on a 1200 canvas. Never at reduced opacity. For a post about a product, the lockup replaces
   it: the product name in the serif, then a small "by White Circle" with the full logo.
 - A link at the top right (a repo, the source) in `--secondary`, only where it leads to the data or
@@ -246,17 +247,23 @@ it, fix it, and render again. Never hand the user a command to run. Below, `<ski
 skill's base directory, the folder this file is in.
 
 1. Read the source (an image, a table, a draft). Transcribe every value and check the sums.
-2. Write the image as one self-contained HTML page at the canvas size, in the user's working folder
-   unless they name another, named for its content (`benchmark-turnover.html`). Start from
-   `<skill>/benchmark-turnover.html`. Keep its `assets/logos/…` path when the image carries a
-   logo, put the data inline in one array (or read the data file it comes from), and compute from
+2. Write the image as one HTML page at the canvas size, in the user's working folder unless they
+   name another, named for its content (`benchmark-turnover.html`). Start from
+   `<skill>/benchmark-turnover.html`. The page links the shared kit by a path relative to the page:
+   `<skill>/kit/figure.css` before its own `<style>` (the colour tokens, the fonts, the canvas, title,
+   subtitle and notes, and `class="square"` on `body` for the 1200 scale), and `<skill>/kit/figure.js`
+   before its own `<script>` (`el`, `svgEl`, `arrow`, `fillValues`, `niceTicks`, `niceAxis`,
+   `drawAxis`). Its own style holds only the body's canvas size and what is particular to the figure,
+   and its own script never redefines a kit name: change the kit instead, so every figure follows.
+   A logo is linked the same way, from `<skill>/assets/logos/`. Put the data inline in one array (or
+   read the data file it comes from), and compute from
    it everything that depends on it: the marks and colours, every derived number on the canvas (a
    total, ratio or range in the title, key or notes), and each axis's range and ticks. A data change
    then updates the whole figure, and no typed number can disagree with the marks.
 3. Render it with `<skill>/scripts/render.sh page.html page.png`. It reads the canvas size from the
    page's `body` rule, checks that both brand fonts and OptiPNG are installed, shoots the page with
-   headless Chrome at 2×, lends it this skill's `assets/` when the page has none of its own, and
-   optimizes the PNG losslessly with OptiPNG (about a fifth smaller, every pixel unchanged).
+   headless Chrome at 2× where it sits (so its relative links resolve), and optimizes the PNG
+   losslessly with OptiPNG (about a fifth smaller, every pixel unchanged).
 4. Run `<skill>/scripts/check.sh page.html`. It lists any text or mark crossing the margins, text
    overlapping text, text closer than 12px to text in another column, text spilling out of its own
    box, any line (gridlines too) running through text, a box behind a label cutting a gap into a

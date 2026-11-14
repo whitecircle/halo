@@ -3,62 +3,15 @@
 <head>
 <meta charset="utf-8">
 <title>GLM-5.3-Flash step split</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --label-col: 420px;
     --bar-h: 18px;
     --bar-gap: 4px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
@@ -148,13 +101,6 @@
 
   .ticks span { position: absolute; }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -183,6 +129,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // [part, seconds on the general kernels, seconds on Halo's], drawn by the time on Halo's
   const PARTS = [
@@ -217,20 +164,6 @@
     const count = Math.floor(max / step + 1e-9) + 1;
 
     return { max, ticks: Array.from({ length: count }, (_, i) => Number((i * step).toPrecision(12))) };
-  }
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
   }
 
   const plot = document.getElementById("plot");

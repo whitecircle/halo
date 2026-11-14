@@ -3,61 +3,13 @@
 <head>
 <meta charset="utf-8">
 <title>Async GRPO step</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --danger: #ff73c9;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --col-gap: 44px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1200px;
-    height: 1200px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 40px 48px 36px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 50px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1200px; height: 1200px; }
 
   .figure {
     position: relative;
@@ -194,16 +146,9 @@
     pointer-events: none;
   }
 
-  footer {
-    font-size: 15px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
-<body>
+<body class="square">
 <div class="canvas">
   <header>
     <h1>A step syncs, rolls out, grades, then trains</h1>
@@ -233,6 +178,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // The shape drawn throughout: the code-contests stage-1 recipe, one rank's round.
   const BS = 1;
@@ -356,30 +302,6 @@
     },
   ];
 
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  function svgEl(tag, attrs) {
-    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-
-    for (const [key, value] of Object.entries(attrs)) {
-      node.setAttribute(key, value);
-    }
-
-    return node;
-  }
-
   function dot(hue) {
     const node = el("i");
     node.style.setProperty("--hue", hue);
@@ -449,24 +371,13 @@
   const ink = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
   /** A straight line from (x1, y1) to (x2, y2), ending in a small head. */
-  function arrow(x1, y1, x2, y2, hue) {
-    const angle = Math.atan2(y2 - y1, x2 - x1);
-    const len = 8;
-    const half = 5;
-    const bx = x2 - len * Math.cos(angle);
-    const by = y2 - len * Math.sin(angle);
-    const px = half * Math.sin(angle);
-    const py = -half * Math.cos(angle);
-    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
-    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
-  }
 
   /** A straight line from the right edge of `from` to the left edge of `to`, at their middles. */
   function connect(from, to, hue) {
     const a = box(from);
     const z = box(to);
     const y = (a.t + a.b) / 2;
-    arrow(a.r, y, z.l - 1, y, hue);
+    arrow(wires, a.r, y, z.l - 1, y, hue);
 
     return { l: a.r, r: z.l, y };
   }
@@ -506,7 +417,7 @@
   wires.append(
     svgEl("polyline", { points: `${x0},${from.b} ${x0},${y} ${x1},${y}`, fill: "none", stroke: ink, "stroke-width": 2 }),
   );
-  arrow(x1, y, x1, to.b + 1, ink);
+  arrow(wires, x1, y, x1, to.b + 1, ink);
   const loopLabel = el("div", "hop", "Next turn, up to max_turns");
   loopLabel.style.left = `${x1}px`;
   loopLabel.style.width = `${x0 - x1}px`;

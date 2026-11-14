@@ -3,23 +3,10 @@
 <head>
 <meta charset="utf-8">
 <title>Forced routing gap</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
     --halo-blue-dim: color-mix(in oklab, var(--halo-blue) 38%, var(--bg));
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
 
     --model-col: 190px;
     --kernel-col: 270px;
@@ -31,46 +18,7 @@
     --dot: 20px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
-  .subtitle {
-    margin-top: 16px;
-    font-size: 27px;
-    line-height: 1.35;
-    color: var(--secondary);
-  }
+  body { width: 1600px; height: 900px; }
 
   /* --inset moves zero right along the track and the axis, to fit the values left of it. */
   .figure {
@@ -190,13 +138,6 @@
 
   .ticks span.start { transform: none; }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -220,6 +161,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // [model, kernels, natural gap, forced gap]: mean absolute log-prob gap to the fp32 forward, nats.
   const MODELS = [
@@ -231,48 +173,7 @@
   ];
   const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
 
-  /**
-   * Ticks from zero at the smallest nice step (1, 2, 2.5 or 5 × 10^k) that puts at most `most` steps at or below
-   * `max`, so 4 to 6 ticks at the default, the last at or short of `max`.
-   */
-  function niceTicks(max, most = 5) {
-    const unit = 10 ** Math.floor(Math.log10(max / (most + 1)));
-    const step = [1, 2, 2.5, 5, 10].map((m) => m * unit).find((s) => max / s < most + 1);
-    const round = (value) => Number(value.toPrecision(12));
 
-    return Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
-  }
-
-  /**
-   * A zero-based axis that ends where the data ends: the smallest maximum from `top` up, in steps of 2% of `top`, for
-   * which `fits(max, ticks)` holds on `niceTicks(max, most)`, so a `fits` that draws the chart leaves it drawn on that
-   * axis. Throws past ten times `top`.
-   */
-  function niceAxis(top, fits, most = 5) {
-    for (let max = top; max <= 10 * top; max += top / 50) {
-      const ticks = niceTicks(max, most);
-
-      if (fits(max, ticks)) {
-        return { max, ticks };
-      }
-    }
-
-    throw new Error(`No axis up to ${10 * top} fits every label inside its plot: widen the plot or shorten the label.`);
-  }
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
 
   const counted = (n, noun) => `${NUMBER_WORDS[n] ?? n.toLocaleString("en-US")} ${noun}${n === 1 ? "" : "s"}`;
   /** The share of the natural gap that forcing removes. */

@@ -3,23 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>The pipeline bubble</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --forward: var(--halo-blue);
     --backward: var(--halo-violet);
     --label-col: 100px;
@@ -27,46 +13,7 @@
     --cell-h: 38px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
-  .subtitle {
-    margin-top: 16px;
-    font-size: 27px;
-    line-height: 1.35;
-    color: var(--secondary);
-  }
+  body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
@@ -202,13 +149,6 @@
     font-variant-numeric: tabular-nums;
   }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -229,6 +169,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   const P = 4;
   const M = 8;
@@ -358,20 +299,6 @@
 
   SCHEDULES[0].note = `One optimizer step is ${SLOTS} slots`;
   SCHEDULES[1].note = `All forwards, then all backwards: the same ${SLOTS} slots`;
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
 
   const figure = document.getElementById("figure");
   figure.style.setProperty("--slots", SLOTS);

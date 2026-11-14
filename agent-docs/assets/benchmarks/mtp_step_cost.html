@@ -3,63 +3,16 @@
 <head>
 <meta charset="utf-8">
 <title>MTP head step cost</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --label-col: 240px;
     --panel-gap: 64px;
     --bar-h: 74px;
     --row-gap: 38px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
@@ -184,13 +137,6 @@
 
   .ticks span:first-of-type { transform: none; }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -212,6 +158,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // [arm, median seconds per step, lower quartile, upper quartile, peak allocated GiB]
   const ARMS = [
@@ -225,60 +172,6 @@
     { head: "Peak allocated memory", sub: "GiB on the fullest GPU", tick: (v, axis) => v.toFixed(axis.digits) },
   ];
   const BASE = ARMS[0][1];
-  const AXIS_GROWTH = 0.02;
-
-  /**
-   * A zero-based axis ending at `top`, the data's largest value, or AXIS_GROWTH of it at a time past it while
-   * `overflows(max)` places the marks and finds one crossing the end, so the marks stay placed on the axis returned.
-   * Its ticks step from zero by the nice step (1, 2, 2.5 or 5 × 10^k) giving four to six, the last at or short of
-   * the end.
-   */
-  function niceAxis(top, overflows = () => false) {
-    const round = (value) => Number(value.toPrecision(12));
-    let max = top;
-
-    for (let grown = 1; overflows(max); grown += 1) {
-      if (grown > 100) {
-        throw new Error(`no axis up to ${max} holds every mark and its label: widen the plot or shorten the label`);
-      }
-
-      max = top * (1 + AXIS_GROWTH * grown);
-    }
-
-    const unit = 10 ** Math.floor(Math.log10(max / 5));
-    const step = [1, 2, 2.5, 5, 10].map((m) => round(m * unit)).find((s) => Math.floor(max / s + 1e-9) <= 5);
-    const ticks = Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
-
-    return { max, ticks, digits: (String(step).split(".")[1] ?? "").length };
-  }
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
-
-  /** Draws an axis into `row`: its line, and at each tick a mark and the tick's value, kept inside the row. */
-  function drawAxis(row, axis, format) {
-    row.append(el("div", "axis"));
-
-    for (const tick of axis.ticks) {
-      const at = `${(tick / axis.max) * 100}%`;
-      const mark = el("i");
-      mark.style.left = `min(${at}, 100% - 1px)`;
-      const label = el("span", undefined, format(tick));
-      row.append(mark, label);
-      label.style.left = `min(${at}, 100% - ${label.offsetWidth / 2}px)`;
-    }
-  }
 
   const joint = ARMS.filter(([name]) => name.startsWith("Joint")).map(([, median]) => Math.round((median / BASE - 1) * 100));
   const [least, most] = [Math.min(...joint), Math.max(...joint)];
@@ -366,7 +259,7 @@
     const axis = niceAxis(Math.max(...tracks[p].map((t) => t.reach)), (max) => {
       tracks[p].forEach((t) => t.place(max));
 
-      return tracks[p].some((t) => t.label.getBoundingClientRect().right > t.track.getBoundingClientRect().right);
+      return tracks[p].every((t) => t.label.getBoundingClientRect().right <= t.track.getBoundingClientRect().right);
     });
     const ticks = el("div", "ticks");
     ticks.style.gridColumn = column(p);

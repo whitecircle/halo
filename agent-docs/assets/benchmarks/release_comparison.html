@@ -3,23 +3,9 @@
 <head>
 <meta charset="utf-8">
 <title>1.2.0 against 1.1.0</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --bg: #000000;
-    --surface: #0a0a0a;
-    --line: #222222;
-    --heading: #efefef;
-    --text: #ffffff;
-    --body: #c6c9cd;
-    --secondary: #7e8186;
-    --tertiary: #6f6f74;
-    --halo-blue: #73bbff;
-    --halo-violet: #c572ff;
-    --halo-indigo: #7287ff;
-
-    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
-    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
-
     --label-col: 430px;
     --ratio-col: 100px;
     --panel-gap: 48px;
@@ -30,40 +16,7 @@
     --tick: 6px;
   }
 
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-
-  html, body { background: var(--bg); }
-
-  body {
-    width: 1600px;
-    height: 900px;
-    overflow: hidden;
-    color: var(--body);
-    font-family: var(--sans);
-    font-weight: 400;
-    -webkit-font-smoothing: antialiased;
-    text-wrap: pretty;
-  }
-
-  .canvas {
-    display: flex;
-    flex-direction: column;
-    height: 100%;
-    padding: 52px 64px 48px;
-  }
-
-  .nw { white-space: nowrap; }
-
-  h1 {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 67px;
-    line-height: 1.08;
-    letter-spacing: -0.025em;
-    color: var(--heading);
-    text-wrap: balance;
-  }
-
+  body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
@@ -195,13 +148,6 @@
 
   .ticks span.start { transform: none; }
 
-  footer {
-    font-size: 20px;
-    line-height: 1.55;
-    color: var(--secondary);
-  }
-
-  footer .s { display: inline-block; }
 </style>
 </head>
 <body>
@@ -226,6 +172,7 @@
   </footer>
 </div>
 
+<script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   // [shape, 1.1.0 tokens/s/GPU, 1.2.0 tokens/s/GPU, 1.1.0 peak GiB, 1.2.0 peak GiB]
   const SHAPES = [
@@ -245,48 +192,7 @@
   /** Pixels trimmed from each side of the 1.1.0 / 1.2.0 boundary, for the 4px gap between the two parts. */
   const SEAM = 2;
 
-  /**
-   * Ticks from zero at the smallest nice step (1, 2, 2.5 or 5 × 10^k) that puts at most `most` steps at or below
-   * `max`, so 4 to 6 ticks at the default, the last at or short of `max`.
-   */
-  function niceTicks(max, most = 5) {
-    const unit = 10 ** Math.floor(Math.log10(max / (most + 1)));
-    const step = [1, 2, 2.5, 5, 10].map((m) => m * unit).find((s) => max / s < most + 1);
-    const round = (value) => Number(value.toPrecision(12));
 
-    return Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
-  }
-
-  /**
-   * A zero-based axis that ends where the data ends: the smallest maximum from `top` up, in steps of 2% of `top`, for
-   * which `fits(max, ticks)` holds on `niceTicks(max, most)`, so a `fits` that draws the chart leaves it drawn on that
-   * axis. Throws past ten times `top`.
-   */
-  function niceAxis(top, fits, most = 5) {
-    for (let max = top; max <= 10 * top; max += top / 50) {
-      const ticks = niceTicks(max, most);
-
-      if (fits(max, ticks)) {
-        return { max, ticks };
-      }
-    }
-
-    throw new Error(`No axis up to ${10 * top} fits every label inside its plot: widen the plot or shorten the label.`);
-  }
-
-  function el(tag, className, text) {
-    const node = document.createElement(tag);
-
-    if (className !== undefined) {
-      node.className = className;
-    }
-
-    if (text !== undefined) {
-      node.textContent = text;
-    }
-
-    return node;
-  }
 
   const signed = (value) => {
     const fixed = Math.abs(value).toFixed(2);
@@ -359,7 +265,7 @@
   plot.append(zero);
 
   /** Draws one panel's axis into its tick cell: a line across its `width` pixels, a tick mark and label at each offset in `xs`. */
-  function drawAxis(cell, width, xs, texts) {
+  function drawPanelAxis(cell, width, xs, texts) {
     const axis = el("div", "axis");
     axis.style.left = "0px";
     axis.style.width = `${width}px`;
@@ -389,7 +295,7 @@
     rate.append(old, added);
   }
 
-  drawAxis(rateTicks, rateWidth, rateAxis.ticks.map(rateX), rateAxis.ticks.map((tick) => (tick === 0 ? "0" : `${tick / 1000}k`)));
+  drawPanelAxis(rateTicks, rateWidth, rateAxis.ticks.map(rateX), rateAxis.ticks.map((tick) => (tick === 0 ? "0" : `${tick / 1000}k`)));
   rateTicks.querySelector("span").className = "start";
 
   /** Draws the memory panel symmetric about zero, `span` GiB either side, with ticks at ± each of `half`. */
@@ -423,7 +329,7 @@
     zero.style.left = `${memBox.left - plotBox.left + memX(0)}px`;
     // The unit rides on zero: on an outer tick its width would hold the axis off the data.
     const texts = ticks.map((tick) => (tick === 0 ? "0 GiB" : `${tick < 0 ? "−" : "+"}${Math.abs(tick)}`));
-    drawAxis(memTicks, memWidth, ticks.map(memX), texts);
+    drawPanelAxis(memTicks, memWidth, ticks.map(memX), texts);
   }
 
   // The memory axis reaches the largest change either side of zero, widened until every change label and tick label
@@ -436,7 +342,7 @@
 
       return box.left >= memBox.left && box.right <= memBox.right;
     });
-  }, 2);
+  }, { most: 2 });
 
   console.log(`gains ${gains.map((g) => g.toFixed(2)).join(" ")} · largest memory move ${Math.max(...deltas.map(Math.abs)).toFixed(2)}`);
 </script>
