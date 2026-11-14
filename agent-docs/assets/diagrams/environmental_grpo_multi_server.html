@@ -5,25 +5,86 @@
 <title>Two rollout servers</title>
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
+  :root {
+    --section-gap: 36px;
+    --lane-label: 190px;
+  }
 
   body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
     margin-block: auto;
-    padding-block: 22px;
   }
 
-  /* Trainer and actors on the left, the server on the right, a gutter between for the lines. */
+  .section-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  /* The host's GPUs in a row after the section name, then the key to their colours. */
+  .split {
+    display: flex;
+    align-items: center;
+  }
+
+  .split .section-head { width: var(--lane-label); }
+
+  .chips {
+    display: flex;
+    gap: 8px;
+  }
+
+  .chip {
+    display: grid;
+    place-items: center;
+    width: 64px;
+    height: 46px;
+    border-radius: 9px;
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+    color: var(--bg);
+    background: var(--hue);
+  }
+
+  .key {
+    display: flex;
+    gap: 36px;
+    margin-left: 56px;
+    font-size: 22px;
+    color: var(--body);
+  }
+
+  .key span {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .key i {
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--hue);
+  }
+
+  .split + .section-head,
+  .topology + .section-head { margin-top: var(--section-gap); }
+
+  /* Trainer and actors on the left, the servers on the right, a gutter between for the lines. */
   .topology {
     display: grid;
-    grid-template-columns: 580px 1fr 580px;
-    align-items: center;
-    row-gap: 50px;
+    grid-template-columns: 560px 1fr 620px;
+    row-gap: 14px;
+    margin-top: 16px;
   }
 
   .card {
-    padding: 24px 30px 26px;
+    padding: 18px 26px 20px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -34,6 +95,7 @@
     align-items: center;
     gap: 12px;
     font-size: 27px;
+    line-height: 1.2;
     color: var(--text);
   }
 
@@ -44,90 +106,39 @@
     background: var(--hue);
   }
 
-  /* A card's facts: a quiet label and its value, in two aligned columns. */
-  .rows {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 16px;
+  .card .lines {
+    margin-top: 10px;
     font-size: 23px;
-    line-height: 1.35;
-  }
-
-  .rows dt { color: var(--tertiary); }
-
-  .rows dd { color: var(--body); }
-
-  /* The GPUs a component holds, numbered, in its colour. */
-  .gpus {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-left: auto;
-    font-size: 20px;
-    color: var(--secondary);
-  }
-
-  .gpus span { margin-right: 6px; }
-
-  .gpus b {
-    display: grid;
-    place-items: center;
-    width: 36px;
-    height: 36px;
-    border-radius: 8px;
-    font-weight: 400;
-    font-size: 20px;
-    font-variant-numeric: tabular-nums;
-    color: var(--bg);
-    background: var(--hue);
+    line-height: 1.32;
+    color: var(--body);
+    white-space: nowrap;
   }
 
   .wire-label {
     position: absolute;
     font-size: 21px;
-    line-height: 1.35;
+    line-height: 1.3;
     color: var(--body);
+    text-align: center;
     white-space: nowrap;
   }
 
   .wire-label .quiet { color: var(--secondary); }
 
   /* One step on the clock: a lane per side, segments drawn to one scale. */
-  .clock { margin-top: 42px; }
-
-  .clock-head {
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 33px;
-    letter-spacing: -0.01em;
-    color: var(--heading);
-  }
-
   .lane {
     display: grid;
-    grid-template-columns: 150px 1fr;
+    grid-template-columns: var(--lane-label) 1fr;
     align-items: center;
   }
 
-  .clock-head + .lane { margin-top: 20px; }
+  .section-head + .lane { margin-top: 16px; }
 
   .lane + .lane { margin-top: 6px; }
 
   .lane-name {
-    display: flex;
-    align-items: center;
-    gap: 12px;
     font-size: 22px;
     color: var(--body);
-  }
-
-  .lane-name i {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--hue);
   }
 
   .track {
@@ -138,8 +149,8 @@
   .seg {
     display: grid;
     place-items: center;
-    height: 48px;
-    border-radius: 12px;
+    height: 46px;
+    border-radius: 10px;
     font-size: 21px;
     white-space: nowrap;
   }
@@ -162,7 +173,6 @@
     overflow: visible;
     pointer-events: none;
   }
-
 </style>
 </head>
 <body>
@@ -172,15 +182,19 @@
   </header>
 
   <div class="figure" id="figure">
+    <div class="split" id="split"></div>
+    <div class="section-head">Topology</div>
     <div class="topology" id="topology"></div>
-    <div class="clock" id="clock"></div>
+    <div class="section-head" id="clock-head"></div>
+    <div id="lanes"></div>
     <svg class="wires" id="wires"></svg>
   </div>
 
   <footer>
     <p>
+      <span class="s">The streamed sync pauses both servers for the whole push.</span>
+      <span class="s">Prefetch holds <span class="nw">prefetch_depth</span> rounds, one by default.</span>
       <span class="s">Bar lengths are illustrative.</span>
-      <span class="s">Each push pauses both servers, and prefetch holds <span class="nw">prefetch_depth</span> rounds in flight, one by default.</span>
     </p>
   </footer>
 </div>
@@ -191,47 +205,42 @@
   const ENGINE = "var(--halo-violet)";
   const ACTORS = "var(--halo-indigo)";
 
-  const TRAINER_GPUS = [0, 1, 2, 3, 4, 5];
+  const GPUS = 8;
+  /** One entry per server, in rollout_server_configs order: its GPU and the line its card ends on. */
+  const SERVERS = [
+    { gpu: 6, note: "ranks 1+, dials the trainer host" },
+    { gpu: 7, note: "group port = rollout_group_port + index" },
+  ];
+  const SERVER_GPUS = SERVERS.map((server) => server.gpu);
+  const TRAINER_GPUS = [...Array(GPUS).keys()].filter((g) => !SERVER_GPUS.includes(g));
+  const GROUP_PORT = 51216;
+  const VLLM_PORT = 8000;
+  const groupPort = (i) => GROUP_PORT + i;
+
   const CARDS = {
     trainer: {
-      name: "Trainer",
+      name: `Trainer, GPU ${TRAINER_GPUS[0]}–${TRAINER_GPUS.at(-1)}`,
       hue: TRAINER,
-      gpus: TRAINER_GPUS,
-      rows: [
-        ["Ranks", `${TRAINER_GPUS.length} under torchrun`],
-        ["Sync", "rank 0, binds both stores"],
+      lines: [
+        `torchrun --nproc_per_node=${TRAINER_GPUS.length}`,
+        "rank 0 of both sync groups",
+        `binds ${SERVERS.map((_, i) => `:${groupPort(i)}`).join(" and ")}`,
       ],
     },
     actors: {
       name: "Ray environment actors",
       hue: ACTORS,
-      rows: [
-        ["Budget", "rollout_actor_budget per node"],
-        ["Runs on", "the CPUs"],
-      ],
+      lines: ["rollout_actor_budget per node", "round-robin over the server URLs"],
     },
-    server1: {
-      name: "Rollout server 1",
+    servers: SERVERS.map((server, i) => ({
+      name: `Server ${i + 1}, GPU ${server.gpu}`,
       hue: ENGINE,
-      gpus: [6],
-      rows: [
-        ["Engine", "vLLM :8000 or SGLang :30000"],
-        ["Sync", "own group, store :51216"],
-      ],
-    },
-    server2: {
-      name: "Rollout server 2",
-      hue: ENGINE,
-      gpus: [7],
-      rows: [
-        ["Engine", "vLLM :8001 or SGLang :30001"],
-        ["Sync", "own group, store :51217"],
-      ],
-    },
+      lines: [`:${VLLM_PORT + i} · NCCL group port ${groupPort(i)}`, server.note],
+    })),
   };
   const LINKS = {
     sync: ["NCCL weight sync"],
-    http: ["HTTP requests", "round-robin over the two URLs"],
+    http: ["POST", "/v1/chat/completions"],
   };
 
   /** Phase lengths in one unit, shared by both server figures so their bars compare. */
@@ -241,25 +250,25 @@
   const LANES = [
     {
       name: "Trainer",
-      hue: TRAINER,
       segs: [
-        ["sync", SYNC, "sync"],
-        ["update on the round before", UPDATE, "work"],
+        ["sync", SYNC, "sync", ENGINE],
+        ["update on the round before", UPDATE, "work", TRAINER],
         ["waiting", ROUND - UPDATE, "idle"],
         ["", UPDATE, "space"],
       ],
     },
     {
       name: "Engines",
-      hue: ENGINE,
-      segs: [["paused", SYNC, "sync"], ["generating this round", ROUND, "work"], ["what prefetch removes", UPDATE, "gone"]],
+      segs: [
+        ["paused", SYNC, "sync", ENGINE],
+        ["generating this round", ROUND, "work", ACTORS],
+        ["what prefetch removes", UPDATE, "gone"],
+      ],
     },
   ];
-  const STEP = "One step = sync + max(round, update)";
-  /** Vertical offset of a line's ends from a card's middle, so no two arrowheads meet. */
-  const PORT = 14;
-  /** Where the Ray link leaves the trainer card, as a share of its width. */
-  const RAY_AT = 0.3;
+  const STEP = "One step on the clock: sync + max(round, update)";
+  /** How far the bracket that gathers the servers stands off their left edge, and the reach of its end ticks. */
+  const BRACKET = { off: 26, tick: 12 };
 
   function buildCard(spec) {
     const card = el("div", "card");
@@ -267,62 +276,69 @@
     const dot = el("i");
     dot.style.setProperty("--hue", spec.hue);
     name.append(dot, spec.name);
+    const lines = el("div", "lines");
 
-    if (spec.gpus !== undefined) {
-      const gpus = el("div", "gpus");
-      gpus.style.setProperty("--hue", spec.hue);
-      gpus.append(el("span", undefined, spec.gpus.length > 1 ? "GPUs" : "GPU"));
-
-      for (const gpu of spec.gpus) {
-        gpus.append(el("b", undefined, String(gpu)));
-      }
-
-      name.append(gpus);
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
     }
 
-    const rows = el("dl", "rows");
-
-    for (const [term, value] of spec.rows) {
-      rows.append(el("dt", undefined, term), el("dd", undefined, value));
-    }
-
-    card.append(name, rows);
+    card.append(name, lines);
 
     return card;
   }
 
+  const split = document.getElementById("split");
+  const chips = el("div", "chips");
+
+  for (let gpu = 0; gpu < GPUS; gpu += 1) {
+    const chip = el("div", "chip", String(gpu));
+    chip.style.setProperty("--hue", SERVER_GPUS.includes(gpu) ? ENGINE : TRAINER);
+    chips.append(chip);
+  }
+
+  const key = el("div", "key");
+
+  for (const [hue, text] of [[TRAINER, "trainer rank"], [ENGINE, "rollout engine"]]) {
+    const item = el("span");
+    const swatch = el("i");
+    swatch.style.setProperty("--hue", hue);
+    item.append(swatch, text);
+    key.append(item);
+  }
+
+  split.append(el("div", "section-head", "GPU split"), chips, key);
+
+  // The first server tops the trainer's row, the last floors the actors' row.
   const topology = document.getElementById("topology");
   const trainer = buildCard(CARDS.trainer);
   const actors = buildCard(CARDS.actors);
-  const servers = [buildCard(CARDS.server1), buildCard(CARDS.server2)];
+  const servers = CARDS.servers.map(buildCard);
   trainer.style.gridArea = "1 / 1";
   actors.style.gridArea = "2 / 1";
-  servers[0].style.gridArea = "1 / 3";
-  servers[1].style.gridArea = "2 / 3";
+  servers.forEach((server, i) => {
+    server.style.gridArea = `${i + 1} / 3`;
+    server.style.alignSelf = i === 0 ? "start" : "end";
+  });
   topology.append(trainer, actors, ...servers);
 
-  const clock = document.getElementById("clock");
+  document.getElementById("clock-head").textContent = STEP;
+  const lanes = document.getElementById("lanes");
   const total = SYNC + ROUND + UPDATE;
-  clock.append(el("div", "clock-head", STEP));
 
   for (const lane of LANES) {
     const row = el("div", "lane");
-    const name = el("div", "lane-name");
-    const dot = el("i");
-    dot.style.setProperty("--hue", lane.hue);
-    name.append(dot, lane.name);
     const track = el("div", "track");
 
-    for (const [text, units, kind] of lane.segs) {
+    for (const [text, units, kind, hue] of lane.segs) {
       const seg = el("div", `seg ${kind}`, text);
-      seg.style.setProperty("--hue", lane.hue);
+      seg.style.setProperty("--hue", hue ?? "var(--surface)");
       // Every edge lands at its share of the track whatever the number of gaps before it.
       seg.style.flex = `0 0 calc(${units / total} * (100% + 5px) - 5px)`;
       track.append(seg);
     }
 
-    row.append(name, track);
-    clock.append(row);
+    row.append(el("div", "lane-name", lane.name), track);
+    lanes.append(row);
   }
 
   const figure = document.getElementById("figure");
@@ -335,27 +351,12 @@
   };
   const css = (value) => getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1)).trim();
 
-  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
-
-  /** A straight line from the right edge of `from` to the left edge of `to`, ending in a small head. */
-  function connect(from, to, hue, fromDy, toDy) {
-    const a = box(from);
-    const z = box(to);
-    arrow(wires, a.r, (a.t + a.b) / 2 + fromDy, z.l - 1, (z.t + z.b) / 2 + toDy, hue);
-  }
-
-  /** A label of one or more lines, every line after the first quieter. */
-  function label(lines, left, top, width) {
+  /** A label of one or more lines, centred over [left, right], every line after the first quieter. */
+  function label(lines, left, right) {
     const node = el("div", "wire-label");
     lines.forEach((line, i) => node.append(el("div", i === 0 ? undefined : "quiet", line)));
     node.style.left = `${left}px`;
-    node.style.top = `${top}px`;
-
-    if (width !== undefined) {
-      node.style.width = `${width}px`;
-      node.style.textAlign = "center";
-    }
-
+    node.style.width = `${right - left}px`;
     figure.append(node);
 
     return node;
@@ -363,22 +364,27 @@
 
   const t = box(trainer);
   const a = box(actors);
-  const s = box(servers[0]);
-
-  // The trainer syncs both servers and the actors round-robin over both: each line leaves and lands
-  // above the middle for the first server or the trainer, below it for the second or the actors.
-  servers.forEach((server, j) => {
-    connect(trainer, server, css(TRAINER), (j === 0 ? -1 : 1) * PORT, -PORT);
-    connect(actors, server, css(ACTORS), (j === 0 ? -1 : 1) * PORT, PORT);
-  });
-  const above = label(LINKS.sync, t.r, 0, s.l - t.r);
-  above.style.top = `${(t.t + t.b) / 2 - PORT - 12 - above.offsetHeight}px`;
-  label(LINKS.http, a.r, (a.t + a.b) / 2 + PORT + 12, s.l - a.r);
-
-  const rayX = t.l + RAY_AT * (t.r - t.l);
-  arrow(wires, rayX, t.b, rayX, a.t - 1, css("var(--tertiary)"));
-  const ray = label(["Ray, on this host"], rayX + 14, 0);
-  ray.style.top = `${(t.b + a.t) / 2 - ray.offsetHeight / 2}px`;
+  const first = box(servers[0]);
+  const last = box(servers.at(-1));
+  // A bracket gathers the servers: the sync reaches every one of them, and the requests round-robin over them.
+  const bx = first.l - BRACKET.off;
+  const engine = css(ENGINE);
+  wires.append(
+    svgEl("polyline", {
+      points: `${bx + BRACKET.tick},${first.t} ${bx},${first.t} ${bx},${last.b} ${bx + BRACKET.tick},${last.b}`,
+      fill: "none",
+      stroke: engine,
+      "stroke-width": 2,
+      "stroke-linejoin": "round",
+    }),
+  );
+  const syncY = (t.t + t.b) / 2;
+  const httpY = (a.t + a.b) / 2;
+  arrow(wires, t.r, syncY, bx - 1, syncY, engine);
+  arrow(wires, a.r, httpY, bx - 1, httpY, css(ACTORS));
+  const above = label(LINKS.sync, t.r, bx);
+  above.style.top = `${syncY - 12 - above.offsetHeight}px`;
+  label(LINKS.http, a.r, bx).style.top = `${httpY + 12}px`;
 </script>
 </body>
 </html>

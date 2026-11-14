@@ -11,94 +11,57 @@
   .figure {
     position: relative;
     margin-block: auto;
-    padding-block: 20px;
+    padding-block: 22px;
   }
 
-  /* The step snakes: left to right, back right to left through the decoder layers, then left to right. */
+  /* Top to bottom: the input band, the decoder stack, the head and the loss; the arrows sit in the gaps. */
   .row {
     display: grid;
-    align-items: center;
-    column-gap: 72px;
+    column-gap: 56px;
   }
 
-  /* Each card of the first row takes its own width, the spare split evenly. */
-  .row.three { grid-template-columns: repeat(3, auto); }
+  .row.three { grid-template-columns: repeat(3, 1fr); }
 
-  .row.two { grid-template-columns: repeat(2, 1fr); column-gap: 120px; }
+  .row.two { grid-template-columns: repeat(2, 1fr); column-gap: 64px; }
 
-  .row + .row,
-  .frame + .row,
-  .row + .frame { margin-top: 40px; }
+  .row + .frame,
+  .frame + .row { margin-top: 50px; }
 
   .frame {
-    position: relative;
-    padding: 24px 24px 22px;
+    padding: 12px 24px 20px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
 
-  /* The label sits on the frame's top edge, so the frame costs no extra row. */
   .frame-label {
-    position: absolute;
-    top: -13px;
-    left: 20px;
-    padding: 0 10px;
-    background: var(--bg);
     font-size: 21px;
     line-height: 26px;
     color: var(--secondary);
   }
 
+  .frame .row { margin-top: 10px; }
+
   .card {
-    padding: 15px 26px 17px;
+    padding: 16px 26px 18px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
   }
 
-  .card .top {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
   .card .name {
     font-size: 27px;
+    line-height: 1.25;
     color: var(--text);
-  }
-
-  .card .scope {
-    display: inline-flex;
-    align-items: center;
-    gap: 9px;
-    font-size: 21px;
-    color: var(--body);
     white-space: nowrap;
-    font-variant-numeric: tabular-nums;
   }
 
-  .card .scope i {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    background: var(--hue);
-  }
-
-  /* A card's facts: a quiet label and its value, in two aligned columns. */
-  .facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 2px;
-    margin-top: 8px;
+  .card .lines {
+    margin-top: 6px;
     font-size: 23px;
     line-height: 1.28;
+    color: var(--body);
+    white-space: nowrap;
   }
-
-  .facts dt { color: var(--tertiary); }
-
-  .facts dd { color: var(--body); }
 
   .hop {
     position: absolute;
@@ -127,8 +90,8 @@
 
   <footer>
     <p>
-      <span class="s">CP size {cpSize} on a {sequence}-token sequence with {heads} attention heads.</span>
-      <span class="s">Violet marks the whole sequence, blue one rank’s chunk.</span>
+      <span class="s">CP size {cpSize} splits a {sequence}-token sequence into {perRank} tokens per rank.</span>
+      <span class="s">Every other layer, and the loss, works on this rank’s chunk.</span>
     </p>
   </footer>
 </div>
@@ -144,73 +107,56 @@
 
   const fmt = (n) => n.toLocaleString("en-US");
   /** Text for each `{name}` in the page's static text. */
-  const VALUES = { cpSize: fmt(SETUP.cpSize), sequence: fmt(SETUP.sequence), heads: fmt(SETUP.heads) };
+  const VALUES = { cpSize: fmt(SETUP.cpSize), sequence: fmt(SETUP.sequence), perRank: fmt(SETUP.sequence / SETUP.cpSize) };
   /** One rank's share of the sequence, as the shapes write it. */
   const S_CHUNK = `S/${SETUP.cpSize}`;
-  /** Colour marks how much of the row a stage holds: violet the whole sequence, blue this rank's chunk. */
-  const WHOLE = { hue: "--halo-violet", tokens: SETUP.sequence };
-  const CHUNK = { hue: "--halo-blue", tokens: SETUP.sequence / SETUP.cpSize };
 
   const ROWS = [
     {
       kind: "three",
       cards: [
-        { id: "batch", name: "Full batch", scope: WHOLE, facts: [["Tensors", "input ids, labels, mask, position ids"], ["Shape", "[B, S]"], ["Held by", "every CP rank"]] },
-        { id: "split", name: "Split the sequence", scope: CHUNK, facts: [["Chunk", `${S_CHUNK} per rank, contiguous`], ["Padding", "S to a multiple of cp_size"]] },
-        { id: "embed", name: "Embeddings", scope: CHUNK, facts: [["In", `[B, ${S_CHUNK}]`], ["Out", `[B, ${S_CHUNK}, hidden]`]] },
+        { id: "batch", name: "Full batch", lines: ["input_ids [B, S]", "labels · mask · position_ids"] },
+        { id: "split", name: "split_sequence_for_cp", lines: [`narrow(1, rank·${S_CHUNK}, ${S_CHUNK})`, "S % cp_size == 0 (collator pads)"] },
+        { id: "embed", name: "Embeddings on the chunk", lines: [`[B, ${S_CHUNK}] → [B, ${S_CHUNK}, hidden]`, "Each rank holds its own chunk"] },
       ],
     },
     {
       kind: "two",
       frame: "× N decoder layers",
       cards: [
-        { id: "mlp", name: "MLP or MoE experts", scope: CHUNK, facts: [["Shape", `[B, ${S_CHUNK}, hidden]`], ["CP-aware", "no"], ["EP dispatch", `${S_CHUNK} tokens per rank`]] },
-        { id: "attn", name: "Ulysses attention", scope: WHOLE, facts: [["Sequence", "full S"], ["Heads", `${fmt(SETUP.heads / SETUP.cpSize)} of ${fmt(SETUP.heads)} per rank`], ["Steps", "all-to-all, flash, all-to-all"]] },
+        { id: "attn", name: "Ulysses attention", lines: ["all-to-all → flash → all-to-all", `Full S, ${fmt(SETUP.heads)}/cp_size heads per rank`] },
+        { id: "mlp", name: "MLP / MoE experts", lines: [`Runs on [B, ${S_CHUNK}, hidden] only`, `CP-unaware: EP dispatches ${S_CHUNK}`] },
       ],
     },
     {
       kind: "two",
       cards: [
-        { id: "head", name: "Head, per chunk", scope: CHUNK, facts: [["Logits", `[B, ${S_CHUNK}, V], never gathered`], ["Fused loss", "no logits plane"], ["Boundary label", "from the next chunk"]] },
-        { id: "loss", name: "Loss", scope: CHUNK, facts: [["Per rank", "cp_size · local_sum / global_tokens"], ["global_tokens", "all-reduced over CP"], ["Router aux", "no cp_size factor"]] },
+        { id: "head", name: "Head, per chunk", lines: [`Logits [B, ${S_CHUNK}, V], never gathered`, "Or fused with the loss: no logits plane", "Boundary label: next chunk"] },
+        { id: "loss", name: "Loss", lines: ["cp_size · local_sum / global_tokens", "global_tokens: all_reduce(SUM, cp)", "Router aux term: no cp_size factor"] },
       ],
     },
   ];
-  /** Arrows in step order: [from, to, direction, what they carry, label]. Only the input crosses whole. */
-  const FLOW = [
-    ["batch", "split", "right", WHOLE],
-    ["split", "embed", "right", CHUNK],
-    ["embed", "attn", "down", CHUNK, "hidden states"],
-    ["attn", "mlp", "left", CHUNK],
-    ["mlp", "head", "down", CHUNK, "final norm"],
-    ["head", "loss", "right", CHUNK],
-  ];
+  /** Arrows across a row, in step order. */
+  const ACROSS = [["batch", "split"], ["split", "embed"], ["attn", "mlp"], ["head", "loss"]];
 
   fillValues(VALUES);
 
-  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const figure = document.getElementById("figure");
   const cards = {};
+  let stack;
 
   for (const row of ROWS) {
     const grid = el("div", `row ${row.kind}`);
 
     for (const spec of row.cards) {
       const card = el("div", "card");
-      const top = el("div", "top");
-      const scope = el("span", "scope");
-      const dot = el("i");
-      dot.style.setProperty("--hue", `var(${spec.scope.hue})`);
-      scope.append(dot, `${spec.scope.tokens.toLocaleString("en-US")} tokens`);
-      top.append(el("span", "name", spec.name), scope);
-      const facts = el("dl", "facts");
+      const lines = el("div", "lines");
 
-      for (const [label, value] of spec.facts) {
-        facts.append(el("dt", undefined, label), el("dd", undefined, value));
+      for (const line of spec.lines) {
+        lines.append(el("div", undefined, line));
       }
 
-      card.append(top, facts);
-
+      card.append(el("div", "name", spec.name), lines);
       grid.append(card);
       cards[spec.id] = card;
     }
@@ -218,9 +164,9 @@
     if (row.frame === undefined) {
       figure.append(grid);
     } else {
-      const frame = el("div", "frame");
-      frame.append(el("div", "frame-label", row.frame), grid);
-      figure.append(frame);
+      stack = el("div", "frame");
+      stack.append(el("div", "frame-label", row.frame), grid);
+      figure.append(stack);
     }
   }
 
@@ -232,46 +178,30 @@
 
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
+  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
-  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
-
-  /** Edge of `from` to the facing edge of `to`; a downward line runs at the middle of the narrower card.
-   *  Returns the line's x and the middle of its stretch outside any frame, where a label goes. */
-  function connect(from, to, hue, dir) {
-    const a = box(from);
-    const z = box(to);
-
-    if (dir === "down") {
-      const narrow = a.r - a.l < z.r - z.l ? a : z;
-      const x = (narrow.l + narrow.r) / 2;
-      arrow(wires, x, a.b + 1, x, z.t - 1, hue);
-      const outer = (node) => box(node.closest(".frame") ?? node);
-
-      return { x, y: (outer(from).b + outer(to).t) / 2 };
-    }
-
+  for (const [from, to] of ACROSS) {
+    const a = box(cards[from]);
+    const z = box(cards[to]);
     const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
-
-    if (dir === "right") {
-      arrow(wires, a.r + 1, y, z.l - 1, y, hue);
-    } else {
-      arrow(wires, a.l - 1, y, z.r + 1, y, hue);
-    }
-
-    return { x: 0, y };
+    arrow(wires, a.r + 6, y, z.l - 6, y, lineHue);
   }
 
-  // Each line carries the colour of what it hands on.
-  for (const [from, to, dir, data, label] of FLOW) {
-    const at = connect(cards[from], cards[to], token(data.hue), dir);
-
-    if (label !== undefined) {
-      const tag = el("div", "hop", label);
-      figure.append(tag);
-      tag.style.left = `${at.x + 16}px`;
-      tag.style.top = `${at.y - tag.getBoundingClientRect().height / 2}px`;
-    }
+  /** A downward arrow at `x` from `top` to `bottom`, labelled on `side` of it. */
+  function drop(x, top, bottom, label, side) {
+    arrow(wires, x, top + 1, x, bottom - 1, lineHue);
+    const tag = el("div", "hop", label);
+    figure.append(tag);
+    tag.style.left = side === "left" ? `${x - 16 - tag.offsetWidth}px` : `${x + 16}px`;
+    tag.style.top = `${(top + bottom - tag.offsetHeight) / 2}px`;
   }
+
+  // The stack is entered under the last card of the input band and left above the head.
+  const embed = box(cards.embed);
+  const head = box(cards.head);
+  const frame = box(stack);
+  drop((embed.l + embed.r) / 2, embed.b, frame.t, "hidden states", "left");
+  drop((head.l + head.r) / 2, frame.b, head.t, "final norm", "right");
 </script>
 </body>
 </html>

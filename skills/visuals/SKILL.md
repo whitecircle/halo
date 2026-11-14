@@ -206,13 +206,12 @@ data does not make.
 
 ## Diagrams
 
-- **A card holds a name and a few short facts**, three or four lines at most, never a paragraph.
-- **Facts are label and value rows.** The label is quiet (`--tertiary`), the value reads (`--body`),
-  in two aligned columns: "Port · 8000", "Tensor parallel · 1", "Serves · POST /v1/chat/completions".
-  Name a code identifier only when the reader needs that exact name.
-- **Behaviour is not a card's job.** A sentence about what happens (a push pauses the server, SGLang
-  aborts the turns in flight) goes where the figure shows it happening (a timeline, a connector's
-  label) or into the notes.
+- **Redesign from the original.** Redrawing an existing figure in this style starts from the original
+  image and keeps its structure and content: the same panels, cards, grids, strips, connectors and
+  chart form (a dot plot stays a dot plot), and each card's lines in the original's wording. Only the
+  look changes, plus what this skill's rules require. Change the structure only when asked.
+- **A card holds a name and short plain lines.** The name (27px, `--text`, with its colour dot when it
+  has a role), then its lines (23px, `--body`), each a plain phrase. No label and value columns.
 - **A card is as tall as its content.** Cards in a row share a height only when they hold alike
   content. When cards shrink, give the space back to the figure (larger cards, wider gutters, larger
   type) rather than leaving a gap.
@@ -294,6 +293,7 @@ skill's base directory, the folder this file is in.
   margins?
 - Are the gaps above and below the figure equal, with any subtitle tight under the title?
 - Does the subtitle, if any, say something no axis title, key or heading already says?
+- For a redrawn figure, does it keep the original's structure, chart form and card wording?
 
 ## Licences
 

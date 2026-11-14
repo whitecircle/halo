@@ -6,45 +6,65 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --label-col: 56px;
-    --prompt-col: 150px;
-    --block-gap: 28px;
+    --label-col: 64px;
+    --count-col: 150px;
+    --block-gap: 20px;
     --cell-gap: 4px;
+    --r0-height: 48px;
+    --thin-height: 22px;
   }
 
   body { width: 1600px; height: 900px; }
 
   .figure {
+    position: relative;
     margin-block: auto;
-    padding-block: 30px;
+    padding-block: 24px;
   }
 
-  /* Rank labels, one block per prompt group, then the prompts each rank drew. */
-  .round {
-    display: grid;
-    grid-template-columns: var(--label-col) repeat(var(--groups), 1fr) var(--prompt-col);
-    column-gap: var(--block-gap);
-    row-gap: 8px;
-    align-items: center;
+  .group-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
   }
 
-  .col-head {
-    align-self: end;
-    padding-bottom: 10px;
-    border-bottom: 1px solid var(--line);
-    margin-bottom: 4px;
+  .caption {
+    margin-top: 6px;
     font-size: 23px;
-    color: var(--body);
-    text-align: center;
-    white-space: nowrap;
-  }
-
-  .col-head small {
-    font-size: 21px;
     color: var(--secondary);
   }
 
-  .col-head.prompts { text-align: left; }
+  /* Rank labels, one column per prompt group, then the row counts. */
+  .round {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--groups), 1fr) var(--count-col);
+    column-gap: var(--block-gap);
+    row-gap: 6px;
+    align-items: center;
+    margin-top: 18px;
+  }
+
+  .chip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 62px;
+    border-radius: 10px;
+    background: var(--halo-violet);
+    color: #000;
+    line-height: 1.15;
+    white-space: nowrap;
+  }
+
+  .chip b {
+    font-weight: 400;
+    font-size: 25px;
+  }
+
+  .chip span { font-size: 21px; }
 
   .rank {
     font-size: 25px;
@@ -52,22 +72,28 @@
     white-space: nowrap;
   }
 
+  .rank.thin {
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
   .block {
     display: grid;
     grid-template-columns: repeat(var(--generations), 1fr);
     gap: var(--cell-gap);
+    height: 100%;
   }
 
   .block i {
-    height: 40px;
     border-radius: 7px;
     background: var(--halo-blue);
   }
 
-  .prompts-of {
+  .block.thin i { border-radius: 5px; }
+
+  .count {
     font-size: 25px;
-    color: var(--body);
-    font-variant-numeric: tabular-nums;
+    color: var(--text);
     white-space: nowrap;
   }
 
@@ -75,11 +101,11 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     column-gap: 32px;
-    margin-top: 44px;
+    margin-top: 32px;
   }
 
   .card {
-    padding: 20px 24px 22px;
+    padding: 18px 26px 20px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -89,6 +115,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    margin-bottom: 8px;
     font-size: 27px;
     line-height: 1.2;
     color: var(--text);
@@ -101,25 +128,19 @@
     background: var(--hue);
   }
 
-  /* A card's facts: a quiet label beside the value it names. */
-  .card dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
+  .card p {
     font-size: 23px;
-    line-height: 1.3;
-  }
-
-  .card dt {
-    color: var(--tertiary);
-    white-space: nowrap;
-  }
-
-  .card dd {
+    line-height: 1.4;
     color: var(--body);
-    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
   }
 
 </style>
@@ -130,14 +151,35 @@
     <h1>Each prompt’s {generations} rows stay on one rank</h1>
   </header>
 
-  <div class="figure">
+  <div class="figure" id="figure">
+    <div class="group-head">One rank’s generation round</div>
+    <p class="caption">TRL’s RepeatSampler delivers each prompt’s {generations} rows consecutively, rank-local.</p>
     <div class="round" id="round"></div>
-    <div class="units" id="units"></div>
+
+    <div class="units">
+      <div class="card">
+        <div class="name"><i style="--hue: var(--halo-blue)"></i>Row</div>
+        <p>One episode, one trajectory</p>
+        <p>Its turns share one advantage</p>
+      </div>
+      <div class="card">
+        <div class="name"><i style="--hue: var(--halo-violet)"></i>Group</div>
+        <p>num_generations = {generations} rows</p>
+        <p>One prompt, rank-local</p>
+      </div>
+      <div class="card">
+        <div class="name">Optimizer step</div>
+        <p>{total} rows = {prompts} prompts × {generations}</p>
+        <p>{stepsPerGeneration} micro-batches of bs {batchSize}</p>
+      </div>
+    </div>
+
+    <svg class="wires" id="wires"></svg>
   </div>
 
   <footer>
     <p>
-      <span class="s">TRL’s RepeatSampler delivers each prompt’s {generations} rows consecutively, on one rank.</span>
+      <span class="s">A step is {ranks} ranks × batch size {batchSize} × {stepsPerGeneration} steps per generation = {total} rows.</span>
       <span class="s">A group never straddles ranks: per_device_train_batch_size × steps_per_generation must divide by num_generations.</span>
     </p>
   </footer>
@@ -159,80 +201,95 @@
   const fmt = (n) => n.toLocaleString("en-US");
   /** Text for each `{name}` in the page's static text. */
   const VALUES = {
+    ranks: fmt(SETUP.ranks),
+    batchSize: fmt(SETUP.batchSize),
+    stepsPerGeneration: fmt(SETUP.stepsPerGeneration),
     generations: fmt(SETUP.generations),
+    total: fmt(TOTAL),
+    prompts: fmt(TOTAL / SETUP.generations),
   };
-
-  const UNITS = [
-    { name: "Row", hue: "var(--halo-blue)", rows: [["Holds", "one episode, one trajectory"], ["Advantage", "one, shared by its turns"]] },
-    { name: "Group", rows: [["Rows", `num_generations = ${fmt(SETUP.generations)}`], ["Holds", "one prompt, on one rank"]] },
-    {
-      name: "Optimizer step",
-      rows: [
-        ["Rows", `${fmt(TOTAL)} = ${fmt(TOTAL / SETUP.generations)} prompts × ${fmt(SETUP.generations)}`],
-        ["Each rank", `${fmt(SETUP.stepsPerGeneration)} micro-batches of ${fmt(SETUP.batchSize)} ${SETUP.batchSize === 1 ? "row" : "rows"}`],
-      ],
-    },
-  ];
 
   fillValues(VALUES);
 
   const round = document.getElementById("round");
   round.style.setProperty("--groups", GROUPS);
   round.style.setProperty("--generations", SETUP.generations);
-  round.append(el("div"));
+  // Prompts, a spacer for their arrows, R0, a spacer, then the thinner rows of the other ranks.
+  round.style.gridTemplateRows = [
+    "auto",
+    "24px",
+    "var(--r0-height)",
+    "4px",
+    ...Array(SETUP.ranks - 1).fill("var(--thin-height)"),
+  ].join(" ");
 
-  for (let g = 0; g < GROUPS; g += 1) {
-    const head = el("div", "col-head", `Group ${g + 1} `);
-    head.append(el("small", undefined, `· ${fmt(SETUP.generations)} rows`));
-    round.append(head);
-  }
+  const rowCells = (rank) => Array.from({ length: GROUPS }, (_, g) => {
+    const block = el("div", "block");
+    block.style.gridRow = rank === 0 ? "3" : `${4 + rank}`;
+    block.style.gridColumn = `${g + 2}`;
 
-  round.append(el("div", "col-head prompts", "Prompts"));
+    for (let i = 0; i < SETUP.generations; i += 1) {
+      block.append(el("i"));
+    }
 
-  for (let r = 0; r < SETUP.ranks; r += 1) {
-    round.append(el("div", "rank", `R${r}`));
+    return block;
+  });
 
-    for (let g = 0; g < GROUPS; g += 1) {
-      const block = el("div", "block");
+  const chips = Array.from({ length: GROUPS }, (_, g) => {
+    const chip = el("div", "chip");
+    chip.style.gridRow = "1";
+    chip.style.gridColumn = `${g + 2}`;
+    chip.append(el("b", undefined, `Prompt ${g + 1}`), el("span", undefined, `Group ${g + 1}`));
+    round.append(chip);
 
-      for (let i = 0; i < SETUP.generations; i += 1) {
-        block.append(el("i"));
-      }
+    return chip;
+  });
 
+  const r0 = el("div", "rank", "R0");
+  r0.style.gridRow = "3";
+  round.append(r0);
+  const r0Blocks = rowCells(0);
+  round.append(...r0Blocks);
+  const r0Count = el("div", "count", `${fmt(ROUND)} rows`);
+  r0Count.style.gridRow = "3";
+  r0Count.style.gridColumn = `${GROUPS + 2}`;
+  round.append(r0Count);
+
+  for (let r = 1; r < SETUP.ranks; r += 1) {
+    const label = el("div", "rank thin", `R${r}`);
+    label.style.gridRow = `${4 + r}`;
+    round.append(label);
+
+    for (const block of rowCells(r)) {
+      block.classList.add("thin");
       round.append(block);
     }
-
-    const first = r * GROUPS + 1;
-    round.append(el("div", "prompts-of", `${first}–${first + GROUPS - 1}`));
   }
 
-  const units = document.getElementById("units");
-
-  for (const unit of UNITS) {
-    const card = el("div", "card");
-    const name = el("div", "name");
-
-    if (unit.hue !== undefined) {
-      const dot = el("i");
-      dot.style.setProperty("--hue", unit.hue);
-      name.append(dot);
-    }
-
-    name.append(unit.name);
-    card.append(name);
-
-    const facts = el("dl");
-
-    for (const [label, value] of unit.rows) {
-      facts.append(el("dt", undefined, label), el("dd", undefined, value));
-    }
-
-    card.append(facts);
-
-    units.append(card);
+  if (SETUP.ranks > 1) {
+    const ranks = el("div", "count", `× ${fmt(SETUP.ranks)} ranks`);
+    ranks.style.gridRow = `5 / span ${SETUP.ranks - 1}`;
+    ranks.style.gridColumn = `${GROUPS + 2}`;
+    round.append(ranks);
   }
 
-  console.log(`round ${ROUND} rows = ${GROUPS} prompts x ${SETUP.generations} · step ${TOTAL} rows = ${TOTAL / SETUP.generations} prompts`);
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  // Each prompt's arrow runs from its chip down into its group's block of R0.
+  chips.forEach((chip, g) => {
+    const from = box(chip);
+    const to = box(r0Blocks[g]);
+    const x = (from.l + from.r) / 2;
+    arrow(wires, x, from.b + 6, x, to.t - 6, grey);
+  });
 </script>
 </body>
 </html>

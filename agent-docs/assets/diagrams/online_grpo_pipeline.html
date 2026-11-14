@@ -67,7 +67,7 @@
   }
 
   .card {
-    padding: 20px 24px 22px;
+    padding: 24px 26px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -83,25 +83,13 @@
     white-space: nowrap;
   }
 
-  /* A card's facts: a quiet label beside the value it names. */
-  .card dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
+  .card .lines {
+    margin-top: 14px;
     font-size: 23px;
-    line-height: 1.3;
-  }
-
-  .card dt {
-    color: var(--tertiary);
+    line-height: 1.45;
+    color: var(--body);
     white-space: nowrap;
   }
-
-  .card dd { color: var(--body); }
-
-  .card dd.formula { grid-column: 1 / -1; }
 
   sub, sup {
     font-size: 0.78em;
@@ -140,7 +128,7 @@
 
   <footer>
     <p>
-      <span class="s">The vLLM server runs on GPUs no trainer rank uses, since a rank cannot broadcast to itself.</span>
+      <span class="s">vLLM only, server mode only: the engine must own GPUs no trainer rank uses, as a rank cannot broadcast to itself.</span>
     </p>
   </footer>
 </div>
@@ -149,32 +137,31 @@
 <script>
   const KEY = [{ name: "Policy", hue: "var(--halo-blue)" }, { name: "vLLM server", hue: "var(--halo-violet)" }];
   const BANDS = ["Generate", "Score and update"];
-  /** Each card sits in a band (0 or 1) and a column (1 to 3), its facts as [label, value] rows; a string row is a
-   * formula across both columns. */
+  /** Each card sits in a band (0 or 1) and a column (1 to 3), its lines one under another. */
   const CARDS = [
     {
       id: "data", band: 0, col: 1, name: "Dataset",
-      rows: [["prompt", "text or messages"], ["answer", "the ground truth"], ["Each prompt", "× num_generations"]],
+      lines: ["prompt: text or messages", "answer: the ground truth", "each prompt × num_generations"],
     },
     {
-      id: "render", band: 0, col: 2, name: "Render and tokenize",
-      rows: [["Template", "the trainer’s"], ["Tokenizer", "TRL, after rendering"], ["Over budget", "dropped, never cut"]],
+      id: "render", band: 0, col: 2, name: "Render + tokenize",
+      lines: ["the trainer’s chat template", "TRL tokenizes the rendered text", "over budget → dropped, not cut"],
     },
     {
       id: "vllm", band: 0, col: 3, name: "vLLM server, GPU 7", hue: "var(--halo-violet)",
-      rows: [["Container", "separate"], ["Port", "8000"], ["Mode", "server, never colocated"], ["Template", "none of its own"]],
+      lines: ["separate container, :8000", "server mode only, never colocate", "applies no template of its own"],
     },
     {
-      id: "step", band: 1, col: 1, name: "GRPO loss and step", hue: "var(--halo-blue)",
-      rows: [["Recipes", "loss_type grpo, beta 0"], ["IS ratio", "vs sampling logprobs"], ["Mask", "sequence if ratio > 3.0"], ["Update", "FSDP2, EP, TP or ETP"]],
+      id: "step", band: 1, col: 1, name: "GRPO loss + step", hue: "var(--halo-blue)",
+      lines: ["recipes: loss_type grpo, beta 0", "IS ratio from the sampling logps", "sequence_mask: ratio > 3.0 → 0", "FSDP2 / EP / TP update"],
     },
     {
       id: "adv", band: 1, col: 2, name: "Group advantages",
-      rows: ["A = (r − mean) / std, per group", ["Group", "one prompt’s rows"], ["scale_rewards", "group"], ["All equal", "A = 0"]],
+      lines: ["A = (r − mean) / std, per group", "scale_rewards: group", "all-equal group → A = 0", "num_generations rows per prompt"],
     },
     {
       id: "rewards", band: 1, col: 3, name: "Rewards",
-      rows: [["accuracy", "last \\boxed{} vs answer"], ["Score", "1.0 if equal, else 0.0"], ["format", "a regex, off by default"], ["Weights", "reward_weights"]],
+      lines: ["accuracy: last \\boxed{}", "equals answer → 1.0 / 0.0", "format: regex, off", "weighted sum → reward_weights"],
     },
   ];
   /** `down` leaves the source's bottom at `at` of its width, label to its right. `back` climbs from the source's
@@ -229,24 +216,13 @@
     }
 
     name.append(spec.name);
-    card.append(name);
-    const facts = el("dl");
+    const lines = el("div", "lines");
 
-    for (const row of spec.rows) {
-      if (typeof row === "string") {
-        const formula = el("dd", "formula");
-        formula.innerHTML = row;
-        facts.append(formula);
-        continue;
-      }
-
-      const [label, value] = row;
-      const dd = el("dd");
-      dd.innerHTML = value;
-      facts.append(el("dt", undefined, label), dd);
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
     }
 
-    card.append(facts);
+    card.append(name, lines);
     bands.append(card);
     cards[spec.id] = card;
   }
@@ -308,7 +284,7 @@
         label.style.top = `${(a.b + z.t - r.height) / 2}px`;
       });
     } else {
-      // Cards are as tall as their facts: the arrow runs at the middle of the span the two cards share.
+      // Cards are as tall as their lines: the arrow runs at the middle of the span the two cards share.
       const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
       const [x1, x2] = arrow.dir === "right" ? [a.r, z.l - 1] : [a.l, z.r + 1];
       connect([[x1, y], [x2, y]], hue);

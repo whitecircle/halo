@@ -11,50 +11,39 @@
   .figure {
     position: relative;
     margin-block: auto;
-    padding-block: 40px;
+    padding-block: 30px;
   }
 
-  /* Three stage columns with a wide gutter between them for the all-to-all lines. */
-  .stages {
+  /* Three card columns, a rank per row, with wide gutters for the all-to-all lines. The labels row names the gutters. */
+  .lanes {
     display: grid;
-    grid-template-columns: 1fr 1fr 1fr;
-    column-gap: 240px;
-    row-gap: 44px;
+    grid-template-columns: repeat(3, 1fr);
+    grid-template-rows: auto auto auto;
+    column-gap: 200px;
+    row-gap: 36px;
   }
 
-  .stage-head b {
-    display: block;
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 33px;
-    letter-spacing: -0.01em;
-    color: var(--heading);
+  .hop-row {
+    grid-column: 1 / -1;
+    height: 62px;
   }
 
-  /* What the stage does, under its name. */
-  .stage-head span {
-    display: block;
-    margin-top: 8px;
-    font-size: 23px;
-    line-height: 1.3;
-    color: var(--secondary);
-  }
+  /* The second rank's row sits well below the first, so the lines crossing between the rows stay apart. */
+  .card.lower { margin-top: 84px; }
 
   .card {
-    padding: 28px 34px 30px;
+    padding: 28px 32px 30px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
   }
-
-  /* The second rank's row sits further down, so the crossing lines between the rows stay apart. */
-  .card.lower { margin-top: 96px; }
 
   .card .name {
     display: flex;
     align-items: center;
     gap: 12px;
     font-size: 27px;
+    line-height: 1.25;
     color: var(--text);
   }
 
@@ -65,21 +54,15 @@
     background: var(--hue);
   }
 
-  /* A card's facts: a quiet label and its value, in two aligned columns. */
-  .facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
+  .card .lines {
     margin-top: 10px;
     font-size: 23px;
     line-height: 1.3;
+    color: var(--body);
+    white-space: nowrap;
   }
 
-  .facts dt { color: var(--tertiary); }
-
-  .facts dd { color: var(--body); }
-
-  /* The label of an all-to-all sits centred in the gutter above the lines it names. */
+  /* The label of an all-to-all sits centred over its gutter, above the cards. */
   .hop {
     position: absolute;
     text-align: center;
@@ -106,15 +89,15 @@
   </header>
 
   <div class="figure" id="figure">
-    <div class="stages" id="stages"></div>
+    <div class="lanes" id="lanes"><div class="hop-row" id="hop-row"></div></div>
     <svg class="wires" id="wires"></svg>
   </div>
 
   <footer>
     <p>
+      <span class="s">EP size {ranks} over {experts} experts, {perRank} per rank, at data parallel {ranks}.</span>
       <span class="s">Lines carry the colour of the batch their tokens came from.</span>
-      <span class="s">Dispatch and combine are DeepEP all-to-alls.</span>
-      <span class="s">EP is orthogonal to DP, so rank 0 still trains on batch A.</span>
+      <span class="s">EP is orthogonal to DP: every token returns to the rank it came from, so rank 0 still trains on batch A.</span>
     </p>
   </footer>
 </div>
@@ -125,10 +108,9 @@
   const SETUP = { ranks: 2, experts: 32 };
   /** Colour marks the batch a rank trains on. */
   const RANK_HUES = ["--halo-blue", "--halo-violet"];
-  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
 
   if (SETUP.ranks !== 2) {
-    throw new Error("this layout draws 2 ranks");
+    throw new Error("this layout draws 2 ranks, one row each");
   }
 
   if (SETUP.experts % SETUP.ranks !== 0) {
@@ -138,53 +120,32 @@
   const perRank = SETUP.experts / SETUP.ranks;
   const fmt = (n) => n.toLocaleString("en-US");
   /** Text for each `{name}` in the page's static text. */
-  const VALUES = {
-    ranksWord: NUMBER_WORDS[SETUP.ranks],
-    experts: fmt(SETUP.experts),
-    perRank: fmt(perRank),
-  };
-  const BATCHES = Array.from({ length: SETUP.ranks }, (_, rank) => ({
+  const VALUES = { ranks: fmt(SETUP.ranks), experts: fmt(SETUP.experts), perRank: fmt(perRank) };
+  const LANES = Array.from({ length: SETUP.ranks }, (_, rank) => ({
     rank,
     batch: String.fromCharCode(65 + rank),
     hue: `var(${RANK_HUES[rank]})`,
     experts: `${fmt(rank * perRank)}–${fmt((rank + 1) * perRank - 1)}`,
   }));
-  const STAGES = [
-    {
-      head: "Route",
-      does: "Router picks the top-k experts of each token",
-      card: (b) => ({ name: `R${b.rank}`, hue: b.hue, facts: [["Batch", b.batch]] }),
-    },
-    {
-      head: "Compute",
-      does: "One grouped GEMM over the tokens sorted by expert",
-      card: (b) => ({ name: `Experts ${b.experts}`, facts: [["Held by", `R${b.rank}`]] }),
-    },
-    {
-      head: "Return",
-      does: "Same rows in the same order, weighted by top-k",
-      card: (b) => ({ name: `R${b.rank}`, hue: b.hue, facts: [["Batch", b.batch]] }),
-    },
+  /** The three cards of a lane: the rank's batch going out, the experts it holds, the batch coming back. */
+  const COLUMNS = [
+    (l) => ({ name: `R${l.rank} · batch ${l.batch}`, hue: l.hue, lines: ["[B·S, hidden] flat rows", "Router top-k per token"] }),
+    (l) => ({ name: `Experts ${l.experts}`, lines: ["grouped_mm(x, w, offs)", "Tokens sorted by expert"] }),
+    (l) => ({ name: `R${l.rank} · batch ${l.batch}`, hue: l.hue, lines: ["Same rows, same order", "Weighted by top-k probs"] }),
   ];
-  const HOPS = ["Dispatch all-to-all", "Combine all-to-all"];
-  /** Vertical offset of a line's ends from a card's middle, so no two arrowheads meet. */
-  const PORT = 14;
+  const HOPS = [["DeepEP dispatch", "all-to-all"], ["DeepEP combine", "all-to-all"]];
+  /** Vertical offset of a line's ends from a card's middle, toward the row it leaves for or comes from. */
+  const PORT = 16;
 
   fillValues(VALUES);
 
-  const stages = document.getElementById("stages");
-  const cards = STAGES.map(() => []);
+  const lanes = document.getElementById("lanes");
+  const cards = COLUMNS.map(() => []);
 
-  for (const stage of STAGES) {
-    const head = el("div", "stage-head");
-    head.append(el("b", undefined, stage.head), el("span", undefined, stage.does));
-    stages.append(head);
-  }
-
-  for (const b of BATCHES) {
-    STAGES.forEach((stage, i) => {
-      const spec = stage.card(b);
-      const card = el("div", b.rank === 0 ? "card" : "card lower");
+  for (const lane of LANES) {
+    COLUMNS.forEach((build, i) => {
+      const spec = build(lane);
+      const card = el("div", lane.rank === 0 ? "card" : "card lower");
       const name = el("div", "name");
 
       if (spec.hue !== undefined) {
@@ -194,15 +155,14 @@
       }
 
       name.append(spec.name);
-      const facts = el("dl", "facts");
+      const lines = el("div", "lines");
 
-      for (const [label, value] of spec.facts) {
-        facts.append(el("dt", undefined, label), el("dd", undefined, value));
+      for (const line of spec.lines) {
+        lines.append(el("div", undefined, line));
       }
 
-      card.append(name, facts);
-
-      stages.append(card);
+      card.append(name, lines);
+      lanes.append(card);
       cards[i].push(card);
     });
   }
@@ -215,49 +175,38 @@
 
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
+  const hue = (rank) => getComputedStyle(document.documentElement).getPropertyValue(RANK_HUES[rank]).trim();
+  const side = (row) => (row === 0 ? -1 : 1);
 
-  /** A straight line from the right edge of `from` to the left edge of `to`, ending in a small head. */
-  function connect(from, to, hue, fromDy, toDy) {
-    const a = box(from);
-    const z = box(to);
-    const x1 = a.r;
-    const y1 = (a.t + a.b) / 2 + fromDy;
-    const x2 = z.l - 1;
-    const y2 = (z.t + z.b) / 2 + toDy;
-    const angle = Math.atan2(y2 - y1, x2 - x1);
-    const len = 8;
-    const half = 5;
-    const bx = x2 - len * Math.cos(angle);
-    const by = y2 - len * Math.sin(angle);
-    const px = half * Math.sin(angle);
-    const py = -half * Math.cos(angle);
-    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
-    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
-  }
-
-  const hue = (i) => getComputedStyle(document.documentElement).getPropertyValue(RANK_HUES[i]).trim();
-
-  // Dispatch: each rank's tokens reach both expert slices. Combine: each slice sends every token home.
+  // Dispatch sends each rank's tokens to both expert slices, combine sends every token home: each line leaves
+  // its card on the side of the row it heads for and lands on the side of the row it came from.
   for (const [src, dst] of [[0, 1], [1, 2]]) {
     for (let i = 0; i < SETUP.ranks; i += 1) {
       for (let j = 0; j < SETUP.ranks; j += 1) {
+        const a = box(cards[src][i]);
+        const z = box(cards[dst][j]);
         const batch = src === 0 ? i : j;
-        const fromCard = cards[src][i];
-        const toCard = cards[dst][j];
-        connect(fromCard, toCard, hue(batch), (j === 0 ? -1 : 1) * PORT, (i === 0 ? -1 : 1) * PORT);
+        arrow(wires, a.r + 1, (a.t + a.b) / 2 + side(j) * PORT, z.l - 1, (z.t + z.b) / 2 + side(i) * PORT, hue(batch));
       }
     }
   }
 
-  // Each hop label sits centred in its gutter, just under the lines it names.
+  // Each hop label sits centred over its gutter, above the first row of cards.
+  const labelsBottom = box(document.getElementById("hop-row")).t + 62;
+
   HOPS.forEach((text, i) => {
-    const left = box(cards[i][1]);
-    const right = box(cards[i + 1][1]);
-    const label = el("div", "hop", text);
+    const left = box(cards[i][0]);
+    const right = box(cards[i + 1][0]);
+    const label = el("div", "hop");
+
+    for (const line of text) {
+      label.append(el("div", undefined, line));
+    }
+
     label.style.left = `${left.r}px`;
     label.style.width = `${right.l - left.r}px`;
     figure.append(label);
-    label.style.top = `${box(cards[i][1]).b + 14}px`;
+    label.style.top = `${labelsBottom - label.offsetHeight}px`;
   });
 </script>
 </body>

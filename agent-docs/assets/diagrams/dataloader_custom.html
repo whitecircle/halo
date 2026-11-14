@@ -31,45 +31,29 @@
     white-space: nowrap;
   }
 
-  /* A card's facts: a quiet label beside the value it names. */
-  .card dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
+  .card .lines {
+    margin-top: 14px;
     font-size: 23px;
-    line-height: 1.3;
-  }
-
-  .card dt {
-    color: var(--tertiary);
-    white-space: nowrap;
-  }
-
-  .card dd {
+    line-height: 1.45;
     color: var(--body);
     white-space: nowrap;
   }
 
-  .gate {
-    width: max-content;
-    padding: 20px 24px 22px;
-  }
+  .gate { padding: 22px 26px 24px; }
 
-  /* Four stage cards, each as wide as its facts, with what is left between them for the arrows. */
+  /* Four stage cards, each as wide as its lines, with what is left between them for the arrows. */
   .stages {
     display: grid;
     grid-template-columns: repeat(4, auto);
     justify-content: space-between;
     column-gap: 36px;
-    margin-top: 40px;
+    margin-top: 36px;
   }
 
-  .stages .card { padding: 20px 22px 22px; }
+  .stages .card { padding: 22px 26px 24px; }
 
   .strip-head {
-    margin-top: 44px;
+    margin-top: 36px;
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
@@ -150,8 +134,8 @@
 
   <footer>
     <p>
-      <span class="s">A rank’s dp_rank is its stage-local rank divided by max(tp, cp), rounded down, and ETP partners share a dispatch rank.</span>
-      <span class="s">Pre-sharded data passes num_processes = 1.</span>
+      <span class="s">dp_rank = stage-local rank // max(tp, cp), and ETP partners share their dispatch rank.</span>
+      <span class="s">A pre-sharded dataset passes num_processes = 1.</span>
     </p>
   </footer>
 </div>
@@ -177,36 +161,35 @@
   const PATH = {
     gate: {
       name: "_needs_custom_dataloader() → True",
-      rows: [["Custom when", "non_dp_replication_factor > 1, or a pre-sharded dataset"], ["Here", `tp ${fmt(SETUP.tp)} makes the factor ${fmt(SETUP.tp)}`]],
+      lines: ["non_dp_replication_factor > 1 · _dataset_presharded: either holds"],
     },
     stages: [
-      { name: "Trainer (Halo)", rows: [["Call", "get_train_dataloader()"], ["Then", "_prepare_dataloader(dl)"]] },
-      { name: "Sampler (not distributed)", rows: [["Call", "_get_train_sampler()"], ["Returns", "RandomSampler"]] },
-      { name: "Accelerate prepare", rows: [["num_processes", fmt(dp)], ["process_index", "dp_rank"]] },
-      { name: "Batch sharding", rows: [["Class", "BatchSamplerShard"], ["Keeps", `idx % ${fmt(dp)} == dp_rank`]] },
+      { name: "Trainer (toolkit)", lines: ["get_train_dataloader()", "_prepare_dataloader(dl)"] },
+      { name: "Sampler (not distributed)", lines: ["_get_train_sampler()", "→ RandomSampler"] },
+      { name: "Accelerate prepare", lines: [`num_processes = ${fmt(dp)}`, "process_index = dp_rank"] },
+      { name: "Batch sharding", lines: ["BatchSamplerShard", `idx % ${fmt(dp)} == dp_rank`] },
     ],
-    stripHead: `What each rank reads: ${fmt(dp)} distinct batches, one per TP pair`,
+    stripHead: `What each rank reads: ${fmt(dp)} distinct batches, one per TP group`,
   };
 
-  function fillCard(card, name, rows) {
-    card.append(el("div", "name", name));
-    const facts = el("dl");
+  function fillCard(card, name, lines) {
+    const body = el("div", "lines");
 
-    for (const [label, value] of rows) {
-      facts.append(el("dt", undefined, label), el("dd", undefined, value));
+    for (const line of lines) {
+      body.append(el("div", undefined, line));
     }
 
-    card.append(facts);
+    card.append(el("div", "name", name), body);
   }
 
   fillValues(VALUES);
 
-  fillCard(document.getElementById("gate"), PATH.gate.name, PATH.gate.rows);
+  fillCard(document.getElementById("gate"), PATH.gate.name, PATH.gate.lines);
 
   const stages = document.getElementById("stages");
   const cards = PATH.stages.map((stage) => {
     const card = el("div", "card");
-    fillCard(card, stage.name, stage.rows);
+    fillCard(card, stage.name, stage.lines);
     stages.append(card);
 
     return card;
@@ -245,8 +228,6 @@
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
   const ink = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
-
-  /** A straight line from (x1, y1) to (x2, y2), ending in a small head. */
 
   /** A straight line from the right edge of `from` to the left edge of `to`, at their middles. */
   function connect(from, to, hue) {

@@ -6,14 +6,14 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --label-col: 430px;
-    --ratio-col: 100px;
-    --panel-gap: 48px;
-    --mem-col: 370px;
-    --bar-h: 20px;
-    --row-gap: 12px;
-    --axis-gap: 4px;
+    --label-col: 440px;
+    --panel-gap: 56px;
+    --mem-col: 360px;
+    --row-h: 28px;
+    --row-gap: 10px;
+    --axis-gap: 6px;
     --tick: 6px;
+    --link: color-mix(in oklab, var(--halo-blue) 45%, var(--bg));
   }
 
   body { width: 1600px; height: 900px; }
@@ -27,20 +27,12 @@
   .head,
   .ticks {
     display: grid;
-    grid-template-columns: var(--label-col) 1fr var(--ratio-col) var(--panel-gap) var(--mem-col);
+    grid-template-columns: var(--label-col) 1fr var(--panel-gap) var(--mem-col);
     align-items: center;
   }
 
-  .head { margin-bottom: 16px; }
-
-  .head .rate-head {
-    grid-column: 2 / 4;
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-  }
-
-  .head .mem-head { grid-column: 5; }
+  /* Room under the panel names for the release names above the top row's dots. */
+  .head { margin-bottom: 40px; }
 
   .panel-name {
     display: inline-flex;
@@ -58,23 +50,7 @@
     width: 14px;
     height: 14px;
     border-radius: 4px;
-    background: var(--hue);
-  }
-
-  .key {
-    display: flex;
-    gap: 28px;
-    font-size: 21px;
-    color: var(--body);
-  }
-
-  .key span { display: inline-flex; align-items: center; gap: 10px; }
-
-  .key i {
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    background: var(--hue);
+    background: var(--halo-violet);
   }
 
   .plot { position: relative; }
@@ -91,34 +67,54 @@
   .track {
     position: relative;
     z-index: 2;
-    height: var(--bar-h);
+    height: var(--row-h);
   }
 
-  .track i {
+  .track svg {
     position: absolute;
-    top: 0;
+    inset: 0;
+    width: 100%;
     height: 100%;
-    border-radius: 5px;
-    background: var(--hue);
+    overflow: visible;
   }
 
-  .track b {
+  .link { stroke: var(--link); stroke-width: 3; }
+
+  .before { fill: var(--bg); stroke: var(--tertiary); stroke-width: 3; }
+
+  .after { fill: var(--halo-blue); }
+
+  /* A release's name above its dot on the top row. */
+  .release {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    font-size: 21px;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--body);
+  }
+
+  .release.now { color: var(--halo-blue); }
+
+  .value {
     position: absolute;
     top: 50%;
     transform: translateY(-50%);
-    font-weight: 400;
-    font-size: 21px;
+    font-size: 23px;
+    font-weight: 500;
+    line-height: 1;
     font-variant-numeric: tabular-nums;
-    color: var(--body);
+    color: var(--text);
     white-space: nowrap;
   }
 
-  .ratio {
-    text-align: right;
-    font-size: 23px;
-    font-weight: 500;
-    font-variant-numeric: tabular-nums;
-    color: var(--text);
+  .track > i {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    border-radius: 5px;
+    background: var(--halo-violet);
   }
 
   /* Memory's zero runs from the top bar through the axis line to the end of its tick, behind the bars. */
@@ -140,13 +136,11 @@
 
   .ticks > div { position: relative; height: 100%; }
 
-  .ticks .axis { position: absolute; top: 0; border-top: 1px solid var(--line); }
+  .ticks .axis { position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
 
   .ticks i { position: absolute; top: 0; height: var(--tick); border-left: 1px solid var(--line); }
 
   .ticks span { position: absolute; top: calc(var(--tick) + 4px); transform: translateX(-50%); white-space: nowrap; }
-
-  .ticks span.start { transform: none; }
 
 </style>
 </head>
@@ -189,77 +183,52 @@
     ["Qwen3.5-35B-A3B EP8, 4,096 tokens", 7893, 8974, 43.03, 41.63],
     ["Qwen3.5-35B-A3B EP8, 16,384 tokens", 11618, 14275, 74.89, 74.96],
   ];
-  /** Pixels trimmed from each side of the 1.1.0 / 1.2.0 boundary, for the 4px gap between the two parts. */
-  const SEAM = 2;
+  /** The largest gains labelled at the top, beside the smallest at the bottom. */
+  const LEAD_LABELS = 2;
+  /** The 1.2.0 dot's radius, and the 1.1.0 ring's to the middle of its stroke. */
+  const R_AFTER = 9;
+  const R_BEFORE = 8;
+  /** Distance from a dot's or bar's end to its label. */
+  const LABEL_GAP = 10;
 
-
-
-  const signed = (value) => {
-    const fixed = Math.abs(value).toFixed(2);
-
-    if (fixed === "0.00") {
-      return fixed;
-    }
-
-    return `${value < 0 ? "−" : "+"}${fixed}`;
-  };
+  const signed = (value) => `${value < 0 ? "−" : "+"}${Math.abs(value).toFixed(2)}`;
   const gain = (row) => row[2] / row[1];
   const rows = [...SHAPES].sort((a, b) => gain(b) - gain(a));
   const gains = rows.map(gain);
+  const deltas = rows.map((row) => row[4] - row[3]);
+  const gainLabelled = new Set(rows.map((_, i) => i).filter((i) => i < LEAD_LABELS || i === rows.length - 1));
+  const deltaLabelled = new Set([deltas.indexOf(Math.max(...deltas)), deltas.indexOf(Math.min(...deltas))]);
 
   document.getElementById("gain-range").textContent = `${Math.min(...gains).toFixed(2)}–${Math.max(...gains).toFixed(2)}×`;
 
-  function swatch(hue) {
-    const node = el("i");
-    node.style.setProperty("--hue", hue);
-
-    return node;
-  }
-
-  // Panel headings and the key.
+  // Panel names: the rate panel's releases are named on its top row, the memory panel's colour beside its name.
   const head = document.getElementById("head");
-  const rateHead = el("div", "rate-head");
-  const rateName = el("div", "panel-name", "Tokens/s per GPU");
-  const key = el("div", "key");
-
-  for (const [name, hue] of [["1.1.0", "var(--tertiary)"], ["Gain in 1.2.0", "var(--halo-blue)"]]) {
-    const item = el("span");
-    item.append(swatch(hue), name);
-    key.append(item);
-  }
-
-  rateHead.append(rateName, key);
-  const memHead = el("div", "mem-head");
   const memName = el("div", "panel-name");
-  memName.append(swatch("var(--halo-violet)"), "Peak memory change");
-  memHead.append(memName);
-  head.append(el("div"), rateHead, memHead);
+  memName.append(el("i"), "Peak memory change");
+  head.append(el("div"), el("div", "panel-name", "Tokens/s per GPU"), el("div"), memName);
 
   // Rows.
   const plot = document.getElementById("plot");
   const tracks = [];
-  const deltas = [];
 
-  for (const row of rows) {
-    const [shape, before, after, peakBefore, peakAfter] = row;
+  rows.forEach((row, i) => {
     const line = el("div", "row");
     const rate = el("div", "track");
     const memory = el("div", "track");
-    line.append(el("div", "label", shape), rate, el("div", "ratio", `${gain(row).toFixed(2)}×`), el("div"), memory);
+    line.append(el("div", "label", row[0]), rate, el("div"), memory);
     plot.append(line);
-    tracks.push([rate, memory, before, after, peakAfter - peakBefore]);
-    deltas.push(peakAfter - peakBefore);
-  }
+    tracks.push({ row, rate, memory, delta: deltas[i], gainLabel: gainLabelled.has(i), deltaLabel: deltaLabelled.has(i) });
+  });
 
   // Marks are placed in pixels once the grid has sized its columns, each panel's axis under it.
-  const rateWidth = tracks[0][0].clientWidth;
-  const memWidth = tracks[0][1].clientWidth;
+  const rateWidth = tracks[0].rate.clientWidth;
+  const memWidth = tracks[0].memory.clientWidth;
   const plotBox = plot.getBoundingClientRect();
-  const memBox = tracks[0][1].getBoundingClientRect();
+  const memBox = tracks[0].memory.getBoundingClientRect();
   const tickRow = document.getElementById("ticks");
   const rateTicks = el("div");
   const memTicks = el("div");
-  tickRow.append(el("div"), rateTicks, el("div"), el("div"), memTicks);
+  tickRow.append(el("div"), rateTicks, el("div"), memTicks);
   const zero = el("div", "zero");
   zero.style.top = `${memBox.top - plotBox.top}px`;
   plot.append(zero);
@@ -281,34 +250,70 @@
     });
   }
 
-  // The rate bars carry no label past their end, so the axis ends at the largest rate.
-  const rateAxis = niceAxis(Math.max(...SHAPES.flatMap((row) => [row[1], row[2]])), () => true);
-  const rateX = (value) => (value / rateAxis.max) * rateWidth;
+  /**
+   * Draws each row's dumbbell on a rate axis to `max`: a line from the 1.1.0 ring to the 1.2.0 dot, a labelled row's
+   * gain beside its 1.2.0 dot on the side away from the ring, and the releases named above the top row's dots.
+   */
+  function drawRates(max) {
+    const x = (value) => (value / max) * rateWidth;
 
-  for (const [rate, , before, after] of tracks) {
-    const old = swatch("var(--tertiary)");
-    old.style.left = "0px";
-    old.style.width = `${rateX(before) - SEAM}px`;
-    const added = swatch("var(--halo-blue)");
-    added.style.left = `${rateX(before) + SEAM}px`;
-    added.style.width = `${rateX(after) - rateX(before) - SEAM}px`;
-    rate.append(old, added);
+    tracks.forEach(({ row, rate, gainLabel }, i) => {
+      const [, before, after] = row;
+      const cy = rate.clientHeight / 2;
+      const way = Math.sign(after - before) || 1;
+      const svg = svgEl("svg", {});
+      rate.replaceChildren(svg);
+
+      if (Math.abs(x(after) - x(before)) > R_BEFORE + R_AFTER) {
+        svg.append(svgEl("line", { class: "link", x1: x(before) + way * R_BEFORE, x2: x(after) - way * R_AFTER, y1: cy, y2: cy }));
+      }
+
+      svg.append(
+        svgEl("circle", { class: "before", cx: x(before), cy, r: R_BEFORE }),
+        svgEl("circle", { class: "after", cx: x(after), cy, r: R_AFTER }),
+      );
+
+      if (gainLabel) {
+        const value = el("div", "value", `${gain(row).toFixed(2)}×`);
+        rate.append(value);
+        const edge = x(after) + way * (R_AFTER + LABEL_GAP);
+        value.style.left = `${way > 0 ? edge : edge - value.offsetWidth}px`;
+      }
+
+      if (i === 0) {
+        rate.append(el("div", "release", "1.1.0"), el("div", "release now", "1.2.0"));
+        const [old, now] = rate.querySelectorAll(".release");
+        old.style.left = `${x(before)}px`;
+        now.style.left = `${x(after)}px`;
+      }
+    });
   }
 
-  drawPanelAxis(rateTicks, rateWidth, rateAxis.ticks.map(rateX), rateAxis.ticks.map((tick) => (tick === 0 ? "0" : `${tick / 1000}k`)));
-  rateTicks.querySelector("span").className = "start";
+  // The rate axis ends at the smallest maximum that holds every dot, gain and release name inside the panel.
+  const rateAxis = niceAxis(Math.max(...SHAPES.flatMap((row) => [row[1], row[2]])), (max) => {
+    drawRates(max);
+    const right = tracks[0].rate.getBoundingClientRect().right;
+
+    return tracks.every(({ rate }) => [...rate.querySelectorAll("circle, .value, .release")].every((node) => node.getBoundingClientRect().right <= right));
+  });
+  const [oldName, newName] = tracks[0].rate.querySelectorAll(".release");
+
+  if (oldName.getBoundingClientRect().right + 12 > newName.getBoundingClientRect().left && newName.getBoundingClientRect().right + 12 > oldName.getBoundingClientRect().left) {
+    throw new Error("The release names above the top row's dots meet: the top row's gain is too small to name the releases on its dots.");
+  }
+
+  drawAxis(rateTicks, rateAxis, (tick) => (tick === 0 ? "0" : `${tick / 1000}k`));
 
   /** Draws the memory panel symmetric about zero, `span` GiB either side, with ticks at ± each of `half`. */
   function drawMemory(span, half) {
     const ticks = [...half.slice(1).reverse().map((tick) => -tick), ...half];
     const memX = (value) => memWidth / 2 + (value / span) * (memWidth / 2);
 
-    for (const [, memory, , , delta] of tracks) {
-      const value = el("b", undefined, signed(delta));
+    for (const { memory, delta, deltaLabel } of tracks) {
       memory.replaceChildren();
 
       if (Math.abs(delta) >= 0.005) {
-        const fill = swatch("var(--halo-violet)");
+        const fill = el("i");
         const x0 = memX(Math.min(0, delta));
         const x1 = memX(Math.max(0, delta));
         fill.style.left = `${x0}px`;
@@ -316,14 +321,18 @@
         memory.append(fill);
       }
 
-      // The number sits 10px off the bar end, on the side away from zero, so it never meets the zero line.
-      if (delta < 0) {
-        value.style.right = `${memWidth - memX(delta) + 10}px`;
-      } else {
-        value.style.left = `${memX(delta) + 10}px`;
-      }
+      // The number sits off the bar end, on the side away from zero, so it never meets the zero line.
+      if (deltaLabel) {
+        const value = el("div", "value", signed(delta));
 
-      memory.append(value);
+        if (delta < 0) {
+          value.style.right = `${memWidth - memX(delta) + LABEL_GAP}px`;
+        } else {
+          value.style.left = `${memX(delta) + LABEL_GAP}px`;
+        }
+
+        memory.append(value);
+      }
     }
 
     zero.style.left = `${memBox.left - plotBox.left + memX(0)}px`;
@@ -337,14 +346,14 @@
   niceAxis(Math.max(...deltas.map(Math.abs)), (span, half) => {
     drawMemory(span, half);
 
-    return [...plot.querySelectorAll("b"), ...memTicks.querySelectorAll("span")].every((node) => {
+    return [...tracks.flatMap(({ memory }) => [...memory.querySelectorAll(".value")]), ...memTicks.querySelectorAll("span")].every((node) => {
       const box = node.getBoundingClientRect();
 
       return box.left >= memBox.left && box.right <= memBox.right;
     });
   }, { most: 2 });
 
-  console.log(`gains ${gains.map((g) => g.toFixed(2)).join(" ")} · largest memory move ${Math.max(...deltas.map(Math.abs)).toFixed(2)}`);
+  console.log(`gains ${gains.map((g) => g.toFixed(2)).join(" ")} · memory moves ${deltas.map(signed).join(" ")}`);
 </script>
 </body>
 </html>

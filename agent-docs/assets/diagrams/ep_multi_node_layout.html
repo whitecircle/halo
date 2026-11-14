@@ -14,121 +14,88 @@
     padding-block: 24px;
   }
 
-  /* The EP group is the outer outline, each node an outline inside it; the gutter between holds the DP pairs. */
-  .ep {
-    padding: 22px 32px 30px;
+  /* Each node is a thin outline around its rank strip and its TP group. */
+  .nodes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 36px;
+  }
+
+  .node {
+    padding: 18px 24px 22px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
 
-  .ep-label {
-    font-size: 23px;
-    color: var(--body);
-  }
-
-  .ep-label span { color: var(--secondary); }
-
-  .nodes {
-    display: grid;
-    grid-template-columns: 400px 1fr 400px;
-    margin-top: 18px;
-  }
-
-  .node {
-    padding: 18px 22px 22px;
-    border: 1px solid var(--line);
-    border-radius: 14px;
-  }
-
   .node-head {
-    display: flex;
-    align-items: baseline;
-    gap: 16px;
     font-family: var(--serif);
     font-weight: 400;
-    font-size: 33px;
+    font-size: 31px;
+    line-height: 1.2;
     letter-spacing: -0.01em;
     font-variant-numeric: lining-nums;
     color: var(--heading);
   }
 
-  .node-head .batch {
-    display: inline-flex;
-    align-items: center;
-    gap: 10px;
-    font-family: var(--sans);
-    font-size: 22px;
-    letter-spacing: 0;
-    color: var(--body);
-  }
-
-  .node-head .batch i,
-  .cell i {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--hue);
-  }
-
-  /* A node's facts: a quiet label and its value. */
-  .facts {
+  .strip {
     display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    margin-top: 6px;
-    font-size: 22px;
-  }
-
-  .facts dt { color: var(--tertiary); }
-
-  .facts dd { color: var(--body); }
-
-  .cells {
-    display: grid;
-    gap: 5px;
+    grid-template-columns: repeat(var(--ranks), 1fr);
+    gap: 6px;
     margin-top: 14px;
   }
 
-  .cell {
+  .chip {
     display: flex;
     align-items: center;
-    gap: 12px;
-    height: 41px;
-    padding: 0 18px;
+    justify-content: center;
+    height: 48px;
     border: 1px solid var(--line);
-    border-radius: 10px;
+    border-radius: 9px;
     background: var(--surface);
-    font-size: 22px;
+    font-size: 21px;
     color: var(--text);
     font-variant-numeric: tabular-nums;
   }
 
-  .cell span {
-    margin-left: auto;
+  .card {
+    padding: 18px 28px 20px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .card .lines {
+    font-size: 23px;
+    line-height: 1.3;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card .name + .lines { margin-top: 6px; }
+
+  .tp {
+    margin-top: 14px;
+    padding-block: 14px 16px;
+  }
+
+  /* Room under the nodes for the tokens arrows into the EP group. */
+  .ep { margin-top: 58px; }
+
+  .mesh { margin-top: 20px; }
+
+  .tag {
+    position: absolute;
     font-size: 21px;
-    color: var(--secondary);
-  }
-
-  .gutter-head {
-    padding: 18px 12px 0;
-    text-align: center;
-  }
-
-  .gutter-head > b {
-    display: block;
-    font-family: var(--serif);
-    font-weight: 400;
-    font-size: 33px;
-    letter-spacing: -0.01em;
-    color: var(--heading);
-  }
-
-  .gutter-head > span {
-    display: block;
-    margin-top: 4px;
-    font-size: 21px;
-    line-height: 1.35;
-    color: var(--secondary);
+    color: var(--body);
+    white-space: nowrap;
   }
 
   svg.wires {
@@ -149,18 +116,15 @@
   </header>
 
   <div class="figure" id="figure">
-    <div class="ep">
-      <div class="ep-label">One EP group of all {world} ranks <span>· {experts} experts, {perRank} on each</span></div>
-      <div class="nodes" id="nodes"></div>
-    </div>
+    <div class="nodes" id="nodes"></div>
+    <div class="card ep" id="ep"></div>
+    <div class="card mesh" id="mesh"></div>
     <svg class="wires" id="wires"></svg>
   </div>
 
   <footer>
     <p>
-      <span class="s">A node’s TP group shards attention and trains on one batch.</span>
-      <span class="s">DeepEP’s all-to-all crosses RDMA between the nodes.</span>
-      <span class="s">On {nodes} × {gpusPerNode} GPUs, ep{gpusPerNode} with tp2 forms {nodesWord} EP groups and is rejected at config time.</span>
+      <span class="s">Above one NVLink domain, EP under TP must be a single group spanning the job: ep{gpusPerNode}/tp2 on {nodes}×{gpusPerNode} forms {nodesWord} groups and is rejected at config time.</span>
     </p>
   </footer>
 </div>
@@ -169,16 +133,15 @@
 <script>
   /** Every number on the canvas is drawn from these. TP fills each node and EP spans every rank. */
   const SETUP = { nodes: 2, gpusPerNode: 8, experts: 128 };
-  /** Colour marks the batch a rank trains on: TP keeps one batch per node, so DP is the node count. */
-  const NODE_HUES = ["--halo-blue", "--halo-violet"];
   const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
 
   if (SETUP.nodes !== 2) {
-    throw new Error("this layout draws two nodes joined by DP pairs");
+    throw new Error("this layout draws two nodes side by side, so dp 2 pairs");
   }
 
   const world = SETUP.nodes * SETUP.gpusPerNode;
   const tp = SETUP.gpusPerNode;
+  const dp = world / tp;
 
   if (SETUP.experts % world !== 0) {
     throw new Error(`${SETUP.experts} experts do not split evenly over ep_size ${world}`);
@@ -186,68 +149,66 @@
 
   const perRank = SETUP.experts / world;
   const fmt = (n) => n.toLocaleString("en-US");
-  const nodesWord = NUMBER_WORDS[SETUP.nodes];
   /** Text for each `{name}` in the page's static text. */
-  const VALUES = {
-    nodes: fmt(SETUP.nodes),
-    nodesWord,
-    nodesWordCap: nodesWord.replace(/^./, (c) => c.toUpperCase()),
-    gpusPerNode: fmt(SETUP.gpusPerNode),
-    ep: fmt(world),
-    tp: fmt(tp),
-    world: fmt(world),
-    dp: fmt(world / tp),
-    experts: fmt(SETUP.experts),
-    perRank: fmt(perRank),
+  const VALUES = { nodes: fmt(SETUP.nodes), nodesWord: NUMBER_WORDS[SETUP.nodes], gpusPerNode: fmt(SETUP.gpusPerNode) };
+  /** The ranks sharing a TP position, one per node: the first two pairs and the last. */
+  const pair = (position) => `(${Array.from({ length: SETUP.nodes }, (_, n) => n * tp + position).join(",")})`;
+  const pairs = `${pair(0)} ${pair(1)} … ${pair(tp - 1)}`;
+  const EP_CARD = {
+    name: `One global EP group: all ${fmt(world)} ranks (ep_scope='global')`,
+    lines: [
+      `${fmt(SETUP.experts)} experts / ep ${fmt(world)} = ${fmt(perRank)} per rank`,
+      `Rank r owns experts ${perRank}r … ${perRank}r+${perRank - 1}`,
+      "DeepEP all-to-all crosses RDMA between the nodes",
+    ],
+  };
+  const MESH_CARD = {
+    name: `FSDP2 mesh (dp ${fmt(dp)}, tp ${fmt(tp)})`,
+    lines: [
+      `Ranks sharing a TP position form a DP pair: ${pairs}`,
+      "Non-expert params shard over the pair: RDMA all-gather / reduce-scatter",
+    ],
   };
 
   fillValues(VALUES);
 
-  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-
-  const nodesEl = document.getElementById("nodes");
-  const cells = [];
-
-  for (let n = 0; n < SETUP.nodes; n += 1) {
-    const batch = String.fromCharCode(65 + n);
-    const hue = NODE_HUES[n];
-    const node = el("div", "node");
-    const head = el("div", "node-head", `Node ${n}`);
-    const tag = el("span", "batch");
-    const dot = el("i");
-    dot.style.setProperty("--hue", `var(${hue})`);
-    tag.append(dot, `batch ${batch}`);
-    head.append(tag);
-    const facts = el("dl", "facts");
-    facts.append(el("dt", undefined, "TP group"), el("dd", undefined, `ranks ${fmt(n * SETUP.gpusPerNode)}–${fmt((n + 1) * SETUP.gpusPerNode - 1)} over NVLink`));
-    node.append(head, facts);
-
-    const list = el("div", "cells");
-    cells.push([]);
-
-    for (let i = 0; i < SETUP.gpusPerNode; i += 1) {
-      const rank = n * SETUP.gpusPerNode + i;
-      const cell = el("div", "cell");
-      const cellDot = el("i");
-      cellDot.style.setProperty("--hue", `var(${hue})`);
-      cell.append(cellDot, `R${rank}`, el("span", undefined, `experts ${fmt(perRank * rank)}–${fmt(perRank * rank + perRank - 1)}`));
-      list.append(cell);
-      cells[n].push(cell);
+  function fillCard(node, spec) {
+    if (spec.name !== undefined) {
+      node.append(el("div", "name", spec.name));
     }
 
-    node.append(list);
-    node.style.gridColumn = String(n * 2 + 1);
-    node.style.gridRow = "1";
-    nodesEl.append(node);
+    const lines = el("div", "lines");
+
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
+    }
+
+    node.append(lines);
+
+    return node;
   }
 
-  const gutter = el("div", "gutter-head");
-  const gutterSub = el("span");
-  gutterSub.append("Each pair shards the ", el("span", "nw", "non-expert"), " parameters");
-  gutter.append(el("b", undefined, "DP pairs over RDMA"), gutterSub);
-  gutter.style.gridColumn = "2";
-  gutter.style.gridRow = "1";
-  nodesEl.append(gutter);
+  const nodesEl = document.getElementById("nodes");
+  const nodes = [];
+
+  for (let n = 0; n < SETUP.nodes; n += 1) {
+    const first = n * SETUP.gpusPerNode;
+    const node = el("div", "node");
+    node.append(el("div", "node-head", `Node ${n}: ranks ${fmt(first)}–${fmt(first + SETUP.gpusPerNode - 1)}`));
+    const strip = el("div", "strip");
+    strip.style.setProperty("--ranks", SETUP.gpusPerNode);
+
+    for (let i = 0; i < SETUP.gpusPerNode; i += 1) {
+      strip.append(el("div", "chip", `R${first + i}`));
+    }
+
+    node.append(strip, fillCard(el("div", "card tp"), { lines: [`TP group, ${fmt(tp)} ranks: attention sharded over NVLink`] }));
+    nodesEl.append(node);
+    nodes.push(node);
+  }
+
+  const epEl = fillCard(document.getElementById("ep"), EP_CARD);
+  fillCard(document.getElementById("mesh"), MESH_CARD);
 
   const figure = document.getElementById("figure");
   const wires = document.getElementById("wires");
@@ -257,23 +218,19 @@
 
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
+  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
-  /** A straight 2px line with a small head at its end, and at its start too when `both`. */
+  // Each node's tokens go down into the one EP group, the label to the right of its arrow.
+  const ep = box(epEl);
 
-  /** Right edge of `from` to left edge of `to`, at height `y` (default: the middle of `from`). */
-  function connect(from, to, hue, { both = false, y } = {}) {
-    const a = box(from);
-    const z = box(to);
-    const at = y ?? (a.t + a.b) / 2;
-    arrow(wires, a.r + 1, at, z.l - 1, at, hue, both);
-  }
-
-  // Each TP position pairs rank i on node 0 with the same position on node 1, across the gap between the nodes.
-  const [left, right] = cells.map((column) => column[0].closest(".node"));
-
-  for (let i = 0; i < SETUP.gpusPerNode; i += 1) {
-    const a = box(cells[0][i]);
-    connect(left, right, token("--secondary"), { both: true, y: (a.t + a.b) / 2 });
+  for (const node of nodes) {
+    const b = box(node);
+    const x = (b.l + b.r) / 2;
+    arrow(wires, x, b.b + 1, x, ep.t - 1, lineHue);
+    const tag = el("div", "tag", "tokens");
+    figure.append(tag);
+    tag.style.left = `${x + 14}px`;
+    tag.style.top = `${(b.b + ep.t - tag.offsetHeight) / 2}px`;
   }
 </script>
 </body>

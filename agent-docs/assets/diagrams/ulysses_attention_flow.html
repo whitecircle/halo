@@ -14,52 +14,67 @@
   .figure {
     position: relative;
     margin-block: auto;
-    padding-block: 32px;
+    padding-block: 30px;
   }
 
-  /* Three stages, each with the block ownership it leaves behind; the all-to-alls sit in the gutters. */
-  .stages {
+  /* The layer's five steps, left to right; the arrows between them sit in the column gaps. */
+  .steps {
     display: grid;
-    grid-template-columns: 84px minmax(0, 1fr) 230px minmax(0, 1fr) 230px minmax(0, 1fr);
-    row-gap: 32px;
+    grid-template-columns: repeat(5, 1fr);
+    column-gap: 44px;
   }
 
-  .stage-head {
+  .card {
+    padding: 22px 26px 24px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .card .lines {
+    margin-top: 8px;
+    font-size: 23px;
+    line-height: 1.3;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  /* Who holds what on the left, the requirements on the right. */
+  .lower {
+    display: flex;
+    align-items: flex-start;
+    gap: 64px;
+    margin-top: 40px;
+  }
+
+  .section {
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
+    line-height: 1.2;
     letter-spacing: -0.01em;
     color: var(--heading);
   }
 
-  .stage-sub {
-    margin-top: 6px;
-    font-size: 22px;
-    line-height: 1.4;
-    color: var(--secondary);
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
+  .grids {
+    display: flex;
+    gap: 150px;
+    margin-top: 14px;
   }
 
-  .stage-sub b {
-    display: block;
-    font-weight: 400;
-    color: var(--body);
-  }
-
-  /* Every matrix shares one row template, so the chunk labels in the first column line up with all three. */
-  .matrix {
+  .grid {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    grid-template-rows: 28px 32px repeat(4, 80px);
+    grid-template-columns: auto repeat(var(--cp), 86px);
+    grid-template-rows: auto repeat(var(--cp), 54px) auto;
     gap: 4px;
     font-variant-numeric: tabular-nums;
-  }
-
-  .axis {
-    grid-column: 1 / -1;
-    font-size: 20px;
-    color: var(--secondary);
   }
 
   .col-label,
@@ -68,38 +83,50 @@
     color: var(--secondary);
   }
 
-  .matrix.labels { grid-template-columns: 1fr; }
-
-  .col-label { text-align: center; }
+  .col-label {
+    padding-bottom: 2px;
+    text-align: center;
+  }
 
   .row-label {
     display: flex;
     align-items: center;
+    padding-right: 10px;
   }
 
   .cell {
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 80px;
-    border-radius: 10px;
-    background: var(--hue);
+    border-radius: 9px;
     font-size: 21px;
+  }
+
+  .cell.held {
+    background: var(--hue);
     color: var(--on-hue);
   }
 
-  .hop {
-    position: absolute;
+  .cell.empty {
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  .caption {
+    grid-column: 2 / -1;
+    margin-top: 10px;
     text-align: center;
     font-size: 21px;
-    line-height: 1.35;
     color: var(--body);
   }
 
-  .hop small {
-    display: block;
-    font-size: 20px;
-    color: var(--secondary);
+  .rules { flex: 1; }
+
+  .hop {
+    position: absolute;
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
   }
 
   svg.wires {
@@ -110,7 +137,6 @@
     overflow: visible;
     pointer-events: none;
   }
-
 </style>
 </head>
 <body>
@@ -120,15 +146,23 @@
   </header>
 
   <div class="figure" id="figure">
-    <div class="stages" id="stages"></div>
+    <div class="steps" id="steps"></div>
+    <div class="lower">
+      <div>
+        <div class="section">Who holds what: rank × sequence chunk</div>
+        <div class="grids" id="grids"></div>
+      </div>
+      <div class="card rules" id="rules"></div>
+    </div>
     <svg class="wires" id="wires"></svg>
   </div>
 
   <footer>
     <p>
-      <span class="s">Each block is one sequence chunk by {queryPerRank} query heads, coloured by the rank that holds it.</span>
-      <span class="s">The result is exact, since heads attend independently.</span>
-      <span class="s">Both head counts must divide by <span class="nw">cp_size</span>, and the collator pads the sequence to fit.</span>
+      <span class="s">CP size {cpSize} with {queryHeads} query and {kvHeads} KV heads: each rank attends with {queryPerRank} query and {kvPerRank} KV heads.</span>
+      <span class="s">A grid cell lists the query heads a rank holds for that sequence chunk.</span>
+      <span class="s">Exact, not approximate: attention is independent across heads.</span>
+      <span class="s">The layer issues two all-to-alls: q, k and v in one buffer, and the output.</span>
     </p>
   </footer>
 </div>
@@ -137,11 +171,11 @@
 <script>
   /** Every number on the canvas is drawn from these. */
   const SETUP = { cpSize: 4, queryHeads: 64, kvHeads: 8 };
-  /** Indigo sits two ranks from violet: the pair is nearly identical under protanopia, so they never touch. */
+  /** One hue per rank. Indigo sits two ranks from violet: the pair is nearly identical under protanopia. */
   const RANK_HUES = ["--halo-blue", "--halo-violet", "--halo-sand", "--halo-indigo"];
 
-  if (SETUP.cpSize !== 4) {
-    throw new Error("this layout draws cp_size 4: a 4 × 4 block grid, one hue per rank");
+  if (SETUP.cpSize < 2 || SETUP.cpSize > RANK_HUES.length) {
+    throw new Error(`this layout draws cp_size 2 to ${RANK_HUES.length}, one hue per rank, not ${SETUP.cpSize}`);
   }
 
   if (SETUP.queryHeads % SETUP.cpSize !== 0 || SETUP.kvHeads % SETUP.cpSize !== 0) {
@@ -151,73 +185,76 @@
   const CP = SETUP.cpSize;
   const perRank = SETUP.queryHeads / CP;
   const fmt = (n) => n.toLocaleString("en-US");
+  const range = (lo, hi) => `${fmt(lo)}–${fmt(hi)}`;
   /** Text for each `{name}` in the page's static text. */
   const VALUES = {
     cpSize: fmt(CP),
     queryHeads: fmt(SETUP.queryHeads),
     kvHeads: fmt(SETUP.kvHeads),
     queryPerRank: fmt(perRank),
+    kvPerRank: fmt(SETUP.kvHeads / CP),
   };
-  /** Who holds block (chunk, head slice): the chunk's rank before attention, the slice's rank during it. */
-  const STAGES = [
-    { head: "Per-rank input", shape: `[B, S/${CP}, ${fmt(SETUP.queryHeads)}, D]`, line: "RoPE on the local chunk", owner: (chunk) => chunk },
-    { head: "Flash attention", shape: `[B, S, ${fmt(perRank)}, D]`, line: `all tokens, ${fmt(perRank)} Q and ${fmt(SETUP.kvHeads / CP)} KV heads`, owner: (chunk, slice) => slice },
-    { head: "Per-rank output", shape: `[B, S/${CP}, ${fmt(SETUP.queryHeads)}, D]`, line: "reshaped into o_proj", owner: (chunk) => chunk },
+  const chunkShape = `[B, S/${CP}, ${fmt(SETUP.queryHeads)}, D]`;
+  const STEPS = [
+    { name: "Per-rank input", lines: [chunkShape, "RoPE on chunk"] },
+    { name: "All-to-all #1", lines: ["Scatter heads", "Gather sequence"] },
+    { name: "Flash attention", lines: [`[B, S, ${fmt(perRank)}, D]`, `Full S, ${fmt(perRank)} heads`] },
+    { name: "All-to-all #2", lines: ["Scatter sequence", "Gather heads"] },
+    { name: "Per-rank output", lines: [chunkShape, "Reshape → o_proj"] },
   ];
-  const HOPS = [
-    { head: "All-to-all #1", what: "Q, K and V in one buffer", moves: ["scatter heads", "gather sequence"] },
-    { head: "All-to-all #2", what: "the output", moves: ["scatter sequence", "gather heads"] },
+  const RULES = {
+    name: "Requirements",
+    lines: ["num_attention_heads % cp == 0", "num_key_value_heads % cp == 0", "seq_len % cp == 0 (collator pads)"],
+  };
+  /** The heads rank `rank` holds of chunk `chunk`, or null: before the swap one chunk with every head, after it every chunk with a slice. */
+  const GRIDS = [
+    { held: (rank, chunk) => (rank === chunk ? range(0, SETUP.queryHeads - 1) : null), caption: `One chunk × all ${fmt(SETUP.queryHeads)} heads` },
+    { held: (rank) => range(rank * perRank, (rank + 1) * perRank - 1), caption: `All S × this rank’s ${fmt(perRank)} heads` },
   ];
-
-  const slices = Array.from({ length: CP }, (_, i) => `${fmt(i * perRank)}–${fmt((i + 1) * perRank - 1)}`);
 
   fillValues(VALUES);
 
-  const stagesEl = document.getElementById("stages");
-  const matrices = [];
+  function buildCard(spec, node = el("div", "card")) {
+    const lines = el("div", "lines");
 
-  const place = (node, column, row) => {
-    node.style.gridColumn = column;
-    node.style.gridRow = row;
-    stagesEl.append(node);
-  };
-
-  const labels = el("div", "matrix labels");
-  labels.append(el("div"), el("div"));
-
-  for (let chunk = 0; chunk < CP; chunk += 1) {
-    labels.append(el("div", "row-label", `chunk ${chunk}`));
-  }
-
-  place(labels, "1", "2");
-
-  // Matrices sit in grid columns 2, 4 and 6; the first heading also spans the chunk labels.
-  STAGES.forEach((stage, si) => {
-    const column = si * 2 + 2;
-    const head = el("div");
-    const sub = el("div", "stage-sub");
-    sub.append(el("b", undefined, stage.shape), stage.line);
-    head.append(el("div", "stage-head", stage.head), sub);
-    place(head, si === 0 ? "1 / span 2" : String(column), "1");
-
-    const matrix = el("div", "matrix");
-    matrix.append(el("div", "axis", "Query heads"));
-
-    for (const slice of slices) {
-      matrix.append(el("div", "col-label", slice));
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
     }
 
+    node.append(el("div", "name", spec.name), lines);
+
+    return node;
+  }
+
+  const steps = document.getElementById("steps");
+  const stepCards = STEPS.map((spec) => steps.appendChild(buildCard(spec)));
+  buildCard(RULES, document.getElementById("rules"));
+
+  const gridsEl = document.getElementById("grids");
+  const grids = GRIDS.map((spec) => {
+    const grid = el("div", "grid");
+    grid.style.setProperty("--cp", CP);
+    grid.append(el("div"));
+
     for (let chunk = 0; chunk < CP; chunk += 1) {
-      for (let slice = 0; slice < CP; slice += 1) {
-        const rank = stage.owner(chunk, slice);
-        const cell = el("div", "cell", `R${rank}`);
+      grid.append(el("div", "col-label", `s${chunk}`));
+    }
+
+    for (let rank = 0; rank < CP; rank += 1) {
+      grid.append(el("div", "row-label", `R${rank}`));
+
+      for (let chunk = 0; chunk < CP; chunk += 1) {
+        const heads = spec.held(rank, chunk);
+        const cell = el("div", heads === null ? "cell empty" : "cell held", heads ?? undefined);
         cell.style.setProperty("--hue", `var(${RANK_HUES[rank]})`);
-        matrix.append(cell);
+        grid.append(cell);
       }
     }
 
-    place(matrix, String(column), "2");
-    matrices.push(matrix);
+    grid.append(el("div", "caption", spec.caption));
+    gridsEl.append(grid);
+
+    return grid;
   });
 
   const figure = document.getElementById("figure");
@@ -228,39 +265,33 @@
 
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
+  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
-  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  // Each step hands on to the next across the gap between their cards.
+  for (let i = 1; i < stepCards.length; i += 1) {
+    const a = box(stepCards[i - 1]);
+    const z = box(stepCards[i]);
+    const y = (a.t + a.b) / 2;
+    arrow(wires, a.r + 6, y, z.l - 6, y, lineHue);
+  }
 
-  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--body").trim();
-  const cellsOf = (matrix) => [...matrix.querySelectorAll(".cell")];
+  // The swap runs from the first grid's cells to the second grid's row labels, at the middle of the cell block.
+  const cellsOf = (grid) => [...grid.querySelectorAll(".cell")];
+  const first = cellsOf(grids[0]);
+  const firstCell = box(first[0]);
+  const lastCell = box(first[first.length - 1]);
+  const next = box(grids[1].querySelector(".row-label"));
+  const mid = (firstCell.t + lastCell.b) / 2;
+  arrow(wires, lastCell.r + 18, mid, next.l - 18, mid, lineHue);
+  const swap = el("div", "hop", "all-to-all");
+  figure.append(swap);
+  swap.style.left = `${(lastCell.r + next.l - swap.offsetWidth) / 2}px`;
+  swap.style.top = `${mid - swap.offsetHeight - 10}px`;
 
-  // Each all-to-all runs between the cell blocks of two neighbouring matrices, its label above and below the line.
-  HOPS.forEach((hop, i) => {
-    const left = cellsOf(matrices[i]);
-    const right = cellsOf(matrices[i + 1]);
-    const a = box(left[left.length - 1]);
-    const top = box(left[0]);
-    const z = box(right[0]);
-    const mid = (top.t + a.b) / 2;
-    arrow(wires, a.r + 14, mid, z.l - 14, mid, lineHue);
-
-    const above = el("div", "hop", hop.head);
-    above.append(el("small", undefined, hop.what));
-    const below = el("div", "hop");
-
-    for (const move of hop.moves) {
-      below.append(el("small", undefined, move));
-    }
-
-    for (const label of [above, below]) {
-      label.style.left = `${a.r}px`;
-      label.style.width = `${z.l - a.r}px`;
-      figure.append(label);
-    }
-
-    above.style.top = `${mid - above.getBoundingClientRect().height - 12}px`;
-    below.style.top = `${mid + 12}px`;
-  });
+  // The requirements sit level with the middle of the cell block, as a panel beside the grids.
+  const rules = document.getElementById("rules");
+  const rulesBox = box(rules);
+  rules.style.marginTop = `${mid - (rulesBox.b - rulesBox.t) / 2 - rulesBox.t}px`;
 </script>
 </body>
 </html>

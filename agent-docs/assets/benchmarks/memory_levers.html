@@ -6,23 +6,23 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --label-col: 560px;
-    --change-col: 110px;
-    --bar-h: 20px;
-    --bar-gap: 4px;
+    --label-col: 600px;
+    --track-h: 28px;
+    --tick: 6px;
+    --link: color-mix(in oklab, var(--halo-blue) 45%, var(--bg));
   }
 
   body { width: 1600px; height: 900px; }
 
   .figure {
     margin-block: auto;
-    padding-block: 22px;
+    padding-block: 24px;
   }
 
   .row,
   .group-head {
     display: grid;
-    grid-template-columns: var(--label-col) 1fr var(--change-col);
+    grid-template-columns: var(--label-col) 1fr;
     align-items: center;
   }
 
@@ -37,9 +37,9 @@
 
   .group-head + .row { margin-top: 14px; }
 
-  .row + .row { margin-top: 10px; }
+  .row + .row { margin-top: 12px; }
 
-  .row + .group-head { margin-top: 22px; }
+  .row + .group-head { margin-top: 26px; }
 
   .key {
     display: flex;
@@ -50,18 +50,7 @@
 
   .key span { display: inline-flex; align-items: center; gap: 10px; }
 
-  .key i {
-    width: 14px;
-    height: 14px;
-    border-radius: 4px;
-    background: var(--hue);
-  }
-
-  .change-head {
-    text-align: right;
-    font-size: 21px;
-    color: var(--secondary);
-  }
+  .key svg { width: 20px; height: 20px; overflow: visible; }
 
   .label .lever {
     font-size: 25px;
@@ -78,64 +67,59 @@
     white-space: nowrap;
   }
 
-  .bar {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    height: var(--bar-h);
+  .track {
+    position: relative;
+    height: var(--track-h);
   }
 
-  .bar + .bar { margin-top: var(--bar-gap); }
-
-  .bar i {
+  .track svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
     height: 100%;
-    border-radius: 5px;
-    background: var(--hue);
+    overflow: visible;
   }
 
-  .bar b {
-    line-height: 1;
-    font-weight: 400;
-    font-size: 21px;
-    font-variant-numeric: tabular-nums;
-    color: var(--secondary);
-  }
+  .link { stroke: var(--link); stroke-width: 3; }
 
-  .bar.now b { font-weight: 500; color: var(--text); }
+  .before { fill: var(--bg); stroke: var(--tertiary); stroke-width: 3; }
+
+  .after { fill: var(--halo-blue); }
 
   .change {
-    text-align: right;
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
     font-size: 23px;
     font-weight: 500;
+    line-height: 1;
     font-variant-numeric: tabular-nums;
     color: var(--text);
+    white-space: nowrap;
   }
 
-  /* The plot prints its values, so it draws no gridlines: an axis line under the bar column carries the scale. */
-  .axis {
-    position: relative;
-    margin: 12px var(--change-col) 0 var(--label-col);
-    border-top: 1px solid var(--line);
-  }
-
-  .axis i {
-    position: absolute;
-    top: 0;
-    height: 6px;
-    border-left: 1px solid var(--line);
-    transform: translateX(-50%);
-  }
-
+  /* The plot prints its values, so it draws no gridlines: an axis line under the dot column carries the scale. */
   .ticks {
     position: relative;
-    height: 26px;
-    margin: 8px var(--change-col) 0 var(--label-col);
+    height: 34px;
+    margin: 12px 0 0 var(--label-col);
     font-size: 19px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;
   }
 
-  .ticks span { position: absolute; }
+  .ticks .axis { position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: var(--tick); border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: calc(var(--tick) + 4px); transform: translateX(-50%); white-space: nowrap; }
+
+  .axis-title {
+    margin-left: var(--label-col);
+    font-size: 19px;
+    line-height: 1.2;
+    color: var(--secondary);
+  }
 
 </style>
 </head>
@@ -147,8 +131,8 @@
 
   <div class="figure">
     <div class="plot" id="plot"></div>
-    <div class="axis" id="axis"></div>
     <div class="ticks" id="ticks"></div>
+    <p class="axis-title">Per GPU, in each group’s unit</p>
   </div>
 
   <footer>
@@ -176,114 +160,90 @@
     ]],
   ];
   const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
-
-  // The axis from zero ends where the data ends: at the smallest maximum that holds every mark and its label. Its ticks
-  // take the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six up to that maximum, which leaves at least
-  // four. A mark is [value, pixels its label reaches past the value], width the plot's pixels.
-  function fitAxis(marks, width) {
-    const max = Math.max(
-      ...marks.map(([value, past]) => {
-        if (past >= width) {
-          throw new Error(`a label reaching ${past}px past its bar does not fit the ${width}px plot`);
-        }
-
-        return (value * width) / (width - past);
-      }),
-    );
-    const e = Math.floor(Math.log10(max)) - 1;
-    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
-      .map((m) => (e < 0 ? m / 10 ** -e : m * 10 ** e))
-      .find((s) => Math.floor(max / s + 1e-9) <= 5);
-    const count = Math.floor(max / step + 1e-9) + 1;
-
-    return { max, ticks: Array.from({ length: count }, (_, i) => Number((i * step).toPrecision(12))) };
-  }
+  /** The dot after the lever's radius, and the ring before it's to the middle of its stroke. */
+  const R_AFTER = 9;
+  const R_BEFORE = 8;
+  /** Distance from a dot's edge to the change beside it. */
+  const LABEL_GAP = 10;
 
   const plot = document.getElementById("plot");
-  const axisLine = document.getElementById("axis");
-  const ticks = document.getElementById("ticks");
-  const decimals = (value) => (String(value).split(".")[1] || "").length;
+  const tickRow = document.getElementById("ticks");
   const marks = [];
-
-  function bar(value, digits, hue, className) {
-    const node = el("div", className);
-    const fill = el("i");
-    fill.style.setProperty("--hue", hue);
-    const label = el("b", undefined, value.toFixed(digits));
-    node.append(fill, label);
-    marks.push({ fill, label, value });
-
-    return node;
-  }
 
   function key() {
     const node = el("div", "key");
 
-    for (const [name, hue] of [["Without the lever", "var(--tertiary)"], ["With it", "var(--halo-blue)"]]) {
+    for (const [name, className] of [["Without the lever", "before"], ["With it", "after"]]) {
       const item = el("span");
-      const swatch = el("i");
-      swatch.style.setProperty("--hue", hue);
-      item.append(swatch, name);
+      const icon = svgEl("svg", { viewBox: "0 0 20 20" });
+      icon.append(svgEl("circle", { class: className, cx: 10, cy: 10, r: className === "after" ? R_AFTER : R_BEFORE }));
+      item.append(icon, name);
       node.append(item);
     }
 
     return node;
   }
 
-  const changes = [];
-
   GROUPS.forEach(([heading, rows], g) => {
     const head = el("div", "group-head");
-    head.append(el("div", "name", heading));
-    head.append(g === 0 ? key() : el("div"));
-    head.append(g === 0 ? el("div", "change-head", "Change") : el("div"));
+    head.append(el("div", "name", heading), g === 0 ? key() : el("div"));
     plot.append(head);
 
     for (const [lever, run, before, after] of rows) {
-      const digits = Math.max(decimals(before), decimals(after));
       const row = el("div", "row");
       const label = el("div", "label");
       label.append(el("div", "lever", lever), el("div", "run", run));
-      const bars = el("div", "bars");
-      bars.append(bar(before, digits, "var(--tertiary)", "bar"), bar(after, digits, "var(--halo-blue)", "bar now"));
-      const change = Math.round((after / before - 1) * 100);
-      changes.push(change);
-      row.append(label, bars, el("div", "change", `${change < 0 ? "−" : "+"}${Math.abs(change)}%`));
+      const track = el("div", "track");
+      row.append(label, track);
       plot.append(row);
+      marks.push({ track, before, after, change: Math.round((after / before - 1) * 100) });
     }
   });
 
-  // Each fill is still empty here, so its label's right edge is how far the label reaches past the value.
-  const width = axisLine.getBoundingClientRect().width;
-  const axis = fitAxis(
-    marks.map(({ fill, label, value }) => [value, label.getBoundingClientRect().right - fill.getBoundingClientRect().right]),
-    width,
-  );
-  const pct = (value) => `${(value / axis.max) * 100}%`;
+  const width = marks[0].track.clientWidth;
 
-  for (const { fill, value } of marks) {
-    fill.style.width = pct(value);
+  /** Draws each row's dumbbell on an axis to `max`: the ring before the lever, the dot after it, a line between, and the change beside the rightmost. */
+  function draw(max) {
+    const x = (value) => (value / max) * width;
+
+    for (const { track, before, after, change } of marks) {
+      const cy = track.clientHeight / 2;
+      const way = Math.sign(after - before) || 1;
+      const svg = svgEl("svg", {});
+      track.replaceChildren(svg);
+
+      if (Math.abs(x(after) - x(before)) > R_BEFORE + R_AFTER) {
+        svg.append(svgEl("line", { class: "link", x1: x(before) + way * R_BEFORE, x2: x(after) - way * R_AFTER, y1: cy, y2: cy }));
+      }
+
+      svg.append(
+        svgEl("circle", { class: "before", cx: x(before), cy, r: R_BEFORE }),
+        svgEl("circle", { class: "after", cx: x(after), cy, r: R_AFTER }),
+      );
+      const label = el("div", "change", `${change < 0 ? "−" : "+"}${Math.abs(change)}%`);
+      label.style.left = `${Math.max(x(before) + R_BEFORE, x(after) + R_AFTER) + LABEL_GAP}px`;
+      track.append(label);
+    }
   }
 
-  for (const tick of axis.ticks) {
-    const mark = el("i");
-    mark.style.left = pct(tick);
-    axisLine.append(mark);
-    const label = el("span", undefined, String(tick));
-    ticks.append(label);
-    // Centred on its tick, kept under the axis line.
-    const at = (tick / axis.max) * width - label.offsetWidth / 2;
-    label.style.left = `${Math.min(Math.max(at, 0), width - label.offsetWidth)}px`;
-  }
+  // The axis from zero ends at the smallest maximum that holds every dot and change inside the plot.
+  const axis = niceAxis(Math.max(...marks.flatMap(({ before, after }) => [before, after])), (max) => {
+    draw(max);
+    const right = marks[0].track.getBoundingClientRect().right;
+
+    return marks.every(({ track }) => [...track.querySelectorAll("circle, .change")].every((node) => node.getBoundingClientRect().right <= right));
+  });
+
+  drawAxis(tickRow, axis, String);
 
   const levers = new Set(GROUPS.flatMap(([, rows]) => rows.map(([lever]) => lever))).size;
   const count = NUMBER_WORDS[levers] ?? String(levers);
-  const cuts = changes.map((change) => -change);
+  const cuts = marks.map(({ change }) => -change);
   const [least, most] = [Math.min(...cuts), Math.max(...cuts)];
   const subject = levers === 1 ? `${count} lever cuts` : `${count} levers cut`;
   document.getElementById("title-count").textContent = subject[0].toUpperCase() + subject.slice(1);
   document.getElementById("title-range").textContent = least === most ? `${most}%` : `${least}–${most}%`;
-  console.log(`changes ${changes.join(" ")}`);
+  console.log(`changes ${marks.map(({ change }) => change).join(" ")}`);
 </script>
 </body>
 </html>

@@ -5,20 +5,23 @@
 <title>Separate inference node</title>
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
+  :root {
+    --card-gap: 16px;
+  }
 
   body { width: 1600px; height: 900px; }
 
   .figure {
     position: relative;
     margin-block: auto;
-    /* The extra top padding holds the node names, which sit on the outline's top edge. */
-    padding: 39px 0 22px;
+    /* The top padding holds the node names, which sit on the outline's top edge. */
+    padding-top: 18px;
   }
 
   /* Two nodes side by side, a gutter between them for the lines that cross. */
   .nodes {
     display: grid;
-    grid-template-columns: 580px 1fr 560px;
+    grid-template-columns: 680px 1fr 560px;
     align-items: center;
   }
 
@@ -27,7 +30,7 @@
     position: relative;
     display: flex;
     flex-direction: column;
-    padding: 28px 20px 16px;
+    padding: 24px 18px 14px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -47,10 +50,10 @@
     background: var(--bg);
   }
 
-  .node .card + .card { margin-top: 44px; }
+  .node .card + .card { margin-top: 34px; }
 
   .card {
-    padding: 20px 26px 20px;
+    padding: 13px 18px 15px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -61,6 +64,7 @@
     align-items: center;
     gap: 12px;
     font-size: 27px;
+    line-height: 1.15;
     color: var(--text);
   }
 
@@ -71,47 +75,29 @@
     background: var(--hue);
   }
 
-  /* A card's facts: a quiet label and its value, in two aligned columns. */
-  .rows {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
-    font-size: 22px;
-    line-height: 1.35;
-  }
-
-  .rows dt { color: var(--tertiary); }
-
-  .rows dd { color: var(--body); }
-
-  /* What each link needs, under the nodes: the card's name, then the links in two pairs of columns. */
-  .links {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    align-items: baseline;
-    column-gap: 48px;
-    margin-top: 24px;
-  }
-
-  .links .rows {
-    grid-template-columns: max-content 1fr max-content 1fr;
-    row-gap: 10px;
-    margin-top: 0;
-  }
-
-  .links .rows dt:nth-of-type(2n) { padding-left: 32px; }
-
-  .wire-label {
-    position: absolute;
-    font-size: 21px;
-    line-height: 1.35;
+  .card .lines {
+    margin-top: 8px;
+    font-size: 23px;
+    line-height: 1.27;
     color: var(--body);
     white-space: nowrap;
   }
 
-  .wire-label .quiet { color: var(--secondary); }
+  /* What each link needs, one card per link, each column as wide as its longest line. */
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(max-content, 1fr));
+    column-gap: var(--card-gap);
+    margin-top: 26px;
+  }
+
+  .wire-label {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.3;
+    color: var(--body);
+    white-space: nowrap;
+  }
 
   svg.wires {
     position: absolute;
@@ -131,7 +117,7 @@
 
   <div class="figure" id="figure">
     <div class="nodes" id="nodes"></div>
-    <div class="card links" id="links"></div>
+    <div class="strip" id="strip"></div>
     <svg class="wires" id="wires"></svg>
   </div>
 </div>
@@ -142,69 +128,99 @@
   const ENGINE = "var(--halo-violet)";
   const ACTORS = "var(--halo-indigo)";
 
+  const GROUP_PORT = 51216;
+  const VLLM_PORT = 8000;
+  const SGLANG_PORT = 30000;
+  const RAY_DASHBOARD_PORT = 8265;
+  const ENGINE_PORTS = `vLLM :${VLLM_PORT} · SGLang :${SGLANG_PORT}`;
+
   const NODES = [
     {
-      name: "Node 1 · training and actors",
+      name: "Node 1: training + actors",
       column: 1,
       cards: [
         {
           id: "trainer",
-          name: "Trainer",
+          name: "Trainer: torchrun ranks",
           hue: TRAINER,
-          rows: [
-            ["Ranks", "torchrun: FSDP2, EP or TP"],
-            ["Sync", "rank 0 binds a store per server"],
+          lines: [
+            "model + optimizer, FSDP2 / EP / TP",
+            "WeightSyncPool on the main process",
+            "rank 0 binds the sync store, one per server",
+            "a push pauses the server, then resumes it",
           ],
         },
         {
           id: "actors",
-          name: "Ray environment actors",
+          name: "Ray actors: same node, CPU",
           hue: ACTORS,
-          rows: [
-            ["Budget", "rollout_actor_budget per node"],
-            ["Runs on", "the CPUs"],
-            ["Env", "the trainer’s"],
+          lines: [
+            "rollout_actor_budget actors per node, split over its ranks",
+            "each holds the environment: tools, sandbox, grader",
+            "no tokenizer: the engine renders the template",
+            "max_concurrent_rollouts bounds in-flight episodes",
           ],
         },
       ],
     },
     {
-      name: "Node 2 · inference",
+      name: "Node 2: inference",
       column: 3,
       cards: [
         {
           id: "server",
           name: "Rollout server",
           hue: ENGINE,
-          rows: [
-            ["Engine", "vLLM :8000 or SGLang :30000"],
-            ["Client", "picked by rollout_backend"],
-            ["Sync", "NCCL ranks 1+"],
-            ["MoE backend", "triton, on either engine"],
+          lines: [
+            ENGINE_PORTS,
+            "rollout_backend picks the client",
+            "its workers join the sync group",
+            "and dial the trainer’s store",
+            "MoE backend triton on either engine",
+            "GPUs no trainer rank uses",
           ],
         },
       ],
     },
   ];
-  const LINKS = {
-    name: "Links",
-    rows: [
-      ["HTTP", "vLLM 8000, SGLang 30000", "resolvable host names"],
-      ["NCCL group", "port 51216 on the trainer", "*_GROUP_HOST if multi-homed"],
-      ["Ray", "ray_address null: local Ray", "dashboard off: no port 8265"],
-      ["EFA", "EFA overlay and make EFA=1", "else the sync uses sockets"],
-    ],
-  };
+  const NETWORK = [
+    {
+      name: "HTTP",
+      lines: [ENGINE_PORTS, "actors → engine, per turn", "round-robin over the pool", "resolves from every node"],
+    },
+    {
+      name: "NCCL group",
+      lines: [`rollout_group_port ${GROUP_PORT}`, "bound on the trainer host", "+1 per extra server", "multi-homed: *_GROUP_HOST"],
+    },
+    {
+      name: "Ray",
+      lines: [
+        "ray_address: null = local",
+        "each rank’s ray.init starts Ray",
+        `dashboard off, no port ${RAY_DASHBOARD_PORT}`,
+        "actors inherit the trainer’s env",
+      ],
+    },
+    {
+      name: "EFA",
+      lines: [
+        "docker-compose.<engine>.efa.yml",
+        "+ make EFA=1 on the trainer",
+        "else the sync runs on sockets",
+        "preflight: weight_sync_transport.py",
+      ],
+    },
+  ];
   const WIRES = {
-    sync: ["NCCL weight sync", "workers dial back to the store"],
-    http: ["HTTP requests"],
+    sync: `NCCL :${GROUP_PORT}`,
+    http: `HTTP :${VLLM_PORT}`,
+    ray: "Ray: local, ray_address null",
   };
-  /** Vertical offset of a line's end from the server card's middle, so the two arrowheads stay apart. */
-  const PORT = 14;
   /** Where the Ray link leaves the trainer card, as a share of its width. */
-  const RAY_AT = 0.3;
+  const RAY_AT = 0.5;
 
-  function buildCard(spec, card = el("div", "card")) {
+  function buildCard(spec) {
+    const card = el("div", "card");
     const name = el("div", "name");
 
     if (spec.hue !== undefined) {
@@ -214,16 +230,13 @@
     }
 
     name.append(spec.name);
-    const rows = el("dl", "rows");
+    const lines = el("div", "lines");
 
-    // A term with several values stacks them in its one value cell.
-    for (const [term, ...values] of spec.rows) {
-      const value = el("dd");
-      value.append(...values.map((line) => el("div", undefined, line)));
-      rows.append(el("dt", undefined, term), value);
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
     }
 
-    card.append(name, rows);
+    card.append(name, lines);
 
     return card;
   }
@@ -244,7 +257,7 @@
     nodes.append(node);
   }
 
-  buildCard(LINKS, document.getElementById("links"));
+  document.getElementById("strip").append(...NETWORK.map(buildCard));
 
   const figure = document.getElementById("figure");
   const wires = document.getElementById("wires");
@@ -256,12 +269,20 @@
   };
   const css = (value) => getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1)).trim();
 
-  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  /** The middle of the height two boxes share, where a level line can join them. Raises when they share none. */
+  function sharedMiddle(p, q) {
+    const top = Math.max(p.t, q.t);
+    const bottom = Math.min(p.b, q.b);
 
-  /** A label of one or more lines, every line after the first quieter. */
-  function label(lines, left, top, width) {
-    const node = el("div", "wire-label");
-    lines.forEach((line, i) => node.append(el("div", i === 0 ? undefined : "quiet", line)));
+    if (bottom <= top) {
+      throw new Error("A link's two cards share no height for a level line: centre the server's node on the other.");
+    }
+
+    return (top + bottom) / 2;
+  }
+
+  function label(text, left, top, width) {
+    const node = el("div", "wire-label", text);
     node.style.left = `${left}px`;
     node.style.top = `${top}px`;
 
@@ -278,21 +299,22 @@
   const t = box(cards.trainer);
   const a = box(cards.actors);
   const s = box(cards.server);
-  const mid = (s.t + s.b) / 2;
-  // Each line runs from its card's middle to a port just above or below the server's middle.
-  const sync = [(t.t + t.b) / 2, mid - PORT];
-  const http = [(a.t + a.b) / 2, mid + PORT];
-  arrow(wires, t.r, sync[0], s.l - 1, sync[1], css(TRAINER));
-  arrow(wires, a.r, http[0], s.l - 1, http[1], css(ACTORS));
-  const gutter = box(nodes.children[0]).r;
-  const width = box(nodes.children[1]).l - gutter;
-  const above = label(WIRES.sync, gutter, 0, width);
-  above.style.top = `${Math.min(...sync) - 12 - above.offsetHeight}px`;
-  label(WIRES.http, gutter, Math.max(...http) + 12, width);
+  // Each link runs level from node to node, at the height its card shares with the server.
+  const gutter = { l: box(nodes.children[0]).r, r: box(nodes.children[1]).l };
+  const links = [
+    [WIRES.sync, sharedMiddle(t, s), ENGINE],
+    [WIRES.http, sharedMiddle(a, s), ACTORS],
+  ];
+
+  for (const [text, y, hue] of links) {
+    arrow(wires, gutter.l, y, gutter.r - 1, y, css(hue));
+    const above = label(text, gutter.l, 0, gutter.r - gutter.l);
+    above.style.top = `${y - 10 - above.offsetHeight}px`;
+  }
 
   const rayX = t.l + RAY_AT * (t.r - t.l);
   arrow(wires, rayX, t.b, rayX, a.t - 1, css("var(--tertiary)"));
-  const ray = label(["Ray, on this node"], rayX + 14, 0);
+  const ray = label(WIRES.ray, rayX + 14, 0);
   ray.style.top = `${(t.b + a.t) / 2 - ray.offsetHeight / 2}px`;
 </script>
 </body>

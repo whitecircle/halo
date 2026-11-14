@@ -6,7 +6,7 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --arrow-gap: 72px;
+    --arrow-gap: 64px;
   }
 
   body { width: 1600px; height: 900px; }
@@ -36,14 +36,6 @@
     background: var(--hue);
   }
 
-  .group-head span {
-    margin-left: 6px;
-    font-family: var(--sans);
-    font-size: 22px;
-    letter-spacing: 0;
-    color: var(--secondary);
-  }
-
   /* Four matmul and update cards in a row, with a gutter for each arrow. */
   .steps {
     display: grid;
@@ -53,98 +45,101 @@
   }
 
   .card {
-    position: relative;
-    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
+    text-align: center;
   }
 
-  .card .top {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 16px;
+  /* A step that runs no matmul, like the activations it sits apart from, takes a dashed edge. */
+  .card.cheap { border-style: dashed; border-color: var(--tertiary); }
+
+  .stage {
+    position: relative;
+    padding: 52px 20px 30px;
   }
 
-  .card .op {
+  .stage .flops {
+    position: absolute;
+    top: 16px;
+    right: 20px;
+    font-size: 23px;
+    color: var(--text);
+  }
+
+  .stage .op {
     font-size: 27px;
     color: var(--text);
     white-space: nowrap;
   }
 
-  .card .op sup {
+  .stage .op sup {
     font-size: 17px;
     line-height: 0;
   }
 
-  /* The matmul's short name, beside its formula. */
-  .card .tag {
-    font-size: 21px;
-    color: var(--secondary);
-  }
-
-  /* A card's facts: a quiet label and its value, in two aligned columns. */
-  .facts {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    margin-top: 12px;
+  .stage p {
+    margin-top: 10px;
     font-size: 23px;
-    line-height: 1.3;
+    color: var(--body);
   }
 
-  .facts dt { color: var(--tertiary); }
+  .stage.cheap .op { color: var(--body); }
 
-  .facts dd { color: var(--body); }
+  .stage.cheap p { color: var(--secondary); }
 
   .total {
     position: relative;
-    height: 66px;
+    height: 74px;
     margin-top: 20px;
   }
 
   .total span {
     position: absolute;
-    top: 22px;
+    top: 28px;
     transform: translateX(-50%);
     font-size: 25px;
     color: var(--text);
     white-space: nowrap;
   }
 
-  .memory { margin-top: 48px; }
+  .memory { margin-top: 30px; }
 
-  .memory .group-head { margin-bottom: 18px; }
-
+  /* The bytes bar and the activations card, each under its caption, in the original's 6.3 : 4.15 split. */
   .bytes {
-    display: flex;
-    gap: 48px;
-    align-items: center;
+    display: grid;
+    grid-template-columns: 6.3fr 4.15fr;
+    column-gap: 60px;
+    row-gap: 12px;
+    margin-top: 12px;
+  }
+
+  .bytes .caption {
+    font-size: 23px;
+    color: var(--secondary);
   }
 
   .bar {
     display: flex;
     gap: 4px;
-    width: 900px;
   }
 
   .seg {
     display: flex;
     flex-direction: column;
+    align-items: center;
     justify-content: center;
     gap: 4px;
-    height: 132px;
-    padding-inline: 24px;
+    height: 108px;
     border-radius: 10px;
     background: var(--hue);
     color: #000;
+    white-space: nowrap;
   }
 
   .seg b {
     font-weight: 400;
     font-size: 25px;
-    white-space: nowrap;
   }
 
   .seg span {
@@ -153,20 +148,23 @@
   }
 
   .acts {
-    flex: 1;
-    padding: 22px 28px 24px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
   }
 
   .acts b {
     font-weight: 400;
-    font-size: 27px;
+    font-size: 25px;
     color: var(--text);
   }
 
-  .acts .facts { margin-top: 8px; }
+  .acts p {
+    font-size: 23px;
+    color: var(--body);
+  }
 
   svg.wires {
     position: absolute;
@@ -189,24 +187,23 @@
 <body>
 <div class="canvas">
   <header>
-    <h1>Two backward matmuls make a step cost 6P</h1>
-    <p class="subtitle">One linear layer Y = X @ W with P parameters</p>
+    <h1>Two backward matmuls make a step cost {total}</h1>
+    <p class="subtitle">Y = X @ W · P = layer parameters</p>
   </header>
 
   <div class="figure" id="figure">
     <div class="steps" id="steps"></div>
-    <div class="total" id="total"><span>Forward 2P + backward 4P = 6P FLOPs per step</span></div>
+    <div class="total" id="total"><span>Forward {forward} + backward {backward} = {total} FLOPs / step</span></div>
 
     <div class="memory">
-      <div class="group-head">Memory in HBM<span>8 B per parameter with bf16 AdamW</span></div>
+      <div class="group-head">Memory in HBM</div>
       <div class="bytes">
+        <p class="caption">Per parameter: {bytes} B total (bf16 AdamW)</p>
+        <p class="caption">+ Activations: the long-context cost</p>
         <div class="bar" id="bar"></div>
-        <div class="acts">
-          <b>+ Activations</b>
-          <dl class="facts">
-            <dt>Grow with</dt><dd>batch × sequence, not P</dd>
-            <dt>Cost</dt><dd>long context</dd>
-          </dl>
+        <div class="card cheap acts">
+          <b>Activations</b>
+          <p>Scale with batch × seq, not per-parameter</p>
         </div>
       </div>
     </div>
@@ -225,15 +222,16 @@
 <script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   const GROUPS = [
-    { name: "Forward", hue: "--halo-blue", span: 1 },
-    { name: "Backward", hue: "--halo-violet", span: 2 },
-    { name: "Update", hue: "--halo-indigo", span: 1 },
+    { name: "Forward", hue: "--halo-blue" },
+    { name: "Backward", hue: "--halo-violet" },
+    { name: "Update", hue: "--halo-indigo" },
   ];
+  /** One linear layer's step. `flops` counts in units of P, and a step without matmul FLOPs is drawn dashed. */
   const STEPS = [
-    { op: "Y = X @ W", facts: [["FLOPs", "2P"], ["Saves", "X for wgrad"]] },
-    { op: "dX = dY @ W<sup>T</sup>", tag: "dgrad", facts: [["FLOPs", "2P"], ["Feeds", "previous layer"]] },
-    { op: "dW = X<sup>T</sup> @ dY", tag: "wgrad", facts: [["FLOPs", "2P"], ["Reads", "saved X"]] },
-    { op: "W −= lr · m/√v", facts: [["Matmul", "none"], ["Kind", "elementwise"]] },
+    { group: "Forward", op: "Y = X @ W", role: "Saves X", flops: 2 },
+    { group: "Backward", op: "dX = dY @ W<sup>T</sup>", role: "→ previous layer", flops: 2 },
+    { group: "Backward", op: "dW = X<sup>T</sup> @ dY", role: "Needs saved X", flops: 2 },
+    { group: "Update", op: "W −= lr · m/√v", role: "m, v · elementwise", flops: 0 },
   ];
   // Labels on the arrows between consecutive steps.
   const HANDOFFS = [null, null, "dW"];
@@ -244,11 +242,24 @@
     { name: "Optimizer m, v", bytes: 4, hue: "--halo-indigo" },
   ];
 
+  const flopsOf = (group) => STEPS.filter((s) => s.group === group).reduce((sum, s) => sum + s.flops, 0);
+  const totalFlops = STEPS.reduce((sum, s) => sum + s.flops, 0);
+  const totalBytes = BYTES.reduce((sum, part) => sum + part.bytes, 0);
+  /** The steps the 6P bracket spans: every one that runs a matmul. */
+  const matmuls = STEPS.filter((s) => s.flops > 0);
+
+  fillValues({
+    forward: `${flopsOf("Forward")}P`,
+    backward: `${flopsOf("Backward")}P`,
+    total: `${totalFlops}P`,
+    bytes: totalBytes,
+  });
+
   const steps = document.getElementById("steps");
 
   for (const group of GROUPS) {
     const head = el("div", "group-head");
-    head.style.gridColumn = `span ${group.span}`;
+    head.style.gridColumn = `span ${STEPS.filter((s) => s.group === group.name).length}`;
     const dot = el("i");
     dot.style.setProperty("--hue", `var(${group.hue})`);
     head.append(dot, group.name);
@@ -256,30 +267,20 @@
   }
 
   const cards = STEPS.map((step) => {
-    const card = el("div", "card");
-    const top = el("div", "top");
+    const card = el("div", step.flops > 0 ? "card stage" : "card stage cheap");
+
+    if (step.flops > 0) {
+      card.append(el("span", "flops", `${step.flops}P`));
+    }
+
     const op = el("div", "op");
     op.innerHTML = step.op;
-    top.append(op);
-
-    if (step.tag !== undefined) {
-      top.append(el("span", "tag", step.tag));
-    }
-
-    const facts = el("dl", "facts");
-
-    for (const [label, value] of step.facts) {
-      facts.append(el("dt", undefined, label), el("dd", undefined, value));
-    }
-
-    card.append(top, facts);
-
+    card.append(op, el("p", undefined, step.role));
     steps.append(card);
 
     return card;
   });
 
-  const totalBytes = BYTES.reduce((sum, part) => sum + part.bytes, 0);
   const bar = document.getElementById("bar");
 
   for (const part of BYTES) {
@@ -291,10 +292,6 @@
     bar.append(seg);
   }
 
-  if (totalBytes !== 8) {
-    throw new Error(`bytes per parameter sum to ${totalBytes}, not 8`);
-  }
-
   const figure = document.getElementById("figure");
   const wires = document.getElementById("wires");
   const origin = figure.getBoundingClientRect();
@@ -303,9 +300,7 @@
 
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
-  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const grey = css("--secondary");
-
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
   HANDOFFS.forEach((label, i) => {
     const a = box(cards[i]);
@@ -321,12 +316,13 @@
     }
   });
 
-  // The 6P bracket spans the three matmul cards, with a short tick at each end.
+  // The bracket spans the matmul cards, with a short tick at each end.
   const total = document.getElementById("total");
-  const t = box(total);
-  const x1 = box(cards[0]).l;
-  const x2 = box(cards[2]).r;
-  const y = t.t + 4;
+  const first = box(cards[STEPS.indexOf(matmuls[0])]);
+  const last = box(cards[STEPS.indexOf(matmuls.at(-1))]);
+  const x1 = first.l;
+  const x2 = last.r;
+  const y = box(total).t + 8;
   wires.append(svgEl("line", { x1, y1: y, x2, y2: y, stroke: grey, "stroke-width": 2 }));
 
   for (const x of [x1 + 1, x2 - 1]) {

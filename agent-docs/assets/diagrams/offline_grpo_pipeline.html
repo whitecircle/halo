@@ -67,7 +67,7 @@
   }
 
   .card {
-    padding: 20px 24px 22px;
+    padding: 24px 26px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -83,23 +83,13 @@
     white-space: nowrap;
   }
 
-  /* A card's facts: a quiet label beside the value it names. */
-  .card dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
+  .card .lines {
+    margin-top: 14px;
     font-size: 23px;
-    line-height: 1.3;
-  }
-
-  .card dt {
-    color: var(--tertiary);
+    line-height: 1.45;
+    color: var(--body);
     white-space: nowrap;
   }
-
-  .card dd { color: var(--body); }
 
   sub, sup {
     font-size: 0.78em;
@@ -138,9 +128,7 @@
 
   <footer>
     <p>
-      <span class="s">Nothing is generated at train time: the rewards ship with the dataset, and each row carries its group’s advantage and weight.</span>
-      <span class="s">Turn the drop on with drop_degenerate_groups.</span>
-      <span class="s">A group may straddle ranks, and each of its rows keeps its 1/group_size.</span>
+      <span class="s">No generation at train time: the rewards ship with the dataset, and each row carries its group’s advantage and weight.</span>
     </p>
   </footer>
 </div>
@@ -149,31 +137,31 @@
 <script>
   const KEY = [{ name: "Policy", hue: "var(--halo-blue)" }];
   const BANDS = ["Once, at tokenization", "Every training step"];
-  /** Each card sits in a band (0 or 1) and a column (1 to 3), its facts as [label, value] rows. */
+  /** Each card sits in a band (0 or 1) and a column (1 to 3), its lines one under another. */
   const CARDS = [
     {
-      id: "rows", band: 0, col: 1, name: "One row, one group",
-      rows: [["prompt", "a message list"], ["completions", "one list per row"], ["rewards", "one float each"]],
+      id: "rows", band: 0, col: 1, name: "One row = one group",
+      lines: ["prompt: list[dict]", "completions: list[list[dict]]", "rewards: list[float]"],
     },
     {
       id: "adv", band: 0, col: 2, name: "Group advantages",
-      rows: [["Default", "quantile_norm"], ["Others", "z_norm · minmax · robust<br>quantile_uniform"], ["Clip", "[−10, 10], after emphasis"]],
+      lines: ["quantile_norm (default) · z_norm", "minmax · quantile_uniform · robust", "emphasis, then clip to [−10, 10]"],
     },
     {
       id: "expand", band: 0, col: 3, name: "One row per completion",
-      rows: [["Carries", "advantage, group size"], ["group_id", "source row’s index"], ["Drops", "ties, n < 2 (opt-in)"]],
+      lines: ["carries its advantage + group_size", "group_id = the source row index", "drop_degenerate_groups: ties, n < 2"],
     },
     {
-      id: "norm", band: 1, col: 1, name: "Normalize by loss_type",
-      rows: [["Weight", "1/group_size per row"], ["bnpo", "global token mean, default"], ["grpo", "per sequence, then groups"], ["dr_grpo", "÷ (∑ weights × max length)"]],
+      id: "norm", band: 1, col: 1, name: "Normalize",
+      lines: ["every row × 1/group_size", "bnpo: global weighted mean", "grpo: per-sequence, then groups", "dr_grpo: ÷ (Σ weights × max_len)"],
     },
     {
       id: "loss", band: 1, col: 2, name: "Per-token loss", hue: "var(--halo-blue)",
-      rows: [["prob_weighted", "−(π · A), default"], ["reinforce", "−(log π · A)"], ["min_log_prob", "floor where A < 0"], ["kl_beta", "> 0 adds β · k3 KL"]],
+      lines: ["prob_weighted: −(π · A)", "reinforce: −(log π · A)", "min_log_prob floor on A < 0", "kl_beta > 0: + β · k3 KL"],
     },
     {
       id: "sampler", band: 1, col: 3, name: "MultiGroupSampler",
-      rows: [["Groups", "flattened"], ["Order", "as in the dataset"], ["DP slice", "cut by position"]],
+      lines: ["flattens groups in dataset order", "cuts the DP slice positionally", "a group may straddle ranks", "the 1/group_size weight rides"],
     },
   ];
   /** `down` leaves the source's bottom at `at` of its width, label to its right. `back` climbs from the source's
@@ -227,16 +215,13 @@
     }
 
     name.append(spec.name);
-    card.append(name);
-    const facts = el("dl");
+    const lines = el("div", "lines");
 
-    for (const [label, value] of spec.rows) {
-      const dd = el("dd");
-      dd.innerHTML = value;
-      facts.append(el("dt", undefined, label), dd);
+    for (const line of spec.lines) {
+      lines.append(el("div", undefined, line));
     }
 
-    card.append(facts);
+    card.append(name, lines);
     bands.append(card);
     cards[spec.id] = card;
   }
@@ -298,7 +283,7 @@
         label.style.top = `${(a.b + z.t - r.height) / 2}px`;
       });
     } else {
-      // Cards are as tall as their facts: the arrow runs at the middle of the span the two cards share.
+      // Cards are as tall as their lines: the arrow runs at the middle of the span the two cards share.
       const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
       const [x1, x2] = arrow.dir === "right" ? [a.r, z.l - 1] : [a.l, z.r + 1];
       connect([[x1, y], [x2, y]], hue);

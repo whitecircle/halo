@@ -67,7 +67,7 @@
   }
 
   .card {
-    padding: 20px 24px 22px;
+    padding: 24px 26px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -83,25 +83,13 @@
     white-space: nowrap;
   }
 
-  /* A card's facts: a quiet label beside the value it names. */
-  .card dl {
-    display: grid;
-    grid-template-columns: max-content 1fr;
-    column-gap: 16px;
-    row-gap: 4px;
-    margin-top: 12px;
+  .card .lines {
+    margin-top: 14px;
     font-size: 23px;
-    line-height: 1.3;
-  }
-
-  .card dt {
-    color: var(--tertiary);
+    line-height: 1.45;
+    color: var(--body);
     white-space: nowrap;
   }
-
-  .card dd { color: var(--body); }
-
-  .card dd.formula { grid-column: 1 / -1; }
 
   sub, sup {
     font-size: 0.78em;
@@ -141,7 +129,7 @@
   <footer>
     <p>
       <span class="s">The margin term is exactly zero once z clears 0, where a sigmoid loss keeps pushing, while the anchors train both sides.</span>
-      <span class="s">Numbers are the config defaults, with β 1.2 and the margin ramped from 0.01 to 0.35.</span>
+      <span class="s">Numbers are the config defaults.</span>
     </p>
   </footer>
 </div>
@@ -150,28 +138,37 @@
 <script>
   const KEY = [{ name: "Policy", hue: "var(--halo-blue)" }];
   const BANDS = ["Margin term", "SFT anchors"];
-  /** Each card sits in a band (0 or 1) and a column (1 to 3), spanning `span` columns, its facts as [label, value]
-   * rows; a string row is a formula across both columns. */
+  /** Each card sits in a band (0 or 1) and a column (1 to 3), spanning `span` columns, its lines one under another.
+   * A line may carry <sub> and <sup> markup. */
   const CARDS = [
     {
-      id: "forward", band: 0, col: 1, name: "One forward over the pair", hue: "var(--halo-blue)",
-      rows: [["Rows", "2N, chosen first"], ["Prompt", "labels −100"], ["Log p", "fp32, shifted and masked"], ["Output", "[2N, T]"]],
+      id: "forward", band: 0, col: 1, name: "One forward: the pair", hue: "var(--halo-blue)",
+      lines: ["the pair concatenated, 2N rows", "chosen rows first, then rejected", "labels −100 over the prompt", "shift + mask, then log-softmax", "→ per-token log p, [2N, T]"],
     },
     {
-      id: "clip", band: 0, col: 2, name: "Percentile clip, margin only",
-      rows: [["Tail", "rejected → its 2% quantile"], ["Cap", "chosen, off by default"], ["Floor", "rejected, min_log_prob −2.3"], ["Bound", "one per half, detached"]],
+      id: "clip", band: 0, col: 2, name: "Percentile clip: margin path",
+      lines: ["runs on the per-token log p", "rejected tail → 2% token quantile", "chosen tail capped (upper, off)", "then min_log_prob −2.3, rejected", "one detached bound per half"],
     },
     {
       id: "margin", band: 0, col: 3, name: "Per-sequence mean → margin",
-      rows: ["logp<sub>c</sub>, logp<sub>r</sub> = fp32 ∑ ÷ tokens", "z = logp<sub>c</sub> − logp<sub>r</sub> − margin", "L<sub>margin</sub> = relu(−β · z)<sup>2</sup>", ["loss_type", "smooth_lower_bound"]],
+      lines: [
+        "logp<sub>c/r</sub> = fp32 Σ ÷ tokens",
+        "z = logp<sub>c</sub> − logp<sub>r</sub> − margin",
+        "L<sub>margin</sub> = relu(−β · z)<sup>2</sup>",
+        "loss_type smooth_lower_bound",
+        "β = 1.2 · margin 0.01 → 0.35",
+      ],
     },
     {
-      id: "anchors", band: 1, col: 1, name: "Anchors, before the clip",
-      rows: [["NLL", "completion-token mean"], ["Sides", "chosen and rejected"]],
+      id: "anchors", band: 1, col: 1, name: "Anchors: pre-clip",
+      lines: ["mean NLL over completion tokens", "taken before the clip, both sides"],
     },
     {
       id: "total", band: 1, col: 2, span: 2, name: "Total",
-      rows: ["L<sub>total</sub> = mean<sub>pairs</sub> L<sub>margin</sub> + α · CE(chosen) + (1 − α) · CE(rejected)", ["α", "chosen_sft_ratio, 0.8"], ["Reference", "none"]],
+      lines: [
+        "L<sub>total</sub> = mean<sub>pairs</sub> L<sub>margin</sub> + α · CE(chosen) + (1 − α) · CE(rejected)",
+        "α = chosen_sft_ratio 0.8 · no reference model",
+      ],
     },
   ];
   /** `down` leaves the source's bottom at `at` of its width, or at the middle of the span it shares with the target,
@@ -221,34 +218,20 @@
     card.style.gridRow = String(2 * spec.band + 2);
     card.style.gridColumn = `${spec.col} / span ${spec.span ?? 1}`;
 
-    // A card across several columns is only as wide as its facts.
-    if (spec.span !== undefined) {
-      card.style.justifySelf = "start";
-    }
-
     if (spec.hue !== undefined) {
       name.append(dot(spec.hue));
     }
 
     name.append(spec.name);
-    card.append(name);
-    const facts = el("dl");
+    const lines = el("div", "lines");
 
-    for (const row of spec.rows) {
-      if (typeof row === "string") {
-        const formula = el("dd", "formula");
-        formula.innerHTML = row;
-        facts.append(formula);
-        continue;
-      }
-
-      const [label, value] = row;
-      const dd = el("dd");
-      dd.innerHTML = value;
-      facts.append(el("dt", undefined, label), dd);
+    for (const line of spec.lines) {
+      const row = el("div");
+      row.innerHTML = line;
+      lines.append(row);
     }
 
-    card.append(facts);
+    card.append(name, lines);
     bands.append(card);
     cards[spec.id] = card;
   }
@@ -310,7 +293,7 @@
         label.style.top = `${(a.b + z.t - r.height) / 2}px`;
       });
     } else {
-      // Cards are as tall as their facts: the arrow runs at the middle of the span the two cards share.
+      // Cards are as tall as their lines: the arrow runs at the middle of the span the two cards share.
       const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
       const [x1, x2] = arrow.dir === "right" ? [a.r, z.l - 1] : [a.l, z.r + 1];
       connect([[x1, y], [x2, y]], hue);
