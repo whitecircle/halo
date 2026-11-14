@@ -23,6 +23,10 @@
   --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
   --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
 
+  /* Spacing shows grouping: a heading sits close to its own rows, and groups sit far apart. */
+  --heading-gap: 14px;
+  --group-gap: 48px;
+
   /* The 1600 × 900 scale. A 1200 × 1200 page puts class="square" on its body. */
   --canvas-pad: 52px 64px 48px;
   --title-size: 67px;
@@ -32,6 +36,8 @@
 }
 
 .square {
+  --heading-gap: 11px;
+  --group-gap: 36px;
   --canvas-pad: 40px 48px 36px;
   --title-size: 50px;
   --subtitle-size: 20px;

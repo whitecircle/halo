@@ -50,7 +50,7 @@
     align-items: center;
     justify-content: center;
     height: 76px;
-    margin-top: 22px;
+    margin-top: 30px;
     font-size: 27px;
     color: var(--text);
   }
@@ -58,7 +58,7 @@
   .kernels {
     display: flex;
     gap: 20px;
-    margin-top: 196px;
+    margin-top: 208px;
   }
 
   .column.fused .kernels { justify-content: center; }
@@ -85,7 +85,7 @@
   }
 
   .total {
-    margin-top: 34px;
+    margin-top: 44px;
     font-size: 27px;
     color: var(--text);
   }
@@ -131,12 +131,6 @@
     <div class="columns" id="columns"></div>
     <svg class="wires" id="wires"></svg>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">y = silu(a) · b is elementwise: at an arithmetic intensity near 1, its runtime is its HBM traffic.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

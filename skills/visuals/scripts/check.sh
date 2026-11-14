@@ -220,6 +220,30 @@ window.addEventListener("load", () => setTimeout(() => {
     });
     if (dot) report(\`COVERS   "\${name(item.n)}" sits on a <\${dot.tagName}> mark: move the label off it\`);
   }
+  // Grouping: a section heading inside the figure (serif text, not the title) must sit clearly nearer the block
+  // after it than the block before it, or it reads as one more row. Measured against its neighbouring elements in
+  // the layout, stacked above and below it; a heading that opens its container or floats over content is skipped.
+  const figure = document.querySelector(".figure");
+  if (figure) {
+    const seen = new Set();
+    const visible = (n) => n && !hidden(n) && n.getBoundingClientRect().height > 0;
+    const sibling = (n, dir) => { let s = n[dir]; while (s && !visible(s)) s = s[dir]; return s; };
+    for (const h of items) {
+      if (!figure.contains(h.n) || h.n.closest("h1, header, footer") || !getComputedStyle(h.n).fontFamily.includes("Otto") || h.fs < 0.018 * W) continue;
+      let block = h.n;
+      while (block.parentElement && block.parentElement !== figure && !sibling(block, "previousElementSibling") && !sibling(block, "nextElementSibling")) block = block.parentElement;
+      if (seen.has(block) || ["absolute", "fixed"].includes(getComputedStyle(block).position)) continue;
+      seen.add(block);
+      const prev = sibling(block, "previousElementSibling"), next = sibling(block, "nextElementSibling");
+      if (!prev || !next) continue;
+      const b = block.getBoundingClientRect(), p = prev.getBoundingClientRect(), x = next.getBoundingClientRect();
+      if (p.bottom > b.top + 1 || x.top < b.bottom - 1) continue;
+      const gapAbove = b.top - p.bottom, gapBelow = x.top - b.bottom;
+      if (gapAbove < 2 * gapBelow || gapAbove < 28 * W / 1600) {
+        report(\`GROUPING "\${name(h.n)}" sits \${Math.round(gapAbove)} px below the block before it and \${Math.round(gapBelow)} px above its own: the gap above must be at least twice the gap below, and 28 px\`);
+      }
+    }
+  }
   const fig = document.querySelector(".figure"), head = document.querySelector("header"), foot = document.querySelector("footer");
   let gaps = "";
   if (fig && head) gaps = \`gap above figure \${Math.round(fig.getBoundingClientRect().top - head.getBoundingClientRect().bottom)} px · below \${Math.round((foot ? foot.getBoundingClientRect().top : H - $bottom) - fig.getBoundingClientRect().bottom)} px\`;

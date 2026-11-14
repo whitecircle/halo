@@ -7,7 +7,7 @@
 <style>
   :root {
     --label-col: 340px;
-    --bar-h: 44px;
+    --bar-h: 46px;
   }
 
   body { width: 1600px; height: 900px; }
@@ -21,7 +21,7 @@
     display: flex;
     gap: 32px;
     margin-left: var(--label-col);
-    margin-bottom: 18px;
+    margin-bottom: 24px;
     font-size: 21px;
     color: var(--body);
   }
@@ -41,7 +41,7 @@
     align-items: center;
   }
 
-  .row + .row { margin-top: 16px; }
+  .row + .row { margin-top: 20px; }
 
   .label {
     font-size: 25px;
@@ -125,15 +125,6 @@
     <div id="plot"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">One step of <span class="nw">gpt-oss-20b</span> at EP8, batch 4 of 4,096-token rows, in a run that syncs the GPU around its timers.</span>
-      <span class="s">Native fp8 is the opt-in DeepGEMM adapter.</span>
-      <span class="s">About 300 ms of the rest sits outside the EP spans, unattributed.</span>
-      <span class="s">The backward’s GEMMs stay bf16, at 114 ms either way.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

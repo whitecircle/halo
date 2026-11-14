@@ -13,8 +13,9 @@
     --col-gap: 28px;
     --track-left: calc(var(--group-col) + var(--recipe-col) + var(--tokens-col) + 3 * var(--col-gap));
     --track-right: calc(var(--value-col) + var(--col-gap));
-    --row-h: 38px;
-    --range-h: 18px;
+    --row-h: 45px;
+    --range-h: 20px;
+    --split-gap: 24px;
   }
 
   body { width: 1600px; height: 900px; }
@@ -37,7 +38,7 @@
   /* The column heads and the colour key share the first row. */
   .row.head {
     height: auto;
-    margin-bottom: 14px;
+    margin-bottom: 22px;
     font-size: 21px;
     color: var(--secondary);
   }
@@ -53,7 +54,7 @@
     background: var(--hue);
   }
 
-  .row.split { margin-top: 18px; padding-top: 18px; height: calc(var(--row-h) + 18px); border-top: 1px solid var(--line); }
+  .row.split { margin-top: var(--split-gap); padding-top: var(--split-gap); height: calc(var(--row-h) + var(--split-gap)); border-top: 1px solid var(--line); }
 
   .group {
     align-self: start;
@@ -144,7 +145,7 @@
   .ticks {
     position: relative;
     height: 38px;
-    margin: 14px var(--track-right) 0 var(--track-left);
+    margin: 20px var(--track-right) 0 var(--track-left);
     font-size: 19px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;
@@ -181,15 +182,6 @@
     <div class="plot" id="plot"><div class="reference" id="reference"></div></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Nemotron 3.5 Super VL’s shipped recipes and Lightning’s full fine-tune at EP8 on 8 × B300, under reentrant checkpointing.</span>
-      <span class="s">Each bar spans the range across the eight ranks.</span>
-      <span class="s">Size a run by its reserved memory.</span>
-      <span class="s">The <span id="noted-count"></span> longest rows ran 5 steps, and their top ranks reached <span id="noted-shares"></span> of the device.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -210,7 +202,6 @@
   ];
   const MIN_RANGE_PX = 8;
   const LINE_CLEAR_PX = 8;
-  const COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
 
   const plot = document.getElementById("plot");
   const reference = document.getElementById("reference");
@@ -242,7 +233,6 @@
   head.lastChild.style.color = "var(--secondary)";
   plot.append(head);
   const device = el("div", "device");
-  device.style.top = "-40px";
   reference.append(device);
 
   // Per row, its track and how its bars and note place on an axis's end, returning whether the note found room.
@@ -311,12 +301,11 @@
     lastGroup = group;
   }
 
-  const topRanks = ROWS.filter((row) => row[7] !== undefined).map((row) => `${row[7]}%`);
-  document.getElementById("noted-count").textContent = COUNT_WORDS[topRanks.length];
-  document.getElementById("noted-shares").textContent = new Intl.ListFormat("en").format(topRanks);
-
-  // The layer starts at the first row, under the column heads, and runs to the last row.
-  reference.style.setProperty("--reference-top", `${head.offsetHeight + 14}px`);
+  // The layer starts at the first row, under the column heads, and runs to the last row. The device line and its label
+  // rise from it to the top of the column heads.
+  const headSpan = head.offsetHeight + parseFloat(getComputedStyle(head).marginBottom);
+  reference.style.setProperty("--reference-top", `${headSpan}px`);
+  device.style.top = `-${headSpan}px`;
 
   const reach = Math.max(DEVICE_GB, ...ROWS.map((row) => Math.max(row[4], row[6])));
   const axis = niceAxis(reach, (max) => {
@@ -331,7 +320,7 @@
 
   const deviceLabel = el("span", "device-label", `Device, ${DEVICE_GB} GB`);
   deviceLabel.style.left = pct(DEVICE_GB, axis.max);
-  deviceLabel.style.top = "-38px";
+  deviceLabel.style.top = `-${headSpan}px`;
   reference.append(deviceLabel);
 
   // The device label sits left of its line, or right of it where it would come closer than a column gap to the key.

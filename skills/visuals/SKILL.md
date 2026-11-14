@@ -138,6 +138,9 @@ From whitecircle.com's research figures. It colours data, never chrome.
 wrong or destructive, and green means good. A pink or green category would suggest a judgment the
 data does not make.
 
+- **Halo is always white.** Wherever Halo itself is a series (Halo against other frameworks, Halo's
+  kernels against general ones), its marks, bars and key swatch are `--text` white, and what it is
+  compared with is grey. The palette colours are for the other categories.
 - For categories, prefer **blue, violet and indigo**, in that order. Sand reads close to yellow and
   coral close to red, so use them only when three colours are not enough.
 - Check that neighbouring colours stay apart for colour-blind readers (a CVD ΔE of at least 8 in
@@ -181,6 +184,9 @@ data does not make.
   record.
 - **Group what belongs together.** Halves sit under their year, with a thin `--line` under the year
   and a wider gap between years than between halves.
+- **Spacing shows grouping.** A section heading sits close to its own rows (`--heading-gap`, 14px on
+  1600) and far from the group above it (`--group-gap`, 48px): the gap above a heading is at least
+  twice the gap below it, so the heading never reads as one more row. Use the kit's two tokens.
 - **Nothing crosses the margins.** The margins are a hard border: every dot, line end, tick and
   label stays inside the content box.
 - **One left edge.** The title, the subtitle, group headings and row labels start on the same
@@ -226,7 +232,10 @@ data does not make.
   a key or the section headings already say it, or when it would only restate the title or list what
   the figure plainly shows. Setup facts (hardware, model, sizes) go in the notes or the key.
 - **The notes at the bottom** give the sample (how many, from where, over which dates), what an
-  empty cell means, how rows were pooled, and the source.
+  empty cell means, how rows were pooled, and the source, when the figure needs them. A redrawn
+  figure has notes only where its original had them, and a figure in a doc page leaves to the page
+  what the page already says. Without notes, the space goes to the figure: more room between rows,
+  groups and panels.
 - **Sentences wrap whole.** In the subtitle and the notes, make each sentence an `inline-block`, so
   a sentence that does not fit moves to the next line whole and no line ends on its first words.
 - **No loose captions.** A supporting fact goes in the subtitle, in the chart as a label, or in the
@@ -266,7 +275,7 @@ skill's base directory, the folder this file is in.
 4. Run `<skill>/scripts/check.sh page.html`. It lists any text or mark crossing the margins, text
    overlapping text, text closer than 12px to text in another column, text spilling out of its own
    box, any line (gridlines too) running through text, a box behind a label cutting a gap into a
-   line, a label sitting on a dot, and any error the page's script throws, and exits 1 on any of
+   line, a label sitting on a dot, a section heading nearer the group above than its own rows, and any error the page's script throws, and exits 1 on any of
    them. Fix every line it prints. Then open the PNG and look at it:
    where lines break, text contrast on every cell, connectors crossing labels. Then shrink a copy to 600px wide in a temporary folder
    (`sips -Z 600 page.png --out <temp>/small.png`) and look at that, as the feed will show it. Fix

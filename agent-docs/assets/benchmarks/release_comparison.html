@@ -9,9 +9,9 @@
     --label-col: 440px;
     --panel-gap: 56px;
     --mem-col: 360px;
-    --row-h: 28px;
-    --row-gap: 10px;
-    --axis-gap: 6px;
+    --row-h: 30px;
+    --row-gap: 12px;
+    --axis-gap: 10px;
     --tick: 6px;
     --link: color-mix(in oklab, var(--halo-blue) 45%, var(--bg));
   }
@@ -32,7 +32,7 @@
   }
 
   /* Room under the panel names for the release names above the top row's dots. */
-  .head { margin-bottom: 40px; }
+  .head { margin-bottom: 44px; }
 
   .panel-name {
     display: inline-flex;
@@ -155,15 +155,6 @@
     <div class="plot" id="plot"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">One 8 × B300 host, batch 1, gradient checkpointing on, 4,096 tokens unless a row says, uniform token ids.</span>
-      <span class="s">Peak is the highest rank’s allocated peak.</span>
-      <span class="s">Each rate is the wall-clock median of three interleaved runs per release, six on Qwen3.5 at 4,096 tokens.</span>
-      <span class="s">The Qwen3.5 rows also move attention from SDPA to FA4.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

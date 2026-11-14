@@ -8,7 +8,7 @@
   :root {
     --y-col: 56px;
     --panel-gap: 64px;
-    --plot-h: 440px;
+    --plot-h: 452px;
   }
 
   body { width: 1600px; height: 900px; }
@@ -34,7 +34,7 @@
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    margin-bottom: 28px;
+    margin-bottom: 36px;
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
@@ -93,7 +93,7 @@
   .xticks {
     position: relative;
     height: 26px;
-    margin-top: 12px;
+    margin-top: 14px;
   }
 
   .xticks span { top: 0; }
@@ -110,14 +110,6 @@
   <div class="figure">
     <div class="panels" id="panels"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">2 × B300, BF16, micro-batch 1 per GPU, every framework as of 2026-09-24, each in its fastest configuration tried.</span>
-      <span class="s">A point is the mean of the framework’s valid runs, and peak is the max over ranks.</span>
-      <span class="s">A hollow point turned on activation checkpointing to fit <span id="checkpointed-lengths"></span> tokens.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -261,10 +253,10 @@
     return runs;
   }
 
-  /** A point's mark: Halo filled blue, another framework filled grey, or a grey ring when it checkpointed. */
+  /** A point's mark: Halo filled white, another framework filled grey, or a grey ring when it checkpointed. */
   function dot(cx, cy, kind) {
     if (kind === "halo") {
-      return svgEl("circle", { cx, cy, r: R_HALO, fill: token("--halo-blue") });
+      return svgEl("circle", { cx, cy, r: R_HALO, fill: token("--text") });
     }
 
     if (kind === "checkpointed") {
@@ -284,11 +276,8 @@
   }
 
   const checkpointed = PANELS.filter((panel) => Object.values(panel.frameworks).some((spec) => spec.checkpointed));
-  const lengths = checkpointed.map((panel) => panel.seq.toLocaleString("en-US"));
   const frameworks = new Set(PANELS.flatMap((panel) => Object.keys(panel.frameworks)));
-  const or = new Intl.ListFormat("en", { type: "disjunction" });
   document.getElementById("framework-count").textContent = COUNT_WORDS[frameworks.size];
-  document.getElementById("checkpointed-lengths").textContent = or.format(lengths);
 
   const panels = document.getElementById("panels");
   const plots = [];

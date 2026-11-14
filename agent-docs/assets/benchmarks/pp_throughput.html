@@ -10,8 +10,8 @@
     --layout-col: 118px;
     --col-gap: 18px;
     --track-left: calc(var(--model-col) + var(--layout-col) + 2 * var(--col-gap));
-    --row-h: 38px;
-    --bar-h: 22px;
+    --row-h: 41px;
+    --bar-h: 24px;
   }
 
   body { width: 1200px; height: 1200px; }
@@ -24,7 +24,7 @@
   .key {
     display: flex;
     gap: 24px;
-    margin: 0 0 14px var(--track-left);
+    margin: 0 0 18px var(--track-left);
     font-size: 16px;
     color: var(--body);
   }
@@ -38,13 +38,13 @@
     background: var(--hue);
   }
 
-  .panel + .panel { margin-top: 26px; }
+  .panel + .panel { margin-top: 30px; }
 
   .panel-head {
     display: flex;
     align-items: baseline;
     gap: 14px;
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     white-space: nowrap;
   }
 
@@ -69,7 +69,7 @@
     height: var(--row-h);
   }
 
-  .row.next-model { margin-top: 8px; }
+  .row.next-model { margin-top: 10px; }
 
   .model {
     font-size: 19px;
@@ -120,7 +120,7 @@
   .ticks {
     position: relative;
     height: 30px;
-    margin: 10px 0 0 var(--track-left);
+    margin: 12px 0 0 var(--track-left);
     font-size: 15px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;
@@ -161,17 +161,6 @@
     <div id="panels"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Halo 1.2.0, one run per arm.</span>
-      <span class="s">Rates are tokens per second per GPU on B300, over the steady steps.</span>
-      <span class="s">The arms of a block train the same rows at the same tokens per GPU per step.</span>
-      <span class="s">A PP rate is the matching arm’s attended tokens over PP’s step time.</span>
-      <span class="s">Gradient checkpointing is off except on <span class="nw">GLM-5.3-Flash.</span></span>
-      <span class="s">The one-machine PP rows run two 4-GPU agents, one stage each.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

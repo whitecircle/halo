@@ -14,7 +14,7 @@
     --col-gap: 40px;
     --track-left: calc(var(--model-col) + var(--kernel-col) + 2 * var(--col-gap));
     --track-right: calc(var(--share-col) + var(--col-gap));
-    --row-h: 60px;
+    --row-h: 62px;
     --dot: 20px;
   }
 
@@ -47,7 +47,8 @@
   .key span { display: inline-flex; align-items: center; gap: 10px; }
 
   .group {
-    margin-top: 30px;
+    margin-top: 36px;
+    margin-bottom: 14px;
     font-family: var(--serif);
     font-size: 33px;
     letter-spacing: -0.01em;
@@ -124,7 +125,7 @@
   .ticks {
     position: relative;
     height: 36px;
-    margin: 4px var(--track-right) 0 var(--track-left);
+    margin: 6px var(--track-right) 0 var(--track-left);
     font-size: 19px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;
@@ -151,14 +152,6 @@
     <div class="plot" id="plot"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">bf16 against an fp32 forward of the same weights on fixed text, with no engine.</span>
-      <span class="s">Forced runs bf16 on the top-k experts the fp32 forward picked.</span>
-      <span class="s">Closed is the share of the natural gap that forcing removes.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

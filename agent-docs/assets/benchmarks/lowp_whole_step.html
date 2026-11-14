@@ -7,9 +7,9 @@
 <style>
   :root {
     --label-col: 460px;
-    --row-h: 84px;
-    --split: 36px;
-    --ref-head: 44px;
+    --row-h: 96px;
+    --split: 44px;
+    --ref-head: 50px;
     --tick: 6px;
   }
 
@@ -24,7 +24,7 @@
     display: flex;
     gap: 30px;
     margin-left: var(--label-col);
-    margin-bottom: 18px;
+    margin-bottom: 24px;
     font-size: 21px;
     color: var(--body);
   }
@@ -148,14 +148,6 @@
     <div class="plot" id="plot"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Whole training steps at EP8 on 8 × B300, 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build.</span>
-      <span class="s">bf16 runs at <span id="bf16-rates"></span> tokens/s per GPU on the <span id="shape-count"></span> shapes, top to bottom.</span>
-      <span class="s">torchao ran on one shape only, through a test wrapper, with its quality unmeasured.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -176,7 +168,6 @@
     ["native mxfp4", "diamond", false, "var(--halo-violet)"],
   ];
   const TORCHAO_ARM = ["torchao MXFP8", "square", false, "var(--tertiary)"];
-  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
   /** A mark's reach from its centre: a circle's radius, a diamond's half diagonal, a square's half side. */
   const REACH = { circle: 10, diamond: 12, square: 9 };
   /** Distance from a mark's edge to its value. */
@@ -281,10 +272,6 @@
   });
 
   drawAxis(document.getElementById("ticks"), axis, (tick) => (tick === 0 ? "0" : tick.toFixed(axis.digits)));
-
-  document.getElementById("bf16-rates").textContent = new Intl.ListFormat("en-GB", { type: "conjunction" })
-    .format(SHAPES.map((s) => s[1].toLocaleString("en-US")));
-  document.getElementById("shape-count").textContent = NUMBER_WORDS[SHAPES.length] ?? String(SHAPES.length);
 
   const simulated = SHAPES.flatMap((s) => [s[2], s[3]]);
   const native = SHAPES.flatMap((s) => [s[4], s[5]]);

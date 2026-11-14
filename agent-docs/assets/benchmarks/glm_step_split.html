@@ -7,7 +7,7 @@
 <style>
   :root {
     --label-col: 420px;
-    --bar-h: 18px;
+    --bar-h: 20px;
     --bar-gap: 4px;
   }
 
@@ -22,7 +22,7 @@
     display: flex;
     gap: 32px;
     margin-left: var(--label-col);
-    margin-bottom: 18px;
+    margin-bottom: 24px;
     font-size: 21px;
     color: var(--body);
   }
@@ -42,7 +42,7 @@
     align-items: center;
   }
 
-  .row + .row { margin-top: 11px; }
+  .row + .row { margin-top: 14px; }
 
   .label {
     font-size: 25px;
@@ -78,7 +78,7 @@
   /* The plot prints its values, so it draws no gridlines: an axis line under the bar column carries the scale. */
   .axis {
     position: relative;
-    margin: 12px 0 0 var(--label-col);
+    margin: 14px 0 0 var(--label-col);
     border-top: 1px solid var(--line);
   }
 
@@ -112,21 +112,12 @@
   <div class="figure">
     <div class="key">
       <span id="key-general" style="--hue: var(--tertiary)"><i></i>General kernels · </span>
-      <span id="key-halo" style="--hue: var(--halo-blue)"><i></i>Halo’s kernels · </span>
+      <span id="key-halo" style="--hue: var(--text)"><i></i>Halo’s kernels · </span>
     </div>
     <div class="plot" id="plot"></div>
     <div class="axis" id="axis"></div>
     <div class="ticks" id="ticks"></div>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">One LoRA step of GLM-5.3-Flash at EP8 and 8,192 tokens on B300, parts sorted by their time on Halo’s kernels.</span>
-      <span class="s">General kernels: torch’s attention kernel and upstream’s hyper-connections.</span>
-      <span class="s">Each part is the mean of the ranks over forward, recompute and backward.</span>
-      <span class="s">The per-part clock adds about 2.6 s over an unclocked step.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -185,7 +176,7 @@
   for (const [name, before, after] of [...PARTS].sort((a, b) => b[2] - a[2])) {
     const row = el("div", "row");
     const bars = el("div", "bars");
-    bars.append(bar(before, "var(--tertiary)", "bar"), bar(after, "var(--halo-blue)", "bar now"));
+    bars.append(bar(before, "var(--tertiary)", "bar"), bar(after, "var(--text)", "bar now"));
     row.append(el("div", "label", name), bars);
     plot.append(row);
   }

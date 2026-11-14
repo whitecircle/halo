@@ -18,7 +18,7 @@
     align-items: center;
     gap: 30px;
     height: 26px;
-    margin-bottom: 22px;
+    margin-bottom: 30px;
     font-size: 21px;
     color: var(--body);
   }
@@ -35,7 +35,7 @@
 
   .heads {
     display: grid;
-    margin-bottom: 25px;
+    margin-bottom: 33px;
   }
 
   .heads h2 {
@@ -48,7 +48,7 @@
   }
 
   .heads p {
-    margin-top: 6px;
+    margin-top: 8px;
     font-size: 20px;
     line-height: 1.3;
     color: var(--secondary);
@@ -82,14 +82,6 @@
     <div class="heads" id="heads"></div>
     <svg class="plot" id="plot"></svg>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Each fit trains the head alone on <span class="nw">Qwen3.6-35B</span> at EP8, scored every <span id="interval"></span> steps by eval_mtp_acceptance_tv on 24 held-out first-turn rows of 256 tokens.</span>
-      <span class="s">The gate stops a fit that ends below its first reading.</span>
-      <span class="s">Only soft fits have been served.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -127,7 +119,7 @@
   const TICK_COL = 64;
   const END_COL = 176;
   const PANEL_GAP = 48;
-  const PLOT_H = 329;
+  const PLOT_H = 353;
   const X_TICK_H = 44;
   const CROSS = 9;
   const CROSS_STROKE = 3;
@@ -170,14 +162,7 @@
     return axis;
   }
 
-  const interval = STEPS[1] - STEPS[0];
-
-  if (STEPS.some((step, i) => step !== i * interval)) {
-    throw new Error(`STEPS ${STEPS.join(", ")} are not evenly spaced from 0, which the note's "every ${interval} steps" assumes`);
-  }
-
   document.getElementById("last-step").textContent = String(STEPS.at(-1));
-  document.getElementById("interval").textContent = String(interval);
 
   const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const width = document.getElementById("figure").clientWidth;

@@ -45,7 +45,9 @@
     background: var(--hue);
   }
 
-  .section.later { margin-top: 14px; }
+  .section { margin-bottom: calc(var(--heading-gap) - 8px); }
+
+  .section.later { margin-top: calc(var(--group-gap) - 8px); }
 
   .key {
     display: flex;
@@ -79,7 +81,7 @@
     white-space: nowrap;
   }
 
-  .row { padding-block: 6px; }
+  .row { padding-block: 8px; }
 
   .track { height: 2px; }
 
@@ -124,14 +126,6 @@
     <div class="chart" id="chart"></div>
     <svg class="marks front" id="marks"></svg>
   </div>
-
-  <footer>
-    <p>
-      <span class="s" id="efa-note"></span>
-      <span class="s">The all-reduce ran on 16 GPUs over two nodes, so it sits with the cross-node rows, not NVLink alone.</span>
-      <span class="s">A collective is priced by the slowest tier it touches.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -192,7 +186,6 @@
 
   const [lowGap, highGap] = [Math.min(...nodeGaps), Math.max(...nodeGaps)].map((n) => n.toLocaleString("en-US"));
   document.getElementById("title").append(el("span", "nw", "Node-to-node"), ` links run ${lowGap === highGap ? lowGap : `${lowGap}–${highGap}`}× below NVLink`);
-  document.getElementById("efa-note").textContent = `EFA’s ${bandwidth(byId.efa.measured)} is an NCCL broadcast.`;
 
   // Whole decades covering every value, a tick on each.
   const values = rows.flatMap((row) => [row.measured, row.spec]).filter((v) => v !== null);

@@ -35,11 +35,11 @@
     color: var(--heading);
   }
 
-  .group-head + .row { margin-top: 14px; }
+  .group-head + .row { margin-top: var(--heading-gap); }
 
-  .row + .row { margin-top: 12px; }
+  .row + .row { margin-top: 17px; }
 
-  .row + .group-head { margin-top: 26px; }
+  .row + .group-head { margin-top: var(--group-gap); }
 
   .key {
     display: flex;
@@ -134,14 +134,6 @@
     <div class="ticks" id="ticks"></div>
     <p class="axis-title">Per GPU, in each group’s unit</p>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Each row is its own run on B300, so rows do not compare with each other.</span>
-      <span class="s">Expandable segments left throughput unchanged on these dense runs.</span>
-      <span class="s">Allocated is the most memory tensors held at once. Reserved is what the allocator held, fragmentation included.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>

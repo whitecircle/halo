@@ -45,7 +45,7 @@
   .key {
     display: flex;
     flex-direction: column;
-    gap: 34px;
+    gap: 56px;
   }
 
   .key h3 {
@@ -84,14 +84,6 @@
     <div class="key" id="key"></div>
     <svg class="chart" id="chart"></svg>
   </div>
-
-  <footer>
-    <p>
-      <span class="s">Ceilings and rings measured on a B300 in bf16.</span>
-      <span class="s">Rings are expert GEMMs at K = N = 2880.</span>
-      <span class="s">M = 128 lands below even the memory ceiling: too few tiles to fill the 148 SMs.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
@@ -125,7 +117,7 @@
       lines: ["Faster HBM doesn’t help: bigger dims, lower precision", "Typical: large-M GEMM, dense MLP"],
     },
   ];
-  const HEIGHT = 560;
+  const HEIGHT = 614;
   /** Length of a tick mark outside an axis. */
   const TICK = 8;
   /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */

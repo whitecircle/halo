@@ -7,7 +7,7 @@
 <style>
   :root {
     --label-col: 500px;
-    --bar-h: 68px;
+    --bar-h: 76px;
   }
 
   body { width: 1600px; height: 900px; }
@@ -33,11 +33,11 @@
     color: var(--heading);
   }
 
-  .group-head + .row { margin-top: 16px; }
+  .group-head + .row { margin-top: 24px; }
 
-  .row + .row { margin-top: 14px; }
+  .row + .row { margin-top: 20px; }
 
-  .row + .group-head { margin-top: 34px; }
+  .row + .group-head { margin-top: 50px; }
 
   .key {
     display: flex;
@@ -89,14 +89,6 @@
   </header>
 
   <div class="figure" id="plot"></div>
-
-  <footer>
-    <p>
-      <span class="s">Mean over ranks on 8 × B300, a 1.2.0 development build, gradient checkpointing on, uniform token ids.</span>
-      <span class="s">Each phase is timed on CUDA events over the forward and its recompute, so the backward sits outside these shares.</span>
-      <span class="s">At EP8 most of combine is waiting for the rank that holds the most rows.</span>
-    </p>
-  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
