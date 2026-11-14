@@ -6,16 +6,12 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 30px;
-  }
+  .figure { position: relative; }
 
   .world {
-    padding: 20px 28px;
+    padding: 24px 28px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -29,12 +25,12 @@
   .groups {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    column-gap: 32px;
-    margin-top: 52px;
+    column-gap: 40px;
+    margin-top: 72px;
   }
 
   .group {
-    padding: 20px 28px 18px;
+    padding: 24px 28px 24px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -52,12 +48,12 @@
   .ranks {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    column-gap: 40px;
-    margin-top: 16px;
+    column-gap: 48px;
+    margin-top: 20px;
   }
 
   .card {
-    padding: 22px 28px 24px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -80,23 +76,23 @@
   }
 
   .card .lines {
-    margin-top: 8px;
+    margin-top: 10px;
     font-size: 23px;
-    line-height: 1.3;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
 
   .dispatch {
-    margin-top: 14px;
+    margin-top: 18px;
     text-align: center;
     font-size: 21px;
     color: var(--body);
   }
 
   /* Room under the groups for the two replica lines and the line naming them. */
-  .replicas { height: 150px; }
+  .replicas { height: 176px; }
 
   .tag {
     position: absolute;
@@ -239,7 +235,7 @@
   // Replica lines: each expert slice drops from its card in every group to one shared line below the groups,
   // the second slice's line under the first, each named on the stretch no other drop line crosses.
   const groupsBottom = box(groupsEl).b;
-  const levels = [groupsBottom + 46, groupsBottom + 104];
+  const levels = [groupsBottom + 56, groupsBottom + 124];
   const dotR = 4;
 
   for (let slot = 0; slot < SETUP.epSize; slot += 1) {
@@ -265,7 +261,7 @@
   const caption = el("div", "tag", "The ranks on one line are DP replicas of that slice: their expert grads are averaged after the backward");
   figure.append(caption);
   caption.style.left = `${(box(groupsEl).l + box(groupsEl).r - caption.offsetWidth) / 2}px`;
-  caption.style.top = `${levels[levels.length - 1] + 16}px`;
+  caption.style.top = `${levels[levels.length - 1] + 20}px`;
 </script>
 </body>
 </html>

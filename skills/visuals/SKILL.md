@@ -53,17 +53,20 @@ one recommendation and its reason in a sentence or two, then act on it.
   - **Square, 1200×1200 CSS px (a 2400×2400 PNG)**, for content taller than it is wide: a table of
     many rows, like the worked example's 17 benchmarks.
   - A link preview (Open Graph) is 1200×630.
+  - **A figure for a doc page has no fixed height.** Its body sets only a width (1600, or 1200 for
+    a figure much taller than wide) and the canvas grows as tall as its content, so spacing is
+    never squeezed to fit a frame. The render and check scripts measure the height.
 - Margins on a 1200-wide canvas: a 48px side gutter, 40px at the top, 36px at the bottom (64, 52
   and 48 on a 1600 canvas). Scale them with the width, like the type.
-- Fix the page to the canvas size (`width` and `height` on `body`, `overflow: hidden`) and lay it
-  out as a column of three blocks: the header (the title, and a subtitle only when needed), the figure,
-  and the notes.
-- **Two spacing steps.** Inside a block, spacing is tight: the subtitle sits about 12px under the
-  title on a 1200 canvas. Between blocks, the gaps are equal: the figure takes `margin-block: auto`
-  and about 30px of `padding-block`, so leftover height splits evenly above and below it and never
-  collects in one gap. A colour key belongs inside the figure or beside the labels it explains,
-  never as a separate row with its own gap. When those gaps grow past the subtitle's height, make
-  the figure larger rather than leaving the space.
+- Lay the page out as a column of three blocks: the header (the title, and a subtitle only when
+  needed), the figure, and the notes. A social post fixes the canvas size (`width` and `height` on
+  `body`); a doc figure fixes only the width.
+- **Spacing steps.** Inside a block, spacing is tight: the subtitle sits about 12px under the
+  title on a 1200 canvas. Between the header, the figure and the notes, the kit's `--block-gap`
+  (56px on 1600). Inside the figure, a section heading sits `--heading-gap` above its rows and
+  `--group-gap` below the group before it (16 and 72px on 1600). A social post with a fixed height
+  centres its figure with `margin-block: auto` instead. A colour key belongs inside the figure or
+  beside the labels it explains, never as a separate row with its own gap.
 - Check that the notes sit fully on the canvas: content that does not fit pushes them off the
   bottom edge, where `overflow: hidden` cuts them off unseen.
 - PNG, under 5 MB. Flat colour keeps a 2400px image well under 1 MB.
@@ -184,8 +187,8 @@ data does not make.
   record.
 - **Group what belongs together.** Halves sit under their year, with a thin `--line` under the year
   and a wider gap between years than between halves.
-- **Spacing shows grouping.** A section heading sits close to its own rows (`--heading-gap`, 14px on
-  1600) and far from the group above it (`--group-gap`, 48px): the gap above a heading is at least
+- **Spacing shows grouping.** A section heading sits close to its own rows (`--heading-gap`, 16px on
+  1600) and far from the group above it (`--group-gap`, 72px): the gap above a heading is at least
   twice the gap below it, so the heading never reads as one more row. Use the kit's two tokens.
 - **Nothing crosses the margins.** The margins are a hard border: every dot, line end, tick and
   label stays inside the content box.
@@ -268,15 +271,18 @@ skill's base directory, the folder this file is in.
    it everything that depends on it: the marks and colours, every derived number on the canvas (a
    total, ratio or range in the title, key or notes), and each axis's range and ticks. A data change
    then updates the whole figure, and no typed number can disagree with the marks.
-3. Render it with `<skill>/scripts/render.sh page.html page.png`. It reads the canvas size from the
-   page's `body` rule, checks that both brand fonts and OptiPNG are installed, shoots the page with
+3. Render it with `<skill>/scripts/render.sh page.html page.png`. It takes the canvas width from the
+   page's `body` rule and the height from that rule too, or, when the rule sets only a width, from
+   the laid-out content (`scripts/canvas-size.sh`), checks that both brand fonts and OptiPNG are
+   installed, shoots the page with
    headless Chrome at 2× where it sits (so its relative links resolve), and optimizes the PNG
    losslessly with OptiPNG (about a fifth smaller, every pixel unchanged).
 4. Run `<skill>/scripts/check.sh page.html`. It lists any text or mark crossing the margins, text
    overlapping text, text closer than 12px to text in another column, text spilling out of its own
    box, any line (gridlines too) running through text, a box behind a label cutting a gap into a
-   line, a label sitting on a dot, a section heading nearer the group above than its own rows, and any error the page's script throws, and exits 1 on any of
-   them. Fix every line it prints. Then open the PNG and look at it:
+   line, a label sitting on a dot, a section heading nearer the group above it than 56px (on 1600)
+   or than twice its gap to its own rows, and any error the page's script throws, and exits 1 on any of them.
+   Fix every line it prints. Then open the PNG and look at it:
    where lines break, text contrast on every cell, connectors crossing labels. Then shrink a copy to 600px wide in a temporary folder
    (`sips -Z 600 page.png --out <temp>/small.png`) and look at that, as the feed will show it. Fix
    the page and render again until both pass.

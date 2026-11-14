@@ -7,22 +7,17 @@
 <style>
   :root {
     --label-col: 420px;
-    --bar-h: 20px;
+    --bar-h: 24px;
     --bar-gap: 4px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  body { width: 1600px; }
 
   .key {
     display: flex;
     gap: 32px;
     margin-left: var(--label-col);
-    margin-bottom: 24px;
+    margin-bottom: 36px;
     font-size: 21px;
     color: var(--body);
   }
@@ -42,7 +37,7 @@
     align-items: center;
   }
 
-  .row + .row { margin-top: 14px; }
+  .row + .row { margin-top: 24px; }
 
   .label {
     font-size: 25px;
@@ -78,7 +73,7 @@
   /* The plot prints its values, so it draws no gridlines: an axis line under the bar column carries the scale. */
   .axis {
     position: relative;
-    margin: 14px 0 0 var(--label-col);
+    margin: 20px 0 0 var(--label-col);
     border-top: 1px solid var(--line);
   }
 

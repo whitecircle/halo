@@ -10,12 +10,7 @@
     --bar-h: 210px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  body { width: 1600px; }
 
   .row {
     display: grid;
@@ -60,6 +55,9 @@
     color: var(--bg);
     white-space: nowrap;
   }
+
+  /* A segment too thin to name its kind drops the padding, which would otherwise widen it past its seconds. */
+  .seg:empty { padding-left: 0; }
 
   .seg .kind { font-size: 27px; }
 

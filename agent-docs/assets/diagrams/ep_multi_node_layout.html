@@ -6,23 +6,19 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 24px;
-  }
+  .figure { position: relative; }
 
   /* Each node is a thin outline around its rank strip and its TP group. */
   .nodes {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    column-gap: 36px;
+    column-gap: 40px;
   }
 
   .node {
-    padding: 18px 24px 22px;
+    padding: 24px 28px 28px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -41,14 +37,14 @@
     display: grid;
     grid-template-columns: repeat(var(--ranks), 1fr);
     gap: 6px;
-    margin-top: 14px;
+    margin-top: 20px;
   }
 
   .chip {
     display: flex;
     align-items: center;
     justify-content: center;
-    height: 48px;
+    height: 52px;
     border: 1px solid var(--line);
     border-radius: 9px;
     background: var(--surface);
@@ -58,7 +54,7 @@
   }
 
   .card {
-    padding: 18px 28px 20px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -73,23 +69,23 @@
 
   .card .lines {
     font-size: 23px;
-    line-height: 1.3;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
 
-  .card .name + .lines { margin-top: 6px; }
+  .card .name + .lines { margin-top: 10px; }
 
   .tp {
-    margin-top: 14px;
-    padding-block: 14px 16px;
+    margin-top: 16px;
+    padding-block: 18px 20px;
   }
 
   /* Room under the nodes for the tokens arrows into the EP group. */
-  .ep { margin-top: 58px; }
+  .ep { margin-top: 88px; }
 
-  .mesh { margin-top: 20px; }
+  .mesh { margin-top: 28px; }
 
   .tag {
     position: absolute;

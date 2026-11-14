@@ -6,13 +6,9 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  .figure { position: relative; }
 
   .stage { position: relative; }
 
@@ -88,7 +84,7 @@
   }
 
   .caption p {
-    margin-top: 6px;
+    margin-top: 8px;
     font-size: 25px;
     color: var(--secondary);
     white-space: nowrap;
@@ -140,11 +136,11 @@
   const DIM_SIDE = 64;
   /** Space between a matrix and the next operator column. */
   const OP_GAP = 80;
-  /** Height of the band above the matrices for the horizontal dimension lines. */
-  const DIM_TOP = 58;
+  /** Height of the band above the matrices for the horizontal dimension lines: the line 30px up, half its letter. */
+  const DIM_TOP = 43;
   /** Clear space between a dimension letter and the line segment on each side of it. */
   const DIM_GAP = 10;
-  const CAPTION_GAP = 38;
+  const CAPTION_GAP = 48;
 
   const stage = document.getElementById("stage");
   const wires = document.getElementById("wires");

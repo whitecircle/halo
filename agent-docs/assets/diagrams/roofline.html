@@ -6,12 +6,7 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 26px;
-  }
+  body { width: 1600px; }
 
   svg.chart {
     display: block;
@@ -45,7 +40,7 @@
   .key {
     display: flex;
     flex-direction: column;
-    gap: 56px;
+    gap: var(--group-gap);
   }
 
   .key h3 {
@@ -66,12 +61,15 @@
     background: var(--hue);
   }
 
+  .key h3 { margin-bottom: var(--heading-gap); }
+
   .key p {
-    margin-top: 6px;
     font-size: 21px;
-    line-height: 1.35;
+    line-height: 1.4;
     color: var(--secondary);
   }
+
+  .key p + p { margin-top: 12px; }
 </style>
 </head>
 <body>
@@ -117,7 +115,7 @@
       lines: ["Faster HBM doesn’t help: bigger dims, lower precision", "Typical: large-M GEMM, dense MLP"],
     },
   ];
-  const HEIGHT = 614;
+  const HEIGHT = 700;
   /** Length of a tick mark outside an axis. */
   const TICK = 8;
   /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
@@ -226,7 +224,7 @@
       add("text", { class: "point", x: sx(ai) + dx, y: sy(tflops) + dy, "text-anchor": anchor, "dominant-baseline": "central" }, `M = ${fmt(m)}`);
     label(...MEASURED[0], -20, 0, "end");
     label(...MEASURED[1], 20, 0, "start");
-    label(...MEASURED[2], 0, 34, "middle");
+    label(...MEASURED[2], 0, 28, "middle");
   }
 
   const LABELS = "text.mark, text.point, text.ridge";

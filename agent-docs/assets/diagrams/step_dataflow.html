@@ -9,13 +9,9 @@
     --arrow-gap: 64px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 24px;
-  }
+  .figure { position: relative; }
 
   .group-head {
     display: flex;
@@ -41,7 +37,7 @@
     display: grid;
     grid-template-columns: repeat(4, 1fr);
     column-gap: var(--arrow-gap);
-    row-gap: 18px;
+    row-gap: var(--heading-gap);
   }
 
   .card {
@@ -56,13 +52,13 @@
 
   .stage {
     position: relative;
-    padding: 52px 20px 30px;
+    padding: 58px 24px 34px;
   }
 
   .stage .flops {
     position: absolute;
-    top: 16px;
-    right: 20px;
+    top: 18px;
+    right: 24px;
     font-size: 23px;
     color: var(--text);
   }
@@ -79,7 +75,7 @@
   }
 
   .stage p {
-    margin-top: 10px;
+    margin-top: 12px;
     font-size: 23px;
     color: var(--body);
   }
@@ -88,30 +84,32 @@
 
   .stage.cheap p { color: var(--secondary); }
 
+  /* As tall as the bracket's room and its label, so the next heading's gap is measured from the label. */
   .total {
     position: relative;
-    height: 74px;
-    margin-top: 20px;
+    height: calc(20px + 1.3 * 25px);
+    margin-top: 24px;
   }
 
   .total span {
     position: absolute;
-    top: 28px;
+    top: 20px;
     transform: translateX(-50%);
     font-size: 25px;
+    line-height: 1.3;
     color: var(--text);
     white-space: nowrap;
   }
 
-  .memory { margin-top: 30px; }
+  .memory { margin-top: var(--group-gap); }
 
   /* The bytes bar and the activations card, each under its caption, in the original's 6.3 : 4.15 split. */
   .bytes {
     display: grid;
     grid-template-columns: 6.3fr 4.15fr;
     column-gap: 60px;
-    row-gap: 12px;
-    margin-top: 12px;
+    row-gap: 14px;
+    margin-top: var(--heading-gap);
   }
 
   .bytes .caption {

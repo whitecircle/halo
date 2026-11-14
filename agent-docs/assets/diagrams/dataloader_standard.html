@@ -10,13 +10,9 @@
     --cell-gap: 4px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 30px;
-  }
+  .figure { position: relative; }
 
   .card {
     border: 1px solid var(--line);
@@ -39,7 +35,7 @@
     white-space: nowrap;
   }
 
-  .gate { padding: 22px 26px 24px; }
+  .gate { padding: 24px 28px 26px; }
 
   /* Four stage cards, each as wide as its lines, with what is left between them for the arrows. */
   .stages {
@@ -47,10 +43,10 @@
     grid-template-columns: repeat(4, auto);
     justify-content: space-between;
     column-gap: 36px;
-    margin-top: 36px;
+    margin-top: 56px;
   }
 
-  .stages .card { padding: 22px 26px 24px; }
+  .stages .card { padding: 24px 28px 26px; }
 
   .strip-head {
     margin-top: var(--group-gap);
@@ -65,7 +61,7 @@
     display: grid;
     grid-template-columns: var(--label-col) repeat(var(--ranks), 1fr);
     column-gap: var(--cell-gap);
-    row-gap: 8px;
+    row-gap: 10px;
     margin-top: var(--heading-gap);
     align-items: center;
   }

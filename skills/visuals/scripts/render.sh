@@ -17,11 +17,7 @@ if (( $# == 4 )); then
   width=$3
   height=$4
 else
-  size=$(perl -0ne 'print "$1 $2" if /(?:^|[\s,}])body\s*\{[^}]*?\bwidth:\s*(\d+)px;[^}]*?\bheight:\s*(\d+)px;/s' "$page")
-  if [[ -z "$size" ]]; then
-    echo "$page fixes no canvas size: give its body rule width and height in px, or pass them after out.png." >&2
-    exit 2
-  fi
+  size=$("${0:A:h}/canvas-size.sh" "$page")
   width=${size% *}
   height=${size#* }
 fi

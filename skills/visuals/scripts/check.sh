@@ -3,11 +3,12 @@
 # other text, text crowding text in another column (a gap under 12px on a 1600 canvas), text spilling out
 # of its own box, a drawn line running through text, and any error the page's script throws. Prints each
 # problem and exits 1, or prints "ok" and the gaps around the figure.
-# Usage: check.sh page.html   (canvas size read from the page's body rule)
+# Usage: check.sh page.html   (canvas size from canvas-size.sh: the body rule's width, and its height or the
+# content's)
 set -euo pipefail
 page=${1:A}
 chrome="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-size=$(perl -0ne 'print "$1 $2" if /(?:^|[\s,}])body\s*\{[^}]*?\bwidth:\s*(\d+)px;[^}]*?\bheight:\s*(\d+)px;/s' "$page")
+size=$("${0:A:h}/canvas-size.sh" "$page")
 width=${size% *}
 height=${size#* }
 if (( width >= 1600 )); then side=64; top=52; bottom=48; else side=48; top=40; bottom=36; fi
@@ -221,9 +222,10 @@ window.addEventListener("load", () => setTimeout(() => {
     if (dot) report(\`COVERS   "\${name(item.n)}" sits on a <\${dot.tagName}> mark: move the label off it\`);
   }
   // Grouping: a section heading inside the figure (serif text, not the title) must sit clearly nearer the block
-  // after it than the block before it, or it reads as one more row. Measured against its neighbouring elements in
-  // the layout, stacked above and below it; a heading that opens its container or floats over content is skipped.
+  // after it than the block before it, or it reads as one more row, and keep room under it. Measured against its
+  // neighbouring elements in the layout; a heading inside a framed container or floating over content is skipped.
   const figure = document.querySelector(".figure");
+  const cssColor = (token) => { const i = document.createElement("i"); i.style.color = \`var(\${token})\`; document.body.append(i); const c = getComputedStyle(i).color; i.remove(); return c; };
   if (figure) {
     const seen = new Set();
     const visible = (n) => n && !hidden(n) && n.getBoundingClientRect().height > 0;
@@ -234,13 +236,45 @@ window.addEventListener("load", () => setTimeout(() => {
       while (block.parentElement && block.parentElement !== figure && !sibling(block, "previousElementSibling") && !sibling(block, "nextElementSibling")) block = block.parentElement;
       if (seen.has(block) || ["absolute", "fixed"].includes(getComputedStyle(block).position)) continue;
       seen.add(block);
-      const prev = sibling(block, "previousElementSibling"), next = sibling(block, "nextElementSibling");
-      if (!prev || !next) continue;
-      const b = block.getBoundingClientRect(), p = prev.getBoundingClientRect(), x = next.getBoundingClientRect();
-      if (p.bottom > b.top + 1 || x.top < b.bottom - 1) continue;
-      const gapAbove = b.top - p.bottom, gapBelow = x.top - b.bottom;
-      if (gapAbove < 2 * gapBelow || gapAbove < 28 * W / 1600) {
-        report(\`GROUPING "\${name(h.n)}" sits \${Math.round(gapAbove)} px below the block before it and \${Math.round(gapBelow)} px above its own: the gap above must be at least twice the gap below, and 28 px\`);
+      // A quiet caption right under a heading (smaller, secondary or tertiary text) belongs to it.
+      const quiet = new Set([cssColor("--secondary"), cssColor("--tertiary")]);
+      const isCaption = (n) => {
+        const s = getComputedStyle(n), r = n.getBoundingClientRect();
+        return quiet.has(s.color) && parseFloat(s.fontSize) < 0.8 * h.fs && r.height < 3.2 * parseFloat(s.fontSize) && n.textContent.trim() !== "" && !n.querySelector("svg, img");
+      };
+      let next = sibling(block, "nextElementSibling"), headBottom = block.getBoundingClientRect().bottom;
+      while (next && isCaption(next)) { headBottom = next.getBoundingClientRect().bottom; next = sibling(next, "nextElementSibling"); }
+      if (!next) continue;
+      const b = block.getBoundingClientRect();
+      // Measured to the first thing drawn inside the next block, not its padding.
+      const inside = [...items.filter((i) => next.contains(i.n)).map((i) => i.t), ...[...next.querySelectorAll("*"), next]
+        .filter((n) => visible(n) && (n instanceof SVGGraphicsElement || opaque(getComputedStyle(n).backgroundColor) || parseFloat(getComputedStyle(n).borderTopWidth) > 0))
+        .map((n) => n.getBoundingClientRect().top)];
+      if (!inside.length) continue;
+      const firstTop = Math.min(...inside);
+      if (firstTop < headBottom - 1) continue;
+      const gapBelow = firstTop - headBottom;
+      // A heading needs room under it before its own rows, whatever comes above it.
+      if (gapBelow < 10 * W / 1600) report(\`GROUPING "\${name(h.n)}" sits \${Math.round(gapBelow)} px above its own rows: leave at least --heading-gap under a heading\`);
+      // The block before it: its previous sibling, or, when it opens a container without a frame, the container's.
+      let prev = sibling(block, "previousElementSibling"), up = block;
+      while (!prev && up.parentElement && up.parentElement !== figure) {
+        up = up.parentElement;
+        const s = getComputedStyle(up);
+        if (parseFloat(s.borderTopWidth) > 0 || opaque(s.backgroundColor)) break;
+        prev = sibling(up, "previousElementSibling");
+      }
+      if (!prev) continue;
+      const drawnIn = (n) => [...items.filter((i) => n.contains(i.n)).map((i) => i.b), ...[...n.querySelectorAll("*"), n]
+        .filter((e) => visible(e) && (e instanceof SVGGraphicsElement || opaque(getComputedStyle(e).backgroundColor) || parseFloat(getComputedStyle(e).borderTopWidth) > 0))
+        .map((e) => e.getBoundingClientRect().bottom)];
+      const above = drawnIn(prev);
+      if (!above.length) continue;
+      const lastBottom = Math.max(...above);
+      if (lastBottom > b.top + 1) continue;
+      const gapAbove = b.top - lastBottom;
+      if (gapAbove < 2 * gapBelow || gapAbove < 56 * W / 1600) {
+        report(\`GROUPING "\${name(h.n)}" sits \${Math.round(gapAbove)} px below the block before it and \${Math.round(gapBelow)} px above its own: the gap above must be at least twice the gap below, and --group-gap\`);
       }
     }
   }

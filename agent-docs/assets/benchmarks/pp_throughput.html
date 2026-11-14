@@ -10,21 +10,18 @@
     --layout-col: 118px;
     --col-gap: 18px;
     --track-left: calc(var(--model-col) + var(--layout-col) + 2 * var(--col-gap));
-    --row-h: 41px;
+    --row-h: 44px;
     --bar-h: 24px;
   }
 
-  body { width: 1200px; height: 1200px; }
+  body { width: 1200px; }
 
-  .figure {
-    margin-block: auto;
-    padding-block: 24px;
-  }
-
+  /* Under the key, a group gap plus the room a row leaves under its bar, so the first heading sits as far below
+     the key as each later heading below its group's last bar. */
   .key {
     display: flex;
     gap: 24px;
-    margin: 0 0 18px var(--track-left);
+    margin: 0 0 calc(var(--group-gap) + (var(--row-h) - var(--bar-h)) / 2) var(--track-left);
     font-size: 16px;
     color: var(--body);
   }
@@ -38,13 +35,13 @@
     background: var(--hue);
   }
 
-  .panel + .panel { margin-top: 30px; }
+  .panel + .panel { margin-top: var(--group-gap); }
 
   .panel-head {
     display: flex;
     align-items: baseline;
     gap: 14px;
-    margin-bottom: 10px;
+    margin-bottom: var(--heading-gap);
     white-space: nowrap;
   }
 

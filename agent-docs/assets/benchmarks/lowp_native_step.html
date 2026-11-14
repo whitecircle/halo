@@ -7,21 +7,16 @@
 <style>
   :root {
     --label-col: 340px;
-    --bar-h: 46px;
+    --bar-h: 48px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 28px;
-  }
+  body { width: 1600px; }
 
   .key {
     display: flex;
     gap: 32px;
     margin-left: var(--label-col);
-    margin-bottom: 24px;
+    margin-bottom: 36px;
     font-size: 21px;
     color: var(--body);
   }
@@ -41,7 +36,7 @@
     align-items: center;
   }
 
-  .row + .row { margin-top: 20px; }
+  .row + .row { margin-top: 24px; }
 
   .label {
     font-size: 25px;
@@ -83,7 +78,7 @@
   .ticks {
     position: relative;
     height: 38px;
-    margin: 14px 0 0 var(--label-col);
+    margin: 20px 0 0 var(--label-col);
     font-size: 19px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;

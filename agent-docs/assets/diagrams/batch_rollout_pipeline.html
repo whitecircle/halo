@@ -6,16 +6,12 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --col-gap: 58px;
-    --band-gap: 48px;
+    --col-gap: 48px;
   }
 
-  body { width: 1200px; height: 1200px; }
+  body { width: 1200px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-  }
+  .figure { position: relative; }
 
   .key {
     display: flex;
@@ -38,7 +34,7 @@
   }
 
   .card {
-    padding: 22px 12px 24px;
+    padding: 22px 15px 24px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -66,7 +62,7 @@
 
   .card > .lines:first-child { margin-top: 0; }
 
-  .push { margin-top: 26px; }
+  .push { margin-top: 28px; }
 
   .card.cut {
     grid-column: 1 / 4;
@@ -75,7 +71,7 @@
   }
 
   .band-head {
-    margin: var(--band-gap) 0 18px;
+    margin: var(--group-gap) 0 var(--heading-gap);
     font-family: var(--serif);
     font-weight: 400;
     font-size: 25px;
@@ -101,18 +97,19 @@
   .lane {
     grid-column: 1 / 4;
     position: relative;
-    height: 80px;
+    height: 88px;
   }
 
   .ends { grid-column: 4; grid-row: 1 / 4; align-self: start; }
 
   .hop {
     position: absolute;
+    padding-inline: 4px;
     text-align: center;
     font-size: 15px;
     line-height: 1.2;
     color: var(--body);
-    white-space: nowrap;
+    text-wrap: balance;
   }
 
   svg.wires {

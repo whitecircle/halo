@@ -13,12 +13,10 @@
     --cell: 25px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
   .figure {
     position: relative;
-    margin-block: auto;
-    padding-block: 30px;
     display: grid;
     grid-template-columns: 1fr auto;
     column-gap: 80px;
@@ -33,20 +31,22 @@
     color: var(--heading);
   }
 
-  /* The packing column: two blocks, the second ending level with the attention grid. */
+  /* The packing column: two blocks at least a group gap apart, the second ending level with the attention grid's
+     caption. */
   .packing {
     display: flex;
     flex-direction: column;
     justify-content: space-between;
+    row-gap: var(--group-gap);
   }
 
   .rows {
     display: grid;
     grid-template-columns: var(--label-col) auto;
-    row-gap: 8px;
+    row-gap: 10px;
     align-items: center;
     justify-content: start;
-    margin-top: 18px;
+    margin-top: var(--heading-gap);
   }
 
   .row-label {
@@ -89,16 +89,24 @@
   }
 
   .caption {
-    margin-top: 14px;
+    margin-top: 18px;
     font-size: 22px;
     line-height: 1.35;
     color: var(--body);
   }
 
+  /* The attention column puts its caption at the bottom, level with the packing column's last caption. */
+  .attention {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .attention .caption { margin-top: auto; }
+
   /* The attention grid: keys across, queries down, a wider gap between segments. */
   .attention .grid {
     display: grid;
-    margin-top: 18px;
+    margin-block: var(--heading-gap) 18px;
     align-items: center;
     justify-items: center;
   }

@@ -10,23 +10,19 @@
     --copy: oklch(from var(--halo-blue) calc(l * 0.58) c h);
     --sum: var(--halo-violet);
     --rank-col: 44px;
-    --cell-w: 60px;
-    --cell-h: 35px;
+    --cell-w: 64px;
+    --cell-h: 44px;
     --arrow-gap: 80px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 22px;
-  }
+  .figure { position: relative; }
 
   .key {
     display: flex;
     gap: 40px;
-    margin-bottom: 26px;
+    margin-bottom: var(--group-gap);
     font-size: 21px;
     color: var(--body);
   }
@@ -45,7 +41,7 @@
     display: grid;
     grid-template-columns: 1fr 1fr;
     column-gap: 80px;
-    row-gap: 34px;
+    row-gap: var(--group-gap);
   }
 
   .head {
@@ -58,6 +54,7 @@
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
+    line-height: 1.1;
     letter-spacing: -0.01em;
     color: var(--heading);
     white-space: nowrap;
@@ -73,7 +70,7 @@
     grid-template-columns: var(--rank-col) repeat(var(--ranks), var(--cell-w)) var(--arrow-gap) repeat(var(--ranks), var(--cell-w));
     grid-auto-rows: var(--cell-h);
     gap: 4px;
-    margin-top: 16px;
+    margin-top: var(--heading-gap);
   }
 
   .rank {
@@ -98,7 +95,7 @@
   .cell.empty { background: var(--surface); border: 1px solid var(--line); }
 
   .cost {
-    margin-top: 14px;
+    margin-top: 18px;
     font-size: 23px;
     color: var(--body);
   }

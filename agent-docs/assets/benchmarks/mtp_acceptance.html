@@ -5,20 +5,16 @@
 <title>MTP head acceptance</title>
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
+  :root { --tick-size: 19px; }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 28px;
-  }
+  body { width: 1600px; }
 
   .key {
     display: flex;
     align-items: center;
     gap: 30px;
     height: 26px;
-    margin-bottom: 30px;
+    margin-bottom: var(--group-gap);
     font-size: 21px;
     color: var(--body);
   }
@@ -33,9 +29,10 @@
     background: var(--line);
   }
 
+  /* The top tick label rises half its line above the plot, so the gap under the headings runs to that label. */
   .heads {
     display: grid;
-    margin-bottom: 33px;
+    margin-bottom: calc(var(--heading-gap) + var(--tick-size) / 2);
   }
 
   .heads h2 {
@@ -64,7 +61,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  .tick { font-size: 19px; fill: var(--secondary); }
+  .tick { font-size: var(--tick-size); fill: var(--secondary); }
 
   .end { font-size: 21px; fill: var(--body); }
 
@@ -119,7 +116,7 @@
   const TICK_COL = 64;
   const END_COL = 176;
   const PANEL_GAP = 48;
-  const PLOT_H = 353;
+  const PLOT_H = 440;
   const X_TICK_H = 44;
   const CROSS = 9;
   const CROSS_STROKE = 3;

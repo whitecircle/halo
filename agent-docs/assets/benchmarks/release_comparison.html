@@ -9,19 +9,14 @@
     --label-col: 440px;
     --panel-gap: 56px;
     --mem-col: 360px;
-    --row-h: 30px;
-    --row-gap: 12px;
-    --axis-gap: 10px;
+    --row-h: 34px;
+    --row-gap: 16px;
+    --axis-gap: 14px;
     --tick: 6px;
     --link: color-mix(in oklab, var(--halo-blue) 45%, var(--bg));
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 24px;
-  }
+  body { width: 1600px; }
 
   .row,
   .head,
@@ -31,8 +26,8 @@
     align-items: center;
   }
 
-  /* Room under the panel names for the release names above the top row's dots. */
-  .head { margin-bottom: 44px; }
+  /* Under the panel names, a heading gap plus the room the release names take above the top row's dots. */
+  .head { margin-bottom: calc(var(--heading-gap) + 27px); }
 
   .panel-name {
     display: inline-flex;

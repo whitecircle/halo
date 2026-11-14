@@ -8,19 +8,15 @@
   :root {
     --label-col: 64px;
     --count-col: 150px;
-    --block-gap: 20px;
+    --col-gap: 24px;
     --cell-gap: 4px;
-    --r0-height: 48px;
-    --thin-height: 22px;
+    --r0-height: 56px;
+    --thin-height: 28px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 24px;
-  }
+  .figure { position: relative; }
 
   .group-head {
     font-family: var(--serif);
@@ -31,7 +27,7 @@
   }
 
   .caption {
-    margin-top: 6px;
+    margin-top: 8px;
     font-size: 23px;
     color: var(--secondary);
   }
@@ -40,10 +36,10 @@
   .round {
     display: grid;
     grid-template-columns: var(--label-col) repeat(var(--groups), 1fr) var(--count-col);
-    column-gap: var(--block-gap);
-    row-gap: 6px;
+    column-gap: var(--col-gap);
+    row-gap: 8px;
     align-items: center;
-    margin-top: 18px;
+    margin-top: var(--heading-gap);
   }
 
   .chip {
@@ -51,11 +47,11 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 62px;
+    height: 76px;
     border-radius: 10px;
     background: var(--halo-violet);
     color: #000;
-    line-height: 1.15;
+    line-height: 1.25;
     white-space: nowrap;
   }
 
@@ -100,12 +96,12 @@
   .units {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    column-gap: 32px;
-    margin-top: 32px;
+    column-gap: 40px;
+    margin-top: var(--group-gap);
   }
 
   .card {
-    padding: 18px 26px 20px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -115,7 +111,7 @@
     display: flex;
     align-items: center;
     gap: 12px;
-    margin-bottom: 8px;
+    margin-bottom: 12px;
     font-size: 27px;
     line-height: 1.2;
     color: var(--text);
@@ -217,9 +213,9 @@
   // Prompts, a spacer for their arrows, R0, a spacer, then the thinner rows of the other ranks.
   round.style.gridTemplateRows = [
     "auto",
-    "24px",
+    "40px",
     "var(--r0-height)",
-    "4px",
+    "12px",
     ...Array(SETUP.ranks - 1).fill("var(--thin-height)"),
   ].join(" ");
 

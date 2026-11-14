@@ -6,16 +6,12 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --section-gap: 36px;
     --lane-label: 190px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-  }
+  .figure { position: relative; }
 
   .section-head {
     font-family: var(--serif);
@@ -43,7 +39,7 @@
     display: grid;
     place-items: center;
     width: 64px;
-    height: 46px;
+    height: 48px;
     border-radius: 9px;
     font-size: 22px;
     font-variant-numeric: tabular-nums;
@@ -73,18 +69,20 @@
   }
 
   .split + .section-head,
-  .topology + .section-head { margin-top: var(--section-gap); }
+  .topology + .section-head { margin-top: var(--group-gap); }
+
+  .section-head + .topology,
+  .section-head + .lanes { margin-top: var(--heading-gap); }
 
   /* Trainer and actors on the left, the servers on the right, a gutter between for the lines. */
   .topology {
     display: grid;
     grid-template-columns: 560px 1fr 620px;
-    row-gap: 14px;
-    margin-top: 16px;
+    row-gap: 24px;
   }
 
   .card {
-    padding: 18px 26px 20px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -109,7 +107,7 @@
   .card .lines {
     margin-top: 10px;
     font-size: 23px;
-    line-height: 1.32;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
   }
@@ -132,9 +130,7 @@
     align-items: center;
   }
 
-  .section-head + .lane { margin-top: 16px; }
-
-  .lane + .lane { margin-top: 6px; }
+  .lane + .lane { margin-top: 10px; }
 
   .lane-name {
     font-size: 22px;
@@ -149,7 +145,7 @@
   .seg {
     display: grid;
     place-items: center;
-    height: 46px;
+    height: 52px;
     border-radius: 10px;
     font-size: 21px;
     white-space: nowrap;
@@ -186,7 +182,7 @@
     <div class="section-head">Topology</div>
     <div class="topology" id="topology"></div>
     <div class="section-head" id="clock-head"></div>
-    <div id="lanes"></div>
+    <div class="lanes" id="lanes"></div>
     <svg class="wires" id="wires"></svg>
   </div>
 

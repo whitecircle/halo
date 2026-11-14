@@ -23,11 +23,13 @@
   --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
   --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
 
-  /* Spacing shows grouping: a heading sits close to its own rows, and groups sit far apart. */
-  --heading-gap: 14px;
-  --group-gap: 48px;
+  /* Spacing shows grouping: a heading sits close to its own rows, groups sit far apart, and the header, the
+     figure and the notes are separated by one block gap. */
+  --heading-gap: 16px;
+  --group-gap: 72px;
+  --block-gap: 56px;
 
-  /* The 1600 × 900 scale. A 1200 × 1200 page puts class="square" on its body. */
+  /* The 1600-wide scale. A 1200-wide page puts class="square" on its body. */
   --canvas-pad: 52px 64px 48px;
   --title-size: 67px;
   --subtitle-size: 27px;
@@ -36,8 +38,9 @@
 }
 
 .square {
-  --heading-gap: 11px;
-  --group-gap: 36px;
+  --heading-gap: 12px;
+  --group-gap: 54px;
+  --block-gap: 42px;
   --canvas-pad: 40px 48px 36px;
   --title-size: 50px;
   --subtitle-size: 20px;
@@ -84,7 +87,12 @@ h1 {
   color: var(--secondary);
 }
 
+/* The figure and the notes follow the header at one block gap. The canvas grows to fit when the body rule sets
+   only a width. A page that fixes a height instead centres its figure with margin-block: auto. */
+.figure { margin-top: var(--block-gap); }
+
 footer {
+  margin-top: var(--block-gap);
   font-size: var(--notes-size);
   line-height: 1.55;
   color: var(--secondary);

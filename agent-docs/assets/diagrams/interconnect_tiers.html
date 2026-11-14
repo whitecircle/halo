@@ -8,15 +8,12 @@
   :root {
     --label-col: 330px;
     --read-col: 410px;
+    --row-pad: 14px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 16px;
-  }
+  .figure { position: relative; }
 
   .chart {
     position: relative;
@@ -45,9 +42,10 @@
     background: var(--hue);
   }
 
-  .section { margin-bottom: calc(var(--heading-gap) - 8px); }
+  /* A row's own padding counts toward the gaps around a heading. */
+  .section { margin-bottom: calc(var(--heading-gap) - var(--row-pad)); }
 
-  .section.later { margin-top: calc(var(--group-gap) - 8px); }
+  .section.later { margin-top: calc(var(--group-gap) - var(--row-pad)); }
 
   .key {
     display: flex;
@@ -69,26 +67,27 @@
 
   .name {
     font-size: 25px;
-    line-height: 1.25;
+    line-height: 1.3;
     color: var(--text);
     white-space: nowrap;
   }
 
   .sub {
+    margin-top: 2px;
     font-size: 21px;
-    line-height: 1.35;
+    line-height: 1.4;
     color: var(--secondary);
     white-space: nowrap;
   }
 
-  .row { padding-block: 8px; }
+  .row { padding-block: var(--row-pad); }
 
   .track { height: 2px; }
 
   .ticks {
     position: relative;
     height: 30px;
-    margin-top: 6px;
+    margin-top: 14px;
     font-size: 21px;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;
@@ -220,7 +219,7 @@
       const read = el("div", "row");
       read.append(el("div", "name", lines[0]), el("div", "sub", lines[1]));
       chart.append(label, track, read);
-      tracks.push({ track, row, hue: css(section.hue) });
+      tracks.push({ label, track, row, hue: css(section.hue) });
     }
   });
 
@@ -244,7 +243,7 @@
   };
 
   const first = box(tracks[0].track);
-  const plotTop = first.t - 34;
+  const plotTop = box(tracks[0].label).t;
   const plotBottom = box(ticks).t - 10;
   const x = (gbps) => first.l + share(gbps) * (first.r - first.l);
   const line = css("--line");

@@ -8,15 +8,11 @@
   :root {
     --y-col: 56px;
     --panel-gap: 64px;
-    --plot-h: 452px;
+    --plot-h: 560px;
+    --tick-size: 19px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 24px;
-  }
+  body { width: 1600px; }
 
   .load-error {
     grid-column: 1 / -1;
@@ -30,11 +26,12 @@
     grid-template-rows: auto var(--plot-h) auto;
   }
 
+  /* A top tick label rises half its line above the plot, so the gap under the headings runs to that label. */
   .panel-head {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
-    margin-bottom: 36px;
+    margin-bottom: calc(var(--heading-gap) + var(--tick-size) / 2);
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
@@ -81,7 +78,7 @@
   .yticks span,
   .xticks span {
     position: absolute;
-    font-size: 19px;
+    font-size: var(--tick-size);
     line-height: 1;
     color: var(--secondary);
     font-variant-numeric: tabular-nums;

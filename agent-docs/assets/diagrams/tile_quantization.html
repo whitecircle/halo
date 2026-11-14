@@ -6,22 +6,20 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
   /* The key names the curve, the peak line and the two parts of the M axis in a column left of the plot. */
   .figure {
     display: grid;
-    grid-template-columns: 330px minmax(0, 1fr);
+    grid-template-columns: 360px minmax(0, 1fr);
     column-gap: 44px;
     align-items: start;
-    margin-block: auto;
-    padding-block: 26px;
   }
 
   .key {
     display: flex;
     flex-direction: column;
-    gap: 46px;
+    gap: var(--group-gap);
   }
 
   .key h3 {
@@ -42,9 +40,9 @@
   }
 
   .key p {
-    margin-top: 6px;
+    margin-top: var(--heading-gap);
     font-size: 21px;
-    line-height: 1.35;
+    line-height: 1.4;
     color: var(--secondary);
   }
 
@@ -122,7 +120,7 @@
   /** The efficiency axis is fixed: 0 to the 100% peak line, with room above it for the line's label. */
   const Y_MAX = 106;
   const Y_TICKS = [0, 25, 50, 75, 100];
-  const HEIGHT = 616;
+  const HEIGHT = 700;
   /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
   const PAD = { l: 124, r: 0, t: 8, b: 84 };
 

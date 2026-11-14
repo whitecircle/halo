@@ -10,12 +10,7 @@
     --bar-h: 76px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 28px;
-  }
+  body { width: 1600px; }
 
   .row,
   .group-head {
@@ -33,11 +28,11 @@
     color: var(--heading);
   }
 
-  .group-head + .row { margin-top: 24px; }
+  .group-head + .row { margin-top: var(--heading-gap); }
 
-  .row + .row { margin-top: 20px; }
+  .row + .row { margin-top: 24px; }
 
-  .row + .group-head { margin-top: 50px; }
+  .row + .group-head { margin-top: var(--group-gap); }
 
   .key {
     display: flex;

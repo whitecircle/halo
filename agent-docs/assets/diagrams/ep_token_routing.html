@@ -6,13 +6,9 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 30px;
-  }
+  .figure { position: relative; }
 
   /* Three card columns, a rank per row, with wide gutters for the all-to-all lines. The labels row names the gutters. */
   .lanes {
@@ -20,16 +16,16 @@
     grid-template-columns: repeat(3, 1fr);
     grid-template-rows: auto auto auto;
     column-gap: 200px;
-    row-gap: 36px;
   }
 
   .hop-row {
     grid-column: 1 / -1;
     height: 62px;
+    margin-bottom: 20px;
   }
 
   /* The second rank's row sits well below the first, so the lines crossing between the rows stay apart. */
-  .card.lower { margin-top: 84px; }
+  .card.lower { margin-top: 142px; }
 
   .card {
     padding: 28px 32px 30px;
@@ -57,7 +53,7 @@
   .card .lines {
     margin-top: 10px;
     font-size: 23px;
-    line-height: 1.3;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
   }

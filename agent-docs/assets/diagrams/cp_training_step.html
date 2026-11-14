@@ -6,13 +6,9 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 22px;
-  }
+  .figure { position: relative; }
 
   /* Top to bottom: the input band, the decoder stack, the head and the loss; the arrows sit in the gaps. */
   .row {
@@ -25,10 +21,10 @@
   .row.two { grid-template-columns: repeat(2, 1fr); column-gap: 64px; }
 
   .row + .frame,
-  .frame + .row { margin-top: 50px; }
+  .frame + .row { margin-top: 88px; }
 
   .frame {
-    padding: 12px 24px 20px;
+    padding: 20px 28px 28px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -39,10 +35,10 @@
     color: var(--secondary);
   }
 
-  .frame .row { margin-top: 10px; }
+  .frame .row { margin-top: 20px; }
 
   .card {
-    padding: 16px 26px 18px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -56,9 +52,9 @@
   }
 
   .card .lines {
-    margin-top: 6px;
+    margin-top: 10px;
     font-size: 23px;
-    line-height: 1.28;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
   }

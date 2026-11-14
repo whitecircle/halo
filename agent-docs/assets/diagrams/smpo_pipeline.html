@@ -9,13 +9,9 @@
     --gutter: 120px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
-  .figure {
-    position: relative;
-    margin-block: auto;
-    padding-block: 30px;
-  }
+  .figure { position: relative; }
 
   /* Two bands of three cards: the first reads left to right, the second right to left under it. Each column is as
    * wide as its widest card, and what is left widens the gutters. */
@@ -32,7 +28,7 @@
     display: flex;
     justify-content: space-between;
     align-items: baseline;
-    margin-bottom: 16px;
+    margin-bottom: var(--heading-gap);
     font-family: var(--serif);
     font-weight: 400;
     font-size: 33px;
@@ -41,7 +37,7 @@
     color: var(--heading);
   }
 
-  .band-head.next { margin-top: 34px; }
+  .band-head.next { margin-top: var(--group-gap); }
 
   .key {
     display: flex;

@@ -6,16 +6,16 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --card-gap: 16px;
+    --card-gap: 24px;
+    --name-size: 33px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
+  /* The top padding holds the half of the node names above the outline's top edge. */
   .figure {
     position: relative;
-    margin-block: auto;
-    /* The top padding holds the node names, which sit on the outline's top edge. */
-    padding-top: 18px;
+    padding-top: calc(var(--name-size) / 2);
   }
 
   /* Two nodes side by side, a gutter between them for the lines that cross. */
@@ -25,12 +25,13 @@
     align-items: center;
   }
 
-  /* A node is a thin outline with its serif name on the top edge. */
+  /* A node is a thin outline with its serif name on the top edge: the top padding holds the half of the name
+     below the edge, then the heading gap. */
   .node {
     position: relative;
     display: flex;
     flex-direction: column;
-    padding: 24px 18px 14px;
+    padding: calc(var(--name-size) / 2 + var(--heading-gap)) 24px 24px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -43,17 +44,17 @@
     transform: translateY(-50%);
     font-family: var(--serif);
     font-weight: 400;
-    font-size: 33px;
+    font-size: var(--name-size);
     line-height: 1;
     letter-spacing: -0.01em;
     color: var(--heading);
     background: var(--bg);
   }
 
-  .node .card + .card { margin-top: 34px; }
+  .node .card + .card { margin-top: 64px; }
 
   .card {
-    padding: 13px 18px 15px;
+    padding: 24px 22px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -64,7 +65,7 @@
     align-items: center;
     gap: 12px;
     font-size: 27px;
-    line-height: 1.15;
+    line-height: 1.2;
     color: var(--text);
   }
 
@@ -76,9 +77,9 @@
   }
 
   .card .lines {
-    margin-top: 8px;
-    font-size: 23px;
-    line-height: 1.27;
+    margin-top: 12px;
+    font-size: 22px;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
   }
@@ -88,7 +89,7 @@
     display: grid;
     grid-template-columns: repeat(4, minmax(max-content, 1fr));
     column-gap: var(--card-gap);
-    margin-top: 26px;
+    margin-top: var(--group-gap);
   }
 
   .wire-label {

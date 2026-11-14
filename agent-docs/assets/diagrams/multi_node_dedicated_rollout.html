@@ -6,16 +6,17 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --column-gap: 34px;
+    --name-size: 33px;
+    /* Between the blocks of a column, a group gap clear of the next node's name on its top edge. */
+    --column-gap: calc(var(--group-gap) + var(--name-size) / 2);
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
+  /* The top padding holds the half of the node names above the outline's top edge. */
   .figure {
     position: relative;
-    margin-block: auto;
-    /* The top padding holds the node names, which sit on the outline's top edge. */
-    padding-top: 18px;
+    padding-top: calc(var(--name-size) / 2);
   }
 
   /* Training node over the actor tier on the left, inference nodes over the config on the right, a gutter for
@@ -34,13 +35,14 @@
 
   .column.right { grid-column: 3; }
 
-  /* A node is a thin outline with its serif name on the top edge. */
+  /* A node is a thin outline with its serif name on the top edge: the top padding holds the half of the name
+     below the edge, then the heading gap. */
   .node {
     position: relative;
     display: flex;
     flex-direction: column;
-    row-gap: 18px;
-    padding: 24px 18px 16px;
+    row-gap: 24px;
+    padding: calc(var(--name-size) / 2 + var(--heading-gap)) 24px 24px;
     border: 1px solid var(--line);
     border-radius: 16px;
   }
@@ -53,7 +55,7 @@
     transform: translateY(-50%);
     font-family: var(--serif);
     font-weight: 400;
-    font-size: 33px;
+    font-size: var(--name-size);
     line-height: 1;
     letter-spacing: -0.01em;
     color: var(--heading);
@@ -61,7 +63,7 @@
   }
 
   .card {
-    padding: 18px 26px 20px;
+    padding: 24px 28px 26px;
     border: 1px solid var(--line);
     border-radius: 12px;
     background: var(--surface);
@@ -84,9 +86,9 @@
   }
 
   .card .lines {
-    margin-top: 10px;
+    margin-top: 12px;
     font-size: 23px;
-    line-height: 1.32;
+    line-height: 1.4;
     color: var(--body);
     white-space: nowrap;
   }

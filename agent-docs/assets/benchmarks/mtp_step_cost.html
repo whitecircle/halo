@@ -9,15 +9,10 @@
     --label-col: 240px;
     --panel-gap: 64px;
     --bar-h: 82px;
-    --row-gap: 42px;
+    --row-gap: 48px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 28px;
-  }
+  body { width: 1600px; }
 
   /* One grid holds both panels, so a row's two bars share its label. */
   .chart {
@@ -28,7 +23,7 @@
 
   .head {
     align-self: end;
-    margin-bottom: 34px;
+    margin-bottom: var(--heading-gap);
   }
 
   .head h2 {

@@ -18,14 +18,10 @@
     --dot: 18px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
   /* --inset moves zero right along the track and the axis, to fit the values left of it. */
-  .figure {
-    --inset: 0px;
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  .figure { --inset: 0px; }
 
   .row {
     display: grid;
@@ -35,10 +31,9 @@
     height: var(--row-h);
   }
 
-  /* The colour key and the ratio column's head share the first row. */
+  /* The colour key and the ratio column's head share the first row, the room a row leaves above its marks under it. */
   .row.head {
     height: auto;
-    margin-bottom: 28px;
     font-size: 21px;
     color: var(--secondary);
   }

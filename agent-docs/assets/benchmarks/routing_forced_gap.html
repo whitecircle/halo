@@ -18,14 +18,10 @@
     --dot: 20px;
   }
 
-  body { width: 1600px; height: 900px; }
+  body { width: 1600px; }
 
   /* --inset moves zero right along the track and the axis, to fit the values left of it. */
-  .figure {
-    --inset: 0px;
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  .figure { --inset: 0px; }
 
   .row {
     display: grid;
@@ -35,9 +31,11 @@
     height: var(--row-h);
   }
 
-  /* The colour key and the share column's head share the first row. */
+  /* The colour key and the share column's head share the first row. Under it, the room a row leaves under its
+     dot, so the first heading sits as far below the key as the second below its rows. */
   .row.head {
     height: auto;
+    padding-bottom: calc((var(--row-h) - var(--dot)) / 2);
     font-size: 21px;
     color: var(--secondary);
   }
@@ -47,8 +45,8 @@
   .key span { display: inline-flex; align-items: center; gap: 10px; }
 
   .group {
-    margin-top: 36px;
-    margin-bottom: 14px;
+    margin-top: var(--group-gap);
+    margin-bottom: var(--heading-gap);
     font-family: var(--serif);
     font-size: 33px;
     letter-spacing: -0.01em;

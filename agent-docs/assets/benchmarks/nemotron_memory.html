@@ -9,21 +9,16 @@
     --group-col: 150px;
     --recipe-col: 330px;
     --tokens-col: 170px;
-    --value-col: 100px;
+    --value-col: 112px;
     --col-gap: 28px;
     --track-left: calc(var(--group-col) + var(--recipe-col) + var(--tokens-col) + 3 * var(--col-gap));
     --track-right: calc(var(--value-col) + var(--col-gap));
-    --row-h: 45px;
+    --row-h: 52px;
     --range-h: 20px;
-    --split-gap: 24px;
+    --split-gap: 36px;
   }
 
-  body { width: 1600px; height: 900px; }
-
-  .figure {
-    margin-block: auto;
-    padding-block: 32px;
-  }
+  body { width: 1600px; }
 
   .plot { position: relative; }
 
@@ -38,7 +33,7 @@
   /* The column heads and the colour key share the first row. */
   .row.head {
     height: auto;
-    margin-bottom: 22px;
+    margin-bottom: 24px;
     font-size: 21px;
     color: var(--secondary);
   }
