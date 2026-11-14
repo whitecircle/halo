@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ulysses attention flow</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+    --halo-sand: #ffc572;
+    --on-hue: #000000;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  /* Three stages, each with the block ownership it leaves behind; the all-to-alls sit in the gutters. */
+  .stages {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr) 230px minmax(0, 1fr) 230px minmax(0, 1fr);
+    row-gap: 32px;
+  }
+
+  .stage-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .stage-sub {
+    margin-top: 6px;
+    font-size: 22px;
+    line-height: 1.4;
+    color: var(--secondary);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stage-sub b {
+    display: block;
+    font-weight: 400;
+    color: var(--body);
+  }
+
+  /* Every matrix shares one row template, so the chunk labels in the first column line up with all three. */
+  .matrix {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    grid-template-rows: 28px 32px repeat(4, 80px);
+    gap: 4px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .axis {
+    grid-column: 1 / -1;
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  .col-label,
+  .row-label {
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  .matrix.labels { grid-template-columns: 1fr; }
+
+  .col-label { text-align: center; }
+
+  .row-label {
+    display: flex;
+    align-items: center;
+  }
+
+  .cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 80px;
+    border-radius: 10px;
+    background: var(--hue);
+    font-size: 21px;
+    color: var(--on-hue);
+  }
+
+  .hop {
+    position: absolute;
+    text-align: center;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+  }
+
+  .hop small {
+    display: block;
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Two all-to-alls swap sequence chunks for heads</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="stages" id="stages"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each block is one sequence chunk by {queryPerRank} query heads, coloured by the rank that holds it.</span>
+      <span class="s">The result is exact, since heads attend independently.</span>
+      <span class="s">Both head counts must divide by <span class="nw">cp_size</span>, and the collator pads the sequence to fit.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { cpSize: 4, queryHeads: 64, kvHeads: 8 };
+  /** Indigo sits two ranks from violet: the pair is nearly identical under protanopia, so they never touch. */
+  const RANK_HUES = ["--halo-blue", "--halo-violet", "--halo-sand", "--halo-indigo"];
+
+  if (SETUP.cpSize !== 4) {
+    throw new Error("this layout draws cp_size 4: a 4 × 4 block grid, one hue per rank");
+  }
+
+  if (SETUP.queryHeads % SETUP.cpSize !== 0 || SETUP.kvHeads % SETUP.cpSize !== 0) {
+    throw new Error(`both head counts (${SETUP.queryHeads} query, ${SETUP.kvHeads} KV) must divide by cp_size ${SETUP.cpSize}`);
+  }
+
+  const CP = SETUP.cpSize;
+  const perRank = SETUP.queryHeads / CP;
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    cpSize: fmt(CP),
+    queryHeads: fmt(SETUP.queryHeads),
+    kvHeads: fmt(SETUP.kvHeads),
+    queryPerRank: fmt(perRank),
+  };
+  /** Who holds block (chunk, head slice): the chunk's rank before attention, the slice's rank during it. */
+  const STAGES = [
+    { head: "Per-rank input", shape: `[B, S/${CP}, ${fmt(SETUP.queryHeads)}, D]`, line: "RoPE on the local chunk", owner: (chunk) => chunk },
+    { head: "Flash attention", shape: `[B, S, ${fmt(perRank)}, D]`, line: `all tokens, ${fmt(perRank)} Q and ${fmt(SETUP.kvHeads / CP)} KV heads`, owner: (chunk, slice) => slice },
+    { head: "Per-rank output", shape: `[B, S/${CP}, ${fmt(SETUP.queryHeads)}, D]`, line: "reshaped into o_proj", owner: (chunk) => chunk },
+  ];
+  const HOPS = [
+    { head: "All-to-all #1", what: "Q, K and V in one buffer", moves: ["scatter heads", "gather sequence"] },
+    { head: "All-to-all #2", what: "the output", moves: ["scatter sequence", "gather heads"] },
+  ];
+
+  const slices = Array.from({ length: CP }, (_, i) => `${fmt(i * perRank)}–${fmt((i + 1) * perRank - 1)}`);
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const stagesEl = document.getElementById("stages");
+  const matrices = [];
+
+  const place = (node, column, row) => {
+    node.style.gridColumn = column;
+    node.style.gridRow = row;
+    stagesEl.append(node);
+  };
+
+  const labels = el("div", "matrix labels");
+  labels.append(el("div"), el("div"));
+
+  for (let chunk = 0; chunk < CP; chunk += 1) {
+    labels.append(el("div", "row-label", `chunk ${chunk}`));
+  }
+
+  place(labels, "1", "2");
+
+  // Matrices sit in grid columns 2, 4 and 6; the first heading also spans the chunk labels.
+  STAGES.forEach((stage, si) => {
+    const column = si * 2 + 2;
+    const head = el("div");
+    const sub = el("div", "stage-sub");
+    sub.append(el("b", undefined, stage.shape), stage.line);
+    head.append(el("div", "stage-head", stage.head), sub);
+    place(head, si === 0 ? "1 / span 2" : String(column), "1");
+
+    const matrix = el("div", "matrix");
+    matrix.append(el("div", "axis", "Query heads"));
+
+    for (const slice of slices) {
+      matrix.append(el("div", "col-label", slice));
+    }
+
+    for (let chunk = 0; chunk < CP; chunk += 1) {
+      for (let slice = 0; slice < CP; slice += 1) {
+        const rank = stage.owner(chunk, slice);
+        const cell = el("div", "cell", `R${rank}`);
+        cell.style.setProperty("--hue", `var(${RANK_HUES[rank]})`);
+        matrix.append(cell);
+      }
+    }
+
+    place(matrix, String(column), "2");
+    matrices.push(matrix);
+  });
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  function arrow(x1, y1, x2, y2, hue) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--body").trim();
+  const cellsOf = (matrix) => [...matrix.querySelectorAll(".cell")];
+
+  // Each all-to-all runs between the cell blocks of two neighbouring matrices, its label above and below the line.
+  HOPS.forEach((hop, i) => {
+    const left = cellsOf(matrices[i]);
+    const right = cellsOf(matrices[i + 1]);
+    const a = box(left[left.length - 1]);
+    const top = box(left[0]);
+    const z = box(right[0]);
+    const mid = (top.t + a.b) / 2;
+    arrow(a.r + 14, mid, z.l - 14, mid, lineHue);
+
+    const above = el("div", "hop", hop.head);
+    above.append(el("small", undefined, hop.what));
+    const below = el("div", "hop");
+
+    for (const move of hop.moves) {
+      below.append(el("small", undefined, move));
+    }
+
+    for (const label of [above, below]) {
+      label.style.left = `${a.r}px`;
+      label.style.width = `${z.l - a.r}px`;
+      figure.append(label);
+    }
+
+    above.style.top = `${mid - above.getBoundingClientRect().height - 12}px`;
+    below.style.top = `${mid + 12}px`;
+  });
+</script>
+</body>
+</html>

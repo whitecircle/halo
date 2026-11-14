@@ -1,0 +1,406 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Low-precision whole step</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --group-col: 270px;
+    --label-col: 340px;
+    --bar-h: 18px;
+    --bar-gap: 4px;
+    --axis-gap: 12px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  .figure {
+    margin-block: auto;
+    padding-block: 28px;
+  }
+
+  /* The key and the bf16 marker share one row above the bar column. */
+  .key {
+    position: relative;
+    display: flex;
+    gap: 32px;
+    height: 26px;
+    margin-left: calc(var(--group-col) + var(--label-col));
+    margin-bottom: 14px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .key .ref {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    color: var(--text);
+  }
+
+  .plot { position: relative; }
+
+  .group {
+    display: grid;
+    grid-template-columns: var(--group-col) var(--label-col) 1fr;
+    row-gap: 10px;
+    align-items: center;
+  }
+
+  .group + .group {
+    margin-top: 18px;
+    padding-top: 18px;
+    border-top: 1px solid var(--line);
+  }
+
+  .group-head {
+    grid-column: 1;
+    align-self: start;
+  }
+
+  .group-head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .group-head p {
+    margin-top: 6px;
+    font-size: 20px;
+    line-height: 1.3;
+    color: var(--secondary);
+  }
+
+  .label {
+    grid-column: 2;
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .bars { grid-column: 3; }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: var(--bar-h);
+  }
+
+  .bar + .bar { margin-top: var(--bar-gap); }
+
+  .bar i {
+    height: 100%;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .bar b {
+    line-height: 1;
+    font-weight: 400;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: var(--body);
+  }
+
+  /* The plot prints its values, so it draws no gridlines: the bf16 line is data and runs over the bar column from
+     under its label in the key row down to the axis line, which carries the scale. */
+  .overlay {
+    position: absolute;
+    top: 0;
+    bottom: calc(-1 * var(--axis-gap));
+    left: calc(var(--group-col) + var(--label-col));
+    right: 0;
+  }
+
+  .overlay .ref {
+    position: absolute;
+    bottom: 0;
+    border-left: 2px solid var(--body);
+    transform: translateX(-1px);
+  }
+
+  .axis {
+    position: relative;
+    margin: var(--axis-gap) 0 0 calc(var(--group-col) + var(--label-col));
+    border-top: 1px solid var(--line);
+  }
+
+  .axis i {
+    position: absolute;
+    top: 0;
+    height: 6px;
+    border-left: 1px solid var(--line);
+    transform: translateX(-50%);
+  }
+
+  .ticks {
+    position: relative;
+    height: 26px;
+    margin: 8px 0 0 calc(var(--group-col) + var(--label-col));
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks span { position: absolute; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>No low-precision path Halo ships beats bf16</h1>
+    <p class="subtitle">Whole-step tokens/s per GPU as a ratio to bf16 on the same shape</p>
+  </header>
+
+  <div class="figure">
+    <div class="key" id="key">
+      <span style="--hue: var(--halo-blue)"><i></i>fp8</span>
+      <span style="--hue: var(--halo-violet)"><i></i>mxfp4</span>
+    </div>
+    <div class="plot" id="plot"><div class="overlay"><div class="ref" id="ref"></div></div></div>
+    <div class="axis" id="axis"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Whole training steps at EP8 on 8 × B300, 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build.</span>
+      <span class="s">bf16 runs at <span id="bf16-rates"></span> tokens/s per GPU on the <span id="shape-count"></span> shapes, top to bottom.</span>
+      <span class="s">torchao ran on one shape only, through a test wrapper, with its quality unmeasured.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // [shape, bf16 tok/s/GPU, simulated fp8, simulated mxfp4, native fp8, native mxfp4]
+  const SHAPES = [
+    ["gpt-oss-20b, batch 4", 13399, 0.449, 0.183, 0.539, 0.531],
+    ["Qwen3-30B-A3B, batch 8", 14063, 0.294, 0.098, 0.425, 0.369],
+    ["Qwen3.5-35B-A3B, batch 8", 16536, 0.442, 0.171, 0.533, 0.373],
+  ];
+  const TORCHAO = ["gpt-oss-20b, batch 4", 1.133];
+  const GROUPS = [
+    { head: "Simulated", sub: "Fake-quant, the QAT oracle", rows: SHAPES.map((s) => [s[0], [[s[2], "var(--halo-blue)"], [s[3], "var(--halo-violet)"]]]) },
+    { head: "Native", sub: "DeepGEMM adapter, opt-in", rows: SHAPES.map((s) => [s[0], [[s[4], "var(--halo-blue)"], [s[5], "var(--halo-violet)"]]]) },
+    { head: "torchao", sub: "MXFP8, not in Halo", rows: [[TORCHAO[0], [[TORCHAO[1], "var(--tertiary)"]]]] },
+  ];
+  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+  /** Room every label keeps from the bf16 line. */
+  const REF_CLEARANCE = 8;
+  /** How far the axis end moves out per try, as a share of the largest value, until every mark and label fits. */
+  const AXIS_GROWTH = 0.01;
+
+  // The axis from zero ends where the data ends: at top, the largest value, moved out by AXIS_GROWTH of it until
+  // holds(max) accepts every mark and its label inside the plot. Its ticks take the finest step of 1, 2, 2.5 or
+  // 5 × 10^k that leaves at most six up to that maximum, which leaves at least four.
+  function fitAxis(top, holds) {
+    let max = top;
+
+    for (let moves = 1; !holds(max); moves += 1) {
+      if (moves > 200) {
+        throw new Error(`no axis up to ${max.toFixed(2)} holds every mark and its label`);
+      }
+
+      max = top * (1 + moves * AXIS_GROWTH);
+    }
+
+    const e = Math.floor(Math.log10(max)) - 1;
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+      .map((m) => (e < 0 ? m / 10 ** -e : m * 10 ** e))
+      .find((s) => Math.floor(max / s + 1e-9) <= 5);
+    const count = Math.floor(max / step + 1e-9) + 1;
+
+    return { max, ticks: Array.from({ length: count }, (_, i) => Number((i * step).toPrecision(12))) };
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const plot = document.getElementById("plot");
+  const ref = document.getElementById("ref");
+  const axisLine = document.getElementById("axis");
+  const ticks = document.getElementById("ticks");
+  const key = document.getElementById("key");
+  const marks = [];
+
+  function bar(ratio, hue) {
+    const node = el("div", "bar");
+    const fill = el("i");
+    fill.style.setProperty("--hue", hue);
+    const label = el("b", undefined, `${ratio.toFixed(2)}×`);
+    node.append(fill, label);
+    marks.push({ fill, label, ratio });
+
+    return node;
+  }
+
+  for (const group of GROUPS) {
+    const node = el("div", "group");
+    const head = el("div", "group-head");
+    head.style.gridRow = `1 / span ${group.rows.length}`;
+    head.append(el("h2", undefined, group.head), el("p", undefined, group.sub));
+    node.append(head);
+
+    group.rows.forEach(([name, values], i) => {
+      const label = el("div", "label", name);
+      const bars = el("div", "bars");
+      label.style.gridRow = String(i + 1);
+      bars.style.gridRow = String(i + 1);
+
+      for (const [ratio, hue] of values) {
+        bars.append(bar(ratio, hue));
+      }
+
+      node.append(label, bars);
+    });
+
+    plot.append(node);
+  }
+
+  const refLabel = el("span", "ref", "bf16");
+  key.append(refLabel);
+
+  const width = axisLine.getBoundingClientRect().width;
+  const refHalf = ref.getBoundingClientRect().width / 2;
+  // Each fill is still empty here, so a label's text starts its gap past the value.
+  const spans = marks.map(({ fill, label }) => {
+    const text = label.getBoundingClientRect();
+
+    return { gap: text.left - fill.getBoundingClientRect().right, w: text.width };
+  });
+
+  /** Where a value's text starts on an axis to max: past the bf16 line when it would come within REF_CLEARANCE of it. */
+  function labelLeft(ratio, { gap, w }, max) {
+    const at = (ratio / max) * width + gap;
+    const line = width / max;
+    const near = at < line + refHalf + REF_CLEARANCE && at + w > line - refHalf - REF_CLEARANCE;
+
+    return near ? line + refHalf + Math.max(gap, REF_CLEARANCE) : at;
+  }
+
+  // The bf16 line stays in view with its label centred on it.
+  const axis = fitAxis(
+    Math.max(1, ...marks.map(({ ratio }) => ratio)),
+    (max) =>
+      width / max + refLabel.getBoundingClientRect().width / 2 <= width &&
+      marks.every(({ ratio }, i) => labelLeft(ratio, spans[i], max) + spans[i].w <= width),
+  );
+  const pct = (ratio) => `${(ratio / axis.max) * 100}%`;
+
+  marks.forEach(({ fill, label, ratio }, i) => {
+    fill.style.width = pct(ratio);
+    label.style.marginLeft = `${labelLeft(ratio, spans[i], axis.max) - ((ratio / axis.max) * width + spans[i].gap)}px`;
+  });
+
+  ref.style.left = pct(1);
+  refLabel.style.left = pct(1);
+  ref.style.top = `${refLabel.getBoundingClientRect().bottom + REF_CLEARANCE - ref.parentElement.getBoundingClientRect().top}px`;
+
+  for (const tick of axis.ticks) {
+    const mark = el("i");
+    mark.style.left = pct(tick);
+    axisLine.append(mark);
+    const label = el("span", undefined, tick === 0 ? "0" : tick.toFixed(2));
+    ticks.append(label);
+    // Centred on its tick, kept under the axis line.
+    const at = (tick / axis.max) * width - label.offsetWidth / 2;
+    label.style.left = `${Math.min(Math.max(at, 0), width - label.offsetWidth)}px`;
+  }
+
+  document.getElementById("bf16-rates").textContent = new Intl.ListFormat("en-GB", { type: "conjunction" })
+    .format(SHAPES.map((s) => s[1].toLocaleString("en-US")));
+  document.getElementById("shape-count").textContent = NUMBER_WORDS[SHAPES.length] ?? String(SHAPES.length);
+
+  const simulated = SHAPES.flatMap((s) => [s[2], s[3]]);
+  const native = SHAPES.flatMap((s) => [s[4], s[5]]);
+  const range = (xs) => `${Math.min(...xs).toFixed(2)}–${Math.max(...xs).toFixed(2)}`;
+  console.log(`simulated ${range(simulated)} native ${range(native)} torchao ${TORCHAO[1].toFixed(2)}`);
+</script>
+</body>
+</html>

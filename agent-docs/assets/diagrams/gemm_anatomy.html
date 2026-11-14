@@ -1,0 +1,322 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM anatomy</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  .stage { position: relative; }
+
+  .stage > * { position: absolute; }
+
+  /* A matrix is a stack of rows (one per token) or one solid block (the weight). */
+  .matrix {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .matrix i {
+    flex: 1;
+    border-radius: 9px;
+    background: color-mix(in oklab, var(--surface), var(--hue) 34%);
+  }
+
+  .tag {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  .tag b {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 54px;
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .tag span {
+    margin-top: 12px;
+    font-size: 25px;
+    color: var(--text);
+  }
+
+  .op {
+    font-size: 54px;
+    line-height: 1;
+    color: var(--secondary);
+    transform: translate(-50%, -50%);
+  }
+
+  .dim {
+    font-size: 25px;
+    line-height: 1;
+    color: var(--body);
+    transform: translate(-50%, -50%);
+  }
+
+  .dim.m { color: var(--halo-blue); }
+
+  .caption { text-align: center; transform: translateX(-50%); }
+
+  .caption .name {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .caption .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .caption p {
+    margin-top: 6px;
+    font-size: 25px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>The tokens set M, the model sets K and N</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="stage" id="stage"><svg class="wires" id="wires"></svg></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">M is batch × seq for a dense layer, or the tokens routed to one expert in a MoE.</span>
+      <span class="s">W is read whole from HBM at any M, so a small M wastes that load.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // Side lengths in px, drawn to one scale so X, W and Y share their edges.
+  const SIDE = { M: 410, K: 264, N: 342 };
+  const ROWS = 8;
+  const GROWS = "var(--halo-blue)";
+  const FIXED = "var(--halo-violet)";
+  const MATRICES = [
+    { id: "X", rows: "M", cols: "K", hue: GROWS, stacked: true, name: "Input activations", line: "Grows with the tokens" },
+    { id: "W", rows: "K", cols: "N", hue: FIXED, stacked: false, name: "Weight", line: "Fixed by the model" },
+    { id: "Y", rows: "M", cols: "N", hue: GROWS, stacked: true, name: "Output", line: "Grows with the tokens" },
+  ];
+  const OPS = ["@", "="];
+  /** Space for a vertical dimension line beside a matrix. */
+  const DIM_SIDE = 64;
+  /** Space between a matrix and the next operator column. */
+  const OP_GAP = 80;
+  /** Height of the band above the matrices for the horizontal dimension lines. */
+  const DIM_TOP = 58;
+  /** Clear space between a dimension letter and the line segment on each side of it. */
+  const DIM_GAP = 10;
+  const CAPTION_GAP = 38;
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  const stage = document.getElementById("stage");
+  const wires = document.getElementById("wires");
+  const width = stage.getBoundingClientRect().width;
+  const color = (token) => getComputedStyle(document.documentElement).getPropertyValue(token.slice(4, -1)).trim();
+
+  /** A small arrowhead at (x, y) pointing along `angle`. */
+  function head(x, y, angle, hue) {
+    const len = 8;
+    const half = 5;
+    const bx = x - len * Math.cos(angle);
+    const by = y - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x},${y} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** A dimension line with a head at both ends, drawn as two segments around its letter in the middle. */
+  function dim(x1, y1, x2, y2, letter, isM) {
+    const hue = isM ? color(GROWS) : color("var(--secondary)");
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const [ux, uy] = [Math.cos(angle), Math.sin(angle)];
+    const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+    const label = el("div", isM ? "dim m" : "dim", letter);
+    label.style.left = `${mx}px`;
+    label.style.top = `${my}px`;
+    stage.append(label);
+    const box = label.getBoundingClientRect();
+    const half = (Math.abs(ux) * box.width + Math.abs(uy) * box.height) / 2 + DIM_GAP;
+    wires.append(
+      svgEl("line", { x1, y1, x2: mx - half * ux, y2: my - half * uy, stroke: hue, "stroke-width": 2 }),
+      svgEl("line", { x1: mx + half * ux, y1: my + half * uy, x2, y2, stroke: hue, "stroke-width": 2 }),
+    );
+    head(x2, y2, angle, hue);
+    head(x1, y1, angle + Math.PI, hue);
+  }
+
+  // Lay the row out left to right, then centre it in the content width.
+  const widths = MATRICES.map((m) => SIDE[m.cols]);
+  const total = DIM_SIDE + widths[0] + 2 * OP_GAP + DIM_SIDE + widths[1] + 2 * OP_GAP + widths[2] + DIM_SIDE;
+  let x = (width - total) / 2 + DIM_SIDE;
+  const midY = DIM_TOP + SIDE.M / 2;
+  const boxes = [];
+
+  MATRICES.forEach((m, i) => {
+    const w = SIDE[m.cols];
+    const h = SIDE[m.rows];
+    const top = midY - h / 2;
+    const node = el("div", "matrix");
+    node.style.cssText = `left:${x}px; top:${top}px; width:${w}px; height:${h}px; --hue:${m.hue}`;
+
+    for (let r = 0; r < (m.stacked ? ROWS : 1); r += 1) {
+      node.append(el("i"));
+    }
+
+    const tag = el("div", "tag");
+    tag.style.cssText = `left:${x}px; top:${top}px; width:${w}px; height:${h}px`;
+    tag.append(el("b", undefined, m.id), el("span", undefined, `${m.rows} × ${m.cols}`));
+    stage.append(node, tag);
+    boxes.push({ l: x, r: x + w, t: top, b: top + h, m });
+
+    if (i < OPS.length) {
+      const op = el("div", "op", OPS[i]);
+      op.style.left = `${x + w + OP_GAP}px`;
+      op.style.top = `${midY}px`;
+      stage.append(op);
+      x += w + 2 * OP_GAP + (i === 0 ? DIM_SIDE : 0);
+    }
+  });
+
+  const [X, W, Y] = boxes;
+  const above = (b) => Math.min(b.t, X.t) - 30;
+  dim(X.l - 34, X.t, X.l - 34, X.b, "M", true);
+  dim(Y.r + 34, Y.t, Y.r + 34, Y.b, "M", true);
+  dim(X.l, above(X), X.r, above(X), "K", false);
+  dim(W.l - 34, W.t, W.l - 34, W.b, "K", false);
+  dim(W.l, W.t - 30, W.r, W.t - 30, "N", false);
+  dim(Y.l, above(Y), Y.r, above(Y), "N", false);
+
+  for (const b of boxes) {
+    const caption = el("div", "caption");
+    const name = el("div", "name");
+    const dot = el("i");
+    dot.style.setProperty("--hue", b.m.hue);
+    name.append(dot, b.m.name);
+    caption.append(name, el("p", undefined, b.m.line));
+    caption.style.left = `${(b.l + b.r) / 2}px`;
+    caption.style.top = `${X.b + CAPTION_GAP}px`;
+    stage.append(caption);
+  }
+
+  const captionBottom = Math.max(...[...stage.querySelectorAll(".caption")].map((c) => c.getBoundingClientRect().bottom))
+    - stage.getBoundingClientRect().top;
+  stage.style.height = `${captionBottom}px`;
+</script>
+</body>
+</html>

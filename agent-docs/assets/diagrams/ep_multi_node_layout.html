@@ -1,0 +1,390 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EP + TP on two nodes</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 24px;
+  }
+
+  /* The EP group is the outer outline, each node an outline inside it; the gutter between holds the DP pairs. */
+  .ep {
+    padding: 22px 32px 30px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .ep-label {
+    font-size: 23px;
+    color: var(--body);
+  }
+
+  .ep-label span { color: var(--secondary); }
+
+  .nodes {
+    display: grid;
+    grid-template-columns: 400px 1fr 400px;
+    margin-top: 18px;
+  }
+
+  .node {
+    padding: 18px 22px 22px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+  }
+
+  .node-head {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+  }
+
+  .node-head .batch {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--body);
+  }
+
+  .node-head .batch i,
+  .cell i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A node's facts: a quiet label and its value. */
+  .facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    margin-top: 6px;
+    font-size: 22px;
+  }
+
+  .facts dt { color: var(--tertiary); }
+
+  .facts dd { color: var(--body); }
+
+  .cells {
+    display: grid;
+    gap: 5px;
+    margin-top: 14px;
+  }
+
+  .cell {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    height: 41px;
+    padding: 0 18px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--surface);
+    font-size: 22px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell span {
+    margin-left: auto;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .gutter-head {
+    padding: 18px 12px 0;
+    text-align: center;
+  }
+
+  .gutter-head > b {
+    display: block;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .gutter-head > span {
+    display: block;
+    margin-top: 4px;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Across nodes, EP with TP is one global group</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="ep">
+      <div class="ep-label">One EP group of all {world} ranks <span>· {experts} experts, {perRank} on each</span></div>
+      <div class="nodes" id="nodes"></div>
+    </div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">A node’s TP group shards attention and trains on one batch.</span>
+      <span class="s">DeepEP’s all-to-all crosses RDMA between the nodes.</span>
+      <span class="s">On {nodes} × {gpusPerNode} GPUs, ep{gpusPerNode} with tp2 forms {nodesWord} EP groups and is rejected at config time.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** Every number on the canvas is drawn from these. TP fills each node and EP spans every rank. */
+  const SETUP = { nodes: 2, gpusPerNode: 8, experts: 128 };
+  /** Colour marks the batch a rank trains on: TP keeps one batch per node, so DP is the node count. */
+  const NODE_HUES = ["--halo-blue", "--halo-violet"];
+  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+
+  if (SETUP.nodes !== 2) {
+    throw new Error("this layout draws two nodes joined by DP pairs");
+  }
+
+  const world = SETUP.nodes * SETUP.gpusPerNode;
+  const tp = SETUP.gpusPerNode;
+
+  if (SETUP.experts % world !== 0) {
+    throw new Error(`${SETUP.experts} experts do not split evenly over ep_size ${world}`);
+  }
+
+  const perRank = SETUP.experts / world;
+  const fmt = (n) => n.toLocaleString("en-US");
+  const nodesWord = NUMBER_WORDS[SETUP.nodes];
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    nodes: fmt(SETUP.nodes),
+    nodesWord,
+    nodesWordCap: nodesWord.replace(/^./, (c) => c.toUpperCase()),
+    gpusPerNode: fmt(SETUP.gpusPerNode),
+    ep: fmt(world),
+    tp: fmt(tp),
+    world: fmt(world),
+    dp: fmt(world / tp),
+    experts: fmt(SETUP.experts),
+    perRank: fmt(perRank),
+  };
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  const nodesEl = document.getElementById("nodes");
+  const cells = [];
+
+  for (let n = 0; n < SETUP.nodes; n += 1) {
+    const batch = String.fromCharCode(65 + n);
+    const hue = NODE_HUES[n];
+    const node = el("div", "node");
+    const head = el("div", "node-head", `Node ${n}`);
+    const tag = el("span", "batch");
+    const dot = el("i");
+    dot.style.setProperty("--hue", `var(${hue})`);
+    tag.append(dot, `batch ${batch}`);
+    head.append(tag);
+    const facts = el("dl", "facts");
+    facts.append(el("dt", undefined, "TP group"), el("dd", undefined, `ranks ${fmt(n * SETUP.gpusPerNode)}–${fmt((n + 1) * SETUP.gpusPerNode - 1)} over NVLink`));
+    node.append(head, facts);
+
+    const list = el("div", "cells");
+    cells.push([]);
+
+    for (let i = 0; i < SETUP.gpusPerNode; i += 1) {
+      const rank = n * SETUP.gpusPerNode + i;
+      const cell = el("div", "cell");
+      const cellDot = el("i");
+      cellDot.style.setProperty("--hue", `var(${hue})`);
+      cell.append(cellDot, `R${rank}`, el("span", undefined, `experts ${fmt(perRank * rank)}–${fmt(perRank * rank + perRank - 1)}`));
+      list.append(cell);
+      cells[n].push(cell);
+    }
+
+    node.append(list);
+    node.style.gridColumn = String(n * 2 + 1);
+    node.style.gridRow = "1";
+    nodesEl.append(node);
+  }
+
+  const gutter = el("div", "gutter-head");
+  const gutterSub = el("span");
+  gutterSub.append("Each pair shards the ", el("span", "nw", "non-expert"), " parameters");
+  gutter.append(el("b", undefined, "DP pairs over RDMA"), gutterSub);
+  gutter.style.gridColumn = "2";
+  gutter.style.gridRow = "1";
+  nodesEl.append(gutter);
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  /** A straight 2px line with a small head at its end, and at its start too when `both`. */
+  function arrow(x1, y1, x2, y2, hue, both) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const head = (x, y, a) => {
+      const bx = x - len * Math.cos(a);
+      const by = y - len * Math.sin(a);
+      const px = half * Math.sin(a);
+      const py = -half * Math.cos(a);
+      wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x},${y} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+
+      return [x, y];
+    };
+    const [ex, ey] = head(x2, y2, angle);
+    const [sx, sy] = both ? head(x1, y1, angle + Math.PI) : [x1, y1];
+    wires.append(svgEl("line", { x1: sx, y1: sy, x2: ex, y2: ey, stroke: hue, "stroke-width": 2 }));
+  }
+
+  /** Right edge of `from` to left edge of `to`, at height `y` (default: the middle of `from`). */
+  function connect(from, to, hue, { both = false, y } = {}) {
+    const a = box(from);
+    const z = box(to);
+    const at = y ?? (a.t + a.b) / 2;
+    arrow(a.r + 1, at, z.l - 1, at, hue, both);
+  }
+
+  // Each TP position pairs rank i on node 0 with the same position on node 1, across the gap between the nodes.
+  const [left, right] = cells.map((column) => column[0].closest(".node"));
+
+  for (let i = 0; i < SETUP.gpusPerNode; i += 1) {
+    const a = box(cells[0][i]);
+    connect(left, right, token("--secondary"), { both: true, y: (a.t + a.b) / 2 });
+  }
+</script>
+</body>
+</html>

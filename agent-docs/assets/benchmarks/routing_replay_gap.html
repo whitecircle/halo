@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Routing replay gap</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+    --halo-blue-dim: color-mix(in oklab, var(--halo-blue) 38%, var(--bg));
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --engine-col: 140px;
+    --model-col: 250px;
+    --ratio-col: 150px;
+    --col-gap: 40px;
+    --track-left: calc(var(--engine-col) + var(--model-col) + 2 * var(--col-gap));
+    --track-right: calc(var(--ratio-col) + var(--col-gap));
+    --row-h: 96px;
+    --dot: 18px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  /* --inset moves zero right along the track and the axis, to fit the values left of it. */
+  .figure {
+    --inset: 0px;
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--engine-col) var(--model-col) 1fr var(--ratio-col);
+    column-gap: var(--col-gap);
+    align-items: center;
+    height: var(--row-h);
+  }
+
+  /* The colour key and the ratio column's head share the first row. */
+  .row.head {
+    height: auto;
+    margin-bottom: 12px;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .key { display: flex; gap: 32px; color: var(--body); white-space: nowrap; }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .row.split { margin-top: 14px; padding-top: 14px; height: calc(var(--row-h) + 14px); border-top: 1px solid var(--line); }
+
+  .engine {
+    font-family: var(--serif);
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .model {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .ratio {
+    text-align: right;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .row.head .ratio { font-size: 21px; color: var(--secondary); }
+
+  .track {
+    position: relative;
+    height: var(--dot);
+  }
+
+  .span {
+    position: absolute;
+    top: 50%;
+    height: 6px;
+    transform: translateY(-50%);
+    border-radius: 3px;
+    background: var(--halo-blue-dim);
+  }
+
+  /* No replay is a hollow ring, R2 a square, R3 a filled dot. */
+  .mark {
+    display: inline-block;
+    flex: none;
+    width: var(--dot);
+    height: var(--dot);
+  }
+
+  .mark.none { border: 3px solid var(--tertiary); border-radius: 50%; background: var(--bg); }
+
+  .mark.r2 { width: 16px; height: 16px; border-radius: 3px; background: var(--halo-violet); }
+
+  .mark.r3 { border-radius: 50%; background: var(--halo-blue); }
+
+  .track .mark {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+  }
+
+  .value {
+    position: absolute;
+    top: 50%;
+    transform: translate(-100%, -50%);
+    margin-left: calc(var(--dot) / -2 - 10px);
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* The axis line runs under the plot in the track column, a tick mark hanging below it at each label. */
+  .ticks {
+    position: relative;
+    height: 36px;
+    margin: 4px var(--track-right) 0 var(--track-left);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis { position: absolute; top: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: 6px; border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: 10px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span.start { transform: none; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Only R3 narrows the trainer–engine gap</h1>
+    <p class="subtitle">Mean absolute log-ratio over the scored tokens at step 1, in nats</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="plot" id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">One short tool-call task before any update: two ranks at ep1, 8 rows per rank, one run per arm, each arm its own rollouts.</span>
+      <span class="s">vLLM samples at top-p 1.0, SGLang at 0.95.</span>
+      <span class="s">R3 is experimental, and this is not a training result.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // [engine, checkpoint, log-ratio under none, R2, R3]
+  const ROWS = [
+    ["vLLM", "gpt-oss-20b", 0.0300, 0.0288, 0.0158],
+    ["vLLM", "Qwen3.6-35B-A3B", 0.0279, 0.0304, 0.0111],
+    ["vLLM", "GLM-4.7-Flash", 0.0375, 0.0388, 0.0318],
+    ["SGLang", "gpt-oss-20b", 0.0289, 0.0299, 0.0147],
+  ];
+  const MODES = [["None", "none"], ["Recompute (R2)", "r2"], ["Rollout (R3)", "r3"]];
+
+  /**
+   * Ticks from zero at the smallest nice step (1, 2, 2.5 or 5 × 10^k) that puts at most `most` steps at or below
+   * `max`, so 4 to 6 ticks at the default, the last at or short of `max`.
+   */
+  function niceTicks(max, most = 5) {
+    const unit = 10 ** Math.floor(Math.log10(max / (most + 1)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * unit).find((s) => max / s < most + 1);
+    const round = (value) => Number(value.toPrecision(12));
+
+    return Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
+  }
+
+  /**
+   * A zero-based axis that ends where the data ends: the smallest maximum from `top` up, in steps of 2% of `top`, for
+   * which `fits(max, ticks)` holds on `niceTicks(max, most)`, so a `fits` that draws the chart leaves it drawn on that
+   * axis. Throws past ten times `top`.
+   */
+  function niceAxis(top, fits, most = 5) {
+    for (let max = top; max <= 10 * top; max += top / 50) {
+      const ticks = niceTicks(max, most);
+
+      if (fits(max, ticks)) {
+        return { max, ticks };
+      }
+    }
+
+    throw new Error(`No axis up to ${10 * top} fits every label inside its plot: widen the plot or shorten the label.`);
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const figure = document.getElementById("figure");
+  const plot = document.getElementById("plot");
+  const tickRow = document.getElementById("ticks");
+
+  /**
+   * Lays the rows and the axis out on a scale from zero to `max` nats, ticked at `ticks`, zero inset just far
+   * enough that every R3 value starts inside the track.
+   */
+  function draw(max, ticks) {
+    const length = (nats) => `calc(${nats / max} * (100% - var(--inset)))`;
+    const at = (nats) => `calc(var(--inset) + ${length(nats)})`;
+    const leftValues = [];
+    figure.style.setProperty("--inset", "0px");
+    plot.replaceChildren();
+
+    const head = el("div", "row head");
+    const key = el("div", "key");
+
+    for (const [name, kind] of MODES) {
+      const item = el("span");
+      item.append(el("i", `mark ${kind}`), name);
+      key.append(item);
+    }
+
+    head.append(el("div"), el("div"), key, el("div", "ratio", "R3 below none"));
+    plot.append(head);
+
+    let lastEngine;
+
+    for (const [engine, model, none, r2, r3] of ROWS) {
+      const row = el("div", "row");
+
+      if (lastEngine !== undefined && engine !== lastEngine) {
+        row.classList.add("split");
+      }
+
+      const track = el("div", "track");
+      const span = el("div", "span");
+      span.style.left = at(r3);
+      span.style.width = length(none - r3);
+      track.append(span);
+
+      MODES.forEach(([, kind], i) => {
+        const mark = el("i", `mark ${kind}`);
+        mark.style.left = at([none, r2, r3][i]);
+        track.append(mark);
+      });
+
+      const value = el("div", "value", r3.toFixed(4));
+      value.style.left = at(r3);
+      leftValues.push([value, r3 / max]);
+      track.append(value);
+      row.append(el("div", "engine", engine === lastEngine ? "" : engine), el("div", "model", model), track, el("div", "ratio", `${(none / r3).toFixed(1)}×`));
+      plot.append(row);
+      lastEngine = engine;
+    }
+
+    const axis = el("div", "axis");
+    axis.style.left = at(0);
+    axis.style.width = length(max);
+    tickRow.replaceChildren(axis);
+
+    for (const tick of ticks) {
+      const mark = el("i");
+      // A mark is drawn 1px wide right of its offset, so one at the axis end steps back onto the line.
+      mark.style.left = `min(${at(tick)}, 100% - 1px)`;
+      const label = el("span", tick === 0 ? "start" : undefined, tick === 0 ? "0 nats" : String(tick));
+      label.style.left = at(tick);
+      tickRow.append(mark, label);
+    }
+
+    // An inset moves a value at share s of the axis right by inset × (1 − s), from where it sits at no inset.
+    const trackLeft = plot.querySelector(".track").getBoundingClientRect().left;
+    const inset = Math.max(0, ...leftValues.map(([node, share]) => (trackLeft - node.getBoundingClientRect().left) / (1 - share)));
+    figure.style.setProperty("--inset", `${Math.ceil(inset)}px`);
+  }
+
+  // The axis ends at the smallest maximum at which every mark and value ends inside its track.
+  niceAxis(Math.max(...ROWS.flatMap((row) => row.slice(2))), (max, ticks) => {
+    draw(max, ticks);
+
+    return [...plot.querySelectorAll(".track > *")].every((node) => node.getBoundingClientRect().right <= node.parentElement.getBoundingClientRect().right);
+  });
+
+  for (const [engine, model, none, r2, r3] of ROWS) {
+    console.log(`${engine} ${model}: none/R3 ${(none / r3).toFixed(3)}, R2/none ${(r2 / none).toFixed(3)}`);
+  }
+</script>
+</body>
+</html>

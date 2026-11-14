@@ -22,14 +22,11 @@ setup), GitGuardian and CodeRabbit report on every PR from outside `.github/work
   `tests/cpu/conventions/test_hosted_conventions_are_stdlib.py` fails, in the image too, when a listed
   file, a package `__init__.py` or conftest pytest runs for it, or a file one of them imports or loads
   reaches torch, `halo` or any other non-stdlib import. `.github/scripts/locked_version.py` reads each
-  job's tool pin (ruff, pytest, matplotlib) out of `uv.lock`.
+  job's tool pin (ruff, pytest) out of `uv.lock`.
 - **`docs.yml`.** `scripts/docs/check_links.sh` blocks on a broken relative link or heading anchor across
   `agent-docs/`, `human-docs/`, `skills/` and the root markdown (an anchor must be GitHub's slug, so a
   `{#id}` heading fails), and resolves their code: a repo-root path must exist, and a dotted first-party
-  name must name a module and a name it binds, read off the source. Its `diagrams` job re-runs
-  `scripts/diagrams/` in `python:3.12-slim` at `uv.lock`'s matplotlib and byte-compares the result with
-  the committed figures under `agent-docs/assets/`: run `make diagrams` and commit after editing a
-  generator.
+  name must name a module and a name it binds, read off the source.
 - **`sensitive-label.yml`.** A PR whose own commits change a path listed in `.github/sensitive-paths` (a
   moved file counts under its old path) fails until it carries the `sensitive` label, which a maintainer
   adds once the change is approved as `CLAUDE.md` requires; a label change re-runs it. It runs on
@@ -38,7 +35,7 @@ setup), GitGuardian and CodeRabbit report on every PR from outside `.github/work
   `tests/cpu/conventions/test_sensitive_label.py` also fails when a listed glob matches no file.
 
 Blocking is the `main` ruleset's **required status checks** (`ruff`, `actionlint`, `build`); a red check
-outside that set, `diagrams` included, still lets a PR merge. `conventions` and `sensitive-label` block
+outside that set still lets a PR merge. `conventions` and `sensitive-label` block
 once a repo admin adds them to the set and creates the `sensitive` label.
 
 `.pre-commit-config.yaml` mirrors the ruff gates on the host at commit time, plus whitespace fixers and

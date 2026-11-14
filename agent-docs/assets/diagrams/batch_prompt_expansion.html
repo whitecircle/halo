@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Batch prompt expansion</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --label-col: 56px;
+    --prompt-col: 150px;
+    --block-gap: 28px;
+    --cell-gap: 4px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    margin-block: auto;
+    padding-block: 30px;
+  }
+
+  /* Rank labels, one block per prompt group, then the prompts each rank drew. */
+  .round {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--groups), 1fr) var(--prompt-col);
+    column-gap: var(--block-gap);
+    row-gap: 8px;
+    align-items: center;
+  }
+
+  .col-head {
+    align-self: end;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    margin-bottom: 4px;
+    font-size: 23px;
+    color: var(--body);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .col-head small {
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .col-head.prompts { text-align: left; }
+
+  .rank {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .block {
+    display: grid;
+    grid-template-columns: repeat(var(--generations), 1fr);
+    gap: var(--cell-gap);
+  }
+
+  .block i {
+    height: 40px;
+    border-radius: 7px;
+    background: var(--halo-blue);
+  }
+
+  .prompts-of {
+    font-size: 25px;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .units {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 32px;
+    margin-top: 44px;
+  }
+
+  .card {
+    padding: 20px 24px 22px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A card's facts: a quiet label beside the value it names. */
+  .card dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 4px;
+    margin-top: 12px;
+    font-size: 23px;
+    line-height: 1.3;
+  }
+
+  .card dt {
+    color: var(--tertiary);
+    white-space: nowrap;
+  }
+
+  .card dd {
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Each prompt’s {generations} rows stay on one rank</h1>
+  </header>
+
+  <div class="figure">
+    <div class="round" id="round"></div>
+    <div class="units" id="units"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">TRL’s RepeatSampler delivers each prompt’s {generations} rows consecutively, on one rank.</span>
+      <span class="s">A group never straddles ranks: per_device_train_batch_size × steps_per_generation must divide by num_generations.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** The code-contests stage-1 recipe. Every number on the canvas is drawn from these. */
+  const SETUP = { ranks: 6, batchSize: 1, stepsPerGeneration: 24, generations: 8 };
+
+  const ROUND = SETUP.batchSize * SETUP.stepsPerGeneration;
+  const GROUPS = ROUND / SETUP.generations;
+  const TOTAL = SETUP.ranks * ROUND;
+
+  if (!Number.isInteger(GROUPS)) {
+    throw new Error(`batch size × steps per generation (${ROUND}) must divide by num_generations (${SETUP.generations}), or a group straddles ranks`);
+  }
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    generations: fmt(SETUP.generations),
+  };
+
+  const UNITS = [
+    { name: "Row", hue: "var(--halo-blue)", rows: [["Holds", "one episode, one trajectory"], ["Advantage", "one, shared by its turns"]] },
+    { name: "Group", rows: [["Rows", `num_generations = ${fmt(SETUP.generations)}`], ["Holds", "one prompt, on one rank"]] },
+    {
+      name: "Optimizer step",
+      rows: [
+        ["Rows", `${fmt(TOTAL)} = ${fmt(TOTAL / SETUP.generations)} prompts × ${fmt(SETUP.generations)}`],
+        ["Each rank", `${fmt(SETUP.stepsPerGeneration)} micro-batches of ${fmt(SETUP.batchSize)} ${SETUP.batchSize === 1 ? "row" : "rows"}`],
+      ],
+    },
+  ];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const round = document.getElementById("round");
+  round.style.setProperty("--groups", GROUPS);
+  round.style.setProperty("--generations", SETUP.generations);
+  round.append(el("div"));
+
+  for (let g = 0; g < GROUPS; g += 1) {
+    const head = el("div", "col-head", `Group ${g + 1} `);
+    head.append(el("small", undefined, `· ${fmt(SETUP.generations)} rows`));
+    round.append(head);
+  }
+
+  round.append(el("div", "col-head prompts", "Prompts"));
+
+  for (let r = 0; r < SETUP.ranks; r += 1) {
+    round.append(el("div", "rank", `R${r}`));
+
+    for (let g = 0; g < GROUPS; g += 1) {
+      const block = el("div", "block");
+
+      for (let i = 0; i < SETUP.generations; i += 1) {
+        block.append(el("i"));
+      }
+
+      round.append(block);
+    }
+
+    const first = r * GROUPS + 1;
+    round.append(el("div", "prompts-of", `${first}–${first + GROUPS - 1}`));
+  }
+
+  const units = document.getElementById("units");
+
+  for (const unit of UNITS) {
+    const card = el("div", "card");
+    const name = el("div", "name");
+
+    if (unit.hue !== undefined) {
+      const dot = el("i");
+      dot.style.setProperty("--hue", unit.hue);
+      name.append(dot);
+    }
+
+    name.append(unit.name);
+    card.append(name);
+
+    const facts = el("dl");
+
+    for (const [label, value] of unit.rows) {
+      facts.append(el("dt", undefined, label), el("dd", undefined, value));
+    }
+
+    card.append(facts);
+
+    units.append(card);
+  }
+
+  console.log(`round ${ROUND} rows = ${GROUPS} prompts x ${SETUP.generations} · step ${TOTAL} rows = ${TOTAL / SETUP.generations} prompts`);
+</script>
+</body>
+</html>

@@ -1,0 +1,382 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CP training step</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 20px;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+
+  /* The step snakes: left to right, back right to left through the decoder layers, then left to right. */
+  .row {
+    display: grid;
+    align-items: center;
+    column-gap: 72px;
+  }
+
+  /* Each card of the first row takes its own width, the spare split evenly. */
+  .row.three { grid-template-columns: repeat(3, auto); }
+
+  .row.two { grid-template-columns: repeat(2, 1fr); column-gap: 120px; }
+
+  .row + .row,
+  .frame + .row,
+  .row + .frame { margin-top: 40px; }
+
+  .frame {
+    position: relative;
+    padding: 24px 24px 22px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  /* The label sits on the frame's top edge, so the frame costs no extra row. */
+  .frame-label {
+    position: absolute;
+    top: -13px;
+    left: 20px;
+    padding: 0 10px;
+    background: var(--bg);
+    font-size: 21px;
+    line-height: 26px;
+    color: var(--secondary);
+  }
+
+  .card {
+    padding: 15px 26px 17px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .top {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .card .name {
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .card .scope {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .card .scope i {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A card's facts: a quiet label and its value, in two aligned columns. */
+  .facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 2px;
+    margin-top: 8px;
+    font-size: 23px;
+    line-height: 1.28;
+  }
+
+  .facts dt { color: var(--tertiary); }
+
+  .facts dd { color: var(--body); }
+
+  .hop {
+    position: absolute;
+    font-size: 21px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Only attention ever sees the whole sequence</h1>
+  </header>
+
+  <div class="figure" id="figure"></div>
+
+  <footer>
+    <p>
+      <span class="s">CP size {cpSize} on a {sequence}-token sequence with {heads} attention heads.</span>
+      <span class="s">Violet marks the whole sequence, blue one rank’s chunk.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { cpSize: 4, sequence: 32768, heads: 64 };
+
+  if (SETUP.sequence % SETUP.cpSize !== 0 || SETUP.heads % SETUP.cpSize !== 0) {
+    throw new Error(`the sequence (${SETUP.sequence}) and the heads (${SETUP.heads}) must divide by cp_size ${SETUP.cpSize}`);
+  }
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = { cpSize: fmt(SETUP.cpSize), sequence: fmt(SETUP.sequence), heads: fmt(SETUP.heads) };
+  /** One rank's share of the sequence, as the shapes write it. */
+  const S_CHUNK = `S/${SETUP.cpSize}`;
+  /** Colour marks how much of the row a stage holds: violet the whole sequence, blue this rank's chunk. */
+  const WHOLE = { hue: "--halo-violet", tokens: SETUP.sequence };
+  const CHUNK = { hue: "--halo-blue", tokens: SETUP.sequence / SETUP.cpSize };
+
+  const ROWS = [
+    {
+      kind: "three",
+      cards: [
+        { id: "batch", name: "Full batch", scope: WHOLE, facts: [["Tensors", "input ids, labels, mask, position ids"], ["Shape", "[B, S]"], ["Held by", "every CP rank"]] },
+        { id: "split", name: "Split the sequence", scope: CHUNK, facts: [["Chunk", `${S_CHUNK} per rank, contiguous`], ["Padding", "S to a multiple of cp_size"]] },
+        { id: "embed", name: "Embeddings", scope: CHUNK, facts: [["In", `[B, ${S_CHUNK}]`], ["Out", `[B, ${S_CHUNK}, hidden]`]] },
+      ],
+    },
+    {
+      kind: "two",
+      frame: "× N decoder layers",
+      cards: [
+        { id: "mlp", name: "MLP or MoE experts", scope: CHUNK, facts: [["Shape", `[B, ${S_CHUNK}, hidden]`], ["CP-aware", "no"], ["EP dispatch", `${S_CHUNK} tokens per rank`]] },
+        { id: "attn", name: "Ulysses attention", scope: WHOLE, facts: [["Sequence", "full S"], ["Heads", `${fmt(SETUP.heads / SETUP.cpSize)} of ${fmt(SETUP.heads)} per rank`], ["Steps", "all-to-all, flash, all-to-all"]] },
+      ],
+    },
+    {
+      kind: "two",
+      cards: [
+        { id: "head", name: "Head, per chunk", scope: CHUNK, facts: [["Logits", `[B, ${S_CHUNK}, V], never gathered`], ["Fused loss", "no logits plane"], ["Boundary label", "from the next chunk"]] },
+        { id: "loss", name: "Loss", scope: CHUNK, facts: [["Per rank", "cp_size · local_sum / global_tokens"], ["global_tokens", "all-reduced over CP"], ["Router aux", "no cp_size factor"]] },
+      ],
+    },
+  ];
+  /** Arrows in step order: [from, to, direction, what they carry, label]. Only the input crosses whole. */
+  const FLOW = [
+    ["batch", "split", "right", WHOLE],
+    ["split", "embed", "right", CHUNK],
+    ["embed", "attn", "down", CHUNK, "hidden states"],
+    ["attn", "mlp", "left", CHUNK],
+    ["mlp", "head", "down", CHUNK, "final norm"],
+    ["head", "loss", "right", CHUNK],
+  ];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const figure = document.getElementById("figure");
+  const cards = {};
+
+  for (const row of ROWS) {
+    const grid = el("div", `row ${row.kind}`);
+
+    for (const spec of row.cards) {
+      const card = el("div", "card");
+      const top = el("div", "top");
+      const scope = el("span", "scope");
+      const dot = el("i");
+      dot.style.setProperty("--hue", `var(${spec.scope.hue})`);
+      scope.append(dot, `${spec.scope.tokens.toLocaleString("en-US")} tokens`);
+      top.append(el("span", "name", spec.name), scope);
+      const facts = el("dl", "facts");
+
+      for (const [label, value] of spec.facts) {
+        facts.append(el("dt", undefined, label), el("dd", undefined, value));
+      }
+
+      card.append(top, facts);
+
+      grid.append(card);
+      cards[spec.id] = card;
+    }
+
+    if (row.frame === undefined) {
+      figure.append(grid);
+    } else {
+      const frame = el("div", "frame");
+      frame.append(el("div", "frame-label", row.frame), grid);
+      figure.append(frame);
+    }
+  }
+
+  const wires = svgEl("svg", { class: "wires" });
+  figure.append(wires);
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  function arrow(x1, y1, x2, y2, hue) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** Edge of `from` to the facing edge of `to`; a downward line runs at the middle of the narrower card.
+   *  Returns the line's x and the middle of its stretch outside any frame, where a label goes. */
+  function connect(from, to, hue, dir) {
+    const a = box(from);
+    const z = box(to);
+
+    if (dir === "down") {
+      const narrow = a.r - a.l < z.r - z.l ? a : z;
+      const x = (narrow.l + narrow.r) / 2;
+      arrow(x, a.b + 1, x, z.t - 1, hue);
+      const outer = (node) => box(node.closest(".frame") ?? node);
+
+      return { x, y: (outer(from).b + outer(to).t) / 2 };
+    }
+
+    const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
+
+    if (dir === "right") {
+      arrow(a.r + 1, y, z.l - 1, y, hue);
+    } else {
+      arrow(a.l - 1, y, z.r + 1, y, hue);
+    }
+
+    return { x: 0, y };
+  }
+
+  // Each line carries the colour of what it hands on.
+  for (const [from, to, dir, data, label] of FLOW) {
+    const at = connect(cards[from], cards[to], token(data.hue), dir);
+
+    if (label !== undefined) {
+      const tag = el("div", "hop", label);
+      figure.append(tag);
+      tag.style.left = `${at.x + 16}px`;
+      tag.style.top = `${at.y - tag.getBoundingClientRect().height / 2}px`;
+    }
+  }
+</script>
+</body>
+</html>

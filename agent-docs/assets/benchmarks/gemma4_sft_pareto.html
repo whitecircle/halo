@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Gemma 4 SFT frameworks</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+    --danger: #ff73c9;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --y-col: 56px;
+    --panel-gap: 64px;
+    --plot-h: 440px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  .figure {
+    margin-block: auto;
+    padding-block: 24px;
+  }
+
+  .load-error {
+    grid-column: 1 / -1;
+    font-size: 25px;
+    color: var(--danger);
+  }
+
+  .panels {
+    display: grid;
+    grid-template-columns: var(--y-col) 1fr var(--panel-gap) 1fr;
+    grid-template-rows: auto var(--plot-h) auto;
+  }
+
+  .panel-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 28px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key {
+    display: flex;
+    gap: 26px;
+    font-family: var(--sans);
+    font-size: 21px;
+    letter-spacing: 0;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key svg { width: 18px; height: 18px; overflow: visible; }
+
+  .plot { position: relative; }
+
+  .plot svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .point-label {
+    position: absolute;
+    font-size: 25px;
+    line-height: 1;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .point-label.halo { font-weight: 500; color: var(--text); }
+
+  .yticks { position: relative; }
+
+  .yticks span,
+  .xticks span {
+    position: absolute;
+    font-size: 19px;
+    line-height: 1;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .yticks span { left: 0; transform: translateY(-50%); }
+
+  .xticks {
+    position: relative;
+    height: 26px;
+    margin-top: 12px;
+  }
+
+  .xticks span { top: 0; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Halo leads Gemma 4 full SFT at both lengths</h1>
+    <p class="subtitle">Cluster tokens/s against peak GiB per GPU, <span id="framework-count"></span> frameworks on <span class="nw">Gemma 4 26B-A4B</span></p>
+  </header>
+
+  <div class="figure">
+    <div class="panels" id="panels"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">2 × B300, BF16, micro-batch 1 per GPU, every framework as of 2026-09-24, each in its fastest configuration tried.</span>
+      <span class="s">A point is the mean of the framework’s valid runs, and peak is the max over ranks.</span>
+      <span class="s">A hollow point turned on activation checkpointing to fit <span id="checkpointed-lengths"></span> tokens.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // A summary that fails to load would leave the panels empty: put the error on the canvas instead.
+  window.addEventListener("error", (event) => {
+    document.getElementById("panels").replaceChildren(el("p", "load-error", event.message));
+  });
+
+  const NAMES = {
+    halo: "Halo",
+    axolotl: "Axolotl",
+    automodel: "NeMo AutoModel",
+    unsloth: "Unsloth",
+    megatron_bridge: "Megatron Bridge",
+    ms_swift: "MS-SWIFT",
+  };
+  // The runs come from the per-run summaries the page's tables cite. Per framework: the side of the point its label
+  // takes when that side is clear, and whether it turned on activation checkpointing to fit, which the summaries do
+  // not record.
+  const SUMMARY = (seq) => `gemma4-sft-2026-09/summary_${seq}.tsv`;
+  const PANELS = [
+    {
+      seq: 2048,
+      frameworks: {
+        halo: { at: "right" },
+        axolotl: { at: "right" },
+        automodel: { at: "right" },
+        unsloth: { at: "above" },
+        megatron_bridge: { at: "below" },
+        ms_swift: { at: "left" },
+      },
+    },
+    {
+      seq: 16384,
+      frameworks: {
+        halo: { at: "left" },
+        axolotl: { at: "right" },
+        automodel: { checkpointed: true, at: "left" },
+        unsloth: { checkpointed: true, at: "right" },
+        megatron_bridge: { checkpointed: true, at: "right" },
+        ms_swift: { checkpointed: true, at: "left" },
+      },
+    },
+  ];
+  const R_HALO = 13;
+  const R_OTHER = 9;
+  /** Distance from a point’s edge to its label’s text. */
+  const LABEL_GAP = 10;
+  /** Room a label claims either side of its text, so two labels side by side keep their texts 12px apart. */
+  const LABEL_PAD = 5;
+  /** Room a label’s claim keeps from every other point and claim. */
+  const LABEL_CLEARANCE = 2;
+  /** Room a label’s claim keeps from the axis lines along the plot’s left and bottom edges, and a dot from the left one. */
+  const AXIS_CLEARANCE = 8;
+  /** Length of a tick mark, drawn outside the plot. */
+  const TICK_LENGTH = 6;
+  /** How far an axis end moves out per try, as a share of the data's span, until every dot and label fits. */
+  const AXIS_GROWTH = 0.01;
+  const COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+  const round = (value) => Number(value.toPrecision(12));
+
+  /** Ticks at the multiples, from min to max, of the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six. */
+  function niceTicks(min, max) {
+    const e = Math.floor(Math.log10(max - min)) - 1;
+    const count = (step) => Math.floor(max / step + 1e-9) - Math.ceil(min / step - 1e-9) + 1;
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+      .map((m) => round(e < 0 ? m / 10 ** -e : m * 10 ** e))
+      .find((s) => count(s) <= 6);
+    const first = Math.ceil(min / step - 1e-9);
+
+    return Array.from({ length: count(step) }, (_, i) => round((first + i) * step));
+  }
+
+  /**
+   * An axis that ends where the data ends, lo to hi, its ticks inside it. overflow(axis) places the marks on a candidate
+   * axis and returns "min" or "max" while a mark or its label crosses that end of the plot, which then moves out by
+   * AXIS_GROWTH of the data's span, so the last call leaves the marks placed on the axis returned.
+   */
+  function fitAxis(lo, hi, overflow = () => undefined) {
+    const axis = (min, max) => ({ min, max, ticks: niceTicks(min, max) });
+    const growth = AXIS_GROWTH * (hi - lo);
+    let fitted = axis(lo, hi);
+
+    for (let end = overflow(fitted), moves = 1; end !== undefined; end = overflow(fitted), moves += 1) {
+      if (moves > 200) {
+        throw new Error(`no axis out to ${round(fitted.min)}–${round(fitted.max)} holds every mark and its label`);
+      }
+
+      fitted = end === "max" ? axis(fitted.min, fitted.max + growth) : axis(fitted.min - growth, fitted.max);
+    }
+
+    return fitted;
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const mean = (values) => values.reduce((sum, v) => sum + v, 0) / values.length;
+  const clamp = (value, lo, hi) => Math.min(Math.max(value, lo), hi);
+
+  /** Framework -> [[tokens/s, peak GiB]] over the valid runs of a summary. Raises on a framework the panel does not place. */
+  function validRuns(seq, frameworks) {
+    const request = new XMLHttpRequest();
+    // Synchronous, so the layout below runs on loaded data. A file:// read needs Chrome's --allow-file-access-from-files.
+    request.open("GET", SUMMARY(seq), false);
+
+    try {
+      request.send();
+    } catch {
+      // Left empty below, so the one message names the file and the remedy.
+    }
+
+    if (request.responseText === "") {
+      throw new Error(`Could not read ${SUMMARY(seq)} beside this page: render it with the visuals skill's render.sh.`);
+    }
+
+    const [header, ...lines] = request.responseText.trim().split("\n").map((line) => line.split("\t"));
+    const column = (name) => header.indexOf(name);
+    const runs = {};
+
+    for (const row of lines) {
+      if (row[column("valid")] !== "yes") {
+        continue;
+      }
+
+      const name = row[column("framework")];
+
+      if (!(name in frameworks)) {
+        throw new Error(`${SUMMARY(seq)} has valid runs of ${name}, which the ${seq}-token panel does not place`);
+      }
+
+      (runs[name] ??= []).push([Number(row[column("tokens_per_second")]), Number(row[column("peak_alloc_gib")])]);
+    }
+
+    for (const name of Object.keys(frameworks)) {
+      if (!(name in runs)) {
+        throw new Error(`${SUMMARY(seq)} has no valid run of ${name}`);
+      }
+    }
+
+    return runs;
+  }
+
+  /** A point's mark: Halo filled blue, another framework filled grey, or a grey ring when it checkpointed. */
+  function dot(cx, cy, kind) {
+    if (kind === "halo") {
+      return svgEl("circle", { cx, cy, r: R_HALO, fill: token("--halo-blue") });
+    }
+
+    if (kind === "checkpointed") {
+      return svgEl("circle", { cx, cy, r: R_OTHER - 1.5, fill: "none", stroke: token("--tertiary"), "stroke-width": 3 });
+    }
+
+    return svgEl("circle", { cx, cy, r: R_OTHER, fill: token("--tertiary") });
+  }
+
+  function keyItem(kind, text) {
+    const item = el("span");
+    const icon = svgEl("svg", { viewBox: "0 0 18 18" });
+    icon.append(dot(9, 9, kind));
+    item.append(icon, text);
+
+    return item;
+  }
+
+  const checkpointed = PANELS.filter((panel) => Object.values(panel.frameworks).some((spec) => spec.checkpointed));
+  const lengths = checkpointed.map((panel) => panel.seq.toLocaleString("en-US"));
+  const frameworks = new Set(PANELS.flatMap((panel) => Object.keys(panel.frameworks)));
+  const or = new Intl.ListFormat("en", { type: "disjunction" });
+  document.getElementById("framework-count").textContent = COUNT_WORDS[frameworks.size];
+  document.getElementById("checkpointed-lengths").textContent = or.format(lengths);
+
+  const panels = document.getElementById("panels");
+  const plots = [];
+
+  PANELS.forEach((panel, p) => {
+    const column = p === 0 ? "1 / 3" : "4 / 5";
+    const head = el("div", "panel-head", `${panel.seq.toLocaleString("en-US")} tokens per row`);
+    head.style.gridColumn = column;
+    head.style.gridRow = "1";
+
+    if (checkpointed.includes(panel)) {
+      const key = el("div", "key");
+      key.append(keyItem("checkpointed", "Checkpointed to fit"));
+      head.append(key);
+    }
+
+    const plot = el("div", "plot");
+    plot.style.gridColumn = p === 0 ? "2" : "4";
+    plot.style.gridRow = "2";
+    const xticks = el("div", "xticks");
+    xticks.style.gridColumn = p === 0 ? "2" : "4";
+    xticks.style.gridRow = "3";
+    panels.append(head, plot, xticks);
+
+    const runs = validRuns(panel.seq, panel.frameworks);
+    const points = Object.entries(panel.frameworks).map(([name, spec]) => ({
+      name,
+      spec,
+      rate: mean(runs[name].map((run) => run[0])),
+      peak: mean(runs[name].map((run) => run[1])),
+    }));
+    const halo = points.find((point) => point.name === "halo");
+    const runnerUp = points.filter((point) => point.name !== "halo").sort((a, b) => b.rate - a.rate)[0];
+    plots.push({ seq: panel.seq, plot, xticks, points, halo, runnerUp, ratio: halo.rate / runnerUp.rate });
+  });
+
+  const yticks = el("div", "yticks");
+  yticks.style.gridColumn = "1";
+  yticks.style.gridRow = "2";
+  panels.append(yticks);
+
+  /**
+   * Draws both panels on the shared axes and returns { x, y, blocked }: per axis, the end a dot or label crosses, if any
+   * (the y axis starts at zero, so only its top), and the points whose label no side holds clear, drawn on their side.
+   */
+  function draw(xAxis, yAxis) {
+    const layout = { x: undefined, y: undefined, blocked: [] };
+
+    for (const { seq, plot, xticks, points, halo, runnerUp, ratio } of plots) {
+      const w = plot.clientWidth;
+      const h = plot.clientHeight;
+      const box = plot.getBoundingClientRect();
+      const room = panels.getBoundingClientRect();
+      const x = (gib) => ((gib - xAxis.min) / (xAxis.max - xAxis.min)) * w;
+      const y = (rate) => h - (rate / yAxis.max) * h;
+      const svg = svgEl("svg", {});
+      plot.replaceChildren(svg);
+      xticks.replaceChildren();
+      // Point names sit on the plot, so it draws no gridlines: axis lines on its left and bottom edges carry the scale,
+      // with a tick mark outside the plot at each tick label.
+      const axisStroke = { fill: "none", stroke: token("--line"), "stroke-width": 1 };
+      svg.append(svgEl("polyline", { points: `0,0 0,${h} ${w},${h}`, ...axisStroke }));
+
+      for (const tick of yAxis.ticks) {
+        svg.append(svgEl("line", { x1: -TICK_LENGTH, x2: 0, y1: y(tick), y2: y(tick), ...axisStroke }));
+      }
+
+      xAxis.ticks.forEach((tick, i) => {
+        svg.append(svgEl("line", { x1: x(tick), x2: x(tick), y1: h, y2: h + TICK_LENGTH, ...axisStroke }));
+        const label = el("span", undefined, i === xAxis.ticks.length - 1 ? `${tick} GiB` : String(tick));
+        xticks.append(label);
+        // Centred on its tick, kept inside the figure.
+        const labelWidth = label.offsetWidth;
+        label.style.left = `${clamp(x(tick) - labelWidth / 2, room.left - box.left, room.right - box.left - labelWidth)}px`;
+      });
+
+      // Halo last, so its mark sits on top.
+      const marks = [...points.filter((p) => p !== halo), halo].map((point) => {
+        const kind = point === halo ? "halo" : point.spec.checkpointed ? "checkpointed" : "other";
+
+        return { point, kind, cx: x(point.peak), cy: y(point.rate), r: kind === "halo" ? R_HALO : R_OTHER };
+      });
+
+      for (const { kind, cx, cy } of marks) {
+        svg.append(dot(cx, cy, kind));
+      }
+
+      const labels = marks.map((mark) => {
+        const { point } = mark;
+        const text = point === halo ? `Halo · ${ratio.toFixed(2)}× ${NAMES[runnerUp.name]}` : NAMES[point.name];
+        const node = el("div", point === halo ? "point-label halo" : "point-label", text);
+        plot.append(node);
+
+        return { mark, node, lw: node.offsetWidth + 2 * LABEL_PAD, lh: node.offsetHeight };
+      });
+      // A claim's side pad is part of the gap, so the text keeps LABEL_GAP from the point.
+      const side = LABEL_GAP - LABEL_PAD;
+      const boxes = [];
+
+      // The widest labels have the fewest clear places, so they choose first.
+      for (const { mark, node, lw, lh } of [...labels].sort((a, b) => b.lw - a.lw)) {
+        const { point, cx, cy, r } = mark;
+        const place = {
+          right: [cx + r + side, cy - lh / 2],
+          left: [cx - r - side - lw, cy - lh / 2],
+          above: [cx - lw / 2, cy - r - LABEL_GAP - lh],
+          below: [cx - lw / 2, cy + r + LABEL_GAP],
+          aboveRight: [cx + r + side, cy - lh],
+          belowRight: [cx + r + side, cy],
+          aboveLeft: [cx - r - side - lw, cy - lh],
+          belowLeft: [cx - r - side - lw, cy],
+        };
+        // A label never sits on another point or label, so it leaves its own side for a clear one. Only its own side may
+        // cross an edge or come within AXIS_CLEARANCE of the y axis line and so widen an axis: another side stays
+        // inside, or the axis would grow and crowd the points further. No side comes within AXIS_CLEARANCE of the x axis
+        // line, since the y axis starts at zero.
+        const fits = (at) => {
+          const [left, top] = place[at];
+
+          return at === point.spec.at || (left >= AXIS_CLEARANCE && left + lw <= w && top >= 0);
+        };
+        const clear = ([left, top]) =>
+          top + lh <= h - AXIS_CLEARANCE &&
+          marks.every(
+            (other) =>
+              other === mark ||
+              Math.hypot(clamp(other.cx, left, left + lw) - other.cx, clamp(other.cy, top, top + lh) - other.cy) >
+                other.r + LABEL_CLEARANCE,
+          ) &&
+          boxes.every(
+            ([l, t, bw, bh]) =>
+              left > l + bw + LABEL_CLEARANCE ||
+              l > left + lw + LABEL_CLEARANCE ||
+              top > t + bh + LABEL_CLEARANCE ||
+              t > top + lh + LABEL_CLEARANCE,
+          );
+        const at = [point.spec.at, ...Object.keys(place)].find((s) => fits(s) && clear(place[s]));
+
+        if (at === undefined) {
+          layout.blocked.push(`${NAMES[point.name]} at ${seq} tokens`);
+        }
+
+        const [labelLeft, labelTop] = place[at ?? point.spec.at];
+        boxes.push([labelLeft, labelTop, lw, lh]);
+        node.style.left = `${labelLeft + LABEL_PAD}px`;
+        node.style.top = `${labelTop}px`;
+      }
+
+      // Dots and labels keep AXIS_CLEARANCE from the y axis line, and dots may reach the plot's other edges.
+      for (const { cx, cy, r } of marks) {
+        layout.x ??= cx - r < AXIS_CLEARANCE ? "min" : cx + r > w ? "max" : undefined;
+        layout.y ??= cy - r < 0 ? "max" : undefined;
+      }
+
+      for (const [left, top, bw] of boxes) {
+        layout.x ??= left < AXIS_CLEARANCE ? "min" : left + bw > w ? "max" : undefined;
+        layout.y ??= top < 0 ? "max" : undefined;
+      }
+    }
+
+    const h = plots[0].plot.clientHeight;
+    yticks.replaceChildren();
+
+    for (const tick of yAxis.ticks) {
+      const label = el("span", undefined, tick === 0 ? "0" : `${tick / 1000}k`);
+      label.style.top = `${h - (tick / yAxis.max) * h}px`;
+      yticks.append(label);
+    }
+
+    return layout;
+  }
+
+  // A label's left and right follow the x axis and its top and bottom the y axis, so each axis fits apart. A label that
+  // left its side to clear a point depends on both, so the final layout is checked against both.
+  const all = plots.flatMap(({ points }) => points);
+  const [lo, hi] = [Math.min(...all.map((point) => point.peak)), Math.max(...all.map((point) => point.peak))];
+  const yAxis = fitAxis(0, Math.max(...all.map((point) => point.rate)), (axis) => draw(fitAxis(lo, hi), axis).y);
+  const xAxis = fitAxis(lo, hi, (axis) => draw(axis, yAxis).x);
+  const final = draw(xAxis, yAxis);
+
+  if (final.blocked.length > 0) {
+    throw new Error(`No side of the point holds the label of ${new Intl.ListFormat("en").format(final.blocked)} clear of the other points and labels: give the plot more height or width.`);
+  }
+
+  if (final.x !== undefined || final.y !== undefined) {
+    throw new Error("A label moved to clear a point crosses the plot's edge: give the plot more height or width.");
+  }
+
+  console.log(`Halo over the next framework ${plots.map(({ ratio }) => ratio.toFixed(2)).join(" and ")}`);
+</script>
+</body>
+</html>

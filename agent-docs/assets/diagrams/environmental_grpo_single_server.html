@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>One rollout server</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 22px;
+  }
+
+  /* Trainer and actors on the left, the server on the right, a gutter between for the lines. */
+  .topology {
+    display: grid;
+    grid-template-columns: 580px 1fr 580px;
+    row-gap: 50px;
+  }
+
+  .card {
+    padding: 24px 30px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card.middle { align-self: center; }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A card's facts: a quiet label and its value, in two aligned columns. */
+  .rows {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 4px;
+    margin-top: 16px;
+    font-size: 23px;
+    line-height: 1.35;
+  }
+
+  .rows dt { color: var(--tertiary); }
+
+  .rows dd { color: var(--body); }
+
+  /* The GPUs a component holds, numbered, in its colour. */
+  .gpus {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  .gpus span { margin-right: 6px; }
+
+  .gpus b {
+    display: grid;
+    place-items: center;
+    width: 36px;
+    height: 36px;
+    border-radius: 8px;
+    font-weight: 400;
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+    color: var(--bg);
+    background: var(--hue);
+  }
+
+  .wire-label {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .wire-label .quiet { color: var(--secondary); }
+
+  /* One step on the clock: a lane per side, segments drawn to one scale. */
+  .clock { margin-top: 42px; }
+
+  .clock-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .lane {
+    display: grid;
+    grid-template-columns: 150px 1fr;
+    align-items: center;
+  }
+
+  .clock-head + .lane { margin-top: 20px; }
+
+  .lane + .lane { margin-top: 6px; }
+
+  .lane-name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 22px;
+    color: var(--body);
+  }
+
+  .lane-name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .track {
+    display: flex;
+    gap: 5px;
+  }
+
+  .seg {
+    display: grid;
+    place-items: center;
+    height: 48px;
+    border-radius: 12px;
+    font-size: 21px;
+    white-space: nowrap;
+  }
+
+  .seg.work { background: var(--hue); color: var(--bg); }
+
+  .seg.sync { background: color-mix(in oklab, var(--hue) 30%, var(--surface)); color: var(--text); }
+
+  .seg.idle { background: var(--surface); border: 1px solid var(--line); color: var(--secondary); }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>One server runs the round and update in turn</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="topology" id="topology"></div>
+    <div class="clock" id="clock"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Bar lengths are illustrative.</span>
+      <span class="s">A push pauses the server, and nothing is served.</span>
+      <span class="s">vLLM then resumes the turns in flight.</span>
+      <span class="s">SGLang aborts them, and the actors re-issue them.</span>
+      <span class="s"><span class="nw">enable_prefetch: true</span> overlaps the round and the update on one server too, one round stale.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  const TRAINER = "var(--halo-blue)";
+  const ENGINE = "var(--halo-violet)";
+  const ACTORS = "var(--halo-indigo)";
+
+  const TRAINER_GPUS = [0, 1, 2, 3, 4, 5, 6];
+  const CARDS = {
+    trainer: {
+      name: "Trainer",
+      hue: TRAINER,
+      gpus: TRAINER_GPUS,
+      rows: [
+        ["Ranks", `${TRAINER_GPUS.length} under torchrun`],
+        ["Sync", "rank 0, binds the store on :51216"],
+      ],
+    },
+    actors: {
+      name: "Ray environment actors",
+      hue: ACTORS,
+      rows: [
+        ["Budget", "rollout_actor_budget per node"],
+        ["Runs on", "the CPUs"],
+      ],
+    },
+    server: {
+      name: "Rollout server",
+      hue: ENGINE,
+      gpus: [7],
+      rows: [
+        ["Engine", "vLLM :8000 or SGLang :30000"],
+        ["Tensor parallel", "1"],
+        ["Serves", "POST /v1/chat/completions"],
+        ["Sync", "NCCL ranks 1+"],
+      ],
+    },
+  };
+  const LINKS = {
+    sync: ["NCCL weight sync"],
+    http: ["HTTP requests", "round-robin over the URLs"],
+  };
+
+  /** Phase lengths in one unit, shared by both server figures so their bars compare. */
+  const SYNC = 0.65;
+  const ROUND = 4.9;
+  const UPDATE = 2.6;
+  const LANES = [
+    {
+      name: "Trainer",
+      hue: TRAINER,
+      segs: [["sync", SYNC, "sync"], ["waiting for the round", ROUND, "idle"], ["update", UPDATE, "work"]],
+    },
+    {
+      name: "Engine",
+      hue: ENGINE,
+      segs: [["paused", SYNC, "sync"], ["generating this round", ROUND, "work"], ["idle", UPDATE, "idle"]],
+    },
+  ];
+  const STEP = "One step = sync + round + update";
+  /** Vertical offset of a line's end from the server card's middle, so the two arrowheads stay apart. */
+  const PORT = 14;
+  /** Where the Ray link leaves the trainer card, as a share of its width. */
+  const RAY_AT = 0.3;
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  function buildCard(spec) {
+    const card = el("div", "card");
+    const name = el("div", "name");
+    const dot = el("i");
+    dot.style.setProperty("--hue", spec.hue);
+    name.append(dot, spec.name);
+
+    if (spec.gpus !== undefined) {
+      const gpus = el("div", "gpus");
+      gpus.style.setProperty("--hue", spec.hue);
+      gpus.append(el("span", undefined, spec.gpus.length > 1 ? "GPUs" : "GPU"));
+
+      for (const gpu of spec.gpus) {
+        gpus.append(el("b", undefined, String(gpu)));
+      }
+
+      name.append(gpus);
+    }
+
+    const rows = el("dl", "rows");
+
+    for (const [term, value] of spec.rows) {
+      rows.append(el("dt", undefined, term), el("dd", undefined, value));
+    }
+
+    card.append(name, rows);
+
+    return card;
+  }
+
+  const topology = document.getElementById("topology");
+  const trainer = buildCard(CARDS.trainer);
+  const actors = buildCard(CARDS.actors);
+  const server = buildCard(CARDS.server);
+  trainer.style.gridArea = "1 / 1";
+  actors.style.gridArea = "2 / 1";
+  server.style.gridArea = "1 / 3 / 3 / 4";
+  server.classList.add("middle");
+  topology.append(trainer, actors, server);
+
+  const clock = document.getElementById("clock");
+  const total = SYNC + ROUND + UPDATE;
+  clock.append(el("div", "clock-head", STEP));
+
+  for (const lane of LANES) {
+    const row = el("div", "lane");
+    const name = el("div", "lane-name");
+    const dot = el("i");
+    dot.style.setProperty("--hue", lane.hue);
+    name.append(dot, lane.name);
+    const track = el("div", "track");
+
+    for (const [text, units, kind] of lane.segs) {
+      const seg = el("div", `seg ${kind}`, text);
+      seg.style.setProperty("--hue", lane.hue);
+      // Every edge lands at its share of the track whatever the number of gaps before it.
+      seg.style.flex = `0 0 calc(${units / total} * (100% + 5px) - 5px)`;
+      track.append(seg);
+    }
+
+    row.append(name, track);
+    clock.append(row);
+  }
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const css = (value) => getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1)).trim();
+
+  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  function arrow(x1, y1, x2, y2, hue) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** A label of one or more lines, every line after the first quieter. */
+  function label(lines, left, top, width) {
+    const node = el("div", "wire-label");
+    lines.forEach((line, i) => node.append(el("div", i === 0 ? undefined : "quiet", line)));
+    node.style.left = `${left}px`;
+    node.style.top = `${top}px`;
+
+    if (width !== undefined) {
+      node.style.width = `${width}px`;
+      node.style.textAlign = "center";
+    }
+
+    figure.append(node);
+
+    return node;
+  }
+
+  const t = box(trainer);
+  const a = box(actors);
+  const s = box(server);
+  const mid = (s.t + s.b) / 2;
+  // Each line runs from its card's middle to a port just above or below the server's middle.
+  const sync = [(t.t + t.b) / 2, mid - PORT];
+  const http = [(a.t + a.b) / 2, mid + PORT];
+  arrow(t.r, sync[0], s.l - 1, sync[1], css(TRAINER));
+  arrow(a.r, http[0], s.l - 1, http[1], css(ACTORS));
+  const above = label(LINKS.sync, t.r, 0, s.l - t.r);
+  above.style.top = `${Math.min(...sync) - 12 - above.offsetHeight}px`;
+  label(LINKS.http, a.r, Math.max(...http) + 12, s.l - a.r);
+
+  const rayX = t.l + RAY_AT * (t.r - t.l);
+  arrow(rayX, t.b, rayX, a.t - 1, css("var(--tertiary)"));
+  const ray = label(["Ray, on this host"], rayX + 14, 0);
+  ray.style.top = `${(t.b + a.t) / 2 - ray.offsetHeight / 2}px`;
+</script>
+</body>
+</html>

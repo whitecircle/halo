@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Forced routing gap</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+    --halo-blue-dim: color-mix(in oklab, var(--halo-blue) 38%, var(--bg));
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --model-col: 190px;
+    --kernel-col: 270px;
+    --share-col: 110px;
+    --col-gap: 40px;
+    --track-left: calc(var(--model-col) + var(--kernel-col) + 2 * var(--col-gap));
+    --track-right: calc(var(--share-col) + var(--col-gap));
+    --row-h: 60px;
+    --dot: 20px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  /* --inset moves zero right along the track and the axis, to fit the values left of it. */
+  .figure {
+    --inset: 0px;
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--model-col) var(--kernel-col) 1fr var(--share-col);
+    column-gap: var(--col-gap);
+    align-items: center;
+    height: var(--row-h);
+  }
+
+  /* The colour key and the share column's head share the first row. */
+  .row.head {
+    height: auto;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .key { display: flex; gap: 32px; color: var(--body); }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .group {
+    margin-top: 30px;
+    font-family: var(--serif);
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .model {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .kernels {
+    font-size: 21px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .share {
+    text-align: right;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  .row.head .share { font-size: 21px; color: var(--secondary); }
+
+  .track {
+    position: relative;
+    height: var(--dot);
+  }
+
+  .span {
+    position: absolute;
+    top: 50%;
+    height: 6px;
+    transform: translateY(-50%);
+    border-radius: 3px;
+    background: var(--halo-blue-dim);
+  }
+
+  /* Natural top-k is a hollow ring, the forced top-k a filled dot. */
+  .dot {
+    display: inline-block;
+    flex: none;
+    width: var(--dot);
+    height: var(--dot);
+    border-radius: 50%;
+  }
+
+  .dot.natural { border: 3px solid var(--tertiary); background: var(--bg); }
+
+  .dot.forced { background: var(--halo-blue); }
+
+  .track .dot {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+  }
+
+  .value {
+    position: absolute;
+    top: 50%;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .value.natural { transform: translateY(-50%); margin-left: calc(var(--dot) / 2 + 10px); color: var(--secondary); }
+
+  .value.forced { transform: translate(-100%, -50%); margin-left: calc(var(--dot) / -2 - 10px); color: var(--text); }
+
+  /* The axis line runs under the plot in the track column, a tick mark hanging below it at each label. */
+  .ticks {
+    position: relative;
+    height: 36px;
+    margin: 4px var(--track-right) 0 var(--track-left);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis { position: absolute; top: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: 6px; border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: 10px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span.start { transform: none; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Most of the gap is routing on <span id="routed-count"></span></h1>
+    <p class="subtitle">Mean absolute log-prob gap of bf16 to an fp32 forward, in nats</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="plot" id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">bf16 against an fp32 forward of the same weights on fixed text, with no engine.</span>
+      <span class="s">Forced runs bf16 on the top-k experts the fp32 forward picked.</span>
+      <span class="s">Closed is the share of the natural gap that forcing removes.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // [model, kernels, natural gap, forced gap]: mean absolute log-prob gap to the fp32 forward, nats.
+  const MODELS = [
+    ["gpt-oss-20b", "GPU, stock transformers", 0.400, 0.079],
+    ["Laguna-XS", "CPU kernels", 0.679, 0.058],
+    ["LFM-2", "CPU kernels", 0.375, 0.050],
+    ["GLM-4.7", "CPU kernels", 0.095, 0.072],
+    ["Gemma 4", "CPU kernels", 0.683, 0.623],
+  ];
+  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve"];
+
+  /**
+   * Ticks from zero at the smallest nice step (1, 2, 2.5 or 5 × 10^k) that puts at most `most` steps at or below
+   * `max`, so 4 to 6 ticks at the default, the last at or short of `max`.
+   */
+  function niceTicks(max, most = 5) {
+    const unit = 10 ** Math.floor(Math.log10(max / (most + 1)));
+    const step = [1, 2, 2.5, 5, 10].map((m) => m * unit).find((s) => max / s < most + 1);
+    const round = (value) => Number(value.toPrecision(12));
+
+    return Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
+  }
+
+  /**
+   * A zero-based axis that ends where the data ends: the smallest maximum from `top` up, in steps of 2% of `top`, for
+   * which `fits(max, ticks)` holds on `niceTicks(max, most)`, so a `fits` that draws the chart leaves it drawn on that
+   * axis. Throws past ten times `top`.
+   */
+  function niceAxis(top, fits, most = 5) {
+    for (let max = top; max <= 10 * top; max += top / 50) {
+      const ticks = niceTicks(max, most);
+
+      if (fits(max, ticks)) {
+        return { max, ticks };
+      }
+    }
+
+    throw new Error(`No axis up to ${10 * top} fits every label inside its plot: widen the plot or shorten the label.`);
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const counted = (n, noun) => `${NUMBER_WORDS[n] ?? n.toLocaleString("en-US")} ${noun}${n === 1 ? "" : "s"}`;
+  /** The share of the natural gap that forcing removes. */
+  const closed = ([, , natural, forced]) => (natural - forced) / natural;
+  // Where forcing closes more than half the gap, most of the gap is routing.
+  const routed = MODELS.filter((model) => closed(model) > 0.5);
+  const groups = [
+    ["Forcing closes most of it", routed],
+    ["Most of it is not routing", MODELS.filter((model) => !routed.includes(model))],
+  ];
+
+  document.getElementById("routed-count").textContent = counted(routed.length, "model");
+
+  const figure = document.getElementById("figure");
+  const plot = document.getElementById("plot");
+  const tickRow = document.getElementById("ticks");
+
+  /**
+   * Lays the rows and the axis out on a scale from zero to `max` nats, ticked at `ticks`, zero inset just far
+   * enough that every forced value starts inside the track.
+   */
+  function draw(max, ticks) {
+    const length = (nats) => `calc(${nats / max} * (100% - var(--inset)))`;
+    const at = (nats) => `calc(var(--inset) + ${length(nats)})`;
+    const leftValues = [];
+    figure.style.setProperty("--inset", "0px");
+    plot.replaceChildren();
+
+    const head = el("div", "row head");
+    const key = el("div", "key");
+
+    for (const [name, kind] of [["Natural top-k", "natural"], ["fp32’s top-k forced", "forced"]]) {
+      const item = el("span");
+      item.append(el("i", `dot ${kind}`), name);
+      key.append(item);
+    }
+
+    head.append(el("div"), el("div"), key, el("div", "share", "Closed"));
+    plot.append(head);
+
+    for (const [group, rows] of groups) {
+      if (rows.length === 0) {
+        continue;
+      }
+
+      plot.append(el("div", "group", group));
+
+      for (const row of rows) {
+        const [model, kernels, natural, forced] = row;
+        const line = el("div", "row");
+        const track = el("div", "track");
+        const span = el("div", "span");
+        span.style.left = at(forced);
+        span.style.width = length(natural - forced);
+        const ring = el("i", "dot natural");
+        ring.style.left = at(natural);
+        const dot = el("i", "dot forced");
+        dot.style.left = at(forced);
+        const naturalValue = el("div", "value natural", natural.toFixed(3));
+        naturalValue.style.left = at(natural);
+        const forcedValue = el("div", "value forced", forced.toFixed(3));
+        forcedValue.style.left = at(forced);
+        leftValues.push([forcedValue, forced / max]);
+        track.append(span, ring, dot, naturalValue, forcedValue);
+        line.append(el("div", "model", model), el("div", "kernels", kernels), track, el("div", "share", `${Math.round(closed(row) * 100)}%`));
+        plot.append(line);
+      }
+    }
+
+    const axis = el("div", "axis");
+    axis.style.left = at(0);
+    axis.style.width = length(max);
+    tickRow.replaceChildren(axis);
+
+    for (const tick of ticks) {
+      const mark = el("i");
+      // A mark is drawn 1px wide right of its offset, so one at the axis end steps back onto the line.
+      mark.style.left = `min(${at(tick)}, 100% - 1px)`;
+      const label = el("span", tick === 0 ? "start" : undefined, tick === 0 ? "0 nats" : String(tick));
+      label.style.left = at(tick);
+      tickRow.append(mark, label);
+    }
+
+    // An inset moves a value at share s of the axis right by inset × (1 − s), from where it sits at no inset.
+    const trackLeft = plot.querySelector(".track").getBoundingClientRect().left;
+    const inset = Math.max(0, ...leftValues.map(([node, share]) => (trackLeft - node.getBoundingClientRect().left) / (1 - share)));
+    figure.style.setProperty("--inset", `${Math.ceil(inset)}px`);
+  }
+
+  // The axis ends at the smallest maximum at which every mark and value ends inside its track.
+  niceAxis(Math.max(...MODELS.flatMap((model) => model.slice(2))), (max, ticks) => {
+    draw(max, ticks);
+
+    return [...plot.querySelectorAll(".track > *")].every((node) => node.getBoundingClientRect().right <= node.parentElement.getBoundingClientRect().right);
+  });
+
+  for (const model of MODELS) {
+    console.log(`${model[0]}: closed ${(closed(model) * 100).toFixed(2)}%`);
+  }
+</script>
+</body>
+</html>

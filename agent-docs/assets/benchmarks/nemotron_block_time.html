@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nemotron-H step split</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+    --halo-sand: #ffc572;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --label-col: 300px;
+    --bar-h: 192px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+  }
+
+  .row + .row { margin-top: 108px; }
+
+  .release {
+    font-family: var(--serif);
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .rate {
+    margin-top: 8px;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary);
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  /* A segment spans its block kind's seconds, less a 4px gap at its end. */
+  .seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 6px;
+    background: var(--hue);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    padding-left: 16px;
+    overflow: hidden;
+    color: var(--bg);
+    white-space: nowrap;
+  }
+
+  .seg .kind { font-size: 27px; }
+
+  .seg .share {
+    margin-top: 4px;
+    font-size: 25px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The step total, and each block kind too thin to name inside its segment, sit just past the bar’s end. */
+  .end {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    margin-left: 12px;
+    white-space: nowrap;
+  }
+
+  .end .total {
+    font-size: 25px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  .end .thin {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 6px;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--body);
+  }
+
+  .end .thin i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* The axis, under the bar column: a line along the plot's bottom edge, a short mark under it at each tick, and
+     the tick's value below. */
+  .ticks {
+    position: relative;
+    height: 38px;
+    margin: 16px 0 0 var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ticks i {
+    position: absolute;
+    top: 0;
+    height: 8px;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticks span { position: absolute; top: 12px; transform: translateX(-50%); }
+
+  .ticks span:first-of-type { transform: none; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Mamba layers take most of a <span class="nw">Nemotron-H</span> step</h1>
+  </header>
+
+  <div class="figure">
+    <div id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Nemotron 3.5 Super VL and Lightning at EP8 on 8 × B300 and 8,192 tokens per rank, the tower’s forward and backward with no optimizer step or FSDP2 reduce.</span>
+      <span class="s">A block kind’s length is the step time times its share of the step.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // [release, seconds per step, tok/s per rank, % Mamba, % MoE, % attention, % head]
+  const RELEASES = [
+    ["Super VL", 2.54, 3226, 64.8, 32.6, 1.6, 1.0],
+    ["Lightning", 0.766, 10694, 58.0, 36.2, 3.2, 2.6],
+  ];
+  // [block kind, hue]
+  const KINDS = [
+    ["Mamba", "var(--halo-blue)"],
+    ["MoE", "var(--halo-violet)"],
+    ["attention", "var(--halo-indigo)"],
+    ["head", "var(--halo-sand)"],
+  ];
+  const GAP = 4;
+  const AXIS_GROWTH = 0.02;
+
+  /**
+   * A zero-based axis ending at `top`, the data's largest value, or AXIS_GROWTH of it at a time past it while
+   * `overflows(max)` places the marks and finds one crossing the end, so the marks stay placed on the axis returned.
+   * Its ticks step from zero by the nice step (1, 2, 2.5 or 5 × 10^k) giving four to six, the last at or short of
+   * the end.
+   */
+  function niceAxis(top, overflows = () => false) {
+    const round = (value) => Number(value.toPrecision(12));
+    let max = top;
+
+    for (let grown = 1; overflows(max); grown += 1) {
+      if (grown > 100) {
+        throw new Error(`no axis up to ${max} holds every mark and its label: widen the plot or shorten the label`);
+      }
+
+      max = top * (1 + AXIS_GROWTH * grown);
+    }
+
+    const unit = 10 ** Math.floor(Math.log10(max / 5));
+    const step = [1, 2, 2.5, 5, 10].map((m) => round(m * unit)).find((s) => Math.floor(max / s + 1e-9) <= 5);
+    const ticks = Array.from({ length: Math.floor(max / step + 1e-9) + 1 }, (_, i) => round(i * step));
+
+    return { max, ticks, digits: (String(step).split(".")[1] ?? "").length };
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  /** Draws an axis into `row`: its line, and at each tick a mark and the tick's value, kept inside the row. */
+  function drawAxis(row, axis, format) {
+    row.append(el("div", "axis"));
+
+    for (const tick of axis.ticks) {
+      const at = `${(tick / axis.max) * 100}%`;
+      const mark = el("i");
+      mark.style.left = `min(${at}, 100% - 1px)`;
+      const label = el("span", undefined, format(tick));
+      row.append(mark, label);
+      label.style.left = `min(${at}, 100% - ${label.offsetWidth / 2}px)`;
+    }
+  }
+
+  const plot = document.getElementById("plot");
+  const ticks = document.getElementById("ticks");
+  const pct = (seconds, max) => `${(seconds / max) * 100}%`;
+  // Per release, its track, the label past its end, how far its bar reaches, and how it places on an axis's end.
+  const rows = [];
+
+  for (const [release, step, rate, ...shares] of RELEASES) {
+    const row = el("div", "row");
+    const label = el("div");
+    label.append(el("div", "release", release), el("div", "rate", `${rate.toLocaleString("en-US")} tok/s per rank`));
+    const track = el("div", "track");
+    const end = el("div", "end");
+    const total = el("div", "total", `${step} s`);
+    const segs = [];
+    let start = 0;
+
+    KINDS.forEach(([kind, hue], i) => {
+      const seconds = (step * shares[i]) / 100;
+      const seg = el("div", "seg");
+      seg.style.setProperty("--hue", hue);
+      const inside = [el("div", "kind", kind), el("div", "share", `${shares[i].toFixed(1)}%`)];
+      const thin = el("div", "thin");
+      const dot = el("i");
+      dot.style.setProperty("--hue", hue);
+      thin.append(dot, `${kind} ${shares[i].toFixed(1)}%`);
+      track.append(seg);
+      segs.push({ seg, inside, thin, from: start, seconds, last: i === KINDS.length - 1 });
+      start += seconds;
+    });
+
+    track.append(end);
+    row.append(label, track);
+    plot.append(row);
+    rows.push({
+      track,
+      end,
+      reach: start,
+      // A kind is named inside its segment when its name and share clear the segment's padding on both sides.
+      place: (max) => {
+        end.replaceChildren(total);
+
+        for (const { seg, inside, thin, from, seconds, last } of segs) {
+          seg.style.left = pct(from, max);
+          seg.style.width = last ? pct(seconds, max) : `max(calc(${pct(seconds, max)} - ${GAP}px), 3px)`;
+          seg.replaceChildren(...inside);
+          const pad = parseFloat(getComputedStyle(seg).paddingLeft);
+
+          if (Math.max(...inside.map((node) => node.offsetWidth)) + 2 * pad > seg.offsetWidth) {
+            seg.replaceChildren();
+            end.append(thin);
+          }
+        }
+
+        end.style.left = pct(start, max);
+      },
+    });
+
+    const sum = shares.reduce((a, b) => a + b, 0);
+    console.log(`${release}: shares sum ${sum.toFixed(1)}%, ${(8192 / step).toFixed(0)} tok/s from the step`);
+  }
+
+  const axis = niceAxis(Math.max(...rows.map((r) => r.reach)), (max) => {
+    rows.forEach((r) => r.place(max));
+
+    return rows.some((r) => r.end.getBoundingClientRect().right > r.track.getBoundingClientRect().right);
+  });
+
+  drawAxis(ticks, axis, (tick) => (tick === 0 ? "0 s" : tick.toFixed(axis.digits)));
+</script>
+</body>
+</html>

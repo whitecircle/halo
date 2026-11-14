@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EP group hierarchy</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 32px;
+  }
+
+  /* The NVLink domain is a thin outline; the two EP groups are its columns, the expert slices its rows. */
+  .domain {
+    padding: 26px 40px 40px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .domain-label {
+    font-size: 22px;
+    color: var(--secondary);
+  }
+
+  .groups {
+    display: grid;
+    grid-template-columns: 360px 1fr 360px;
+    grid-template-rows: auto auto 118px auto;
+    margin-top: 18px;
+  }
+
+  .group-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+  }
+
+  .group-head span {
+    margin-left: 14px;
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--secondary);
+  }
+
+  .card {
+    margin-top: 20px;
+    padding: 24px 32px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card + .card { margin-top: 0; }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A card's facts: a quiet label and its value, in two aligned columns. */
+  .facts {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 2px;
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.3;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .facts dt { color: var(--tertiary); }
+
+  .facts dd { color: var(--body); }
+
+  /* Labels placed by the script against the lines they name. */
+  .tag {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .tag.mid { text-align: center; }
+
+  .tag small {
+    display: block;
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Ranks with the same experts are DP replicas</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="domain">
+      <div class="domain-label">One NVLink domain · {gpus} GPUs</div>
+      <div class="groups" id="groups"></div>
+    </div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Every rank trains on its own batch, so the job is data parallel {dp}.</span>
+      <span class="s">One domain holds several groups only at <span class="nw">ep_size</span> 2, so ep4 on 8 GPUs is rejected at config time.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { gpus: 4, epSize: 2, experts: 32 };
+  /** Colour marks the expert slice a rank holds, as in the token-routing figure. */
+  const SLICE_HUES = ["--halo-blue", "--halo-violet"];
+  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"];
+
+  if (SETUP.epSize !== 2 || SETUP.gpus !== 4) {
+    throw new Error("this layout draws two EP groups of two ranks: ep_size 2 on 4 GPUs");
+  }
+
+  if (SETUP.experts % SETUP.epSize !== 0) {
+    throw new Error(`${SETUP.experts} experts do not split evenly over ep_size ${SETUP.epSize}`);
+  }
+
+  const groupCount = SETUP.gpus / SETUP.epSize;
+  const perRank = SETUP.experts / SETUP.epSize;
+  const fmt = (n) => n.toLocaleString("en-US");
+  const word = (n) => NUMBER_WORDS[n] ?? fmt(n);
+  /** Batch letters follow the rank: every rank is its own DP replica. */
+  const batchOf = (rank) => String.fromCharCode(65 + rank);
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    gpus: fmt(SETUP.gpus),
+    gpusWordCap: word(SETUP.gpus).replace(/^./, (c) => c.toUpperCase()),
+    epSize: fmt(SETUP.epSize),
+    experts: fmt(SETUP.experts),
+    groupsWord: word(groupCount),
+    perRank: fmt(perRank),
+    dp: fmt(SETUP.gpus), // EP never reduces the data parallel size
+  };
+  const groups = Array.from({ length: groupCount }, (_, g) => ({
+    group: g,
+    ranks: Array.from({ length: SETUP.epSize }, (_, slot) => {
+      const rank = g * SETUP.epSize + slot;
+
+      return { rank, slot, experts: `${fmt(slot * perRank)}–${fmt((slot + 1) * perRank - 1)}`, batch: batchOf(rank) };
+    }),
+  }));
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  // Grid: column 1 and 3 hold the groups, column 2 is the gutter the replica lines cross.
+  const grid = document.getElementById("groups");
+  const cards = groups.map(() => []);
+
+  groups.forEach((g, gi) => {
+    const head = el("div", "group-head", `EP group ${g.group}`);
+    head.append(el("span", undefined, `ranks ${g.ranks.map((r) => r.rank).join(" and ")}`));
+    head.style.gridColumn = String(gi * 2 + 1);
+    head.style.gridRow = "1";
+    grid.append(head);
+
+    g.ranks.forEach((r) => {
+      const card = el("div", "card");
+      const name = el("div", "name");
+      const dot = el("i");
+      dot.style.setProperty("--hue", `var(${SLICE_HUES[r.slot]})`);
+      name.append(dot, `R${r.rank}`);
+      const facts = el("dl", "facts");
+      facts.append(el("dt", undefined, "Experts"), el("dd", undefined, r.experts), el("dt", undefined, "Batch"), el("dd", undefined, r.batch));
+      card.append(name, facts);
+      card.style.gridColumn = String(gi * 2 + 1);
+      card.style.gridRow = String(r.slot * 2 + 2);
+      grid.append(card);
+      cards[gi].push(card);
+    });
+  });
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  /** A straight 2px line with a small head at its end, and at its start too when `both`. */
+  function arrow(x1, y1, x2, y2, hue, both) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const head = (x, y, a) => {
+      const bx = x - len * Math.cos(a);
+      const by = y - len * Math.sin(a);
+      const px = half * Math.sin(a);
+      const py = -half * Math.cos(a);
+      wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x},${y} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+
+      return [x, y];
+    };
+    const [ex, ey] = head(x2, y2, angle);
+    const [sx, sy] = both ? head(x1, y1, angle + Math.PI) : [x1, y1];
+    wires.append(svgEl("line", { x1: sx, y1: sy, x2: ex, y2: ey, stroke: hue, "stroke-width": 2 }));
+  }
+
+  /** Right edge of `from` to left edge of `to`, or bottom to top when `down`. */
+  function connect(from, to, hue, { both = false, down = false } = {}) {
+    const a = box(from);
+    const z = box(to);
+
+    if (down) {
+      const x = (a.l + a.r) / 2;
+      arrow(x, a.b + 1, x, z.t - 1, hue, both);
+    } else {
+      const y = (a.t + a.b) / 2;
+      arrow(a.r + 1, y, z.l - 1, y, hue, both);
+    }
+  }
+
+  // Replica links: the same expert slice in each group, averaged after the backward.
+  const gutterLabels = [];
+
+  for (let slot = 0; slot < SETUP.epSize; slot += 1) {
+    const left = cards[0][slot];
+    const right = cards[cards.length - 1][slot];
+    connect(left, right, token(SLICE_HUES[slot]), { both: true });
+
+    const a = box(left);
+    const z = box(right);
+    const label = el("div", "tag mid", `DP replicas of experts ${groups[0].ranks[slot].experts}`);
+    label.append(el("small", undefined, "gradients averaged after the backward"));
+    figure.append(label);
+    const w = label.getBoundingClientRect().width;
+    label.style.left = `${(a.r + z.l - w) / 2}px`;
+    label.style.top = `${(a.t + a.b) / 2 - label.getBoundingClientRect().height - 10}px`;
+    gutterLabels.push(label);
+  }
+
+  // Dispatch links: the two ranks of a group exchange tokens in one DeepEP all-to-all.
+  for (const column of cards) {
+    connect(column[0], column[1], token("--secondary"), { both: true, down: true });
+
+    const a = box(column[0]);
+    const z = box(column[1]);
+    const label = el("div", "tag", "DeepEP all-to-all");
+    figure.append(label);
+    label.style.left = `${(a.l + a.r) / 2 + 20}px`;
+    label.style.top = `${(a.b + z.t - label.getBoundingClientRect().height) / 2}px`;
+  }
+</script>
+</body>
+</html>

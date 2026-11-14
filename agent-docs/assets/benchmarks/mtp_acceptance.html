@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MTP head acceptance</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --danger: #ff73c9;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  .figure {
+    margin-block: auto;
+    padding-block: 28px;
+  }
+
+  .key {
+    display: flex;
+    align-items: center;
+    gap: 30px;
+    height: 26px;
+    margin-bottom: 22px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key svg { overflow: visible; }
+
+  .key .sep {
+    width: 1px;
+    height: 22px;
+    background: var(--line);
+  }
+
+  .heads {
+    display: grid;
+    margin-bottom: 25px;
+  }
+
+  .heads h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .heads p {
+    margin-top: 6px;
+    font-size: 20px;
+    line-height: 1.3;
+    color: var(--secondary);
+  }
+
+  svg.plot {
+    display: block;
+    overflow: visible;
+  }
+
+  svg text {
+    font-family: var(--sans);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .tick { font-size: 19px; fill: var(--secondary); }
+
+  .end { font-size: 21px; fill: var(--body); }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Soft fits climb at each rate, hard ones vary</h1>
+    <p class="subtitle">Held-out MTP acceptance of <span class="nw">Qwen3.6-35B</span> heads over <span id="last-step"></span> steps</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <div class="heads" id="heads"></div>
+    <svg class="plot" id="plot"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each fit trains the head alone on <span class="nw">Qwen3.6-35B</span> at EP8, scored every <span id="interval"></span> steps by eval_mtp_acceptance_tv on 24 held-out first-turn rows of 256 tokens.</span>
+      <span class="s">The gate stops a fit that ends below its first reading.</span>
+      <span class="s">Only soft fits have been served.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  const STEPS = [0, 30, 60, 90, 120, 150];
+  const HUES = { soft: "--halo-blue", hard: "--halo-violet" };
+  // Learning rate -> [dash pattern, stroke width]; an empty pattern is a solid line.
+  const RATES = { "1e-5": ["", 3.5], "3.33e-6": ["12 7", 3.5], "1e-6": ["0.1 7.5", 4] };
+  // [loss, learning rate, acceptance at each of STEPS, stopped by the gate]
+  const PANELS = [
+    {
+      head: "Stale start",
+      sub: "Qwen3.5-35B’s head on the Qwen3.6 trunk",
+      fits: [
+        ["soft", "1e-5", [0.7760, 0.8154, 0.8240, 0.8238, 0.8247, 0.8252], false],
+        ["hard", "1e-5", [0.7760, 0.8009, 0.7985, 0.7896, 0.7845, 0.7643], true],
+        ["hard", "3.33e-6", [0.7760, 0.7992, 0.8060, 0.8054, 0.8038, 0.7983], false],
+        ["hard", "1e-6", [0.7760, 0.8051, 0.8056, 0.8071, 0.8072, 0.8070], false],
+      ],
+    },
+    {
+      head: "Own start",
+      sub: "The release’s head",
+      fits: [
+        ["soft", "1e-5", [0.8187, 0.8223, 0.8232, 0.8238, 0.8248, 0.8245], false],
+        ["soft", "3.33e-6", [0.8187, 0.8210, 0.8230, 0.8255, 0.8251, 0.8260], false],
+        ["soft", "1e-6", [0.8187, 0.8206, 0.8214, 0.8226, 0.8232, 0.8241], false],
+        ["hard", "1e-5", [0.8187, 0.8015, 0.8005, 0.7905, 0.7869, 0.7638], true],
+        ["hard", "3.33e-6", [0.8187, 0.8094, 0.8082, 0.8075, 0.8057, 0.8004], true],
+        ["hard", "1e-6", [0.8187, 0.8172, 0.8129, 0.8119, 0.8109, 0.8106], true],
+      ],
+    },
+  ];
+  /** Widths across the figure: y tick labels, each plot, its line-end labels, and the gap between panels. */
+  const TICK_COL = 64;
+  const END_COL = 176;
+  const PANEL_GAP = 48;
+  const PLOT_H = 329;
+  const X_TICK_H = 44;
+  const CROSS = 9;
+  const CROSS_STROKE = 3;
+  /** Line-end labels: a loss's fits all ending within MERGE_PX share one, and labels keep LABEL_PX apart. */
+  const MERGE_PX = 12;
+  const LABEL_PX = 26;
+  /** The y axis's padding beyond the readings, as a share of their span, before it rounds out to the step. */
+  const Y_PAD = 0.05;
+  const COUNT_WORDS = ["no", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+  /**
+   * A nice axis over data from lo to hi: a step of 1, 2, 2.5 or 5 × 10^k giving at most six ticks, each end on a tick.
+   * overflow(axis) places the marks on a candidate axis and returns "min" or "max" while a mark or its label crosses
+   * that end of the plot, which then moves out a step, so the last call leaves the marks placed on the axis returned.
+   */
+  function niceAxis(lo, hi, overflow = () => undefined) {
+    const round = (value) => Number(value.toPrecision(12));
+    const snap = (value, step, up) => round(Math[up ? "ceil" : "floor"](value / step + (up ? -1e-9 : 1e-9)) * step);
+    const e = Math.floor(Math.log10((hi - lo) / 5));
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+      .map((m) => round(m * 10 ** e))
+      .find((s) => snap(hi, s, true) - snap(lo, s, false) <= 5 * s + 1e-9);
+    const span = (min, max) => ({
+      min,
+      max,
+      step,
+      ticks: Array.from({ length: Math.round((max - min) / step) + 1 }, (_, i) => round(min + i * step)),
+      digits: (String(step).split(".")[1] ?? "").length,
+    });
+    let axis = span(snap(lo, step, false), snap(hi, step, true));
+
+    for (let end = overflow(axis), moves = 1; end !== undefined; end = overflow(axis), moves += 1) {
+      if (moves > 20) {
+        throw new Error(`no axis out to ${axis.min}–${axis.max} holds every mark and its label`);
+      }
+
+      axis = end === "max" ? span(axis.min, round(axis.max + step)) : span(round(axis.min - step), axis.max);
+    }
+
+    return axis;
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs, text) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const interval = STEPS[1] - STEPS[0];
+
+  if (STEPS.some((step, i) => step !== i * interval)) {
+    throw new Error(`STEPS ${STEPS.join(", ")} are not evenly spaced from 0, which the note's "every ${interval} steps" assumes`);
+  }
+
+  document.getElementById("last-step").textContent = String(STEPS.at(-1));
+  document.getElementById("interval").textContent = String(interval);
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const width = document.getElementById("figure").clientWidth;
+  const plotW = (width - TICK_COL - 2 * END_COL - PANEL_GAP) / 2;
+  const left = (i) => TICK_COL + i * (plotW + END_COL + PANEL_GAP);
+  const x = (step) => (step / STEPS[STEPS.length - 1]) * plotW;
+  const capitalized = (word) => word[0].toUpperCase() + word.slice(1);
+
+  function cross(cx, cy, colour) {
+    const g = svgEl("g", { class: "cross", stroke: colour, "stroke-width": CROSS_STROKE, "stroke-linecap": "round" });
+    g.append(
+      svgEl("line", { x1: cx - CROSS, y1: cy - CROSS, x2: cx + CROSS, y2: cy + CROSS }),
+      svgEl("line", { x1: cx - CROSS, y1: cy + CROSS, x2: cx + CROSS, y2: cy - CROSS }),
+    );
+
+    return g;
+  }
+
+  function sample(colour, rate) {
+    const [dash, stroke] = RATES[rate];
+    const svg = svgEl("svg", { width: 40, height: 14 });
+    svg.append(svgEl("line", { x1: 2, y1: 7, x2: 38, y2: 7, stroke: colour, "stroke-width": stroke, "stroke-dasharray": dash, "stroke-linecap": "round" }));
+
+    return svg;
+  }
+
+  /** A panel's line-end labels top to bottom, as [y, text], each kept LABEL_PX below the one above. */
+  function endLabels(fits, y) {
+    const labels = [];
+
+    for (const loss of new Set(fits.map((fit) => fit[0]))) {
+      const ends = fits.filter((fit) => fit[0] === loss).map(([, rate, readings]) => [y(readings.at(-1)), rate]);
+      const [top, bottom] = [Math.min(...ends.map(([at]) => at)), Math.max(...ends.map(([at]) => at))];
+
+      // A loss whose fits all end within MERGE_PX reads as one line, so they share one label.
+      if (ends.length > 1 && bottom - top < MERGE_PX) {
+        labels.push([(top + bottom) / 2, `${capitalized(loss)}, ${ends.length === 2 ? "both" : `all ${COUNT_WORDS[ends.length]}`}`]);
+      } else {
+        labels.push(...ends.map(([at, rate]) => [at, `${capitalized(loss)} ${rate}`]));
+      }
+    }
+
+    labels.sort((a, b) => a[0] - b[0]);
+    labels.forEach((label, i) => {
+      label[0] = i === 0 ? label[0] : Math.max(label[0], labels[i - 1][0] + LABEL_PX);
+    });
+
+    return labels;
+  }
+
+  const key = document.getElementById("key");
+  const keyItem = (glyph, text) => {
+    const span = el("span");
+    span.append(glyph, text);
+    key.append(span);
+  };
+  keyItem(sample(token(HUES.soft), "1e-5"), "Soft loss");
+  keyItem(sample(token(HUES.hard), "1e-5"), "Hard loss");
+  key.append(el("i", "sep"));
+
+  for (const rate of Object.keys(RATES)) {
+    keyItem(sample(token("--body"), rate), `Learning rate ${rate}`);
+  }
+
+  key.append(el("i", "sep"));
+  const mark = svgEl("svg", { width: 22, height: 22 });
+  mark.append(cross(11, 11, token("--danger")));
+  keyItem(mark, "Stopped by the gate");
+
+  const heads = document.getElementById("heads");
+  heads.style.gridTemplateColumns = `${left(1)}px 1fr`;
+
+  for (const panel of PANELS) {
+    const head = el("div");
+    head.append(el("h2", undefined, panel.head), el("p", undefined, panel.sub));
+    heads.append(head);
+  }
+
+  const plot = document.getElementById("plot");
+  plot.setAttribute("width", width);
+  plot.setAttribute("height", PLOT_H + X_TICK_H);
+
+  function draw(axis) {
+    const y = (value) => ((axis.max - value) / (axis.max - axis.min)) * PLOT_H;
+    plot.replaceChildren();
+
+    for (const tick of axis.ticks) {
+      plot.append(svgEl("text", { class: "tick", x: TICK_COL - 16, y: y(tick), "text-anchor": "end", "dominant-baseline": "central" }, tick.toFixed(axis.digits)));
+    }
+
+    PANELS.forEach((panel, i) => {
+      const g = svgEl("g", { transform: `translate(${left(i)}, 0)` });
+
+      for (const tick of axis.ticks) {
+        g.append(svgEl("line", { x1: 0, y1: y(tick), x2: plotW, y2: y(tick), stroke: token("--line"), "stroke-width": 1 }));
+      }
+
+      for (const step of STEPS) {
+        g.append(svgEl("text", { class: "tick", x: x(step), y: PLOT_H + 32, "text-anchor": step === 0 ? "start" : "middle" }, String(step)));
+      }
+
+      // Hard lines first, so the soft lines sit on top where they meet at the start.
+      const order = [...panel.fits].sort((a, b) => (a[0] === b[0] ? 0 : a[0] === "hard" ? -1 : 1));
+
+      for (const [loss, rate, readings] of order) {
+        const [dash, stroke] = RATES[rate];
+        const points = readings.map((value, j) => `${x(STEPS[j])},${y(value)}`).join(" ");
+        g.append(svgEl("polyline", { points, fill: "none", stroke: token(HUES[loss]), "stroke-width": stroke, "stroke-dasharray": dash, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+      }
+
+      for (const [, , readings, stopped] of panel.fits) {
+        if (stopped) {
+          g.append(cross(x(STEPS[STEPS.length - 1]), y(readings[readings.length - 1]), token("--danger")));
+        }
+      }
+
+      for (const [at, text] of endLabels(panel.fits, y)) {
+        g.append(svgEl("text", { class: "end", x: plotW + 22, y: at, "dominant-baseline": "central" }, text));
+      }
+
+      plot.append(g);
+    });
+  }
+
+  const readings = PANELS.flatMap((panel) => panel.fits.flatMap((fit) => fit[2]));
+  const [lo, hi] = [Math.min(...readings), Math.max(...readings)];
+  niceAxis(lo - Y_PAD * (hi - lo), hi + Y_PAD * (hi - lo), (axis) => {
+    draw(axis);
+    const extents = [...plot.querySelectorAll(".end, .cross")].map((node) => {
+      const box = node.getBBox();
+      const stroke = node.classList.contains("cross") ? CROSS_STROKE / 2 : 0;
+
+      return [box.y - stroke, box.y + box.height + stroke];
+    });
+
+    if (extents.some(([top]) => top < 0)) {
+      return "max";
+    }
+
+    return extents.some(([, bottom]) => bottom > PLOT_H) ? "min" : undefined;
+  });
+</script>
+</body>
+</html>

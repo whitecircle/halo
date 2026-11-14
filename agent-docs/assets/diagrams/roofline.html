@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>B300 roofline</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    margin-block: auto;
+    padding-block: 26px;
+  }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+
+  svg .why { font-size: 22px; fill: var(--secondary); }
+
+  svg .mark { font-size: 23px; fill: var(--body); }
+
+  svg .point { font-size: 22px; fill: var(--text); }
+
+  svg .ridge { font-size: 25px; fill: var(--text); }
+
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+
+  /* The key names the two regions in a column left of the plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 44px;
+    align-items: start;
+  }
+
+  .key {
+    display: flex;
+    flex-direction: column;
+    gap: 34px;
+  }
+
+  .key h3 {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key h3 i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .key p {
+    margin-top: 6px;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <svg class="chart" id="chart"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Ceilings and rings measured on a B300 in bf16.</span>
+      <span class="s">Rings are expert GEMMs at K = N = 2880.</span>
+      <span class="s">M = 128 lands below even the memory ceiling: too few tiles to fill the 148 SMs.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  const PEAK = 1818; // TFLOP/s, best dense bf16 8192³ GEMM on an unloaded B300
+  const BW = 6.6; // TB/s, so TFLOP/s per FLOP/byte
+  const RIDGE = PEAK / BW;
+  // [M, AI in FLOP/byte, TFLOP/s]: the gpt-oss expert sweep, K = N = 2880.
+  const MEASURED = [
+    [128, 118, 180],
+    [512, 378, 548],
+    [8192, 1225, 1375],
+  ];
+  /** Decades of throughput the memory ceiling climbs to the ridge, so its slope reads. */
+  const SLOPE_DECADES = 2;
+  /** Region fills: a faint wash of each ceiling's colour over the canvas. */
+  const TINTS = {
+    memory: "color-mix(in oklab, var(--bg), var(--halo-violet) 9%)",
+    compute: "color-mix(in oklab, var(--bg), var(--halo-blue) 6%)",
+  };
+  /** The two regions the ridge splits the plot into, named in the key above it, left to right. */
+  const REGIONS = [
+    {
+      name: "Memory-bound",
+      hue: "var(--halo-violet)",
+      lines: ["More cores don’t help: move fewer bytes, or use faster HBM", "Typical: fine-grained MoE experts, small per-expert M"],
+    },
+    {
+      name: "Compute-bound",
+      hue: "var(--halo-blue)",
+      lines: ["Faster HBM doesn’t help: bigger dims, lower precision", "Typical: large-M GEMM, dense MLP"],
+    },
+  ];
+  const HEIGHT = 560;
+  /** Length of a tick mark outside an axis. */
+  const TICK = 8;
+  /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
+  const PAD = { l: 124, r: 0, t: 0, b: 84 };
+
+  function svgEl(tag, attrs, text) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  if (REGIONS.length !== 2) {
+    throw new Error("The ridge splits the plot in two: the key takes exactly two regions.");
+  }
+
+  const key = document.getElementById("key");
+
+  for (const region of REGIONS) {
+    const column = document.createElement("div");
+    const heading = document.createElement("h3");
+    const dot = document.createElement("i");
+    dot.style.setProperty("--hue", region.hue);
+    heading.append(dot, region.name);
+    column.append(heading);
+
+    for (const line of region.lines) {
+      const p = document.createElement("p");
+      p.textContent = line;
+      column.append(p);
+    }
+
+    key.append(column);
+  }
+
+  const chart = document.getElementById("chart");
+  const width = chart.getBoundingClientRect().width;
+  chart.setAttribute("height", HEIGHT);
+  chart.setAttribute("viewBox", `0 0 ${width} ${HEIGHT}`);
+
+  const plot = { l: PAD.l, r: width - PAD.r, t: PAD.t, b: HEIGHT - PAD.b };
+  const logScale = ([lo, hi], a, b) => (v) => a + ((Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (b - a);
+  const fmt = (v) => v.toLocaleString("en-US");
+  const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+  // The epsilon keeps an exact power of ten on its own decade through log10's rounding.
+  const decadeBelow = (v) => 10 ** Math.floor(Math.log10(v) + 1e-9);
+  const decadeAbove = (v) => 10 ** Math.ceil(Math.log10(v) - 1e-9);
+  const ridgeText = `${fmt(Math.round(RIDGE))} FLOP/byte`;
+
+  document.getElementById("title").textContent = `Below ${ridgeText}, HBM sets the speed`;
+
+  /** Draw the whole chart on these log ranges. */
+  function draw(xRange, yRange) {
+    chart.replaceChildren();
+    const sx = logScale(xRange, plot.l, plot.r);
+    const sy = logScale(yRange, plot.b, plot.t);
+    const decades = ([lo, hi]) => {
+      const first = Math.round(Math.log10(lo));
+
+      return Array.from({ length: Math.round(Math.log10(hi)) - first + 1 }, (_, i) => 10 ** (first + i));
+    };
+    // Regions, behind everything: memory-bound left of the ridge, compute-bound right of it.
+    add("rect", { x: plot.l, y: plot.t, width: sx(RIDGE) - plot.l, height: plot.b - plot.t, fill: TINTS.memory });
+    add("rect", { x: sx(RIDGE), y: plot.t, width: plot.r - sx(RIDGE), height: plot.b - plot.t, fill: TINTS.compute });
+
+    // Labels sit on the plot, so it draws no gridlines: a tick mark outside each axis marks every decade.
+    for (const v of decades(xRange)) {
+      add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + TICK, stroke: "var(--secondary)", "stroke-width": 1 });
+      add("text", { class: "tick", x: sx(v), y: plot.b + 34, "text-anchor": v === xRange[1] ? "end" : "middle" }, fmt(v));
+    }
+
+    for (const v of decades(yRange)) {
+      add("line", { x1: plot.l - TICK, x2: plot.l, y1: sy(v), y2: sy(v), stroke: "var(--secondary)", "stroke-width": 1 });
+      add("text", { class: "tick", x: plot.l - TICK - 10, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, fmt(v));
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "Arithmetic intensity, FLOP per byte");
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Throughput, TFLOP/s");
+
+    // The two ceilings meet at the ridge point. The memory ceiling enters at the left edge or the floor.
+    const enter = Math.max(xRange[0], yRange[0] / BW);
+    add("line", { x1: sx(RIDGE), x2: sx(RIDGE), y1: sy(PEAK), y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5 });
+    add("line", { x1: sx(enter), y1: sy(BW * enter), x2: sx(RIDGE), y2: sy(PEAK), stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
+    add("line", { x1: sx(RIDGE), y1: sy(PEAK), x2: plot.r, y2: sy(PEAK), stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
+    add("circle", { cx: sx(RIDGE), cy: sy(PEAK), r: 9, fill: "var(--text)" });
+
+    // Ceiling labels: the flat one above its line at the right end, the diagonal one along and above it, low
+    // on the slope in the empty memory-bound corner, clear of the measured points near the ridge.
+    const computeLabel = svgEl("text", { class: "mark", x: plot.r - 12, y: sy(PEAK) - 48, "text-anchor": "end" });
+    computeLabel.append(
+      svgEl("tspan", {}, "Compute ceiling"),
+      svgEl("tspan", { class: "why", x: plot.r - 12, dy: 30 }, `${fmt(PEAK)} TFLOP/s measured`),
+    );
+    chart.append(computeLabel);
+    const a0 = 10 ** (Math.log10(enter) + 0.1 * (Math.log10(RIDGE) - Math.log10(enter)));
+    const angle = (Math.atan2(sy(PEAK) - sy(BW * enter), sx(RIDGE) - sx(enter)) * 180) / Math.PI;
+    add("text", { class: "mark", transform: `translate(${sx(a0)} ${sy(BW * a0)}) rotate(${angle}) translate(0 -16)` }, `Memory ceiling = AI × ${BW} TB/s`);
+
+    const ridgeLabel = svgEl("text", { class: "ridge", x: sx(RIDGE) - 24, y: sy(PEAK) - 48, "text-anchor": "end" });
+    ridgeLabel.append(
+      svgEl("tspan", {}, "Ridge point"),
+      svgEl("tspan", { class: "why", x: sx(RIDGE) - 24, dy: 30 }, `AI ≈ ${ridgeText}`),
+    );
+    chart.append(ridgeLabel);
+
+    for (const [m, ai, tflops] of MEASURED) {
+      add("circle", { cx: sx(ai), cy: sy(tflops), r: 8, fill: "var(--bg)", stroke: "var(--text)", "stroke-width": 2.5 });
+    }
+
+    const label = (m, ai, tflops, dx, dy, anchor) =>
+      add("text", { class: "point", x: sx(ai) + dx, y: sy(tflops) + dy, "text-anchor": anchor, "dominant-baseline": "central" }, `M = ${fmt(m)}`);
+    label(...MEASURED[0], -20, 0, "end");
+    label(...MEASURED[1], 20, 0, "start");
+    label(...MEASURED[2], 0, 34, "middle");
+  }
+
+  const LABELS = "text.mark, text.point, text.ridge";
+
+  /**
+   * True when every label and dot in the plot sits inside it, no label overlaps a dot, and side by side two
+   * texts keep 12px apart.
+   */
+  function fits() {
+    const origin = chart.getBoundingClientRect();
+    const items = [...chart.querySelectorAll(`${LABELS}, circle`)].map((n) => ({ text: n.tagName === "text", label: n.matches("text, .dot"), r: n.getBoundingClientRect() }));
+    const out = ({ r }) => r.left < origin.left + plot.l || r.right > origin.left + plot.r || r.top < origin.top + plot.t || r.bottom > origin.top + plot.b;
+    const overlap = (a, b) =>
+      (a.label || b.label) &&
+      Math.min(a.r.right, b.r.right) + (a.text && b.text ? 12 : 0) > Math.max(a.r.left, b.r.left) &&
+      Math.min(a.r.bottom, b.r.bottom) > Math.max(a.r.top, b.r.top);
+
+    return items.every((a, i) => !out(a) && items.slice(i + 1).every((b) => !overlap(a, b)));
+  }
+
+  // Whole decades covering the measured points, the ridge and SLOPE_DECADES of the memory ceiling, the
+  // x axis starting where that ceiling meets the floor. Where a label does not fit, widen the fewest decades.
+  const ais = MEASURED.map(([, ai]) => ai);
+  const yLo = Math.min(decadeBelow(PEAK / 10 ** SLOPE_DECADES), decadeBelow(Math.min(...MEASURED.map(([, , t]) => t))));
+  const xLo = Math.min(decadeBelow(yLo / BW), decadeBelow(Math.min(...ais)));
+  const xHi = decadeAbove(Math.max(RIDGE, ...ais));
+  const yHi = decadeAbove(PEAK);
+  /** The ranges widened by [x low, x high, y low, y high] decades. */
+  const widened = ([a, b, c, d]) => [[xLo / 10 ** a, xHi * 10 ** b], [yLo / 10 ** c, yHi * 10 ** d]];
+  const steps = [0, 1, 2];
+  const total = (w) => w.reduce((sum, n) => sum + n, 0);
+  const widenings = steps.flatMap((a) => steps.flatMap((b) => steps.flatMap((c) => steps.map((d) => [a, b, c, d]))));
+  const fitting = widenings.sort((p, q) => total(p) - total(q)).find((w) => {
+    draw(...widened(w));
+
+    return fits();
+  });
+
+  if (fitting === undefined) {
+    draw(...widened([0, 0, 0, 0]));
+    throw new Error("No whole-decade range fits every roofline label: widen the canvas or shorten a label.");
+  }
+
+  draw(...widened(fitting));
+</script>
+</body>
+</html>

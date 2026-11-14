@@ -82,12 +82,12 @@ EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=
 NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
   -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
 NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
-# CPU-only variant (no --gpus): check-lock, the CPU tier, seed-hf-cache and diagrams. The Hugging Face
+# CPU-only variant (no --gpus): check-lock, the CPU tier and seed-hf-cache. The Hugging Face
 # cache is mounted so the tests that load a real tokenizer work without the hub, read-write so
-# seed-hf-cache can fill it; set HF_CACHE= to disable that mount. check-lock and diagrams read no
-# cache, so they run without it and without a scratch volume.
+# seed-hf-cache can fill it; set HF_CACHE= to disable that mount. check-lock reads no cache, so it
+# runs without it and without a scratch volume.
 HF_CACHE ?= $(scratch_dir)/hf
-check-lock diagrams: HF_CACHE =
+check-lock: HF_CACHE =
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
   -e PYTHONPATH=/workspace $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
@@ -262,10 +262,10 @@ verify-efficiency: ## what the EfficiencyCallback reports, BASE vs HEAD_REF (BAS
 docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown
 	./scripts/docs/check_links.sh
 
-# One `python` per generator: most write their figures at import time with no `__main__` guard, and
-# `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` / `_chart_style.py` are shared style, not generators.
-diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
-	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
+diagrams: ## re-render each agent-docs/assets figure from the HTML page beside it, refusing one that overflows, and optimizes each PNG losslessly (host: Chrome, the ABC fonts and OptiPNG)
+	@for page in agent-docs/assets/*/*.html; do echo "$$page"; \
+	  out=$$(./skills/visuals/scripts/check.sh "$$page") || { echo "$$out"; exit 1; }; \
+	  ./skills/visuals/scripts/render.sh "$$page" "$${page%.html}.png" >/dev/null || exit 1; done
 
 BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
 

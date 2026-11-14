@@ -1,0 +1,381 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Separate inference node</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    /* The extra top padding holds the node names, which sit on the outline's top edge. */
+    padding: 39px 0 22px;
+  }
+
+  /* Two nodes side by side, a gutter between them for the lines that cross. */
+  .nodes {
+    display: grid;
+    grid-template-columns: 580px 1fr 560px;
+    align-items: center;
+  }
+
+  /* A node is a thin outline with its serif name on the top edge. */
+  .node {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    padding: 28px 20px 16px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .node-name {
+    position: absolute;
+    top: 0;
+    left: 18px;
+    padding: 0 10px;
+    transform: translateY(-50%);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    background: var(--bg);
+  }
+
+  .node .card + .card { margin-top: 44px; }
+
+  .card {
+    padding: 20px 26px 20px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A card's facts: a quiet label and its value, in two aligned columns. */
+  .rows {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 4px;
+    margin-top: 12px;
+    font-size: 22px;
+    line-height: 1.35;
+  }
+
+  .rows dt { color: var(--tertiary); }
+
+  .rows dd { color: var(--body); }
+
+  /* What each link needs, under the nodes: the card's name, then the links in two pairs of columns. */
+  .links {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    align-items: baseline;
+    column-gap: 48px;
+    margin-top: 24px;
+  }
+
+  .links .rows {
+    grid-template-columns: max-content 1fr max-content 1fr;
+    row-gap: 10px;
+    margin-top: 0;
+  }
+
+  .links .rows dt:nth-of-type(2n) { padding-left: 32px; }
+
+  .wire-label {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .wire-label .quiet { color: var(--secondary); }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>The inference node dials back to the trainer</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="nodes" id="nodes"></div>
+    <div class="card links" id="links"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+</div>
+
+<script>
+  const TRAINER = "var(--halo-blue)";
+  const ENGINE = "var(--halo-violet)";
+  const ACTORS = "var(--halo-indigo)";
+
+  const NODES = [
+    {
+      name: "Node 1 · training and actors",
+      column: 1,
+      cards: [
+        {
+          id: "trainer",
+          name: "Trainer",
+          hue: TRAINER,
+          rows: [
+            ["Ranks", "torchrun: FSDP2, EP or TP"],
+            ["Sync", "rank 0 binds a store per server"],
+          ],
+        },
+        {
+          id: "actors",
+          name: "Ray environment actors",
+          hue: ACTORS,
+          rows: [
+            ["Budget", "rollout_actor_budget per node"],
+            ["Runs on", "the CPUs"],
+            ["Env", "the trainer’s"],
+          ],
+        },
+      ],
+    },
+    {
+      name: "Node 2 · inference",
+      column: 3,
+      cards: [
+        {
+          id: "server",
+          name: "Rollout server",
+          hue: ENGINE,
+          rows: [
+            ["Engine", "vLLM :8000 or SGLang :30000"],
+            ["Client", "picked by rollout_backend"],
+            ["Sync", "NCCL ranks 1+"],
+            ["MoE backend", "triton, on either engine"],
+          ],
+        },
+      ],
+    },
+  ];
+  const LINKS = {
+    name: "Links",
+    rows: [
+      ["HTTP", "vLLM 8000, SGLang 30000", "resolvable host names"],
+      ["NCCL group", "port 51216 on the trainer", "*_GROUP_HOST if multi-homed"],
+      ["Ray", "ray_address null: local Ray", "dashboard off: no port 8265"],
+      ["EFA", "EFA overlay and make EFA=1", "else the sync uses sockets"],
+    ],
+  };
+  const WIRES = {
+    sync: ["NCCL weight sync", "workers dial back to the store"],
+    http: ["HTTP requests"],
+  };
+  /** Vertical offset of a line's end from the server card's middle, so the two arrowheads stay apart. */
+  const PORT = 14;
+  /** Where the Ray link leaves the trainer card, as a share of its width. */
+  const RAY_AT = 0.3;
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  function buildCard(spec, card = el("div", "card")) {
+    const name = el("div", "name");
+
+    if (spec.hue !== undefined) {
+      const dot = el("i");
+      dot.style.setProperty("--hue", spec.hue);
+      name.append(dot);
+    }
+
+    name.append(spec.name);
+    const rows = el("dl", "rows");
+
+    // A term with several values stacks them in its one value cell.
+    for (const [term, ...values] of spec.rows) {
+      const value = el("dd");
+      value.append(...values.map((line) => el("div", undefined, line)));
+      rows.append(el("dt", undefined, term), value);
+    }
+
+    card.append(name, rows);
+
+    return card;
+  }
+
+  const nodes = document.getElementById("nodes");
+  const cards = {};
+
+  for (const spec of NODES) {
+    const node = el("div", "node");
+    node.style.gridColumn = String(spec.column);
+    node.append(el("div", "node-name", spec.name));
+
+    for (const card of spec.cards) {
+      cards[card.id] = buildCard(card);
+      node.append(cards[card.id]);
+    }
+
+    nodes.append(node);
+  }
+
+  buildCard(LINKS, document.getElementById("links"));
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const css = (value) => getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1)).trim();
+
+  /** A straight 2px line from (x1, y1) to (x2, y2), ending in a small head. */
+  function arrow(x1, y1, x2, y2, hue) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** A label of one or more lines, every line after the first quieter. */
+  function label(lines, left, top, width) {
+    const node = el("div", "wire-label");
+    lines.forEach((line, i) => node.append(el("div", i === 0 ? undefined : "quiet", line)));
+    node.style.left = `${left}px`;
+    node.style.top = `${top}px`;
+
+    if (width !== undefined) {
+      node.style.width = `${width}px`;
+      node.style.textAlign = "center";
+    }
+
+    figure.append(node);
+
+    return node;
+  }
+
+  const t = box(cards.trainer);
+  const a = box(cards.actors);
+  const s = box(cards.server);
+  const mid = (s.t + s.b) / 2;
+  // Each line runs from its card's middle to a port just above or below the server's middle.
+  const sync = [(t.t + t.b) / 2, mid - PORT];
+  const http = [(a.t + a.b) / 2, mid + PORT];
+  arrow(t.r, sync[0], s.l - 1, sync[1], css(TRAINER));
+  arrow(a.r, http[0], s.l - 1, http[1], css(ACTORS));
+  const gutter = box(nodes.children[0]).r;
+  const width = box(nodes.children[1]).l - gutter;
+  const above = label(WIRES.sync, gutter, 0, width);
+  above.style.top = `${Math.min(...sync) - 12 - above.offsetHeight}px`;
+  label(WIRES.http, gutter, Math.max(...http) + 12, width);
+
+  const rayX = t.l + RAY_AT * (t.r - t.l);
+  arrow(rayX, t.b, rayX, a.t - 1, css("var(--tertiary)"));
+  const ray = label(["Ray, on this node"], rayX + 14, 0);
+  ray.style.top = `${(t.b + a.t) / 2 - ray.offsetHeight / 2}px`;
+</script>
+</body>
+</html>

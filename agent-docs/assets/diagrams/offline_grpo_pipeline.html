@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Offline GRPO pipeline</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --gutter: 124px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 30px;
+  }
+
+  /* Two bands of three cards: the first reads left to right, the second right to left under it. Each column is as
+   * wide as its widest card, and what is left widens the gutters. */
+  .bands {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    justify-content: space-between;
+    column-gap: var(--gutter);
+    align-items: start;
+  }
+
+  .band-head {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 16px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .band-head.next { margin-top: 34px; }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--body);
+  }
+
+  .key span {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .key i,
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .card {
+    padding: 20px 24px 22px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* A card's facts: a quiet label beside the value it names. */
+  .card dl {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 16px;
+    row-gap: 4px;
+    margin-top: 12px;
+    font-size: 23px;
+    line-height: 1.3;
+  }
+
+  .card dt {
+    color: var(--tertiary);
+    white-space: nowrap;
+  }
+
+  .card dd { color: var(--body); }
+
+  sub, sup {
+    font-size: 0.78em;
+    line-height: 0;
+  }
+
+  .hop {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Advantages are fixed once, at tokenization</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="bands" id="bands"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Nothing is generated at train time: the rewards ship with the dataset, and each row carries its group’s advantage and weight.</span>
+      <span class="s">Turn the drop on with drop_degenerate_groups.</span>
+      <span class="s">A group may straddle ranks, and each of its rows keeps its 1/group_size.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  const KEY = [{ name: "Policy", hue: "var(--halo-blue)" }];
+  const BANDS = ["Once, at tokenization", "Every training step"];
+  /** Each card sits in a band (0 or 1) and a column (1 to 3), its facts as [label, value] rows. */
+  const CARDS = [
+    {
+      id: "rows", band: 0, col: 1, name: "One row, one group",
+      rows: [["prompt", "a message list"], ["completions", "one list per row"], ["rewards", "one float each"]],
+    },
+    {
+      id: "adv", band: 0, col: 2, name: "Group advantages",
+      rows: [["Default", "quantile_norm"], ["Others", "z_norm · minmax · robust<br>quantile_uniform"], ["Clip", "[−10, 10], after emphasis"]],
+    },
+    {
+      id: "expand", band: 0, col: 3, name: "One row per completion",
+      rows: [["Carries", "advantage, group size"], ["group_id", "source row’s index"], ["Drops", "ties, n < 2 (opt-in)"]],
+    },
+    {
+      id: "norm", band: 1, col: 1, name: "Normalize by loss_type",
+      rows: [["Weight", "1/group_size per row"], ["bnpo", "global token mean, default"], ["grpo", "per sequence, then groups"], ["dr_grpo", "÷ (∑ weights × max length)"]],
+    },
+    {
+      id: "loss", band: 1, col: 2, name: "Per-token loss", hue: "var(--halo-blue)",
+      rows: [["prob_weighted", "−(π · A), default"], ["reinforce", "−(log π · A)"], ["min_log_prob", "floor where A < 0"], ["kl_beta", "> 0 adds β · k3 KL"]],
+    },
+    {
+      id: "sampler", band: 1, col: 3, name: "MultiGroupSampler",
+      rows: [["Groups", "flattened"], ["Order", "as in the dataset"], ["DP slice", "cut by position"]],
+    },
+  ];
+  /** `down` leaves the source's bottom at `at` of its width, label to its right. `back` climbs from the source's
+   * top at `at` to the target's bottom at `toAt`, label above its lane. */
+  const ARROWS = [
+    { from: "rows", to: "adv", dir: "right", label: "rewards" },
+    { from: "adv", to: "expand", dir: "right", label: "advantage" },
+    { from: "expand", to: "sampler", dir: "down", at: 0.5, label: "expanded dataset" },
+    { from: "sampler", to: "loss", dir: "left", label: "micro-batch" },
+    { from: "loss", to: "norm", dir: "left", label: "[B, T] loss" },
+  ];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  function dot(hue) {
+    const node = el("i");
+    node.style.setProperty("--hue", hue);
+
+    return node;
+  }
+
+  const bands = document.getElementById("bands");
+  const cards = {};
+
+  BANDS.forEach((text, b) => {
+    const head = el("div", b === 0 ? "band-head" : "band-head next");
+    head.style.gridRow = String(2 * b + 1);
+    head.append(el("span", undefined, text));
+
+    if (b === 0) {
+      const key = el("div", "key");
+
+      for (const item of KEY) {
+        const entry = el("span");
+        entry.append(dot(item.hue), item.name);
+        key.append(entry);
+      }
+
+      head.append(key);
+    }
+
+    bands.append(head);
+  });
+
+  for (const spec of CARDS) {
+    const card = el("div", "card");
+    const name = el("div", "name");
+    card.style.gridRow = String(2 * spec.band + 2);
+    card.style.gridColumn = `${spec.col} / span ${spec.span ?? 1}`;
+
+    if (spec.hue !== undefined) {
+      name.append(dot(spec.hue));
+    }
+
+    name.append(spec.name);
+    card.append(name);
+    const facts = el("dl");
+
+    for (const [label, value] of spec.rows) {
+      const dd = el("dd");
+      dd.innerHTML = value;
+      facts.append(el("dt", undefined, label), dd);
+    }
+
+    card.append(facts);
+    bands.append(card);
+    cards[spec.id] = card;
+  }
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const tone = (hue) => getComputedStyle(document.documentElement).getPropertyValue(hue.slice(4, -1)).trim();
+
+  /** Straight segments through `points`, the last one ending in a small head. */
+  function connect(points, hue) {
+    const [x1, y1] = points[points.length - 2];
+    const [x2, y2] = points[points.length - 1];
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    const path = points.map(([x, y]) => `${x},${y}`).join(" ");
+    wires.append(svgEl("polyline", { points: path, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linejoin": "miter" }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  function hop(text, place) {
+    const label = el("div", "hop");
+    label.innerHTML = text;
+    figure.append(label);
+    place(label, label.getBoundingClientRect());
+  }
+
+  for (const arrow of ARROWS) {
+    const a = box(cards[arrow.from]);
+    const z = box(cards[arrow.to]);
+    const hue = tone(arrow.hue ?? "var(--secondary)");
+
+    if (arrow.dir === "back") {
+      // From the second band up to the first, along a lane at the middle of the second band's heading.
+      const head = box(document.querySelector(".band-head.next"));
+      const lane = (head.t + head.b) / 2;
+      const x1 = a.l + arrow.at * (a.r - a.l);
+      const x2 = z.l + arrow.toAt * (z.r - z.l);
+      connect([[x1, a.t], [x1, lane], [x2, lane], [x2, z.b + 1]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${(x1 + x2 - r.width) / 2}px`;
+        label.style.top = `${lane - 8 - r.height}px`;
+      });
+    } else if (arrow.dir === "down") {
+      const x = a.l + arrow.at * (a.r - a.l);
+      connect([[x, a.b], [x, z.t - 1]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${x + 14}px`;
+        label.style.top = `${(a.b + z.t - r.height) / 2}px`;
+      });
+    } else {
+      // Cards are as tall as their facts: the arrow runs at the middle of the span the two cards share.
+      const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
+      const [x1, x2] = arrow.dir === "right" ? [a.r, z.l - 1] : [a.l, z.r + 1];
+      connect([[x1, y], [x2, y]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${(x1 + x2 - r.width) / 2}px`;
+        label.style.top = `${y - 10 - r.height}px`;
+      });
+    }
+  }
+</script>
+</body>
+</html>

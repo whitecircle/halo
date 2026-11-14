@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Memory levers</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --label-col: 560px;
+    --change-col: 110px;
+    --bar-h: 20px;
+    --bar-gap: 4px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    margin-block: auto;
+    padding-block: 22px;
+  }
+
+  .row,
+  .group-head {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr var(--change-col);
+    align-items: center;
+  }
+
+  .group-head .name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .group-head + .row { margin-top: 14px; }
+
+  .row + .row { margin-top: 10px; }
+
+  .row + .group-head { margin-top: 22px; }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .change-head {
+    text-align: right;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .label .lever {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .run {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: var(--bar-h);
+  }
+
+  .bar + .bar { margin-top: var(--bar-gap); }
+
+  .bar i {
+    height: 100%;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .bar b {
+    line-height: 1;
+    font-weight: 400;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary);
+  }
+
+  .bar.now b { font-weight: 500; color: var(--text); }
+
+  .change {
+    text-align: right;
+    font-size: 23px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  /* The plot prints its values, so it draws no gridlines: an axis line under the bar column carries the scale. */
+  .axis {
+    position: relative;
+    margin: 12px var(--change-col) 0 var(--label-col);
+    border-top: 1px solid var(--line);
+  }
+
+  .axis i {
+    position: absolute;
+    top: 0;
+    height: 6px;
+    border-left: 1px solid var(--line);
+    transform: translateX(-50%);
+  }
+
+  .ticks {
+    position: relative;
+    height: 26px;
+    margin: 8px var(--change-col) 0 var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks span { position: absolute; }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1><span id="title-count"></span> peak memory by <span id="title-range"></span></h1>
+  </header>
+
+  <div class="figure">
+    <div class="plot" id="plot"></div>
+    <div class="axis" id="axis"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each row is its own run on B300, so rows do not compare with each other.</span>
+      <span class="s">Expandable segments left throughput unchanged on these dense runs.</span>
+      <span class="s">Allocated is the most memory tensors held at once. Reserved is what the allocator held, fragmentation included.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // [group heading, [[lever, run, before, after]]]
+  const GROUPS = [
+    ["Peak allocated, GiB", [
+      ["fsdp_shard_ep1_experts", "gpt-oss-20b at EP1, batch 1 · Halo 1.1.0 or earlier", 148.3, 60.3],
+      ["Length-ordered deal", "Async GRPO six-GPU test row · Halo 1.2.0", 210.25, 183.35],
+      ["CP fused head loss", "GLM-4.7-Flash at EP8 × CP4, 65,536 tokens · Halo 1.2.0", 53.30, 46.99],
+    ]],
+    ["Peak reserved, GB", [
+      ["Expandable segments", "Dense packed SFT, Qwen3-8B · Halo 1.1.0 or earlier", 41.3, 35.4],
+      ["Expandable segments", "DPO · Halo 1.1.0 or earlier", 61.6, 52.7],
+      ["Expandable segments", "SMPO · Halo 1.1.0 or earlier", 41.1, 35.8],
+    ]],
+  ];
+  const NUMBER_WORDS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+
+  // The axis from zero ends where the data ends: at the smallest maximum that holds every mark and its label. Its ticks
+  // take the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six up to that maximum, which leaves at least
+  // four. A mark is [value, pixels its label reaches past the value], width the plot's pixels.
+  function fitAxis(marks, width) {
+    const max = Math.max(
+      ...marks.map(([value, past]) => {
+        if (past >= width) {
+          throw new Error(`a label reaching ${past}px past its bar does not fit the ${width}px plot`);
+        }
+
+        return (value * width) / (width - past);
+      }),
+    );
+    const e = Math.floor(Math.log10(max)) - 1;
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+      .map((m) => (e < 0 ? m / 10 ** -e : m * 10 ** e))
+      .find((s) => Math.floor(max / s + 1e-9) <= 5);
+    const count = Math.floor(max / step + 1e-9) + 1;
+
+    return { max, ticks: Array.from({ length: count }, (_, i) => Number((i * step).toPrecision(12))) };
+  }
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const plot = document.getElementById("plot");
+  const axisLine = document.getElementById("axis");
+  const ticks = document.getElementById("ticks");
+  const decimals = (value) => (String(value).split(".")[1] || "").length;
+  const marks = [];
+
+  function bar(value, digits, hue, className) {
+    const node = el("div", className);
+    const fill = el("i");
+    fill.style.setProperty("--hue", hue);
+    const label = el("b", undefined, value.toFixed(digits));
+    node.append(fill, label);
+    marks.push({ fill, label, value });
+
+    return node;
+  }
+
+  function key() {
+    const node = el("div", "key");
+
+    for (const [name, hue] of [["Without the lever", "var(--tertiary)"], ["With it", "var(--halo-blue)"]]) {
+      const item = el("span");
+      const swatch = el("i");
+      swatch.style.setProperty("--hue", hue);
+      item.append(swatch, name);
+      node.append(item);
+    }
+
+    return node;
+  }
+
+  const changes = [];
+
+  GROUPS.forEach(([heading, rows], g) => {
+    const head = el("div", "group-head");
+    head.append(el("div", "name", heading));
+    head.append(g === 0 ? key() : el("div"));
+    head.append(g === 0 ? el("div", "change-head", "Change") : el("div"));
+    plot.append(head);
+
+    for (const [lever, run, before, after] of rows) {
+      const digits = Math.max(decimals(before), decimals(after));
+      const row = el("div", "row");
+      const label = el("div", "label");
+      label.append(el("div", "lever", lever), el("div", "run", run));
+      const bars = el("div", "bars");
+      bars.append(bar(before, digits, "var(--tertiary)", "bar"), bar(after, digits, "var(--halo-blue)", "bar now"));
+      const change = Math.round((after / before - 1) * 100);
+      changes.push(change);
+      row.append(label, bars, el("div", "change", `${change < 0 ? "−" : "+"}${Math.abs(change)}%`));
+      plot.append(row);
+    }
+  });
+
+  // Each fill is still empty here, so its label's right edge is how far the label reaches past the value.
+  const width = axisLine.getBoundingClientRect().width;
+  const axis = fitAxis(
+    marks.map(({ fill, label, value }) => [value, label.getBoundingClientRect().right - fill.getBoundingClientRect().right]),
+    width,
+  );
+  const pct = (value) => `${(value / axis.max) * 100}%`;
+
+  for (const { fill, value } of marks) {
+    fill.style.width = pct(value);
+  }
+
+  for (const tick of axis.ticks) {
+    const mark = el("i");
+    mark.style.left = pct(tick);
+    axisLine.append(mark);
+    const label = el("span", undefined, String(tick));
+    ticks.append(label);
+    // Centred on its tick, kept under the axis line.
+    const at = (tick / axis.max) * width - label.offsetWidth / 2;
+    label.style.left = `${Math.min(Math.max(at, 0), width - label.offsetWidth)}px`;
+  }
+
+  const levers = new Set(GROUPS.flatMap(([, rows]) => rows.map(([lever]) => lever))).size;
+  const count = NUMBER_WORDS[levers] ?? String(levers);
+  const cuts = changes.map((change) => -change);
+  const [least, most] = [Math.min(...cuts), Math.max(...cuts)];
+  const subject = levers === 1 ? `${count} lever cuts` : `${count} levers cut`;
+  document.getElementById("title-count").textContent = subject[0].toUpperCase() + subject.slice(1);
+  document.getElementById("title-range").textContent = least === most ? `${most}%` : `${least}–${most}%`;
+  console.log(`changes ${changes.join(" ")}`);
+</script>
+</body>
+</html>

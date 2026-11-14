@@ -556,9 +556,13 @@ deliberate perturbation, and the verdict fails when that record matches its base
 
 Update the owning doc page in the same PR when you change `halo/` (`skills/docs/docs-ownership.md` is the
 map), following the style charter of the `docs` skill (`skills/docs/style.md`). `make docs` runs the
-link, anchor and code-reference check that blocks a merge; editing a `scripts/diagrams/gen_*.py`
-generator owes `make diagrams` and the regenerated figure in the same commit
-([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)).
+link, anchor and code-reference check that blocks a merge
+([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)). Each figure under
+`agent-docs/assets/` is rendered from the HTML page beside it, which holds its data and draws it in the
+`visuals` skill's style (`skills/visuals/SKILL.md`): edit the page, run `make diagrams` on a host with
+Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG and any alt-text change together.
+Every render is optimized losslessly with OptiPNG. CI does not re-render the figures, since the fonts are
+licensed and stay off the runners.
 
 ## Proof of Value
 

@@ -1,0 +1,517 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Async GRPO step</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --danger: #ff73c9;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --col-gap: 44px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1200px;
+    height: 1200px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 40px 48px 36px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 50px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 24px;
+  }
+
+  .key {
+    display: flex;
+    gap: 24px;
+    font-size: 16px;
+    color: var(--secondary);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 8px; color: var(--body); }
+
+  .key span:first-child { color: var(--secondary); }
+
+  .key i,
+  .card .name i {
+    flex: none;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .band-head {
+    margin: 38px 0 16px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 25px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .band {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: var(--col-gap);
+  }
+
+  .card {
+    padding: 20px 14px 22px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 20px;
+    line-height: 1.2;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* A step's one-line gist, where a label would only repeat its name. */
+  .card p {
+    margin-top: 8px;
+    font-size: 16px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  /* A card's facts: a quiet label and its value, in two aligned columns. */
+  .rows {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    column-gap: 12px;
+    row-gap: 4px;
+    margin-top: 12px;
+    font-size: 16px;
+    line-height: 1.35;
+  }
+
+  .rows dt { color: var(--tertiary); }
+
+  .rows dd { color: var(--body); }
+
+  /* The push that opens the step: its name, then its facts as three pairs on one line. */
+  .card.sync {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    align-items: baseline;
+    column-gap: 36px;
+    margin-top: 18px;
+  }
+
+  .card.sync .rows {
+    grid-template-columns: repeat(3, max-content 1fr);
+    margin-top: 0;
+  }
+
+  .card.cut .name { color: var(--danger); }
+
+  /* The episode band: the turn loop over three columns, the end conditions in the fourth. */
+  .loop {
+    grid-column: 1 / 4;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    column-gap: 36px;
+  }
+
+  .lane {
+    grid-column: 1 / 4;
+    position: relative;
+    height: 62px;
+  }
+
+  .ends { grid-column: 4; grid-row: 1 / 4; align-self: start; }
+
+  .cut { grid-column: 1 / 4; justify-self: start; }
+
+  .hop {
+    position: absolute;
+    text-align: center;
+    font-size: 15px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 15px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>A step syncs, rolls out, grades, then trains</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <div class="card sync" id="sync"></div>
+    <div class="band-head">Generation round</div>
+    <div class="band" id="round"></div>
+    <div class="band-head">Multi-turn episode: one row, one actor</div>
+    <div class="band" id="episode">
+      <div class="loop" id="loop"></div>
+      <div class="lane" id="lane"></div>
+    </div>
+    <div class="band-head">Return path</div>
+    <div class="band" id="return"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s"><span class="nw">max_concurrent_rollouts</span> caps how many episodes run at once.</span>
+      <span class="s">By default one server runs the round and the update in turn.</span>
+      <span class="s">Two or more servers, or enable_prefetch: true, overlap them.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // The shape drawn throughout: the code-contests stage-1 recipe, one rank's round.
+  const BS = 1;
+  const GA = 24;
+  const GEN = 8;
+  const ROUND = BS * GA;
+  const GROUPS = ROUND / GEN;
+
+  const PLACES = {
+    trainer: { name: "Trainer rank", hue: "var(--halo-blue)" },
+    actor: { name: "Ray actor", hue: "var(--halo-violet)" },
+    engine: { name: "Rollout engine", hue: "var(--halo-indigo)" },
+  };
+
+  const SYNC = {
+    name: "Weight push",
+    rows: [
+      ["When", "the start of every step"],
+      ["To", "every rollout engine, over NCCL"],
+      ["Engines", "paused for the push"],
+    ],
+  };
+  const ROUND_CARDS = [
+    {
+      name: "Trainer rank",
+      at: "trainer",
+      rows: [
+        ["Rows", `${ROUND} = ${GROUPS} prompts × ${GEN}`],
+        ["Group", `${GEN} consecutive rows`],
+        ["Scope", "rank-local"],
+      ],
+    },
+    {
+      name: "RolloutManager",
+      at: "trainer",
+      rows: [
+        ["Episode", "one per row"],
+        ["Routing", "round-robin"],
+        ["Over", "actors × URLs"],
+      ],
+    },
+    {
+      name: "Environment actors",
+      at: "actor",
+      rows: [
+        ["Pool", "per rank"],
+        ["Each", "one environment"],
+        ["Holds", "tools, sandbox, grader"],
+      ],
+    },
+    {
+      name: "vLLM or SGLang",
+      at: "engine",
+      rows: [
+        ["POST", "/v1/chat/completions"],
+        ["Body", "messages + tools"],
+        ["Tokens", "made server-side"],
+      ],
+    },
+  ];
+  /** The label over the arrow after each generation-round card. */
+  const ROUND_HOPS = ["", "", "HTTP"];
+  const TURN = [
+    { name: "Generate", at: "engine", gist: "One assistant turn" },
+    { name: "Parse", at: "actor", gist: "tool_calls" },
+    { name: "Execute", at: "actor", gist: "In the environment" },
+    { name: "Observe", at: "actor", gist: "Result → history" },
+  ];
+  const ENDS = {
+    name: "The episode ends at",
+    rows: [
+      ["Answer", "a final one"],
+      ["Turns", "all burned"],
+      ["Recoveries", "spent"],
+      ["Output", "its budget spent"],
+    ],
+  };
+  const CUT = {
+    name: "A cut or empty turn",
+    rows: [
+      ["Handling", "nudged and retried"],
+      ["Cost", "a turn, not the episode"],
+    ],
+  };
+  const RETURN_CARDS = [
+    {
+      name: "Grade",
+      at: "actor",
+      rows: [
+        ["By", "the environment"],
+        ["Over", "whole trajectory"],
+        ["Rungs", "objective + shaping"],
+      ],
+    },
+    {
+      name: "Training rows",
+      at: "trainer",
+      rows: [
+        ["Each", "an assistant turn"],
+        ["Prompt", "rendered history"],
+        ["Completion", "sampled ids"],
+      ],
+    },
+    {
+      name: "Group advantages",
+      at: "trainer",
+      rows: [
+        ["Over", `the group’s ${GEN} rows`],
+        ["Value", "reward − baseline"],
+        ["Shared", "by its turn rows"],
+      ],
+    },
+    {
+      name: "GRPO loss → step",
+      at: "trainer",
+      rows: [
+        ["IS ratio", "vs sampling logps"],
+        ["Masks", "trust-region"],
+        ["Then", "the next sync"],
+      ],
+    },
+  ];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  function dot(hue) {
+    const node = el("i");
+    node.style.setProperty("--hue", hue);
+
+    return node;
+  }
+
+  function card(spec, className, node) {
+    const box = node ?? el("div", className === undefined ? "card" : `card ${className}`);
+    const name = el("div", "name");
+
+    if (spec.at !== undefined) {
+      name.append(dot(PLACES[spec.at].hue));
+    }
+
+    name.append(spec.name);
+    box.append(name);
+
+    if (spec.gist !== undefined) {
+      box.append(el("p", undefined, spec.gist));
+    }
+
+    if (spec.rows !== undefined) {
+      const rows = el("dl", "rows");
+
+      for (const [term, value] of spec.rows) {
+        rows.append(el("dt", undefined, term), el("dd", undefined, value));
+      }
+
+      box.append(rows);
+    }
+
+    return box;
+  }
+
+  const key = document.getElementById("key");
+  key.append(el("span", undefined, "Runs on"));
+
+  for (const place of Object.values(PLACES)) {
+    const item = el("span");
+    item.append(dot(place.hue), place.name);
+    key.append(item);
+  }
+
+  card(SYNC, undefined, document.getElementById("sync"));
+
+  const roundCards = ROUND_CARDS.map((spec) => card(spec));
+  document.getElementById("round").append(...roundCards);
+
+  const turnCards = TURN.map((spec) => card(spec));
+  document.getElementById("loop").append(...turnCards);
+
+  const episode = document.getElementById("episode");
+  episode.append(card(ENDS, "ends"), card(CUT, "cut"));
+
+  const returnCards = RETURN_CARDS.map((spec) => card(spec));
+  document.getElementById("return").append(...returnCards);
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const ink = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  /** A straight line from (x1, y1) to (x2, y2), ending in a small head. */
+  function arrow(x1, y1, x2, y2, hue) {
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** A straight line from the right edge of `from` to the left edge of `to`, at their middles. */
+  function connect(from, to, hue) {
+    const a = box(from);
+    const z = box(to);
+    const y = (a.t + a.b) / 2;
+    arrow(a.r, y, z.l - 1, y, hue);
+
+    return { l: a.r, r: z.l, y };
+  }
+
+  /** A label centred over the gutter an arrow crosses. */
+  function hop(text, gutter) {
+    const label = el("div", "hop", text);
+    label.style.left = `${gutter.l}px`;
+    label.style.width = `${gutter.r - gutter.l}px`;
+    figure.append(label);
+    label.style.top = `${gutter.y - 8 - label.offsetHeight}px`;
+  }
+
+  for (let i = 0; i + 1 < roundCards.length; i += 1) {
+    const gutter = connect(roundCards[i], roundCards[i + 1], ink);
+
+    if (ROUND_HOPS[i] !== "") {
+      hop(ROUND_HOPS[i], gutter);
+    }
+  }
+
+  for (let i = 0; i + 1 < turnCards.length; i += 1) {
+    connect(turnCards[i], turnCards[i + 1], ink);
+  }
+
+  for (let i = 0; i + 1 < returnCards.length; i += 1) {
+    connect(returnCards[i], returnCards[i + 1], ink);
+  }
+
+  // The next turn: down from Observe, left under the loop, up into Generate.
+  const from = box(turnCards[turnCards.length - 1]);
+  const to = box(turnCards[0]);
+  const lane = box(document.getElementById("lane"));
+  const x0 = (from.l + from.r) / 2;
+  const x1 = (to.l + to.r) / 2;
+  const y = lane.t + 22;
+  wires.append(
+    svgEl("polyline", { points: `${x0},${from.b} ${x0},${y} ${x1},${y}`, fill: "none", stroke: ink, "stroke-width": 2 }),
+  );
+  arrow(x1, y, x1, to.b + 1, ink);
+  const loopLabel = el("div", "hop", "Next turn, up to max_turns");
+  loopLabel.style.left = `${x1}px`;
+  loopLabel.style.width = `${x0 - x1}px`;
+  loopLabel.style.top = `${y + 10}px`;
+  figure.append(loopLabel);
+</script>
+</body>
+</html>

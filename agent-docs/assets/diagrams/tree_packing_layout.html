@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tree packing layout</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    --label-col: 124px;
+    --token: 25px;
+    --gap: 4px;
+    --seg-gap: 14px;
+    --cell: 25px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 30px;
+    display: grid;
+    grid-template-columns: 1fr auto;
+    column-gap: 80px;
+  }
+
+  .group-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  /* The packing column: two blocks, the second ending level with the attention grid. */
+  .packing {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+  }
+
+  .rows {
+    display: grid;
+    grid-template-columns: var(--label-col) auto;
+    row-gap: 8px;
+    align-items: center;
+    justify-content: start;
+    margin-top: 18px;
+  }
+
+  .row-label {
+    font-size: 22px;
+    color: var(--body);
+  }
+
+  .strip {
+    display: flex;
+    gap: var(--seg-gap);
+  }
+
+  .seg {
+    display: flex;
+    gap: var(--gap);
+  }
+
+  .seg-name {
+    font-size: 21px;
+    line-height: 1.2;
+    color: var(--body);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .tok {
+    width: var(--token);
+    height: 44px;
+    border-radius: 6px;
+    background: var(--hue);
+  }
+
+  .val {
+    width: var(--token);
+    text-align: center;
+    font-size: 20px;
+    line-height: 1.2;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .caption {
+    margin-top: 14px;
+    font-size: 22px;
+    line-height: 1.35;
+    color: var(--body);
+  }
+
+  /* The attention grid: keys across, queries down, a wider gap between segments. */
+  .attention .grid {
+    display: grid;
+    margin-top: 18px;
+    align-items: center;
+    justify-items: center;
+  }
+
+  .attention .key-name,
+  .attention .query-name {
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .attention .key-name { padding-bottom: 8px; align-self: end; }
+
+  .attention .query-name { justify-self: end; padding-right: 14px; }
+
+  .attention .c {
+    width: var(--cell);
+    height: var(--cell);
+    border-radius: 6px;
+  }
+
+  .attention .c.seen { background: var(--hue); }
+
+  .attention .c.masked {
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Tree packing stores a shared prefix once</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="packing" id="packing"></div>
+    <div class="attention" id="attention"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each row keeps the tokens, positions and context it has on its own: only the repeated work is gone.</span>
+      <span class="s">In the grid, rows are queries and columns are keys, and an empty cell is a key the query does not see.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  // The shared prefix and each row's own tail, in tokens.
+  const PREFIX = { name: "shared prefix", short: "prefix", tokens: 6, hue: "var(--secondary)" };
+  const TAILS = [
+    { name: "A", short: "A", tokens: 2, hue: "var(--halo-blue)" },
+    { name: "B", short: "B", tokens: 3, hue: "var(--halo-violet)" },
+    { name: "C", short: "C", tokens: 2, hue: "var(--halo-indigo)" },
+  ];
+  const TREE = [PREFIX, ...TAILS];
+  const FLAT = TAILS.flatMap((tail) => [PREFIX, tail]);
+  /** A wider gap between two segments of the attention grid than between two of its cells. */
+  const GRID_SEG_GAP = 8;
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  const count = (segments) => segments.reduce((sum, s) => sum + s.tokens, 0);
+
+  /** One strip row: a cell per token, built by `cell(segment, offset)`, grouped by segment. */
+  function strip(segments, cell) {
+    const row = el("div", "strip");
+
+    segments.forEach((segment, index) => {
+      const seg = el("div", "seg");
+
+      for (let offset = 0; offset < segment.tokens; offset += 1) {
+        seg.append(cell(segment, offset, index));
+      }
+
+      row.append(seg);
+    });
+
+    return row;
+  }
+
+  /** The segment names, each centred over its segment's tokens. */
+  function names(segments) {
+    const row = el("div", "strip");
+
+    for (const segment of segments) {
+      const seg = el("div", "seg-name", segment.name);
+      seg.style.width = `calc(${segment.tokens} * var(--token) + ${segment.tokens - 1} * var(--gap))`;
+      row.append(seg);
+    }
+
+    return row;
+  }
+
+  function token(segment) {
+    const node = el("div", "tok");
+    node.style.setProperty("--hue", segment.hue);
+
+    return node;
+  }
+
+  // A row's own positions: the prefix from 0, its tail continuing them. Depth: 0 in the prefix, 1 in a branch.
+  const position = (segment, offset) => (segment === PREFIX ? offset : PREFIX.tokens + offset);
+  const depth = (segment) => (segment === PREFIX ? 0 : 1);
+
+  function block(head, segments, extraRows, caption) {
+    const wrap = el("div");
+    wrap.append(el("div", "group-head", head));
+    const rows = el("div", "rows");
+    rows.append(el("div"), names(segments));
+    rows.append(el("div", "row-label", "Tokens"), strip(segments, token));
+
+    for (const [label, value] of extraRows) {
+      rows.append(el("div", "row-label", label), strip(segments, (s, o) => el("div", "val", String(value(s, o)))));
+    }
+
+    wrap.append(rows);
+    const note = el("p", "caption");
+    note.style.marginLeft = "var(--label-col)";
+    note.textContent = caption;
+    wrap.append(note);
+
+    return wrap;
+  }
+
+  const packing = document.getElementById("packing");
+  packing.append(
+    block("Packed flat", FLAT, [["Position", position]], `${count(FLAT)} tokens: the prefix is computed once per row`),
+    block(
+      "Packed as a tree",
+      TREE,
+      [["Position", position], ["Depth", depth]],
+      `${count(TREE)} tokens: every branch continues the prefix’s positions`,
+    ),
+  );
+
+  // Attention in the tree row: a query sees a key on its own path at a position no later than its own.
+  const tokens = TREE.flatMap((segment, s) => Array.from({ length: segment.tokens }, (_, o) => ({ s, o })));
+  const pos = tokens.map(({ s, o }) => position(TREE[s], o));
+  const n = tokens.length;
+  const attention = document.getElementById("attention");
+  attention.append(el("div", "group-head", "Attention in the tree row"));
+  const grid = el("div", "grid");
+
+  // Columns: the query names, then each token with a gap column between segments.
+  const track = [];
+  const columnOf = [];
+  track.push("auto");
+  tokens.forEach((t, i) => {
+    if (i > 0 && t.s !== tokens[i - 1].s) {
+      track.push(`${GRID_SEG_GAP}px`);
+    }
+
+    track.push("var(--cell)");
+    columnOf.push(track.length);
+  });
+  grid.style.gridTemplateColumns = track.join(" ");
+  grid.style.columnGap = "4px";
+  grid.style.rowGap = "4px";
+  const rowsTrack = ["auto"];
+  const rowOf = [];
+  tokens.forEach((t, i) => {
+    if (i > 0 && t.s !== tokens[i - 1].s) {
+      rowsTrack.push(`${GRID_SEG_GAP}px`);
+    }
+
+    rowsTrack.push("var(--cell)");
+    rowOf.push(rowsTrack.length);
+  });
+  grid.style.gridTemplateRows = rowsTrack.join(" ");
+
+  TREE.forEach((segment, s) => {
+    const first = tokens.findIndex((t) => t.s === s);
+    const last = first + segment.tokens - 1;
+    const keyName = el("div", "key-name", segment.short);
+    keyName.style.gridRow = "1";
+    keyName.style.gridColumn = `${columnOf[first]} / ${columnOf[last] + 1}`;
+    const queryName = el("div", "query-name", segment.short);
+    queryName.style.gridColumn = "1";
+    queryName.style.gridRow = `${rowOf[first]} / ${rowOf[last] + 1}`;
+    grid.append(keyName, queryName);
+  });
+
+  let seen = 0;
+
+  for (let q = 0; q < n; q += 1) {
+    for (let k = 0; k < n; k += 1) {
+      const visible = (tokens[k].s === 0 || tokens[k].s === tokens[q].s) && pos[k] <= pos[q];
+      const cell = el("div", `c ${visible ? "seen" : "masked"}`);
+
+      if (visible) {
+        cell.style.setProperty("--hue", TREE[tokens[k].s].hue);
+        seen += 1;
+      }
+
+      cell.style.gridRow = String(rowOf[q]);
+      cell.style.gridColumn = String(columnOf[k]);
+      grid.append(cell);
+    }
+  }
+
+  attention.append(grid);
+  const note = el("p", "caption", "A query sees the prefix and its own branch only");
+  attention.append(note);
+  console.log(`flat ${count(FLAT)} · tree ${count(TREE)} · grid ${n}x${n} · seen ${seen}`);
+</script>
+</body>
+</html>

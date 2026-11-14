@@ -22,12 +22,11 @@ _SCRIPTS_DIR = REPO_ROOT / "scripts"
 _SCRIPTS = sorted(
     path for path in _SCRIPTS_DIR.rglob("*.py") if "parse_script_args(" in path.read_text(encoding="utf-8")
 )
-# Built on argparse, so the sweep above never reaches them. ``diagrams/`` is excluded: its generators import a sibling
-# style module off their own directory.
+# Built on argparse, so the sweep above never reaches them.
 _TOOLS = sorted(
     path
     for path in _SCRIPTS_DIR.rglob("*.py")
-    if path not in _SCRIPTS and "diagrams" not in path.parts and "__main__" in path.read_text(encoding="utf-8")
+    if path not in _SCRIPTS and "__main__" in path.read_text(encoding="utf-8")
 )
 
 

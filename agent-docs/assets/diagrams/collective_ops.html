@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The four collectives</title>
+<style>
+  :root {
+    --bg: #000000;
+    --surface: #0a0a0a;
+    --line: #222222;
+    --heading: #efefef;
+    --text: #ffffff;
+    --body: #c6c9cd;
+    --secondary: #7e8186;
+    --tertiary: #6f6f74;
+    --halo-blue: #73bbff;
+    --halo-violet: #c572ff;
+    --halo-indigo: #7287ff;
+
+    --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+    --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+    /* One rank's copy of a chunk is a tint of blue, a chunk summed over ranks is full violet. */
+    --copy: oklch(from var(--halo-blue) calc(l * 0.58) c h);
+    --sum: var(--halo-violet);
+    --rank-col: 44px;
+    --cell-w: 60px;
+    --cell-h: 35px;
+    --arrow-gap: 80px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body { background: var(--bg); }
+
+  body {
+    width: 1600px;
+    height: 900px;
+    overflow: hidden;
+    color: var(--body);
+    font-family: var(--sans);
+    font-weight: 400;
+    -webkit-font-smoothing: antialiased;
+    text-wrap: pretty;
+  }
+
+  .canvas {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    padding: 52px 64px 48px;
+  }
+
+  .nw { white-space: nowrap; }
+
+  h1 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 67px;
+    line-height: 1.08;
+    letter-spacing: -0.025em;
+    color: var(--heading);
+    text-wrap: balance;
+  }
+
+  .subtitle {
+    margin-top: 16px;
+    font-size: 27px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
+  .figure {
+    position: relative;
+    margin-block: auto;
+    padding-block: 22px;
+  }
+
+  .key {
+    display: flex;
+    gap: 40px;
+    margin-bottom: 26px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .key i {
+    width: 30px;
+    height: 20px;
+    border-radius: 6px;
+    background: var(--fill);
+    border: 1px solid var(--edge, transparent);
+  }
+
+  .panels {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 80px;
+    row-gap: 34px;
+  }
+
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .head span {
+    font-size: 22px;
+    color: var(--secondary);
+  }
+
+  .grids {
+    display: grid;
+    grid-template-columns: var(--rank-col) repeat(var(--ranks), var(--cell-w)) var(--arrow-gap) repeat(var(--ranks), var(--cell-w));
+    grid-auto-rows: var(--cell-h);
+    gap: 4px;
+    margin-top: 16px;
+  }
+
+  .rank {
+    align-self: center;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    font-size: 25px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell.copy { background: var(--copy); color: var(--text); }
+
+  .cell.sum { background: var(--sum); color: #000; }
+
+  .cell.empty { background: var(--surface); border: 1px solid var(--line); }
+
+  .cost {
+    margin-top: 14px;
+    font-size: 23px;
+    color: var(--body);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  footer {
+    font-size: 20px;
+    line-height: 1.55;
+    color: var(--secondary);
+  }
+
+  footer .s { display: inline-block; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1><span class="nw">All-reduce</span> is <span class="nw">reduce-scatter</span> plus <span class="nw">all-gather</span></h1>
+    <p class="subtitle">Chunks of a D-byte tensor on R = {ranks} ranks, before and after each collective</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key">
+      <span style="--fill: var(--copy)"><i></i>a₁ is chunk a from R1</span>
+      <span style="--fill: var(--sum)"><i></i>∑a is chunk a summed over every rank</span>
+      <span style="--fill: var(--surface); --edge: var(--line)"><i></i>Slot not held</span>
+    </div>
+    <div class="panels" id="panels"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Bytes are what each GPU sends over a ring.</span>
+      <span class="s">Backward runs the dual: <span class="nw">all-gather</span> and <span class="nw">reduce-scatter</span> are each other’s gradient, and an <span class="nw">all-to-all</span>’s is another <span class="nw">all-to-all</span>.</span>
+    </p>
+  </footer>
+</div>
+
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { ranks: 4 };
+
+  if (SETUP.ranks < 2 || SETUP.ranks > 4) {
+    throw new Error("this layout fits 2 to 4 ranks: wider grids overflow the two panel columns");
+  }
+
+  const R = SETUP.ranks;
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = { ranks: String(R) };
+  /** Chunk c is the c-th letter, a copy from rank r carries r as a subscript. */
+  const chunkName = (chunk) => String.fromCharCode(97 + chunk);
+  const subscript = (rank) => String(rank).replace(/\d/g, (d) => String.fromCharCode(0x2080 + Number(d)));
+
+  // A cell is a chunk copied from one rank, a chunk summed over ranks, or an empty slot.
+  const copy = (chunk, rank) => ({ kind: "copy", text: `${chunkName(chunk)}${subscript(rank)}` });
+  const sum = (chunk) => ({ kind: "sum", text: `∑${chunkName(chunk)}` });
+  const EMPTY = { kind: "empty", text: "" };
+  const grid = (cell) => Array.from({ length: R }, (_, r) => Array.from({ length: R }, (_, c) => cell(r, c)));
+
+  const EVERY_RANK_FULL = grid((r, c) => copy(c, r));
+  const COLLECTIVES = [
+    {
+      name: "All-gather",
+      uses: "FSDP forward: everyone gets every shard",
+      cost: "(R − 1)/R × D per GPU",
+      before: grid((r, c) => (c === r ? copy(c, c) : EMPTY)),
+      after: grid((r, c) => copy(c, c)),
+    },
+    {
+      name: "Reduce-scatter",
+      uses: "FSDP backward: sum, keep your shard",
+      cost: "(R − 1)/R × D per GPU, the dual of all-gather",
+      before: EVERY_RANK_FULL,
+      after: grid((r, c) => (c === r ? sum(c) : EMPTY)),
+    },
+    {
+      name: "All-reduce",
+      uses: "DDP gradient sync · TP layer outputs",
+      cost: "Reduce-scatter then all-gather: 2 · (R − 1)/R × D",
+      before: EVERY_RANK_FULL,
+      after: grid((r, c) => sum(c)),
+    },
+    {
+      name: "All-to-all",
+      uses: "EP dispatch · CP Ulysses",
+      cost: "A transpose: each chunk has one destination",
+      before: EVERY_RANK_FULL,
+      after: grid((r, c) => copy(r, c)),
+    },
+  ];
+
+  function el(tag, className, text) {
+    const node = document.createElement(tag);
+
+    if (className !== undefined) {
+      node.className = className;
+    }
+
+    if (text !== undefined) {
+      node.textContent = text;
+    }
+
+    return node;
+  }
+
+  function svgEl(tag, attrs) {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+
+    for (const [key, value] of Object.entries(attrs)) {
+      node.setAttribute(key, value);
+    }
+
+    return node;
+  }
+
+  /** Replaces each `{name}` in the canvas text with VALUES[name], in place, so no text node splits. */
+  function fillValues() {
+    const walker = document.createTreeWalker(document.querySelector(".canvas"), NodeFilter.SHOW_TEXT);
+
+    for (let node = walker.nextNode(); node !== null; node = walker.nextNode()) {
+      node.nodeValue = node.nodeValue.replace(/\{(\w+)\}/g, (_, name) => {
+        if (!(name in VALUES)) {
+          throw new Error(`no value named ${name}`);
+        }
+
+        return VALUES[name];
+      });
+    }
+  }
+
+  fillValues();
+
+  const panels = document.getElementById("panels");
+  panels.style.setProperty("--ranks", R);
+  const arrows = [];
+
+  for (const op of COLLECTIVES) {
+    const panel = el("div", "panel");
+    const head = el("div", "head");
+    head.append(el("h2", undefined, op.name), el("span", undefined, op.uses));
+
+    const grids = el("div", "grids");
+    const firstAfter = [];
+    const lastBefore = [];
+
+    for (let r = 0; r < R; r += 1) {
+      grids.append(el("div", "rank", `R${r}`));
+
+      for (const [side, rows] of [["before", op.before], ["after", op.after]]) {
+        if (side === "after") {
+          grids.append(el("div"));
+        }
+
+        rows[r].forEach((cell, c) => {
+          const node = el("div", `cell ${cell.kind}`, cell.text);
+          grids.append(node);
+
+          if (side === "before" && c === R - 1) {
+            lastBefore.push(node);
+          }
+
+          if (side === "after" && c === 0) {
+            firstAfter.push(node);
+          }
+        });
+      }
+    }
+
+    panel.append(head, grids, el("div", "cost", op.cost));
+    panels.append(panel);
+    arrows.push([lastBefore, firstAfter]);
+  }
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  /** A straight line between two x positions at height y, ending in a small head. */
+  function arrow(x1, x2, y, hue) {
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len;
+    wires.append(svgEl("line", { x1, y1: y, x2, y2: y, stroke: hue, "stroke-width": 2 }));
+    wires.append(svgEl("polyline", { points: `${bx},${y - half} ${x2},${y} ${bx},${y + half}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  // Each before grid points at its after grid across the gap, level with the middle of the rank rows.
+  for (const [lastBefore, firstAfter] of arrows) {
+    const from = box(lastBefore[0]);
+    const to = box(firstAfter[0]);
+    const y = (box(lastBefore[0]).t + box(lastBefore[R - 1]).b) / 2;
+    arrow(from.r + 18, to.l - 18, y, grey);
+  }
+</script>
+</body>
+</html>
