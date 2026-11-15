@@ -13,6 +13,7 @@ import torch.nn.functional as F
 from torch.autograd import Function
 
 from halo.kernels.grouped_mm import grouped_mm_grads
+from halo.kernels.lowp.dequant_triton import FUSED_DEQUANT_BLOCK, dequantize_bank_triton
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import QuantFormat
 
@@ -57,6 +58,13 @@ class FrozenExpertBank:
     def dequantize_linear(self, start: int = 0, end: int | None = None) -> torch.Tensor:
         """Experts ``[start, end)`` as bf16 ``[E, N, K]``."""
         end = self.num_experts if end is None else end
+        # One fused kernel on CUDA, bit-identical to the eager path below.
+        if self.data.is_cuda and self.in_features % FUSED_DEQUANT_BLOCK == 0:
+            with torch.profiler.record_function(f"frozen_bank.dequantize_fused[{self.quant_format}]"):
+                global_scale = None if self.global_scale is None else self.global_scale[start:end]
+                return dequantize_bank_triton(
+                    self.data[start:end], self.scales[start:end], global_scale, self.quant_format
+                )
         packed = self.quant_format == "nvfp4"
         out = torch.empty(
             (end - start, self.out_features, self.in_features), dtype=torch.bfloat16, device=self.data.device
