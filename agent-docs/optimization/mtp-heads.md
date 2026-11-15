@@ -10,7 +10,7 @@
 | GLM-4 MoE Lite | decoder list entry at `num_hidden_layers` | `eh_proj`, `enorm`, `hnorm`, `shared_head.norm` beside the layer's own children; the release's `embed_tokens` and `shared_head.head` copies are the trunk's in training |
 | Nemotron-H: Lightning, and Super VL on its text and composite routes | `mtp.*` beside the output embedding it shares, so `language_model.mtp.*` on the composite | `layers.0`, an attention block with `eh_proj`, `enorm` and `hnorm`; `layers.1`, a MoE block with `final_layernorm` |
 
-Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, DeepSeek-V4 stores vendor names and quantized experts. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
+Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, Inkling 2 ships a five-layer draft head of its own configuration that transformers' class does not build, DeepSeek-V4 stores vendor names and quantized experts. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
 
 Ling-3.0-flash's remote forward runs its own head; see [Bailing](../models/bailing.md#mtp-tail).
 

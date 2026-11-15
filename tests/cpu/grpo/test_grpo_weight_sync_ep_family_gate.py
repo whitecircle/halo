@@ -18,6 +18,7 @@ from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 EXPECTED_UNSUPPORTED = {
     "EPCohere2MoELayer",
     "EPInklingMoELayer",
+    "EPInkling2MoELayer",
     "EPNemotronHMoELayer",
     "EPQwen3NextMoELayer",
     "EPQwen4ExpMoELayer",

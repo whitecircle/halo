@@ -23,6 +23,7 @@ of them are MoE.
 | [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL; the text-only [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](../agent-docs/models/nemotron-h.md#lightning) ↗ has its own recipe, run for 5 steps at EP8 |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; SDPA; the tokenizer ships no pad token |
+| [Inkling 2](../agent-docs/models/inkling2.md) ↗ | `thinkingmachines/Inkling-2-Small` | MoE | eager attention; NVFP4/MXFP8 experts only, so expert LoRA over frozen quantized experts at EP ≥ 2 |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only; LoRA fits one 8-GPU machine, a full fine-tune takes two |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |

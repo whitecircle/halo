@@ -81,6 +81,17 @@ class InklingHeadTransform(HeadTransformSpec):
         return HeadTransform(hidden_scale=1.0 / text.logits_mup_width_multiplier, vocab_size=text.unpadded_vocab_size)
 
 
+class Inkling2HeadTransform(HeadTransformSpec):
+    """``final_logit_softcapping`` caps the logits; the padded vocabulary columns are cut off."""
+
+    HF_MODULE_NAMES = ("Inkling2ForCausalLM", "Inkling2ForConditionalGeneration")
+
+    @classmethod
+    def transform(cls, config) -> HeadTransform:
+        text = text_config(config)
+        return HeadTransform(softcap=text.final_logit_softcapping, vocab_size=text.unpadded_vocab_size)
+
+
 class CohereHeadTransform(HeadTransformSpec):
     """``logit_scale`` multiplies the logits."""
 

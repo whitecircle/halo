@@ -9,6 +9,7 @@ from transformers.models.deepseek_v4.configuration_deepseek_v4 import DeepseekV4
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextConfig
 from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditionalGeneration
+from transformers.models.inkling2.modeling_inkling2 import Inkling2ForConditionalGeneration
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
@@ -19,6 +20,7 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.models.moe.family_specs import expert_weight_roots
+from tests.common.inkling2 import tiny_inkling2_config
 from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
@@ -45,8 +47,12 @@ def _deepseek_v4():
     return DeepseekV4ForCausalLM, DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG))
 
 
+def _inkling2():
+    return Inkling2ForConditionalGeneration, Inkling2ForConditionalGeneration(tiny_inkling2_config())
+
+
 # model_type → (model class, tiny random-init instance) for the families with a tiny config.
-_BUILDERS = {"glm5_next": _glm5_next, "step3p7": _step3p7, "deepseek_v4": _deepseek_v4}
+_BUILDERS = {"glm5_next": _glm5_next, "step3p7": _step3p7, "deepseek_v4": _deepseek_v4, "inkling2": _inkling2}
 
 
 def _lazy_converted_families() -> list[str]:

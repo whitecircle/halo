@@ -174,6 +174,7 @@ The on-policy GRPO trainers' packed micro-batches (`packed_microbatch_tokens`) f
 |---|---|---|
 | Qwen3 (dense + MoE), GLM-4 MoE Lite, Laguna, Gemma 4, and dense Llama, Qwen2, Mistral, Mixtral, OLMo3, Cohere2, Gemma 1, 2 and 3, and PaliGemma | isolated on their supported backends | — |
 | Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them; `packing` and `padding_free` are **refused** unless `allow_cross_document_linear_attention` |
+| Inkling 2 | eager only, so `padding_free` (varlen) is refused | the same four depthwise causal convs per layer **cross**; `packing` is **refused** unless `allow_cross_document_linear_attention` |
 | Mistral4 | isolated — flash reads the `position_ids` the attention hands its interface; dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |

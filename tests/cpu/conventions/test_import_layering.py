@@ -83,7 +83,7 @@ _MEMBER_ORDERS = {
     ),
     "distributed.expert_parallel.deepep": (("settings",), ("capacity",), ("backends",), ("dispatcher",)),
     "distributed.expert_parallel.moe_layer": (
-        ("compute", "routing", "grad_sync", "expert_lora", "gather", "balancing_bias"),
+        ("compute", "routing", "grad_sync", "expert_lora", "gather", "balancing_bias", "frozen_banks"),
         ("layer",),
         ("shared_experts_layer",),
     ),

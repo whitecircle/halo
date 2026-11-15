@@ -106,8 +106,8 @@ only where the pinned engine reads that family's layout:
   their architecture), and Zaya on SGLang, whose loader reads a layout the export
   does not carry.
 - **Untested:** Zaya on vLLM's generic transformers backend, Ling 3.0, Inkling,
-  and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The exports use the
-  hub's names, but no engine has served one.
+  Inkling 2, and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The
+  exports use the hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
   (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. A
   `text_only_model` export of Nemotron 3.5 Super VL serves after

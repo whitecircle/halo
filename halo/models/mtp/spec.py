@@ -15,6 +15,7 @@ from halo.models.moe.family_specs import (
     GLM4,
     GLM5_NEXT,
     INKLING,
+    INKLING2,
     NEMOTRON_H,
     QWEN3_5,
     QWEN3_NEXT,
@@ -149,6 +150,11 @@ MTP_REFUSALS: dict[str, str] = {
     **dict.fromkeys(
         INKLING.model_types,
         "its release stores eight draft layers under names that need renames",
+    ),
+    **dict.fromkeys(
+        INKLING2.model_types,
+        "its release ships a five-layer draft head of its own configuration (mtp_config) that transformers' class does "
+        "not build",
     ),
     **dict.fromkeys(
         QWEN4_EXP.model_types,

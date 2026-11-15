@@ -23,6 +23,8 @@ from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
 from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from transformers.models.inkling.modeling_inkling import InklingMoE
+from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 from transformers.models.lfm2_moe.configuration_lfm2_moe import Lfm2MoeConfig
 from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeSparseMoeBlock
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
@@ -49,6 +51,7 @@ from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
@@ -77,6 +80,11 @@ _GLM5_SWIGLU_LIMIT = 0.5
 # The routed and shared bounds differ so a wrapper that read the wrong list still diverges.
 _STEP3P7_SWIGLU_LIMIT = 0.5
 _STEP3P7_SHARED_SWIGLU_LIMIT = 0.4
+
+# Inkling 2's gate and up softcaps differ and sit inside the fixture's activation scale, so a wrapper that dropped
+# either, or swapped them, diverges.
+_INKLING2_GATE_SOFTCAP = 0.5
+_INKLING2_UP_SOFTCAP = 0.3
 
 _COMMON = {
     "hidden_size": H,
@@ -235,6 +243,22 @@ def _inkling() -> InklingMoE:
     )
 
 
+def _inkling2() -> Inkling2SparseMoeBlock:
+    """``route_scale`` is non-neutral; the config aliases ``intermediate_size`` to the expert width, so it is not
+    passed twice."""
+    common = {key: value for key, value in _COMMON.items() if key != "intermediate_size"}
+    return Inkling2SparseMoeBlock(
+        Inkling2TextConfig(
+            n_routed_experts=E,
+            num_experts_per_tok=K,
+            route_scale=2.5,
+            mlp_gate_softcap=_INKLING2_GATE_SOFTCAP,
+            mlp_up_softcap=_INKLING2_UP_SOFTCAP,
+            **common,
+        )
+    )
+
+
 def _step3p7() -> Step3p7SparseMoeBlock:
     """Bounds and scaling are non-neutral so a wrapper dropping any diverges; the family has no ``norm_topk_prob``
     knob and no group limiting."""
@@ -306,6 +330,7 @@ FAMILIES = [
     ("zaya", EPZayaMoELayer, _zaya, _block_inputs),
     ("deepseek_v4", EPDeepseekV4MoELayer, _deepseek_v4, _block_inputs),
     ("inkling", EPInklingMoELayer, _inkling, _block_inputs),
+    ("inkling2", EPInkling2MoELayer, _inkling2, _block_inputs),
     ("cohere2_moe", EPCohere2MoELayer, _cohere2_moe, _block_inputs),
     ("step3p7", EPStep3p7MoELayer, _step3p7, _block_inputs),
 ]
@@ -337,6 +362,10 @@ def _build(factory, wrapper, dtype: torch.dtype) -> tuple[nn.Module, nn.Module]:
     because the routing biases live there."""
     torch.manual_seed(0)
     module = factory().to(dtype)
+    if isinstance(module, Inkling2SparseMoeBlock):
+        # transformers pins ``mlp.gate.weight`` to fp32 (``_keep_in_fp32_modules_strict``) and the router casts its
+        # input to fp32, so the reference cannot run with an fp64 router.
+        module.gate.float()
     for parameter in module.parameters():
         nn.init.normal_(parameter, std=0.2)
     for _name, buffer in module.named_buffers():

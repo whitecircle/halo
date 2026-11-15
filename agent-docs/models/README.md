@@ -21,6 +21,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | Yes ¹³ | `examples/sft/glm4/*` |
 | [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | Yes ¹³ | `examples/sft/laguna/*` |
 | [Inkling-Small](inkling.md) | `inkling_text` | Yes | Yes | No | No | Yes ¹⁰ ¹³ | `examples/sft/inkling/*` |
+| [Inkling-2-Small](inkling2.md) | `inkling2_text` | Yes ¹⁶ | Yes ⁶ | No | No | No | — |
 | [Gemma 4 MoE](gemma4.md) | `gemma4` | Yes | Yes | No | No | No | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | `bailing_moe` | Yes | Yes | Yes ⁷ | No | No | `examples/sft/bailing/*` |
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
@@ -33,7 +34,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Step-3.7 Flash](step3p7.md) | `step3p7` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/step3p7/*` |
 | Any other HF model with a `tp_plan` (Llama, Mistral, Phi, …) | — | — | — | No | Yes | No | — |
 
-The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Mistral4, Nemotron-H, Qwen3-Next and Qwen3.8-Flash-Next. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Inkling 2, Mistral4, Nemotron-H, Qwen3-Next and Qwen3.8-Flash-Next. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 ¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
@@ -64,6 +65,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
 
 ¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
+
+¹⁶ The release ships its routed experts only as NVFP4/MXFP8, so it trains as expert LoRA over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)); full fine-tuning runs on tiny models only.
 
 ## MoE knobs
 
@@ -129,6 +132,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
 - [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's, differing in the top-k weight default and the hub↔module key spellings.
 - [Inkling](inkling.md) — Thinking Machines multimodal MoE; joint routed+shared router normalization forces a standalone wrapper, and its shipped config runs multi-node EP16.
+- [Inkling 2](inkling2.md) — Thinking Machines multimodal MoE, 384 sigmoid-routed experts, eager attention; the quantized-only release trains as expert LoRA over frozen NVFP4/MXFP8 experts.
 - [Gemma 4 MoE](gemma4.md) — router outside the EP-wrapped module.
 - [Bailing MoE / Ling](bailing.md) — softmax GQA + shared experts; needs `trust_remote_code`.
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.

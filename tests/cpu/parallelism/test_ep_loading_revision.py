@@ -29,7 +29,12 @@ def _make_ep_config() -> EPConfig:
 
 
 def _ep_pc(**overrides) -> SimpleNamespace:
-    fields = {"ep_config": _make_ep_config, "ep_lazy_loading": True, "fp32_non_ep_params": False}
+    fields = {
+        "ep_config": _make_ep_config,
+        "ep_lazy_loading": True,
+        "fp32_non_ep_params": False,
+        "frozen_quantized_experts": False,
+    }
     return SimpleNamespace(**{**fields, "max_concurrent_loading": 1, **overrides})
 
 

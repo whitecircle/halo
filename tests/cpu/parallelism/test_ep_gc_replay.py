@@ -78,11 +78,20 @@ def _record_passes(model: torch.nn.Module) -> dict[str, list]:
     return passes
 
 
-def _assert_same_gradients(model: torch.nn.Module, reference: torch.nn.Module) -> None:
+# Inkling 2's attention residuals sum each layer's gradient into every earlier block; a reentrant backward runs one
+# nested backward per layer, which orders those sums differently, so its gradients agree to rounding, not bitwise.
+_ROUNDING_UNDER_REENTRANT = {"inkling2_text"}
+
+
+def _assert_same_gradients(model: torch.nn.Module, reference: torch.nn.Module, *, exact: bool = True) -> None:
     for (name, param), (_, expected) in zip(model.named_parameters(), reference.named_parameters(), strict=True):
         assert (param.grad is None) == (expected.grad is None), name
-        if param.grad is not None:
+        if param.grad is None:
+            continue
+        if exact:
             assert torch.equal(param.grad, expected.grad), name
+        else:
+            torch.testing.assert_close(param.grad, expected.grad, rtol=0, atol=2e-6 * expected.grad.abs().max().item())
     for path, layer in named_ep_layers(model):
         ungraded = [name for name, param in layer.expert_named_params() if param.grad is None]
         assert not ungraded, f"{path}: no gradient reached the experts {ungraded}"
@@ -109,7 +118,7 @@ def test_the_recompute_replays_the_forwards_dispatch_and_combine(name, mode):
         ], path
         (scope, recompute), (replay_scope, replay_recompute) = passes[path]
         assert scope is not None and replay_scope is scope and (recompute, replay_recompute) == (False, True), path
-    _assert_same_gradients(model, reference)
+    _assert_same_gradients(model, reference, exact=not (name in _ROUNDING_UNDER_REENTRANT and mode == "reentrant"))
 
 
 @pytest.mark.parametrize("mode", CHECKPOINT_MODES)
@@ -160,7 +169,7 @@ def test_microbatches_in_flight_replay_their_own_frames(name, mode):
             ("combine_backward", second),
             ("dispatch_backward", second),
         ], path
-    _assert_same_gradients(model, reference)
+    _assert_same_gradients(model, reference, exact=not (name in _ROUNDING_UNDER_REENTRANT and mode == "reentrant"))
 
 
 @pytest.mark.parametrize("mode", CHECKPOINT_MODES)

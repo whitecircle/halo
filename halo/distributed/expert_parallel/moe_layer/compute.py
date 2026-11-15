@@ -155,7 +155,7 @@ class EPExpertComputeMixin:
         if self._expert_kernels_warmed or not (grouped or dispatched):
             return
         self._expert_kernels_warmed = True
-        width = 2 * self.down_proj.shape[1]  # down_proj is [E, M, H] on every layout, ETP included
+        width = 2 * self._expert_intermediate_width()
         # Zeros, not a draw: the recompute restores the RNG to region entry and this latched warmup does not
         # rerun, so a draw would shift expert-LoRA dropout's sample. Grad on and inference mode off, since a
         # first forward under either still has to compile the backward kernels.
@@ -173,6 +173,10 @@ class EPExpertComputeMixin:
             if dispatched:
                 with torch.no_grad():
                     self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
+
+    def _expert_intermediate_width(self) -> int:
+        """This rank's expert FFN width ``M``: ``down_proj`` is ``[E, M, H]`` on every layout, ETP included."""
+        return self.down_proj.shape[1]
 
     def _warm_expert_gemm(self, device: torch.device, dtype: torch.dtype, hidden: int) -> None:
         """Run :meth:`_grouped_expert_ffn`, forward and backward, over zero tokens at one row per local expert and at
@@ -284,7 +288,7 @@ class EPExpertComputeMixin:
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype
     ) -> torch.Tensor:
         """Grouped-GEMM expert projection ``x @ W[weight_attr]``, plus the LoRA delta where it is adapted."""
-        out = self._grouped_mm(x, getattr(self, weight_attr).to(out_dtype), offs=offs)
+        out = self._expert_base_proj(x, weight_attr, offs, out_dtype)
         if self._expert_adapters_enabled and weight_attr in self._expert_lora_attrs:
             # Adapters stay bf16 under lowp: block-scaling along rank r is unrepresentable (r < block size).
             lora_a = getattr(self, f"{weight_attr}_lora_A").to(out_dtype)
@@ -292,6 +296,12 @@ class EPExpertComputeMixin:
             hidden = self._grouped_mm(self.expert_lora_dropout(x), lora_a, offs=offs, lowp=False)
             out = out + self.expert_lora_scaling * self._grouped_mm(hidden, lora_b, offs=offs, lowp=False)
         return out
+
+    def _expert_base_proj(
+        self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype
+    ) -> torch.Tensor:
+        """``x @ W[weight_attr]`` over the base weight alone; a layer whose base is no parameter overrides it."""
+        return self._grouped_mm(x, getattr(self, weight_attr).to(out_dtype), offs=offs)
 
     def _grouped_mm(
         self,
@@ -361,12 +371,16 @@ class EPExpertComputeMixin:
         return proj(self._glu_combine(proj(x, "gate_proj"), proj(x, "up_proj")), "down_proj")
 
     def _expert_proj_single(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
-        out = x @ getattr(self, weight_attr)[idx]
+        out = self._expert_base_proj_single(idx, x, weight_attr)
         if self._expert_adapters_enabled and weight_attr in self._expert_lora_attrs:
             lora_a = getattr(self, f"{weight_attr}_lora_A")[idx]
             lora_b = getattr(self, f"{weight_attr}_lora_B")[idx]
             out = out + self.expert_lora_scaling * (self.expert_lora_dropout(x) @ lora_a @ lora_b)
         return out
+
+    def _expert_base_proj_single(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
+        """One expert's ``x @ W[weight_attr][idx]`` over the base weight alone (the per-expert loop)."""
+        return x @ getattr(self, weight_attr)[idx]
 
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         """``act_fn(gate) * up`` through the latched fused kernel where one exists; a family with its own combine

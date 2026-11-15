@@ -125,6 +125,7 @@ _MODEL_REFUSALS = {
     "mistral4": ("mistral4", "flash_attention_2", "row index"),
     "glm5_next": ("glm5_next", "flash_attention_2", "receive no document boundary"),
     "inkling": ("inkling_text", "flash_attention_2", "receive no document boundary"),
+    "inkling2": ("inkling2_text", "flash_attention_2", "receive no document boundary"),
 }
 
 

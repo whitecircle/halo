@@ -212,6 +212,23 @@ INKLING = MoEFamilySpec(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
 )
+# Inkling 2: 384 sigmoid-routed experts, no shared expert, softcapped SwiGLU. The composite spells ``inkling2``, the
+# text tower ``inkling2_text``.
+INKLING2 = MoEFamilySpec(
+    model_types=("inkling2", "inkling2_text"),
+    balancing_slot=_E_SCORE_CORRECTION_BIAS,
+    # Declared so the absent slot registers as None (the block ships none), as LFM-2.
+    shared_expert_attrs=("shared_experts",),
+    hub_conversion_keys=("inkling2",),
+    unmarked_sequence_mixer="depthwise causal short convolutions (on the projected K/V and around each sublayer)",
+    eager_only_attention=(
+        "every attention layer adds a learned relative-logits bias and a query-conditioned sink, and the class "
+        "declares no SDPA, flash or flex support"
+    ),
+    weight_sync_refusal=(
+        "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
+    ),
+)
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),
@@ -320,6 +337,7 @@ MOE_FAMILY_SPECS: tuple[MoEFamilySpec, ...] = (
     GLM5_NEXT,
     GPT_OSS,
     INKLING,
+    INKLING2,
     LAGUNA,
     LFM2,
     MISTRAL4,

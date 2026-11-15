@@ -504,7 +504,7 @@ model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
-  Inkling (no engine run has validated its sync), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
+  Inkling and Inkling 2 (no engine run has validated their sync), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
   SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
   [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)), Nemotron-H (no engine run has validated its sync)
   and Cohere2 MoE carry on both engines.
@@ -613,7 +613,7 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
+Inkling, Inkling 2, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
 family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
 GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server

@@ -67,6 +67,7 @@ _TINY_MOE_FAMILY_MARKERS = {
     "glm5_next": "glm5",
     "gpt_oss": "gptoss",
     "inkling_text": "inkling",
+    "inkling2_text": "inkling2",
     "laguna": "laguna",
     "lfm2_moe": "lfm2",
     "mistral4": "mistral4",
@@ -952,7 +953,7 @@ MANIFEST: dict[str, TestSpec] = {
                     markers=("gpu", "full", "4gpu", "ep", "etp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                     timeout=900,
                 )
-                for family in ("gpt_oss", "inkling_text", "nemotron_h", "qwen4_exp_text")
+                for family in ("gpt_oss", "inkling_text", "inkling2_text", "nemotron_h", "qwen4_exp_text")
             ),
             # No latent, the shape of Nemotron-H's Lightning release, on the wire and through the expert split.
             Row("--family nemotron_h --no-latent", markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron")),
@@ -986,6 +987,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_lazy_load_inkling.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "inkling"), timeout=900
+    ),
+    "parallelism/ep/test_lazy_load_inkling2_frozen.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "ep", "lora", "moe", "inkling2"), timeout=900
     ),
     # A family joins this matrix when transformers' conversion is its own to replay: ``hub_conversion_keys``, or
     # Nemotron-H's level drop and per-expert banks.
@@ -2815,6 +2819,7 @@ ALL_MARKERS = (
     "zaya",
     "deepseek_v4",
     "inkling",
+    "inkling2",
     "cohere2_moe",
     "glm5",
     "step3p7",

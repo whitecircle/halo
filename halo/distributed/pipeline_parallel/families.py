@@ -294,6 +294,14 @@ ZAYA_PP = PPFamilySpec(
         "does not carry; the loop also selects layer_types and rotary embeddings by list position."
     ),
 )
+INKLING2_PP = PPFamilySpec(
+    hf_module_names=("Inkling2TextModel",),
+    refusal=(
+        "Inkling 2's attention residuals feed each decoder layer a learned mix of every completed residual block "
+        "before it, a block_states stack the loop grows layer by layer, which a single-activation stage boundary "
+        "does not carry."
+    ),
+)
 # Nothing in the loop indexes by list position (masks are loop-invariant, per-layer state hangs off
 # each module's own layer_idx), so any split offset is exact.
 DEEPSEEK_V4_PP = PPFamilySpec(
@@ -343,7 +351,16 @@ NEMOTRON_H_PP = PPFamilySpec(
     layer_types_rebase_safe=True,
     validated=True,
 )
-PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP, NEMOTRON_H_PP, QWEN4_EXP_PP)
+PP_FAMILY_SPECS = (
+    STOCK_FORWARD_PP,
+    ZAYA_PP,
+    DEEPSEEK_V4_PP,
+    GEMMA4_PP,
+    GLM5_NEXT_PP,
+    INKLING2_PP,
+    NEMOTRON_H_PP,
+    QWEN4_EXP_PP,
+)
 
 
 def build_pp_spec_map(specs: tuple[PPFamilySpec, ...]) -> dict[str, PPFamilySpec]:
