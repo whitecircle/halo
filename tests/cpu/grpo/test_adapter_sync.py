@@ -39,6 +39,7 @@ from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
 from tests.common.fake_engines import FakeSGLangServer
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _LORA = {
     "max_lora_rank": 16,
@@ -123,9 +124,9 @@ def base_pushes(monkeypatch, events):
     return pushes
 
 
-def _adapter_sync(model, pool, launch_base=None) -> AdapterSync:
+def _adapter_sync(model, pool, launch_base=None, base_refusal=None) -> AdapterSync:
     routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
-    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions(), routes, launch_base)
+    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions(), routes, launch_base, base_refusal)
     sync.servers = pool
     return sync
 
@@ -450,6 +451,82 @@ def test_a_restarted_server_that_serves_another_base_gets_the_full_push(
     assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
 
 
+_BASE_REFUSAL = "no full push into this family is validated"
+
+
+@pytest.fixture
+def unpushable_sync_of(servers):
+    """A sync whose model's base no engine takes, served from the launch base the fake servers hold."""
+    pool, _ = servers
+    model = _peft_model()
+    return _adapter_sync(model, pool, _LAUNCH_BASE, _BASE_REFUSAL), SimpleNamespace(model=model)
+
+
+def test_an_unpushable_base_is_never_pushed_and_each_sync_loads_the_adapter(
+    unpushable_sync_of, servers, base_pushes, events
+):
+    """No group either: the trainer forms none for a base no push carries, so the sync runs without a pool."""
+    (sync, trainer), (_, fakes) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    first = sync.versions.current
+    sync.sync(trainer, None)
+
+    assert base_pushes == [] and events == [], "no push and no reconnect: the servers launched on the base"
+    assert first != sync.versions.current
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize("pushable", [True, False], ids=["pushed-base", "unpushable-base"])
+def test_no_collective_runs_inside_a_rank0_probe(pushable, request, monkeypatch, client_pool, base_pushes):
+    """A probe runs on rank 0 alone: a collective inside it pairs with the other ranks' outer one and desyncs them."""
+    depth = []
+    verdict = adapter_sync.rank0_verdict
+
+    def tracked(probe, what, *args, **kwargs):
+        assert not depth, f"{what!r} is a collective inside a rank-0 probe"
+        depth.append(what)
+        try:
+            return verdict(probe, what, *args, **kwargs)
+        finally:
+            depth.pop()
+
+    monkeypatch.setattr(adapter_sync, "rank0_verdict", tracked)
+    sync, trainer = request.getfixturevalue("sync_of" if pushable else "unpushable_sync_of")
+    pool = client_pool if pushable else None
+    sync.sync(trainer, pool)
+    sync.sync(trainer, pool)
+    sync.recover(pool)
+
+
+@pytest.mark.parametrize("between_syncs", [False, True], ids=["at-the-sync", "between-syncs"])
+def test_an_unpushable_base_gets_its_adapter_back_on_a_restart_onto_the_launch_base(
+    between_syncs, unpushable_sync_of, servers, base_pushes, events
+):
+    (sync, trainer), (_, [kept, restarted]) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    restarted.restart()
+
+    if between_syncs:
+        sync.recover(None)
+    else:
+        sync.sync(trainer, None)
+
+    assert base_pushes == []
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize("launched_as", [{"model_path": "/models/other"}, {"served_model_name": "org/other"}])
+def test_an_unpushable_base_refuses_a_server_on_another_base(launched_as, unpushable_sync_of, servers, base_pushes):
+    (sync, trainer), (_, [_, foreign]) = unpushable_sync_of, servers
+    for field, value in launched_as.items():
+        setattr(foreign, field, value)
+
+    with pytest.raises(Exception, match=_BASE_REFUSAL) as raised:
+        sync.sync(trainer, None)
+
+    assert foreign.url in str(raised.value) and base_pushes == []
+
+
 def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_of, servers, base_pushes, client_pool):
     """A from-scratch or vocabulary-grown model has no launch base (``None``), whatever the server reports."""
     (sync, trainer), (_, [_, restarted]) = sync_of, servers
@@ -667,10 +744,6 @@ def _refusal_cases():
         "grown vocabulary": (grown, "grown vocabulary"),
         "other trainable parameters": (trainable_norm, "trainable parameters other than the adapters"),
         "qlora": (patched(lambda m: m.setattr(adapter_sync, "has_packed_quantized_params", lambda _: True)), "QLoRA"),
-        "expert lora": (
-            patched(lambda m: m.setattr(adapter_sync, "model_has_expert_lora", lambda _: True)),
-            "native expert LoRA",
-        ),
     }
 
 
@@ -719,14 +792,19 @@ def test_rslora_scales_by_the_square_root_of_the_rank():
 
 
 def _config(**overrides):
-    fields = {"rollout_backend": "sglang", "routing_replay": "none", "model_name": _BASE_MODEL}
+    fields = {
+        "rollout_backend": "sglang",
+        "routing_replay": "none",
+        "model_name": _BASE_MODEL,
+        "rollout_adapter_dir": None,
+    }
     return SimpleNamespace(**{**fields, **overrides})
 
 
 @pytest.mark.parametrize(
     ("overrides", "reason"),
     [
-        ({"rollout_backend": "vllm"}, VLLMWeightSyncClient.ADAPTER_SYNC_REFUSAL[:30]),
+        ({"rollout_backend": "vllm"}, "loads an adapter only from a directory"),
         ({"routing_replay": "rollout"}, "R3"),
         ({"model_name": None}, "must be set and hold no colon"),
         ({"model_name": "org:policy"}, "must be set and hold no colon"),
@@ -737,8 +815,9 @@ def test_a_config_the_engine_cannot_serve_is_refused(overrides, reason):
         reject_unadaptable_config(_config(**overrides))
 
 
-def test_a_servable_config_passes():
-    reject_unadaptable_config(_config())
+@pytest.mark.parametrize("overrides", [{}, {"rollout_backend": "vllm", "rollout_adapter_dir": "/shared/adapters"}])
+def test_a_servable_config_passes(overrides):
+    reject_unadaptable_config(_config(**overrides))
 
 
 @pytest.mark.parametrize(("prefetch_depth", "active", "live"), [(3, True, 5), (1, True, 3), (3, False, 2)])
@@ -816,6 +895,29 @@ def test_the_gpu_e2e_builds_its_sync_with_the_class_signature():
     sync = build_adapter_sync(resolve_adapter_serving(_peft_model()), AdapterVersions())
 
     assert isinstance(sync, AdapterSync)
+
+
+_INKLING2_ATTENTION = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj")
+
+
+def _inkling2_peft(family: str, targets: tuple[str, ...]) -> torch.nn.Module:
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES.get(family) or TINY_MOE_VLM_FAMILIES[family])
+    return get_peft_model(model, LoraConfig(r=8, lora_alpha=16, target_modules=list(targets))).to(torch.bfloat16)
+
+
+@pytest.mark.parametrize("family", ["inkling2_text", "inkling2"])
+def test_inkling2_attention_adapters_reach_the_release_names_vllm_packs(family):
+    """vLLM loads Inkling 2's adapters under the release's names and packs wq_du/wk_dv/wv_dv/wr_du into qkvr."""
+    model = _inkling2_peft(family, _INKLING2_ATTENTION)
+    parallelism = SimpleNamespace(is_tp_mode=False, is_pp_mode=False, is_cp_mode=False)
+    assert adapter_sync._unadaptable_reasons(model, parallelism, VLLMWeightSyncClient) == []
+    state = {name: param for name, param in model.named_parameters() if ".lora_" in name}
+    hub = adapter_sync._hub_adapter_state(model, state)
+    hub = {key: value for key, value in hub.items() if ".visual." not in key}
+    layer0 = {key.split(".attn.")[1].split(".")[0] for key in hub if ".layers.0.attn." in key}
+    assert layer0 == {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud"}
+    assert all(".model.llm.layers." in key for key in hub), "the release's layer path"
 
 
 if __name__ == "__main__":

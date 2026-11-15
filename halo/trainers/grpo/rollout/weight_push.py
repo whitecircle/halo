@@ -189,6 +189,15 @@ def _reject_refused_families(families: list[tuple[str, type[EPMoELayerBase]]], c
             )
 
 
+def base_push_refusal(model: torch.nn.Module) -> str | None:
+    """Why no engine takes this model's full weights (its family's ``weight_sync_refusal``), ``None`` where they push."""
+    families = {type(module) for _name, module in named_ep_layers(model)}
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    if not families and config is not None:
+        families = set(ep_layer_classes_for_config(config))
+    return next((cls.FAMILY.weight_sync_refusal for cls in families if cls.FAMILY.weight_sync_refusal), None)
+
+
 def _reject_unquantizable_rollout(config, backend: str, precision: RolloutWeightPrecision) -> None:
     """Refuses ``rollout_weight_precision: fp8_block`` on a family no GPU row has validated it for."""
     if precision == "bf16":
@@ -200,19 +209,25 @@ def _reject_unquantizable_rollout(config, backend: str, precision: RolloutWeight
         )
 
 
-def reject_unsyncable_config(config, backend: str, precision: RolloutWeightPrecision = "bf16") -> None:
+def reject_unsyncable_config(
+    config, backend: str, precision: RolloutWeightPrecision = "bf16", *, adapter_sync: bool = False
+) -> None:
     """What ``config`` alone settles, for a script to raise before the load and the server preflights a refused family
-    would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model."""
+    would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model.
+    ``adapter_sync`` pushes no base, so a family whose full weights no engine takes passes."""
     if config is None:
         return
     client_cls = resolve_weight_sync_client(backend)
     _reject_unservable_model_types(config, backend, client_cls)
-    registry = f"model_type registry for {config.model_type}"
-    _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
+    if not adapter_sync:
+        registry = f"model_type registry for {config.model_type}"
+        _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
     _reject_unquantizable_rollout(config, backend, precision)
 
 
-def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
+def _reject_engine_fit(
+    model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase], *, adapter_sync: bool
+) -> None:
     """Refuses an unservable family, one with a ``weight_sync_refusal``, a stock tree whose experts or spelling no engine
     layout covers (:func:`_reject_stock_tree`), and one missing a buffer the push must carry."""
     client_cls = resolve_weight_sync_client(backend)
@@ -225,7 +240,8 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
         families = [
             (f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)
         ]
-    _reject_refused_families(families, client_cls)
+    if not adapter_sync:
+        _reject_refused_families(families, client_cls)
     if not ep_layers:
         _reject_stock_tree(config, sorted({cls.__name__ for _where, cls in families}), client_cls)
     for where, layer in ep_layers.items():
@@ -283,11 +299,14 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
         )
 
 
-def reject_unsyncable_model(model: torch.nn.Module, backend: str, precision: RolloutWeightPrecision = "bf16") -> None:
-    """Refuses at construction; structural, so every rank raises alike."""
+def reject_unsyncable_model(
+    model: torch.nn.Module, backend: str, precision: RolloutWeightPrecision = "bf16", *, adapter_sync: bool = False
+) -> None:
+    """Refuses at construction; structural, so every rank raises alike. ``adapter_sync`` pushes no base, so a family
+    whose full weights no engine takes passes; :func:`base_push_refusal` holds it to its launch base."""
     ep_layers = dict(named_ep_layers(model))
     _reject_model_state(model, ep_layers)
-    _reject_engine_fit(model, backend, ep_layers)
+    _reject_engine_fit(model, backend, ep_layers, adapter_sync=adapter_sync)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     _reject_unquantizable_rollout(config, backend, precision)
     _reject_balancing_state(model)

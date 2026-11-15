@@ -7,6 +7,7 @@ import socket
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
 from urllib.parse import urlparse
@@ -152,6 +153,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     CHUNK_FAILURE_REMEDIES: Mapping[str, str] = {}
     # The adapted module names the engine validates and serves.
     ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
+    # Whether the engine loads an adapter only from a directory it reads (rollout_adapter_dir).
+    ADAPTER_NEEDS_DIRECTORY = False
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
@@ -380,8 +383,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
         """The ``model`` a request names to be served through ``adapter``."""
         cls._reject_adapter_serving()
 
-    def load_adapter(self, name: str, config: dict, payload: str) -> None:
-        """Register the serialized adapter ``payload`` as ``name``; raises where the engine refuses."""
+    def load_adapter(self, name: str, config: dict, payload: str | Path) -> None:
+        """Register the adapter ``payload`` (serialized tensors, or a published directory) as ``name``; raises where the
+        engine refuses."""
         self._reject_adapter_serving()
 
     def unload_adapter(self, name: str) -> None:

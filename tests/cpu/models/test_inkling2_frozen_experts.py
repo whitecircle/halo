@@ -141,11 +141,14 @@ def test_frozen_layer_refuses_every_expert_gather_and_keeps_banks_out_of_checkpo
     assert {f"{slot.weight}_lora_{side}" for slot in FROZEN_SLOTS for side in "AB"} <= set(layer.state_dict())
 
 
-_FROZEN_OK = {"ep_size": 2, "expert_lora": ExpertLoraSpec(r=8, alpha=16), "frozen_quantized_experts": True}
+_FROZEN_OK = {"ep_size": 2, "frozen_quantized_experts": True}
 
 
-def test_frozen_quantized_experts_builds_beside_an_ep_group_and_expert_lora():
-    assert make_parallelism_config(world_size=2, gpus_per_node=2, **_FROZEN_OK).frozen_quantized_experts
+@pytest.mark.parametrize("expert_lora", [None, ExpertLoraSpec(r=8, alpha=16)], ids=["no_expert_lora", "expert_lora"])
+def test_frozen_quantized_experts_builds_beside_an_ep_group(expert_lora):
+    """Attention-only LoRA leaves the banks untrained, as expert LoRA leaves them frozen."""
+    config = make_parallelism_config(world_size=2, gpus_per_node=2, expert_lora=expert_lora, **_FROZEN_OK)
+    assert config.frozen_quantized_experts
 
 
 @pytest.mark.parametrize(
@@ -153,7 +156,6 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group_and_expert_lora():
     [
         ({"ep_size": 1}, "expert_parallel_size >= 2"),
         ({"ep_lazy_loading": False}, "ep_lazy_loading: true"),
-        ({"expert_lora": None}, "lora_target_modules"),
         ({"merge_expert_lora_on_save": True}, "merge_expert_lora_on_save: false"),
     ],
 )

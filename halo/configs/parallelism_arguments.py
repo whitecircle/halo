@@ -157,7 +157,7 @@ class ParallelismArguments(ValidatedConfig):
         default=ParallelismConfig.frozen_quantized_experts,
         metadata={
             "help": "Keep a block-scaled release's routed experts in their shipped NVFP4/MXFP8 layout as a frozen "
-            "base under expert LoRA, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
+            "base, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
             "See agent-docs/models/inkling2.md#frozen-quantized-experts."
         },
     )

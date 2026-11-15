@@ -5,6 +5,7 @@ import logging
 import re
 from collections.abc import Callable
 from functools import partial
+from pathlib import Path
 from typing import NoReturn
 
 import requests
@@ -17,6 +18,7 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    ServedBase,
     ServerFlags,
     WeightSyncClientBase,
     pick_launch_facts,
@@ -40,6 +42,9 @@ _IDENTITY_KEY = "VLLM_HALO_PATCHES"
 # Listed on /server_info as the server reads it; this client never reads its own environment for it.
 _STRICT_TOOL_CALLING_KEY = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
 _TOKEN_ID_PREFIX = "token_id:"
+
+# Loading or unloading an adapter waits out the requests running under the one replaced.
+_ADAPTER_UPDATE_TIMEOUT_S = 120.0
 
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
@@ -66,10 +71,12 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
     TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
     CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
-    ADAPTER_SYNC_REFUSAL = (
-        f"{ENGINE_RELEASE} loads an adapter only from a directory both containers mount, and its decode with an "
-        f"adapter served ran over 5% slower than the merged weights on the model measured"
-    )
+    ADAPTER_SYNC_REFUSAL = None
+    ADAPTER_NEEDS_DIRECTORY = True
+    # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
+    ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    # Names the adapter a score request reads through, when the run serves its policy as one.
+    adapter_source: Callable[[], str | None] | None = None
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
@@ -104,6 +111,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         "attention_backend": ("attention_config", "backend"),
         "compilation_mode": ("compilation_config", "mode"),
         "cudagraph_mode": ("compilation_config", "cudagraph_mode"),
+        "max_lora_rank": ("lora_config", "max_lora_rank"),
+        "max_loras_per_batch": ("lora_config", "max_loras"),
+        "max_loaded_loras": ("lora_config", "max_cpu_loras"),
     }
     _INIT_LOG = "NCCL init: inference_ws={engine_ws}, master={master}:{port}, listening on {bind}"
     _READY_LOG = "NCCL weight transfer initialized"
@@ -113,6 +123,64 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         "vLLM node cannot reach that address, set {env} to an interface routable from the vLLM server (and "
         "NCCL_SOCKET_IFNAME for the data plane on multi-homed hosts)."
     )
+
+    @classmethod
+    def adapter_request_model(cls, base_model: str, adapter: str) -> str:
+        """vLLM serves a loaded adapter under its own name."""
+        return adapter
+
+    def load_adapter(self, name: str, config: dict, payload: str | Path) -> None:
+        """Load the adapter directory ``payload`` (:func:`~halo.weight_sync.adapter_payload.publish_adapter_directory`)
+        as ``name``; the server must run with ``VLLM_ALLOW_RUNTIME_LORA_UPDATING=True``."""
+        if not isinstance(payload, Path):
+            raise ValueError(f"{self.ENGINE_RELEASE} loads an adapter only from a directory: set rollout_adapter_dir")
+        response = self.request(
+            "POST",
+            "/v1/load_lora_adapter",
+            retry=False,
+            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
+            check=False,
+            json={"lora_name": name, "lora_path": str(payload)},
+        )
+        self._require_adapter_update(response, f"load adapter {name!r}")
+
+    def unload_adapter(self, name: str) -> None:
+        response = self.request(
+            "POST",
+            "/v1/unload_lora_adapter",
+            retry=False,
+            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
+            check=False,
+            json={"lora_name": name},
+        )
+        self._require_adapter_update(response, f"unload adapter {name!r}")
+
+    def loaded_adapters(self) -> list[str]:
+        """The adapters registered on the engine: the model cards that name a parent."""
+        return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
+
+    def served_base(self) -> ServedBase:
+        info = self.request(
+            "GET", "/server_info", retry=True, timeout=_SERVER_INFO_TIMEOUT_S, params={"config_format": "json"}
+        ).json()
+        model = (info.get("vllm_config") or {}).get("model_config", {})
+        return ServedBase(
+            model_id=self.served_model_id(),
+            path=(model.get("model") or "").rstrip("/") or None,
+            revision=model.get("revision") or None,
+        )
+
+    @classmethod
+    def is_adapter_missing(cls, error: str, adapter: str) -> bool:
+        """Matches the engine's 404 for a request naming an adapter it does not hold."""
+        return re.search(rf"The model `{re.escape(adapter)}` does not exist", error) is not None
+
+    def _require_adapter_update(self, response: requests.Response, what: str) -> None:
+        if response.ok:
+            return
+        raise RuntimeError(
+            f"vLLM {self.base_url} could not {what}: HTTP {response.status_code}, {response.text[:300]}"
+        )
 
     def read_server_flags(self) -> ServerFlags:
         info = self.request(
@@ -131,7 +199,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             quantization=(model["quantization"] or "") if "quantization" in model else None,
             instance_id=config.get("instance_id"),
             pipeline_stages=config.get("parallel_config", {}).get("pipeline_parallel_size"),
-            extras=pick_launch_facts(config, self.LAUNCH_FACTS),
+            extras={**pick_launch_facts(config, self.LAUNCH_FACTS), "enable_lora": bool(config.get("lora_config"))},
         )
 
     def reports_sampled_token_ids(self) -> bool | None:
@@ -291,8 +359,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
     ) -> list[float]:
         """One prefill through the completions ``prompt_logprobs`` echo, the raw (pre-sampler) distribution."""
+        adapter = self.adapter_source() if self.adapter_source is not None else None
         body = {
-            "model": self.served_model_id(),
+            "model": adapter or self.served_model_id(),
             "prompt": list(prompt_ids) + list(completion_ids),
             "max_tokens": 1,
             "prompt_logprobs": 0,

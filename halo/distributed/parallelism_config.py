@@ -160,13 +160,12 @@ class ParallelismConfig:
             needs = {
                 "expert_parallel_size >= 2": self.ep_size >= 2,
                 "ep_lazy_loading: true": self.ep_lazy_loading,
-                "the expert projections in lora_target_modules": self.expert_lora is not None,
                 "merge_expert_lora_on_save: false": not self.merge_expert_lora_on_save,
             }
             if missing := [need for need, met in needs.items() if not met]:
                 raise ValueError(
                     "frozen_quantized_experts keeps the release's packed experts as a frozen base that the lazy EP "
-                    f"loader installs and only expert LoRA trains over; it needs {', '.join(missing)}."
+                    f"loader installs and no gradient reaches; it needs {', '.join(missing)}."
                 )
         if self.max_concurrent_loading is not None and self.max_concurrent_loading < 0:
             raise ValueError(

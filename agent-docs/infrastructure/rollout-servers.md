@@ -247,8 +247,8 @@ one server and has no such field. The default `per_server` is unchanged. Both en
 ### Adapter sync
 
 `rollout_adapter_sync: true` serves a LoRA policy as an adapter beside the frozen base instead of pushing it folded
-into the weights. SGLang only: vLLM loads an adapter from a directory both containers mount, and its decode with an
-adapter served ran over 5% slower than merged weights on the model measured.
+into the weights. SGLang takes each version in the request body or from `rollout_adapter_dir`; vLLM loads it only from
+`rollout_adapter_dir`, a directory the trainer and every server mount at the same path.
 
 - **First sync.** The base goes out as above, adapters left out (`fold_adapters=False`), then the adapter loads. A
   restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines.
@@ -259,11 +259,17 @@ adapter served ran over 5% slower than merged weights on the model measured.
   parallel rank. The route's own `ForkingPickler` form hands CPU tensors over by file descriptor and CUDA tensors by
   IPC handle, which works on one host only. A per-version directory needs the same mount in the trainer and every
   engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
-  0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row.
+  0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row. With `rollout_adapter_dir` set, rank 0 writes
+  each version there as a PEFT directory (staged under a temporary name, then renamed) and the servers load it by path:
+  `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`.
+  Retirement removes the directory with the version.
 - **Selection.** Every episode leases the newest version for its whole length and its requests send
-  `model: <model_name>:<version>`, so a multi-turn episode and a prefetched round keep the version they started on.
-  A request with no version published raises, since the engine would serve the base. The `isr_engine_reference`
-  re-score sends `lora_path` with the newest version.
+  `model: <model_name>:<version>` on SGLang and `model: <version>` on vLLM, so a multi-turn episode and a prefetched
+  round keep the version they started on. A request with no version published raises, since the engine would serve the
+  base. The `isr_engine_reference` re-score names the newest version the same way.
+- **Base no push carries.** A family whose `weight_sync_refusal` is set (Inkling 2's frozen NVFP4/MXFP8 experts) is
+  never pushed. Every server must serve the trainer's launch base from the start, by the match under **Restart**, and
+  the preflight skips its quantization and MoE-runner checks. A server that serves another base fails the sync.
 - **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
   others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
 - **Restart.** Every step that is not a sync probes each server's `/v1/models` (a refused connection is retried for
@@ -286,7 +292,7 @@ adapter served ran over 5% slower than merged weights on the model measured.
 - **Cost.** On Qwen3.5-35B-A3B, SGLang 0.5.22 decoded 2.6% slower with `--enable-lora` and no adapter against a warm
   base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar.
 
-Refused at construction, with the reason in the message: a backend other than SGLang, `routing_replay: rollout`, a
+Refused at construction, with the reason in the message: vLLM without `rollout_adapter_dir`, `routing_replay: rollout`, a
 `model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA, DoRA, `lora_bias`,
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears

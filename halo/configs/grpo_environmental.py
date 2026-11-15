@@ -1,6 +1,7 @@
 """Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncRolloutConfig``."""
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import timedelta
@@ -311,8 +312,16 @@ class AsyncRolloutConfig(
             "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
             "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
             "name that new episodes select. SGLang only, launched with --enable-lora; attention and dense-MLP "
-            "projections only. A model it cannot serve is refused at startup with the reason. "
-            "See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+            "projections, and the routed experts of a fused-GLU family. A model it cannot serve is refused at startup "
+            "with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+        },
+    )
+    rollout_adapter_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": "Under rollout_adapter_sync: an absolute directory every rollout server reads at the same path. "
+            "Each adapter version is published there and loaded from disk instead of sent in a request body, which "
+            "expert adapters (GBs) need."
         },
     )
     sync_weights_every_n_steps: int = field(
@@ -558,6 +567,13 @@ class AsyncRolloutConfig(
             raise ValueError(
                 "rollout_chat_template_kwargs must not carry 'reasoning_effort': the level is per episode and "
                 "travels as the request's top-level field."
+            )
+        if self.rollout_adapter_dir is not None and (
+            not self.rollout_adapter_sync or not os.path.isabs(self.rollout_adapter_dir)
+        ):
+            raise ValueError(
+                f"rollout_adapter_dir={self.rollout_adapter_dir!r} needs rollout_adapter_sync: true and an absolute "
+                "path the rollout servers read at the same path."
             )
         if self.rollout_weight_precision != "bf16" and self.rollout_adapter_sync:
             raise ValueError(

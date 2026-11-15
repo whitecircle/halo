@@ -4,6 +4,7 @@ failure keeps its state change."""
 import base64
 import io
 import json
+import pathlib
 import pickle
 import re
 import threading
@@ -219,6 +220,9 @@ class FakeVLLMServer(FakeEngineServer):
         self.returns_token_ids = True
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
         self.joined_stores: list[TCPStore] = []
+        # Set to launch with --enable-lora (its lora_config); the adapters it then holds, name -> directory.
+        self.lora: dict | None = None
+        self.adapters: dict[str, str] = {}
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
         if (method, path) == ("GET", "/is_paused"):
@@ -244,8 +248,15 @@ class FakeVLLMServer(FakeEngineServer):
                 "scheduler_config": {"max_num_seqs": 256, "max_num_batched_tokens": 16384},
                 "attention_config": {"backend": "FLASH_ATTN"},
                 "compilation_config": {"mode": "VLLM_COMPILE", "cudagraph_mode": "FULL_AND_PIECEWISE"},
+                **({} if self.lora is None else {"lora_config": self.lora}),
             }
             return 200, {"vllm_env": env, "vllm_config": config}
+        if (method, path) == ("GET", "/v1/models"):
+            _, reply = super().answer(method, path, body)
+            reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
+            return 200, reply
+        if method == "POST" and path in ("/v1/load_lora_adapter", "/v1/unload_lora_adapter"):
+            return self._update_adapter(path, body)
         if (method, path) == ("POST", "/v1/chat/completions"):
             if body.get("tools") and not self.tool_call_parser:
                 return 400, {"error": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser'}
@@ -281,6 +292,22 @@ class FakeVLLMServer(FakeEngineServer):
                 return 500, {"error": f"update_info carries fields the engine does not declare: {sorted(unknown)}"}
             return 200, {}
         return super().answer(method, path, body)
+
+    def _update_adapter(self, path: str, body: dict) -> tuple[int, dict]:
+        """vLLM's runtime adapter routes: a load reads the PEFT directory at ``lora_path``."""
+        name = body["lora_name"]
+        if path == "/v1/unload_lora_adapter":
+            if self.adapters.pop(name, None) is None:
+                return 404, {"error": {"message": f"The lora adapter '{name}' cannot be found."}}
+            return 200, {}
+        if self.lora is None:
+            return 400, {"error": {"message": "LoRA is not enabled"}}
+        if name in self.adapters:
+            return 400, {"error": {"message": f"The lora adapter '{name}' has already been loaded."}}
+        if not (pathlib.Path(body["lora_path"]) / "adapter_config.json").is_file():
+            return 400, {"error": {"message": f"No adapter found for {body['lora_path']}"}}
+        self.adapters[name] = body["lora_path"]
+        return 200, {}
 
     def _join_store(self, host: str, port: int, world_size: int) -> None:
         store = TCPStore(

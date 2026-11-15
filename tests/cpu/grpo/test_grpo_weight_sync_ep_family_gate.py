@@ -10,7 +10,7 @@ import torch.nn as nn
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
-from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
+from halo.trainers.grpo.rollout.weight_push import base_push_refusal, reject_unsyncable_model
 
 # Families refused on every engine; each reason is stated at the class declaration. What one engine
 # alone cannot serve is that engine client's ``UNSERVABLE_MODEL_TYPES``
@@ -71,6 +71,17 @@ def test_gate_rejects_unsupported_ep_family(backend):
     model.mlp = _UnsupportedEPModuleStub()
     with pytest.raises(ValueError, match="does not support weight sync"):
         reject_unsyncable_model(model, backend)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_adapter_sync_passes_an_unsupported_family_and_names_its_base_refusal(backend):
+    """No base is pushed under adapter sync, so the family's refusal moves to the base push it would need."""
+    model = nn.Module()
+    model.mlp = _UnsupportedEPModuleStub()
+    reject_unsyncable_model(model, backend, adapter_sync=True)
+    assert base_push_refusal(model) == _UnsupportedEPModuleStub.FAMILY.weight_sync_refusal
+    model.mlp = _EPModuleStub()
+    assert base_push_refusal(model) is None
 
 
 def test_gate_reports_the_offending_module_path():

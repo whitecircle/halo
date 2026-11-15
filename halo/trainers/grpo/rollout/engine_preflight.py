@@ -92,6 +92,9 @@ class ServerRequirements(NamedTuple):
     weight_precision: RolloutWeightPrecision = "bf16"
     candidate_logprobs: int = 0
     """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
+    pushes_base: bool = True
+    """``False`` for an adapter-synced policy over a base no push may carry: the served weights are never written, so
+    their format and MoE runner do not matter."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -140,8 +143,9 @@ def _server_flag_refusals(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
             f"{client_cls.IMAGE_REMEDY}"
         )
-    refusals.extend(_quantization_refusals(flags, needs))
-    if needs.is_moe and flags.moe_backend not in (None, "triton"):
+    if needs.pushes_base:
+        refusals.extend(_quantization_refusals(flags, needs))
+    if needs.pushes_base and needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
             f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "
             f"them behind a 200. Serve with {client_cls.MOE_BACKEND_FLAG}."

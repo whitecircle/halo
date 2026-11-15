@@ -47,7 +47,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
-from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
+from halo.trainers.grpo.rollout.weight_push import base_push_refusal, sync_trainer_weights
 from halo.trainers.metrics.world_metrics import world_sums
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
@@ -153,7 +153,12 @@ class AsyncRolloutMixin:
         self._adapter_versions = AdapterVersions()
         self._adapter_routes = AdapterRoutes(resolve_weight_sync_client(config.rollout_backend).is_adapter_missing)
         self._adapter_sync = AdapterSync(
-            serving, self._adapter_versions, self._adapter_routes, resolve_launch_base(self.model, config)
+            serving,
+            self._adapter_versions,
+            self._adapter_routes,
+            resolve_launch_base(self.model, config),
+            base_refusal=base_push_refusal(self.model),
+            adapter_dir=config.rollout_adapter_dir,
         )
 
     def _init_async_components(self):
@@ -280,16 +285,18 @@ class AsyncRolloutMixin:
         if not self.accelerator.is_main_process:
             return
 
-        # A pool at any server count, so a server restarted between syncs is recovered on one URL too.
         config = self.async_config
-        self._weight_sync_client = WeightSyncPool(
-            server_configs=config.rollout_server_configs or [{"url": config.rollout_server_url}],
-            connection_timeout=config.rollout_connection_timeout,
-            client_cls=resolve_weight_sync_client(config.rollout_backend),
-            base_group_port=config.rollout_group_port,
-            topology=config.rollout_sync_topology,
-        )
-        self._weight_sync_client.init_communicator(device=self.accelerator.device)
+        # A base no push carries needs no group: the servers only load adapters, over HTTP.
+        if self._adapter_sync is None or self._adapter_sync.base_refusal is None:
+            # A pool at any server count, so a server restarted between syncs is recovered on one URL too.
+            self._weight_sync_client = WeightSyncPool(
+                server_configs=config.rollout_server_configs or [{"url": config.rollout_server_url}],
+                connection_timeout=config.rollout_connection_timeout,
+                client_cls=resolve_weight_sync_client(config.rollout_backend),
+                base_group_port=config.rollout_group_port,
+                topology=config.rollout_sync_topology,
+            )
+            self._weight_sync_client.init_communicator(device=self.accelerator.device)
         if self._adapter_sync is not None:
             self._adapter_sync.servers = AdapterServers(
                 config.get_server_urls(),

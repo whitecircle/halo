@@ -44,6 +44,8 @@ from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from halo.weight_sync.adapter_payload import (
     ADAPTER_WIRE_DTYPE,
     build_adapter_config,
+    publish_adapter_directory,
+    remove_adapter_directory,
     serialize_adapter_tensors,
     wire_adapter_tensors,
 )
@@ -125,6 +127,11 @@ def reject_unadaptable_config(async_config: AsyncRolloutConfig) -> None:
     reasons = []
     if client_cls.ADAPTER_SYNC_REFUSAL is not None:
         reasons.append(f"rollout_backend={async_config.rollout_backend!r}: {client_cls.ADAPTER_SYNC_REFUSAL}")
+    if client_cls.ADAPTER_NEEDS_DIRECTORY and async_config.rollout_adapter_dir is None:
+        reasons.append(
+            f"rollout_backend={async_config.rollout_backend!r} loads an adapter only from a directory: set "
+            f"rollout_adapter_dir to one every server reads at the same path"
+        )
     if async_config.routing_replay == "rollout":
         reasons.append(
             "routing_replay: rollout (R3) captures the routing of the engine's forward, and whether that capture "
@@ -289,12 +296,18 @@ class AdapterSync:
         versions: AdapterVersions,
         routes: AdapterRoutes,
         launch_base: ServedBase | None,
+        base_refusal: str | None = None,
+        adapter_dir: str | None = None,
     ):
         self.serving = serving
         self.versions = versions
         self.routes = routes
         # What a restarted server serves again when it launched with the trainer's base; ``None`` never matches.
         self.launch_base = launch_base
+        # Why no engine takes this model's full weights; the servers must then hold its launch base, never a push.
+        self.base_refusal = base_refusal
+        # Where each version is published for the servers to read; ``None`` sends it in the request body.
+        self.adapter_dir = adapter_dir
         self.servers: AdapterServers | None = None
         # Rank 0's, so no two trainers (or two runs of one) name a version alike on an engine.
         self._nonce: str = broadcast_from_rank0(uuid.uuid4().hex[:8])
@@ -317,13 +330,15 @@ class AdapterSync:
     def sync(self, trainer, pool) -> None:
         """The base once, and again when a server lost the adapter it held (a restart) and no longer serves the
         trainer's base, then the adapter. A restarted server's client reconnects first: its old communicator has no
-        peer, and a push into it waits out the broadcast deadline."""
+        peer, and a push into it waits out the broadcast deadline. ``pool`` is ``None`` for a base no push carries,
+        which forms no group."""
         model = unwrap_framework_wrappers(trainer.model)
         plan = rank0_verdict(partial(self._plan_base_push, pool), "Adapter probe of the rollout servers")
         self._learn(plan.holdings)
         if plan.push_base:
             sync_trainer_weights(trainer, pool, fold_adapters=False)
             self._base_pushed = True
+        if plan.push_base or (self.base_refusal is not None and self.versions.current is None):
             self._retire_predecessor_versions()
         name = f"{ADAPTER_NAME_PREFIX}-{self._nonce}-{self._sequence}"
         self._sequence += 1
@@ -353,6 +368,8 @@ class AdapterSync:
     def _plan_base_push(self, pool) -> BasePlan:
         """Whether the base must be pushed; reconnects the clients of servers that lost the newest adapter first."""
         current = self.versions.current
+        if self.base_refusal is not None:
+            return self._plan_launch_base_only(pool, current)
         if not self._base_pushed or current is None:
             pool.reconnect_servers()
             return BasePlan(True, {})
@@ -364,6 +381,22 @@ class AdapterSync:
         if restarted:
             pool.reconnect_servers(restarted)
         return BasePlan(bool(restarted), holdings)
+
+    def _plan_launch_base_only(self, pool, current: str | None) -> BasePlan:
+        """For a base no push can carry: every server must hold the trainer's launch base, and one that lost the
+        newest adapter is marked restarted so it loads again."""
+        holdings = self._bound_servers().require_all_answering()
+        foreign = [url for url in holdings if not self._serves_trainers_base(url)]
+        if foreign:
+            launch = self.launch_base.path if self.launch_base is not None else "the checkpoint the trainer loaded"
+            raise ValueError(
+                f"Rollout server(s) {foreign} do not serve the trainer's base, and this model's base cannot be pushed "
+                f"({self.base_refusal}). Launch them on {launch} under the rollout model_name."
+            )
+        restarted = [url for url, names in holdings.items() if current is not None and current not in names]
+        if restarted and pool is not None:
+            pool.mark_servers_restarted(restarted)
+        return BasePlan(False, holdings)
 
     def _restore_restarted(self, pool) -> dict[str, list[str] | None]:
         servers = self._bound_servers()
@@ -381,7 +414,8 @@ class AdapterSync:
         except RuntimeError as error:
             logger.warning(f"Adapter {name} could not be put back on restarted server(s) {restorable}: {error}")
             return holdings
-        pool.mark_servers_restarted(restorable)
+        if pool is not None:
+            pool.mark_servers_restarted(restorable)
         for url in restorable:
             holdings[url] = [*holdings[url], name]
         logger.info(f"Loaded adapter {name} on restarted rollout server(s) {restorable}; their base is the trainer's.")
@@ -429,7 +463,10 @@ class AdapterSync:
     def _send(self, model: torch.nn.Module, name: str, state: dict[str, torch.Tensor]) -> None:
         wire = wire_adapter_tensors(_hub_adapter_state(model, state), self.serving.scaling)
         config = build_adapter_config(rank=self.serving.rank, target_modules=self.serving.modules)
-        payload = serialize_adapter_tensors(wire)
+        if self.adapter_dir is None:
+            payload = serialize_adapter_tensors(wire)
+        else:
+            payload = publish_adapter_directory(self.adapter_dir, name, wire, config)
         self._bound_servers().load(name, config, payload)
         self._newest_load = (name, config, payload)
         self._loaded.append(name)
@@ -442,6 +479,9 @@ class AdapterSync:
         def retire() -> None:
             stale = [name for name in self._loaded if name != current and name not in held]
             self._bound_servers().unload(stale)
+            if self.adapter_dir is not None:
+                for name in stale:
+                    remove_adapter_directory(self.adapter_dir, name)
             self._loaded = [name for name in self._loaded if name not in stale]
 
         rank0_verdict(retire, "Retiring stale adapter versions")

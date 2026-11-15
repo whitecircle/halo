@@ -2,7 +2,7 @@
 
 Thinking Machines' `Inkling2ForConditionalGeneration` (`thinkingmachines/Inkling-2-Small`, NVFP4 experts; `-MXFP8`, MXFP8 experts) — a multimodal MoE whose text tower routes every one of its 48 layers to 384 experts with top-8 selection and no shared expert, at hidden 4608.
 
-The hub ships no bf16 release. Its `config.json` declares `quant_method: modelopt`, which transformers 5.23 cannot load, so the release trains only through [frozen quantized experts](#frozen-quantized-experts): expert LoRA over the shipped NVFP4/MXFP8 experts under EP ≥ 2.
+The hub ships no bf16 release. Its `config.json` declares `quant_method: modelopt`, which transformers 5.23 cannot load, so the release trains only through [frozen quantized experts](#frozen-quantized-experts): LoRA over the shipped NVFP4/MXFP8 experts under EP ≥ 2.
 
 `transformers.models.inkling2` exists from transformers 5.23.0 (the version the image pins). The composite config's `model_type` is `inkling2`, the text config's `inkling2_text`.
 
@@ -25,9 +25,9 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 ## Frozen quantized experts
 
-`frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base under expert LoRA. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
+`frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base, with or without expert LoRA over it. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `ep_lazy_loading: true`, the expert projections in `lora_target_modules`, and `merge_expert_lora_on_save: false`. The loader refuses bf16 expert tensors and every family other than Inkling 2.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `ep_lazy_loading: true` and `merge_expert_lora_on_save: false`. The loader refuses bf16 expert tensors and every family other than Inkling 2.
 
 A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
