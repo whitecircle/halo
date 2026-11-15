@@ -30,9 +30,9 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 - Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. The loader's structural probe declines a per-expert checkpoint in the `-legacy` layout.
 - Routing replay is unsupported (`supports_routing_replay=False` on `ZAYA`) — the EDA state makes a replayed forward non-reproducible.
 
-vLLM 0.32.0 ships no **native** Zaya implementation. An exported checkpoint still resolves through vLLM's transformers backend, whose generation quality for this family the toolkit does not validate.
+vLLM 0.1.dev25249 registers a native `ZayaForCausalLM`, whose loader reads the experts as the stacked `mlp.experts.gate_up_proj` / `down_proj` pair. The toolkit does not validate serving an exported checkpoint on it.
 
-RL weight sync is refused at construction on both engines, each for its own loader gap: vLLM has no native served model for the broadcast to land in, and SGLang 0.5.22's `zaya` loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`), not the native fused layout the trainer holds ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+RL weight sync is refused at construction on both engines: no Halo weight sync has been validated into vLLM's `ZayaForCausalLM` (no loader map or parity fixture covers it), and SGLang 0.5.22's `zaya` loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`), not the native fused layout the trainer holds ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
 ## Limitations
 

@@ -11,6 +11,7 @@ from typing import NamedTuple
 
 import pytest
 
+from halo.weight_sync.clients.vllm import _MIN_SERVER_VERSION
 from tests.common.repo import REPO_ROOT, load_script_module
 
 nccl_pin = load_script_module("docker/nccl_pin.py")
@@ -103,6 +104,7 @@ ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("trl", "1.17.1"): "the TRL release the framework comparison benchmarked as a competitor",
     ("liger", "0.8.2"): "the Liger release the TRL arm of the framework comparison ran",
     ("transformers", "5.18.0"): "the transformers release NeMo AutoModel ran in the framework comparison",
+    ("vllm", "0.32"): "the vLLM release Halo 1.2.0 shipped on, in its release note",
 }
 
 
@@ -217,13 +219,22 @@ def _form_matches(form: str, statement: Statement) -> bool:
     )
 
 
+def _reached(statement: Statement, pins: set[str]) -> set[str]:
+    """The releases a pin has reached. The vLLM image's engine is a main-branch build whose version string
+    (``0.1.devN``) sorts below every release; it carries the weight transfer the client requires, so it has reached
+    the client's minimum release."""
+    if statement.package != "vllm":
+        return pins
+    return pins | {".".join(map(str, _MIN_SERVER_VERSION))}
+
+
 def _exemption(statement: Statement, pins: set[str]) -> str | None:
     """Why a number that is not the pin is legitimate anyway, or ``None`` if it is drift."""
     if (statement.package, statement.version) in ALLOWED_EXCEPTIONS:
         return ALLOWED_EXCEPTIONS[statement.package, statement.version]
     # ``version_code`` is the lock's own version→int encoding: monotone, and it stops at a local
     # suffix (``.post1``) the way a comparison must.
-    if nccl_pin.version_code(statement.version) > max(nccl_pin.version_code(pin) for pin in pins):
+    if nccl_pin.version_code(statement.version) > max(nccl_pin.version_code(pin) for pin in _reached(statement, pins)):
         return None  # nothing is history about a release this stack has not reached
     return next((reason for form, reason in HISTORICAL_FORMS.items() if _form_matches(form, statement)), None)
 
@@ -320,7 +331,8 @@ def test_image_tags_agree_with_the_dockerfile_args():
     for path in sorted({REPO_ROOT / "Makefile", *SCANNED_FILES}):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
             for image, version in expected.items():
-                for tagged in re.findall(rf"{image}-(\d+(?:\.\d+)*)", line):
+                # A main-branch engine tags its dev build (``0.1.dev25249``).
+                for tagged in re.findall(rf"{image}-(\d+(?:\.\d+)*(?:\.?(?:post|rc|dev)\d+)?)", line):
                     found[image] += 1
                     if tagged != version:
                         wrong.append(f"{path}:{number} tags {image}-{tagged}, but the ARG builds {version}")

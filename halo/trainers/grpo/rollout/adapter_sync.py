@@ -23,11 +23,16 @@ from halo.checkpoint.parallel.adapters import gather_adapter_state
 from halo.checkpoint.reading import find_hub_snapshot
 from halo.checkpoint.weights_source import weights_read_from
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
+from halo.distributed.expert_parallel.moe_layer.expert_lora import (
+    expert_lora_layers,
+    gather_expert_lora_adapters,
+    model_has_expert_lora,
+)
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.model_loading.tokenizer_setup import vocabulary_grown
+from halo.models.introspection.config_access import config_model_types
 from halo.models.introspection.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
     base_transformers_model,
@@ -190,8 +195,7 @@ def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: Parallelism
     ):
         if active:
             reasons.append(mode)
-    if model_has_expert_lora(model):
-        reasons.append("native expert LoRA: no engine layout has been validated for the grouped expert adapters")
+    reasons.extend(_unservable_expert_lora(model, config, client_cls))
     for flag, why in (
         ("use_dora", "DoRA: the engine refuses it"),
         ("lora_bias", "lora_bias: the engine refuses it"),
@@ -280,6 +284,47 @@ def _hub_adapter_state(model: torch.nn.Module, state: dict[str, torch.Tensor]) -
             raise ValueError(f"The adapter tensor {key!r} has no hub spelling the engine could load it under.")
         hub[f"{PEFT_BASE_MODEL_PREFIX}{path}{marker}{leaf}"] = tensor
     return hub
+
+
+def _unservable_expert_lora(model: torch.nn.Module, peft_config, client_cls) -> list[str]:
+    """Native grouped expert adapters ride beside the attention ones, so they need the engine's routed-expert LoRA for
+    the model and the attention adapters' rank and scaling: one adapter config carries both."""
+    layers = expert_lora_layers(model)
+    if not layers:
+        return []
+    reasons = []
+    model_types = config_model_types(getattr(base_transformers_model(model), "config", None))
+    if not client_cls.ADAPTER_EXPERT_MODEL_TYPES.intersection(model_types):
+        reasons.append(
+            f"native expert LoRA: {client_cls.ENGINE_RELEASE} serves no routed-expert adapter on this model"
+        )
+    attention = ExpertLoraSpec(r=peft_config.r, alpha=peft_config.lora_alpha, use_rslora=peft_config.use_rslora)
+    _name, layer = layers[0]
+    if layer.ep_config.expert_lora.r != peft_config.r or layer.expert_lora_scaling != attention.scaling:
+        reasons.append("native expert LoRA at another rank or scaling than the attention adapters: one is served")
+    return reasons
+
+
+def _engine_expert_adapters(model: torch.nn.Module, experts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    """The gathered grouped adapters (``<layer>.experts.<attr>.lora_{A,B}``, ``[E, in, r]`` / ``[E, r, out]``) as the
+    engine's 3D per-expert ones on the checkpoint's expert weights, ``[E, r, in]`` / ``[E, out, r]``: ``w13_weight``,
+    whose B rows interleave gate and up as the checkpoint's w13 does, and ``w2_weight``."""
+    respell = _build_hub_respeller(model)
+    engine = {}
+    for key, tensor in experts.items():
+        layer, _, rest = key.partition(".experts.")
+        attr, side = rest.split(".lora_")
+        path = respell(layer)
+        if path is None:
+            raise ValueError(
+                f"The expert layer {layer!r} has no hub spelling the engine could load its adapters under."
+            )
+        matrix = tensor.transpose(1, 2)
+        if attr == "gate_up_proj" and side == "B":
+            matrix = torch.stack(matrix.chunk(2, dim=1), dim=2).flatten(1, 2)
+        weight = "w13_weight" if attr == "gate_up_proj" else "w2_weight"
+        engine[f"{PEFT_BASE_MODEL_PREFIX}{path}.experts.{weight}.lora_{side}.weight"] = matrix.contiguous()
+    return engine
 
 
 def _union(gathered: list[list[str]]) -> frozenset[str]:
@@ -455,13 +500,17 @@ class AdapterSync:
         forwarding = is_global_main_process()
         guard = DeferredRankFailure(f"Adapter load of {name} onto the rollout servers")
         state = gather_adapter_state(find_peft_model(model), retain=forwarding)
+        experts = gather_expert_lora_adapters(model, retain=forwarding)
         if forwarding:
-            guard.run(partial(self._send, model, name, state))
-        del state
+            guard.run(partial(self._send, model, name, state, experts))
+        del state, experts
         guard.reject()
 
-    def _send(self, model: torch.nn.Module, name: str, state: dict[str, torch.Tensor]) -> None:
-        wire = wire_adapter_tensors(_hub_adapter_state(model, state), self.serving.scaling)
+    def _send(
+        self, model: torch.nn.Module, name: str, state: dict[str, torch.Tensor], experts: dict[str, torch.Tensor]
+    ) -> None:
+        engine_state = {**_hub_adapter_state(model, state), **_engine_expert_adapters(model, experts)}
+        wire = wire_adapter_tensors(engine_state, self.serving.scaling)
         config = build_adapter_config(rank=self.serving.rank, target_modules=self.serving.modules)
         if self.adapter_dir is None:
             payload = serialize_adapter_tensors(wire)

@@ -11,7 +11,7 @@ vLLM (all GPUs visible, masked by CUDA_VISIBLE_DEVICES; ``--trust-remote-code`` 
         --network host --ipc host \\
         -v $HF_HOME:/root/.cache/huggingface:ro -e HF_HUB_OFFLINE=1 -e HF_MODULES_CACHE=/root/hf_modules \\
         -e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket -e NCCL_P2P_LEVEL=NVL \\
-        halo:vllm-0.32.0 $MODEL --port 8000 --dtype auto --weight-transfer-config '{"backend": "nccl"}' \\
+        halo:vllm-0.1.dev25249 $MODEL --port 8000 --dtype auto --weight-transfer-config '{"backend": "nccl"}' \\
         --moe-backend triton --return-tokens-as-token-ids --logprobs-mode processed_logprobs --enable-prefix-caching
 
 SGLang (``SGLANG_TRUST_REMOTE_CODE=1`` for Ling-mini-2.0; ``SGLANG_ATTENTION_BACKEND=triton

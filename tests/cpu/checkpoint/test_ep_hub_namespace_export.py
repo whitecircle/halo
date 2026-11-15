@@ -376,7 +376,7 @@ def test_the_sharded_refusal_is_wired_into_the_family_check(tmp_path):
 
 
 def test_command_a_plus_writes_the_tower_vllm_loads(tmp_path):
-    """vLLM 0.32.0 raises on a flattened tower key and on ``lm_head``; the experts stay the fused pair it reads."""
+    """The pinned vLLM raises on a flattened tower key and on ``lm_head``; the experts stay the fused pair it reads."""
     saved = _loaded("cohere2_vision", tmp_path).saved
 
     assert "model.vision_tower.vision_model.embeddings.patch_embedding.weight" in saved

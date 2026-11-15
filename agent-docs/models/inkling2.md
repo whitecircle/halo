@@ -49,13 +49,62 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **PP.** No pipeline spec covers the family.
 - **Packing.** The convolutions read no document boundary, so `packing` is refused unless `allow_cross_document_linear_attention: true` accepts the crossing ([Document isolation](../data/collators.md#document-isolation-under-packing)). Eager attention has no varlen kernel, so `padding_free` is refused.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
-- **Online and async GRPO.** The spec's `weight_sync_refusal`: no weight sync into either pinned engine has been validated. Offline GRPO needs no server.
+- **Weight sync.** The spec's `weight_sync_refusal`: no full-weight push into either pinned engine has been validated, so online GRPO is refused and environmental GRPO runs only with [adapter sync](#rollouts). Offline GRPO needs no server.
 
 ## LoRA
 
 Attention adapters (`q_proj`, `k_proj`, `v_proj`, `o_proj`) train under PEFT; expert adapters train as native grouped adapters ([PEFT](../optimization/peft.md#moe-models--expert-targets-and-full-trained-modules)). On the release both are frozen-bank LoRA. On tiny models `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family inkling2_text` runs bf16 expert and mixed adapters at ep1 and ep2 through a merged save and an exact resume, and checks that ep2 × cp2 is refused.
 
 Liger covers the weighted RMSNorm (Gemma casting mode) and the cross-entropy. The MLP and head stay eager: the softcapped SwiGLU has no fused kernel, and the head's softcap and vocab cut are the family's declared head transform (`Inkling2HeadTransform`, `halo/models/head_transform.py`), which offline GRPO's chunked log-prob sweep also applies.
+
+## Rollouts
+
+Environmental GRPO trains LoRA on the release and serves it to vLLM as an adapter (`rollout_adapter_sync`). The server loads the release, NVFP4/MXFP8 experts included, and takes each adapter version by path; the trainer never pushes the base and forms no NCCL group with it ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)). Two GPUs serve and two train:
+
+```bash
+make build-vllm           # the vLLM image
+make up-vllm-inkling2      # download the release once, serve it on GPUs 2,3
+make train-inkling2        # the trainer on GPUs 0,1, through halo launch
+```
+
+`INKLING2_LORA=expert` on `up-vllm-inkling2` and `train-inkling2` trains and serves LoRA on the routed experts too. The release and the adapters live under `HALO_SCRATCH` (`INKLING2_DIR`, `INKLING2_ADAPTER_DIR`); `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES` pick the GPUs. The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
+
+| Example | LoRA | Server LoRA modules |
+|---|---|---|
+| `inkling2-small-exam-qa-attention-lora-ep2.yaml` | r16 on the text tower's q/k/v/r/o | `qkvr`, `wo_ud` |
+| `inkling2-small-exam-qa-expert-lora-ep2.yaml` | r8 on `o_proj` and the routed experts | all |
+
+The trainer and the server read the release directory and the adapter directory at the same paths: the server loads each version from the path the trainer published it at, and the trainer matches the server's base by its path. A launch outside `make` passes both:
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 halo launch grpo/environmental examples/grpo/environmental/inkling2/vllm/inkling2-small-exam-qa-attention-lora-ep2.yaml \
+  --nproc 2 --model_name_or_path=<release dir> --rollout_adapter_dir=<adapter dir>
+```
+
+The server is Halo's vLLM image (`Dockerfile.vllm`), served by `docker-compose.vllm.yml`; `make up-vllm-inkling2` sets its Inkling 2 flags.
+
+The configs set three things for this model:
+
+- `pad_token: "<|endoftext|>"`: the release's tokenizer names no pad token, and environmental GRPO pads its batch rows.
+- Attention LoRA targets the text tower alone (`'.*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)'`), since the vision tower's attention also names `q_proj` / `k_proj` / `v_proj`. vLLM packs `wq_du` / `wk_dv` / `wv_dv` / `wr_du` into its `qkvr` layer and serves `wo_ud` apart.
+- Expert LoRA lists its targets, `[o_proj, gate_up_proj, down_proj]`: a regex string drops the expert targets, and these names stay off the vision tower. Expert and attention adapters share one rank and scaling.
+
+### Expert LoRA on the quantized experts
+
+vLLM's quantized experts hold their rows tile-padded and grouped by expert, and the image's bf16 grouped GEMM adds the gate/up delta to the w13 output before the quantizing SwiGLU reads it. The down branch recomputes that SwiGLU in bf16 and adds its delta to the w2 output before the combine. Three Triton kernels carry it: one maps the layout rows to their tokens and experts, one recomputes the activation of the routed rows with the quantizing kernel's arithmetic, and the grouped GEMM masks each row to its adapter slot, so every slot's adapters, stored side by side, take one shrink and one expand per projection. The trainer sends each layer's experts as `mlp.experts.w13_weight` (`lora_A` `[E, r, H]`, `lora_B` `[E, 2I, r]`, rows alternating gate and up as in the checkpoint) and `mlp.experts.w2_weight` (`[E, r, I]`, `[E, H, r]`).
+
+On the MXFP8 experts at Inkling-2-Small's shapes, with two adapter slots (r8, r16) and tokens on each slot and on none, the image's GPU check (`docker run --gpus 1 --entrypoint python3 halo:vllm-0.1.dev25249 /opt/halo/verify_inkling2_expert_lora.py`) finds the output with LoRA at most 1.6% off the reference, the same as the base output alone (1.4%), with deltas of 8% to 37% of the output. Without the down delta the output is 8% to 9% off, which fails the check.
+
+One expert-layer forward on one B300, two r16 slots:
+
+| Tokens | Base | With LoRA |
+|---|---|---|
+| 8 | 0.42 ms | 0.64 ms (+50%) |
+| 256 | 2.02 ms | 2.47 ms (+22%) |
+| 2048 | 2.27 ms | 3.26 ms (+44%) |
+| 8192 | 3.03 ms | 5.04 ms (+67%) |
+
+The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.67 ms at 8192), then the activation recompute (0.28 ms at 8192).
 
 ## Measured
 

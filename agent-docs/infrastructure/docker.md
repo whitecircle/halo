@@ -5,7 +5,7 @@ anything that executes runs inside one.
 
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
 - `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).
-- `halo:vllm-0.32.0` — the vLLM rollout server (separate container).
+- `halo:vllm-0.1.dev25249` — the vLLM rollout server (separate container).
 - `halo:sglang-0.5.22` — the SGLang rollout server (separate container).
 
 All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` with the same tags
@@ -122,7 +122,7 @@ The build needs no GPU (it cross-compiles via `TORCH_CUDA_ARCH_LIST`) and no cre
 ```bash
 make build-hopper
 make build-blackwell
-make build-vllm      # halo:vllm-0.32.0
+make build-vllm      # halo:vllm-0.1.dev25249
 make build-sglang    # halo:sglang-0.5.22
 
 # Raw equivalent; pass the stamps `make` adds yourself
@@ -235,9 +235,10 @@ job, so there is no separate `-efa` tag. The launch env per fabric:
 
 ## Rollout server images
 
-`halo:vllm-0.32.0` is upstream `vllm/vllm-openai:v0.32.0` and `halo:sglang-0.5.22` upstream
-`lmsysorg/sglang:v0.5.22`, each with the `uv.lock` NCCL, the EFA userspace and the weight-sync patches
-asserted at build. Each pins its own torch and transformers, so the trainer never imports either
+`halo:vllm-0.1.dev25249` is upstream `vllm/vllm-openai:inkling-2-small`, vLLM's Inkling 2 build: vLLM main of
+2026-10-12 with the Inkling 2 model ([vllm-project/vllm#67325](https://github.com/vllm-project/vllm/pull/67325)),
+which reports version `0.1.dev25249+gb974b306f`. `halo:sglang-0.5.22` is upstream `lmsysorg/sglang:v0.5.22`.
+Each adds the `uv.lock` NCCL, the EFA userspace and the weight-sync patches, asserted at build, and pins its own torch and transformers, so the trainer never imports either
 engine. Their compose files require one host path each, with no fallback: `HALO_SCRATCH` for
 `docker-compose.vllm.yml` (even to start the server alone) and `SGLANG_MODEL_DIR` for
 `docker-compose.sglang.yml`; set them in the shell or the repo-root `.env`. Build gates, patches,
@@ -249,24 +250,24 @@ Prebuilt images live on Amazon ECR Public:
 
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:blackwell     # or :hopper
-docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
+docker pull public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 ```
 
-Each moving tag has an immutable release pin: `blackwell-1.3.0rc1`, `hopper-1.3.0rc1`, `vllm-0.32.0-1.3.0rc1`,
-`sglang-0.5.22-1.3.0rc1`. There is deliberately no `latest`, which would let a Hopper host pull a
+Each moving tag has an immutable release pin: `blackwell-1.3.0rc2`, `hopper-1.3.0rc2`, `vllm-0.1.dev25249-1.3.0rc2`,
+`sglang-0.5.22-1.3.0rc2`. There is deliberately no `latest`, which would let a Hopper host pull a
 Blackwell image. Pair a trainer with the server images of the same release: the vLLM image unpickles
 the trainer's `ncclUniqueId` through a shim at the trainer's module path. Pin a release by pulling its
 tag and retagging it under the local name the `make` targets use:
 
 ```bash
-docker pull public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1
-docker tag  public.ecr.aws/whitecircle/halo:hopper-1.3.0rc1 halo:hopper
+docker pull public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2
+docker tag  public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2 halo:hopper
 ```
 
 The compose files take the server images from `VLLM_IMAGE` / `SGLANG_IMAGE` (default: the local
-`halo:vllm-0.32.0` / `halo:sglang-0.5.22`) and build nothing, so a pulled server image needs no
-retag: `export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.32.0`.
+`halo:vllm-0.1.dev25249` / `halo:sglang-0.5.22`) and build nothing, so a pulled server image needs no
+retag: `export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249`.
 
 Maintainers publish with `make push-public-all` (`ecr-public-login` plus the four `push-public-*`
 targets). To host the images elsewhere, `docker tag` and `docker push` the local builds; nothing

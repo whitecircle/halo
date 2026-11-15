@@ -11,6 +11,7 @@ from typing import NoReturn
 import requests
 import torch
 
+from halo.models.moe.family_specs import INKLING2
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
@@ -50,7 +51,7 @@ _ADAPTER_UPDATE_TIMEOUT_S = 120.0
 class VLLMWeightSyncClient(WeightSyncClientBase):
     BACKEND_KEY = "vllm"
     BACKEND_NAME = "vLLM"
-    ENGINE_RELEASE = "vLLM 0.32.0"
+    ENGINE_RELEASE = "vLLM 0.1.dev25249"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     REPORTS_INSTANCE_ID = True
     CHUNK_STAGER = PackedChunkStager
@@ -75,10 +76,15 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     ADAPTER_NEEDS_DIRECTORY = True
     # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    # Inkling 2's quantized experts take an adapter with Halo's source patch (docker/vllm/patches/patch_vllm_inkling2.py).
+    ADAPTER_EXPERT_MODEL_TYPES = frozenset(INKLING2.model_types)
     # Names the adapter a score request reads through, when the run serves its policy as one.
     adapter_source: Callable[[], str | None] | None = None
     UNSERVABLE_MODEL_TYPES = {
-        "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
+        "zaya": (
+            f"{ENGINE_RELEASE}'s Zaya implementation has never taken a Halo weight sync: no loader map or parity "
+            "fixture covers it (agent-docs/models/zaya.md)"
+        ),
         "mistral4": (
             f"{ENGINE_RELEASE} registers no Mistral4ForCausalLM and maps no mistral4 model_type, so the "
             "composite loader has no class for the text tower a toolkit export writes "
@@ -247,18 +253,18 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
 
     def read_engine_layout(self, *, require: bool) -> tuple[int, int]:
         # An engine off this wire, off this image, paused or generation-wedged is reported before the group forms.
-        if require:
-            self._check_server_version()
         try:
             flags = self.read_server_flags()
         except (requests.exceptions.RequestException, ValueError) as e:
             # As in the preflights, a report that cannot be read refuses nothing; a group needs the launch id, though.
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
             flags = None
-        else:
-            if require:
-                self._require_toolkit_image(flags)
-                self._group_instance = flags.instance_id
+        # The toolkit's image pins an engine its build checks against this wire; any other server shows it by version.
+        if require and not (flags is not None and flags.toolkit_image):
+            self._check_server_version()
+        if require and flags is not None:
+            self._require_toolkit_image(flags)
+            self._group_instance = flags.instance_id
         if require:
             self.probe_generation()
         reply = self.request("GET", "/get_world_size", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()

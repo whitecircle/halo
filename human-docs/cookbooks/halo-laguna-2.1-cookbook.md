@@ -111,7 +111,7 @@ To train without replay, drop `VLLM_ENABLE_R3=1` and `--routing_replay=rollout`.
   periods and refuses a nonzero aux-loss coefficient (the released checkpoints ship `0.0`).
 - No SGLang weight sync. SGLang 0.5.22's Laguna loader expects every expert weight in every update,
   which a chunked update can't provide. Online RL runs on vLLM.
-- vLLM 0.32.0 drops the exported correction bias. A model trained with `bias_update` never serves on
+- vLLM 0.1.dev25249 drops the exported correction bias. A model trained with `bias_update` never serves on
   the trained bias there.
 
 ## Export and serve

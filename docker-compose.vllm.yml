@@ -1,21 +1,17 @@
-# Training + vLLM 0.32.0 rollout server: two containers on one host, HTTP for rollouts and a shared
-# NCCL group for weight sync. The server image is `make build-vllm`'s halo:vllm-0.32.0, or VLLM_IMAGE
-# set to the prebuilt public.ecr.aws/whitecircle/halo:vllm-0.32.0; the trainer image comes from
+# Training + vLLM rollout server: two containers on one host, HTTP for rollouts and a shared
+# NCCL group for weight sync. The server image is `make build-vllm`'s halo:vllm-0.1.dev25249, or VLLM_IMAGE
+# set to the prebuilt public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249; the trainer image comes from
 # `make build-blackwell` (TRAIN_IMAGE=halo:hopper on Hopper). The sync needs network_mode + ipc host
 # and all GPUs visible, VLLM_ and TRAINER_CUDA_DEVICES disjoint; EFA layers docker-compose.vllm.efa.yml.
 
 services:
   vllm-server:
-    image: ${VLLM_IMAGE:-halo:vllm-0.32.0}
+    image: ${VLLM_IMAGE:-halo:vllm-0.1.dev25249}
     ipc: host
     network_mode: host
     environment:
       - CUDA_VISIBLE_DEVICES=${VLLM_CUDA_DEVICES:-7}
       - VLLM_SERVER_DEV_MODE=1
-      # Model Runner V2, which the image pins (VLLM_USE_V2_MODEL_RUNNER=1): it enforces thinking budgets
-      # and is the only runner R3 capture runs on. Passed through bare, so unset keeps the image's value;
-      # 0 or 1 only, since vLLM parses it with int() and an empty value kills the server at startup.
-      - VLLM_USE_V2_MODEL_RUNNER
       # Off for RL: strict mode constrains every tool-bearing request with a structural-tag grammar,
       # so the served distribution is no longer the policy's, and it costs the engine core CPU per
       # step. The tool parser still parses the calls.
@@ -85,6 +81,9 @@ services:
       - ${HF_HOME:-~/.cache/huggingface}:/root/.cache/huggingface
       # The chat templates the recipes pin, at the path their headers name for VLLM_CHAT_TEMPLATE.
       - ./jinja-templates:/jinja-templates:ro
+      # Same path as the trainer's: a checkpoint the server boots from, or an adapter version the trainer publishes
+      # (rollout_adapter_dir), is one path on both sides.
+      - ${HALO_SCRATCH:?set HALO_SCRATCH to a large host volume (findmnt / df -h)}:${HALO_SCRATCH}
 
   training:
     image: ${TRAIN_IMAGE:-halo:blackwell}

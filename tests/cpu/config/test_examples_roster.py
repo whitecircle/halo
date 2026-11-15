@@ -16,6 +16,7 @@ from datasets import Dataset
 from transformers import Trainer
 from transformers.trainer_pt_utils import BatchRebalanceSampler
 
+from halo.cli import training_methods
 from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.distributed.expert_parallel.deepep.capacity import (
@@ -63,7 +64,8 @@ from tests.cpu.config.test_examples_parse import (
 # rank-math rule (NVLink domain, EP group count, DP width) is relative to it.
 DEFAULT_GPUS_PER_NODE = 8
 
-_NPROC = re.compile(r"--nproc[-_]per[-_]node[= ](\d+)")
+# torchrun --nproc_per_node, or halo launch --nproc.
+_NPROC = re.compile(r"--nproc(?:[-_]per[-_]node)?[= ](\d+)")
 _NNODES = re.compile(r"--nnodes[= ](\d+)")
 _VISIBLE_DEVICES = re.compile(r"CUDA_VISIBLE_DEVICES=([\d,]+)")
 _ACCELERATE_CONFIG = re.compile(r"--config_file\s+(\S+)")
@@ -75,6 +77,7 @@ _EXPANDABLE_SEGMENTS_PREFIX = re.compile(
     r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True\s+(?:\w+=\S*\s+)*(?:python|torchrun|accelerate|halo)\s"
 )
 _HALO_LAUNCH = re.compile(r"\bhalo launch\s")
+_HALO_LAUNCH_METHOD = re.compile(r"\bhalo launch\s+(\S+)")
 _COMMENT_CONTINUATION = re.compile(r"\\\n\s*#\s*")
 _EXPORT_LINE = re.compile(r"\s*#\s*export\s")
 _ALLOCATOR_DOC = "agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments"
@@ -100,6 +103,13 @@ def raw_config(config: Path) -> dict:
 
 def comment_block(config: Path) -> str:
     return "\n".join(line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#"))
+
+
+def halo_launch_script(line: str) -> str | None:
+    """The entry script (relative to ``scripts/training``) a ``halo launch METHOD`` line runs, or None."""
+    match = _HALO_LAUNCH_METHOD.search(line)
+    script = training_methods(REPO_ROOT).get(match[1]) if match else None
+    return script.relative_to(REPO_ROOT / "scripts" / "training").as_posix() if script else None
 
 
 def launch_commands(config: Path) -> list[str]:
@@ -388,8 +398,11 @@ def test_moe_weight_sync_example_names_the_triton_moe_backend(config):
     """An auto-selected backend holds the experts in a repacked layout while the push writes the bf16 unpacked one.
     The engine accepts the update and the served policy stops being the trained one."""
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    if not ep_layer_classes_for_config(model_config_for(config, parsed)):
+    layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
+    if not layer_classes:
         return
+    if parsed_field(parsed, "rollout_adapter_sync") and any(cls.FAMILY.weight_sync_refusal for cls in layer_classes):
+        return  # a base no push carries: the engine's experts are only read
     comments = comment_block(config)
     assert "--moe-backend triton" in comments or "--moe-runner-backend triton" in comments, (
         "this config syncs weights into an engine serving a MoE model but its launch instructions "
@@ -425,7 +438,10 @@ def test_example_launch_lines_fit_the_config(config):
     commands = launch_commands(config)
     assert commands, "no comment line launches this config"
     for line in commands:
-        assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
+        script = script_for(config)
+        assert f"scripts/training/{script}" in line or halo_launch_script(line) == script, (
+            f"names another entry script: {line}"
+        )
         nproc = _NPROC.search(line)
         if uses_expert_parallelism(raw):
             assert nproc, f"expert parallelism needs torchrun's width: {line}"

@@ -2,7 +2,7 @@
 name: rl-setup
 description: >-
   Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use) for
-  Halo: bring up the separate rollout container — vLLM 0.32.0 (cu13), or
+  Halo: bring up the separate rollout container — vLLM 0.1.dev25249 (cu13, vLLM's Inkling 2 build), or
   SGLang 0.5.22 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
   — point the trainer at it via AsyncRolloutConfig rollout URLs, establish
@@ -23,7 +23,7 @@ allowed-tools:
 # rl-setup
 
 Wire up online GRPO (RLVR) or async GRPO with environments (multi-turn tool-use). The generation engine
-runs in a **separate container** (vLLM 0.32.0, or SGLang 0.5.22 for async GRPO): the training image
+runs in a **separate container** (vLLM 0.1.dev25249, or SGLang 0.5.22 for async GRPO): the training image
 cannot import either engine. Trainer and engine talk over **HTTP** (generation) and **NCCL** (weight sync
 through the engine client in `halo/weight_sync/`). The owner page for everything server-side is
 `agent-docs/infrastructure/rollout-servers.md`; a green image build is what proves the server can be

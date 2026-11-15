@@ -105,7 +105,7 @@ it in `tests/common/models.py` so the seed carries it.
 
 The scope Halo 1.2.0 is validated on:
 
-- **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
+- **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (measured on vLLM 0.32.0,
   SGLang 0.5.22) and the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`).
 - **Throughput band** (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)): on a second
   B300 machine, 8 of 9 rows sat within band over three repeats, and no median moved more than 1.7% from the

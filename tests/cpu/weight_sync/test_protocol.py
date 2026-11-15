@@ -843,7 +843,7 @@ def test_init_communicator_surfaces_a_server_side_init_failure(server, monkeypat
 def test_init_communicator_refuses_an_engine_older_than_its_wire(server, monkeypatch):
     """An engine before the init-carried packed geometry would refuse the first update with a bare 500 mid-sync."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    server.version = "0.26.0"
+    server.version, server.toolkit_image = "0.26.0", False
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
 
     with pytest.raises(RuntimeError, match=r"runs vLLM '0\.26\.0'"):
@@ -853,12 +853,24 @@ def test_init_communicator_refuses_an_engine_older_than_its_wire(server, monkeyp
 
 def test_init_communicator_refuses_a_server_that_reports_no_version(server, monkeypatch):
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    server.version = None
+    server.version, server.toolkit_image = None, False
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
 
     with pytest.raises(RuntimeError, match="runs vLLM None"):
         handle.init_communicator(device="cpu")
     assert "POST /init_weight_transfer_engine" not in server.requests
+
+
+@pytest.mark.parametrize("version", ["0.1.dev25249+gb974b306f", "0.26.0"])
+def test_the_toolkit_image_is_taken_whatever_engine_version_it_reports(server, monkeypatch, version):
+    """The image pins an engine its build checks against the wire, so its version string gates nothing."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.version = version
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    handle.read_engine_layout(require=True)
+
+    assert "GET /version" not in server.requests
 
 
 def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):

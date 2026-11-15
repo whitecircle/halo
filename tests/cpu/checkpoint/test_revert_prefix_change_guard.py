@@ -85,7 +85,7 @@ def test_wrapper_save_still_reverts_the_prefix():
 
 
 def test_a_sub_model_prefix_is_reverted_though_the_tree_has_no_such_child():
-    """vLLM 0.32.0's SigLIP loader requires the level; the child check guards the model-level text-only case only."""
+    """The pinned vLLM's SigLIP loader needs the level; the child check guards the model-level text-only case only."""
     model = _WithFlattenedTower()
     out = revert_to_load_layout(model, {"model.vision_tower.linear.weight": torch.zeros(2, 2)})
     assert set(out) == {"model.vision_tower.vision_model.linear.weight"}, out

@@ -22,7 +22,6 @@ _PATCHES = {
     "vllm.distributed.weight_transfer.nccl_engine": "vllm_weight_transfer_reinit_patch",
     "vllm.config.reasoning": "vllm_reasoning_forced_end_patch",
     "vllm.v1.worker.gpu.sample.thinking_budget": "vllm_thinking_budget_completion_patch",
-    "vllm.v1.sample.ops.topk_topp_triton": "vllm_topp_split_guard_patch",
     "vllm.envs": "vllm_image_identity_patch",
 }
 

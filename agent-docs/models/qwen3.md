@@ -42,7 +42,7 @@ The per-method canonical examples (DPO, SMPO, KTO, reward, classification, disti
 - Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at EP layer construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
 - Compute: Grouped GEMM on SM90+, falling back to a per-expert loop with `index_add_`.
 - RL weight sync: `gather_expert_state_dict` emits the per-expert hub layout, which both pinned
-  engines read — vLLM 0.32.0's `RoutedExperts` and SGLang 0.5.22's `qwen3_moe` loader
+  engines read — vLLM 0.1.dev25249's `RoutedExperts` and SGLang 0.5.22's `qwen3_moe` loader
   (`make_expert_params_mapping`) alike, so either `rollout_backend` takes the sync
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 

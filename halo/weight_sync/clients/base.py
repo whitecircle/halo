@@ -155,6 +155,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
     # Whether the engine loads an adapter only from a directory it reads (rollout_adapter_dir).
     ADAPTER_NEEDS_DIRECTORY = False
+    # The model types whose routed experts the engine serves an adapter on, as 3D per-expert tensors.
+    ADAPTER_EXPERT_MODEL_TYPES: frozenset[str] = frozenset()
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.

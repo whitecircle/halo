@@ -1,6 +1,6 @@
 # Rollout Servers
 
-A rollout server is a **separate inference container**, vLLM 0.32.0 or SGLang 0.5.22, that generates
+A rollout server is a **separate inference container**, vLLM 0.1.dev25249 or SGLang 0.5.22, that generates
 the rollouts during RL. The trainer sends prompts over HTTP and pushes updated weights back over a
 per-server NCCL group through the clients in `halo/weight_sync/`; it never imports either engine
 (ABI-incompatible stacks). [Online GRPO](../training-methods/grpo/online.md) is vLLM-only;
@@ -24,7 +24,7 @@ missing `url`, a `group_port` outside 0–65535, and a non-default `rollout_serv
 trainer-side mechanics (prefetch and its staleness, sync cadence, trajectory length) live on
 [Async GRPO → Weight synchronization](../training-methods/async-grpo/setup.md#weight-synchronization).
 
-| | vLLM 0.32.0 | SGLang 0.5.22 |
+| | vLLM 0.1.dev25249 | SGLang 0.5.22 |
 |---|---|---|
 | Trainers | online GRPO, online SDPG, async GRPO | async GRPO |
 | Sampled-token ids | `--return-tokens-as-token-ids` (server flag) | per-request `return_meta_info` |
@@ -293,7 +293,8 @@ into the weights. SGLang takes each version in the request body or from `rollout
   base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar.
 
 Refused at construction, with the reason in the message: vLLM without `rollout_adapter_dir`, `routing_replay: rollout`, a
-`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA, DoRA, `lora_bias`,
+`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA (served on Inkling 2's experts by
+`halo:vllm-inkling2`, at the attention adapters' rank and scaling: [Inkling 2](../models/inkling2.md#rollouts)), DoRA, `lora_bias`,
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
@@ -352,7 +353,7 @@ cache, as the compose file's same-path mounts allow. Where the trainer cannot re
 and an `fp8_block` run is refused until the server is launched with `--quantization fp8` (`SGLANG_EXTRA_ARGS`), which
 keeps the checkpoint's block layout.
 
-Measured on Qwen3.5-35B-A3B (vLLM 0.32.0, triton MoE): pushing the quantized weights in place is bit-exact against a
+Measured on vLLM 0.32.0 with Qwen3.5-35B-A3B (triton MoE): pushing the quantized weights in place is bit-exact against a
 fresh boot of the same checkpoint. Against the trainer's bf16 log-probs the mean per-position gap grows from 0.042 to
 0.064 nats on prompts (p99 0.38 to 0.56), so the first-push parity probe's bound is 1.5 nats for `fp8_block` against 1
 ([First-push parity probe](#first-push-parity-probe)). The larger trainer-versus-engine gap is absorbed by the
@@ -399,7 +400,7 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
   load weights` is benign). Do not override `PYTHONPATH` at `docker run`: dropping `/opt/nccl_compat`
   kills weight-transfer init (`No module named 'halo'`).
 - **Weight-transfer re-init** (`vllm_weight_transfer_reinit_patch.py`) destroys the previous NCCL
-  communicator before `/init_weight_transfer_engine` builds the next. Stock 0.32.0 drops it without
+  communicator before `/init_weight_transfer_engine` builds the next. The base engine drops it without
   destroying it, so each trainer connection strands a communicator holding device memory on every
   engine-core worker until `ncclCommInitRank` fails while `/health` still answers `200`. The trainer
   aborts its own half on `close_communicator()`; on SGLang the client also asks the engine to destroy
@@ -409,11 +410,6 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
   `vllm_thinking_budget_completion_patch.py`) let the gpt-oss parser force its whole move into the final
   channel when the analysis channel overruns its budget, on Model Runner V2's budget
   ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)).
-- **Split top-p guard** (`vllm_topp_split_guard_patch.py`) adds the monolithic kernel's logit-space
-  no-mask check to the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at most 64.
-  Without it a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the whole row,
-  and the engine samples token 0 and reports a NaN log-prob.
-
 - **Image identity** (`vllm_image_identity_patch.py`) lists these patches as `VLLM_HALO_PATCHES` on `/server_info`,
   where the trainer refuses a server without it ([Startup preflight](#startup-preflight)). It lands only where
   `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
@@ -424,18 +420,17 @@ for gpt-oss, point the server log at stderr and move FlashInfer CUTLASS to the b
 MoE backends. Each edit asserts its pre- and post-image; `python3 /opt/halo/patch_vllm_source.py
 --verify` re-checks a running container.
 
-**Model Runner V2** is pinned (`VLLM_USE_V2_MODEL_RUNNER=1`): it enforces thinking budgets, is the only
-runner R3 capture starts on, and computes prompt log-probs before the drafter under speculative
-decoding (the V1 runner's drafter graph overwrites the target's hidden states, so prompt log-probs come
-back garbage, [vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). The
+**Model Runner V2** is the engine's only runner: it enforces thinking budgets, runs R3 capture, and computes prompt
+log-probs before the drafter under speculative decoding. The
 `isr_engine_reference` startup probe refuses a server whose prompt log-probs do not follow from its
 tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py`,
+**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/verify_topp_budget_cut.py`,
 `docker/vllm/plugins/verify_gptoss_plugins.py`) assert the patches, the transformers/tokenizers pins,
 the `ncclUniqueId` pickle shim, the weight-transfer wire (init and update request fields, the packed
 chunk boundary, the routes), that `/pause` accepts `mode=keep` and resets the prefix cache under it,
-that the split top-p guard keeps a budget-cut row whole while masking an ordinary row as upstream does,
+that the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at most 64 keeps a budget cut's forced
+token (logit 1e9) while masking an ordinary row,
 that the gpt-oss parser plugins drive Model Runner V2's budget, that `EngineArgs` carries
 `weight_transfer_config` / `enable_return_routed_experts` and `KernelConfig.moe_backend`, and the
 per-family [config-schema parity](#config-schema-parity). A green build is what proves the server can
@@ -609,12 +604,12 @@ GptOss's interleaved pair. What differs is which families each pinned release ca
 update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), which the
 [construction gate](#construction-gates) quotes.
 
-| Family (`model_type`) | vLLM 0.32.0 | SGLang 0.5.22 | Loader fact |
+| Family (`model_type`) | vLLM 0.1.dev25249 | SGLang 0.5.22 | Loader fact |
 |---|:--:|:--:|---|
 | Mistral4 (`mistral4`) | ✗ | ✗ | neither registers a class ([Mistral4](../models/mistral4.md#serving)) |
 | Ling 3.0 (`bailing_hybrid`) | ✗ | ✗ | both register `BailingMoeV3ForCausalLM`; no online update into it is validated |
 | Ring (`bailing_moe_linear`) | ✗ | ✗ | the checkpoints declare `BailingMoeLinearV2ForCausalLM`; both register `BailingMoeV2_5ForCausalLM` |
-| Zaya (`zaya`) | ✗ | ✗ | vLLM ships no class; SGLang's loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`) |
+| Zaya (`zaya`) | ✗ | ✗ | vLLM registers `ZayaForCausalLM`, which no Halo weight sync has been validated against; SGLang's loader reads the pre-transformers-5.14 per-expert checkpoint (`zaya_block.experts.local_experts.N.linear_fc1`) |
 | DeepSeek-V4 (`deepseek_v4`) | ✗ | ✗ | both map per-expert `w1/w2/w3` where the gather emits the fused pair |
 | Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
@@ -649,7 +644,7 @@ Three SGLang 0.5.22 loader facts shape its image and client:
 
 ## vLLM
 
-`Dockerfile.vllm` builds `halo:vllm-0.32.0` from upstream `vllm/vllm-openai:v0.32.0` (CUDA 13) with
+`Dockerfile.vllm` builds `halo:vllm-0.1.dev25249` from upstream `vllm/vllm-openai:inkling-2-small` (CUDA 13, [vLLM's Inkling 2 build](docker.md#rollout-server-images)) with
 the native NCCL weight-transfer engine (`VLLM_SERVER_DEV_MODE=1`, which exposes the pause and update
 routes, so keep the server off untrusted networks), the patches above, the gpt-oss parser plugins, R3
 capture (base64-npy `routed_experts` per completion choice), the EFA userspace and `nvidia-nccl-cu13`
@@ -658,13 +653,15 @@ a process resolves, and `VLLM_NCCL_SO_PATH` points pynccl at that wheel so the b
 system copy never wins. A skew fails or hangs `ncclCommInitRank` at `/init_weight_transfer_engine`;
 rebuild the image after any bump of the pin.
 
-The client reads `GET /version` and refuses a server older than 0.32.0 or one that reports no version:
-the packed-transfer geometry (`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) rides
-`/init_weight_transfer_engine`, which older engines refuse. No newer release is validated.
+A server whose `/server_info` does not identify the toolkit image is read through `GET /version`, and the
+client refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry
+(`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which
+older engines refuse. The toolkit image skips that check: its engine reports the development version
+0.1.dev25249, and its build asserts the patched wire. No other engine build is validated.
 
 ### Config-schema parity
 
-The server parses every checkpoint with its own transformers, the base image's 5.19.0
+The server parses every checkpoint with its own transformers, the base image's 5.22.2
 (`Dockerfile.vllm` asserts it sits inside vLLM's declared range). `docker/vllm/parity/check.py` runs at
 image build: vLLM's `ModelConfig` must resolve what the toolkit exports, to a per-layer attention
 geometry, for every family whose EP layer admits weight sync and the vLLM client does not list as
@@ -691,7 +688,7 @@ scratch volume, even to start the server alone, because compose interpolates the
 once in the repo-root `.env`).
 
 ```bash
-make build-vllm      # or: export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.32.0
+make build-vllm      # or: export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVICES=0,1,2,3,4,5 \
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
@@ -702,7 +699,7 @@ expert-repacking auto MoE backend:
 
 ```bash
 docker run --gpus all --network=host --ipc=host \
-  halo:vllm-0.32.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
+  halo:vllm-0.1.dev25249 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
   --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
   --return-tokens-as-token-ids --logprobs-mode processed_logprobs \
   --enable-auto-tool-choice --tool-call-parser hermes
@@ -710,7 +707,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0` |
+| `VLLM_IMAGE` | `halo:vllm-0.1.dev25249` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249` |
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host; drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the Makefile's |
 | `VLLM_CUDA_DEVICES` | `7` | Server GPUs, disjoint from `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`; a rank cannot broadcast to itself). Selected via `CUDA_VISIBLE_DEVICES` in a container that sees every GPU: hiding devices instead (`--gpus device=N`) breaks the cross-container P2P import and `/init_weight_transfer_engine` fails with `unhandled cuda error` |
@@ -753,11 +750,6 @@ reads them as env vars. Load-bearing flags the compose file sets:
 `--max-model-len` is left unset, so the server serves the model's native window; the trainer's startup
 probe reads it off `/v1/models` and raises when `max_prompt_length` plus one turn's generation exceeds
 it (the worst-case multi-turn budget only warns).
-
-`VLLM_USE_V2_MODEL_RUNNER` is an env var the compose file passes through bare, so unset keeps the
-image's `1`. `0` falls back to the V1 runner, where R3 refuses to start and the gpt-oss budget loses
-its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty key in `.env` counts)
-kills the server with a bare `ValueError`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,
 `qa_search`, open-book `exam_qa`) a missing or wrong parser leaves calls as text with no `tool_calls`, so every

@@ -95,7 +95,7 @@ For RL the training and serving templates must match, since log-probs are comput
 
 ## Serving for GRPO (vLLM)
 
-Use the toolkit `halo:vllm-0.32.0` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_source.py`) forces vLLM's harmony pipeline off and generates coherently.
+Use the toolkit `halo:vllm-0.1.dev25249` image, not stock upstream vLLM: on B300 the stock `vllm/vllm-openai` image produces garbage GPT-OSS output with harmony on *or* off. The toolkit image (`Dockerfile.vllm` plus `docker/vllm/patches/patch_vllm_source.py`) forces vLLM's harmony pipeline off and generates coherently.
 
 With harmony disabled, five settings are load-bearing.
 

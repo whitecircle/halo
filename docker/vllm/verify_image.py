@@ -126,9 +126,17 @@ def check_weight_transfer_wire_contract() -> None:
         "packed",
         "packed_buffer_size_bytes",
         "packed_num_buffers",
+        "use_load_plan",
+        "metadata",
     }, f"init request fields changed: {sorted(init)}"
+    # The client sends neither load-plan field, so the engine writes each received tensor through load_weights.
+    defaults = {f.name: f.default for f in dataclasses.fields(NCCLWeightTransferInitInfo)}
+    assert (defaults["use_load_plan"], defaults["metadata"]) == (False, None), "the load plan is on by default"
     update = {f.name for f in dataclasses.fields(NCCLWeightTransferUpdateInfo)}
-    assert update == {"names", "dtype_names", "shapes"}, f"update request fields changed: {sorted(update)}"
+    assert update == {"names", "dtype_names", "shapes", "src"}, f"update request fields changed: {sorted(update)}"
+    # The client sends no src: the trainer broadcasts as group rank 0.
+    src = next(f for f in dataclasses.fields(NCCLWeightTransferUpdateInfo) if f.name == "src")
+    assert src.default == 0, "the update's broadcasting rank is not 0 by default"
     assert (packed_tensor.DEFAULT_PACKED_BUFFER_SIZE_BYTES, packed_tensor.DEFAULT_PACKED_NUM_BUFFERS) == (
         1 << 30,
         2,
@@ -216,30 +224,35 @@ def check_pause_keep_clears_cache() -> None:
     ), "/pause clear_cache changed"
     llm = MagicMock()
     llm.renderer.clear_mm_cache_async = AsyncMock()
-    llm.engine_core.pause_scheduler_async = AsyncMock()
+    llm.engine_core.pause_generation_async = AsyncMock()
 
     def forwarded(clear: bool) -> bool:
         asyncio.run(AsyncLLM.pause_generation(llm, mode="keep", clear_cache=clear))
-        return llm.engine_core.pause_scheduler_async.await_args.kwargs["clear_cache"]
+        return llm.engine_core.pause_generation_async.await_args.kwargs["clear_cache"]
 
     assert forwarded(True) is True and forwarded(False) is False, (
-        "pause_generation no longer forwards clear_cache under mode=keep"
+        "pause_generation does not forward clear_cache under mode=keep"
     )
     engine = MagicMock()
+    EngineCoreProc.pause_generation(engine, mode="keep", clear_cache=True)
+    assert engine.pause_scheduler.call_args.args == ("keep", True), "the engine's pause drops mode or clear_cache"
+    assert engine.reject_new_requests is False, "a keep pause rejects the requests it should queue"
+    engine = MagicMock()
+    engine._pause_complete.return_value = True
     EngineCoreProc.pause_scheduler(engine, mode="keep", clear_cache=True)
-    assert engine._finish_pause.call_args.args == (True,), (
-        "a keep pause no longer finishes with the clear_cache it was given"
-    )
+    assert engine._finish_pause.call_args.args[0] is True, "a keep pause finishes without the clear_cache it was given"
     engine = MagicMock()
-    EngineCore._finish_pause(engine, False)
-    assert not engine._reset_caches.called, "clear_cache=false still resets"
+    engine._checkpoint_state = None
+    EngineCore._finish_pause(engine, False, True)
+    assert not engine._reset_caches.called, "clear_cache=false resets"
     engine = MagicMock()
-    EngineCore._finish_pause(engine, True)
-    assert engine._reset_caches.called, "clear_cache=true no longer resets"
+    engine._checkpoint_state = None
+    EngineCore._finish_pause(engine, True, True)
+    assert engine._reset_caches.called, "clear_cache=true does not reset"
     engine = MagicMock()
     EngineCore._reset_caches(engine)
     assert engine.reset_prefix_cache.call_args.kwargs.get("reset_running_requests") is True, (
-        "pause reset no longer preempts running requests"
+        "pause reset does not preempt running requests"
     )
     print("/pause mode=keep + clear_cache: OK")
 

@@ -170,7 +170,7 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 > [!WARNING]
 > **GPT-OSS: toolkit vLLM image, sinks on**
 >
-> Serve GPT-OSS from the toolkit `halo:vllm-0.32.0` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
+> Serve GPT-OSS from the toolkit `halo:vllm-0.1.dev25249` image with sinks on (the default) and keep `reset_sinks: false` on the trainer; stock vLLM emits garbage GPT-OSS output on Blackwell ([GPT-OSS](../../models/gpt-oss.md#serving-for-grpo-vllm)).
 
 ### Weight sync
 

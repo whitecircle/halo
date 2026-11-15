@@ -20,6 +20,7 @@ from halo.environments.rollout_config import RolloutConfig
 from halo.environments.rollouts.engine_wire import build_payload
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,
@@ -918,6 +919,64 @@ def test_inkling2_attention_adapters_reach_the_release_names_vllm_packs(family):
     layer0 = {key.split(".attn.")[1].split(".")[0] for key in hub if ".layers.0.attn." in key}
     assert layer0 == {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud"}
     assert all(".model.llm.layers." in key for key in hub), "the release's layer path"
+
+
+class _ExpertLoraLayer:
+    """An EP layer with native expert LoRA at rank 8 and the given scaling."""
+
+    def __init__(self, scaling: float):
+        self.ep_config = SimpleNamespace(expert_lora=SimpleNamespace(r=8))
+        self.expert_lora_scaling = scaling
+
+
+@pytest.mark.parametrize(
+    ("family", "client_cls", "scaling", "reason"),
+    [
+        ("inkling2_text", VLLMWeightSyncClient, 2.0, None),
+        ("inkling2_text", VLLMWeightSyncClient, 1.0, "another rank or scaling"),
+        ("inkling2_text", SGLangWeightSyncClient, 2.0, "serves no routed-expert adapter"),
+        ("qwen3_moe", VLLMWeightSyncClient, 2.0, "serves no routed-expert adapter"),
+    ],
+)
+def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, client_cls, scaling, reason, monkeypatch):
+    """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank."""
+    model = _inkling2_peft(family, ("q_proj", "o_proj"))
+    monkeypatch.setattr(adapter_sync, "expert_lora_layers", lambda _: [("mlp", _ExpertLoraLayer(scaling))])
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
+    if reason is None:
+        assert reasons == []
+    else:
+        assert any(reason in each for each in reasons), reasons
+
+
+def test_expert_adapters_reach_vllm_per_expert_with_gate_and_up_interleaved():
+    """Halo's grouped ``[E, in, r]`` / ``[E, r, out]`` adapters become vLLM's ``[E, r, in]`` / ``[E, out, r]`` on
+    ``w13_weight`` / ``w2_weight`` under the release's layer path, the w13 B rows alternating gate and up."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["inkling2"])
+    layer = next(name for name, _ in model.named_modules() if name.endswith("layers.0.mlp"))
+    experts, hidden, width, rank = 4, 8, 6, 2
+    gate_up_a, gate_up_b = torch.randn(experts, hidden, rank), torch.randn(experts, rank, 2 * width)
+    down_a, down_b = torch.randn(experts, width, rank), torch.randn(experts, rank, hidden)
+    gathered = {
+        f"{layer}.experts.gate_up_proj.lora_A": gate_up_a,
+        f"{layer}.experts.gate_up_proj.lora_B": gate_up_b,
+        f"{layer}.experts.down_proj.lora_A": down_a,
+        f"{layer}.experts.down_proj.lora_B": down_b,
+    }
+
+    engine = adapter_sync._engine_expert_adapters(model, gathered)
+
+    prefix = f"{PEFT_BASE_MODEL_PREFIX}model.llm.layers.0.mlp.experts"
+    assert engine.keys() == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    assert torch.equal(engine[f"{prefix}.w13_weight.lora_A.weight"], gate_up_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_A.weight"], down_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_B.weight"], down_b.transpose(1, 2))
+    # The engine's w13 delta, rows (g0, u0, g1, u1, ...), against the layer's [gate | up] one.
+    delta = engine[f"{prefix}.w13_weight.lora_B.weight"][1] @ engine[f"{prefix}.w13_weight.lora_A.weight"][1]
+    halo_delta = (gate_up_a[1] @ gate_up_b[1]).T
+    assert torch.allclose(delta[0::2], halo_delta[:width]) and torch.allclose(delta[1::2], halo_delta[width:])
 
 
 if __name__ == "__main__":
