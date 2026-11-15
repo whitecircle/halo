@@ -62,7 +62,7 @@ _DENSE_PROJECTION = re.compile(rf"\.({'|'.join(MLP_PROJECTIONS)})\.weight$")
 _MERGED_PAIRS = tuple(dict.fromkeys((MLP_PROJECTIONS, *per_expert_layouts())))
 
 # How the quantized tensors and ``config.json`` are written: Halo's own manifest and key names, or the
-# compressed-tensors layout vLLM's and SGLang's loaders read.
+# compressed-tensors layout vLLM's loader reads.
 BLOCK_SCALED, COMPRESSED_TENSORS = "block_scaled", "compressed-tensors"
 EXPORT_FORMATS = (BLOCK_SCALED, COMPRESSED_TENSORS)
 DEFAULT_EXPORT_FORMAT = BLOCK_SCALED
@@ -338,7 +338,7 @@ def _engine_loadable_modules(plan: _ExportPlan) -> tuple[list[str], list[str]]:
         if header.dim() != 2:
             raise ValueError(
                 f"{name!r} is a fused {header.dim()}-D expert bank, which no compressed-tensors loader reads quantized: "
-                f"vLLM and SGLang load one ``<experts>.<i>.<proj>`` Linear per expert. Un-fuse the checkpoint with "
+                f"vLLM loads one ``<experts>.<i>.<proj>`` Linear per expert. Un-fuse the checkpoint with "
                 f"scripts/after_training/unfuse_moe_experts.py first, or export with --export_format {BLOCK_SCALED}."
             )
         if header.shape[DENSE_CONTRACTION_AXIS] % block != 0:
@@ -609,7 +609,7 @@ def _write_manifest(
     # from_pretrained, whose coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
     # ``block_scaled`` method; plain transformers only warns and random-initializes every quantized weight. A raw
     # format name would select a method reading a different on-disk layout. Under compressed-tensors the stamp is the
-    # config those engines load, and transformers reads it through its compressed-tensors quantizer.
+    # config vLLM loads.
     config = read_checkpoint_config(output_dir, missing_ok=True)
     if config is not None:
         config["quantization_config"] = _compressed_tensors_config(fmt, targets) if compressed_tensors else manifest

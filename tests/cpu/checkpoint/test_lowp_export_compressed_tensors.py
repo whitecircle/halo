@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""``quantize_to_lowp.py --export_format compressed-tensors``: the layout vLLM's and SGLang's compressed-tensors loaders
-read, in place of Halo's ``block_scaled`` manifest, which they refuse.
+"""``quantize_to_lowp.py --export_format compressed-tensors``: the layout vLLM's compressed-tensors loader reads, in
+place of Halo's ``block_scaled`` manifest, which it refuses.
 - Each format writes the tensors its compressed-tensors compressor names: ``weight`` + ``weight_scale`` for mxfp8,
   ``weight_packed`` + ``weight_scale`` for mxfp4, plus ``weight_global_scale`` for nvfp4, and no ``weight_shape``.
 - Decoding them by compressed-tensors' rules reproduces the QAT forward's weight bit for bit, and so does decoding an

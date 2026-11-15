@@ -69,7 +69,7 @@ def parse_args():
         "--export_format",
         choices=list(EXPORT_FORMATS),
         default=DEFAULT_EXPORT_FORMAT,
-        help="On-disk layout: Halo's own block_scaled manifest, or compressed-tensors, which vLLM and SGLang load "
+        help="On-disk layout: Halo's own block_scaled manifest, or compressed-tensors, which vLLM loads "
         "(per-expert MoE checkpoints only; default: %(default)s).",
     )
     p.add_argument(
