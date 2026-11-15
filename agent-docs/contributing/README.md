@@ -562,10 +562,11 @@ link, anchor and code-reference check that blocks a merge
 `visuals` skill's style (`skills/visuals/SKILL.md`). Every page links the skill's shared kit
 (`skills/visuals/kit/`: the colour tokens, type scale and page skeleton, and the element, arrow and axis
 helpers), so a change there reaches every figure on the next render. Edit the page or the kit, run
-`make diagrams` on a host with
-Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG and any alt-text change together.
-Every render is optimized losslessly with OptiPNG. CI does not re-render the figures, since the fonts are
-licensed and stay off the runners.
+`make diagrams` on a host with Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG,
+`agent-docs/assets/figures.sha256` and any alt-text change together. Every render is optimized
+losslessly with OptiPNG. CI does not re-render the figures, since the fonts are licensed and stay off
+the runners; it fails a figure left stale against what it is rendered from
+([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)).
 
 ## Proof of Value
 

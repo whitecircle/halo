@@ -259,13 +259,15 @@ verify-efficiency: ## what the EfficiencyCallback reports, BASE vs HEAD_REF (BAS
 	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
 	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.efficiency_callback $(COMPARISON_ARGS)
 
-docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown
+docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown, and no figure stale against its page
 	./scripts/docs/check_links.sh
+	./scripts/docs/figure_manifest.sh check
 
-diagrams: ## re-render each agent-docs/assets figure from the HTML page beside it, refusing one that overflows, and optimizes each PNG losslessly (host: Chrome, the ABC fonts and OptiPNG)
+diagrams: ## re-render each agent-docs/assets figure from the HTML page beside it, refusing one that overflows, optimize each PNG losslessly and record them in agent-docs/assets/figures.sha256 (host: Chrome, the ABC fonts and OptiPNG)
 	@for page in agent-docs/assets/*/*.html; do echo "$$page"; \
 	  out=$$(./skills/visuals/scripts/check.sh "$$page") || { echo "$$out"; exit 1; }; \
 	  ./skills/visuals/scripts/render.sh "$$page" "$${page%.html}.png" >/dev/null || exit 1; done
+	./scripts/docs/figure_manifest.sh write
 
 BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
 

@@ -273,7 +273,7 @@ skill's base directory, the folder this file is in.
    then updates the whole figure, and no typed number can disagree with the marks.
 3. Render it with `<skill>/scripts/render.sh page.html page.png`. It takes the canvas width from the
    page's `body` rule and the height from that rule too, or, when the rule sets only a width, from
-   the laid-out content (`scripts/canvas-size.sh`), checks that both brand fonts and OptiPNG are
+   the laid-out content (`<skill>/scripts/canvas-size.sh`), checks that both brand fonts and OptiPNG are
    installed, shoots the page with
    headless Chrome at 2× where it sits (so its relative links resolve), and optimizes the PNG
    losslessly with OptiPNG (about a fifth smaller, every pixel unchanged).

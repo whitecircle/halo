@@ -294,6 +294,7 @@ torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp
 | Script | Description |
 |--------|-------------|
 | `scripts/docs/check_links.py` | The docs link gate (`scripts/docs/check_links.sh`, `make docs`): every relative link, heading anchor and code reference in the given markdown files or directories (default: `agent-docs`, `human-docs`, `skills` and the root markdown) must resolve; exits 1 naming each one that does not |
+| `scripts/docs/figure_manifest.sh` | The stale-figure gate: `write` (run by `make diagrams`) records the SHA-256 of every figure under `agent-docs/assets/` and of what it is rendered from in `agent-docs/assets/figures.sha256`; `check` (`make docs`, the docs workflow) exits 1 naming each file changed since, or a page never rendered |
 
 ## Related pages
 

@@ -23,3 +23,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: links, anchors and code references (agent-docs, human-docs, skills, root markdown)
         run: ./scripts/docs/check_links.sh
+      - name: no figure stale against its page (agent-docs/assets/figures.sha256, written by make diagrams)
+        # The render needs licensed fonts the runner does not hold, so the gate compares hashes instead.
+        if: ${{ !cancelled() }}
+        run: ./scripts/docs/figure_manifest.sh check
