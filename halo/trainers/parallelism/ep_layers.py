@@ -119,3 +119,6 @@ class EPLayersMixin:
         # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit.
         self.args.gradient_checkpointing_kwargs = gc_kwargs
         self.args.gradient_checkpointing = False
+        # transformers' Trainer reads the renamed pair in train(); left on, it re-installs a bare checkpoint there.
+        self.args.activation_checkpointing_kwargs = gc_kwargs
+        self.args.activation_checkpointing = False

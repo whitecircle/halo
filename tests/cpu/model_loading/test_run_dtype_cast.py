@@ -308,17 +308,23 @@ def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpo
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, family):
-    """A family that starts or stops pinning fails here. None pins inside a MoE block, the premise of the EP
-    loaders' block cast."""
+    """A family that starts or stops pinning fails here. A pin inside a MoE block is its router's (Inkling's
+    ``gate.global_scale``), which ``fp32_router`` keeps; the EP loaders' block cast trains every other block
+    parameter at the run dtype."""
     tiny = TINY_MOE_FAMILIES[family]
     model = tiny.load_class.from_pretrained(
         roster_checkpoints[family], dtype=torch.bfloat16, trust_remote_code=tiny.trust_remote_code
     )
     fp32 = set(params_off_dtype(model, torch.bfloat16))
     in_blocks = {f"{path}.{name}" for path, block in ep_claimed_blocks(model) for name, _ in block.named_parameters()}
+    routers = fp32_master_param_keys(
+        model,
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True, fp32_router=True),
+        keep_non_ep=False,
+    )
 
     assert bool(fp32) == (family in PINNED_FP32_FAMILIES)
-    assert not fp32 & in_blocks
+    assert fp32 & in_blocks <= routers
 
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
@@ -431,8 +437,10 @@ def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, fami
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
+    # The EP and PP loaders train a pin inside a MoE block (a router's) at the run dtype unless fp32_router.
     masters = None if loader == "path_string" else _outside_moe_blocks(model)
-    _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32, masters=masters)
+    kept = pinned if masters is None else pinned & masters
+    _assert_keeps_exactly(model, {name: name for name in kept}, stored, keep_fp32, masters=masters)
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])

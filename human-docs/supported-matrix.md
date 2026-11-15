@@ -9,7 +9,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | --- | --- |
 | Python | 3.12, installed with uv into the system interpreter |
 | PyTorch | 2.11.0, `cu130` wheel (CUDA 13.2 toolkit) |
-| Transformers | 5.20.2 |
+| Transformers | 5.23.0 |
 | TRL | 1.14.2 |
 | Accelerate | 1.11.0 |
 | PEFT | 0.18.1 |

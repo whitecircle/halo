@@ -373,7 +373,7 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     monkeypatch.setattr(lazy_plan, "broadcast_from_rank0", lambda _value: "rank0-verdict")
 
     for layout_supported in (False, True):
-        monkeypatch.setattr(lazy_plan, "is_lazy_loadable", lambda _dir, supported=layout_supported: supported)
+        monkeypatch.setattr(lazy_plan, "is_lazy_loadable", lambda _dir, supported=layout_supported, **_kw: supported)
         assert lazy_plan.agree_lazy_load(_SOURCE) == "rank0-verdict"
 
 
@@ -393,7 +393,7 @@ def test_the_lazy_gate_needs_safetensors_and_a_supported_layout(
     monkeypatch.setattr(lazy_plan, "has_whole_model_weight_file", lambda _dir, **_kw: has_safetensors)
     monkeypatch.setattr(lazy_plan, "broadcast_from_rank0", lambda value: value)
 
-    def _layout(path):
+    def _layout(path, **_kw):
         asked.append(path)
         return layout_supported
 

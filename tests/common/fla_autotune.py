@@ -6,7 +6,12 @@ import sys
 from triton.runtime.autotuner import Autotuner
 from triton.runtime.jit import KernelInterface
 
-from halo.kernels.fla_launch import triton_autotuner
+
+def triton_autotuner(kernel) -> Autotuner | None:
+    """The ``triton.Autotuner`` under ``kernel``'s ``triton.heuristics`` wrappers, or ``None``."""
+    while kernel is not None and not isinstance(kernel, Autotuner):
+        kernel = getattr(kernel, "fn", None)
+    return kernel
 
 
 def _loaded_fla_autotuners() -> list[Autotuner]:

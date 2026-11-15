@@ -1,6 +1,7 @@
 """The DPO / KTO ``precompute_ref_log_probs`` resume body. A Path-B resume builds the policy from the checkpoint first,
 so TRL's sweep would score trained weights and zero every log-ratio; checkpoints carry the untrained columns
-(``reference_logps.pt``) instead. A control not told the checkpoint must miss, and a missing sidecar must refuse."""
+(``reference_logps.pt``) instead. A control not told the checkpoint must rederive different columns; a missing
+sidecar must refuse."""
 
 import argparse
 import math
@@ -294,9 +295,12 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         checks["control_reference_misses_the_base_run"] = (
             metrics["control_reference_max_logp_delta"] > CONTROL_MIN_LOGP_DELTA
         )
-        checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
-            control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
-        )
+        checks["control_first_step_loss_is_finite"] = math.isfinite(control_delta)
+        # Balanced KTO losses can cancel even when reference columns differ substantially.
+        if kind == "dpo":
+            checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
+                control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
+            )
     else:
         checks["control_sweep_of_the_base_reproduces_the_base_run"] = _columns_equal(control_columns, base_columns)
 

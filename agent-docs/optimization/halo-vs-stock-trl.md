@@ -1,6 +1,6 @@
 # Halo vs stock TRL / transformers
 
-Halo 1.2.0 against `trl.SFTTrainer` 1.17.1 on Transformers 5.20.2, 8× B300 and the Blackwell image, bf16, FA4, Liger,
+Halo 1.2.0 against `trl.SFTTrainer` 1.17.1, measured on Transformers 5.20.2, 8× B300 and the Blackwell image, bf16, FA4, Liger,
 `grouped_mm` experts. Same model, rows and kernels on both sides; only the framework changes. The rates themselves, with
 NeMo AutoModel and Megatron Bridge beside them, and the conditions that decide how to read them are in
 [Throughput Benchmarks](throughput-benchmarks.md#full-parameter-sft-framework-comparison). This page holds the TRL

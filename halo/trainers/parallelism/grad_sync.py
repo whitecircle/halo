@@ -94,8 +94,8 @@ class GradientSyncMixin:
         self._window_end_armed = is_last
 
     def _finish_fsdp2_backward(self, model: nn.Module) -> None:
-        """COLLECTIVE where a group reduces. Complete the post-backward a reentrant recompute skipped, then refuse one
-        still undone, before the clip. Groups come off the model the step ran, which an accelerate launch wraps only in
+        """COLLECTIVE where a group reduces. Complete the post-backward FSDP2's hooks left undone, then refuse one still
+        undone, before the clip. Groups come off the model the step ran, which an accelerate launch wraps only in
         ``train()``."""
         cached_model, groups = getattr(self, "_fsdp2_groups_of", (None, None))
         if cached_model is not model:
@@ -108,8 +108,8 @@ class GradientSyncMixin:
         if reduced and not getattr(self, "_fsdp2_completion_logged", False) and is_global_main_process():
             self._fsdp2_completion_logged = True
             logger.info(
-                f"  FSDP2: {reduced} shard group(s) recomputed more than once by reentrant gradient checkpointing "
-                f"had their post-backward completed after the backward (one extra reduce-scatter each per backward)"
+                f"  FSDP2: {reduced} shard group(s) had their post-backward completed after the backward "
+                f"(one extra reduce-scatter each per backward)"
             )
 
     def _register_grad_sync_step_hooks(self) -> None:

@@ -283,7 +283,7 @@ RUN pip install --ignore-installed --no-deps PyYAML pygments wheel
 # their dependencies come from the locked install below, and a fresh resolve here would leave
 # unlocked packages in the image.
 RUN export TORCH_CUDA_ARCH_LIST=$(cat /etc/cuda_arch) \
-    && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
+    && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.6.0"
 
 # Remaining locked deps (flat export; compiled deps already satisfy their pins and are skipped).
 # The export carries the dev group — this image is also the test/docs/lint runtime — and both optional

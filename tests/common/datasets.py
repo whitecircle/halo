@@ -3,6 +3,7 @@ stays in that file."""
 
 import random
 from datetime import datetime
+from unittest.mock import patch
 
 from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
@@ -44,16 +45,16 @@ def _compute_result(a: int, b: int, op: str) -> int:
         return a - b
 
 
-def _apply_chat_template(tokenizer, messages, add_generation_prompt=False):
-    """Apply the chat template, with a fallback for tokenizers lacking one; a render kwarg ``strftime_now`` shadows the
-    jinja global to pin the clock."""
+def render_chat(tokenizer, messages, add_generation_prompt=False):
+    """Render with a fixed template clock, falling back to role-prefixed text without a chat template."""
     if hasattr(tokenizer, "apply_chat_template") and tokenizer.chat_template:
-        return tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=add_generation_prompt,
-            strftime_now=CHAT_TEMPLATE_NOW.strftime,
-        )
+        with patch("transformers.utils.chat_template_utils.datetime") as clock:
+            clock.now.return_value = CHAT_TEMPLATE_NOW
+            return tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+            )
     sep = "\n"
     parts = []
     for m in messages:
@@ -90,7 +91,7 @@ def create_sft_dataset(
                     {"role": "assistant", "content": ft[1].format(a=a2, b=b2, r=r2)},
                 ]
             )
-        text = _apply_chat_template(tokenizer, messages)
+        text = render_chat(tokenizer, messages)
         data.append({"text": text})
     return Dataset.from_list(data)
 
@@ -152,7 +153,7 @@ def create_single_turn_sft_dataset(
             {"role": "user", "content": instruction},
             {"role": "assistant", "content": response},
         ]
-        data.append({"text": _apply_chat_template(tokenizer, messages)})
+        data.append({"text": render_chat(tokenizer, messages)})
     return Dataset.from_list(data)
 
 
@@ -202,7 +203,7 @@ def create_preference_dataset(
             correct = a2 + b2
             incorrect = correct + random.randint(1, 5)
 
-        prompt = _apply_chat_template(tokenizer, messages, add_generation_prompt=True)
+        prompt = render_chat(tokenizer, messages, add_generation_prompt=True)
         chosen = t["chosen"].format(a=a, b=b, correct=correct, incorrect=incorrect)
         rejected = t["rejected"].format(a=a, b=b, correct=correct, incorrect=incorrect)
         data.append({"prompt": prompt, "chosen": chosen, "rejected": rejected})
@@ -261,7 +262,7 @@ def create_offline_grpo_dataset(
                 {"role": "user", "content": followup.format(c=c)},
             ]
 
-        prompt = _apply_chat_template(tokenizer, messages, add_generation_prompt=True)
+        prompt = render_chat(tokenizer, messages, add_generation_prompt=True)
 
         offsets = [0, rng.choice([1, -1]), rng.choice([5, -5, 10, -10]), rng.randint(20, 50)]
         answers = rng.sample(GRPO_ANSWER_TEMPLATES, num_completions)
@@ -310,7 +311,7 @@ def create_variable_length_sft_dataset(
             {"role": "user", "content": instruction},
             {"role": "assistant", "content": response},
         ]
-        base_text = _apply_chat_template(tokenizer, base_messages)
+        base_text = render_chat(tokenizer, base_messages)
         base_tokens = len(tokenizer.encode(base_text))
 
         remaining = max(0, target_tokens - base_tokens)
@@ -321,7 +322,7 @@ def create_variable_length_sft_dataset(
             {"role": "user", "content": instruction},
             {"role": "assistant", "content": response + filler},
         ]
-        text = _apply_chat_template(tokenizer, messages)
+        text = render_chat(tokenizer, messages)
         data.append({"text": text})
 
     return Dataset.from_list(data)

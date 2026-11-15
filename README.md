@@ -74,8 +74,8 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
   - **New models:** NVIDIA Nemotron 3.5 (Super VL and Lightning), Qwen3-Next, and experimental
     Qwen3.8-Flash-Next, for eighteen MoE families in all.
   - **SFT features:** tree packing, which stores a shared prefix once, and training of MTP heads.
-  - **Upgrade notes:** the import package is now `halo`, on transformers 5.20, TRL 1.14, vLLM 0.32, and
-    SGLang 0.5.22. PaliGemma SFT and distillation now use a causal mask, which 1.1.0 left off.
+  - **Upgrade notes:** the import package is now `halo`, and 1.2.0 shipped on transformers 5.20, TRL 1.14,
+    vLLM 0.32, and SGLang 0.5.22. PaliGemma SFT and distillation now use a causal mask, which 1.1.0 left off.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume, and more reliable async RL. Fused MoE
   kernels and FlexAttention on sliding-window layers made Gemma 4 26B-A4B 1.67× faster than 1.0.0 on two
   GPUs, and an atomic-free expert permute made gpt-oss at EP8 up to 27% faster. Checkpoint and resume problems now stop the run instead of

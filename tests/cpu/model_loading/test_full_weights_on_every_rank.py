@@ -1,5 +1,5 @@
-"""The toolkit's weight funnel holds full weights on every rank under accelerate's rank-0-only loading, which zeroes
-other ranks and never broadcasts to a frozen reference."""
+"""Under accelerate's ``fsdp_cpu_ram_efficient_loading`` every rank loads the full weights and buffers, through a
+plain load and the toolkit's policy and frozen loads alike: a frozen reference gets no broadcast to repair them."""
 
 import json
 import os
@@ -18,8 +18,11 @@ RANKS = 2
 ACCELERATE_FSDP_ENV = {"ACCELERATE_USE_FSDP": "true", "FSDP_CPU_RAM_EFFICIENT_LOADING": "true"}
 
 
-def _abs_sum(model) -> float:
-    return float(sum(p.detach().abs().sum() for p in model.parameters()))
+def _abs_sum(model) -> tuple[float, float]:
+    """Parameters, and the rotary ``inv_freq`` every load builds."""
+    inv_freq = [b for name, b in model.named_buffers() if name.endswith("inv_freq") and "original" not in name]
+    assert inv_freq, "the fixture has no rotary buffer to compare"
+    return float(sum(p.detach().abs().sum() for p in model.parameters())), float(sum(b.abs().sum() for b in inv_freq))
 
 
 def _load_on_rank(rank: int, checkpoint: str, out_dir: str) -> None:
@@ -30,7 +33,6 @@ def _load_on_rank(rank: int, checkpoint: str, out_dir: str) -> None:
         "control": _abs_sum(control),
         "policy": _abs_sum(policy),
         "frozen": _abs_sum(frozen),
-        "flag_after": os.environ.get("FSDP_CPU_RAM_EFFICIENT_LOADING"),
     }
     with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as handle:
         json.dump(record, handle)
@@ -45,25 +47,14 @@ def per_rank(tmp_path_factory):
     out_dir = tmp_path_factory.mktemp("ranks")
     run_gloo_ranks(_load_on_rank, RANKS, str(checkpoint), str(out_dir), env=ACCELERATE_FSDP_ENV)
     records = [json.loads((out_dir / f"rank{rank}.json").read_text()) for rank in range(RANKS)]
-    return _abs_sum(model), records
+    return _abs_sum(AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float32)), records
 
 
-def test_the_control_load_is_zero_off_local_rank_0(per_rank):
-    expected, records = per_rank
-    assert records[0]["control"] == pytest.approx(expected)
-    assert records[1]["control"] == 0.0
-
-
-@pytest.mark.parametrize("load", ["policy", "frozen"])
+@pytest.mark.parametrize("load", ["control", "policy", "frozen"])
 def test_every_rank_loads_the_full_weights(per_rank, load):
     expected, records = per_rank
     for rank, record in enumerate(records):
-        assert record[load] == pytest.approx(expected), f"{load} on rank {rank}"
-
-
-def test_the_loading_flag_is_restored(per_rank):
-    _, records = per_rank
-    assert [record["flag_after"] for record in records] == ["true"] * RANKS
+        assert record[load] == pytest.approx(list(expected)), f"{load} on rank {rank}"
 
 
 if __name__ == "__main__":

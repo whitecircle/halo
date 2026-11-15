@@ -22,6 +22,7 @@ from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.dtype import cast_parameters_to_run_dtype
 from halo.models.introspection.param_roles import persistent_buffers
 from tests.common.checkpoint_io import load_context, save_context, written_keys
 from tests.common.distributed import fake_process_group_mesh
@@ -59,7 +60,11 @@ CASES["qwen3_5_moe_text-fused_hub"] = (TINY_MOE_FAMILIES["qwen3_5_moe_text"], _f
 
 
 def _load(family, path: str):
-    return family.load_class.from_pretrained(path, dtype=torch.bfloat16, trust_remote_code=family.trust_remote_code)
+    """As the run's loader does: the cast unifies the ``_keep_in_fp32_modules_strict`` pins, which can share a module
+    with run-dtype siblings (Inkling's ``gate.global_scale``) that no FSDP2 group split separates."""
+    model = family.load_class.from_pretrained(path, dtype=torch.bfloat16, trust_remote_code=family.trust_remote_code)
+    cast_parameters_to_run_dtype(model, torch.bfloat16)
+    return model
 
 
 def _live_state(model) -> dict[str, torch.Tensor]:

@@ -16,10 +16,14 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LigerFamilySpec
 from halo.model_loading.liger.fused_modules import GLU_FLAGS, apply_fused_modules, apply_fused_modules_to_model
+from halo.model_loading.liger.upstream_outputs import supply_folded_output_classes
 from halo.model_loading.remote_code import register_remote_class_hook
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+# Before any upstream applier runs, this module's delegations and HF Trainer's re-application alike.
+supply_folded_output_classes()
 
 # (required class names, patch) armed for the modules transformers has not loaded yet.
 _armed: list[tuple[tuple[str, ...], Callable[[ModuleType], object]]] = []

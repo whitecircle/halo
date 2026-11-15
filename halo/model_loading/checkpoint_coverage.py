@@ -7,8 +7,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterable
 
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -25,7 +24,6 @@ logger = logging.getLogger(__name__)
 ALLOW_MISSING_CHECKPOINT_KEYS_ENV = "HALO_ALLOW_MISSING_CHECKPOINT_KEYS"
 # accelerate's switch under an FSDP launch for keeping the checkpoint's weights on each node's local rank 0 only;
 # transformers reads it inside ``from_pretrained``.
-_FSDP_CPU_RAM_EFFICIENT_LOADING = "FSDP_CPU_RAM_EFFICIENT_LOADING"
 
 
 def unexpected_missing_keys(
@@ -87,22 +85,6 @@ def verify_checkpoint_coverage(
     )
 
 
-@contextmanager
-def full_weights_on_every_rank() -> Iterator[None]:
-    """Turn ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the scope. Under an accelerate FSDP launch it leaves off-rank-0
-    weights as CPU zero copies until ``accelerator.prepare``'s broadcast, which a frozen model never gets and which
-    anything using the policy first (a reference sweep, a teacher on its device) precedes."""
-    previous = os.environ.get(_FSDP_CPU_RAM_EFFICIENT_LOADING)
-    os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = "false"
-    try:
-        yield
-    finally:
-        if previous is None:
-            os.environ.pop(_FSDP_CPU_RAM_EFFICIENT_LOADING, None)
-        else:
-            os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = previous
-
-
 def reject_adapter_directory(model_name_or_path: str) -> None:
     """transformers' own adapter load imports a module the pinned PEFT lacks, an error that names neither the adapter
     nor what to do."""
@@ -119,12 +101,11 @@ def reject_adapter_directory(model_name_or_path: str) -> None:
 def from_pretrained_verified(
     model_class, model_name_or_path: str, *, excuse_task_head: bool = True, **kwargs
 ) -> PreTrainedModel:
-    """``from_pretrained`` with its missing-key report gated, inside :func:`full_weights_on_every_rank`. A passed
+    """``from_pretrained`` with its missing-key report gated. A passed
     ``config`` carries this run's stamps and is kept; one read from the checkpoint takes
     :func:`drop_toolkit_stamps`."""
     reject_adapter_directory(model_name_or_path)
-    with full_weights_on_every_rank():
-        model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
+    model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
     if kwargs.get("config") is None:
         drop_toolkit_stamps(model.config)
     reject_untieable_list_ties(model)

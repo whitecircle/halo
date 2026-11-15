@@ -34,7 +34,6 @@ from halo.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from halo.model_loading.checkpoint_coverage import full_weights_on_every_rank
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches, apply_run_model_policies, resolve_build_config
@@ -261,11 +260,8 @@ def _load_sentence_transformer(
             "config itself, so the table would build as a trainable embedding on every rank. Embedding training "
             "takes no backbone with external tables; train a backbone without them."
         )
-    with (
-        joined_node_load(
-            f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
-        ),
-        full_weights_on_every_rank(),
+    with joined_node_load(
+        f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
     ):
         st_model = SentenceTransformer(
             context.model_source,

@@ -203,9 +203,10 @@ def test_an_fp32_softcapped_flash_request_is_redirected_to_flex_by_name():
     assert fp32_warnings and "attn_implementation='flex_attention'" in fp32_warnings[0]
 
 
-def test_the_sdpa_refusal_is_keyed_on_the_softcap_not_the_family():
-    with _on("hopper"):
-        assert _resolve(_config("gemma2", attn_logit_softcapping=None), SDPA) == SDPA
+def test_the_softcap_refusal_is_keyed_on_the_softcap_not_the_family():
+    """transformers' Gemma 2 class declares no SDPA support at all, so the toolkit's own refusal is read directly."""
+    assert attention_mod.has_attention_logit_softcap(_config("gemma2"))
+    assert not attention_mod.has_attention_logit_softcap(_config("gemma2", attn_logit_softcapping=None))
 
 
 @pytest.mark.parametrize("family", ["gemma2", "gemma3_text"])

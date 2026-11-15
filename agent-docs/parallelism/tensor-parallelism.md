@@ -74,8 +74,9 @@ Hand-sliced params (`register_hand_sliced`, `halo/distributed/tensor_parallel/pl
 
 ### Tied embeddings under HF-native TP
 
-`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
-injects `embed_tokens: embedding_rowwise` into the backbone `base_model_tp_plan`, the ForCausalLM's
+`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. transformers
+plans a backbone's `embed_tokens` as `embedding_rowwise` whenever the backbone carries a TP plan that does
+not name it, the ForCausalLM's
 `lm_head: colwise_gather_output` agrees with it on `Shard(0)` of the vocab dim, and transformers
 shards module by module and ties *afterwards* — so both ends land on the same DTensor: one weight,
 one gradient, one exported key, and half the embedding + head memory per rank at `tp_size=2`.
@@ -90,8 +91,12 @@ An architecture planning only **one** end of the pair (a multimodal wrapper clas
 `lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
 
-`consistent_tied_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
-the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
+`toolkit_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
+the load so the pair stays replicated, warning that those weights cost a full copy per rank. It also
+names an untied `embed_tokens` under the no-op `replicate` style whenever the backbone plan leaves it
+out: transformers would otherwise vocab-shard it, and DTensor's embedding backward returns a replicated
+gradient beside the shard, which AdamWBF16 refuses and the norm clip counts `tp_size` times. A tied
+pair keeps both ends sharded, since its head use returns the gradient sharded.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
 
@@ -143,12 +148,12 @@ gradient is already summed over the TP group. The rope half of their `kv_a_proj_
 output bypasses `kv_b_proj`, so a forward hook (`register_mla_rope_grad_reduction`) sums its
 gradient over the TP group.
 
-Transformers' own `ReplicatedWithGradAllReduce` is deliberately **not** used: its
-`full_backward_hook` re-reduces whatever sits in `.grad` on every backward, so under gradient
-accumulation each earlier micro-batch's contribution is multiplied by `tp_size` again per
-micro-step. On the HF-native `tp_plan="auto"` path `retarget_hf_replicated_grad_hooks` strips those
-hooks into the same step-time SUM, and raises if the plan asks for that reduction and no hook is
-found. Guarded by `tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py`.
+Transformers' own `ReplicatedWithGradAllReduce` is deliberately **not** used: its forward wrapper
+registers a post-accumulate-grad hook that re-reduces whatever sits in `.grad` on every backward, so
+under gradient accumulation each earlier micro-batch's contribution is multiplied by `tp_size` again
+per micro-step. On the HF-native `tp_plan="auto"` path `retarget_hf_replicated_grad_hooks` removes
+that wrapper before the first forward and registers the norms for the same step-time SUM; it raises if
+the plan asks for that reduction and no wrapper is found. Guarded by `tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py`.
 
 MoE layers are never in this plan. In EP+TP the experts belong to EP; in pure-TP MoE they stay
 replicated.

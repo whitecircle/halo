@@ -5,7 +5,6 @@ from collections.abc import Callable
 
 import torch.nn as nn
 
-from halo.kernels.fla_launch import apply_fla_launch_options
 from halo.log import warn_once
 from halo.model_loading.buffer_repair import apply_buffer_repairs
 from halo.model_loading.external_tables import attach_external_tables
@@ -62,9 +61,8 @@ def finalize_loaded_model(
 ) -> None:
     """Post-load repair every load path must run. transformers 5 re-materializes non-persistent buffers as
     ``torch.empty_like``, and a remote-code ``_init_weights`` without ``super()`` never repairs them: a zero inv_freq
-    degenerates RoPE to NoPE at a plausible loss. Also sets FLA launch options and attaches external tables."""
+    degenerates RoPE to NoPE at a plausible loss. Also attaches external tables."""
     apply_buffer_repairs(model)
     _retie_shared_weights(model)
     _warn_on_idle_mtp_tail(model)
-    apply_fla_launch_options()
     attach_external_tables(model, weights_dir, checkpoint_name)

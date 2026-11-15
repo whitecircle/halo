@@ -322,7 +322,7 @@ _BIAS_PERTURBATION = 1.5
 
 _UNCOMPARABLE = {
     "EPBailingMoELayer": (
-        "remote-code modeling — transformers 5.20 ships no bailing_moe module, and a stand-in "
+        "remote-code modeling — transformers 5.23 ships no bailing_moe module, and a stand-in "
         "reference would only certify this file's own assumptions"
     ),
     "EPLagunaMoELayer": (

@@ -36,7 +36,6 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.families.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.families.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.families.zaya import apply_zaya_patches
@@ -165,10 +164,6 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # Else each forward's mask construction reads whether position_ids hold packed documents, for a mask flash ignores.
     if is_flash_attn_implementation(attn_implementation):
         patch_transformers_packed_sequence_probe()
-    # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
-    # packed path never engages and packed documents attend across each other.
-    if is_flash_attn_implementation(attn_implementation) and model_type_matches(model_config, "mistral4"):
-        patch_mistral4_flash_packed_position_ids()
     # Else every attention layer of a padded batch re-derives the unpad set, a nonzero and a host read each, and
     # again in the checkpoint recompute.
     if is_flash_attn_implementation(attn_implementation):

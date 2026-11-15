@@ -98,7 +98,7 @@ The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-
 
 Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache. Fresh caches can pick differently, which changes bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)).
 
-On Blackwell the KDA path shares the delta-rule state kernel whose `num_warps=4` configs are excluded there; the Ling 3.0 remote code imports `fla` directly, and the restriction applies when its load finishes ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
+On Blackwell the KDA path shares the delta-rule state kernel, which fla autotunes only over its `num_warps=2` configs there, so the restriction also covers the Ling 3.0 remote code's direct `fla` import ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
 
 ## Router balancing
 

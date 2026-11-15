@@ -87,7 +87,9 @@ def test_permute_rope_matches_transformers_op():
     for tensor in (torch.randn(rows, H), torch.randn(rows)):
         for inverse in (False, True):
             theirs = PermuteForRope(subconfig_key="vision_config", permute_layer_names=["q_proj"], inverse=inverse)
-            expected = theirs.convert({"attn.q_proj.weight": tensor}, [], [], config=config)["attn.q_proj.weight"]
+            expected = theirs.convert(
+                {"attn.q_proj.weight": tensor}, ["attn.q_proj.weight"], ["attn.q_proj.weight"], config=config
+            )["attn.q_proj.weight"]
             assert torch.equal(PermuteRope(n_heads, inverse=inverse)(tensor), expected)
     # Anti-vacuity: the permutation is not the identity.
     assert not torch.equal(
