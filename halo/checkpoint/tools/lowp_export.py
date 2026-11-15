@@ -9,7 +9,7 @@ import logging
 import math
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from itertools import groupby
 from operator import itemgetter
 
@@ -57,6 +57,9 @@ _VERIFY_RELERR_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}
 _PER_EXPERT_SEGMENT = re.compile(rf"\b({'|'.join(experts_container_attrs())})\.\d+\.")
 # A per-expert spelling outside an expert segment (LFM-2's dense ``feed_forward.w1``) trains in bf16 and stays so.
 _DENSE_PROJECTION = re.compile(rf"\.({'|'.join(MLP_PROJECTIONS)})\.weight$")
+# (gate, up, down) spellings whose gate and up an engine loads as one merged layer: the dense MLP's and each per-expert
+# layout's.
+_MERGED_PAIRS = tuple(dict.fromkeys((MLP_PROJECTIONS, *per_expert_layouts())))
 
 # How the quantized tensors and ``config.json`` are written: Halo's own manifest and key names, or the
 # compressed-tensors layout vLLM's and SGLang's loaders read.
@@ -268,6 +271,8 @@ class _ExportPlan:
     fused_expert_axis: int | None
     input_dir: str
     export_format: str = BLOCK_SCALED
+    # nvfp4 under compressed-tensors: each merged-layer partition's shared global scale (``_merged_global_scales``).
+    merged_global_scales: dict[str, torch.Tensor] = field(default_factory=dict)
 
 
 @dataclass
@@ -281,6 +286,7 @@ class _ExportTally:
     copied: int = 0
     max_relerr: float = 0.0
     worst_relerr_name: str | None = None
+    rescaled: int = 0
     weight_map: dict[str, str] = field(default_factory=dict)
     total_size: int = 0
 
@@ -438,6 +444,71 @@ def _compressed_tensors_config(fmt: str, targets: list[str]) -> dict:
     }
 
 
+def _merged_layer_key(name: str) -> str | None:
+    """The merged layer an engine loads ``name`` into, for the projections vLLM fuses: a dense MLP's ``gate_proj`` and
+    ``up_proj`` (``gate_up_proj``) and an expert's first two per-expert keys (``w13``). None for any other weight."""
+    for gate, up, _down in _MERGED_PAIRS:
+        for part in (gate, up):
+            suffix = f".{part}.weight"
+            if name.endswith(suffix):
+                return f"{name[: -len(suffix)]}.{gate}+{up}"
+    return None
+
+
+def _nvfp4_global_scale(t: torch.Tensor) -> torch.Tensor:
+    """The global scale ``quantize_nvfp4`` gives ``t``. It depends on the tensor amax alone, so one block holding
+    that amax gets the quantizer's own value without quantizing the whole weight."""
+    probe = torch.zeros(FORMAT_BLOCK_SIZE["nvfp4"], dtype=torch.float32)
+    probe[0] = t.float().abs().max()
+    return QUANTIZERS["nvfp4"](probe).global_scale.cpu()
+
+
+def _merged_global_scales(plan: _ExportPlan) -> dict[str, torch.Tensor]:
+    """Under compressed-tensors, the nvfp4 global scale each merged-layer partition is written with: the largest of its
+    partitions'. vLLM decodes a merged layer under one global scale (a dense layer the largest stored divisor, a MoE
+    expert its first partition's), so partitions written with their own scales, as the QAT forward quantized them,
+    would decode off by a power of two. Reads each partition's amax ahead of the write."""
+    if plan.fmt != "nvfp4" or plan.export_format != COMPRESSED_TENSORS:
+        return {}
+    block = FORMAT_BLOCK_SIZE[plan.fmt]
+    groups: dict[str, dict[str, torch.Tensor]] = {}
+    for _shard, reader, name in iter_checkpoint_shard_entries(plan.input_dir):
+        key = _merged_layer_key(name)
+        if key is None:
+            continue
+        t = reader.get_tensor(name)
+        if not _plan_selects(name, t, plan) or t.dim() != 2 or t.shape[DENSE_CONTRACTION_AXIS] % block != 0:
+            continue
+        groups.setdefault(key, {})[name] = _nvfp4_global_scale(t)
+    shared = {}
+    for members in groups.values():
+        top = max(members.values(), key=lambda scale: scale.item())
+        shared.update(dict.fromkeys(members, top))
+    return shared
+
+
+def _share_global_scale(name: str, q: BlockScaledTensor, shared: torch.Tensor) -> tuple[BlockScaledTensor, bool]:
+    """``q`` re-expressed under ``shared``, a power of two at least its own global scale: the block scales step down by
+    the ratio and the codes stay. Exact while every stepped-down scale is an e4m3 value; one that is not would decode to
+    another weight than the QAT forward used, so it raises before the index and config are written."""
+    shared = shared.to(q.global_scale.device)
+    if torch.equal(q.global_scale, shared):
+        return q, False
+    want = q.scales.float() * (q.global_scale / shared)
+    scales = want.to(torch.float8_e4m3fn)
+    inexact = int((scales.float() != want).sum())
+    if inexact:
+        raise ValueError(
+            f"{name!r}: vLLM decodes its merged layer under one nvfp4 global scale, and re-expressing this partition "
+            f"under the shared one rounds {inexact} of its {want.numel()} e4m3 block scales, so the served weight would "
+            f"differ from the QAT forward's. Export it with --export_format {BLOCK_SCALED}, or pass --exclude to keep "
+            f"the pair in high precision."
+        )
+    return BlockScaledTensor(
+        q.data, scales.contiguous(), q.block_size, q.axis, q.packed, q.pow2_scale, global_scale=shared
+    ), True
+
+
 def _export_shard(entries, plan: _ExportPlan, tally: _ExportTally, *, verify: bool) -> dict[str, torch.Tensor]:
     """One input shard's tensors as written: every weight the plan selects block-scaled, the rest unchanged."""
     block = FORMAT_BLOCK_SIZE[plan.fmt]
@@ -454,6 +525,9 @@ def _export_shard(entries, plan: _ExportPlan, tally: _ExportTally, *, verify: bo
             tally.skipped.append(name)
             continue
         q = QUANTIZERS[plan.fmt](t.cuda().float() if torch.cuda.is_available() else t.float(), axis=axis)
+        if name in plan.merged_global_scales:
+            q, rescaled = _share_global_scale(name, q, plan.merged_global_scales[name])
+            tally.rescaled += rescaled
         out_tensors.update(_block_scaled_tensors(name, t, q, plan.export_format))
         tally.quantized.append(name)
         tally.weight_axes[name] = axis
@@ -470,6 +544,10 @@ def _log_export(tally: _ExportTally, fmt: str, *, verify: bool) -> None:
         f"quantized {len(tally.quantized)} weights to {fmt}; copied {tally.copied} tensors unchanged; "
         f"skipped {len(tally.skipped)} (contraction axis not divisible by {block})."
     )
+    if tally.rescaled:
+        logger.info(
+            f"  {tally.rescaled} nvfp4 weights written under their merged layer's shared global scale (exact)."
+        )
     if tally.skipped:
         logger.info(
             f"  left high-precision (not block-divisible): {tally.skipped[:8]}{' …' if len(tally.skipped) > 8 else ''}"
@@ -576,6 +654,7 @@ def quantize_checkpoint(
         fmt, inc, exc, kept_blocks, apply_dense_mlp, apply_moe_experts, fused_expert_axis, input_dir, export_format
     )
     _reject_empty_export(plan)
+    plan = replace(plan, merged_global_scales=_merged_global_scales(plan))
     targets = None
     if export_format == COMPRESSED_TENSORS:
         engine_modules, weight_modules = _engine_loadable_modules(plan)

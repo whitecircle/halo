@@ -3,12 +3,13 @@
 read, in place of Halo's ``block_scaled`` manifest, which they refuse.
 - Each format writes the tensors its compressed-tensors compressor names: ``weight`` + ``weight_scale`` for mxfp8,
   ``weight_packed`` + ``weight_scale`` for mxfp4, plus ``weight_global_scale`` for nvfp4, and no ``weight_shape``.
-- Decoding them by compressed-tensors' rules reproduces the QAT forward's weight bit for bit.
+- Decoding them by compressed-tensors' rules reproduces the QAT forward's weight bit for bit, and so does decoding an
+  nvfp4 ``gate_proj`` + ``up_proj`` pair the way vLLM decodes its merged layer, under one global scale.
 - ``config.json`` carries the ``quantization_config`` compressed-tensors itself serializes for the format, with
   targets that match exactly the quantized modules under the engine's matching rule.
 - What an engine cannot load quantized is refused before any write.
-The decoders and the expected config mirror compressed-tensors 0.17.0, the release in the ``vllm-0.32.0`` image; the
-image-side test loads the same exports with the library itself."""
+The decoders and the expected config mirror compressed-tensors 0.17.0 and vLLM 0.32.0, the releases in the
+``vllm-0.32.0`` image, which the training image does not install."""
 
 import json
 import os
@@ -22,7 +23,7 @@ from safetensors.torch import load_file, save_file
 
 from halo.checkpoint.tools import lowp_export
 from halo.checkpoint.tools.lowp_export import BLOCK_SCALED, COMPRESSED_TENSORS, quantize_checkpoint
-from halo.kernels.lowp.quantization import fake_quant
+from halo.kernels.lowp.quantization import fake_quant, quantize_nvfp4
 from tests.common.repo import load_script_module
 
 FORMATS = ("mxfp8", "mxfp4", "nvfp4")
@@ -60,7 +61,8 @@ def _expected_args(fmt: str, *, dynamic: bool) -> dict:
 
 
 def _weights(blocks: int = _BLOCKS) -> dict[str, torch.Tensor]:
-    """A per-expert MoE with a dense MLP beside the experts, so both seams export, plus what must stay bf16."""
+    """A per-expert MoE with a dense MLP beside the experts, so both seams export, plus what must stay bf16. ``up_proj``
+    is three times ``gate_proj``, so each pair's own nvfp4 global scales differ by a power of two or more."""
     torch.manual_seed(0)
     ckpt = {
         "model.embed_tokens.weight": torch.randn(100, 64, dtype=torch.bfloat16),
@@ -73,7 +75,7 @@ def _weights(blocks: int = _BLOCKS) -> dict[str, torch.Tensor]:
         ckpt[f"{prefix}.mlp.gate.weight"] = torch.randn(_EXPERTS, 64, dtype=torch.bfloat16)
         for owner in ("mlp", *(f"mlp.experts.{expert}" for expert in range(_EXPERTS))):
             ckpt[f"{prefix}.{owner}.gate_proj.weight"] = torch.randn(128, 64, dtype=torch.bfloat16) * 0.1
-            ckpt[f"{prefix}.{owner}.up_proj.weight"] = torch.randn(128, 64, dtype=torch.bfloat16) * 0.1
+            ckpt[f"{prefix}.{owner}.up_proj.weight"] = torch.randn(128, 64, dtype=torch.bfloat16) * 0.3
             ckpt[f"{prefix}.{owner}.down_proj.weight"] = torch.randn(64, 128, dtype=torch.bfloat16) * 0.1
     return ckpt
 
@@ -202,6 +204,42 @@ def test_config_json_carries_what_compressed_tensors_serializes_for_the_format(t
     assert manifest["format"] == fmt and manifest["scope"]["apply_moe_experts"] is True
     assert sorted(manifest["quantized_weights"]) == sorted(f"{module}.weight" for module in _quantized_modules())
     assert "compressed-tensors" in manifest["layout"]
+
+
+def test_nvfp4_gate_and_up_decode_under_the_merged_layers_one_global_scale(tmp_path):
+    """vLLM loads ``gate_proj`` and ``up_proj`` into one layer and decodes it under one nvfp4 global scale: a dense
+    ``gate_up_proj`` the largest stored divisor, a MoE expert's ``w13`` the gate's. Each pair is written with one."""
+    source, saved, _config, _manifest = _export(tmp_path, "nvfp4")
+    owners = {module.rsplit(".", 1)[0] for module in _quantized_modules()}
+    for owner in sorted(owners):
+        gate, up = f"{owner}.gate_proj", f"{owner}.up_proj"
+        own = {quantize_nvfp4(source[f"{m}.weight"].float()).global_scale.item() for m in (gate, up)}
+        assert len(own) == 2, f"{owner}: the fixture should give gate and up different global scales"
+        divisors = [saved[f"{m}.weight_global_scale"] for m in (gate, up)]
+        assert torch.equal(*divisors), f"{owner}: gate and up written with different global scales {divisors}"
+        engine_divisor = divisors[0] if ".experts." in owner else torch.maximum(*divisors)
+        for module in (gate, up):
+            merged = {**saved, f"{module}.weight_global_scale": engine_divisor}
+            torch.testing.assert_close(
+                _compressed_tensors_dequant(merged, module, "nvfp4"),
+                fake_quant(source[f"{module}.weight"], "nvfp4"),
+                rtol=0,
+                atol=0,
+                msg=f"{module} decodes under its merged layer's global scale to another weight than QAT used",
+            )
+
+
+def test_a_pair_that_cannot_share_one_nvfp4_global_scale_exactly_is_refused(tmp_path):
+    """``up_proj`` 2^-16 of ``gate_proj``: under the gate's global scale its block scales fall to e4m3 subnormals and
+    round, which would serve another weight than QAT trained."""
+    ckpt = _weights(blocks=1)
+    gate = ckpt["model.layers.0.mlp.gate_proj.weight"]
+    ckpt["model.layers.0.mlp.up_proj.weight"] = (gate.float() * 2**-16).to(torch.bfloat16)
+    src, out = _write(tmp_path / "src", ckpt), tmp_path / "out"
+    with pytest.raises(ValueError, match=r"mlp\.up_proj\.weight.*one nvfp4 global scale.*rounds \d+ of its"):
+        quantize_checkpoint(src, str(out), "nvfp4", export_format=COMPRESSED_TENSORS)
+    assert not (out / "config.json").exists()
+    quantize_checkpoint(src, str(out), "nvfp4", export_format=BLOCK_SCALED)  # Halo's own layout keeps each scale
 
 
 def test_targets_match_exactly_the_quantized_modules(tmp_path):

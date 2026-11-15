@@ -4,7 +4,7 @@ Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp
 
 **Train in bf16; it stays the default.** Neither low-precision path Halo ships beats it. As whole training steps at ep8 on 8× B300 the simulated fake-quant path (the QAT oracle) ran at 0.10–0.45× bf16 with an eager activation round trip, and the opt-in DeepGEMM adapter, an FP8 forward over a bf16 backward, at 0.37–0.54× ([Why bf16 is the default](#why-bf16-is-the-default)). mxfp8 and mxfp4 round-trip activations in one fused kernel, and simulated mxfp4 runs at 0.93–0.99× bf16 on 8× H200 (ep8, [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed)). nvfp4 keeps the eager round trip and the B300 ratio. The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
 
-`scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them; serving engines do not load the manifest as-is. The roofline argument: [GPU Training Theory §7](../reference/gpu-training-theory.md#when-low-precision-compute-helps).
+`scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them. Serving engines do not load Halo's manifest as-is, so `--export_format compressed-tensors` writes the layout vLLM loads ([Serving the export with vLLM](#serving-the-export-with-vllm)). The roofline argument: [GPU Training Theory §7](../reference/gpu-training-theory.md#when-low-precision-compute-helps).
 
 ## The three paths
 
@@ -192,6 +192,17 @@ Consuming the result — per quantized weight `<name>`:
 - `quantization_config.json` also carries a `scope` block recording what this export reproduced: `apply_dense_mlp`, `apply_moe_experts`, `keep_first_blocks`, `keep_last_blocks` (the flags, minus the `lowp_` prefix) plus the resolved `kept_blocks` indices. The whole manifest is stamped into the output `config.json` under `quantization_config` as well.
 
 For a bf16 source the dequantized weight reproduces the simulated QAT forward exactly (relerr 0); `halo.kernels.lowp.quantization.dequantize` is the reference reader (its nvfp4 `global_scale` is the reciprocal of the stored one). Serving engines do not load this manifest as-is.
+
+### Serving the export with vLLM
+
+`--export_format compressed-tensors` writes the same weights in the layout compressed-tensors' compressors read, which vLLM loads through its `compressed-tensors` quantization method. The default stays `block_scaled`.
+
+- mxfp8 keeps unpacked `e4m3` data under `<name>.weight`. mxfp4 and nvfp4 pack it under `<name>.weight_packed`. Every format stores `<name>.weight_scale`, nvfp4 adds `<name>.weight_global_scale`, and no format writes `weight_shape`.
+- `config.json` carries the `quantization_config` compressed-tensors serializes for its MXFP8, MXFP4 and NVFP4A16 presets, with `re:` targets that match exactly the quantized modules. MX declares dynamic input activations, as QAT quantized both GEMM operands. nvfp4 is weight-only, since an engine's W4A4 needs a calibrated static input scale. Halo's own manifest moves to the `quantization_config.json` sidecar.
+- vLLM reads a MoE expert as one Linear per `<experts>.<i>.<proj>`, so a fused 3-D bank is refused before any write. Un-fuse it first with `scripts/after_training/unfuse_moe_experts.py`.
+- vLLM loads `gate_proj` and `up_proj` (an expert's `w1` and `w3`) into one merged layer and can decode nvfp4 under one global scale for it: a dense `gate_up_proj` takes the largest stored divisor, and most MoE backends take the gate's. QAT quantizes each projection with its own power-of-two global scale, and on Qwen3-0.6B half the pairs differ by 2×. So the export writes each pair under the larger of its two global scales and steps the other projection's `e4m3` block scales down by the same power of two. That is exact unless a stepped-down scale lands between `e4m3` subnormals, which raises before the index and `config.json` are written.
+
+Checked against vLLM 0.32.0 (`halo:vllm-0.32.0`) on H200: each format's config selects its compressed-tensors scheme, and served prompt logprobs of Qwen3-0.6B match the fake-quant weights to within the bf16 engine-to-engine difference. On Hopper the served logprobs track those weights, not the QAT forward, whose activations are fake-quantized too.
 
 ## Usage
 
