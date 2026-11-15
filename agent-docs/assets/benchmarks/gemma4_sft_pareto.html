@@ -7,27 +7,30 @@
 <style>
   :root {
     --y-col: 56px;
-    --panel-gap: 64px;
-    --plot-h: 560px;
+    --plot-h: 440px;
     --tick-size: 19px;
   }
 
   body { width: 1600px; }
 
   .load-error {
-    grid-column: 1 / -1;
     font-size: 25px;
     color: var(--danger);
   }
 
-  .panels {
+  /* The panels stack on one x scale, each the figure's width, so a gridline at every tick leaves each label a clear
+     side. */
+  .panel {
     display: grid;
-    grid-template-columns: var(--y-col) 1fr var(--panel-gap) 1fr;
+    grid-template-columns: var(--y-col) 1fr;
     grid-template-rows: auto var(--plot-h) auto;
   }
 
+  .panel + .panel { margin-top: var(--group-gap); }
+
   /* A top tick label rises half its line above the plot, so the gap under the headings runs to that label. */
   .panel-head {
+    grid-column: 1 / -1;
     display: flex;
     align-items: baseline;
     justify-content: space-between;
@@ -53,7 +56,7 @@
 
   .key svg { width: 18px; height: 18px; overflow: visible; }
 
-  .plot { position: relative; }
+  .plot { position: relative; grid-area: 2 / 2; }
 
   .plot svg {
     position: absolute;
@@ -73,7 +76,7 @@
 
   .point-label.halo { font-weight: 500; color: var(--text); }
 
-  .yticks { position: relative; }
+  .yticks { position: relative; grid-area: 2 / 1; }
 
   .yticks span,
   .xticks span {
@@ -88,6 +91,7 @@
   .yticks span { left: 0; transform: translateY(-50%); }
 
   .xticks {
+    grid-area: 3 / 2;
     position: relative;
     height: 26px;
     margin-top: 14px;
@@ -162,6 +166,10 @@
   const LABEL_CLEARANCE = 2;
   /** Room a label’s claim keeps from the axis lines along the plot’s left and bottom edges, and a dot from the left one. */
   const AXIS_CLEARANCE = 8;
+  /** Room a label’s text keeps from every gridline. */
+  const GRID_CLEARANCE = 8;
+  /** A gridline nearer the y axis line than this reads as a doubled axis, so the axis line stands for it. */
+  const GRID_AXIS_GAP = 24;
   /** Length of a tick mark, drawn outside the plot. */
   const TICK_LENGTH = 6;
   /** How far an axis end moves out per try, as a share of the data's span, until every dot and label fits. */
@@ -170,25 +178,28 @@
 
   const round = (value) => Number(value.toPrecision(12));
 
-  /** Ticks at the multiples, from min to max, of the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six. */
-  function rangeTicks(min, max) {
+  /**
+   * Ticks at the multiples, from min to max, of the finest step of 1, 2, 2.5 or 5 × 10^k that is at least minStep and
+   * leaves at most six.
+   */
+  function rangeTicks(min, max, minStep) {
     const e = Math.floor(Math.log10(max - min)) - 1;
     const count = (step) => Math.floor(max / step + 1e-9) - Math.ceil(min / step - 1e-9) + 1;
-    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50, 100, 200, 250, 500]
       .map((m) => round(e < 0 ? m / 10 ** -e : m * 10 ** e))
-      .find((s) => count(s) <= 6);
+      .find((s) => s >= minStep && count(s) <= 6);
     const first = Math.ceil(min / step - 1e-9);
 
     return Array.from({ length: count(step) }, (_, i) => round((first + i) * step));
   }
 
   /**
-   * An axis that ends where the data ends, lo to hi, its ticks inside it. overflow(axis) places the marks on a candidate
-   * axis and returns "min" or "max" while a mark or its label crosses that end of the plot, which then moves out by
-   * AXIS_GROWTH of the data's span, so the last call leaves the marks placed on the axis returned.
+   * An axis that ends where the data ends, lo to hi, its ticks inside it and no finer than minStep. overflow(axis) places
+   * the marks on a candidate axis and returns "min" or "max" while a mark or its label crosses that end of the plot,
+   * which then moves out by AXIS_GROWTH of the data's span, so the last call leaves the marks placed on the axis returned.
    */
-  function fitAxis(lo, hi, overflow = () => undefined) {
-    const axis = (min, max) => ({ min, max, ticks: rangeTicks(min, max) });
+  function fitAxis(lo, hi, minStep, overflow = () => undefined) {
+    const axis = (min, max) => ({ min, max, ticks: rangeTicks(min, max, minStep) });
     const growth = AXIS_GROWTH * (hi - lo);
     let fitted = axis(lo, hi);
 
@@ -279,11 +290,8 @@
   const panels = document.getElementById("panels");
   const plots = [];
 
-  PANELS.forEach((panel, p) => {
-    const column = p === 0 ? "1 / 3" : "4 / 5";
+  for (const panel of PANELS) {
     const head = el("div", "panel-head", `${panel.seq.toLocaleString("en-US")} tokens per row`);
-    head.style.gridColumn = column;
-    head.style.gridRow = "1";
 
     if (checkpointed.includes(panel)) {
       const key = el("div", "key");
@@ -291,13 +299,12 @@
       head.append(key);
     }
 
+    const yticks = el("div", "yticks");
     const plot = el("div", "plot");
-    plot.style.gridColumn = p === 0 ? "2" : "4";
-    plot.style.gridRow = "2";
     const xticks = el("div", "xticks");
-    xticks.style.gridColumn = p === 0 ? "2" : "4";
-    xticks.style.gridRow = "3";
-    panels.append(head, plot, xticks);
+    const box = el("div", "panel");
+    box.append(head, plot, yticks, xticks);
+    panels.append(box);
 
     const runs = validRuns(panel.seq, panel.frameworks);
     const points = Object.entries(panel.frameworks).map(([name, spec]) => ({
@@ -308,13 +315,8 @@
     }));
     const halo = points.find((point) => point.name === "halo");
     const runnerUp = points.filter((point) => point.name !== "halo").sort((a, b) => b.rate - a.rate)[0];
-    plots.push({ seq: panel.seq, plot, xticks, points, halo, runnerUp, ratio: halo.rate / runnerUp.rate });
-  });
-
-  const yticks = el("div", "yticks");
-  yticks.style.gridColumn = "1";
-  yticks.style.gridRow = "2";
-  panels.append(yticks);
+    plots.push({ seq: panel.seq, plot, xticks, yticks, points, halo, runnerUp, ratio: halo.rate / runnerUp.rate });
+  }
 
   /**
    * Draws both panels on the shared axes and returns { x, y, blocked }: per axis, the end a dot or label crosses, if any
@@ -323,7 +325,7 @@
   function draw(xAxis, yAxis) {
     const layout = { x: undefined, y: undefined, blocked: [] };
 
-    for (const { seq, plot, xticks, points, halo, runnerUp, ratio } of plots) {
+    for (const { seq, plot, xticks, yticks, points, halo, runnerUp, ratio } of plots) {
       const w = plot.clientWidth;
       const h = plot.clientHeight;
       const box = plot.getBoundingClientRect();
@@ -333,9 +335,20 @@
       const svg = svgEl("svg", {});
       plot.replaceChildren(svg);
       xticks.replaceChildren();
-      // Point names sit on the plot, so it draws no gridlines: axis lines on its left and bottom edges carry the scale,
-      // with a tick mark outside the plot at each tick label.
+      // A gridline at every tick inside the plot, axis lines on its left and bottom edges, and a tick mark outside the
+      // plot at each tick label. Every label is placed clear of the gridlines below.
       const axisStroke = { fill: "none", stroke: token("--line"), "stroke-width": 1 };
+      const columns = xAxis.ticks.map(x).filter((gx) => gx >= GRID_AXIS_GAP);
+      const rows = yAxis.ticks.filter((tick) => tick > 0).map(y);
+
+      for (const gx of columns) {
+        svg.append(svgEl("line", { x1: gx, x2: gx, y1: 0, y2: h, ...axisStroke }));
+      }
+
+      for (const gy of rows) {
+        svg.append(svgEl("line", { x1: 0, x2: w, y1: gy, y2: gy, ...axisStroke }));
+      }
+
       svg.append(svgEl("polyline", { points: `0,0 0,${h} ${w},${h}`, ...axisStroke }));
 
       for (const tick of yAxis.ticks) {
@@ -386,11 +399,16 @@
           belowRight: [cx + r + side, cy],
           aboveLeft: [cx - r - side - lw, cy - lh],
           belowLeft: [cx - r - side - lw, cy],
+          // Off a point that sits on a gridline: clear of the line through its centre.
+          highRight: [cx + r + side, cy - r - lh],
+          lowRight: [cx + r + side, cy + r],
+          highLeft: [cx - r - side - lw, cy - r - lh],
+          lowLeft: [cx - r - side - lw, cy + r],
         };
-        // A label never sits on another point or label, so it leaves its own side for a clear one. Only its own side may
-        // cross an edge or come within AXIS_CLEARANCE of the y axis line and so widen an axis: another side stays
-        // inside, or the axis would grow and crowd the points further. No side comes within AXIS_CLEARANCE of the x axis
-        // line, since the y axis starts at zero.
+        // A label never sits on another point, label or gridline, so it leaves its own side for a clear one. Only its
+        // own side may cross an edge or come within AXIS_CLEARANCE of the y axis line and so widen an axis, unless no
+        // side inside is clear: then the axis grows to hold a clear side rather than the grid losing a line. No side
+        // comes within AXIS_CLEARANCE of the x axis line, since the y axis starts at zero.
         const fits = (at) => {
           const [left, top] = place[at];
 
@@ -398,6 +416,8 @@
         };
         const clear = ([left, top]) =>
           top + lh <= h - AXIS_CLEARANCE &&
+          columns.every((gx) => gx < left + LABEL_PAD - GRID_CLEARANCE || gx > left + lw - LABEL_PAD + GRID_CLEARANCE) &&
+          rows.every((gy) => gy < top - GRID_CLEARANCE || gy > top + lh + GRID_CLEARANCE) &&
           marks.every(
             (other) =>
               other === mark ||
@@ -411,7 +431,8 @@
               top > t + bh + LABEL_CLEARANCE ||
               t > top + lh + LABEL_CLEARANCE,
           );
-        const at = [point.spec.at, ...Object.keys(place)].find((s) => fits(s) && clear(place[s]));
+        const sides = [point.spec.at, ...Object.keys(place)];
+        const at = sides.find((s) => fits(s) && clear(place[s])) ?? sides.find((s) => clear(place[s]));
 
         if (at === undefined) {
           layout.blocked.push(`${NAMES[point.name]} at ${seq} tokens`);
@@ -433,30 +454,74 @@
         layout.x ??= left < AXIS_CLEARANCE ? "min" : left + bw > w ? "max" : undefined;
         layout.y ??= top < 0 ? "max" : undefined;
       }
-    }
 
-    const h = plots[0].plot.clientHeight;
-    yticks.replaceChildren();
+      yticks.replaceChildren();
 
-    for (const tick of yAxis.ticks) {
-      const label = el("span", undefined, tick === 0 ? "0" : `${tick / 1000}k`);
-      label.style.top = `${h - (tick / yAxis.max) * h}px`;
-      yticks.append(label);
+      for (const tick of yAxis.ticks) {
+        const label = el("span", undefined, tick === 0 ? "0" : `${tick / 1000}k`);
+        label.style.top = `${y(tick)}px`;
+        yticks.append(label);
+      }
     }
 
     return layout;
   }
 
-  // A label's left and right follow the x axis and its top and bottom the y axis, so each axis fits apart. A label that
-  // left its side to clear a point depends on both, so the final layout is checked against both.
   const all = plots.flatMap(({ points }) => points);
   const [lo, hi] = [Math.min(...all.map((point) => point.peak)), Math.max(...all.map((point) => point.peak))];
-  const yAxis = fitAxis(0, Math.max(...all.map((point) => point.rate)), (axis) => draw(fitAxis(lo, hi), axis).y);
-  const xAxis = fitAxis(lo, hi, (axis) => draw(axis, yAxis).x);
-  const final = draw(xAxis, yAxis);
+  const fastest = Math.max(...all.map((point) => point.rate));
+
+  /**
+   * Fits both axes on ticks no finer than xStep and yStep and draws them, returning draw's layout with the axes. A
+   * label's side depends on both axes, so each fits on the other's last fit until a pass leaves the x axis where it was;
+   * the final layout is checked against both.
+   */
+  function fit(xStep, yStep) {
+    let xAxis = fitAxis(lo, hi, xStep);
+    let yAxis;
+
+    for (let pass = 0; pass < 10; pass += 1) {
+      yAxis = fitAxis(0, fastest, yStep, (axis) => draw(xAxis, axis).y);
+      const refit = fitAxis(lo, hi, xStep, (axis) => draw(axis, yAxis).x);
+
+      if (refit.min === xAxis.min && refit.max === xAxis.max) {
+        break;
+      }
+
+      xAxis = refit;
+    }
+
+    return { xAxis, yAxis, ...draw(xAxis, yAxis) };
+  }
+
+  // While a label has no side clear of the gridlines, one axis takes its next coarser step: the one that leaves fewer
+  // labels blocked, the y axis on a tie, since the plots are wide and short.
+  const coarser = (axis) => 1.01 * (axis.ticks[1] - axis.ticks[0]);
+  let [xStep, yStep] = [0, 0];
+  let final = fit(xStep, yStep);
+
+  while (final.blocked.length > 0) {
+    const options = [];
+
+    if (final.yAxis.ticks.length > 2) {
+      options.push([xStep, coarser(final.yAxis)]);
+    }
+
+    if (final.xAxis.ticks.length > 2) {
+      options.push([coarser(final.xAxis), yStep]);
+    }
+
+    if (options.length === 0) {
+      break;
+    }
+
+    const blocked = options.map(([xs, ys]) => fit(xs, ys).blocked.length);
+    [xStep, yStep] = options[blocked.indexOf(Math.min(...blocked))];
+    final = fit(xStep, yStep);
+  }
 
   if (final.blocked.length > 0) {
-    throw new Error(`No side of the point holds the label of ${new Intl.ListFormat("en").format(final.blocked)} clear of the other points and labels: give the plot more height or width.`);
+    throw new Error(`No side of the point holds the label of ${new Intl.ListFormat("en").format(final.blocked)} clear of the other points, labels and gridlines on any grid: give the plot more height or width.`);
   }
 
   if (final.x !== undefined || final.y !== undefined) {

@@ -200,12 +200,13 @@ data does not make.
 - **Only short labels sit on a plot**: a value, a point's name, a line's name, each tied to its mark. A
   region's name and description, an explanation or a hint is a key: put it in a column left of the plot
   (or above it), never on the plot area.
-- **No line runs through text, and nothing hides a line.** A chart that prints values or names marks on
-  its plot draws no interior gridlines: the printed values and the axis ticks carry the reading, so no
-  label can land on a line whatever the data does. Keep the axis ticks, an axis line along the plot's
-  edge and the reference lines that are data (a ceiling, a device limit, the 1.0 line), and place every
-  label clear of them. Never fix a crossing with a box or a halo behind the label: it cuts a gap into
-  the line, which reads as a broken line. Gridlines stay only on a plot that carries no labels.
+- **No line runs through text, and nothing hides a line.** A plot may draw a gridline at each tick,
+  beside the axis line along its edge and the reference lines that are data (a ceiling, a device limit,
+  the 1.0 line). A label printed on the plot is placed clear of every one of them: its layout tries
+  each side of its mark and takes one no line crosses, and when a label finds no clear side the grid
+  takes the next coarser tick step, so no label lands on a line whatever the data does. Never fix a
+  crossing with a box or a halo behind the label: it cuts a gap into the line, which reads as a broken
+  line.
 - **Arrowheads are open chevrons**, never filled triangles: two short strokes the weight and colour
   of their line (about 8px long and 5px to each side on a 1600 canvas), round caps, with the line
   running all the way to the tip.
