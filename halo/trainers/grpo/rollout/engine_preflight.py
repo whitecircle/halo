@@ -665,8 +665,9 @@ def _verify_engine_prompt_logprobs_on_rank0(
                 f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
                 f"vLLM's V1 model runner with speculative decoding (MTP): the drafter's CUDA graph overwrites the "
                 f"hidden states the prompt log-probs are read from whenever the prefill runs as a graph "
-                f"(vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm builds, which pins Model "
-                f"Runner V2, turn speculative decoding off, or set isr_engine_reference: false."
+                f"(vllm-project/vllm#53488). Serve vLLM from an image Dockerfile.vllm builds, whose build asserts "
+                f"Model Runner V2 is the engine's runner, turn speculative decoding off, or set "
+                f"isr_engine_reference: false."
             )
         logger.info(
             f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "
