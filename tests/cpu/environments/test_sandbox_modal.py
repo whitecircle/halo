@@ -3,7 +3,6 @@ subprocess, so limits, verdicts and session state go through the production runn
 its own user, so these tests need root. The live test (a few programs in a real Modal sandbox) runs only with
 ``HALO_MODAL_LIVE=1``, the Modal SDK and Modal credentials."""
 
-import json
 import math
 import os
 import shutil
@@ -33,7 +32,8 @@ from halo.environments.sandbox.local import (
 )
 from halo.environments.sandbox.modal_sandbox import ModalSandbox
 from halo.environments.sandbox.results import SandboxInfraError
-from halo.environments.sandbox.runner_session import RUNNER_SOURCE
+from halo.environments.sandbox.runner_messages import Limits, Outcome, RunProgram, decode
+from halo.environments.sandbox.runner_session import runner_source
 from halo.environments.tasks.coding.grading import run_solution_against_tests
 
 _MIB = 1024 * 1024
@@ -84,7 +84,7 @@ class _FakeProcess:
         if self._modal.runner_returncode is not None:
             self.out, self.err, self.code = "", "Traceback: boom", self._modal.runner_returncode
             return
-        request = json.loads(self.stdin.data)
+        request = decode(self.stdin.data)
         self._modal.requests.append(request)
         argv = [sys.executable, *self._argv[1:]]
         with self._modal.lock:
@@ -111,7 +111,7 @@ class _FakeSandbox:
         self.terminated = False
 
     def exec(self, *argv, timeout=None):
-        assert argv[:3] == ("python3", "-I", "-c") and argv[3] == RUNNER_SOURCE
+        assert argv[:3] == ("python3", "-I", "-c") and argv[3] == runner_source()
         self.exec_calls += 1
         if self.terminated:
             raise RuntimeError("sandbox terminated")
@@ -191,6 +191,14 @@ def executor(modal):
     sandbox.close()
 
 
+def _builds(request):
+    return isinstance(request.operation, RunProgram) and request.operation.build is not None
+
+
+def _code(request):
+    return request.operation.sources[-1].content
+
+
 def _exec_count(modal):
     return sum(sb.exec_calls for sb in modal.sandboxes)
 
@@ -242,17 +250,17 @@ def test_runner_crash_is_infra_and_drops_the_sandbox(modal, executor):
 
 def test_request_carries_the_local_backends_limits_and_env(modal, executor):
     executor.run("print(1)", timeout=4)
-    req = modal.requests[0]
-    assert req["limits"] == {
-        "RLIMIT_CPU": math.ceil(4 + RLIMIT_CPU_SLACK_SECONDS),
-        "RLIMIT_FSIZE": LOCAL_FSIZE_LIMIT,
-        "RLIMIT_CORE": 0,
-        "RLIMIT_AS": SANDBOX_DEFAULT_MEMORY_MB * _MIB,
-        "RLIMIT_NPROC": LOCAL_NPROC_LIMIT,
-    }
-    assert req["env"] == build_program_env(req["workdir"]) and "PATH" not in req["env"]
+    request = modal.requests[0]
+    assert request.operation.run.limits == Limits(
+        cpu_seconds=math.ceil(4 + RLIMIT_CPU_SLACK_SECONDS),
+        file_bytes=LOCAL_FSIZE_LIMIT,
+        memory_bytes=SANDBOX_DEFAULT_MEMORY_MB * _MIB,
+        stack_bytes=None,
+        processes=LOCAL_NPROC_LIMIT,
+    )
+    assert request.operation.env == build_program_env(request.workdir) and "PATH" not in request.operation.env
     cpp = executor.limits.for_run(require_language("cpp"), timeout=4)
-    assert cpp["RLIMIT_STACK"] == SANDBOX_DEFAULT_MEMORY_MB * _MIB
+    assert cpp.stack_bytes == SANDBOX_DEFAULT_MEMORY_MB * _MIB
 
 
 def test_runner_enforces_the_requested_memory_limit(modal):
@@ -271,14 +279,14 @@ def test_compile_verdicts_and_build_reuse(modal, executor):
     with executor.open_session() as session:
         assert session.run(good, stdin="21", language="c").stdout == "42\n"
         assert session.run(good, stdin="5", language="c").stdout == "10\n"
-    builds = [req for req in modal.requests if req["op"] == "run" and req["compile_argv"]]
-    assert [req["build"] for req in builds[-2:]] == [True, False]  # the second run reuses the binary
+    builds = [request.operation for request in modal.requests if _builds(request)]
+    assert [run.build_requested for run in builds[-2:]] == [True, False]  # the second run reuses the binary
 
 
 def test_missing_compiler_is_infra_not_a_verdict(modal):
-    step = {"timed_out": False, "returncode": 127, "stdout": "", "stderr": "gcc: not found"}
+    step = Outcome(stdout="", stderr="gcc: not found", returncode=127, timed_out=False)
     session = ModalSandbox().open_session()
-    res = session._compile_verdict(step, require_language("c"))
+    res = session._build_verdict(step, require_language("c"))
     assert res.error == "compiler not found: 'gcc'" and not res.compile_failed
 
 
@@ -335,7 +343,7 @@ def test_sandbox_that_refuses_the_exec_is_replaced_without_losing_the_run(modal,
     res = executor.run("print(5)")
     assert res.ok and res.stdout == "5\n"
     assert modal.sandboxes[0].terminated and len(modal.sandboxes) == 2
-    assert [req["code"] for req in modal.requests] == ["print(0)", "print(5)"]  # the program ran once
+    assert [_code(request) for request in modal.requests] == ["print(0)", "print(5)"]  # the program ran once
 
 
 def test_two_refused_execs_are_infra(modal, executor):
@@ -384,7 +392,7 @@ def test_compiled_session_rebuilds_when_a_file_op_reaches_the_replaced_sandbox_f
     assert session.list_files() == []  # recreates the directory, so the runner no longer sees a new one
     res = session.run(_C_HELLO, language="c")
     assert res.ok and res.stdout == "hi\n"
-    assert modal.requests[-1]["build"] is True
+    assert modal.requests[-1].operation.build_requested is True
 
 
 @pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")

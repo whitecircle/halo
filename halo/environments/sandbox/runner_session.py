@@ -1,13 +1,13 @@
-"""The client half of ``program_runner``, shared by the hosted backends (Modal, Baseten): what a session asks the
-runner to do and how the runner's replies read as verdicts. A backend adds the transport, :meth:`RunnerSession.exchange`."""
+"""The trainer's side of the program runner: a session that sends Requests through a backend's sandbox and reads the
+Replies as verdicts. A backend supplies :meth:`RunnerSession.exchange`."""
 
-import json
+import functools
 import math
+import re
 import signal
 from abc import abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxSession
 from halo.environments.sandbox.languages import INTERPRETER_PLACEHOLDER, LanguageSpec, require_language, utf8_encodable
@@ -15,9 +15,6 @@ from halo.environments.sandbox.local import (
     LOCAL_FSIZE_LIMIT,
     LOCAL_NPROC_LIMIT,
     RLIMIT_CPU_SLACK_SECONDS,
-    SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
-    SANDBOX_DEFAULT_COMPILE_TIMEOUT,
-    SANDBOX_DEFAULT_MEMORY_MB,
     TAMPERED_WORKDIR_RETURNCODE,
     build_program_env,
 )
@@ -28,77 +25,109 @@ from halo.environments.sandbox.results import (
     compile_failure_verdict,
     compile_limit_verdict,
 )
-from halo.environments.sandbox.workspace import SessionPathError
+from halo.environments.sandbox.runner_messages import (
+    Command,
+    FileContent,
+    FileList,
+    Limits,
+    ListFiles,
+    Outcome,
+    ProgramRan,
+    ReadFile,
+    Reply,
+    Request,
+    RunProgram,
+    SourceFile,
+    Tampered,
+    WriteFile,
+    decode,
+)
+from halo.environments.sandbox.workspace import Entry, SessionPathError
 
-_WORKSPACE_IMPORT = "from halo.environments.sandbox.workspace import SessionPathError, Workspace, walk_tree\n"
-
-
-def _runner_source() -> str:
-    """``workspace.py`` and ``program_runner.py`` as one file: a sandbox has no ``halo`` package to import from."""
-    workspace, runner = (Path(__file__).with_name(name).read_text() for name in ("workspace.py", "program_runner.py"))
-    if _WORKSPACE_IMPORT not in runner:
-        raise RuntimeError("program_runner.py no longer imports its workspace names on the line this module removes")
-    return workspace + runner.replace(_WORKSPACE_IMPORT, "")
-
-
-RUNNER_SOURCE = _runner_source()
-# Deadline slack over the runner's own limits, for transport and the runner's start.
+# Seconds a call may take beyond the program's own time limits: transport and the runner's start.
 EXCHANGE_OVERHEAD_SECONDS = 30.0
-# The users sessions' programs run as. A backend holding several sessions in one sandbox hands them out in turn; one
-# comes round again only after every other has been used, long after its last session's directory is gone. Within
-# 16 bits, the range a user-namespaced container maps.
+# The users programs run as, within the 16 bits a user-namespaced container maps.
 SESSION_UIDS = range(20_000, 60_000)
 MIB = 1024 * 1024
+
+_RUNNER_FILES = ("workspace.py", "runner_messages.py", "program_runner.py")
+_HALO_IMPORT = re.compile(r"^from halo\.[\w.]+ import (\([^)]*\)|[^\n(]*)\n", re.MULTILINE)
+
+
+@functools.cache
+def runner_source() -> str:
+    """The runner and the modules it uses as one file: a sandbox has no ``halo`` package to import them from."""
+    sources = [Path(__file__).with_name(name).read_text(encoding="utf-8") for name in _RUNNER_FILES]
+    return "\n".join(_HALO_IMPORT.sub("", source) for source in sources)
+
+
+def decode_reply(text: str) -> Reply:
+    try:
+        reply = decode(text)
+    except (ValueError, KeyError, TypeError) as error:
+        raise SandboxInfraError("sandbox runner returned malformed output") from error
+    if not isinstance(reply, Reply):
+        raise SandboxInfraError("sandbox runner returned malformed output")
+    return reply
 
 
 @dataclass(frozen=True)
 class ProgramLimits:
-    """The limits of ``local``, applied by the runner inside the sandbox."""
+    memory_limit_mb: int
+    compile_timeout: float
+    compile_memory_limit_mb: int
 
-    memory_limit_mb: int = SANDBOX_DEFAULT_MEMORY_MB
-    compile_timeout: float = SANDBOX_DEFAULT_COMPILE_TIMEOUT
-    compile_memory_limit_mb: int = SANDBOX_DEFAULT_COMPILE_MEMORY_MB
+    def for_run(self, spec: LanguageSpec, timeout: float) -> Limits:
+        memory_bytes = self.memory_limit_mb * MIB if self.memory_limit_mb else None
+        return Limits(
+            cpu_seconds=math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS),
+            file_bytes=LOCAL_FSIZE_LIMIT,
+            memory_bytes=memory_bytes,
+            stack_bytes=memory_bytes if spec.is_compiled else None,
+            processes=LOCAL_NPROC_LIMIT,
+        )
 
-    def for_run(self, spec: LanguageSpec, timeout: float) -> dict[str, int]:
-        limits = {**self._rlimits(timeout, self.memory_limit_mb), "RLIMIT_NPROC": LOCAL_NPROC_LIMIT}
-        if spec.is_compiled:
-            limits["RLIMIT_STACK"] = self.memory_limit_mb * MIB
-        return limits
+    def for_build(self) -> Limits:
+        return Limits(
+            cpu_seconds=math.ceil(self.compile_timeout + RLIMIT_CPU_SLACK_SECONDS),
+            file_bytes=LOCAL_FSIZE_LIMIT,
+            memory_bytes=self.compile_memory_limit_mb * MIB if self.compile_memory_limit_mb else None,
+            stack_bytes=None,
+            processes=None,
+        )
 
-    def for_compile(self) -> dict[str, int]:
-        return self._rlimits(self.compile_timeout, self.compile_memory_limit_mb)
 
-    @staticmethod
-    def _rlimits(timeout: float, memory_mb: int) -> dict[str, int]:
-        limits = {
-            "RLIMIT_CPU": int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
-            "RLIMIT_FSIZE": LOCAL_FSIZE_LIMIT,
-            "RLIMIT_CORE": 0,
-        }
-        if memory_mb:
-            limits["RLIMIT_AS"] = memory_mb * MIB
-        return limits
+@dataclass(frozen=True)
+class Program:
+    language: str
+    code: str
+    files: tuple[SourceFile, ...]
+
+
+@dataclass(frozen=True)
+class Build:
+    program: Program
+    # None once the program is built and runnable.
+    verdict: SandboxResult | None
 
 
 class RunnerSession(SandboxSession):
-    """A directory in a sandbox, driven through the runner. A compiled program rebuilds only when language, source or
-    ``files`` change, or when the sandbox lost the directory, which the session then continues empty."""
+    """A working directory in a sandbox. A compiled program is built once and rebuilt only when its language, source
+    or files change, or when the sandbox lost the directory."""
 
-    def __init__(self, workdir: str, uid: int, limits: ProgramLimits, interpreter: str = "python3"):
+    def __init__(self, workdir: str, *, uid: int, limits: ProgramLimits, interpreter: str):
         self.workdir = workdir
         self.uid = uid
         self.limits = limits
         self.interpreter = interpreter
-        # The built program's key and compile verdict (None once it is runnable).
-        self._build: tuple[tuple, SandboxResult | None] | None = None
-        # The directory's entries when the last program started; reset_to_prepared keeps only these.
-        self._prepared: list[list] | None = None
+        self._build: Build | None = None
+        self._prepared: list[Entry] | None = None
         self._reset_pending = False
 
     @abstractmethod
-    def exchange(self, request: dict[str, Any], *, deadline: float) -> dict[str, Any]:
-        """Send one request to the runner in this session's sandbox and return its reply. Raises
-        :class:`SandboxInfraError` when the sandbox, the transport or the runner fails."""
+    def exchange(self, request: Request, *, deadline: float) -> Reply:
+        """Run the runner on ``request`` in this session's sandbox. Raises :class:`SandboxInfraError` when the
+        sandbox, the transport or the runner fails."""
 
     def run(
         self,
@@ -111,119 +140,104 @@ class RunnerSession(SandboxSession):
     ) -> SandboxResult:
         try:
             spec = require_language(language)
-        except ValueError as exc:
-            return SandboxResult(error=str(exc))
+        except ValueError as error:
+            return SandboxResult(error=str(error))
         files = files or {}
         for name in files:
             if not self.is_safe_member_name(name):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
-        key = (spec.name, code, tuple(sorted(files.items())))
-        built = spec.is_compiled and self._build is not None and self._build[0] == key
-        if built and self._build[1] is not None:
-            return self._build[1]
+
+        auxiliary = tuple(SourceFile(name, utf8_encodable(content)) for name, content in sorted(files.items()))
+        program = Program(spec.name, code, auxiliary)
+        built = spec.is_compiled and self._build is not None and self._build.program == program
+        if built and self._build.verdict is not None:
+            return self._build.verdict
         if not built:
-            # Any other program may have removed the binary the recorded build left.
             self._build = None
-        request = self._run_request(spec, code, files, stdin, timeout, build=not built)
+
+        operation = RunProgram(
+            sources=[*auxiliary, SourceFile(spec.source_name, utf8_encodable(code))],
+            stdin=utf8_encodable(stdin),
+            env=build_program_env(self.workdir),
+            run=Command(self._run_argv(spec), timeout, self.limits.for_run(spec, timeout)),
+            build=self._build_command(spec),
+            build_requested=not built,
+        )
         deadline = EXCHANGE_OVERHEAD_SECONDS + timeout + (self.limits.compile_timeout if spec.is_compiled else 0)
         try:
-            reply = self._ask(request, deadline=deadline)
-        except SandboxInfraError as exc:
-            return SandboxResult(error=str(exc))
-        return self._result(reply, spec, key)
-
-    def _run_request(
-        self, spec: LanguageSpec, code: str, files: dict[str, str], stdin: str, timeout: float, *, build: bool
-    ) -> dict[str, Any]:
-        return {
-            "op": "run",
-            "source_name": spec.source_name,
-            "code": utf8_encodable(code),
-            "files": {name: utf8_encodable(content) for name, content in files.items()},
-            "stdin": utf8_encodable(stdin),
-            "run_argv": [self.interpreter if token == INTERPRETER_PLACEHOLDER else token for token in spec.run_argv],
-            "timeout": timeout,
-            "limits": self.limits.for_run(spec, timeout),
-            "compile_argv": list(spec.compile_argv) if spec.is_compiled else None,
-            "build": build,
-            "compile_timeout": self.limits.compile_timeout,
-            "compile_limits": self.limits.for_compile(),
-        }
-
-    def _result(self, reply: dict[str, Any], spec: LanguageSpec, key: tuple) -> SandboxResult:
-        """The verdict a run's reply comes to, recording the build and the entries a later reset keeps."""
-        if "tampered" in reply:
-            # The program's own runtime error, as on ``local``: an infra error would let it void its episode.
+            result = self._send(operation, deadline=deadline)
+        except SandboxInfraError as error:
+            return SandboxResult(error=str(error))
+        if isinstance(result, Tampered):
             self._build = None
             return SandboxResult(
-                stderr=f"working directory tampered: {reply['tampered']}", returncode=TAMPERED_WORKDIR_RETURNCODE
+                stderr=f"working directory tampered: {result.reason}", returncode=TAMPERED_WORKDIR_RETURNCODE
             )
-        if "compile" in reply:
-            verdict = self._compile_verdict(reply["compile"], spec)
-            self._build = (key, verdict)
-            if verdict is not None:
-                return verdict
-        self._prepared = reply["entries"]
-        outcome = reply["run"]
-        return SandboxResult(
-            stdout=outcome["stdout"],
-            stderr=outcome["stderr"],
-            returncode=None if outcome["timed_out"] else outcome["returncode"],
-            timed_out=outcome["timed_out"] or outcome["returncode"] == -signal.SIGXCPU,
-        )
+        return self._verdict(result, spec, program)
 
     def reset_to_prepared(self) -> None:
-        """Applied by the session's next exchange before anything else, so a graded test costs one exchange."""
         self._reset_pending = self._prepared is not None
 
     def write_file(self, path: str, content: str) -> None:
         self.reject_unsafe_path(path)
         self._build = None
-        reply = self._ask({"op": "write", "files": {path: utf8_encodable(content)}})
-        # The written file is part of what a later reset keeps.
+        result = self._send(WriteFile(SourceFile(path, utf8_encodable(content))))
         self._prepared = None
-        if "tampered" in reply:
-            raise SessionPathError(reply["tampered"])
+        if isinstance(result, Tampered):
+            raise SessionPathError(result.reason)
 
     def read_file(self, path: str) -> str | None:
-        """``None`` when ``path`` is not a regular file."""
         self.reject_unsafe_path(path)
-        return self._ask({"op": "read", "path": path})["content"]
+        result = self._send(ReadFile(path))
+        return result.content if isinstance(result, FileContent) else None
 
     def list_files(self) -> list[str]:
-        return list(self._ask({"op": "list"})["files"])
+        result = self._send(ListFiles())
+        return result.names if isinstance(result, FileList) else []
 
-    def _ask(self, request: dict[str, Any], *, deadline: float = EXCHANGE_OVERHEAD_SECONDS) -> dict[str, Any]:
-        reply = self.exchange(
-            {
-                **request,
-                "workdir": self.workdir,
-                "uid": self.uid,
-                "env": build_program_env(self.workdir),
-                "reset_to": self._prepared if self._reset_pending else None,
-            },
-            deadline=deadline,
+    def _send(self, operation, *, deadline: float = EXCHANGE_OVERHEAD_SECONDS):
+        request = Request(
+            workdir=self.workdir,
+            uid=self.uid,
+            closed_workdirs=[],
+            keep_only=self._prepared if self._reset_pending else None,
+            operation=operation,
         )
+        reply = self.exchange(request, deadline=deadline)
         self._reset_pending = False
-        if reply["fresh"]:
-            # The runner had to create the directory: the sandbox lost the old one with its build and entries.
-            self._build, self._prepared, self._reset_pending = None, None, False
-        return reply
+        if reply.new_workspace:
+            self._build = None
+            self._prepared = None
+        return reply.result
 
-    def _compile_verdict(self, step: dict[str, Any], spec: LanguageSpec) -> SandboxResult | None:
-        """As ``local`` judges a build: past the limit or rejected is the source's verdict, a missing compiler sets
-        ``error``. ``None`` once the program is built."""
-        if step["timed_out"]:
+    def _run_argv(self, spec: LanguageSpec) -> list[str]:
+        return [self.interpreter if token == INTERPRETER_PLACEHOLDER else token for token in spec.run_argv]
+
+    def _build_command(self, spec: LanguageSpec) -> Command | None:
+        if not spec.is_compiled:
+            return None
+        return Command(list(spec.compile_argv), self.limits.compile_timeout, self.limits.for_build())
+
+    def _verdict(self, ran: ProgramRan, spec: LanguageSpec, program: Program) -> SandboxResult:
+        if ran.build is not None:
+            build_verdict = self._build_verdict(ran.build, spec)
+            self._build = Build(program, build_verdict)
+            if build_verdict is not None:
+                return build_verdict
+        self._prepared = ran.entries
+        return SandboxResult(
+            stdout=ran.run.stdout,
+            stderr=ran.run.stderr,
+            returncode=ran.run.returncode,
+            timed_out=ran.run.timed_out or ran.run.returncode == -signal.SIGXCPU,
+        )
+
+    def _build_verdict(self, build: Outcome, spec: LanguageSpec) -> SandboxResult | None:
+        """``None`` when the program was built. A missing compiler is the backend's fault, not the program's."""
+        if build.timed_out:
             return compile_limit_verdict(f"compilation timed out after {self.limits.compile_timeout:g} s")
-        if step["returncode"] == COMMAND_NOT_FOUND_RETURNCODE:
-            return SandboxResult(error=f"compiler not found: {spec.compile_argv[0]!r}", stderr=step["stderr"].strip())
-        if step["returncode"] != 0:
-            return compile_failure_verdict(step["stderr"], step["stdout"], step["returncode"])
+        if build.returncode == COMMAND_NOT_FOUND_RETURNCODE:
+            return SandboxResult(error=f"compiler not found: {spec.compile_argv[0]!r}", stderr=build.stderr.strip())
+        if build.returncode != 0:
+            return compile_failure_verdict(build.stderr, build.stdout, build.returncode)
         return None
-
-
-def parse_runner_reply(raw: str) -> dict[str, Any]:
-    try:
-        return json.loads(raw)
-    except ValueError as exc:
-        raise SandboxInfraError("sandbox runner returned malformed output") from exc

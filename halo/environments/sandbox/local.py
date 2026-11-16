@@ -27,7 +27,7 @@ from halo.environments.sandbox.results import (
     compile_failure_verdict,
     compile_limit_verdict,
 )
-from halo.environments.sandbox.workspace import EntryKinds, SessionPathError, Workspace
+from halo.environments.sandbox.workspace import Entry, Owner, SessionPathError, Workspace
 from halo.hardware import available_cpu_count
 
 _PYTHON_INTERPRETER = sys.executable or "python"
@@ -163,8 +163,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
     # rebuild, and have the rebuilt source include that file into the compiler's message.
     COMPILES_WITHOUT_TEST_INPUT = False
 
-    # The (uid, gid) the program runs as, which owns its working directory; None: this process's own.
-    program_owner: tuple[int, int] | None = None
+    # The user the program runs as, who owns its working directory; None: this process's own.
+    program_owner: Owner | None = None
 
     def __init__(
         self,
@@ -359,7 +359,7 @@ class _LocalSession(SandboxSession):
         # Build key and compile verdict (None = built, runnable).
         self._build: tuple[_BuildKey, SandboxResult | None] | None = None
         # What reset_to_prepared keeps; typed so an entry the program swapped for a link is dropped.
-        self._prepared_entries: EntryKinds | None = None
+        self._prepared_entries: set[Entry] | None = None
 
     def run(
         self,

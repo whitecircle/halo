@@ -1,16 +1,17 @@
-"""Modal backend: programs run in one long-lived Modal Sandbox per executor (gVisor, network blocked). Each session is a
-directory and a user of its own in it, and every call is one exec of ``program_runner``. ``modal`` is an optional
-dependency; Modal's own config (``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``) authenticates."""
+"""Modal backend. An executor keeps one Modal Sandbox (gVisor, network blocked); each session is a directory and a
+user of its own in it, and each call is one exec of the program runner. ``modal`` is an optional dependency, and
+Modal's own configuration (``MODAL_TOKEN_ID`` / ``MODAL_TOKEN_SECRET`` or ``~/.modal.toml``) authenticates."""
 
 import atexit
 import contextlib
 import itertools
-import json
+import logging
 import math
 import threading
 import uuid
 import weakref
-from typing import Any
+from dataclasses import replace
+from typing import Any, NamedTuple
 
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.local import (
@@ -19,22 +20,29 @@ from halo.environments.sandbox.local import (
     SANDBOX_DEFAULT_MEMORY_MB,
 )
 from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.sandbox.runner_messages import Reply, Request, RunProgram, encode
 from halo.environments.sandbox.runner_session import (
-    RUNNER_SOURCE,
     SESSION_UIDS,
     ProgramLimits,
     RunnerSession,
-    parse_runner_reply,
+    decode_reply,
+    runner_source,
 )
 
+logger = logging.getLogger(__name__)
+
 WORKSPACE = "/workspace"
-# Modal terminates a sandbox no exec has reached for this long, reclaiming one a killed trainer left behind.
+# Modal terminates a sandbox that no exec has reached for this long, so one a killed trainer left is reclaimed.
 IDLE_TIMEOUT_SECONDS = 300
-# Modal's longest sandbox lifetime. A sandbox that reaches it takes its runs in flight with it.
+# The longest lifetime Modal gives a sandbox.
 MAX_LIFETIME_SECONDS = 86400
-# What ContainerProcess.wait() returns once the exec ``timeout`` expires (it maps ExecTimeoutError to -1); an exit is
-# 0-255 and a signal 128+N, so no program or runner exit reads as it.
+# What Modal's ContainerProcess.wait() returns when the exec timeout expires. No real exit code is negative.
 EXEC_DEADLINE_RETURNCODE = -1
+
+class RunnerExec(NamedTuple):
+    sandbox: Any
+    process: Any
+
 
 live_executors: "weakref.WeakSet[ModalSandbox]" = weakref.WeakSet()
 
@@ -56,10 +64,9 @@ def close_live_executors() -> None:
 
 
 class ModalSandbox(SandboxExecutor):
-    """``cpu`` / ``memory_mb`` reserve the sandbox; at most ``max_concurrency`` (default ``int(cpu)``) runs execute in
-    it at once and the rest queue before their clock starts, so a time limit measures a reserved core."""
+    """``cpu`` and ``memory_mb`` are what the sandbox reserves. At most ``max_concurrency`` programs (default
+    ``int(cpu)``) run in it at once; the rest wait, and their time limit starts only when they run."""
 
-    # The program runs in the Modal container with its network blocked, never on this host.
     isolated = True
 
     def __init__(
@@ -91,13 +98,17 @@ class ModalSandbox(SandboxExecutor):
         self.cpu = cpu
         self.memory_mb = memory_mb
         self.sandbox_timeout = sandbox_timeout
-        self.limits = ProgramLimits(memory_limit_mb, compile_timeout, compile_memory_limit_mb)
-        # An authenticated call: missing or invalid credentials fail at construction, not on the first run.
+        self.limits = ProgramLimits(
+            memory_limit_mb=memory_limit_mb,
+            compile_timeout=compile_timeout,
+            compile_memory_limit_mb=compile_memory_limit_mb,
+        )
+        # This call authenticates, so bad credentials fail here and not on the first run.
         self.app = self.modal.App.lookup(app_name, create_if_missing=True)
         self.run_slots = threading.BoundedSemaphore(self.max_concurrency)
         self._lock = threading.Lock()
         self._sandbox: Any = None
-        self._retired_workdirs: list[str] = []
+        self._closed_workdirs: list[str] = []
         self._session_uids = itertools.cycle(SESSION_UIDS)
         live_executors.add(self)
 
@@ -112,51 +123,62 @@ class ModalSandbox(SandboxExecutor):
             self._terminate(sandbox)
         live_executors.discard(self)
 
-    def retire_workdir(self, workdir: str) -> None:
+    def remove_later(self, workdir: str) -> None:
         """Queue a closed session's directory for removal by the next exec, so closing makes no remote call."""
         with self._lock:
-            self._retired_workdirs.append(workdir)
+            self._closed_workdirs.append(workdir)
 
-    def exec_runner(self, request: dict[str, Any], *, deadline: float) -> dict[str, Any]:
-        """One runner exec on the sandbox (created on first use), returning its reply. Every failure raises
-        :class:`SandboxInfraError` and drops the sandbox, which may still hold the program. Once the runner has
-        started nothing is sent again: the program may have run."""
+    def exec_runner(self, request: Request, *, deadline: float) -> Reply:
+        """Run the runner once on the sandbox, which is created on first use. Every failure raises
+        :class:`SandboxInfraError` and drops the sandbox, since it may still hold the program. Nothing is sent a
+        second time once the runner has started: the program may have run."""
         sandbox, process = self._start_runner(deadline)
         with self._lock:
-            retired, self._retired_workdirs = self._retired_workdirs, []
+            closed_workdirs, self._closed_workdirs = self._closed_workdirs, []
         try:
-            process.stdin.write(json.dumps({**request, "remove": retired}))
+            process.stdin.write(encode(replace(request, closed_workdirs=closed_workdirs)))
             process.stdin.write_eof()
             process.stdin.drain()
             stdout = process.stdout.read()
             stderr = process.stderr.read()
             returncode = process.wait()
-        except Exception as exc:
+        except Exception as error:  # the SDK raises its own types for a lost sandbox or connection
             self._drop(sandbox)
-            raise SandboxInfraError(f"modal sandbox lost: {type(exc).__name__}: {exc}") from exc
+            raise SandboxInfraError(f"modal sandbox lost: {type(error).__name__}: {error}") from error
         try:
-            if returncode == EXEC_DEADLINE_RETURNCODE:
-                raise SandboxInfraError(f"modal sandbox exec passed its {deadline:g} s deadline")
-            if returncode != 0:
-                last_line = (stderr or "").strip().splitlines()[-1:] or ["no stderr"]
-                raise SandboxInfraError(f"modal sandbox runner exited {returncode}: {last_line[0]}")
-            return parse_runner_reply(stdout)
+            return self._reply(returncode, stdout, stderr, deadline)
         except SandboxInfraError:
             self._drop(sandbox)
             raise
 
-    def _start_runner(self, deadline: float) -> tuple[Any, Any]:
-        """The sandbox and a runner process on it. A sandbox that refuses the exec (its idle timeout or lifetime ended
-        it) is replaced once: the runner never started, so no program ran."""
-        for last_attempt in (False, True):
-            sandbox = self._current_sandbox()
-            try:
-                return sandbox, sandbox.exec("python3", "-I", "-c", RUNNER_SOURCE, timeout=int(math.ceil(deadline)))
-            except Exception as exc:
-                self._drop(sandbox)
-                if last_attempt:
-                    raise SandboxInfraError(f"modal sandbox lost: {type(exc).__name__}: {exc}") from exc
-        raise AssertionError("unreachable")
+    @staticmethod
+    def _reply(returncode: int, stdout: str, stderr: str, deadline: float) -> Reply:
+        if returncode == EXEC_DEADLINE_RETURNCODE:
+            raise SandboxInfraError(f"modal sandbox exec passed its {deadline:g} s deadline")
+        if returncode != 0:
+            last_line = (stderr or "").strip().splitlines()[-1:] or ["no stderr"]
+            raise SandboxInfraError(f"modal sandbox runner exited {returncode}: {last_line[0]}")
+        return decode_reply(stdout)
+
+    def _start_runner(self, deadline: float) -> RunnerExec:
+        """Start the runner. A sandbox that refuses the exec was ended by its idle timeout or lifetime; it is replaced
+        once, which is safe because no runner started."""
+        sandbox = self._current_sandbox()
+        try:
+            return RunnerExec(sandbox, self._spawn_runner(sandbox, deadline))
+        except Exception as error:  # the SDK raises its own types for a sandbox that is gone
+            logger.info("modal sandbox refused an exec (%s: %s); starting a new one", type(error).__name__, error)
+            self._drop(sandbox)
+        sandbox = self._current_sandbox()
+        try:
+            return RunnerExec(sandbox, self._spawn_runner(sandbox, deadline))
+        except Exception as exc:
+            self._drop(sandbox)
+            raise SandboxInfraError(f"modal sandbox lost: {type(exc).__name__}: {exc}") from exc
+
+    @staticmethod
+    def _spawn_runner(sandbox: Any, deadline: float) -> Any:
+        return sandbox.exec("python3", "-I", "-c", runner_source(), timeout=math.ceil(deadline))
 
     def _current_sandbox(self) -> Any:
         with self._lock:
@@ -174,7 +196,7 @@ class ModalSandbox(SandboxExecutor):
                     )
                 except Exception as exc:
                     raise SandboxInfraError(f"modal sandbox provisioning failed: {type(exc).__name__}: {exc}") from exc
-                self._retired_workdirs.clear()
+                self._closed_workdirs.clear()
             return self._sandbox
 
     def _drop(self, sandbox: Any) -> None:
@@ -193,14 +215,14 @@ class ModalSession(RunnerSession):
     """A directory in the executor's sandbox, owned by the session's own user."""
 
     def __init__(self, executor: ModalSandbox, uid: int):
-        super().__init__(f"{WORKSPACE}/{uuid.uuid4().hex}", uid, executor.limits)
+        super().__init__(f"{WORKSPACE}/{uuid.uuid4().hex}", uid=uid, limits=executor.limits, interpreter="python3")
         self.executor = executor
 
-    def exchange(self, request: dict[str, Any], *, deadline: float) -> dict[str, Any]:
-        if request["op"] != "run":
+    def exchange(self, request: Request, *, deadline: float) -> Reply:
+        if not isinstance(request.operation, RunProgram):
             return self.executor.exec_runner(request, deadline=deadline)
         with self.executor.run_slots:
             return self.executor.exec_runner(request, deadline=deadline)
 
     def close(self) -> None:
-        self.executor.retire_workdir(self.workdir)
+        self.executor.remove_later(self.workdir)
