@@ -1,7 +1,8 @@
 """``moe_backend: mok`` is refused at config time wherever its kernels cannot run the configuration, and at layer build
 for a block whose experts they would compute wrong; the padded token count covers the declared budget, no routing
-overflows the schedule MoK traps on, and the adapter hands MoK the layer's experts in MoK's layouts and back (against
-an eager stand-in for its kernels, as no image ships the package)."""
+overflows the schedule MoK traps on, MXFP8 is the one low-precision recipe it takes, needing no ``deep_gemm``, and the
+adapter hands MoK the layer's experts in MoK's layouts and back (against an eager stand-in for its kernels, as no
+image ships the package)."""
 
 import dataclasses
 import math
@@ -25,6 +26,7 @@ from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer import layer as layer_module
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel import load_rules
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -39,9 +41,17 @@ def _mok(**kw):
     return create_config(moe_backend="mok", **{"world_size": 4, "gpus_per_node": 4, "ep_size": 4, **BUDGET, **kw})
 
 
+MXFP8 = LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False)
+
+
 @pytest.mark.parametrize("ep_size", [1, 4])
-def test_pure_node_local_ep_with_a_budget_is_accepted(ep_size):
-    assert _mok(ep_size=ep_size).moe_backend == "mok"
+@pytest.mark.parametrize(
+    "lowp",
+    [LowpSpec(), MXFP8, LowpSpec(precision="fp8", apply_moe_experts=False)],
+    ids=["bf16", "mxfp8", "simulated_on_the_dense_mlps_alone"],
+)
+def test_pure_node_local_ep_with_a_budget_is_accepted(ep_size, lowp):
+    assert _mok(ep_size=ep_size, lowp=lowp).lowp == lowp
 
 
 @pytest.mark.parametrize(
@@ -53,7 +63,15 @@ def test_pure_node_local_ep_with_a_budget_is_accepted(ep_size):
         ({"ep_size": 1, "cp_size": 4}, "context_parallel_size=4"),
         ({"expert_lora": ExpertLoraSpec(r=8, alpha=16)}, "expert LoRA"),
         ({"ep_fp32_experts": True}, "fp32_experts"),
-        ({"lowp": LowpSpec(precision="fp8")}, "lowp_precision='fp8'"),
+        ({"lowp": LowpSpec(precision="fp8")}, "lowp_backend='simulated'"),
+        (
+            {"lowp": LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False)},
+            "lowp_backward_precision='bf16'",
+        ),
+        (
+            {"lowp": LowpSpec(precision="mxfp4", backend="native", backward_precision="fp8", apply_dense_mlp=False)},
+            "lowp_precision='mxfp4'",
+        ),
         ({"ep_rows_per_device": 0}, "no declared token budget"),
         ({"use_grouped_gemm": False}, "use_grouped_gemm=False"),
         ({"ep_size": 1, "use_grouped_gemm": False}, "use_grouped_gemm=False"),
@@ -80,7 +98,7 @@ def test_the_token_capacity_is_the_budget_padded_to_mok_shapes(tokens, capacity)
 @pytest.fixture
 def mok_config(monkeypatch):
     """``_mok_config`` over a stand-in ``MoKConfig`` that keeps its fields."""
-    monkeypatch.setattr(mok, "_mok", lambda: SimpleNamespace(MoKConfig=SimpleNamespace))
+    monkeypatch.setattr(mok, "_mok", lambda: (SimpleNamespace(MoKConfig=SimpleNamespace), None))
     mok._mok_config.cache_clear()
     yield mok._mok_config
     mok._mok_config.cache_clear()
@@ -241,6 +259,38 @@ def test_an_inherited_declaration_is_refused_at_build(monkeypatch):
         _build(Subclassed, _qwen3_block(256), monkeypatch)
 
 
+def test_mxfp8_under_mok_needs_no_deep_gemm(monkeypatch):
+    """MoK's own kernels run the native recipe; the DeepGEMM gate is for the DeepEP path."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    layer = _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)
+    assert layer.set_lowp_compute(MXFP8, weight_cacheable=True) and layer._lowp_native
+
+
+def test_the_mxfp8_cast_is_redone_after_an_optimizer_write_and_only_then(monkeypatch):
+    """The backward and every grad-accumulation microbatch reuse one cast per step; a stale one trains old weights."""
+    casts = []
+
+    def quantize(w, normal, transposed):
+        casts.append(w)
+        return w, w, w, w
+
+    monkeypatch.setattr(mok, "_mok", lambda: (None, quantize))
+    banks = tuple(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
+    first = mok._mxfp8_weights(banks, cacheable=True)
+    assert mok._mxfp8_weights(banks, cacheable=True) is first and len(casts) == 3
+    with torch.no_grad():
+        banks[1].add_(1.0)
+    assert mok._mxfp8_weights(banks, cacheable=True) is not first and len(casts) == 6
+    mok._mxfp8_weights(banks, cacheable=False)
+    assert len(casts) == 9, "an FSDP2-managed bank is cast on every call"
+    rebound = (banks[0], nn.Parameter(banks[1].detach().clone()))
+    with torch.no_grad():
+        rebound[1].add_(0.0)
+    assert rebound[1]._version == banks[1]._version, "premise: another tensor at the same version"
+    mok._mxfp8_weights(banks, cacheable=True)
+    assert mok._mxfp8_weights(rebound, cacheable=True) is not first and len(casts) == 12, "a rebound bank is cast"
+
+
 def test_an_absent_package_is_refused_at_build(monkeypatch):
     with pytest.raises(RuntimeError, match="needs the mok package"):
         _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch, available=False)
@@ -319,7 +369,7 @@ def test_the_adapter_runs_the_layers_experts_through_mok_layouts_and_back(monkey
     local expert ids only, and the config is sized for this group."""
     torch.manual_seed(0)
     functional = _EagerMoK()
-    monkeypatch.setattr(mok, "_mok", lambda: functional)
+    monkeypatch.setattr(mok, "_mok", lambda: (functional, None))
     monkeypatch.setattr(mok, "transpose_last_two", _transpose)
     monkeypatch.setattr(mok.dist, "get_world_size", lambda group: 1)
     mok._mok_config.cache_clear()

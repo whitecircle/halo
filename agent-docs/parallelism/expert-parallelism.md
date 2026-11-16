@@ -283,9 +283,18 @@ replay and the family's shared expert stay on Halo's path.
   Any other EP layer is refused at load, Qwen3-Next's included, as are experts whose hidden or intermediate size is
   not a multiple of 256 or whose activation is not SiLU, and a model with no MoE block Halo wraps.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
-  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, `use_grouped_gemm: false`, a non-default
-  `ep_buffer_backend` and a run that declares no token budget. DeepEP's own layout rules still apply (several EP
-  groups in one NVLink domain among them); MoK has not been run past them.
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, `use_grouped_gemm: false`, a non-default `ep_buffer_backend`, a
+  run that declares no token budget, and any low precision on the experts but MoK's MXFP8 recipe below. DeepEP's own
+  layout rules still apply (several EP groups in one NVLink domain among them); MoK has not been run past them.
+- **MXFP8.** `lowp_precision: fp8`, `lowp_backend: native`, `lowp_backward_precision: fp8` (and
+  `lowp_apply_dense_mlp: false`) run MoK's MXFP8 kernels for the forward, dgrad and wgrad: e4m3 with an e8m0 scale per
+  32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. The expert banks are cast once
+  per optimizer step where Halo owns them (`ep_size > 1`) and every call where FSDP2 does. Any other low-precision
+  setting on the experts is refused. Each bank is cast in the layer's own layout, whose transposed cast is MoK's
+  normal one: the same bits as casting MoK's layout, with no transpose first. The cast and its transposed twin stay
+  cached beside the bf16 bank, one more byte a parameter each. Measured as below, with
+  the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's shapes, 0.93×, 1.02× and 1.13× on
+  the gpt-oss-like one and 0.84×, 1.01× and 1.21× on DeepSeek-V3's.
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
   batch when the run evaluates and that is larger. Padding rows carry zero router weight and move no output or

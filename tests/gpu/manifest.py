@@ -1004,7 +1004,10 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=(
             "--family qwen3",
             "--family qwen3_5",
+            "--family qwen3 --mxfp8",
+            "--family qwen3_5 --mxfp8",
             "--family qwen3 --skew",
+            "--family qwen3 --mxfp8 --skew",
             Row("--family qwen3 --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3")),
         ),
         timeout=900,
