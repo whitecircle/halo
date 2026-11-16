@@ -68,28 +68,65 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 
 ### Baseten Sandboxes
 
-`--halo-rollout-backend baseten` on `halo launch` or `halo run` sets `HALO_SANDBOX_BACKEND=baseten` for the launched process and its Ray rollout actors. `ray.init` carries every `HALO_SANDBOX_*` variable to the actors of a shared cluster (`ray_address`); the key is not carried, so each cluster node needs its own. The one variable a partner sets is `BASETEN_API_KEY` (a personal or full-access team key):
+One flag sends code-contests grading, its test tool and the `swe` tools to Baseten:
 
 ```bash
 BASETEN_API_KEY=... halo launch grpo/environmental <config>.yaml -n 4 --halo-rollout-backend baseten
 ```
 
-An explicit `sandbox_backend` in `environment_kwargs` takes precedence over the flag. `HALO_SANDBOX_URL` must be unset: the backend refuses a URL so a SandboxFusion address never receives Baseten credentials.
+The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=baseten`. An explicit `sandbox_backend` in `environment_kwargs` takes precedence.
 
-The backend (`halo/environments/sandbox/baseten.py`) follows the [Baseten Sandboxes API](https://docs.baseten.co/sandboxes/overview):
+- `BASETEN_API_KEY` is the only credential: a personal or full-access team key. A missing key raises at construction.
+- `HALO_SANDBOX_URL` must be unset. The backend refuses a URL, so a SandboxFusion address never receives Baseten credentials.
+- On a shared Ray cluster (`ray_address`) the backend selection travels to the actors with the job. The key does not: put it on every cluster node.
 
-- **Auth.** The API key mints a 2-hour sandbox access token (`POST /v1/token`), refreshed after 90 minutes. Sandbox calls carry only the token; the key is never logged. A missing key raises at construction.
-- **One sandbox per session.** A session creates its microVM on first use and deletes it on close, so concurrent episodes never share one. A one-shot `run()` (the scratchpad test tool) creates and deletes a sandbox per call. A `TTL_IDLE` expiration (`idle_ttl`, default `30m`) deletes a sandbox whose session was never closed.
-- **Concurrency.** `max_concurrency` (default and maximum 10, Baseten's per-organization sandbox limit) caps live sandboxes per process; a session past it waits for a slot. A value above 10 raises at construction. The limit is per organization, so across Ray actors keep the sum of `max_concurrency` at or below 10.
-- **Execution.** Every call uploads one request and runs the runner (`program_runner.py`, uploaded when the sandbox is created) through `POST /process` with `waitForCompletion`. The runner applies the rlimits and child environment the request carries, `local`'s, and times the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local` (`runner_session.py`); a compiled session reuses its build, and `reset_to_prepared` rides on the session's next call.
-- **The program's user.** The runner runs as root and the program as another user, so a program cannot signal the runner or replace its files. Every process that user still has is killed when a run ends. The image must run as root.
-- **Tampering.** A source or file path the program replaced with a link, directory or FIFO is never written through or read: the next run is the program's runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
-- **Faults.** An HTTP failure, a request outliving its deadline (run timeout + compile timeout + 30 s, plus `request_overhead`), and a runner the service reports as anything but completed with exit code 0 are `error` from `run` and `SandboxInfraError` from the file calls. A sandbox its expiration removed (404) is an `error` once; the next call creates a new one and the session continues empty.
-- **Retries.** 429, 5xx and connection errors retry with exponential backoff honoring `Retry-After` (`max_retries` 4, `backoff_factor` 1.0). A read timeout is never retried, so a program never runs twice.
+**How it runs**
 
-`sandbox_options` keys: `image` (default `baseten/base-image:latest`), `cpu` (default 2), `idle_ttl`, `interpreter` (default `python3`), `request_timeout`, `request_overhead`, `create_timeout`, `max_retries`, `backoff_factor`, `max_concurrency`, and `local`'s limits (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`). Use an image with `gcc` / `g++` for C and C++.
+- Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
+- `run()` is a throwaway session: it creates and deletes a sandbox per call.
+- Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
+- The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
 
-The backend needs no Baseten package. The `baseten` extra (`pip install 'halo[baseten]'`) installs Baseten's [Truss CLI](https://docs.baseten.co/reference/cli/truss/overview) for work on the Baseten side (`truss login`, `truss push`).
+**Sandbox limit**
+
+Baseten runs at most 10 sandboxes per organization. `max_concurrency` (default and maximum 10) caps live sandboxes per process; a session past it waits for a slot. Across Ray actors, keep the sum of `max_concurrency` at or below 10.
+
+**What a program cannot do**
+
+The program runs as a different user from the process that supervises it.
+
+- It cannot signal that process or replace its files.
+- It cannot leave a process behind: every process of its user is killed when the run ends.
+- It cannot make the backend write or read through a link, directory or FIFO it put in a file's place. The next run reports a runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+
+The image must run as root.
+
+**When something fails**
+
+| What happened | What the caller sees |
+|---|---|
+| 429, 5xx or a connection error | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
+| The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
+| Baseten deleted the sandbox (`idle_ttl`, default 30 minutes idle) | `error` once; the next call creates a new sandbox and the session continues empty |
+
+File calls raise `SandboxInfraError` where `run` returns `error`. A sandbox whose session was never closed is deleted by its `idle_ttl`.
+
+**Options** (`sandbox_options`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `image` | `baseten/base-image:latest` | Use one with `gcc` / `g++` for C and C++ |
+| `cpu` | 2 | vCPUs of each sandbox |
+| `idle_ttl` | `30m` | Idle time after which Baseten deletes a sandbox |
+| `interpreter` | `python3` | The Python the sandbox runs programs with |
+| `max_concurrency` | 10 | Live sandboxes in this process |
+| `request_timeout`, `request_overhead`, `create_timeout` | 60 s, 30 s, 600 s | HTTP timeouts |
+| `max_retries`, `backoff_factor` | 4, 1.0 | Retry policy |
+| `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
+
+The backend needs no Baseten package. `pip install 'halo[baseten]'` adds Baseten's [Truss CLI](https://docs.baseten.co/reference/cli/truss/overview) (`truss login`, `truss push`).
+
+The code is in `halo/environments/sandbox/baseten.py`; the part that runs inside the sandbox is `halo/environments/sandbox/program_runner.py`.
 
 ## Using it from Python
 
