@@ -15,13 +15,15 @@
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, checked at construction); `gcc` / `g++` for C/C++ |
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
+| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits | python, bash, cpp, c (default image) | The Modal SDK (`pip install modal`) and Modal credentials ([Modal](#modal)) |
 
 Coding environments select it in `environment_kwargs`:
 
 ```yaml
 environment_kwargs:
-  sandbox_backend: remote                 # local (default) | bubblewrap | remote
+  sandbox_backend: remote                 # local (default) | bubblewrap | remote | modal
   sandbox_url: http://sandbox-host:8080   # remote only
+  # sandbox_options: {cpu: 8, memory_mb: 16384}   # the backend's constructor arguments
 ```
 
 Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with `local` or `bubblewrap`.
@@ -30,7 +32,7 @@ Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL
 
 A confined program cannot write the host filesystem or reach the network, but can read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`).
 
-- `remote` confines; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
+- `remote` and `modal` confine; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
 - On `local` the program can rewrite what grades it, fetch a solution, and read the trainer's `--env-file` secrets from `/proc/<pid>/environ`.
 - `swe` and `code_contests` log a warning when built on an executor that does not confine.
 
@@ -64,6 +66,28 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 - A program that exits `128 + n` reads as killed by signal `n`.
 - While a jailed run is in flight the host process is a child subreaper, so an orphan of anything else it started meanwhile is reparented to it, and only a jail's init is reaped.
 
+### Modal
+
+Run every code execution of an async-GRPO config in Modal with one flag:
+
+```bash
+pip install modal                     # or: uv pip install modal
+export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (modal token new)
+halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
+```
+
+The flag, on `halo launch` and `halo run`, sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1` for the process, its ranks and its Ray actors. That covers code-contests grading and its test tool, the `swe` tools, and the Python REPL tools, each call of which becomes one remote exec (80 to 330 ms warm, below).
+
+- **One sandbox per executor.** Created on first use with `cpu` (default 4) and `memory_mb` (default 8192); sessions are directories in it, and `run()` is a throwaway session. At most `max_concurrency` (default `int(cpu)`) runs execute at once; the rest queue before their clock starts. The constructor refuses a `memory_mb` that cannot hold `max_concurrency` builds at `compile_memory_limit_mb`.
+- **One exec per call.** The runner (`modal_runner.py`) applies the rlimits and child environment the request carries, `local`'s, and runs the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local`; a compiled session reuses its build and `reset_to_prepared` rides on the next run.
+- **Faults.** A lost sandbox or transport, a runner crash, and an exec past its deadline (run timeout + compile timeout + 30 s) are `error`, never retried, since the program may already have run; the next call starts a new sandbox and a session continues empty.
+- **Cleanup.** A closed session's directory is removed by the next exec. `close()` and an `atexit` hook terminate the sandbox; Modal's 5-minute idle timeout reclaims one a killed process left.
+- **Shared sandbox.** As on `local`, the programs of concurrent episodes run as one user and can reach each other's directories and processes.
+
+Options (`sandbox_options`): `app_name` (default `halo-sandbox`), `image` (a registry tag or `modal.Image` with `python3`; default Debian slim with Python 3.12, `gcc` and `g++`), `cpu`, `memory_mb`, `max_concurrency`, `sandbox_timeout` (lifetime, default 3600 s) and `local`'s limits.
+
+Measured from a CPU host (default image): first run including sandbox start 0.7 to 1.0 s once the image is built (5.1 s on its first build); warm Python exec 80 to 330 ms median, varying between sandboxes of one run.
+
 ## Using it from Python
 
 ```python
@@ -85,7 +109,7 @@ with sandbox.open_session() as session:
 
 `close()` deletes the working directory (`remote`: drops the written files), is idempotent and never raises; the context manager calls it.
 
-`environment_kwargs` carries only `sandbox_backend` and `sandbox_url`. The executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`) go through `sandbox=`:
+`environment_kwargs` carries `sandbox_backend`, `sandbox_url` and `sandbox_options`, the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`, Modal's options). From Python they also go through `sandbox=`:
 
 ```python
 env = SweEnvironment(sandbox=build_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
@@ -133,6 +157,7 @@ A grader of your own that calls `sandbox.run()` must handle its host-side except
 A program that drives its own run into an `error` voids its episode. The routes left:
 
 - `remote`: a response the service fails to produce (huge output, service OOM), or one past the client deadline (run timeout + 30 s).
+- `modal`: a run that kills the runner or keeps the exec past its deadline.
 - `local` / `bubblewrap` grading: a host-side exception during a test, such as a `TMPDIR` the program filled.
 - `local` only: a `setsid()` child that outlives the run fills the process table, or, under a root grader, the program deletes the compiler (`compiler not found` for every later build on that host).
 
@@ -142,7 +167,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Languages
 
-`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
+`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local`, `bubblewrap` and `modal` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
 
 | Language | Aliases | Compile | Run |
 |---|---|---|---|
@@ -155,7 +180,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Limits
 
-Rlimits bound each `local` / `bubblewrap` run; `remote` enforces its own.
+Rlimits bound each `local` / `bubblewrap` / `modal` run; `remote` enforces its own.
 
 | Resource | Run step | Compile step | Set by |
 |---|---|---|---|

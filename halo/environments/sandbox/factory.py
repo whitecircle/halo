@@ -8,6 +8,7 @@ from halo.env import env_str
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.modal_sandbox import ModalSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.log import warn_once
 
@@ -39,7 +40,9 @@ def build_sandbox(
         if not url:
             raise ValueError("remote sandbox requires a url (pass url= or set HALO_SANDBOX_URL)")
         return RemoteSandbox(url, **kwargs)
-    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local', 'bubblewrap', or 'remote')")
+    if backend == "modal":
+        return ModalSandbox(**kwargs)
+    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local', 'bubblewrap', 'remote', or 'modal')")
 
 
 def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
