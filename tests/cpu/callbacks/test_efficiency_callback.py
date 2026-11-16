@@ -15,7 +15,6 @@ from halo.diagnostics import phase_timers
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
 from halo.hardware import _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
-from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from tests.common.parallelism import make_parallelism_config
@@ -195,17 +194,11 @@ def test_the_fp32_peak_key_is_tf32_aware():
         torch.set_float32_matmul_precision(prev)
 
 
-def _lowp_ep_layer(quant_format: str | None, *, grouped: bool = True) -> EPQwen3MoELayer:
+def _lowp_ep_layer(quant_format: str | None, *, grouped: bool = True, native: bool = True) -> EPQwen3MoELayer:
     layer = EPQwen3MoELayer.__new__(EPQwen3MoELayer)
     nn.Module.__init__(layer)
-    layer._lowp_quant_format, layer._use_grouped_mm = quant_format, grouped
+    layer._lowp_quant_format, layer._use_grouped_mm, layer._lowp_native = quant_format, grouped, native
     return layer
-
-
-@pytest.fixture
-def native_opt_in(monkeypatch):
-    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", "1")
-    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (object(), object()))
 
 
 @pytest.mark.parametrize("lowp_precision", ["fp8", "fp4", "mxfp4", "bf16"])
@@ -224,7 +217,7 @@ def test_simulated_compute_scores_against_the_run_dtype(monkeypatch, lowp_precis
 @pytest.mark.parametrize(
     ("lowp_precision", "quant_format", "expected"), [("fp8", "mxfp8", "fp8"), ("mxfp4", "mxfp4", "fp4")]
 )
-def test_native_expert_gemms_score_against_the_recipe_peak(native_opt_in, lowp_precision, quant_format, expected):
+def test_native_expert_gemms_score_against_the_recipe_peak(lowp_precision, quant_format, expected):
     """A bf16 peak would charge a kernel issuing at 2-4x that rate, reading MFU 2-4x high."""
     model = nn.ModuleList([_lowp_ep_layer(quant_format)])
     assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), lowp_precision) == expected
@@ -237,22 +230,23 @@ def test_native_expert_gemms_score_against_the_recipe_peak(native_opt_in, lowp_p
         ("fp8", nn.ModuleList([nn.Linear(2, 2)])),
         ("fp8", nn.ModuleList([_lowp_ep_layer("mxfp8", grouped=False)])),
         ("fp8", nn.ModuleList([_lowp_ep_layer(None)])),
+        ("fp8", nn.ModuleList([_lowp_ep_layer("mxfp8", native=False)])),
         ("fp8", None),
     ],
-    ids=["no-kernel-for-nvfp4", "dense-model", "per-expert-loop", "experts-opted-out", "model-not-yet-handed-over"],
+    ids=[
+        "no-kernel-for-nvfp4",
+        "dense-model",
+        "per-expert-loop",
+        "experts-opted-out",
+        "simulated-backend",
+        "model-not-yet-handed-over",
+    ],
 )
-def test_the_flag_alone_does_not_claim_the_native_peak(native_opt_in, lowp_precision, model):
+def test_only_a_native_grouped_layer_claims_the_native_peak(lowp_precision, model):
     assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), lowp_precision) == "bf16"
 
 
-def test_the_flag_without_the_package_does_not_claim_the_native_peak(monkeypatch):
-    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", "1")
-    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
-    model = nn.ModuleList([_lowp_ep_layer("mxfp8")])
-    assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), "fp8") == "bf16"
-
-
-def test_a_detected_gpu_without_a_peak_for_the_precision_warns(native_opt_in, monkeypatch, caplog):
+def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
     """A missing table entry zeroes MFU, S-MFU and TFLOP/s for the whole run, so INFO can't be the only trace."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
     callback = efficiency.EfficiencyCallback(

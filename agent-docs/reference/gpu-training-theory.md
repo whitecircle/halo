@@ -259,7 +259,7 @@ FP8/FP4 doubles or quadruples tensor-core throughput and raises the compute ceil
 - **Compute-bound (AI above ridge):** the ceiling is what you are hitting, so raising it makes the step faster. This is the large-M / wide-matmul regime (dense MLPs at long seq, very wide experts).
 - **Memory-bound (AI below ridge):** you're on the diagonal, nowhere near the ceiling, so raising it does nothing. Most schemes also add a per-step quantization pass (read operand, compute scales, write quantized copy), so on a bandwidth-bound kernel the net result is slower.
 
-An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, so the kernel has headroom, but Halo's low-precision paths spend more on casts and copies than the kernel saves, and the backward stays bf16. Their whole steps run at 0.10–0.54× bf16, so bf16 is the default ([Why bf16 is the default](../optimization/low-precision-moe-kernels.md#why-bf16-is-the-default)).
+An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, so the kernel has headroom, but the simulated path spends more on casts than the kernel saves and the native DeepGEMM path has not been measured as a whole step since its casts moved to Triton kernels and its backward to FP8. The whole steps measured ran at 0.10–0.54× bf16, so bf16 is the default ([Why bf16 is the default](../optimization/low-precision-moe-kernels.md#why-bf16-is-the-default)).
 
 A frontier-scale result does not transfer on its own. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
 
@@ -269,7 +269,7 @@ Compute rows per expert for your shape ([Grouped GEMM](../optimization/grouped-g
 
 An isolated block-scaled nvfp4 grouped kernel does beat bf16 — but only with the group layout known ahead of time. MoE routing is dynamic, so each group's size and offset change every step and the fixed-layout CuTe grouped API has to rebuild its per-expert pointer arrays and swizzle metadata on the CPU every call, leaving the GPU idle behind a host wall.
 
-DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it runs whole steps at 0.37–0.54× bf16 at ep8; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it ran whole steps at 0.37–0.54× bf16 at ep8 with Python casts and a bf16 backward, and stays opt-in (`lowp_backend: native`). Measurements, its MoE layer with Triton casts and an FP8 backward among them: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
 
 ### bf16 numerics (what stays fp32)
 

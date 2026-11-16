@@ -24,6 +24,8 @@ def make_layer():
     torch.manual_seed(0)
     stub = SimpleNamespace(
         _lowp_quant_format="mxfp8",
+        _lowp_native=False,
+        _lowp_fp8_backward=False,
         _lowp_weight_cacheable=True,
         _expert_adapters_enabled=True,
         _expert_lora_attrs=frozenset({"gate_proj"}),

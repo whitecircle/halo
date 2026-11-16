@@ -565,6 +565,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fla_blackwell_autotune.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_fla_simple_gla.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "bailing"), timeout=600),
     "kernels/test_fake_quant_triton.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_deepgemm_cast_triton.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_lowp_expert_lora.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "lora", "moe"), timeout=600),
     "kernels/test_packed_broadcast_memory.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_lowp_ep_trainer.py": TestSpec(
@@ -576,6 +577,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--precision mxfp4",
             "--precision fp8 --native",
             "--precision mxfp4 --native",
+            "--precision fp8 --native --backward fp8",
         ),
         timeout=900,
     ),

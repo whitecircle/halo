@@ -14,7 +14,6 @@ from halo.diagnostics.profiling import read_cuda_memory
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import PEAK_KEY_BY_DTYPE, detect_gpu_model, get_gpu_peak_flops, peak_precision_key
-from halo.kernels.lowp.deepgemm import use_deepgemm
 from halo.kernels.lowp.spec import LOWP_RECIPES
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.models.attention.layout import AttentionLayout
@@ -172,10 +171,10 @@ def _utilization_report(
 def _runs_native_expert_gemms(model: torch.nn.Module | None, lowp_precision: str) -> bool:
     """Whether a grouped EP layer runs the native kernel; a dense linear and a per-expert-loop layer never do."""
     recipe = LOWP_RECIPES.get(lowp_precision)
-    if recipe is None or model is None or not use_deepgemm(recipe.quant_format):
+    if recipe is None or not recipe.native or model is None:
         return False
     return any(
-        layer._use_grouped_mm and layer._lowp_quant_format == recipe.quant_format
+        layer._use_grouped_mm and layer._lowp_native and layer._lowp_quant_format == recipe.quant_format
         for _, layer in named_ep_layers(model)
     )
 

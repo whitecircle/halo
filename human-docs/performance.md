@@ -94,7 +94,8 @@ Step-3.7. Each lever's page carries its measurements:
 ## Levers that do not help here
 
 Halo's fp8/fp4 QAT path and the opt-in DeepGEMM adapter ran whole training steps at
-about half bf16's speed or less, and `torch.compile` on an EP MoE run gained at most
+about half bf16's speed or less (the adapter before its casts moved to Triton kernels and its backward to
+FP8; not measured as a whole step since), and `torch.compile` on an EP MoE run gained at most
 1%
 ([Levers that do not help](../agent-docs/optimization/README.md#levers-that-do-not-help-at-these-shapes) ↗).
 
