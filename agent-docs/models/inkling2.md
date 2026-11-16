@@ -27,7 +27,7 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 `frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base, with or without expert LoRA over it. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `ep_lazy_loading: true` and `merge_expert_lora_on_save: false`. The loader refuses bf16 expert tensors and every family other than Inkling 2.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false` and `use_peft: true`. The loader refuses bf16 expert tensors and every family other than Inkling 2.
 
 A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
@@ -49,7 +49,8 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **PP.** No pipeline spec covers the family.
 - **Packing.** The convolutions read no document boundary, so `packing` is refused unless `allow_cross_document_linear_attention: true` accepts the crossing ([Document isolation](../data/collators.md#document-isolation-under-packing)). Eager attention has no varlen kernel, so `padding_free` is refused.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
-- **Online and async GRPO.** The spec's `weight_sync_refusal`: no weight sync into either pinned engine has been validated. Offline GRPO needs no server.
+- **Full fine-tuning of the release.** No save exports the frozen banks, so `frozen_quantized_experts` requires `use_peft: true`.
+- **Online GRPO, and async GRPO with a weight push.** The spec's `weight_sync_refusal`: no weight sync into either pinned engine has been validated. Async GRPO runs on vLLM with `rollout_adapter_sync`, which serves attention LoRA adapters beside the launch base and pushes no weights ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)); SGLang is refused. Offline GRPO needs no server.
 
 ## LoRA
 

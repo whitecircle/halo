@@ -311,17 +311,17 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
             "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
-            "name that new episodes select. SGLang only, launched with --enable-lora; attention and dense-MLP "
-            "projections, and the routed experts of a fused-GLU family. A model it cannot serve is refused at startup "
-            "with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+            "name that new episodes select. SGLang launched with --enable-lora, and vLLM for Inkling 2 with "
+            "rollout_adapter_dir; attention and dense-MLP projections only. A model it cannot serve is refused at "
+            "startup with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
         },
     )
     rollout_adapter_dir: str | None = field(
         default=None,
         metadata={
-            "help": "Under rollout_adapter_sync: an absolute directory every rollout server reads at the same path. "
-            "Each adapter version is published there and loaded from disk instead of sent in a request body, which "
-            "expert adapters (GBs) need."
+            "help": "Under rollout_adapter_sync: an absolute directory the trainer and every rollout server mount at "
+            "the same path. Each adapter version is published there and loaded by path instead of sent in a request "
+            "body. vLLM requires it."
         },
     )
     sync_weights_every_n_steps: int = field(
