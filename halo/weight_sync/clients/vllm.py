@@ -5,7 +5,6 @@ import logging
 import re
 from collections.abc import Callable
 from functools import partial
-from pathlib import Path
 from typing import NoReturn
 
 import requests
@@ -43,9 +42,6 @@ _IDENTITY_KEY = "VLLM_HALO_PATCHES"
 _STRICT_TOOL_CALLING_KEY = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
 _TOKEN_ID_PREFIX = "token_id:"
 
-# Loading or unloading an adapter waits out the requests running under the one replaced.
-_ADAPTER_UPDATE_TIMEOUT_S = 120.0
-
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
     BACKEND_KEY = "vllm"
@@ -71,8 +67,15 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
     TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
     CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
-    ADAPTER_SYNC_REFUSAL = None
+    # Lifted for a family whose spec lists this backend in ``adapter_sync_backends``.
+    ADAPTER_SYNC_REFUSAL = (
+        f"{ENGINE_RELEASE}'s decode with an adapter served ran over 5% slower than the merged weights on the model "
+        f"measured, so it serves as an adapter only a family with no merged alternative that an engine run validated"
+    )
     ADAPTER_NEEDS_DIRECTORY = True
+    # The runtime routes, which the server takes with VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.
+    ADAPTER_DIRECTORY_LOAD_ROUTE = "/v1/load_lora_adapter"
+    ADAPTER_UNLOAD_ROUTE = "/v1/unload_lora_adapter"
     # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     # Names the adapter a score request reads through, when the run serves its policy as one.
@@ -129,32 +132,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         """vLLM serves a loaded adapter under its own name."""
         return adapter
 
-    def load_adapter(self, name: str, config: dict, payload: str | Path) -> None:
-        """Load the adapter directory ``payload`` (:func:`~halo.weight_sync.adapter_payload.publish_adapter_directory`)
-        as ``name``; the server must run with ``VLLM_ALLOW_RUNTIME_LORA_UPDATING=True``."""
-        if not isinstance(payload, Path):
-            raise ValueError(f"{self.ENGINE_RELEASE} loads an adapter only from a directory: set rollout_adapter_dir")
-        response = self.request(
-            "POST",
-            "/v1/load_lora_adapter",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json={"lora_name": name, "lora_path": str(payload)},
-        )
-        self._require_adapter_update(response, f"load adapter {name!r}")
-
-    def unload_adapter(self, name: str) -> None:
-        response = self.request(
-            "POST",
-            "/v1/unload_lora_adapter",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json={"lora_name": name},
-        )
-        self._require_adapter_update(response, f"unload adapter {name!r}")
-
     def loaded_adapters(self) -> list[str]:
         """The adapters registered on the engine: the model cards that name a parent."""
         return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
@@ -174,13 +151,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     def is_adapter_missing(cls, error: str, adapter: str) -> bool:
         """Matches the engine's 404 for a request naming an adapter it does not hold."""
         return re.search(rf"The model `{re.escape(adapter)}` does not exist", error) is not None
-
-    def _require_adapter_update(self, response: requests.Response, what: str) -> None:
-        if response.ok:
-            return
-        raise RuntimeError(
-            f"vLLM {self.base_url} could not {what}: HTTP {response.status_code}, {response.text[:300]}"
-        )
 
     def read_server_flags(self) -> ServerFlags:
         info = self.request(

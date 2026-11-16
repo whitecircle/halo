@@ -40,12 +40,11 @@ from halo.runtime.collectives import broadcast_from_rank0, combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, rank0_verdict
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements
-from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
+from halo.trainers.grpo.rollout.weight_push import serves_family_as_adapter, sync_trainer_weights
+from halo.weight_sync.adapter_directory import publish_adapter_directory, remove_adapter_directories
 from halo.weight_sync.adapter_payload import (
     ADAPTER_WIRE_DTYPE,
     build_adapter_config,
-    publish_adapter_directory,
-    remove_adapter_directory,
     serialize_adapter_tensors,
     wire_adapter_tensors,
 )
@@ -121,12 +120,14 @@ def resolve_live_versions(async_config: AsyncRolloutConfig) -> int:
     return (async_config.prefetch_depth if async_config.prefetch_active() else 0) + 2
 
 
-def reject_unadaptable_config(async_config: AsyncRolloutConfig) -> None:
-    """Refuses what the config alone settles."""
-    client_cls = resolve_weight_sync_client(async_config.rollout_backend)
+def reject_unadaptable_config(async_config: AsyncRolloutConfig, model_config=None) -> None:
+    """Refuses what the rollout config and the model's family (``model_config``) settle. An engine with an
+    ``ADAPTER_SYNC_REFUSAL`` serves only the families validated as adapters on it."""
+    backend = async_config.rollout_backend
+    client_cls = resolve_weight_sync_client(backend)
     reasons = []
-    if client_cls.ADAPTER_SYNC_REFUSAL is not None:
-        reasons.append(f"rollout_backend={async_config.rollout_backend!r}: {client_cls.ADAPTER_SYNC_REFUSAL}")
+    if client_cls.ADAPTER_SYNC_REFUSAL is not None and not serves_family_as_adapter(model_config, backend):
+        reasons.append(f"rollout_backend={backend!r}: {client_cls.ADAPTER_SYNC_REFUSAL}")
     if client_cls.ADAPTER_NEEDS_DIRECTORY and async_config.rollout_adapter_dir is None:
         reasons.append(
             f"rollout_backend={async_config.rollout_backend!r} loads an adapter only from a directory: set "
@@ -313,14 +314,17 @@ class AdapterSync:
         self._nonce: str = broadcast_from_rank0(uuid.uuid4().hex[:8])
         self._sequence = 0
         self._base_pushed = False
+        # Whether this run's first sync has retired the versions found on the engines.
+        self._predecessors_retired = False
         # The versions rank 0 has loaded and not retired.
         self._loaded: list[str] = []
         # The newest version's load, kept on rank 0 to put it on a server that restarted before the next sync.
         self._newest_load: tuple[str, dict, str] | None = None
 
     def reset(self) -> None:
-        """A second ``train()`` pushes the base again."""
+        """A second ``train()`` pushes the base again, and its first sync retires the versions this one leaves loaded."""
         self._base_pushed = False
+        self._predecessors_retired = False
         self._loaded = []
         self._newest_load = None
         if self.servers is not None:
@@ -338,8 +342,9 @@ class AdapterSync:
         if plan.push_base:
             sync_trainer_weights(trainer, pool, fold_adapters=False)
             self._base_pushed = True
-        if plan.push_base or (self.base_refusal is not None and self.versions.current is None):
+        if plan.push_base or not self._predecessors_retired:
             self._retire_predecessor_versions()
+            self._predecessors_retired = True
         name = f"{ADAPTER_NAME_PREFIX}-{self._nonce}-{self._sequence}"
         self._sequence += 1
         self._load_adapter(model, name)
@@ -438,7 +443,8 @@ class AdapterSync:
         return self.servers
 
     def _retire_predecessor_versions(self) -> None:
-        """Retires the versions an earlier trainer left on the engines, which nothing here leases."""
+        """Retires the versions an earlier trainer, or an earlier ``train()`` of this one, left on the engines, which
+        nothing here leases, and removes their directories."""
 
         def retire() -> None:
             servers = self._bound_servers()
@@ -446,6 +452,7 @@ class AdapterSync:
                 {name for names in servers.loaded() for name in names if name.startswith(ADAPTER_NAME_PREFIX)}
             )
             servers.unload(left)
+            self._remove_directories(left)
 
         rank0_verdict(retire, "Retiring a predecessor's adapter versions")
 
@@ -467,7 +474,12 @@ class AdapterSync:
             payload = serialize_adapter_tensors(wire)
         else:
             payload = publish_adapter_directory(self.adapter_dir, name, wire, config)
-        self._bound_servers().load(name, config, payload)
+        try:
+            self._bound_servers().load(name, config, payload)
+        except BaseException:
+            # The load is all or none, so no server holds the version.
+            self._remove_directories([name])
+            raise
         self._newest_load = (name, config, payload)
         self._loaded.append(name)
         logger.info(f"Loaded adapter {name} on the rollout servers ({len(wire)} tensors)")
@@ -479,9 +491,12 @@ class AdapterSync:
         def retire() -> None:
             stale = [name for name in self._loaded if name != current and name not in held]
             self._bound_servers().unload(stale)
-            if self.adapter_dir is not None:
-                for name in stale:
-                    remove_adapter_directory(self.adapter_dir, name)
+            self._remove_directories(stale)
             self._loaded = [name for name in self._loaded if name not in stale]
 
         rank0_verdict(retire, "Retiring stale adapter versions")
+
+    def _remove_directories(self, names: list[str]) -> None:
+        """The published directories of versions no server holds."""
+        if self.adapter_dir is not None:
+            remove_adapter_directories(self.adapter_dir, names)

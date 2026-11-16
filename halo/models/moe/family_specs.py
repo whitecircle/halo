@@ -95,6 +95,9 @@ class MoEFamilySpec:
     tool_call_terminator: str | None = None
     # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
+    # The rollout backends an engine run validated ``rollout_adapter_sync`` on for the family: its adapters load beside
+    # the launch base, which lifts ``weight_sync_refusal`` and the engine client's ``ADAPTER_SYNC_REFUSAL`` there.
+    adapter_sync_backends: tuple[str, ...] = ()
     # Why no block-FP8 rollout server is validated for the family; None where a GPU row passed.
     fp8_rollout_refusal: str | None = UNVALIDATED_FP8_ROLLOUT
     # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
@@ -228,6 +231,8 @@ INKLING2 = MoEFamilySpec(
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
+    # Attention LoRA over the release's frozen experts, the adapters loaded by vLLM beside its launch base.
+    adapter_sync_backends=("vllm",),
 )
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(

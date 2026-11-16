@@ -4,13 +4,21 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch.nn as nn
 
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
-from halo.trainers.grpo.rollout.weight_push import base_push_refusal, reject_unsyncable_model
+from halo.trainers.grpo.rollout.weight_push import (
+    base_push_refusal,
+    pushes_base,
+    reject_unsyncable_config,
+    reject_unsyncable_model,
+    serves_family_as_adapter,
+)
 
 # Families refused on every engine; each reason is stated at the class declaration. What one engine
 # alone cannot serve is that engine client's ``UNSERVABLE_MODEL_TYPES``
@@ -73,15 +81,54 @@ def test_gate_rejects_unsupported_ep_family(backend):
         reject_unsyncable_model(model, backend)
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_adapter_sync_passes_an_unsupported_family_and_names_its_base_refusal(backend):
+class _AdapterValidatedEPModuleStub(_EPModuleStub):
+    FAMILY = MoEFamilySpec(
+        model_types=(),
+        weight_sync_refusal="no sync into this stub family is validated",
+        adapter_sync_backends=("vllm",),
+    )
+
+
+def test_adapter_sync_passes_a_refused_family_only_on_the_engine_validated_for_it():
     """No base is pushed under adapter sync, so the family's refusal moves to the base push it would need."""
     model = nn.Module()
-    model.mlp = _UnsupportedEPModuleStub()
-    reject_unsyncable_model(model, backend, adapter_sync=True)
-    assert base_push_refusal(model) == _UnsupportedEPModuleStub.FAMILY.weight_sync_refusal
+    model.mlp = _AdapterValidatedEPModuleStub()
+    reject_unsyncable_model(model, "vllm", adapter_sync=True)
+    assert base_push_refusal(model) == _AdapterValidatedEPModuleStub.FAMILY.weight_sync_refusal
+    assert not pushes_base(model, adapter_sync=True) and pushes_base(model, adapter_sync=False)
+    with pytest.raises(ValueError, match="does not support weight sync.*rollout_backend: vllm"):
+        reject_unsyncable_model(model, "sglang", adapter_sync=True)
+    with pytest.raises(ValueError, match="does not support weight sync"):
+        reject_unsyncable_model(model, "vllm")
     model.mlp = _EPModuleStub()
-    assert base_push_refusal(model) is None
+    assert base_push_refusal(model) is None and pushes_base(model, adapter_sync=True)
+
+
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_adapter_sync_does_not_lift_the_refusal_of_a_family_no_run_validated(backend):
+    model = nn.Module()
+    model.mlp = _UnsupportedEPModuleStub()
+    with pytest.raises(ValueError, match="does not support weight sync"):
+        reject_unsyncable_model(model, backend, adapter_sync=True)
+
+
+def test_adapter_sync_is_validated_for_inkling2_on_vllm_alone():
+    """Read off the registry: a family or engine added here ran its adapter sync against the engine."""
+    validated = {
+        cls.__name__: cls.FAMILY.adapter_sync_backends
+        for cls in set(MOE_LAYER_MAP.values())
+        if cls.FAMILY.adapter_sync_backends
+    }
+    assert validated == {"EPInkling2MoELayer": ("vllm",)}
+    for model_type in ("inkling2", "inkling2_text"):
+        config = SimpleNamespace(model_type=model_type)
+        assert serves_family_as_adapter(config, "vllm") and not serves_family_as_adapter(config, "sglang")
+        reject_unsyncable_config(config, "vllm", adapter_sync=True)
+        for backend, adapter_sync in (("sglang", True), ("vllm", False)):
+            with pytest.raises(ValueError, match="does not support weight sync"):
+                reject_unsyncable_config(config, backend, adapter_sync=adapter_sync)
+    assert not serves_family_as_adapter(SimpleNamespace(model_type="qwen3_moe"), "vllm")
+    assert not serves_family_as_adapter(None, "vllm")
 
 
 def test_gate_reports_the_offending_module_path():
