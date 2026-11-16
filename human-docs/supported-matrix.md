@@ -16,7 +16,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | sentence-transformers | 6.1.0 |
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
-| flash-linear-attention | 0.4.2 |
+| flash-linear-attention | 0.6.0 |
 | vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
@@ -218,7 +218,7 @@ advanced parallelism. What each family is for:
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP on tiny models only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP on tiny models only; on SDPA, so use `packing`, not `padding_free` |
 | Inkling-Small | Yes | Yes | No | No | Yes | multimodal MoE; LoRA and PP on tiny models only; PP takes the text tower, no packing |
-| Inkling-2-Small | Yes | Yes | No | No | No | eager attention only; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; full fine-tuning and ETP on tiny bf16 models only ([details](../agent-docs/models/inkling2.md) ↗) |
+| Inkling-2-Small | Yes | Yes | No | No | No | eager attention only; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; ETP is refused over the frozen experts, so the release takes none; full fine-tuning and ETP run on tiny bf16 models only ([details](../agent-docs/models/inkling2.md) ↗) |
 | Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
 | Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP on a tiny-model LoRA test only |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |

@@ -540,7 +540,9 @@ the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` 
 first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
 a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
 grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
-those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
+those in memory. A base whose `config.json` declares a `quantization_config` is refused outright: its tensors are
+stored packed, and a delta folded into the stored values gives no weight
+([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.
 
 ## Tests and benchmarks

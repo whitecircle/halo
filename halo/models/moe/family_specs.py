@@ -62,6 +62,28 @@ class EngineLoadedBuffers:
     config_flag: str
 
 
+@dataclass(frozen=True)
+class FrozenExpertSlot:
+    """One projection of a release's packed (NVFP4/MXFP8) expert layout: the live weight name, which the packed data
+    takes, and the release's stem for NVFP4's sidecars. The block scales sit under transformers'
+    ``<weight>_scale_inv`` conversion target."""
+
+    weight: str
+    hub_stem: str
+
+    @property
+    def scale(self) -> str:
+        return f"{self.weight}_scale_inv"
+
+    @property
+    def amax(self) -> str:
+        return f"{self.hub_stem}_amax"
+
+    @property
+    def denominator(self) -> str:
+        return f"{self.hub_stem}_outer_scale_denominator"
+
+
 @dataclass(frozen=True, eq=False)
 class MoEFamilySpec:
     """Identity-compared, as each family has exactly one spec constant."""
@@ -84,6 +106,9 @@ class MoEFamilySpec:
     fused_contraction_axis: int = -1
     # transformers' conversion-mapping keys for a vendor-namespace hub checkpoint.
     hub_conversion_keys: tuple[str, ...] = ()
+    # The release's packed expert layout, one slot per projection, which ``frozen_quantized_experts`` keeps: the lazy
+    # loader fills the slots and the EP layer builds its frozen banks from them.
+    frozen_expert_slots: tuple[FrozenExpertSlot, ...] = ()
     # A composite transformers' CausalLM mapping does not name: ``text_only_model`` builds its text sub-config's class.
     text_only_layout: CompositeTextLayout | None = None
     supports_lazy_loading: bool = True
@@ -223,6 +248,8 @@ INKLING2 = MoEFamilySpec(
     # Declared so the absent slot registers as None (the block ships none), as LFM-2.
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("inkling2",),
+    # ``w13_weight`` is the interleaved gate/up, ``w2_weight`` the down projection.
+    frozen_expert_slots=(FrozenExpertSlot("gate_up_proj", "w13_weight"), FrozenExpertSlot("down_proj", "w2_weight")),
     unmarked_sequence_mixer="depthwise causal short convolutions (on the projected K/V and around each sublayer)",
     eager_only_attention=(
         "every attention layer adds a learned relative-logits bias and a query-conditioned sink, and the class "
@@ -412,6 +439,14 @@ def experts_container_attrs() -> tuple[str, ...]:
     """Longest first, so a matcher trying them in order never shadows a longer spelling with one it contains."""
     attrs = {attr for spec in MOE_FAMILY_SPECS for attr in spec.experts_container_attrs}
     return tuple(sorted(attrs, key=lambda attr: (-len(attr), attr)))
+
+
+@lru_cache(maxsize=1)
+def frozen_expert_sidecar_attrs() -> tuple[str, ...]:
+    """The per-expert sidecars of every declared frozen slot (block scales, NVFP4 ``amax``), which shard on the expert
+    axis with their weight; the scalar denominator replicates."""
+    slots = (slot for spec in MOE_FAMILY_SPECS for slot in spec.frozen_expert_slots)
+    return tuple(dict.fromkeys(name for slot in slots for name in (slot.scale, slot.amax)))
 
 
 @lru_cache(maxsize=1)

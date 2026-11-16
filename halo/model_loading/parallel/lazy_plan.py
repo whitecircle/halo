@@ -14,18 +14,22 @@ import torch.nn as nn
 
 from halo.checkpoint.reading import has_whole_model_weight_file, read_checkpoint_config, resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_EXPERT_SIDECARS
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import resolve_load_dtype
 from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
-from halo.model_loading.parallel.frozen_experts import FROZEN_BANK_FAMILIES
+from halo.model_loading.parallel.frozen_experts import supports_frozen_experts
 from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
-from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
+from halo.models.moe.family_specs import (
+    experts_container_attrs,
+    find_moe_family_spec,
+    frozen_expert_sidecar_attrs,
+    per_expert_fusion_map,
+)
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.filesystem import fs_aware_main_first
 from halo.runtime.ranks import get_global_rank
@@ -40,7 +44,7 @@ FUSED_EXPERT_KEY_PATTERN = re.compile(
 )
 # A frozen quantized bank's per-expert sidecar (block scales, NVFP4 amax), sharded on the expert axis with its weight.
 _FROZEN_SIDECAR_KEY_PATTERN = re.compile(
-    rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in FROZEN_EXPERT_SIDECARS)})$"
+    rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in frozen_expert_sidecar_attrs())})$"
 )
 # One expert's tensor (``…mlp.experts.N.gate_proj.weight``): (1) the container attribute, (2) the expert index.
 PER_EXPERT_KEY_PATTERN = re.compile(rf"\.({_CONTAINER_ALT})\.(\d+)\.")
@@ -79,7 +83,7 @@ def lazy_load_blocker(model_path: str, *, frozen_quantized_experts: bool = False
     spec = find_moe_family_spec(config.get("model_type"))
     if spec is not None and not spec.supports_lazy_loading:
         return LAZY_FAMILY_UNVERIFIED
-    if config.get("quantization_config") and not (frozen_quantized_experts and spec in FROZEN_BANK_FAMILIES):
+    if config.get("quantization_config") and not (frozen_quantized_experts and supports_frozen_experts(spec)):
         return LAZY_QUANTIZED
     try:
         weight_map = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint").weight_map

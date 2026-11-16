@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CP training step</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  /* Top to bottom: the input band, the decoder stack, the head and the loss; the arrows sit in the gaps. */
+  .row {
+    display: grid;
+    column-gap: 56px;
+  }
+
+  .row.three { grid-template-columns: repeat(3, 1fr); }
+
+  .row.two { grid-template-columns: repeat(2, 1fr); column-gap: 64px; }
+
+  .row + .frame,
+  .frame + .row { margin-top: 88px; }
+
+  .frame {
+    padding: 20px 28px 28px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .frame-label {
+    font-size: 21px;
+    line-height: 26px;
+    color: var(--secondary);
+  }
+
+  .frame .row { margin-top: 20px; }
+
+  .card {
+    padding: 24px 28px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .card .lines {
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .hop {
+    position: absolute;
+    font-size: 21px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Only attention ever sees the whole sequence</h1>
+  </header>
+
+  <div class="figure" id="figure"></div>
+
+  <footer>
+    <p>
+      <span class="s">CP size {cpSize} splits a {sequence}-token sequence into {perRank} tokens per rank.</span>
+      <span class="s">Every other layer, and the loss, works on this rank’s chunk.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { cpSize: 4, sequence: 32768, heads: 64 };
+
+  if (SETUP.sequence % SETUP.cpSize !== 0 || SETUP.heads % SETUP.cpSize !== 0) {
+    throw new Error(`the sequence (${SETUP.sequence}) and the heads (${SETUP.heads}) must divide by cp_size ${SETUP.cpSize}`);
+  }
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = { cpSize: fmt(SETUP.cpSize), sequence: fmt(SETUP.sequence), perRank: fmt(SETUP.sequence / SETUP.cpSize) };
+  /** One rank's share of the sequence, as the shapes write it. */
+  const S_CHUNK = `S/${SETUP.cpSize}`;
+
+  const ROWS = [
+    {
+      kind: "three",
+      cards: [
+        { id: "batch", name: "Full batch", lines: ["input_ids [B, S]", "labels · mask · position_ids"] },
+        { id: "split", name: "split_sequence_for_cp", lines: [`narrow(1, rank·${S_CHUNK}, ${S_CHUNK})`, "S % cp_size == 0 (collator pads)"] },
+        { id: "embed", name: "Embeddings on the chunk", lines: [`[B, ${S_CHUNK}] → [B, ${S_CHUNK}, hidden]`, "Each rank holds its own chunk"] },
+      ],
+    },
+    {
+      kind: "two",
+      frame: "× N decoder layers",
+      cards: [
+        { id: "attn", name: "Ulysses attention", lines: ["all-to-all → flash → all-to-all", `Full S, ${fmt(SETUP.heads)}/cp_size heads per rank`] },
+        { id: "mlp", name: "MLP / MoE experts", lines: [`Runs on [B, ${S_CHUNK}, hidden] only`, `CP-unaware: EP dispatches ${S_CHUNK}`] },
+      ],
+    },
+    {
+      kind: "two",
+      cards: [
+        { id: "head", name: "Head, per chunk", lines: [`Logits [B, ${S_CHUNK}, V], never gathered`, "Or fused with the loss: no logits plane", "Boundary label: next chunk"] },
+        { id: "loss", name: "Loss", lines: ["cp_size · local_sum / global_tokens", "global_tokens: all_reduce(SUM, cp)", "Router aux term: no cp_size factor"] },
+      ],
+    },
+  ];
+  /** Arrows across a row, in step order. */
+  const ACROSS = [["batch", "split"], ["split", "embed"], ["attn", "mlp"], ["head", "loss"]];
+
+  fillValues(VALUES);
+
+  const figure = document.getElementById("figure");
+  const cards = {};
+  let stack;
+
+  for (const row of ROWS) {
+    const grid = el("div", `row ${row.kind}`);
+
+    for (const spec of row.cards) {
+      const card = el("div", "card");
+      const lines = el("div", "lines");
+
+      for (const line of spec.lines) {
+        lines.append(el("div", undefined, line));
+      }
+
+      card.append(el("div", "name", spec.name), lines);
+      grid.append(card);
+      cards[spec.id] = card;
+    }
+
+    if (row.frame === undefined) {
+      figure.append(grid);
+    } else {
+      stack = el("div", "frame");
+      stack.append(el("div", "frame-label", row.frame), grid);
+      figure.append(stack);
+    }
+  }
+
+  const wires = svgEl("svg", { class: "wires" });
+  figure.append(wires);
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const lineHue = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  for (const [from, to] of ACROSS) {
+    const a = box(cards[from]);
+    const z = box(cards[to]);
+    const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
+    arrow(wires, a.r + 6, y, z.l - 6, y, lineHue);
+  }
+
+  /** A downward arrow at `x` from `top` to `bottom`, labelled on `side` of it. */
+  function drop(x, top, bottom, label, side) {
+    arrow(wires, x, top + 1, x, bottom - 1, lineHue);
+    const tag = el("div", "hop", label);
+    figure.append(tag);
+    tag.style.left = side === "left" ? `${x - 16 - tag.offsetWidth}px` : `${x + 16}px`;
+    tag.style.top = `${(top + bottom - tag.offsetHeight) / 2}px`;
+  }
+
+  // The stack is entered under the last card of the input band and left above the head.
+  const embed = box(cards.embed);
+  const head = box(cards.head);
+  const frame = box(stack);
+  drop((embed.l + embed.r) / 2, embed.b, frame.t, "hidden states", "left");
+  drop((head.l + head.r) / 2, frame.b, head.t, "final norm", "right");
+</script>
+</body>
+</html>

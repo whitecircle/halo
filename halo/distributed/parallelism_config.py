@@ -159,8 +159,8 @@ class ParallelismConfig:
         if self.frozen_quantized_experts:
             needs = {
                 "expert_parallel_size >= 2": self.ep_size >= 2,
-                # The banks are sliced on the expert axis alone, so ETP ranks would each hold and sum a full-width bank.
-                "expert_tensor_parallel_size == 1": self.expert_tp_size == 1,
+                # A bank is sliced on the expert axis only, so every expert-TP rank would hold the full FFN width.
+                "expert_tensor_parallel_size: 1": self.expert_tp_size == 1,
                 "ep_lazy_loading: true": self.ep_lazy_loading,
                 "merge_expert_lora_on_save: false": not self.merge_expert_lora_on_save,
             }

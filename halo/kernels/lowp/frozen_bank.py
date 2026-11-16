@@ -6,15 +6,21 @@ weight no gradient: a bank is the frozen base under LoRA."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Function
 
 from halo.kernels.grouped_mm import grouped_mm_grads
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import QuantFormat
+
+if TYPE_CHECKING:
+    from halo.models.moe.family_specs import FrozenExpertSlot
 
 # ``dequantize`` holds int64 nibble indices and fp32 elements, ~15x its bf16 output, so it runs a few experts at a time.
 _DEQUANT_EXPERT_CHUNK = 4
@@ -75,6 +81,26 @@ class FrozenExpertBank:
                 )
                 out[lo - start : hi - start] = dequantize(chunk)
         return out
+
+
+def build_frozen_banks(
+    experts: nn.Module, slots: Sequence[FrozenExpertSlot], start: int, end: int, *, already_sharded: bool
+) -> dict[str, FrozenExpertBank]:
+    """Experts ``[start, end)`` of the container the load filled per ``slots``, one bank per projection keyed by its
+    weight name; ``already_sharded`` when the container holds only this rank's experts."""
+    rows = slice(None) if already_sharded else slice(start, end)
+    banks = {}
+    for slot in slots:
+        data, scales = experts._buffers[slot.weight], experts._buffers[slot.scale]
+        global_scale = None
+        if data.dtype == torch.uint8:
+            amax = experts._buffers[slot.amax][rows]
+            global_scale = (amax.float() / experts._buffers[slot.denominator].float()).contiguous()
+        quant_format = "nvfp4" if data.dtype == torch.uint8 else "mxfp8"
+        banks[slot.weight] = FrozenExpertBank(
+            quant_format, data[rows].contiguous(), scales[rows].contiguous(), global_scale
+        )
+    return banks
 
 
 class _FrozenBankGroupedMM(Function):
