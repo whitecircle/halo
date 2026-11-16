@@ -20,7 +20,7 @@ from transformers import PreTrainedModel
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.checkpoint_coverage import verify_checkpoint_coverage
 from halo.model_loading.dtype import reject_fp8_tensor
-from halo.model_loading.lazy_safetensors.conversion import Concat, FanIn, Mxfp4Decode
+from halo.model_loading.lazy_safetensors.conversion import FanIn
 from halo.models.introspection.param_roles import fp32_pinned_names
 
 logger = logging.getLogger(__name__)
@@ -56,10 +56,8 @@ def materialize_weight_plan(plan: WeightPlan, read: Callable[[str, WeightPlan], 
     """Read a plan and replay its conversion ops through the caller's whole/ranged tensor reader."""
     tensor = read(plan.disk_key, plan)
     for op in plan.ops:
-        if isinstance(op, Concat):
-            tensor = torch.cat([tensor, *(read(sibling, plan) for sibling in op.siblings)], dim=op.dim)
-        elif isinstance(op, Mxfp4Decode):
-            tensor = op.decode(tensor, read(op.siblings[0], plan))
+        if isinstance(op, FanIn):
+            tensor = op.combine(tensor, [read(sibling, plan) for sibling in op.siblings])
         else:
             tensor = op(tensor)
     return tensor

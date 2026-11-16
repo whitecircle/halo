@@ -45,14 +45,14 @@ _NESTED_EXPERT_KEY_PATTERN = re.compile(rf"\.(?:{_CONTAINER_ALT})\.[A-Za-z_]\w*\
 LAZY_FAMILY_UNVERIFIED = "lazy_family_unverified"
 LAZY_QUANTIZED = "quantized_checkpoint"
 LAZY_NESTED_EXPERT_KEYS = "lazy_incompatible_expert_layout"
-# The one checkpoint-native quantization the lazy loaders decode: gpt-oss's MXFP4 experts (``Mxfp4Decode``).
-_NATIVE_MXFP4 = ("gpt_oss", "mxfp4")
 
 
 def is_native_mxfp4(config: dict) -> bool:
-    """Whether a ``config.json`` describes a native MXFP4 gpt-oss release (``openai/gpt-oss-*``)."""
+    """Whether a ``config.json`` describes an MXFP4 release of a family whose spec sets ``lazy_decodes_mxfp4``
+    (``openai/gpt-oss-*``)."""
+    spec = find_moe_family_spec(config.get("model_type"))
     quantization = config.get("quantization_config") or {}
-    return (config.get("model_type"), quantization.get("quant_method")) == _NATIVE_MXFP4
+    return spec is not None and spec.lazy_decodes_mxfp4 and quantization.get("quant_method") == "mxfp4"
 
 
 class ExpertKeyLayout(Enum):
@@ -137,7 +137,7 @@ class WeightPlanner:
         unexpected: list[str] = []
         fanout = fanout or {}
         ignored = [re.compile(pattern) for pattern in ignore_unexpected]
-        # A fan-in's siblings are read by its first source's plan (the leading Concat or Mxfp4Decode), never alone.
+        # A fan-in's siblings are read by its first source's plan, never on their own.
         consumed = {
             sibling
             for targets in fanout.values()

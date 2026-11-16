@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """A native MXFP4 gpt-oss checkpoint (``openai/gpt-oss-*``) loads lazily, its experts decoded to bf16 while reading:
-- the decode is bit-identical to transformers' ``convert_moe_packed_tensors`` for every code and scale,
+- the per-expert decode is bit-identical to transformers' ``convert_moe_packed_tensors`` on the whole bank,
 - the lazy load equals ``from_pretrained(..., quantization_config=Mxfp4Config(dequantize=True))`` at ep1, ep2 and with
   fp32 experts, and consumes every ``_blocks``/``_scales`` key,
 - no MXFP4 quantizer is built, and the loaded model's config and its save no longer claim MXFP4, so a stock
@@ -38,7 +38,7 @@ def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
 
 
 def _decode(blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
-    return Mxfp4Decode(("x_scales",)).decode(blocks, scales)
+    return Mxfp4Decode(("x_scales",)).combine(blocks, [scales])
 
 
 # ---------------------------------------------------------------------------------------------------------- decode
@@ -59,18 +59,6 @@ def test_decode_matches_transformers_on_every_code_and_scale():
     reference = convert_moe_packed_tensors(blocks, scales)
     assert _same_bits(_decode(blocks, scales), reference)
     assert reference.isinf().any() and (reference.abs() < 2.0**-126).logical_and(reference != 0).any()
-
-
-def test_decode_test_inputs_catch_a_wrong_bias_and_swapped_nibbles():
-    """Negative controls: a decoder off by one in the scale bias, or reading the high nibble first, fails the check
-    above on its inputs."""
-    blocks = torch.arange(256, dtype=torch.uint8).reshape(16, 16).repeat(254, 1, 1)[None]
-    scales = torch.arange(1, 255, dtype=torch.uint8)[None, :, None].expand(1, 254, 16).contiguous()
-    reference = convert_moe_packed_tensors(blocks, scales)
-    swapped = ((blocks & 0x0F) << 4) | (blocks >> 4)
-    assert not _same_bits(_decode(swapped, scales), reference)
-    for off_by_one in (scales - 1, scales + 1):
-        assert not _same_bits(_decode(blocks, off_by_one), reference)
 
 
 def test_decode_refuses_mismatched_shapes():

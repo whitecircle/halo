@@ -4,8 +4,10 @@ translation."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import partial
+from typing import Protocol, runtime_checkable
 
 import torch
 from transformers.core_model_loading import (
@@ -16,7 +18,7 @@ from transformers.core_model_loading import (
     WeightConverter,
     rename_source_key,
 )
-from transformers.integrations.mxfp4 import Mxfp4Dequantize
+from transformers.integrations.mxfp4 import Mxfp4Dequantize, convert_moe_packed_tensors
 
 from halo.model_loading.checkpoint_keys import CheckpointKeyPlan, ConversionGroup, is_expert_bank_merge
 
@@ -63,55 +65,64 @@ class PermuteRope:
         return permuted.reshape(tensor.shape).contiguous()
 
 
+@runtime_checkable
+class FanIn(Protocol):
+    """An op that leads a multi-source pipeline: the materializer reads ``siblings`` (further disk keys, in declared
+    order) with the first source's read, whole or ranged, and the op combines them. Every other op is a callable on
+    one tensor."""
+
+    @property
+    def siblings(self) -> tuple[str, ...]: ...
+
+    @property
+    def dim(self) -> int:
+        """The first dim the op changes, which an expert-sharded read must not split."""
+        ...
+
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor: ...
+
+
 @dataclass(frozen=True)
 class Concat:
-    """Fan-in of a multi-source entry, mirroring transformers' ``Concatenate``: leads the first source's pipeline, with
-    ``siblings`` its further disk keys in declared order. The materializer resolves their reads; other ops are
-    callables."""
+    """Fan-in of a multi-source entry, mirroring transformers' ``Concatenate``."""
 
     dim: int
     siblings: tuple[str, ...]
 
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([first, *siblings], dim=self.dim)
 
-# e2m1 code → value, the sign in bit 3, as transformers' ``FP4_VALUES``. Every value times a power of two in e8m0's
-# range is exact in bf16 or overflows to inf, so the decode has nothing to round.
-_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
-_E8M0_BIAS = 127
+
 # The projections a native MXFP4 gpt-oss checkpoint stores as ``<proj>_blocks`` and ``<proj>_scales``.
 MXFP4_PROJECTIONS = ("gate_up_proj", "down_proj")
 
 
 @dataclass(frozen=True)
 class Mxfp4Decode:
-    """Fan-in of a native MXFP4 expert tensor: leads the ``<proj>_blocks`` pipeline (uint8 ``[E, R, G, 16]``, two e2m1
-    codes per byte, the low nibble the even element), with ``siblings`` its ``<proj>_scales`` key (uint8 e8m0
-    ``[E, R, G]``). Decodes as transformers' ``convert_moe_packed_tensors``, value × ``2^(scale - 127)`` then dims 1
-    and 2 swapped to gpt-oss's matmul layout. The ranged read of the expert dim stands, and it brings in the packed
-    blocks and scales of every expert the rank owns. Only the decode goes one expert at a time, so the unpacked codes
-    and values of a single expert are live at once."""
+    """Fan-in of a native MXFP4 expert tensor: leads the ``<proj>_blocks`` pipeline (uint8 ``[E, R, G, 16]``), with
+    ``siblings`` its ``<proj>_scales`` key (uint8 e8m0 ``[E, R, G]``), and decodes with transformers'
+    ``convert_moe_packed_tensors`` into gpt-oss's bf16 matmul layout ``[E, G * 32, R]``. The ranged read of the expert
+    dim stands, and it brings in the packed blocks and scales of every expert the rank owns. The decode takes one
+    expert at a time, so the unpacked values of a single expert are live at once."""
 
     siblings: tuple[str, ...]
 
     @property
     def dim(self) -> int:
-        """The first dim it changes. It never touches the expert dim 0."""
+        """It never touches the expert dim 0."""
         return 1
 
-    def decode(self, blocks: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor:
+        blocks, (scales,) = first, siblings
         if blocks.dtype != torch.uint8 or scales.dtype != torch.uint8 or blocks.shape[:-1] != scales.shape:
             raise ValueError(
                 f"MXFP4 expert tensor {self.siblings[0]!r}: expected uint8 blocks [E, R, G, 16] and uint8 scales "
                 f"[E, R, G], got {blocks.dtype} {tuple(blocks.shape)} and {scales.dtype} {tuple(scales.shape)}."
             )
         experts, rows, groups, width = blocks.shape
-        lut = torch.tensor(_E2M1_VALUES, dtype=torch.bfloat16, device=blocks.device)
         out = torch.empty(experts, groups * 2 * width, rows, dtype=torch.bfloat16, device=blocks.device)
         for e in range(experts):
-            codes = torch.stack([blocks[e] & 0x0F, blocks[e] >> 4], dim=-1).reshape(rows, groups, 2 * width)
-            values = torch.empty(rows, groups, 2 * width, dtype=torch.bfloat16, device=blocks.device)
-            # As transformers: ldexp into bf16, so an overflowing scale gives inf the same way.
-            torch.ldexp(lut[codes.int()], scales[e].int().unsqueeze(-1) - _E8M0_BIAS, out=values)
-            out[e] = values.reshape(rows, -1).t()
+            out[e] = convert_moe_packed_tensors(blocks[e : e + 1], scales[e : e + 1])[0]
         return out
 
 
@@ -134,10 +145,8 @@ def mxfp4_dequantize_conversions() -> list[WeightConverter]:
 
 
 _TensorOp = Deinterleave | TakeChunk | PermuteRope
-# Ops that lead a multi-source pipeline and read their ``siblings`` with the first source's read.
-FanIn = Concat | Mxfp4Decode
 # A converted disk key's targets: (canonical key, op pipeline) per target.
-ConvertTargets = tuple[tuple[str, tuple[Concat | _TensorOp, ...]], ...]
+ConvertTargets = tuple[tuple[str, tuple[FanIn | _TensorOp, ...]], ...]
 
 
 def _op_kind(op) -> str:
