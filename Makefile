@@ -360,21 +360,22 @@ INKLING2_CONFIG           = examples/grpo/environmental/inkling2/vllm/inkling2-s
 INKLING2_LORA_ARGS        = --enable-lora --max-loras 2 --max-cpu-loras 4 \
   $(if $(filter attention,$(INKLING2_LORA)),--max-lora-rank 16 --lora-target-modules qkvr wo_ud,--max-lora-rank 8)
 
-up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it from INKLING2_VLLM_IMAGE on INKLING2_SERVER_DEVICES (2,3) for train-inkling2
+up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it from INKLING2_VLLM_IMAGE on INKLING2_SERVER_DEVICES (2,3), port VLLM_PORT, for train-inkling2
 	mkdir -p $(INKLING2_ADAPTER_DIR)
 	$(DOCKER_RUN) bash -lc "hf download thinkingmachines/Inkling-2-Small --local-dir $(INKLING2_DIR) --quiet"
 	HALO_SCRATCH=$(scratch_dir) VLLM_IMAGE=$(INKLING2_VLLM_IMAGE) VLLM_MODEL=$(INKLING2_DIR) VLLM_TP=2 \
-	  VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
+	  VLLM_PORT=$(VLLM_PORT) VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
 	  VLLM_TOOL_PARSER=inkling VLLM_REASONING_PARSER=inkling \
 	  VLLM_EXTRA_ARGS="--quantization inkling2 --max-model-len 16384 $(INKLING2_LORA_ARGS)" \
 	  docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 train-inkling2: EXTRA_DOCKER_ENV = -e CUDA_VISIBLE_DEVICES=$(INKLING2_TRAINER_DEVICES)
-train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
-	@curl -sf http://localhost:8000/health >/dev/null || { echo "No Inkling 2 server on :8000: make up-vllm-inkling2 \
-	  INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
+train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2 at VLLM_SERVER_URL, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
+	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No Inkling 2 server at $(VLLM_SERVER_URL): make \
+	  up-vllm-inkling2 INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) --nproc 2 \
-	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) $(EXTRA)"
+	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) \
+	  --rollout_server_url=$(VLLM_SERVER_URL) $(EXTRA)"
 
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.
 clean: ## prune wandb/, the ruff/pytest caches and $(HALO_SCRATCH) test scratch (leaves checkpoints/)

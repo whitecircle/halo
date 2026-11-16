@@ -4,6 +4,7 @@ Inkling 2 alone. The client pins each tag's engine build, the image names its bu
 on the other tag is refused before training."""
 
 import ast
+import dataclasses
 import importlib.util
 import re
 import sys
@@ -11,6 +12,7 @@ import types
 
 import pytest
 
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.models.moe.family_specs import INKLING2
 from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_server_flags
 from halo.weight_sync.clients.base import EngineImage
@@ -65,13 +67,28 @@ def test_the_client_pins_the_tags_and_builds_the_dockerfile_builds():
 )
 def test_each_make_target_builds_its_own_tag(target, version, inkling2):
     """A target that tags the other engine publishes Inkling 2's build under the release's name, or the reverse."""
-    [recipe] = re.findall(rf"^{target}:.*\n((?:\t.*\n)+)", MAKEFILE, re.MULTILINE)
+    recipe = _recipe(target)
     assert f"-t halo:vllm-$({version})" in recipe
     assert ("--build-arg VLLM_ENGINE=inkling2" in recipe) is inkling2
     assert re.search(
         rf"^{version}\s*:= \$\(shell sed -n 's/\^ARG {version}=//p' Dockerfile\.vllm\)$", MAKEFILE, re.MULTILINE
     )
     assert _arg(version)
+
+
+def _recipe(target: str) -> str:
+    [recipe] = re.findall(rf"^{target}:.*\n((?:\t.*\n)+)", MAKEFILE, re.MULTILINE)
+    return recipe
+
+
+def test_the_inkling2_targets_serve_and_dial_one_port():
+    """Compose binds ``VLLM_PORT``; a trainer that dials a fixed port misses a server moved off it."""
+    serve, train = _recipe("up-vllm-inkling2"), _recipe("train-inkling2")
+    assert "VLLM_PORT=$(VLLM_PORT)" in serve and "VLLM_IMAGE=$(INKLING2_VLLM_IMAGE)" in serve
+    assert "curl -sf $(VLLM_SERVER_URL)/health" in train and "--rollout_server_url=$(VLLM_SERVER_URL)" in train
+    assert not re.search(r"\b8000\b", serve + train), "a port is spelled by hand"
+    assert re.search(r"^VLLM_SERVER_URL \?= http://localhost:\$\(VLLM_PORT\)$", MAKEFILE, re.MULTILINE)
+    assert "rollout_server_url" in {field.name for field in dataclasses.fields(AsyncRolloutConfig)}
 
 
 def test_each_tag_carries_its_own_engine_specifics():
