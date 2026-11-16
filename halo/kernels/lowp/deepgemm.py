@@ -1,6 +1,6 @@
 """Native grouped MoE GEMM on DeepGEMM's ``m_indices`` kernels (``lowp_backend: native``): FP8 activations (1x128)
 times FP8 (128x128) or MXFP4 (1x32) weights, each expert's tokens padded to a 128-row segment. The backward is bf16
-``F.grouped_mm``, or FP8 under ``lowp_backward_precision: fp8``: dgrad on the forward's FP8 weight and wgrad on 128x1
+``F.grouped_mm``, or FP8 under ``lowp_backward_precision: fp8``: dgrad on the 128x128 FP8 weight and wgrad on 128x1
 token tiles of the gradient and the activation. The projections of one expert FFN share their row layout, and gate and
 up their activation casts, so each is built once per pass."""
 
@@ -19,6 +19,7 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
     cast_rows_to_fp8,
     cast_tiles_to_fp8,
     cast_weight_blocks_to_fp8,
+    cast_weight_rows_to_mxfp4,
 )
 from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import LOWP_RECIPES, QuantFormat
@@ -34,7 +35,8 @@ _WGRAD_LONG_GROUP_BLOCKS = {torch.float32: 32}
 _WGRAD_LONG_GROUP_BLOCKS_DEFAULT = 16
 _CAST_CHUNK_BYTES = 256 << 20  # the fp32 temporaries of one weight-cast call, which are the size of its input
 
-_weight_cache = WeightVersionCache()  # w -> (data, scales), re-quantized once per optimizer step
+# w -> (data, scales) per format, re-quantized once per optimizer step; the MXFP4 forward and its FP8 dgrad each keep one.
+_weight_caches = {fmt: WeightVersionCache() for fmt in DEEPGEMM_FORMATS}
 
 
 @functools.lru_cache(maxsize=1)
@@ -171,15 +173,17 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool
     cacheable = cacheable and w.is_leaf
     fingerprint = (w._version, fmt)
     if cacheable:
-        cached = _weight_cache.get(w, fingerprint)
+        cached = _weight_caches[fmt].get(w, fingerprint)
         if cached is not None:
             return cached
-    # e2m1 has no NaN code and the cast turns a NaN amax into a 2^127 scale, so the block would decode as finite zeros.
-    if fmt == "mxfp4" and not w.isfinite().all():
-        raise ValueError(f"Non-finite expert weight {tuple(w.shape)}: DeepGEMM's MXFP4 cast would hide it as zeros.")
-    if fmt == "mxfp8" and w.is_cuda:
-        operand = cast_weight_blocks_to_fp8(w)
-    else:  # DeepGEMM's reference casts, on CPU and for MXFP4; the FP8 operand keeps the weight's [E, K, N]
+    if w.is_cuda:  # the MXFP4 cast raises on a non-finite weight itself
+        operand = cast_weight_blocks_to_fp8(w) if fmt == "mxfp8" else cast_weight_rows_to_mxfp4(w, k_pad)
+    else:  # DeepGEMM's reference casts: the FP8 operand keeps the weight's [E, K, N], the MXFP4 one is [E, N, K]
+        # e2m1 has no NaN code and the cast turns a NaN amax into a 2^127 scale: the block would decode as zeros.
+        if fmt == "mxfp4" and not w.isfinite().all():
+            raise ValueError(
+                f"Non-finite expert weight {tuple(w.shape)}: DeepGEMM's MXFP4 cast would hide it as zeros."
+            )
         b = w.contiguous() if fmt == "mxfp8" else w.transpose(-2, -1).contiguous()
         if fmt == "mxfp4" and k_pad != b.shape[2]:
             b = F.pad(b, (0, k_pad - b.shape[2]))  # zero-pad the contraction; result unchanged
@@ -190,7 +194,7 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool
         )
         operand = _cast_experts(b, cast, dg_utils.align, block_scaled=fmt == "mxfp8")
     if cacheable:
-        _weight_cache.put(w, fingerprint, operand)
+        _weight_caches[fmt].put(w, fingerprint, operand)
     return operand
 
 
@@ -223,7 +227,7 @@ def _deepgemm_forward(x, w, layout: _RowLayout, fmt: QuantFormat, weight_cacheab
 
 
 def _fp8_dgrad(grad: torch.Tensor, w_fp8, layout: _RowLayout, k: int) -> torch.Tensor:
-    """``grad @ W^T`` per expert, ``[T, K]``: the forward's ``[E, K, N]`` 128x128-scaled FP8 weight, read N-major."""
+    """``grad @ W^T`` per expert, ``[T, K]``: the ``[E, K, N]`` 128x128-scaled FP8 weight, read N-major."""
     deep_gemm, _ = _deep_gemm()
     d = grad.new_empty(layout.rows, k, dtype=torch.bfloat16)
     _launch(
@@ -305,8 +309,9 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
         if ctx.fp8_backward:
             grad_x = grad_w = None
             if needs_x:
-                # The forward's cast, from the per-step cache; an uncached weight (FSDP2's, an fp32 master's bf16
-                # copy) is cast again, which costs less than holding an FP8 copy of every bank in the graph.
+                # The forward's cast under fp8 and one of its own under mxfp4, whose forward weight has no FP8 copy,
+                # either from the per-step cache; an uncached weight (FSDP2's, an fp32 master's bf16 copy) is
+                # cast again, which costs less than holding an FP8 copy of every bank in the graph.
                 w_fp8 = _quant_weight(w, "mxfp8", w.shape[1], cacheable=ctx.weight_cacheable)
                 grad_x = _fp8_dgrad(grad_output, w_fp8, ctx.layout, w.shape[1])
             if needs_w:
@@ -330,8 +335,6 @@ def deepgemm_grouped_gemm(
         raise ValueError(
             f"deepgemm_grouped_gemm supports only {DEEPGEMM_FORMATS}, got {quant_format!r} (nvfp4 is simulated-only)"
         )
-    if fp8_backward and quant_format != "mxfp8":
-        raise ValueError(f"the fp8 backward reuses the forward's fp8 weight; {quant_format!r} has none")
     if not deepgemm_available():
         raise ImportError("deepgemm_grouped_gemm needs the deep_gemm package (Blackwell image only)")
     if offs is None:

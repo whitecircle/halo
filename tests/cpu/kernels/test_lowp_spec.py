@@ -50,11 +50,7 @@ def test_every_peak_flops_key_is_a_peak_table_precision():
             "set lowp_apply_dense_mlp: false and keep lowp_apply_moe_experts: true",
         ),
         (LowpSpec(precision="fp8", backward_precision="fp8"), "needs lowp_backend='native'"),
-        (
-            LowpSpec(precision="mxfp4", backend="native", backward_precision="fp8", apply_dense_mlp=False),
-            "reuses the forward's FP8 weight",
-        ),
-        (LowpSpec(backward_precision="fp8"), "reuses the forward's FP8 weight"),
+        (LowpSpec(backward_precision="fp8"), "needs lowp_backend='native'"),
     ],
 )
 def test_validate_refuses(spec, message):
