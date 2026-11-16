@@ -417,9 +417,30 @@ def test_planted_link_is_neither_written_through_nor_read(modal, executor, tmp_p
     session = executor.open_session()
     assert session.run(f"import os\nos.symlink({str(target)!r}, 'note.txt')").ok
     assert session.read_file("note.txt") is None
-    with pytest.raises(ValueError, match="not a regular file"):
+    with pytest.raises(ValueError, match="is a link"):
         session.write_file("note.txt", "overwritten")
     assert target.read_text() == "outside"
+
+
+def test_directory_replaced_by_a_file_is_the_programs_runtime_error(executor):
+    session = executor.open_session()
+    session.write_file("pkg/mod.py", "X = 1\n")
+    assert session.run("import shutil\nshutil.rmtree('pkg')\nopen('pkg', 'w').close()").ok
+    res = session.run("print(1)", files={"pkg/mod.py": "X = 2\n"})
+    assert res.error is None and res.returncode not in (0, None) and "tampered" in res.stderr
+
+
+def test_tree_nested_past_the_recursion_limit_is_removed(executor):
+    """A reset or a closed session meets whatever the program left; neither may fail on its depth."""
+    session = executor.open_session()
+    deep = "import os\nfor _ in range(1500):\n    os.mkdir('d')\n    os.chdir('d')\n"
+    assert session.run(deep).ok
+    session.reset_to_prepared()
+    assert session.list_files() == ["main.py"]
+    assert session.run(deep).ok
+    workdir = session.workdir
+    session.close()
+    assert executor.run("print(1)").ok and not os.path.exists(workdir)
 
 
 def test_planted_fifo_does_not_block_the_runner(executor):

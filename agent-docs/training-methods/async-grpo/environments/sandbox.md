@@ -125,7 +125,7 @@ After an `error` the executor starts a new sandbox, and open sessions continue w
 | `sandbox_timeout` | 86400 s | Sandbox lifetime (Modal's maximum); runs in flight when it ends are `error` |
 | `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
 
-The code is in `halo/environments/sandbox/modal_sandbox.py`; the part that runs inside the sandbox is `halo/environments/sandbox/program_runner.py`.
+The code is in `halo/environments/sandbox/modal_sandbox.py`. What runs inside the sandbox is `halo/environments/sandbox/program_runner.py` on the working-directory code `local` uses, `halo/environments/sandbox/workspace.py`.
 
 ## Using it from Python
 

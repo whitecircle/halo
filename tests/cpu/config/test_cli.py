@@ -197,7 +197,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     # a new scripts/ subtree (profiling, inference, ...) must index without a hand-maintained list
     write_script(tmp_path / "scripts/profiling/trace_report.py")
     write_script(tmp_path / "scripts/after_training/merge_models.py")
-    write_script(tmp_path / "scripts/diagrams/gen_roofline.py")
     write_script(tmp_path / "scripts/training/sft.py")
 
     index = tool_commands(tmp_path)
@@ -206,9 +205,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     assert index["after-training/merge-models"] == tmp_path / "scripts/after_training/merge_models.py"
     assert all(not name.startswith("training/") for name in index)
     assert "sft" not in index
-    # diagrams regenerates doc assets through generators that must run as a script, so advertising them as tools would
-    # mislead.
-    assert all(not name.startswith("diagrams/") for name in index)
 
 
 def test_real_repo_profiling_tools_are_indexed():

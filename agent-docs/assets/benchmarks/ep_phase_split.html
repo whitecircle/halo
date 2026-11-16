@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EP phase split</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 500px;
+    --bar-h: 76px;
+  }
+
+  body { width: 1600px; }
+
+  .row,
+  .group-head {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+  }
+
+  .group-head .name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .group-head + .row { margin-top: var(--heading-gap); }
+
+  .row + .row { margin-top: 24px; }
+
+  .row + .group-head { margin-top: var(--group-gap); }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .label {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .bar {
+    display: flex;
+    gap: 4px;
+    height: var(--bar-h);
+  }
+
+  .bar i {
+    display: flex;
+    align-items: center;
+    padding-left: 14px;
+    border-radius: 5px;
+    background: var(--hue);
+    font-style: normal;
+    font-size: 23px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: var(--bg);
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>At <span id="title-group"></span>, combine takes <span id="title-range"></span> of EP time</h1>
+  </header>
+
+  <div class="figure" id="plot"></div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Phases in bar order. Blue sits in the middle, so violet and indigo never touch.
+  const PHASES = [
+    ["Dispatch", "var(--halo-indigo)"],
+    ["Expert compute", "var(--halo-blue)"],
+    ["Combine, wait included", "var(--halo-violet)"],
+  ];
+  // [group, [[shape, dispatch %, expert compute %, combine %]]]
+  const GROUPS = [
+    ["EP8", [
+      ["gpt-oss-20b, batch 1, 4,096 tokens", 13.3, 47.2, 39.4],
+      ["gpt-oss-20b, batch 4, 4,096 tokens", 9.0, 45.6, 45.4],
+      ["gpt-oss-20b, batch 1, 16,384 tokens", 9.0, 45.6, 45.4],
+    ]],
+    ["EP2", [
+      ["gpt-oss-20b, batch 1, 4,096 tokens", 12.2, 71.8, 15.9],
+      ["Qwen3.5-35B-A3B, batch 4, 4,096 tokens", 12.2, 74.3, 13.4],
+    ]],
+  ];
+
+  function key() {
+    const node = el("div", "key");
+
+    for (const [name, hue] of PHASES) {
+      const item = el("span");
+      const swatch = el("i");
+      swatch.style.setProperty("--hue", hue);
+      item.append(swatch, name);
+      node.append(item);
+    }
+
+    return node;
+  }
+
+  const plot = document.getElementById("plot");
+  const totals = [];
+
+  GROUPS.forEach(([heading, rows], g) => {
+    const head = el("div", "group-head");
+    head.append(el("div", "name", heading), g === 0 ? key() : el("div"));
+    plot.append(head);
+
+    for (const [shape, ...shares] of rows) {
+      const total = shares.reduce((sum, share) => sum + share, 0);
+
+      // The bar always spans 0–100%, and shares rounded to 0.1 reach 100 within 0.05 each.
+      if (Math.abs(total - 100) > 0.05 * shares.length) {
+        throw new Error(`the ${heading} shares of ${shape} sum to ${total.toFixed(1)}%, not 100%`);
+      }
+
+      const row = el("div", "row");
+      const bar = el("div", "bar");
+      shares.forEach((share, i) => {
+        const part = el("i", undefined, `${share.toFixed(1)}%`);
+        part.style.flex = `${share} 1 0`;
+        part.style.setProperty("--hue", PHASES[i][1]);
+        bar.append(part);
+      });
+      totals.push(total.toFixed(1));
+      row.append(el("div", "label", shape), bar);
+      plot.append(row);
+    }
+  });
+
+  // The title states the first group's combine shares.
+  const [group, groupRows] = GROUPS[0];
+  const combine = groupRows.map(([, , , share]) => Math.round(share));
+  const [least, most] = [Math.min(...combine), Math.max(...combine)];
+  document.getElementById("title-group").textContent = group;
+  document.getElementById("title-range").textContent = least === most ? `${most}%` : `${least}–${most}%`;
+  console.log(`row totals ${totals.join(" ")}`);
+</script>
+</body>
+</html>

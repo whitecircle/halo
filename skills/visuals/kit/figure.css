@@ -1,0 +1,102 @@
+/* The figure kit: colour tokens, fonts, the page skeleton and the type scale every figure shares. A page links
+   it before its own <style>, which holds only what is particular to that figure (and its body's canvas size). */
+
+:root {
+  --bg: #000000;
+  --surface: #0a0a0a;
+  --line: #222222;
+  --heading: #efefef;
+  --text: #ffffff;
+  --body: #c6c9cd;
+  --secondary: #7e8186;
+  --tertiary: #6f6f74;
+  --danger: #ff73c9;
+  --success: #8ce99a;
+
+  /* The Halo palette. Pink and green carry meaning, so categories take blue, violet and indigo first. */
+  --halo-blue: #73bbff;
+  --halo-violet: #c572ff;
+  --halo-indigo: #7287ff;
+  --halo-sand: #ffc572;
+  --halo-coral: #ff8c72;
+
+  --sans: "ABC Monument Grotesk", "ABC Monument Grotesk Variable", Arial, Helvetica, sans-serif;
+  --serif: "ABC Otto", "ABC Otto Variable", Georgia, "Times New Roman", serif;
+
+  /* Spacing shows grouping: a heading sits close to its own rows, groups sit far apart, and the header, the
+     figure and the notes are separated by one block gap. */
+  --heading-gap: 16px;
+  --group-gap: 72px;
+  --block-gap: 56px;
+
+  /* The 1600-wide scale. A 1200-wide page puts class="square" on its body. */
+  --canvas-pad: 52px 64px 48px;
+  --title-size: 67px;
+  --subtitle-size: 27px;
+  --subtitle-gap: 16px;
+  --notes-size: 20px;
+}
+
+.square {
+  --heading-gap: 12px;
+  --group-gap: 54px;
+  --block-gap: 42px;
+  --canvas-pad: 40px 48px 36px;
+  --title-size: 50px;
+  --subtitle-size: 20px;
+  --subtitle-gap: 12px;
+  --notes-size: 15px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { background: var(--bg); }
+
+body {
+  overflow: hidden;
+  color: var(--body);
+  font-family: var(--sans);
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  text-wrap: pretty;
+}
+
+.canvas {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: var(--canvas-pad);
+}
+
+.nw { white-space: nowrap; }
+
+h1 {
+  font-family: var(--serif);
+  font-weight: 400;
+  font-size: var(--title-size);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  color: var(--heading);
+  text-wrap: balance;
+}
+
+.subtitle {
+  margin-top: var(--subtitle-gap);
+  font-size: var(--subtitle-size);
+  line-height: 1.35;
+  color: var(--secondary);
+}
+
+/* The figure and the notes follow the header at one block gap. The canvas grows to fit when the body rule sets
+   only a width. A page that fixes a height instead centres its figure with margin-block: auto. */
+.figure { margin-top: var(--block-gap); }
+
+footer {
+  margin-top: var(--block-gap);
+  font-size: var(--notes-size);
+  line-height: 1.55;
+  color: var(--secondary);
+}
+
+/* A sentence that does not fit moves to the next line whole. */
+footer .s { display: inline-block; }
