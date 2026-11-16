@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Inkling 2 on ``inkling2_relative_flex``: the tiny model's logits and parameter gradients match the eager path on a
 batch whose rows outrun the sliding window and the relative extent and one of which is left-padded; a packed row of
-three documents scores each document as that document alone, in its logits and its gradients; and one Inkling-2-Small
-attention call at 8,192 tokens runs forward and backward faster and in less memory than eager."""
+three documents scores each document as that document alone, in its logits and its gradients; one Inkling-2-Small
+attention call at 8,192 tokens runs forward and backward faster and in less memory than eager; and at 2,048 tokens its
+bf16 gradients are no further from the fp64 eager attention's than the bf16 eager attention's."""
 
 import time
 
@@ -99,6 +100,28 @@ class _Layer(torch.nn.Module):
     training = True
 
 
+def _eager_attention(query, key, value, relative, sinks) -> torch.Tensor:
+    """The eager path of one full-attention call: the dense relative bias gathered per distance, under a causal
+    mask. Returns ``[B, Q, H, D]``."""
+    length, extent = query.shape[2], relative.shape[-1]
+    positions = torch.arange(length, device=query.device)
+    distance = positions[:, None] - positions[None, :]
+    index = distance.clamp(0, extent - 1)[None, None].expand(1, query.shape[1], -1, -1)
+    bias = relative.gather(-1, index).masked_fill((distance < 0) | (distance >= extent), 0.0)
+    causal = torch.full((length, length), float("-inf"), device=query.device, dtype=query.dtype).triu(1)[None, None]
+    out, _ = inkling2_modeling.eager_attention_forward(
+        _Layer(), query, key, value, causal, scaling=query.shape[-1] ** -0.5, position_bias=bias, sinks=sinks
+    )
+    return out
+
+
+def _flex_attention(query, key, value, relative, sinks) -> torch.Tensor:
+    out, _ = inkling2_relative_flex_attention(
+        _Layer(), query, key, value, None, scaling=query.shape[-1] ** -0.5, position_bias=relative, sinks=sinks
+    )
+    return out
+
+
 def _time_and_peak(fn) -> tuple[float, float]:
     fn()
     torch.cuda.synchronize()
@@ -158,6 +181,48 @@ def check_speed_and_memory() -> None:
     assert times["flex"][1] < times["eager"][1], "flex peaks above eager"
 
 
+def check_bf16_against_fp64() -> None:
+    """One full-attention call at Inkling-2-Small's head shape (48 query and 8 KV heads of 128, relative extent 1024),
+    2,048 tokens. The bf16 kernel call takes ``_KERNEL_OPTIONS``, which the fp32 tiny model does not reach."""
+    heads, kv_heads, head_dim, extent, length = 48, 8, 128, 1024, 2048
+    generator = torch.Generator(device=DEV).manual_seed(4)
+    shapes = {
+        "query": (1, heads, length, head_dim),
+        "key": (1, kv_heads, length, head_dim),
+        "value": (1, kv_heads, length, head_dim),
+        "relative": (1, heads, length, extent),
+        "sinks": (1, heads, length, 1),
+    }
+    reference_inputs = {
+        name: torch.randn(*shape, device=DEV, dtype=torch.float64, generator=generator)
+        for name, shape in shapes.items()
+    }
+
+    def output_and_gradients(attention, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+        inputs = {name: tensor.to(dtype).requires_grad_() for name, tensor in reference_inputs.items()}
+        out = attention(**inputs)
+        out.double().square().mean().backward()
+        return {"output": out.detach().double(), **{name: tensor.grad.double() for name, tensor in inputs.items()}}
+
+    reference = output_and_gradients(_eager_attention, torch.float64)
+    errors = {}
+    for label, attention in (("eager", _eager_attention), ("flex", _flex_attention)):
+        got = output_and_gradients(attention, torch.bfloat16)
+        errors[label] = {
+            name: ((got[name] - reference[name]).norm() / reference[name].norm()).item() for name in reference
+        }
+        del got
+    for name in reference:
+        log(f"  bf16 vs fp64, {name}: eager {errors['eager'][name]:.2e}, flex {errors['flex'][name]:.2e}")
+    assert all(torch.isfinite(tensor).all() for tensor in reference.values()), "premise: a finite reference"
+    gradients = [name for name in reference if name != "output"]
+    flex_error, eager_error = (sum(errors[label][name] for name in gradients) for label in ("flex", "eager"))
+    assert flex_error <= eager_error, (
+        f"flex gradients are further from fp64 than eager's: summed relative error {flex_error:.2e} against "
+        f"{eager_error:.2e}"
+    )
+
+
 @gpu_test_main(exact_world_size=1, prefix="inkling2_relative_flex", partial_state=False)
 def run(ctx) -> dict:
     apply_inkling2_patches()
@@ -166,6 +231,7 @@ def run(ctx) -> dict:
     record_check(checks, "matches_eager", check_matches_eager)
     record_check(checks, "packed_documents_stay_apart", check_packed_documents_stay_apart)
     record_check(checks, "speed_and_memory", check_speed_and_memory)
+    record_check(checks, "bf16_against_fp64", check_bf16_against_fp64)
     return {"checks": checks}
 
 

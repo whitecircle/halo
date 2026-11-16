@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import functools
 import math
-from contextvars import ContextVar
 
 import torch
 import torch.nn.functional as F
 import transformers.models.inkling2.modeling_inkling2 as inkling2_modeling
 
 from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
+from halo.models.segment_markers import positions_restart
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
 
 # ``Inkling2TopKRouter``'s renormalization floor.
@@ -22,14 +22,12 @@ UPSTREAM_RELATIVE_LOGITS_FORWARD = inkling2_modeling.Inkling2RelativeLogits.forw
 UPSTREAM_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2ShortConvolution.forward
 UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2DynamicShortConvolution.forward
 
-_ATTENTION_CLASSES = (inkling2_modeling.Inkling2SlidingAttention, inkling2_modeling.Inkling2FullAttention)
 _DECODER_LAYER_CLASSES = (inkling2_modeling.Inkling2SlidingDecoderLayer, inkling2_modeling.Inkling2FullDecoderLayer)
 
-# The ``position_ids`` of the decoder layer running a full-sequence forward (no KV cache). Set per layer call, so a
-# gradient-checkpoint recompute, which calls the layer again, sees it too.
-_LAYER_POSITIONS: ContextVar[torch.Tensor | None] = ContextVar("inkling2_layer_positions", default=None)
-# Set on the forward's ``position_ids``: per kernel size, the convolution taps that cross a document start.
+# Set on the forward's ``position_ids``: per kernel size, the convolution taps that cross a document start, and
+# whether a row restarts.
 _CROSSING_TAPS_ATTR = "_inkling2_crossing_taps"
+_RESTARTS_ATTR = "_inkling2_restarts"
 
 
 def _router_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -47,30 +45,38 @@ def _router_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, to
 def _relative_logits_forward(self, relative_states, query_positions, key_positions):
     """Under ``inkling2_relative_flex``, the ``[batch, heads, q_len, rel_extent]`` logits in place of the dense
     ``[batch, heads, q_len, kv_len]`` bias the eager path adds."""
-    if not getattr(self, "emits_compact_logits", False):
+    # A KV-cache decode step has fewer queries than keys and runs the eager attention.
+    if not getattr(self, "emits_compact_logits", False) or query_positions.shape != key_positions.shape:
         return UPSTREAM_RELATIVE_LOGITS_FORWARD(self, relative_states, query_positions, key_positions)
     # relative_states: [batch, q_len, num_heads, d_rel] -> [batch, num_heads, q_len, rel_extent]
     return (relative_states @ self.proj).transpose(1, 2)
 
 
-def _attention_forward(upstream):
-    @functools.wraps(upstream)
-    def forward(self, *args, **kwargs):
-        self.rel_logits_proj.emits_compact_logits = self.config._attn_implementation == INKLING2_RELATIVE_FLEX
-        return upstream(self, *args, **kwargs)
-
-    return forward
-
-
 def _decoder_layer_forward(upstream):
+    """Sets what the layer's patched modules read for this call: whether the relative logits stay compact, and on each
+    short convolution the ``position_ids`` of a full-sequence forward (None under a KV cache). Set per layer call, so
+    a gradient-checkpoint recompute, which calls the layer again, sets it too."""
+
     @functools.wraps(upstream)
     def forward(self, *args, **kwargs):
+        attention = self.self_attn
+        attention.rel_logits_proj.emits_compact_logits = (
+            attention.config._attn_implementation == INKLING2_RELATIVE_FLEX
+        )
         positions = kwargs.get("position_ids") if kwargs.get("past_key_values") is None else None
-        token = _LAYER_POSITIONS.set(positions)
+        convolutions = (
+            attention.k_sconv,
+            attention.v_sconv,
+            self.post_attention_convolution,
+            self.post_mlp_convolution,
+        )
+        for convolution in convolutions:
+            convolution.document_positions = positions
         try:
             return upstream(self, *args, **kwargs)
         finally:
-            _LAYER_POSITIONS.reset(token)
+            for convolution in convolutions:
+                convolution.document_positions = None
 
     return forward
 
@@ -94,11 +100,26 @@ def crossing_taps(position_ids: torch.Tensor, kernel_size: int) -> tuple[tuple[i
     return cache[kernel_size]
 
 
-def _layer_crossing_taps(hidden_states: torch.Tensor, kernel_size: int) -> tuple[tuple[int, torch.Tensor], ...]:
-    positions = _LAYER_POSITIONS.get()
-    if positions is None or positions.dim() != 2 or positions.shape[0] != 1:
+def _has_restart(position_ids: torch.Tensor) -> bool:
+    restarts = getattr(position_ids, _RESTARTS_ATTR, None)
+    if restarts is None:
+        restarts = positions_restart(position_ids)
+        setattr(position_ids, _RESTARTS_ATTR, restarts)
+    return restarts
+
+
+def _layer_crossing_taps(convolution, hidden_states: torch.Tensor) -> tuple[tuple[int, torch.Tensor], ...]:
+    positions = getattr(convolution, "document_positions", None)
+    if positions is None or positions.dim() != 2:
         return ()
-    taps = crossing_taps(positions, kernel_size)
+    if positions.shape[0] != 1:
+        if _has_restart(positions):
+            raise ValueError(
+                f"position_ids of shape {tuple(positions.shape)} restart inside a row: the short convolutions stop "
+                "their taps at document starts on one [1, N] row only; packed documents run as one [1, N] row."
+            )
+        return ()
+    taps = crossing_taps(positions, convolution.conv_kernel_size)
     if taps and hidden_states.shape[0] != 1:
         raise ValueError(
             f"A batch of {hidden_states.shape[0]} rows shares one position_ids row that restarts; packed documents "
@@ -110,7 +131,7 @@ def _layer_crossing_taps(hidden_states: torch.Tensor, kernel_size: int) -> tuple
 def _short_convolution_forward(self, hidden_states, past_key_values=None, conv_mask=None, **kwargs):
     """On a packed row, the upstream convolution less the taps that reach into the previous document; a row holding
     one document runs the upstream forward."""
-    taps = () if past_key_values is not None else _layer_crossing_taps(hidden_states, self.conv_kernel_size)
+    taps = () if past_key_values is not None else _layer_crossing_taps(self, hidden_states)
     if not taps:
         return UPSTREAM_SHORT_CONVOLUTION_FORWARD(
             self, hidden_states, past_key_values=past_key_values, conv_mask=conv_mask, **kwargs
@@ -133,7 +154,7 @@ def _dynamic_short_convolution_forward(
 ):
     """On a packed row, the upstream convolution with each tap's weight zeroed where it reaches into the previous
     document; a row holding one document runs the upstream forward."""
-    taps = () if past_key_values is not None else _layer_crossing_taps(hidden_states, self.conv_kernel_size)
+    taps = () if past_key_values is not None else _layer_crossing_taps(self, hidden_states)
     if not taps:
         return UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD(
             self, hidden_states, dynamic_input, past_key_values=past_key_values, conv_mask=conv_mask, **kwargs
@@ -145,7 +166,7 @@ def _dynamic_short_convolution_forward(
     dynamic_weights = dynamic_weights.view(batch_size, seq_len, self.num_heads, 1, kernel_size)
     weights = self.static_weight.float().T.view(self.num_heads, -1, kernel_size) + dynamic_weights
     # The tap at lag l reads the token l back, which is in this token's document only while l <= its position.
-    positions = _LAYER_POSITIONS.get()[0]
+    positions = self.document_positions[0]
     reach = positions[:, None] >= torch.arange(kernel_size, device=positions.device)
     weights = weights * reach[None, :, None, None, :]
 
@@ -182,7 +203,5 @@ def apply_inkling2_patches() -> None:
     inkling2_modeling.Inkling2RelativeLogits.forward = _relative_logits_forward
     inkling2_modeling.Inkling2ShortConvolution.forward = _short_convolution_forward
     inkling2_modeling.Inkling2DynamicShortConvolution.forward = _dynamic_short_convolution_forward
-    for cls in _ATTENTION_CLASSES:
-        cls.forward = _attention_forward(cls.forward)
     for cls in _DECODER_LAYER_CLASSES:
         cls.forward = _decoder_layer_forward(cls.forward)

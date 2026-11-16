@@ -591,6 +591,7 @@ def test_every_load_warms_the_kernel_behind_the_fence(monkeypatch):
     monkeypatch.setattr(whole_model, "barrier_on_exit", lambda _: contextlib.nullcontext())
     monkeypatch.setattr(whole_model, "warm_fa4_kernels", lambda *a, **k: None)
     monkeypatch.setattr(whole_model, "warm_flex_sliding_kernels", lambda *a, **k: None)
+    monkeypatch.setattr(whole_model, "warm_inkling2_relative_flex_kernels", lambda *a, **k: None)
     monkeypatch.setattr(
         whole_model, "warm_masked_matmul_kernels", lambda model, *, dtype: warmed.append((model, dtype))
     )

@@ -21,6 +21,7 @@ from halo.model_loading.model_preparation import apply_family_patches, auto_load
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from halo.models.attention.backend_setup import warm_fa4_kernels
+from halo.models.attention.inkling2_relative_flex import warm_inkling2_relative_flex_kernels
 from halo.models.attention.masked_matmul import warm_masked_matmul_kernels
 from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
@@ -173,6 +174,7 @@ def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> Non
     _warm_then_join(
         partial(warm_fa4_kernels, model, dtype=dtype),
         partial(warm_flex_sliding_kernels, model, dtype=dtype),
+        partial(warm_inkling2_relative_flex_kernels, model, dtype=dtype),
         partial(warm_masked_matmul_kernels, model, dtype=dtype),
     )
 
