@@ -151,14 +151,18 @@ def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]
     return _e2m1_codes(blocks, divisor), scales, None
 
 
+def nvfp4_global_scale(amax: torch.Tensor) -> torch.Tensor:
+    """The per-tensor fp32 global scale nvfp4 gives a tensor whose max ``|x|`` is ``amax``. It lifts that amax to
+    ``E4M3_MAX``, as a single absolute scale zeroes any block whose amax is below ``E2M1_MAX x`` half e4m3's smallest
+    subnormal (5.86e-3), where the residual-scaled ``down_proj`` init sits. Rounded up to a power of two, it keeps e4m3
+    rounding invariant, so an EP rank's shard and the gathered tensor dequantize identically, for one bit of the second
+    level's ~4.6 decades. The export plans merged layers' shared scales with it, so it cannot drift from the quantizer."""
+    return torch.exp2(torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / _NVFP4_GLOBAL_SCALE_DIVISOR)))
+
+
 def _nvfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """``blocks`` → (e2m1 code uint8, ``e4m3`` scale, per-tensor fp32 global scale). The global scale lifts the tensor
-    amax to ``E4M3_MAX``, as a single absolute scale zeroes any block whose amax is below ``E2M1_MAX x`` half e4m3's
-    smallest subnormal (5.86e-3), where the residual-scaled ``down_proj`` init sits. Rounded up to a power of two, it
-    keeps e4m3 rounding invariant, so an EP rank's shard and the gathered tensor dequantize identically, for one bit of
-    the second level's ~4.6 decades."""
-    tensor_amax = blocks.abs().amax().clamp(min=_AMAX_FLOOR)
-    global_scale = torch.exp2(torch.ceil(torch.log2(tensor_amax / _NVFP4_GLOBAL_SCALE_DIVISOR)))
+    """``blocks`` → (e2m1 code uint8, ``e4m3`` scale, per-tensor fp32 global scale from :func:`nvfp4_global_scale`)."""
+    global_scale = nvfp4_global_scale(blocks.abs().amax())
     amax = blocks.abs().amax(dim=-1, keepdim=True)
     # Redundant in exact arithmetic; keeps fp rounding from pushing the scale past e4m3's range (NaN).
     scale = (amax / _ELEMENT_MAX["nvfp4"] / global_scale).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)

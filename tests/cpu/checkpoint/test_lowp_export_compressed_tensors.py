@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+from typing import get_args
 from unittest import mock
 
 import pytest
@@ -22,11 +23,18 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from halo.checkpoint.tools import lowp_export
-from halo.checkpoint.tools.lowp_export import BLOCK_SCALED, COMPRESSED_TENSORS, quantize_checkpoint
+from halo.checkpoint.tools.compressed_tensors_layout import (
+    BLOCK_SCALED,
+    COMPRESSED_TENSORS,
+    COMPRESSED_TENSORS_FORMAT,
+    ExportFormat,
+    compressed_tensors_config,
+)
+from halo.checkpoint.tools.lowp_export import quantize_checkpoint
 from halo.kernels.lowp.quantization import fake_quant, quantize_nvfp4
+from halo.kernels.lowp.spec import QuantFormat
 from tests.common.repo import load_script_module
 
-FORMATS = ("mxfp8", "mxfp4", "nvfp4")
 _BLOCKS = 3
 _EXPERTS = 2
 _PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
@@ -139,7 +147,7 @@ def _engine_matches(layer_name: str, targets: list[str]) -> bool:
     )
 
 
-@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_each_format_writes_the_tensors_its_compressor_names(tmp_path, fmt):
     source, saved, _config, _manifest = _export(tmp_path, fmt)
     group = _WEIGHT_ARGS[fmt]["group_size"]
@@ -166,7 +174,7 @@ def test_each_format_writes_the_tensors_its_compressor_names(tmp_path, fmt):
     assert not any(key.endswith(".weight_shape") for key in saved)
 
 
-@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_decoding_by_compressed_tensors_rules_reproduces_the_qat_forward(tmp_path, fmt):
     source, saved, _config, _manifest = _export(tmp_path, fmt)
     for module in _quantized_modules():
@@ -179,7 +187,7 @@ def test_decoding_by_compressed_tensors_rules_reproduces_the_qat_forward(tmp_pat
         )
 
 
-@pytest.mark.parametrize("fmt", FORMATS)
+@pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_config_json_carries_what_compressed_tensors_serializes_for_the_format(tmp_path, fmt):
     _source, _saved, config, manifest = _export(tmp_path, fmt)
     (group,) = config.pop("config_groups").values()
@@ -229,17 +237,46 @@ def test_nvfp4_gate_and_up_decode_under_the_merged_layers_one_global_scale(tmp_p
             )
 
 
-def test_a_pair_that_cannot_share_one_nvfp4_global_scale_exactly_is_refused(tmp_path):
+def test_a_pair_that_cannot_share_one_nvfp4_global_scale_exactly_is_refused_before_any_write(tmp_path):
     """``up_proj`` 2^-16 of ``gate_proj``: under the gate's global scale its block scales fall to e4m3 subnormals and
-    round, which would serve another weight than QAT trained."""
+    round, which would serve another weight than QAT trained. The pre-pass finds it, so no shard is written."""
     ckpt = _weights(blocks=1)
     gate = ckpt["model.layers.0.mlp.gate_proj.weight"]
     ckpt["model.layers.0.mlp.up_proj.weight"] = (gate.float() * 2**-16).to(torch.bfloat16)
     src, out = _write(tmp_path / "src", ckpt), tmp_path / "out"
     with pytest.raises(ValueError, match=r"mlp\.up_proj\.weight.*one nvfp4 global scale.*rounds \d+ of its"):
         quantize_checkpoint(src, str(out), "nvfp4", export_format=COMPRESSED_TENSORS)
-    assert not (out / "config.json").exists()
+    assert not out.exists()
     quantize_checkpoint(src, str(out), "nvfp4", export_format=BLOCK_SCALED)  # Halo's own layout keeps each scale
+
+
+def test_the_header_only_refusals_come_before_the_shared_scale_pass_reads_data(tmp_path):
+    """A fused bank is refused from headers, so the pass that reads the merged partitions' data never runs."""
+    ckpt = _weights(blocks=1)
+    ckpt["model.layers.0.mlp.experts.gate_up_proj"] = torch.randn(_EXPERTS, 64, 256, dtype=torch.bfloat16)
+    src, out = _write(tmp_path / "src", ckpt), tmp_path / "out"
+    with (
+        mock.patch.object(lowp_export, "_merged_global_scales", side_effect=AssertionError("read before refusing")),
+        pytest.raises(ValueError, match="fused 3-D expert bank"),
+    ):
+        quantize_checkpoint(src, str(out), "nvfp4", export_format=COMPRESSED_TENSORS)
+
+
+@pytest.mark.parametrize("fmt", get_args(QuantFormat))
+def test_the_config_equals_compressed_tensors_own_serialization_of_its_preset(fmt):
+    """Where compressed-tensors is installed (the vLLM image, not the training image): its preset for the format,
+    serialized by the library itself, equals what the export writes, so a release that changes a field fails here."""
+    quantization = pytest.importorskip("compressed_tensors.quantization")
+    presets = pytest.importorskip("compressed_tensors.quantization.quant_scheme").PRESET_SCHEMES
+    targets = [r"re:(?:.*\.)?layers\.(?:0)\.mlp\.gate_proj$"]
+    preset = {"mxfp8": "MXFP8", "mxfp4": "MXFP4", "nvfp4": "NVFP4A16"}[fmt]
+    scheme = quantization.QuantizationScheme(targets=targets, format=COMPRESSED_TENSORS_FORMAT[fmt], **presets[preset])
+    expected = quantization.QuantizationConfig(
+        config_groups={"group_0": scheme},
+        format=COMPRESSED_TENSORS_FORMAT[fmt],
+        quantization_status=quantization.QuantizationStatus.COMPRESSED,
+    )
+    assert compressed_tensors_config(fmt, targets) == json.loads(expected.model_dump_json())
 
 
 def test_targets_match_exactly_the_quantized_modules(tmp_path):
@@ -291,6 +328,7 @@ def test_targets_that_reach_an_unquantized_module_are_refused_before_any_write(t
 
 
 def test_an_unknown_export_format_is_refused(tmp_path):
+    assert {BLOCK_SCALED, COMPRESSED_TENSORS} == set(get_args(ExportFormat))
     src = _write(tmp_path / "src", _weights(blocks=1))
     with pytest.raises(ValueError, match="unknown export_format 'gguf'"):
         quantize_checkpoint(src, str(tmp_path / "out"), "mxfp8", export_format="gguf")

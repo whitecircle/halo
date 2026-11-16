@@ -16,12 +16,13 @@ the forward left in bf16; all else is copied unchanged. The ``lowp_*`` scope kno
 back in, as the checkpoint does not carry them."""
 
 import argparse
+from typing import get_args
 
 from halo.checkpoint.tools.lowp_export import (
     DEFAULT_EXCLUDE,
     DEFAULT_EXPORT_FORMAT,
     DEFAULT_INCLUDE,
-    EXPORT_FORMATS,
+    ExportFormat,
     quantize_checkpoint,
 )
 from halo.kernels.lowp.quantization import QUANTIZERS
@@ -67,7 +68,7 @@ def parse_args():
     )
     p.add_argument(
         "--export_format",
-        choices=list(EXPORT_FORMATS),
+        choices=list(get_args(ExportFormat)),
         default=DEFAULT_EXPORT_FORMAT,
         help="On-disk layout: Halo's own block_scaled manifest, or compressed-tensors, which vLLM loads "
         "(per-expert MoE checkpoints only; default: %(default)s).",

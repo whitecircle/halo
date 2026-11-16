@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass, field, replace
 from itertools import groupby
 from operator import itemgetter
+from typing import get_args
 
 import torch
 
@@ -25,10 +26,26 @@ from halo.checkpoint.reading import (
     iter_checkpoint_shard_entries,
     read_checkpoint_config,
 )
+from halo.checkpoint.tools.compressed_tensors_layout import (
+    BLOCK_SCALED,
+    COMPRESSED_TENSORS,
+    COMPRESSED_TENSORS_FORMAT,
+    DEFAULT_EXPORT_FORMAT,
+    ExportFormat,
+    compressed_tensors_config,
+    compressed_tensors_targets,
+    reject_ambiguous_targets,
+)
 from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
 from halo.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
 from halo.kernels.lowp.linear import DENSE_CONTRACTION_AXIS
-from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
+from halo.kernels.lowp.quantization import (
+    FORMAT_BLOCK_SIZE,
+    QUANTIZERS,
+    BlockScaledTensor,
+    dequantize,
+    nvfp4_global_scale,
+)
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, kept_block_indices
 from halo.models.introspection.module_tree import decoder_layer_index, decoder_layer_stack_prefix
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
@@ -60,27 +77,6 @@ _DENSE_PROJECTION = re.compile(rf"\.({'|'.join(MLP_PROJECTIONS)})\.weight$")
 # (gate, up, down) spellings whose gate and up an engine loads as one merged layer: the dense MLP's and each per-expert
 # layout's.
 _MERGED_PAIRS = tuple(dict.fromkeys((MLP_PROJECTIONS, *per_expert_layouts())))
-
-# How the quantized tensors and ``config.json`` are written: Halo's own manifest and key names, or the
-# compressed-tensors layout vLLM's loader reads.
-BLOCK_SCALED, COMPRESSED_TENSORS = "block_scaled", "compressed-tensors"
-EXPORT_FORMATS = (BLOCK_SCALED, COMPRESSED_TENSORS)
-DEFAULT_EXPORT_FORMAT = BLOCK_SCALED
-# compressed-tensors' ``CompressionFormat`` per block-scaled format, and the ``QuantizationArgs`` its MXFP8, MXFP4 and
-# NVFP4A16 presets serialize to (compressed-tensors 0.17.0). MX trains with both GEMM operands quantized, so its
-# activations are declared dynamic; nvfp4 is weight-only, as an engine's W4A4 needs a calibrated static input scale.
-_COMPRESSED_TENSORS_FORMAT = {
-    "mxfp8": "mxfp8-quantized",
-    "mxfp4": "mxfp4-pack-quantized",
-    "nvfp4": "nvfp4-pack-quantized",
-}
-_COMPRESSED_TENSORS_ARGS = {
-    "mxfp8": {"num_bits": 8, "strategy": "group", "scale_dtype": "torch.uint8"},
-    "mxfp4": {"num_bits": 4, "strategy": "group", "scale_dtype": "torch.uint8"},
-    "nvfp4": {"num_bits": 4, "strategy": "tensor_group", "scale_dtype": "torch.float8_e4m3fn"},
-}
-_DYNAMIC_ACTIVATION_FORMATS = ("mxfp8", "mxfp4")
-_TARGET_REGEX_PREFIX = "re:"
 
 
 def _is_expert_weight(name: str, ndim: int) -> bool:
@@ -224,7 +220,7 @@ def _contraction_axis(name: str, tensor: torch.Tensor, fused_expert_axis: int | 
 
 
 def _block_scaled_tensors(
-    name: str, tensor: torch.Tensor, quantized: BlockScaledTensor, export_format: str = BLOCK_SCALED
+    name: str, tensor: torch.Tensor, quantized: BlockScaledTensor, export_format: ExportFormat = BLOCK_SCALED
 ) -> dict[str, torch.Tensor]:
     """The block-scaled entries for ``name``: data, block scales and, for nvfp4, global scale. Halo's own layout adds
     the shape and names every data tensor ``weight_packed``; compressed-tensors has no shape entry, and keeps unpacked
@@ -270,7 +266,7 @@ class _ExportPlan:
     apply_moe_experts: bool
     fused_expert_axis: int | None
     input_dir: str
-    export_format: str = BLOCK_SCALED
+    export_format: ExportFormat = BLOCK_SCALED
     # nvfp4 under compressed-tensors: each merged-layer partition's shared global scale (``_merged_global_scales``).
     merged_global_scales: dict[str, torch.Tensor] = field(default_factory=dict)
 
@@ -353,97 +349,6 @@ def _engine_loadable_modules(plan: _ExportPlan) -> tuple[list[str], list[str]]:
     return quantized, modules
 
 
-def _compressed_tensors_targets(modules: list[str]) -> list[str]:
-    """``re:`` targets naming the quantized ``modules``, one per projection spelling: block indices as an alternation
-    (a ``lowp_keep_*`` window leaves blocks out) and expert indices as ``\\d+``. The decoder stack's own prefix is left
-    open, since an engine roots a composite's text backbone under another name than the checkpoint does."""
-    containers = experts_container_attrs()
-    blocks_by_spelling: dict[tuple[str | None, ...], set[int]] = {}
-    for module in modules:
-        block = decoder_layer_index(module)
-        tail = module if block is None else module[len(decoder_layer_stack_prefix(module)) :]
-        segments = tail.split(".")
-        spelling = tuple(
-            None
-            if block is not None and position == 1
-            else r"\d+"
-            if segment.isdigit() and position > 0 and segments[position - 1] in containers
-            else re.escape(segment)
-            for position, segment in enumerate(segments)
-        )
-        blocks_by_spelling.setdefault(spelling, set())
-        if block is not None:
-            blocks_by_spelling[spelling].add(block)
-    targets = []
-    for spelling, blocks in blocks_by_spelling.items():
-        block_alternation = f"(?:{'|'.join(map(str, sorted(blocks)))})"
-        body = r"\.".join(block_alternation if segment is None else segment for segment in spelling)
-        targets.append(rf"{_TARGET_REGEX_PREFIX}(?:.*\.)?{body}$")
-    return targets
-
-
-def _matches_a_target(module: str, targets: list[str]) -> bool:
-    """vLLM's rule for a ``re:`` target: ``re.match`` against the layer name."""
-    return any(re.match(target[len(_TARGET_REGEX_PREFIX) :], module) for target in targets)
-
-
-def _reject_ambiguous_targets(targets: list[str], quantized: list[str], modules: list[str]) -> None:
-    """Refuse targets that reach a module the export leaves in high precision, which an engine would then build
-    quantized and fail to load (a vision tower spelling its MLP like the text backbone's)."""
-    quantized_set = set(quantized)
-    missed = [module for module in quantized if not _matches_a_target(module, targets)]
-    if missed:
-        raise RuntimeError(f"compressed-tensors targets do not name quantized module(s) {missed[:4]}: {targets}")
-    reached = [module for module in modules if module not in quantized_set and _matches_a_target(module, targets)]
-    if reached:
-        raise ValueError(
-            f"The compressed-tensors targets for this export also match {len(reached)} module(s) it leaves in high "
-            f"precision (first few: {reached[:4]}), so an engine would build them quantized and fail to load their "
-            f"weights. They share a ``layers.<N>...`` spelling with the quantized backbone under another root. "
-            f"Export with --export_format {BLOCK_SCALED}."
-        )
-
-
-def _compressed_tensors_config(fmt: str, targets: list[str]) -> dict:
-    """The ``quantization_config`` compressed-tensors' loaders read: one config group over ``targets``, with the
-    fields ``QuantizationConfig.model_dump_json`` writes."""
-
-    def quantization_args(*, dynamic: bool) -> dict:
-        return {
-            "num_bits": _COMPRESSED_TENSORS_ARGS[fmt]["num_bits"],
-            "type": "float",
-            "symmetric": True,
-            "group_size": FORMAT_BLOCK_SIZE[fmt],
-            "strategy": _COMPRESSED_TENSORS_ARGS[fmt]["strategy"],
-            "block_structure": None,
-            "dynamic": dynamic,
-            "actorder": None,
-            "scale_dtype": _COMPRESSED_TENSORS_ARGS[fmt]["scale_dtype"],
-            "zp_dtype": None,
-            "observer": None if dynamic else "memoryless_minmax",
-            "observer_kwargs": {},
-        }
-
-    compression_format = _COMPRESSED_TENSORS_FORMAT[fmt]
-    return {
-        "config_groups": {
-            "group_0": {
-                "targets": targets,
-                "weights": quantization_args(dynamic=False),
-                "input_activations": quantization_args(dynamic=True) if fmt in _DYNAMIC_ACTIVATION_FORMATS else None,
-                "output_activations": None,
-                "format": compression_format,
-            }
-        },
-        "quant_method": COMPRESSED_TENSORS,
-        "kv_cache_scheme": None,
-        "format": compression_format,
-        "quantization_status": "compressed",
-        "global_compression_ratio": None,
-        "ignore": [],
-    }
-
-
 def _merged_layer_key(name: str) -> str | None:
     """The merged layer an engine loads ``name`` into, for the projections vLLM fuses: a dense MLP's ``gate_proj`` and
     ``up_proj`` (``gate_up_proj``) and an expert's first two per-expert keys (``w13``). None for any other weight."""
@@ -455,19 +360,21 @@ def _merged_layer_key(name: str) -> str | None:
     return None
 
 
-def _nvfp4_global_scale(t: torch.Tensor) -> torch.Tensor:
-    """The global scale ``quantize_nvfp4`` gives ``t``. It depends on the tensor amax alone, so one block holding
-    that amax gets the quantizer's own value without quantizing the whole weight."""
-    probe = torch.zeros(FORMAT_BLOCK_SIZE["nvfp4"], dtype=torch.float32)
-    probe[0] = t.float().abs().max()
-    return QUANTIZERS["nvfp4"](probe).global_scale.cpu()
+def _on_export_device(t: torch.Tensor) -> torch.Tensor:
+    """fp32 on the device the export quantizes on, so the pre-pass computes a global scale the way the write does."""
+    return t.cuda().float() if torch.cuda.is_available() else t.float()
+
+
+def _quantize(t: torch.Tensor, fmt: str, axis: int) -> BlockScaledTensor:
+    return QUANTIZERS[fmt](_on_export_device(t), axis=axis)
 
 
 def _merged_global_scales(plan: _ExportPlan) -> dict[str, torch.Tensor]:
     """Under compressed-tensors, the nvfp4 global scale each merged-layer partition is written with: the largest of its
     partitions'. vLLM decodes a merged layer under one global scale (a dense layer the largest stored divisor, a MoE
     expert its first partition's), so partitions written with their own scales, as the QAT forward quantized them,
-    would decode off by a power of two. Reads each partition's amax ahead of the write."""
+    would decode off by a power of two. Selects from headers, reads only the selected partitions, and quantizes each
+    one the shared scale steps down, so a pair that cannot share one exactly is refused before the output exists."""
     if plan.fmt != "nvfp4" or plan.export_format != COMPRESSED_TENSORS:
         return {}
     block = FORMAT_BLOCK_SIZE[plan.fmt]
@@ -476,21 +383,31 @@ def _merged_global_scales(plan: _ExportPlan) -> dict[str, torch.Tensor]:
         key = _merged_layer_key(name)
         if key is None:
             continue
-        t = reader.get_tensor(name)
-        if not _plan_selects(name, t, plan) or t.dim() != 2 or t.shape[DENSE_CONTRACTION_AXIS] % block != 0:
+        header = torch.empty(reader.get_slice(name).get_shape(), device="meta")
+        if not _plan_selects(name, header, plan) or header.dim() != 2 or header.shape[DENSE_CONTRACTION_AXIS] % block:
             continue
-        groups.setdefault(key, {})[name] = _nvfp4_global_scale(t)
-    shared = {}
+        groups.setdefault(key, {})[name] = nvfp4_global_scale(
+            _on_export_device(reader.get_tensor(name)).abs().amax()
+        ).cpu()
+    shared: dict[str, torch.Tensor] = {}
+    stepped_down: set[str] = set()
     for members in groups.values():
         top = max(members.values(), key=lambda scale: scale.item())
         shared.update(dict.fromkeys(members, top))
+        stepped_down.update(name for name, own in members.items() if not torch.equal(own, top))
+    for _shard, reader, name in iter_checkpoint_shard_entries(plan.input_dir):
+        if name in stepped_down:
+            _share_global_scale(
+                name, _quantize(reader.get_tensor(name), plan.fmt, DENSE_CONTRACTION_AXIS), shared[name]
+            )
     return shared
 
 
 def _share_global_scale(name: str, q: BlockScaledTensor, shared: torch.Tensor) -> tuple[BlockScaledTensor, bool]:
     """``q`` re-expressed under ``shared``, a power of two at least its own global scale: the block scales step down by
     the ratio and the codes stay. Exact while every stepped-down scale is an e4m3 value; one that is not would decode to
-    another weight than the QAT forward used, so it raises before the index and config are written."""
+    another weight than the QAT forward used, so it raises. ``_merged_global_scales`` runs it on every partition it
+    steps down, so the refusal comes before the output directory exists."""
     shared = shared.to(q.global_scale.device)
     if torch.equal(q.global_scale, shared):
         return q, False
@@ -524,7 +441,7 @@ def _export_shard(entries, plan: _ExportPlan, tally: _ExportTally, *, verify: bo
             out_tensors[name] = t  # contraction axis not block-divisible; leave high precision
             tally.skipped.append(name)
             continue
-        q = QUANTIZERS[plan.fmt](t.cuda().float() if torch.cuda.is_available() else t.float(), axis=axis)
+        q = _quantize(t, plan.fmt, axis)
         if name in plan.merged_global_scales:
             q, rescaled = _share_global_scale(name, q, plan.merged_global_scales[name])
             tally.rescaled += rescaled
@@ -567,16 +484,19 @@ def _write_manifest(
     names: list[str],
     weight_axes: dict[str, int],
     scope: dict,
+    export_format: ExportFormat,
     targets: list[str] | None = None,
 ) -> None:
-    """Copy every non-weight file and write a ``quantization_config.json`` describing the block-scaled scheme.
-    ``targets`` selects the compressed-tensors layout: ``config.json`` then carries the config its loaders read, and
-    the manifest stays in the sidecar for Halo's tools and a re-export."""
-    compressed_tensors = targets is not None
+    """Copy every non-weight file and write a ``quantization_config.json`` describing the block-scaled scheme. Under
+    compressed-tensors, ``config.json`` carries the config its loaders read over ``targets`` instead, and the manifest
+    stays in the sidecar for Halo's tools and a re-export."""
+    compressed_tensors = export_format == COMPRESSED_TENSORS
+    if compressed_tensors and not targets:
+        raise RuntimeError("a compressed-tensors export needs the targets naming its quantized modules")
     copy_checkpoint_aux_files(input_dir, output_dir)
     lowp_precision = next(precision for precision, recipe in LOWP_RECIPES.items() if recipe.quant_format == fmt)
     manifest = {
-        "quant_method": "block_scaled",
+        "quant_method": BLOCK_SCALED,
         "format": fmt,
         "weight_dtype": "float8_e4m3fn" if fmt == "mxfp8" else "uint8_packed_e2m1",
         "scale_dtype": "uint8_e8m0" if fmt in ("mxfp8", "mxfp4") else "float8_e4m3fn",
@@ -585,7 +505,7 @@ def _write_manifest(
         # 3-D fused experts differ by family, so a loader reads the axis per weight, falling back to contraction_axis.
         "weight_axes": weight_axes,
         "layout": (
-            f"{COMPRESSED_TENSORS} {_COMPRESSED_TENSORS_FORMAT[fmt]} "
+            f"{COMPRESSED_TENSORS} {COMPRESSED_TENSORS_FORMAT[fmt]} "
             f"({'weight' if fmt == 'mxfp8' else 'weight_packed'} / weight_scale)"
             if compressed_tensors
             else "block-scaled (weight_packed / weight_scale / weight_shape)"
@@ -612,7 +532,7 @@ def _write_manifest(
     # config vLLM loads.
     config = read_checkpoint_config(output_dir, missing_ok=True)
     if config is not None:
-        config["quantization_config"] = _compressed_tensors_config(fmt, targets) if compressed_tensors else manifest
+        config["quantization_config"] = compressed_tensors_config(fmt, targets) if compressed_tensors else manifest
         write_config_json(output_dir, config)
 
 
@@ -628,10 +548,10 @@ def quantize_checkpoint(
     keep_first_blocks: int = LowpSpec.keep_first_blocks,
     keep_last_blocks: int = LowpSpec.keep_last_blocks,
     verify: bool = False,
-    export_format: str = DEFAULT_EXPORT_FORMAT,
+    export_format: ExportFormat = DEFAULT_EXPORT_FORMAT,
 ) -> None:
-    if export_format not in EXPORT_FORMATS:
-        raise ValueError(f"unknown export_format {export_format!r} (expected one of {list(EXPORT_FORMATS)})")
+    if export_format not in get_args(ExportFormat):
+        raise ValueError(f"unknown export_format {export_format!r} (expected one of {list(get_args(ExportFormat))})")
     inc, exc = re.compile(include), re.compile(exclude)
     reject_in_place_conversion(input_dir, output_dir)
 
@@ -654,12 +574,13 @@ def quantize_checkpoint(
         fmt, inc, exc, kept_blocks, apply_dense_mlp, apply_moe_experts, fused_expert_axis, input_dir, export_format
     )
     _reject_empty_export(plan)
-    plan = replace(plan, merged_global_scales=_merged_global_scales(plan))
     targets = None
     if export_format == COMPRESSED_TENSORS:
         engine_modules, weight_modules = _engine_loadable_modules(plan)
-        targets = _compressed_tensors_targets(engine_modules)
-        _reject_ambiguous_targets(targets, engine_modules, weight_modules)
+        targets = compressed_tensors_targets(engine_modules)
+        reject_ambiguous_targets(targets, engine_modules, weight_modules)
+    # After the header-only refusals, since it reads the merged partitions' data.
+    plan = replace(plan, merged_global_scales=_merged_global_scales(plan))
     tally = _ExportTally()
     os.makedirs(output_dir, exist_ok=True)
     # Grouping the walk's entries by shard carries the input's shard layout into the output, one file per input file.
@@ -695,5 +616,7 @@ def quantize_checkpoint(
         "kept_blocks": sorted(kept_blocks),
     }
     block = FORMAT_BLOCK_SIZE[fmt]
-    _write_manifest(input_dir, output_dir, fmt, block, tally.quantized, tally.weight_axes, scope, targets)
+    _write_manifest(
+        input_dir, output_dir, fmt, block, tally.quantized, tally.weight_axes, scope, export_format, targets
+    )
     _log_export(tally, fmt, verify=verify)
