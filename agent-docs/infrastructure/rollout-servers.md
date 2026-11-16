@@ -437,7 +437,9 @@ tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/ob
 
 **Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py` on
 `halo:vllm-0.32.0` and `docker/vllm/verify_topp_budget_cut.py` on the Inkling 2 tag,
-`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the patches, the transformers/tokenizers pins,
+`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the engine build each tag pins (`vllm.__version__`), that
+Model Runner V2 is the runner the engine starts (the switch on `halo:vllm-0.32.0`; no V1 runner on the Inkling 2
+tag), the patches, the transformers/tokenizers pins,
 the `ncclUniqueId` pickle shim, the weight-transfer wire (init and update request fields, the packed
 chunk boundary, the routes), that `/pause` accepts `mode=keep` and resets the prefix cache under it,
 that split top-p keeps a budget-cut row whole while masking an ordinary row as upstream does,

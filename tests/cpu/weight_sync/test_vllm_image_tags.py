@@ -58,6 +58,20 @@ def test_each_tag_carries_its_own_engine_specifics():
     assert "\nFROM engine-${VLLM_ENGINE} AS " in DOCKERFILE
 
 
+def test_the_build_asserts_the_engine_build_of_the_tag_it_builds():
+    """``inkling-2-small`` is a moving upstream tag: the base is pinned by digest and the build checks the version."""
+    assert re.fullmatch(r"vllm/vllm-openai@sha256:[0-9a-f]{64}", _arg("VLLM_INKLING2_BASE"))
+    assert _arg("VLLM_INKLING2_BUILD").startswith(f"{_arg('VLLM_INKLING2_VERSION')}+"), "the tag is another build's"
+    assert "FROM ${VLLM_INKLING2_BASE} AS engine-inkling2" in DOCKERFILE
+    assert "FROM vllm/vllm-openai:v${VLLM_VERSION} AS engine-release" in DOCKERFILE
+    runs = re.findall(r"^RUN (?:.*\\\n)*.*$", DOCKERFILE, re.MULTILINE)
+    [verify] = [step for step in runs if "verify_image.py" in step]
+    assert 'release) build="${VLLM_VERSION}"' in verify and 'inkling2) build="${VLLM_INKLING2_BUILD}"' in verify
+    assert 'python3 /tmp/verify_image.py "${VLLM_ENGINE}" "${build}"' in verify
+    script = (REPO_ROOT / "docker/vllm/verify_image.py").read_text(encoding="utf-8")
+    assert "    check_engine_build(pinned_build)\n" in script and "    check_model_runner_v2,\n" in script
+
+
 @pytest.mark.parametrize("guard_shipped", [True, False], ids=["release", "inkling2"])
 def test_sitecustomize_applies_the_split_guard_only_where_the_image_ships_it(monkeypatch, guard_shipped):
     """The hook table is one file for both tags; the guard's row follows the file the release stage copies."""

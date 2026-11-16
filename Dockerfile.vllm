@@ -12,10 +12,12 @@
 # Which tag this build is: release or inkling2.
 ARG VLLM_ENGINE=release
 ARG VLLM_VERSION=0.32.0
-# vLLM's Inkling 2 build: vLLM main with the Inkling 2 model (vllm-project/vllm#67325). VLLM_INKLING2_VERSION is
-# the version the engine reports, which tags the image.
+# vLLM's Inkling 2 build: vLLM main with the Inkling 2 model (vllm-project/vllm#67325). The engine reports
+# VLLM_INKLING2_BUILD, which the build asserts, and VLLM_INKLING2_VERSION tags the image. The base is upstream's
+# inkling-2-small tag at the digest below, since that tag moves.
 ARG VLLM_INKLING2_VERSION=0.1.dev25249
-ARG VLLM_INKLING2_BASE=vllm/vllm-openai:inkling-2-small
+ARG VLLM_INKLING2_BUILD=0.1.dev25249+gb974b306f
+ARG VLLM_INKLING2_BASE=vllm/vllm-openai@sha256:a710ed3b5eba4e205fa1904cae57444446ead088bac575423f9b4a392a9a80a5
 
 FROM vllm/vllm-openai:v${VLLM_VERSION} AS engine-release
 LABEL org.opencontainers.image.description="vLLM 0.32.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
@@ -120,11 +122,15 @@ RUN python3 /tmp/nccl_pin.py /tmp/uv.lock --verify && rm /tmp/uv.lock /tmp/nccl_
 COPY docker/vllm/parity /tmp/parity
 RUN python3 /tmp/parity/check.py /tmp/parity && rm -rf /tmp/parity
 
-# The stack pins, the runtime patches and the weight-sync contracts (docker/vllm/verify_image.py names
-# why each matters): an upstream change fails the build instead of hanging a group or reverting a sync.
+# The engine build, Model Runner V2, the stack pins, the runtime patches and the weight-sync contracts
+# (docker/vllm/verify_image.py names why each matters): an upstream change fails the build instead of hanging a
+# group or reverting a sync.
 ARG VLLM_ENGINE
+ARG VLLM_VERSION
+ARG VLLM_INKLING2_BUILD
 COPY docker/vllm/verify_image.py /tmp/verify_image.py
-RUN python3 /tmp/verify_image.py "${VLLM_ENGINE}" && rm /tmp/verify_image.py
+RUN case "${VLLM_ENGINE}" in release) build="${VLLM_VERSION}" ;; inkling2) build="${VLLM_INKLING2_BUILD}" ;; esac \
+    && python3 /tmp/verify_image.py "${VLLM_ENGINE}" "${build}" && rm /tmp/verify_image.py
 
 # Split top-p on a budget-cut row (the release tag's guard patch, the Inkling 2 build's own pipeline), and both
 # parser plugins with the budget they drive, on the Triton interpreter (no GPU here); they import vLLM, so no test

@@ -242,7 +242,9 @@ job, so there is no separate `-efa` tag. The launch env per fabric:
 `lmsysorg/sglang:v0.5.22`, each with the `uv.lock` NCCL, the EFA userspace and the weight-sync patches
 asserted at build. `halo:vllm-0.1.dev25249` is the same `Dockerfile.vllm` over vLLM's Inkling 2 build, vLLM main
 with the Inkling 2 model ([vllm-project/vllm#67325](https://github.com/vllm-project/vllm/pull/67325)); it serves
-Inkling 2 and no other family ([Inkling 2](../models/inkling2.md#rollouts)). Each pins its own torch and
+Inkling 2 and no other family ([Inkling 2](../models/inkling2.md#rollouts)). Its base is upstream's
+`vllm/vllm-openai:inkling-2-small`, a moving tag, pinned by digest, and the build asserts the engine reports
+`0.1.dev25249+gb974b306f`. Each pins its own torch and
 transformers, so the trainer never imports either
 engine. Their compose files require one host path each, with no fallback: `HALO_SCRATCH` for
 `docker-compose.vllm.yml` (even to start the server alone) and `SGLANG_MODEL_DIR` for

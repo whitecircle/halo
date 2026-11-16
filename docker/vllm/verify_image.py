@@ -4,14 +4,16 @@ weight-sync client relies on (the Triton-interpreter checks live beside their pa
 No test suite can run these: they import vLLM, which the training image does not have (ABI-incompatible
 stacks), so the image build is the only gate. Each check fails the build on an upstream change that would
 otherwise surface as a hung group, a silently reverted sync or a wrong serve-time result. ``Dockerfile.vllm`` passes
-the tag it builds:
+the tag it builds and the engine build that tag pins:
 
-    python3 verify_image.py release
-    python3 verify_image.py inkling2
+    python3 verify_image.py release 0.32.0
+    python3 verify_image.py inkling2 0.1.dev25249+gb974b306f
 """
 
 import asyncio
 import dataclasses
+import importlib
+import importlib.util
 import inspect
 import sys
 import typing
@@ -56,12 +58,21 @@ ENGINE = RELEASE
 # Request fields the Inkling 2 build declares beyond the release's; the client sends none of them.
 INKLING2_INIT_FIELDS = {"use_load_plan", "metadata"}
 INKLING2_UPDATE_FIELDS = {"src"}
+RUNNER_SWITCH = "VLLM_USE_V2_MODEL_RUNNER"
+V1_RUNNER_MODULE = "vllm.v1.worker.gpu_model_runner"
+V2_RUNNER_MODULE = "vllm.v1.worker.gpu.model_runner"
 SPLIT_GUARD_PATCH = "vllm_topp_split_guard_patch"
+
+
+def check_engine_build(build: str) -> None:
+    """The engine is the build this tag pins: the client refuses an identity row that names another one, and the
+    Inkling 2 base is a development build with no release number to tell two of them apart."""
+    assert vllm.__version__ == build, f"the base image runs vLLM {vllm.__version__}, and this tag pins {build}"
+    print(f"vLLM: {vllm.__version__} ({ENGINE})")
 
 
 def check_engine_stack() -> None:
     """transformers and tokenizers stay at the base image's own, inside the range vLLM declares."""
-    print(f"vLLM: {vllm.__version__} ({ENGINE})")
     reqs = [r for r in map(Requirement, requires("vllm")) if r.name in ("transformers", "tokenizers")]
     bad = [
         f"{r.name} {version(r.name)} not in {r.specifier}"
@@ -195,6 +206,30 @@ def check_serve_flags() -> None:
     print("serve flags: OK")
 
 
+def check_model_runner_v2() -> None:
+    """Model Runner V2 is the runner the engine starts: it enforces thinking budgets (the completion patch targets its
+    sampler), and it is the only runner R3 capture runs on. The release ships both runners behind a switch, which the
+    image's ENV holds at V2; the Inkling 2 build ships V2 alone."""
+    if RUNNER_SWITCH in envs.environment_variables:
+        assert getattr(envs, RUNNER_SWITCH) is True, f"{RUNNER_SWITCH} selects the V1 runner in this image"
+    else:
+        assert importlib.util.find_spec(V1_RUNNER_MODULE) is None, (
+            f"the engine ships the V1 runner ({V1_RUNNER_MODULE}) with no {RUNNER_SWITCH} to pin V2 by"
+        )
+    assert (RUNNER_SWITCH in envs.environment_variables) == (ENGINE == RELEASE), (
+        f"{RUNNER_SWITCH} is declared on the Inkling 2 build or gone from the release"
+    )
+    runner = importlib.import_module(V2_RUNNER_MODULE)
+    assert ThinkingBudgetState.__module__.startswith(f"{runner.__package__}."), (
+        "the thinking-budget state the completion patch targets is not Model Runner V2's"
+    )
+    worker = importlib.import_module("vllm.v1.worker.gpu_worker")
+    assert f"from {V2_RUNNER_MODULE} import GPUModelRunner" in inspect.getsource(worker), (
+        "the GPU worker does not build Model Runner V2"
+    )
+    print("Model Runner V2: OK")
+
+
 def check_image_identity() -> None:
     """``/server_info`` names the patches, on the route the trainer reads, or it refuses this image as upstream. The
     split top-p guard is the release tag's alone."""
@@ -296,6 +331,7 @@ CHECKS = (
     check_weight_transfer_wire_contract,
     check_thinking_budget_patches,
     check_serve_flags,
+    check_model_runner_v2,
     check_image_identity,
     check_tool_calling_grammar_off,
     check_pause_keep_clears_cache,
@@ -303,7 +339,8 @@ CHECKS = (
 
 
 if __name__ == "__main__":
-    (ENGINE,) = sys.argv[1:]
+    ENGINE, pinned_build = sys.argv[1:]
     assert ENGINE in (RELEASE, INKLING2), f"unknown engine {ENGINE!r}"
+    check_engine_build(pinned_build)
     for check in CHECKS:
         check()
