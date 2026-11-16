@@ -38,9 +38,10 @@ _FOLDED_OUTPUT_CLASSES = {
 _FOLDED_MODEL_OUTPUTS = (BaseModelOutputWithPast, MoeModelOutputWithPast)
 
 
-def supply_folded_output_classes() -> None:
+def ensure_folded_output_classes() -> None:
     """Bind each missing name to its generic output, and a ``None`` ``rope_deltas`` to each model output without one;
-    what liger-kernel or transformers still define is left alone."""
+    what liger-kernel or transformers still define is left alone. Idempotent; run before an upstream applier, which
+    imports its fused forward when called."""
     for name, generic in _FOLDED_OUTPUT_CLASSES.items():
         if not hasattr(output_classes, name):
             setattr(output_classes, name, generic)
