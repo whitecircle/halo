@@ -738,5 +738,69 @@ def test_a_launch_without_numa_binding_is_unchanged(tmp_path, launcher, expected
     ]
 
 
+def test_rollout_backend_flag_sets_the_sandbox_backend_for_the_launched_process(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_config(tmp_path / "cfg.yaml")
+    envs: list[dict[str, str]] = []
+    _, argvs = stub_exec(monkeypatch, envs)
+    monkeypatch.delenv("HALO_SANDBOX_BACKEND", raising=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "launch",
+            "grpo/environmental",
+            "cfg.yaml",
+            "-n",
+            "4",
+            "--halo-rollout-backend",
+            "baseten",
+            "--root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["HALO_SANDBOX_BACKEND"] == "baseten"
+    assert argvs[0][:2] == ["torchrun", "--nproc_per_node=4"]
+    assert "HALO_SANDBOX_BACKEND" not in os.environ
+
+
+def test_rollout_backend_flag_reaches_tools_and_dry_run(tmp_path):
+    write_script(tmp_path / "scripts/environments/inference/eval_code_contests.py")
+
+    result = runner.invoke(
+        app, ["run", "eval-code-contests", "--halo-rollout-backend", "baseten", "--dry_run", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("HALO_SANDBOX_BACKEND=baseten ")
+
+
+def test_without_the_flag_the_sandbox_backend_is_left_alone(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "cfg.yaml")
+    envs: list[dict[str, str]] = []
+    stub_exec(monkeypatch, envs)
+    monkeypatch.delenv("HALO_SANDBOX_BACKEND", raising=False)
+
+    result = runner.invoke(app, ["launch", "sft", "cfg.yaml", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "HALO_SANDBOX_BACKEND" not in envs[0]
+
+
+def test_unknown_rollout_backend_is_refused(tmp_path):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "cfg.yaml")
+
+    result = runner.invoke(
+        app, ["launch", "sft", "cfg.yaml", "--halo-rollout-backend", "nope", "--dry_run", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "HALO_SANDBOX_BACKEND" not in result.stdout
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

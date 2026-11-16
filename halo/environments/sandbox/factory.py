@@ -6,6 +6,7 @@ from collections.abc import Hashable
 
 from halo.env import env_str
 from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.baseten import BasetenSandbox
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
@@ -23,6 +24,13 @@ def build_sandbox(
 ) -> SandboxExecutor:
     backend = (backend or env_str("HALO_SANDBOX_BACKEND") or "local").lower()
     url = url or env_str("HALO_SANDBOX_URL")
+    if backend == "baseten":
+        if url:
+            # A url meant for a SandboxFusion service would receive the Baseten credentials.
+            raise ValueError(
+                f"the baseten sandbox backend takes no url, but one is set ({url!r}); unset HALO_SANDBOX_URL"
+            )
+        return BasetenSandbox(**kwargs)
     if backend != "remote" and url:
         # Ignoring a url would run model-generated code in the training container, not the expected sandbox service.
         raise ValueError(
@@ -39,7 +47,7 @@ def build_sandbox(
         if not url:
             raise ValueError("remote sandbox requires a url (pass url= or set HALO_SANDBOX_URL)")
         return RemoteSandbox(url, **kwargs)
-    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local', 'bubblewrap', or 'remote')")
+    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local', 'bubblewrap', 'remote', or 'baseten')")
 
 
 def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:
