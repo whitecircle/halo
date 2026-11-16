@@ -211,6 +211,8 @@ class FakeVLLMServer(FakeEngineServer):
     def __init__(self):
         super().__init__()
         self.version = self.VERSION
+        # The image's identity row on /server_info, reported while ``toolkit_image`` is set.
+        self.identity = f"{VLLMWeightSyncClient.IMAGE.build}|vllm_layerwise_reload_patch"
         self.update_open = False
         self.world_size = 1
         self.pp_size = 1
@@ -232,7 +234,7 @@ class FakeVLLMServer(FakeEngineServer):
         if (method, path) == ("GET", "/server_info"):
             env = {"VLLM_ENFORCE_STRICT_TOOL_CALLING": self.strict_tool_calling}
             if self.toolkit_image:
-                env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
+                env["VLLM_HALO_PATCHES"] = self.identity
             config = {
                 **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},

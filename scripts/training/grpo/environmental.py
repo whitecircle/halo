@@ -76,6 +76,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.introspection.config_access import config_model_types
 from halo.models.introspection.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
@@ -165,6 +166,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         weight_precision=async_config.rollout_weight_precision,
         candidate_logprobs=async_config.score_centering_top_k or 0,
         pushes_base=not (async_config.rollout_adapter_sync and base_push_refusal(model) is not None),
+        model_types=config_model_types(model.config),
     )
 
 

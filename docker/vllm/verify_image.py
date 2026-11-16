@@ -231,12 +231,18 @@ def check_model_runner_v2() -> None:
 
 
 def check_image_identity() -> None:
-    """``/server_info`` names the patches, on the route the trainer reads, or it refuses this image as upstream. The
-    split top-p guard is the release tag's alone."""
-    listed = _get_vllm_env_vars().get(identity_patch.IDENTITY_KEY, "").split(",")
-    assert "vllm_layerwise_reload_patch" in listed, f"/server_info lists {listed!r} as the image's patches"
-    assert (SPLIT_GUARD_PATCH in listed) == (ENGINE == RELEASE), f"/server_info lists {listed!r} on the {ENGINE} tag"
-    print(f"image identity on /server_info: OK ({','.join(listed)})")
+    """``/server_info`` names the engine build and the patches, on the route the trainer reads, or it refuses this
+    image as upstream. The split top-p guard is the release tag's alone."""
+    listed = _get_vllm_env_vars().get(identity_patch.IDENTITY_KEY, "")
+    build, _, patches = listed.partition("|")
+    assert build == vllm.__version__, f"/server_info names engine build {build!r}, not {vllm.__version__!r}"
+    assert "vllm_layerwise_reload_patch" in patches.split(","), (
+        f"/server_info lists {patches!r} as the image's patches"
+    )
+    assert (SPLIT_GUARD_PATCH in patches.split(",")) == (ENGINE == RELEASE), (
+        f"/server_info lists {patches!r} on the {ENGINE} tag"
+    )
+    print(f"image identity on /server_info: OK ({listed})")
 
 
 def check_tool_calling_grammar_off() -> None:

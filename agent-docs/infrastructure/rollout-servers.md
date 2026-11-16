@@ -417,9 +417,10 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
   and the engine samples token 0 and reports a NaN log-prob. It ships on `halo:vllm-0.32.0` alone: the Inkling 2
   build's pipeline keeps the forced token, which that tag's build asserts.
 
-- **Image identity** (`vllm_image_identity_patch.py`) lists these patches as `VLLM_HALO_PATCHES` on `/server_info`,
-  where the trainer refuses a server without it ([Startup preflight](#startup-preflight)). It lands only where
-  `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
+- **Image identity** (`vllm_image_identity_patch.py`) lists the engine build and these patches as `VLLM_HALO_PATCHES`
+  on `/server_info` (`<vllm.__version__>|<patch>,<patch>,...`), where the trainer refuses a server without it, or
+  with a build other than the one its family's tag pins ([Startup preflight](#startup-preflight)). It lands only
+  where `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
 
 **Build-time source edits** (`docker/vllm/patches/patch_vllm_source.py`, through
 `docker/engine_source_patch.py`, the patcher the SGLang image shares) turn vLLM's harmony pipeline off
@@ -559,7 +560,8 @@ server that does not answer is logged as unread.
 
 | Refused | Because |
 |---|---|
-| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, or one naming a build neither vLLM tag pins; no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A vLLM server on the other tag: Inkling 2 on `halo:vllm-0.32.0`, any other family on `halo:vllm-0.1.dev25249` (`FAMILY_IMAGES` on the client) | The release has no Inkling 2 model, and no other family has run on the Inkling 2 build. The refusal names the tag and the `make` target that serve the family |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
 | A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
 | Servers of a `single_group` run that serve different models or launch flags | One broadcast reaches all of them, and each would load it differently |
@@ -676,9 +678,13 @@ The same Dockerfile builds a second tag, `halo:vllm-0.1.dev25249` (`make build-v
 ships it, LoRA on its NVFP4/MXFP8 experts) and sets `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`; it carries no split
 top-p guard and no runner pin. Every other family is served from `halo:vllm-0.32.0`.
 
-The client reads `GET /version` and refuses a server older than 0.32.0 or one that reports no version:
-the packed-transfer geometry (`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) rides
-`/init_weight_transfer_engine`, which older engines refuse. No newer release is validated.
+The client takes a server as the toolkit's image where its identity row names the engine build one of the two tags
+pins (`IMAGE`, `FAMILY_IMAGES` on `VLLMWeightSyncClient`; each build asserts its own). A weight-sync group forms
+only with `halo:vllm-0.32.0`: a row naming another build, the Inkling 2 tag's among them, is refused before any
+join, and Inkling 2 forms no group. A server with no such row is read through `GET /version` first, and the client
+refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry (`packed`,
+`packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which older engines refuse.
+No other engine build is validated.
 
 ### Config-schema parity
 

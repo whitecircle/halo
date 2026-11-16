@@ -1,19 +1,29 @@
 #!/usr/bin/env python
 """``Dockerfile.vllm`` builds two tags: vLLM's release for every family but Inkling 2, and vLLM's Inkling 2 build for
-Inkling 2 alone."""
+Inkling 2 alone. The client pins each tag's engine build, the image names its build on ``/server_info``, and a family
+on the other tag is refused before training."""
 
+import ast
 import importlib.util
 import re
 import sys
+import types
 
 import pytest
 
+from halo.models.moe.family_specs import INKLING2
+from halo.trainers.grpo.rollout.engine_preflight import ServerRequirements, verify_server_flags
+from halo.weight_sync.clients.base import EngineImage
+from halo.weight_sync.clients.vllm import _IDENTITY_KEY, VLLMWeightSyncClient
+from tests.common.fake_engines import FakeVLLMServer
 from tests.common.repo import REPO_ROOT, load_script_module
 
 DOCKERFILE = (REPO_ROOT / "Dockerfile.vllm").read_text(encoding="utf-8")
 MAKEFILE = (REPO_ROOT / "Makefile").read_text(encoding="utf-8")
 PATCHES_DIR = REPO_ROOT / "docker/vllm/patches"
 SPLIT_GUARD = "vllm_topp_split_guard_patch"
+RELEASE, INKLING2_TAG = VLLMWeightSyncClient.IMAGE, VLLMWeightSyncClient.INKLING2_IMAGE
+PATCHES = "vllm_layerwise_reload_patch"
 
 
 def _arg(name: str) -> str:
@@ -25,6 +35,28 @@ def _stage(name: str) -> str:
     """The instructions of one build stage, up to the next ``FROM``."""
     [body] = re.findall(rf"^FROM \S+ AS {re.escape(name)}\n(.*?)(?=^FROM )", DOCKERFILE, re.MULTILINE | re.DOTALL)
     return body
+
+
+@pytest.fixture
+def server():
+    fake = FakeVLLMServer()
+    yield fake
+    fake.close()
+
+
+def test_the_client_pins_the_tags_and_builds_the_dockerfile_builds():
+    """A client pin that drifts from the build's refuses the image the Makefile builds."""
+    assert EngineImage(f"halo:vllm-{_arg('VLLM_VERSION')}", _arg("VLLM_VERSION"), "make build-vllm") == RELEASE
+    assert (
+        EngineImage(
+            f"halo:vllm-{_arg('VLLM_INKLING2_VERSION')}", _arg("VLLM_INKLING2_BUILD"), "make build-vllm-inkling2"
+        )
+        == INKLING2_TAG
+    )
+    assert f"vLLM {RELEASE.build}" == VLLMWeightSyncClient.ENGINE_RELEASE
+    for image in (RELEASE, INKLING2_TAG):
+        target = image.make_target.removeprefix("make ")
+        assert re.search(rf"^{target}:", MAKEFILE, re.MULTILINE), f"the Makefile has no {target} target"
 
 
 @pytest.mark.parametrize(
@@ -91,6 +123,93 @@ def test_sitecustomize_applies_the_split_guard_only_where_the_image_ships_it(mon
     assert (SPLIT_GUARD in hooks._PATCHES.values()) is guard_shipped
     assert "vllm_layerwise_reload_patch" in hooks._PATCHES.values()
     assert (PATCHES_DIR / f"{SPLIT_GUARD}.py").is_file()
+
+
+@pytest.mark.parametrize("image", [RELEASE, INKLING2_TAG], ids=["release", "inkling2"])
+def test_the_identity_row_the_image_writes_is_the_build_the_client_reads(monkeypatch, server, image):
+    """The row is ``<vllm.__version__>|<patches>``; a format the client parses another way refuses every server."""
+    envs = types.ModuleType("vllm.envs")
+    envs.environment_variables = {}
+    engine = types.ModuleType("vllm")
+    engine.__version__, engine.envs = image.build, envs
+    monkeypatch.setitem(sys.modules, "vllm", engine)
+    monkeypatch.setitem(sys.modules, "vllm.envs", envs)
+    hooks = types.SimpleNamespace(_PATCHES={"vllm.envs": "vllm_image_identity_patch", "vllm.reload": PATCHES})
+    monkeypatch.setitem(sys.modules, "sitecustomize", hooks)
+    patch = load_script_module("docker/vllm/patches/vllm_image_identity_patch.py")
+    assert patch.IDENTITY_KEY == _IDENTITY_KEY
+
+    patch.apply()
+    server.identity = envs.environment_variables[_IDENTITY_KEY]()
+
+    assert server.identity == f"{image.build}|vllm_image_identity_patch,{PATCHES}"
+    flags = VLLMWeightSyncClient(base_url=server.url).read_server_flags()
+    assert (flags.toolkit_image, flags.engine_build) == (True, image.build)
+
+
+@pytest.mark.parametrize("identity", [PATCHES, f"|{PATCHES}", f"{RELEASE.build}|", f"0.26.0|{PATCHES}"])
+def test_a_row_without_a_pinned_build_is_no_toolkit_image(server, identity):
+    """The row's presence proves nothing: it names a build one of the two tags pins, with its patches."""
+    server.identity = identity
+    assert VLLMWeightSyncClient(base_url=server.url).read_server_flags().toolkit_image is False
+
+
+def _verify(server, model_types) -> None:
+    needs = ServerRequirements(is_moe=True, model_types=model_types)
+    verify_server_flags([server.url], needs, backend=VLLMWeightSyncClient.BACKEND_KEY, connection_timeout=5.0)
+
+
+@pytest.mark.parametrize("model_types", [("qwen3_5_moe",), (), *[(each,) for each in INKLING2.model_types]])
+def test_a_family_passes_the_preflight_on_its_own_tag(server, model_types):
+    server.identity = f"{VLLMWeightSyncClient.image_for(model_types).build}|{PATCHES}"
+    _verify(server, model_types)
+
+
+@pytest.mark.parametrize(
+    ("model_types", "served", "remedy"),
+    [
+        (("inkling2",), RELEASE, INKLING2_TAG),
+        (("inkling2", "inkling2_text"), RELEASE, INKLING2_TAG),
+        (("qwen3_5_moe",), INKLING2_TAG, RELEASE),
+        (("glm5_next",), INKLING2_TAG, RELEASE),
+        ((), INKLING2_TAG, RELEASE),
+    ],
+)
+def test_a_family_on_the_other_tag_is_refused_with_the_image_that_serves_it(server, model_types, served, remedy):
+    """The release has no Inkling 2 model, and no other family has run on the Inkling 2 build."""
+    server.identity = f"{served.build}|{PATCHES}"
+    with pytest.raises(ValueError) as refusal:
+        _verify(server, model_types)
+    message = str(refusal.value)
+    assert f"engine build {served.build!r}" in message
+    assert f"Serve from {remedy.tag} ({remedy.make_target})" in message
+    assert f"Serve from {served.tag}" not in message
+
+
+def test_a_server_off_both_tags_is_sent_to_the_image_of_the_run_s_family(server):
+    server.toolkit_image = False
+    with pytest.raises(ValueError, match=re.escape(f"Serve from {INKLING2_TAG.tag} ({INKLING2_TAG.make_target})")):
+        _verify(server, ("inkling2",))
+
+
+@pytest.mark.parametrize("script", ["environmental.py", "online.py"])
+def test_each_script_tells_the_preflight_the_model_s_types(script):
+    """Without them every model resolves to the release tag, and Inkling 2 on it passes the preflight."""
+    tree = ast.parse((REPO_ROOT / "scripts/training/grpo" / script).read_text(encoding="utf-8"))
+    [needs] = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "ServerRequirements"
+    ]
+    given = {keyword.arg: ast.unparse(keyword.value) for keyword in needs.keywords}
+    assert given.get("model_types") == "config_model_types(model.config)"
+
+
+def test_only_a_family_no_push_reaches_is_served_from_another_tag():
+    """Group formation takes the release build alone, which holds while every family on another tag pushes no base."""
+    assert set(VLLMWeightSyncClient.FAMILY_IMAGES) == set(INKLING2.model_types)
+    assert set(VLLMWeightSyncClient.FAMILY_IMAGES.values()) == {INKLING2_TAG}
+    assert INKLING2.weight_sync_refusal is not None
 
 
 if __name__ == "__main__":

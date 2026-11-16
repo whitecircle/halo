@@ -98,9 +98,9 @@ RUN mkdir -p /opt/nccl_compat/halo/weight_sync/transport \
 # layers that write weights with a direct `param.copy_()` revert on every /update_weights; the re-init
 # patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects
 # without a clean shutdown; the two thinking-budget patches let the gpt-oss parser force its whole
-# move into the final channel when an analysis channel overruns its budget. The identity patch names them on
-# /server_info, where the trainer refuses a server without them. `sitecustomize` applies them in the API
-# server and every engine-core worker.
+# move into the final channel when an analysis channel overruns its budget. The identity patch names the
+# engine build and the patches on /server_info, where the trainer refuses a server without them or on the tag
+# another family is served from. `sitecustomize` applies them in the API server and every engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
      docker/vllm/patches/vllm_reasoning_forced_end_patch.py \
