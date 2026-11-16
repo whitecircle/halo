@@ -2,6 +2,7 @@
 dequantized weights, LoRA adapters that train exactly as over a bf16 base, and no expert weight left to train."""
 
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,8 +10,10 @@ import torch.nn as nn
 from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.configs.parallelism_arguments import reject_frozen_experts_without_adapters
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_SLOTS, is_frozen_bank_container
+from halo.entrypoints import script
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.inkling2 import NVFP4_OUTER_SCALE_DENOMINATOR, quantize_release_bank
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
@@ -162,6 +165,46 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group(expert_lora):
 def test_frozen_quantized_experts_names_each_missing_requirement(override, named):
     with pytest.raises(ValueError, match=named):
         make_parallelism_config(world_size=2, gpus_per_node=2, **{**_FROZEN_OK, **override})
+
+
+def test_frozen_quantized_experts_refuses_expert_tensor_parallelism():
+    """The banks are sliced on the expert axis alone; this holds without the expert-LoRA rule that also refuses ETP."""
+    with pytest.raises(ValueError, match="frozen_quantized_experts.*needs expert_tensor_parallel_size == 1"):
+        make_parallelism_config(world_size=4, gpus_per_node=4, expert_tp_size=2, **_FROZEN_OK)
+
+
+@pytest.mark.parametrize(
+    ("frozen", "use_peft", "refused"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+    ids=["full-fine-tune", "adapters", "bf16-experts"],
+)
+def test_frozen_quantized_experts_trains_adapters_alone(frozen, use_peft, refused):
+    """No save exports the banks, so a full fine-tune over them would fail at its first checkpoint."""
+    dist_args, model_config = SimpleNamespace(frozen_quantized_experts=frozen), SimpleNamespace(use_peft=use_peft)
+    if not refused:
+        reject_frozen_experts_without_adapters(dist_args, model_config)
+        return
+    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
+        reject_frozen_experts_without_adapters(dist_args, model_config)
+
+
+def test_a_training_script_refuses_a_full_fine_tune_over_frozen_banks_before_it_builds_its_config(monkeypatch):
+    def reached(*args, **kwargs):
+        raise AssertionError("the parallelism config was built")
+
+    monkeypatch.setattr(script, "agree_rank_uniform_env", lambda: None)
+    monkeypatch.setattr(script, "_pin_single_process_to_bound_gpu", lambda training_config: None)
+    monkeypatch.setattr(script, "parallelism_config_from_args", reached)
+
+    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
+        script.init_training_script(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(use_peft=False),
+            SimpleNamespace(frozen_quantized_experts=True),
+            script_prefix="sft",
+            trainer_cls=object,
+        )
 
 
 if __name__ == "__main__":
