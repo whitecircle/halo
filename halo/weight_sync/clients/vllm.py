@@ -260,7 +260,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
             flags = None
         # The toolkit's image pins an engine its build checks against this wire; any other server shows it by version.
-        if require and not (flags is not None and flags.toolkit_image):
+        if require and flags is not None and not flags.toolkit_image:
             self._check_server_version()
         if require and flags is not None:
             self._require_toolkit_image(flags)
