@@ -6,12 +6,14 @@ import torch
 import triton
 import triton.language as tl
 
-from halo.kernels.lowp.fake_quant_triton import _mul_rn, _pow2
+from halo.kernels.lowp.fake_quant_triton import mul_rn, pow2
+from halo.kernels.lowp.quantization import E8M0_BIAS, E8M0_NAN
 
 # Output elements per program: a multiple of both formats' block sizes (16, 32) that divides 2304 and 4608.
 FUSED_DEQUANT_BLOCK = 256
-_E8M0_BIAS = tl.constexpr(127)
-_E8M0_NAN = tl.constexpr(255)
+# A kernel reads a module-level value only as a constexpr.
+_E8M0_BIAS = tl.constexpr(E8M0_BIAS)
+_E8M0_NAN = tl.constexpr(E8M0_NAN)
 
 
 @triton.jit
@@ -20,7 +22,7 @@ def _e2m1(code):
     magnitude = code & 7
     exponent = magnitude >> 1
     mantissa = (magnitude & 1).to(tl.float32)
-    value = tl.where(exponent == 0, mantissa * 0.5, (1.0 + mantissa * 0.5) * _pow2(exponent - 1))
+    value = tl.where(exponent == 0, mantissa * 0.5, (1.0 + mantissa * 0.5) * pow2(exponent - 1))
     # A multiply by the sign, as eager applies it: code 8 is -0.
     return value * tl.where(code >= 8, -1.0, 1.0)
 
@@ -36,8 +38,8 @@ def _nvfp4_bank_kernel(
     packed = tl.load(data_ptr + row * (K // 2) + col0 // 2 + tl.arange(0, BLOCK_K // 2)).to(tl.int32)
     elements = tl.reshape(tl.join(_e2m1(packed & 0x0F), _e2m1(packed >> 4)), [BLOCK_K // 16, 16])
     scales = tl.load(scales_ptr + row * (K // 16) + col0 // 16 + tl.arange(0, BLOCK_K // 16)).to(tl.float32)
-    scales = _mul_rn(scales, tl.load(global_ptr + row // rows_per_expert))
-    out = tl.reshape(_mul_rn(elements, scales[:, None]), [BLOCK_K])
+    scales = mul_rn(scales, tl.load(global_ptr + row // rows_per_expert))
+    out = tl.reshape(mul_rn(elements, scales[:, None]), [BLOCK_K])
     tl.store(out_ptr + row * K + col0 + tl.arange(0, BLOCK_K), out.to(tl.bfloat16))
 
 
@@ -48,8 +50,8 @@ def _mxfp8_bank_kernel(data_ptr, scales_ptr, out_ptr, K: tl.constexpr, BLOCK_K: 
     col0 = tl.program_id(1) * BLOCK_K
     elements = tl.load(data_ptr + row * K + col0 + tl.arange(0, BLOCK_K)).to(tl.float32)
     codes = tl.load(scales_ptr + row * (K // 32) + col0 // 32 + tl.arange(0, BLOCK_K // 32)).to(tl.int32)
-    scales = tl.where(codes == _E8M0_NAN, float("nan"), _pow2(codes - _E8M0_BIAS))
-    out = tl.reshape(_mul_rn(tl.reshape(elements, [BLOCK_K // 32, 32]), scales[:, None]), [BLOCK_K])
+    scales = tl.where(codes == _E8M0_NAN, float("nan"), pow2(codes - _E8M0_BIAS))
+    out = tl.reshape(mul_rn(tl.reshape(elements, [BLOCK_K // 32, 32]), scales[:, None]), [BLOCK_K])
     tl.store(out_ptr + row * K + col0 + tl.arange(0, BLOCK_K), out.to(tl.bfloat16))
 
 
