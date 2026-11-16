@@ -121,6 +121,11 @@ and `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_16384.tsv`. The pro
 `BENCH_ROOT=<dir> [BENCH_SEQ=16384 BENCH_STEPS=50] bash scripts/benchmarks/gemma4_sft/reproduce.sh`
 runs the data build, every framework and the summary.
 
+Halo 1.2.0 against Halo 1.0.0 on this protocol, four runs per version on one host
+(`scripts/benchmarks/gemma4_sft/results/halo_1.0.0_vs_1.2.0.tsv`): 15,641 against 8,670 cluster tok/s at 2,048 tokens
+and 16,129 against 3,980 at 16,384. Each rate is the mean of the four runs. Each peak is the largest of the four:
+101.9 against 101.8 GiB at 2,048 tokens and 225.1 against 244.6 GiB at 16,384.
+
 The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
 
 ![Cluster tokens/s against peak GiB per GPU for six frameworks on Gemma 4 26B-A4B. At 2,048 tokens per row Halo leads at 1.65× Axolotl with the least memory. At 16,384 Halo leads at 1.32× Axolotl; Unsloth, NeMo AutoModel, Megatron Bridge and MS-SWIFT needed checkpointing to fit](../assets/benchmarks/gemma4_sft_pareto.png)

@@ -78,6 +78,9 @@ Long rows (BENCH_SEQ > 2048; the 16,384-token results in results/s16384/)
              and 8.69 and the second at 6.90 and 6.86; at 16,384 tokens the first runs in three fresh environments
              started at 6.35-6.36 and the second runs at 7.76, 6.35 and 6.96. Its rows are the means of its valid
              runs.
+             Halo 1.0.0 starts at 6.976 at 2,048 tokens and Halo 1.2.0 at 6.919 (results/halo_1.0.0_vs_1.2.0.tsv).
+             The difference is in the Liger kernels: Halo 1.0.0 with use_liger_kernel=false starts at 6.913. Halo
+             1.0.0 runs Liger's RMSNorm on Gemma 4 and Halo 1.2.0 runs torch's F.rms_norm.
   Hosts      B300 hosts of one type. The 2,048-token rows of the other frameworks ran on one host, one framework at a
              time, each in a fresh environment (new container, empty caches and data directories). At 16,384 tokens
              Axolotl, AutoModel, Megatron Bridge and MS-SWIFT ran on a second host, one run at a time. Every Halo row
@@ -100,3 +103,5 @@ Layout
   gemma4_sft/<framework>/      the framework's launch script, configs and helpers, and its Dockerfiles where the
                                official image needed a derived one
   gemma4_sft/halo/launch.sh    the Halo rows in the published image
+  On Halo 1.2.0 only the Halo path has run (results/halo_1.0.0_vs_1.2.0.tsv). The Axolotl, NeMo AutoModel, Unsloth,
+  Megatron Bridge and MS-SWIFT scripts are untested on that release.
