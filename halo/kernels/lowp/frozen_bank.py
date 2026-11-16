@@ -2,8 +2,7 @@
 
 A bank holds one projection for this rank's experts in ``F.linear`` convention (``[E, N, K]``, blocks along ``K``).
 The grouped GEMM dequantizes it for the call and again in backward instead of saving the bf16 weight, and gives the
-weight no gradient: a bank is the frozen base under LoRA. ``build_frozen_banks`` reads a rank's banks off an expert
-container whose buffers follow a family's ``frozen_expert_slots``."""
+weight no gradient: a bank is the frozen base under LoRA."""
 
 from __future__ import annotations
 
