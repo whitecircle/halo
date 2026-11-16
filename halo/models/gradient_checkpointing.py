@@ -1,6 +1,7 @@
 """Recompute scopes shared by an activation checkpoint's two passes, and the gradient-checkpointing enable that
 installs them. A scope makes the pass count an exact recompute signal and lets a layer replay first-pass results. Also
-the input a reentrant checkpoint needs for its layer's trainable parameters to take a gradient."""
+the input a reentrant checkpoint needs for its layer's trainable parameters to take a gradient, and the forward
+replacement that keeps a transformers layer checkpointing."""
 
 from __future__ import annotations
 
@@ -198,6 +199,16 @@ def enable_scoped_gradient_checkpointing(model: nn.Module, *, gradient_checkpoin
     logger.info(
         f"Gradient checkpointing enabled on {scoped} modules (kwargs={kwargs}, every_n_layers={every_n_layers})"
     )
+
+
+def patch_layer_forward(owner: type, forward: Callable) -> None:
+    """Replace ``owner.forward`` with ``forward``. transformers checkpoints a ``GradientCheckpointingLayer`` inside the
+    wrapper its ``__init_subclass__`` puts around the class's ``forward``, and only while that wrapper is the class's
+    outermost ``forward``. A bare replacement on such a layer therefore runs it unchecked with no error, so the
+    replacement is wrapped the same way, and the wrapper it replaces passes through as an inner one."""
+    owner.forward = forward
+    if issubclass(owner, GradientCheckpointingLayer):
+        GradientCheckpointingLayer.__init_subclass__.__func__(owner)
 
 
 def _declares_non_reentrant(checkpoint_func: Callable) -> bool:
