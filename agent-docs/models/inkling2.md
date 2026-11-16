@@ -6,7 +6,7 @@ The hub ships no bf16 release. Its `config.json` declares `quant_method: modelop
 
 `transformers.models.inkling2` exists from transformers 5.23.0 (the version the image pins). The composite config's `model_type` is `inkling2`, the text config's `inkling2_text`.
 
-Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). EP and ETP run; CP, TP and PP do not ([why](#what-is-refused)).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). EP runs, and ETP runs on bf16 experts; CP, TP, PP and ETP over frozen experts do not ([why](#what-is-refused)).
 
 ## Architecture
 
@@ -27,9 +27,9 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 `frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base under expert LoRA. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `ep_lazy_loading: true`, the expert projections in `lora_target_modules`, and `merge_expert_lora_on_save: false`. The loader refuses bf16 expert tensors and every family other than Inkling 2.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, the expert projections in `lora_target_modules`, and `merge_expert_lora_on_save: false`. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
 
-A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
+A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and have no merged export: `merge_peft_adapters.py` refuses a base whose `config.json` declares a `quantization_config`, as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
 The release layout, per layer and projection (`w13_weight` is the interleaved gate/up, `w2_weight` the down projection):
 
@@ -38,13 +38,14 @@ The release layout, per layer and projection (`w13_weight` is the interleaved ga
 | 0–39 (`-Small`) | NVFP4 | `uint8` nibbles `[E, N, K/2]`, one scale per 16 elements along `K`, per-expert `_amax`, scalar `_outer_scale_denominator` |
 | 40–47 (`-Small`) | MXFP8 | `float8_e4m3fn` `[E, N, K]`, one scale per 32 elements along `K` |
 
-`install_frozen_bank_slots` (`halo/model_loading/parallel/frozen_experts.py`) swaps each meta expert container's bf16 `gate_up_proj` / `down_proj` for buffers sized from the safetensors headers before the lazy plan runs. The packed weight takes the weight's own name, its scale transformers' `<weight>_scale_inv` target (de-interleaved by row with the weight), and NVFP4's sidecars `w13_weight_amax` / `w13_weight_outer_scale_denominator` (and `w2_…`). Each rank reads only its expert rows. The EP layer builds one `FrozenExpertBank` per projection; an NVFP4 bank's per-expert global scale is `amax / outer_scale_denominator`.
+The family spec declares the layout once (`INKLING2.frozen_expert_slots`, `halo/models/moe/family_specs.py`); the loader and the EP layer both read it. `install_frozen_bank_slots` (`halo/model_loading/parallel/frozen_experts.py`) swaps each meta expert container's bf16 `gate_up_proj` / `down_proj` for buffers sized from the safetensors headers before the lazy plan runs. The packed weight takes the weight's own name, its scale transformers' `<weight>_scale_inv` target (de-interleaved by row with the weight), and NVFP4's sidecars `w13_weight_amax` / `w13_weight_outer_scale_denominator` (and `w2_…`). Each rank reads only its expert rows. The EP layer builds one `FrozenExpertBank` per projection; an NVFP4 bank's per-expert global scale is `amax / outer_scale_denominator`.
 
 The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]` shape in bf16. Every non-expert tensor loads as `from_pretrained` loads it. `tests/gpu/parallelism/ep/test_lazy_load_inkling2_frozen.py` pins a tiny release-layout checkpoint against its bf16 dequantization: the banks, the loss, and an adapter step that leaves the banks unchanged.
 
 ## What is refused
 
 - **CP.** The short convolutions run over the sequence axis, so a CP shard severs their receptive field, and the relative-logits bias and sink cannot pass through `flash_attn_func`. Validation rejects the convolution classes by name.
+- **ETP over frozen experts.** `frozen_quantized_experts` refuses `expert_tensor_parallel_size` > 1 at config time: a bank is sliced on the expert axis only, so every expert-TP rank would hold the full FFN width. ETP runs on bf16 experts.
 - **TP.** The selective-TP planner cannot shard the per-layer head geometry (`swa_*`), the K/V convolutions or the relative-logits projection.
 - **PP.** No pipeline spec covers the family.
 - **Packing.** The convolutions read no document boundary, so `packing` is refused unless `allow_cross_document_linear_attention: true` accepts the crossing ([Document isolation](../data/collators.md#document-isolation-under-packing)). Eager attention has no varlen kernel, so `padding_free` is refused.
