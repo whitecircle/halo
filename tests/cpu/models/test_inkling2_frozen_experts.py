@@ -10,14 +10,16 @@ from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConf
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_SLOTS, is_frozen_bank_container
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import INKLING2, frozen_expert_sidecar_attrs
 from tests.common.inkling2 import NVFP4_OUTER_SCALE_DENOMINATOR, quantize_release_bank
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
 E, H, M, K = 8, 64, 32, 2
 TOKENS = (2, 6)
 FORMATS = ("nvfp4", "mxfp8")
+FROZEN_SLOTS = INKLING2.frozen_expert_slots
 
 
 def _block(dtype: torch.dtype) -> Inkling2SparseMoeBlock:
@@ -60,7 +62,6 @@ def _dequantized_and_frozen(quant_format: str, dtype: torch.dtype):
         if quant_format == "nvfp4":
             experts.register_buffer(slot.amax, stored["_amax"])
             experts.register_buffer(slot.denominator, torch.tensor([NVFP4_OUTER_SCALE_DENOMINATOR]))
-    assert is_frozen_bank_container(experts)
     return reference, frozen
 
 
@@ -160,6 +161,21 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group_and_expert_lora():
 def test_frozen_quantized_experts_names_each_missing_requirement(override, named):
     with pytest.raises(ValueError, match=named):
         make_parallelism_config(world_size=2, gpus_per_node=2, **{**_FROZEN_OK, **override})
+
+
+def test_the_frozen_bank_families_are_the_ep_layers_that_declare_them():
+    assert frozen_bank_families() == (INKLING2,)
+    for cls in ep_layer_classes():
+        assert not cls.SUPPORTS_FROZEN_BANKS or cls.FAMILY.frozen_expert_slots, cls.__name__
+
+
+def test_the_per_expert_sidecars_come_from_the_declared_slots():
+    assert set(frozen_expert_sidecar_attrs()) == {
+        "gate_up_proj_scale_inv",
+        "w13_weight_amax",
+        "down_proj_scale_inv",
+        "w2_weight_amax",
+    }
 
 
 if __name__ == "__main__":
