@@ -263,6 +263,17 @@ def test_listed_policies_score_the_fraction_not_violated(server):
     assert result.score is None and "policy_a" in result.error
 
 
+def test_a_listed_term_reads_only_its_own_policies(server):
+    """Two terms on one environment see every policy on each event; the one listing policy_b is clean although the
+    event is flagged by another term's policy_c."""
+    policies = {"policy_b": {"flagged": False, "name": "B"}, "policy_c": {"flagged": True, "name": "C"}}
+    server(_assistant({"flagged": True, "policies": policies}))
+    term = WhiteCircleTerm(name="quality", environment_id="env_test", policies=["policy_b"])
+    [result] = _score(term, [_sample()])
+    assert result.score == 1.0 and result.detail is None
+    assert result.metrics == {"whitecircle/quality/flagged": 0.0, "whitecircle/quality/policy_b": 0.0}
+
+
 @pytest.mark.parametrize(
     ("verdict", "reason"),
     [

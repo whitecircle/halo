@@ -5,8 +5,10 @@
     WHITECIRCLE_API_KEY=wc-... halo run create-whitecircle-policies \\
         --environment-id <id> --policies examples/grpo/online/whitecircle/policies.json
 
-Policies that already exist (by name) are reused, so a rerun creates nothing twice. One condition, ``halo-grpo``,
-selects every policy of the file for the environment."""
+One condition, ``halo-grpo``, selects every policy of the file for the environment. A policy whose name already exists
+is reused when its rules match the file's, so a rerun creates nothing twice. With other rules, one ``halo-grpo`` selects
+(this tool's own) is replaced by the file's version; any other stops the run, naming it, as it is not the file's to
+change."""
 
 import argparse
 import json
@@ -37,11 +39,32 @@ class Client:
             raise SystemExit(f"{method} {path} answered {e.code}: {e.read().decode()[:300]}") from None
 
 
-def ensure_policies(client: Client, specs: list[dict], existing: dict[str, str]) -> list[str]:
+def _rule_texts(rules: list[dict]) -> list[tuple[str, str]]:
+    return sorted(
+        (kind, rule[kind]) for rule in rules for kind in ("flagged_content", "allowed_content") if rule.get(kind)
+    )
+
+
+def ensure_policies(client: Client, specs: list[dict], existing: dict[str, str], owned: set[str]) -> list[str]:
+    """Each policy's id: reused when its rules match, replaced when it is one of ``owned`` (``halo-grpo``'s), else
+    created; a same-named policy outside ``owned`` with other rules stops the run."""
     ids = []
     for spec in specs:
-        if spec["name"] not in existing:
-            rules = [{"flagged_content": spec["flag"]}] + [{"allowed_content": a} for a in spec.get("allow", [])]
+        rules = [{"flagged_content": text} for text in spec["flagged_content"]]
+        rules += [{"allowed_content": text} for text in spec.get("allowed_content", [])]
+        policy_id = existing.get(spec["name"])
+        if policy_id is not None:
+            current = client.call("GET", f"/api/policy/get_by_id?id={policy_id}")["rules"]
+            if _rule_texts(current) != _rule_texts(rules):
+                if policy_id not in owned:
+                    raise SystemExit(
+                        f"a policy named {spec['name']!r} already exists with other rules; rename it in the file or "
+                        "in White Circle, or delete the existing one"
+                    )
+                # The API's update keeps a policy's rule set, so the file's version replaces it.
+                client.call("POST", "/api/policy/delete", {"id": policy_id})
+                policy_id = None
+        if policy_id is None:
             body = {
                 "name": spec["name"],
                 "rules": rules,
@@ -49,15 +72,19 @@ def ensure_policies(client: Client, specs: list[dict], existing: dict[str, str])
                 "applies_to": "output",
                 "mode": "prod",
             }
-            existing[spec["name"]] = client.call("POST", "/api/policy/create", body)["id"]
-        ids.append(existing[spec["name"]])
+            policy_id = existing[spec["name"]] = client.call("POST", "/api/policy/create", body)["id"]
+        ids.append(policy_id)
     return ids
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--environment-id", required=True, help="White Circle environment the policies attach to")
-    parser.add_argument("--policies", required=True, help="JSON mapping each set's name to its policies")
+    parser.add_argument(
+        "--policies",
+        required=True,
+        help="JSON mapping each set's name to its policies (name, flagged_content, allowed_content)",
+    )
     parser.add_argument("--region", default="us", choices=["us", "eu"], help="API region (default: us)")
     args = parser.parse_args()
 
@@ -68,18 +95,19 @@ def main() -> None:
     with open(args.policies) as fh:
         sets = json.load(fh)
 
+    condition = next((c for c in client.call("GET", "/api/condition/list") if c["name"] == CONDITION_NAME), None)
+    owned = set(condition["policy_ids"]) if condition else set()
     existing = {policy["name"]: policy["id"] for policy in client.call("GET", "/api/policy/list")}
-    set_ids = {name: ensure_policies(client, specs, existing) for name, specs in sets.items()}
+    set_ids = {name: ensure_policies(client, specs, existing, owned) for name, specs in sets.items()}
     every_id = [policy_id for ids in set_ids.values() for policy_id in ids]
 
-    condition = next((c for c in client.call("GET", "/api/condition/list") if c["name"] == CONDITION_NAME), None)
     if condition is None:
         body = {"name": CONDITION_NAME, "environment_ids": [args.environment_id], "policy_ids": every_id}
         client.call("POST", "/api/condition/create", body)
     else:
-        policy_ids = sorted(set(condition["policy_ids"]) | set(every_id))
+        # The condition selects exactly the file's policies, so one the file dropped stops scoring.
         environment_ids = sorted(set(condition["environment_ids"]) | {args.environment_id})
-        body = {"id": condition["id"], "policy_ids": policy_ids, "environment_ids": environment_ids}
+        body = {"id": condition["id"], "policy_ids": every_id, "environment_ids": environment_ids}
         client.call("POST", "/api/condition/update", body)
 
     print("rewards:")

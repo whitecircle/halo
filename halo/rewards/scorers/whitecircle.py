@@ -153,17 +153,20 @@ class WhiteCircleScorer(Scorer):
         if not violated:
             # The API answers an Event no Condition selected a Policy for as completed and unflagged.
             raise ValueError(f"no policy was checked on the completion: {results[0].get('note')}")
-        flagged = any(result[_FLAGGED] for result in results)
-        metrics = {self._key(_FLAGGED): float(flagged)}
         if term.policies:
             unchecked = [policy for policy in term.policies if policy not in violated]
             if unchecked:
                 raise ValueError(
                     f"policies {unchecked} were not checked on the completion: no condition selected them"
                 )
-            metrics.update({self._key(policy): float(violated[policy]) for policy in term.policies})
-            score = 1.0 - sum(violated[policy] for policy in term.policies) / len(term.policies)
+            # A listed term reads its own policies only: another term's policies on the same events cost it nothing.
+            read = {policy: violated[policy] for policy in term.policies}
+            score = 1.0 - sum(read.values()) / len(read)
         else:
-            score = 0.0 if flagged else 1.0
-        broken = [names[policy] for policy, hit in violated.items() if hit]
+            read = violated
+            score = 0.0 if any(result[_FLAGGED] for result in results) else 1.0
+        metrics = {self._key(_FLAGGED): float(score < 1.0)}
+        if term.policies:
+            metrics.update({self._key(policy): float(hit) for policy, hit in read.items()})
+        broken = [names[policy] for policy, hit in read.items() if hit]
         return ScoreResult(score, metrics, detail=f"flagged: {', '.join(broken)}" if broken else None)
