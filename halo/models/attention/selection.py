@@ -74,7 +74,7 @@ def is_flash_attn_implementation(attn_impl: str | None) -> bool:
     return attn_impl in VARLEN_ATTN_IMPLEMENTATIONS
 
 
-def isolates_packed_documents(attn_impl: str | None) -> bool:
+def is_document_isolating_attn_implementation(attn_impl: str | None) -> bool:
     return attn_impl in DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS
 
 

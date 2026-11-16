@@ -9,7 +9,10 @@ from halo.distributed.expert_parallel.deepep.capacity import (
     reject_oversized_dispatch,
 )
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
-from halo.models.attention.selection import DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS, isolates_packed_documents
+from halo.models.attention.selection import (
+    DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS,
+    is_document_isolating_attn_implementation,
+)
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.grpo.rounds.row_order import reject_microbatch_dependent_objective
@@ -64,7 +67,7 @@ def reject_unpackable_model(model, attn_impl: str | None) -> None:
             f"{knob} is refused for model_type={getattr(config, 'model_type', None)!r}: its attention reads a token's "
             f"row index, which a flattened row changes. Unset {knob}."
         )
-    if not isolates_packed_documents(attn_impl):
+    if not is_document_isolating_attn_implementation(attn_impl):
         raise ValueError(
             f"{knob} needs an attention backend that reads the row's documents off its position_ids, but this model "
             f"resolved to attn_implementation={attn_impl!r}: a dense kernel builds an [N, N] mask over the flattened "

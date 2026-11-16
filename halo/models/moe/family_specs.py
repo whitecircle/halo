@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
+from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
 from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_layout import (
@@ -225,7 +226,7 @@ INKLING2 = MoEFamilySpec(
     # Every attention layer adds a learned relative-logits bias and a query-conditioned sink, which only the eager
     # path and this kernel carry. The short convolutions read the document starts of a packed row through the
     # family's patches (halo/models/families/inkling2.py).
-    toolkit_attention="inkling2_relative_flex",
+    toolkit_attention=INKLING2_RELATIVE_FLEX,
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
