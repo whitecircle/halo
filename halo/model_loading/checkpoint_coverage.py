@@ -91,7 +91,8 @@ def verify_checkpoint_coverage(
 def full_weights_on_every_rank() -> Iterator[None]:
     """Turn ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the scope. Under an accelerate FSDP launch transformers loads
     the checkpoint's tensors on every rank, but leaves a key the checkpoint lacks (a task head on a base checkpoint) on
-    the meta device off each node's local rank 0 and marks it initialized, awaiting a broadcast from rank 0."""
+    the meta device off each node's local rank 0 and marks it initialized; only a broadcast from rank 0 would fill
+    it."""
     previous = os.environ.get(_FSDP_CPU_RAM_EFFICIENT_LOADING)
     os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = "false"
     try:
