@@ -12,7 +12,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). EP and
 
 - **Experts.** Fused `gate_up_proj`/`down_proj` (width 2304). The activation is a softcapped SwiGLU (`Inkling2SoftcappedSwiGLU`): the gate's linear factor is capped at `mlp_gate_softcap` (4), the up half at `mlp_up_softcap` (25), and the product runs in fp32.
 - **Router.** `Inkling2TopKRouter` selects top-8 on `sigmoid(logits) + e_score_correction_bias`, gathers the unbiased scores, renormalizes them and scales by `route_scale` (8). The bias steers selection only. Transformers pins the router weight and the bias to fp32.
-- **Attention.** Five sliding-window layers (window 1024) to one full layer. Position enters as a learned relative-logits bias (no RoPE), and every attention layer adds a query-conditioned sink logit. The class declares no SDPA, flash or flex support, so every load runs eager attention: any other `attn_implementation` is overridden to `eager` with a warning (the family spec's `eager_only_attention`).
+- **Attention.** Five sliding-window layers (window 1024) to one full layer. Position enters as a learned relative-logits bias (no RoPE), and every attention layer adds a query-conditioned sink logit. No stock kernel takes either term, so on CUDA every load runs the toolkit's `inkling2_relative_flex` (the family spec's `toolkit_attention`; `halo/models/attention/inkling2_relative_flex.py`): compiled FlexAttention whose `score_mod` reads the relative logits at their `[batch, heads, q_len, rel_extent]` size, with the sinks applied from the softmax normalizer. Another requested `attn_implementation` is overridden with a warning; `attn_implementation: eager` keeps the eager path, which CPU runs and KV-cache decoding take.
 - **Short convolutions.** Depthwise causal convolutions on the projected K/V (dynamic per-token taps on the full layers) and after each attention and MLP sublayer.
 - **Attention residuals.** Decoder layers sum into blocks of `n_layers_per_attn_res_block` (6). Each sublayer's input, and the final norm's, is an attention with a learned query over the finished blocks plus the partial one.
 - **Head.** The logits are softcapped at `final_logit_softcapping` (30) and cut from the padded 201024 columns to `unpadded_vocab_size` (200058).
@@ -47,7 +47,7 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **CP.** The short convolutions run over the sequence axis, so a CP shard severs their receptive field, and the relative-logits bias and sink cannot pass through `flash_attn_func`. Validation rejects the convolution classes by name.
 - **TP.** The selective-TP planner cannot shard the per-layer head geometry (`swa_*`), the K/V convolutions or the relative-logits projection.
 - **PP.** No pipeline spec covers the family.
-- **Packing.** The convolutions read no document boundary, so `packing` is refused unless `allow_cross_document_linear_attention: true` accepts the crossing ([Document isolation](../data/collators.md#document-isolation-under-packing)). Eager attention has no varlen kernel, so `padding_free` is refused.
+- **Packing.** On a packed row (`position_ids` restarting at 0) the family's patches stop every short-convolution tap at its document's start, and `inkling2_relative_flex` reads the documents off `position_ids`, so the on-policy GRPO trainers' `packed_microbatch_tokens` and SFT's `packing` train it ([Document isolation](../data/collators.md#document-isolation-under-packing)). `padding_free` is refused: it needs a varlen flash kernel.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
 - **Weight sync.** The spec's `weight_sync_refusal`: no full-weight push into either pinned engine has been validated, so online GRPO is refused and environmental GRPO runs only with [adapter sync](#rollouts). Offline GRPO needs no server.
 
@@ -109,6 +109,10 @@ The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.
 ## Measured
 
 Each frozen bank dequantizes in one fused Triton kernel (`halo/kernels/lowp/dequant_triton.py`), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
+
+One full-attention layer at Inkling-2-Small's shape (48 query and 8 KV heads of 128, relative extent 1024), 8,192 tokens in bf16, forward and backward on one B300: `inkling2_relative_flex` takes 41 ms at a 2.6 GiB peak, eager 166 ms at 61 GiB (`tests/gpu/models/test_inkling2_relative_flex.py`).
+
+Environmental GRPO on DAPO-Math-17k, expert LoRA r8, 8× B300 (two vLLM TP2 engines, EP4 trainer), 32 prompts × 8 samples of up to 4,096 tokens, `packed_microbatch_tokens: 8192`: a step takes 322 s on-policy (rollout 125 s, adapter sync 15 s, forward and backward about 200 s) and 194 s with `enable_prefetch: true`, whose rollout overlaps the previous step's training.
 
 Inkling-2-Small, LoRA r16 on attention q/k/v/o and the experts, 4× B300 at EP4 with `frozen_quantized_experts`: the load takes ~17 s per rank from local disk. Over 150 steps GSM8K held-out loss goes 0.549 → 0.136, ARC-Challenge `acc_norm` 0.777 → 0.779 and HellaSwag (1k) `acc_norm` 0.752 → 0.756.
 
