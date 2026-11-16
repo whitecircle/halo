@@ -39,6 +39,7 @@ from halo.models.introspection.unwrapping import (
     find_peft_model,
     unwrap_framework_wrappers,
 )
+from halo.models.moe.expert_layout import to_w13_w2_expert_adapter
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.runtime.collectives import broadcast_from_rank0, combine_across_ranks
@@ -306,9 +307,8 @@ def _unservable_expert_lora(model: torch.nn.Module, peft_config, client_cls) -> 
 
 
 def _engine_expert_adapters(model: torch.nn.Module, experts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-    """The gathered grouped adapters (``<layer>.experts.<attr>.lora_{A,B}``, ``[E, in, r]`` / ``[E, r, out]``) as the
-    engine's 3D per-expert ones on the checkpoint's expert weights, ``[E, r, in]`` / ``[E, out, r]``: ``w13_weight``,
-    whose B rows interleave gate and up as the checkpoint's w13 does, and ``w2_weight``."""
+    """The gathered grouped adapters (``<layer>.experts.<attr>.lora_{A,B}``) as the engine's 3D per-expert ones on the
+    checkpoint's expert weights, under the hub's layer paths (:func:`to_w13_w2_expert_adapter`)."""
     respell = _build_hub_respeller(model)
     engine = {}
     for key, tensor in experts.items():
@@ -319,11 +319,8 @@ def _engine_expert_adapters(model: torch.nn.Module, experts: dict[str, torch.Ten
             raise ValueError(
                 f"The expert layer {layer!r} has no hub spelling the engine could load its adapters under."
             )
-        matrix = tensor.transpose(1, 2)
-        if attr == "gate_up_proj" and side == "B":
-            matrix = torch.stack(matrix.chunk(2, dim=1), dim=2).flatten(1, 2)
-        weight = "w13_weight" if attr == "gate_up_proj" else "w2_weight"
-        engine[f"{PEFT_BASE_MODEL_PREFIX}{path}.experts.{weight}.lora_{side}.weight"] = matrix.contiguous()
+        weight, matrix = to_w13_w2_expert_adapter(attr, side, tensor)
+        engine[f"{PEFT_BASE_MODEL_PREFIX}{path}.experts.{weight}.lora_{side}.weight"] = matrix
     return engine
 
 
