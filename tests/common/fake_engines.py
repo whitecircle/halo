@@ -204,11 +204,9 @@ class FakeVLLMServer(FakeEngineServer):
             "packed",
             "packed_buffer_size_bytes",
             "packed_num_buffers",
-            "use_load_plan",
-            "metadata",
         }
     )
-    UPDATE_INFO_FIELDS = frozenset({"names", "dtype_names", "shapes", "src"})
+    UPDATE_INFO_FIELDS = frozenset({"names", "dtype_names", "shapes"})
 
     def __init__(self):
         super().__init__()

@@ -18,6 +18,10 @@ TOOLKIT_PREFIXES = ("HALO_", "DIST_", "VLLM_", "SGLANG_", "NVLINK_", "EP_")
 THIRD_PARTY_ROWS = {
     "WANDB_RESUME": "read by the wandb SDK; the row exists to pair it with WANDB_RUN_ID",
     "HALO_SCRATCH": "consumed by the Makefile and compose files on the host; derives the in-container HALO_DATA_ROOT",
+    "VLLM_USE_V2_MODEL_RUNNER": (
+        "read by the vLLM server; the row exists because a 0 there overrides the image's pinned Model Runner V2, "
+        "which thinking budgets and R3 capture run on"
+    ),
     "CAUSAL_CONV1D_DETERMINISTIC": (
         "read by causal_conv1d's backward; the row exists because it overrides torch's deterministic flag, which "
         "selects the same path under full_determinism"

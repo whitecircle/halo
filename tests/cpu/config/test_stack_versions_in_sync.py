@@ -11,7 +11,6 @@ from typing import NamedTuple
 
 import pytest
 
-from halo.weight_sync.clients.vllm import _MIN_SERVER_VERSION
 from tests.common.repo import REPO_ROOT, load_script_module
 
 nccl_pin = load_script_module("docker/nccl_pin.py")
@@ -104,7 +103,6 @@ ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("trl", "1.17.1"): "the TRL release the framework comparison benchmarked as a competitor",
     ("liger", "0.8.2"): "the Liger release the TRL arm of the framework comparison ran",
     ("transformers", "5.18.0"): "the transformers release NeMo AutoModel ran in the framework comparison",
-    ("vllm", "0.32"): "the vLLM release Halo 1.2.0 shipped on, in its release note",
 }
 
 
@@ -139,6 +137,22 @@ def _dockerfile_value(dockerfile: str, pattern: str) -> str:
     return matches[0]
 
 
+def _dockerfile_values(dockerfile: str, pattern: str) -> set[str]:
+    """Every value of ``pattern``'s capture group in a Dockerfile that builds more than one tag."""
+    matches = set(re.findall(pattern, (REPO_ROOT / dockerfile).read_text(encoding="utf-8"), flags=re.MULTILINE))
+    assert matches, f"{pattern!r} matched nothing in {dockerfile}"
+    return matches
+
+
+def _vllm_tag_versions() -> set[str]:
+    """The engine version of each tag ``Dockerfile.vllm`` builds: the release every family but Inkling 2 is served
+    from, and vLLM's Inkling 2 build."""
+    return {
+        _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$"),
+        _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_INKLING2_VERSION=(\S+)$"),
+    }
+
+
 def _matches(stated: str, pinned: str) -> bool:
     """``5.16`` covers ``5.16.1`` and vice versa; ``5.1`` never covers ``5.16``. Pins hold at their source's
     precision, so a truncated pin cannot wildcard a patch level."""
@@ -155,7 +169,7 @@ def stack_pins() -> dict[str, set[str]]:
         "accelerate": {_declared_lower_bound("accelerate")},
         "peft": {_declared_lower_bound("peft")},
         "liger": {_declared_lower_bound("liger-kernel")},
-        "vllm": {_dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$")},
+        "vllm": _vllm_tag_versions(),
         "sglang": {_dockerfile_value("Dockerfile.sglang", r"^ARG SGLANG_VERSION=(\S+)$")},
         # The floor deep_ep._C needs is a legitimate second number for NCCL: it is what the images
         # assert against, and it moves only with a DeepEP rebuild.
@@ -174,7 +188,7 @@ def engine_scoped_pins() -> dict[str, set[str]]:
     server."""
     return {
         "transformers": {
-            _dockerfile_value("Dockerfile.vllm", r"transformers==([\d.]+)"),
+            *_dockerfile_values("Dockerfile.vllm", r"transformers==([\d.]+)"),
             _dockerfile_value("Dockerfile.sglang", r"transformers==([\d.]+)"),
         }
     }
@@ -219,22 +233,13 @@ def _form_matches(form: str, statement: Statement) -> bool:
     )
 
 
-def _reached(statement: Statement, pins: set[str]) -> set[str]:
-    """The releases a pin has reached. The vLLM image's engine is a main-branch build whose version string
-    (``0.1.devN``) sorts below every release; it carries the weight transfer the client requires, so it has reached
-    the client's minimum release."""
-    if statement.package != "vllm":
-        return pins
-    return pins | {".".join(map(str, _MIN_SERVER_VERSION))}
-
-
 def _exemption(statement: Statement, pins: set[str]) -> str | None:
     """Why a number that is not the pin is legitimate anyway, or ``None`` if it is drift."""
     if (statement.package, statement.version) in ALLOWED_EXCEPTIONS:
         return ALLOWED_EXCEPTIONS[statement.package, statement.version]
     # ``version_code`` is the lock's own version→int encoding: monotone, and it stops at a local
     # suffix (``.post1``) the way a comparison must.
-    if nccl_pin.version_code(statement.version) > max(nccl_pin.version_code(pin) for pin in _reached(statement, pins)):
+    if nccl_pin.version_code(statement.version) > max(nccl_pin.version_code(pin) for pin in pins):
         return None  # nothing is history about a release this stack has not reached
     return next((reason for form, reason in HISTORICAL_FORMS.items() if _form_matches(form, statement)), None)
 
@@ -322,22 +327,24 @@ def test_image_tags_agree_with_the_dockerfile_args():
     states."""
     pins = stack_pins()
     expected = {
-        "halo:vllm": _dockerfile_value("Dockerfile.vllm", r"^ARG VLLM_VERSION=(\S+)$"),
-        "halo:sglang": _dockerfile_value("Dockerfile.sglang", r"^ARG SGLANG_VERSION=(\S+)$"),
+        "halo:vllm": _vllm_tag_versions(),
+        "halo:sglang": {_dockerfile_value("Dockerfile.sglang", r"^ARG SGLANG_VERSION=(\S+)$")},
     }
-    assert expected["halo:vllm"] in pins["vllm"] and expected["halo:sglang"] in pins["sglang"]
+    assert expected["halo:vllm"] <= pins["vllm"] and expected["halo:sglang"] <= pins["sglang"]
 
-    wrong, found = [], {image: 0 for image in expected}
+    wrong, found = [], {(image, version): 0 for image, versions in expected.items() for version in versions}
     for path in sorted({REPO_ROOT / "Makefile", *SCANNED_FILES}):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-            for image, version in expected.items():
-                # A main-branch engine tags its dev build (``0.1.dev25249``).
+            for image, versions in expected.items():
+                # The Inkling 2 tag is a development build (``0.1.dev25249``).
                 for tagged in re.findall(rf"{image}-(\d+(?:\.\d+)*(?:\.?(?:post|rc|dev)\d+)?)", line):
-                    found[image] += 1
-                    if tagged != version:
-                        wrong.append(f"{path}:{number} tags {image}-{tagged}, but the ARG builds {version}")
+                    if tagged in versions:
+                        found[image, tagged] += 1
+                    else:
+                        wrong.append(f"{path}:{number} tags {image}-{tagged}, but the ARGs build {sorted(versions)}")
     assert not wrong, "image tags disagree with the Dockerfile ARG they are built from:\n  " + "\n  ".join(wrong)
-    assert all(found.values()), f"no image tag left to check for {sorted(k for k, v in found.items() if not v)}"
+    unstated = sorted(f"{image}-{version}" for (image, version), count in found.items() if not count)
+    assert not unstated, f"no image tag left to check for {unstated}"
 
 
 def test_ruff_is_pinned_once_in_the_lock():

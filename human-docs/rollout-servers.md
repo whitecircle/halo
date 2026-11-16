@@ -18,7 +18,7 @@ sides; an overlap fails group formation at its 120 s deadline.
 Build the image from `Dockerfile.vllm`, or pull it:
 
 ```bash
-make build-vllm        # or pull public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249 and set VLLM_IMAGE to it
+make build-vllm        # or pull public.ecr.aws/whitecircle/halo:vllm-0.32.0 and set VLLM_IMAGE to it
 
 VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 \
     docker compose -f docker-compose.vllm.yml up -d vllm-server
@@ -197,7 +197,7 @@ layout with no error. The trainer refuses a server that reports one of them.
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a reasoning cap. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap. |
+| 400 on every rollout, zero tokens back | The server cannot take a reasoning cap. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
 | `… the server parsed no call` by the second round | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser is refused at startup. If the parser is right and the model only writes malformed calls so far, raise `tool_parser_watch_rounds` or set it to `null`. |
 | `No token carried a policy gradient …` | Every group tied or dropped: read the shares in the message. A launch that has not trained yet stops at `zero_gradient_round_limit` rounds in a row, so raise it for a very sparse reward; past its first trained round a streak only warns. |
 | `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server. Serve from this repo's image and restate the flags the message names. |

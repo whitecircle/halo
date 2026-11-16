@@ -51,7 +51,7 @@ _ADAPTER_UPDATE_TIMEOUT_S = 120.0
 class VLLMWeightSyncClient(WeightSyncClientBase):
     BACKEND_KEY = "vllm"
     BACKEND_NAME = "vLLM"
-    ENGINE_RELEASE = "vLLM 0.1.dev25249"
+    ENGINE_RELEASE = "vLLM 0.32.0"
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     REPORTS_INSTANCE_ID = True
     CHUNK_STAGER = PackedChunkStager
@@ -81,10 +81,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     # Names the adapter a score request reads through, when the run serves its policy as one.
     adapter_source: Callable[[], str | None] | None = None
     UNSERVABLE_MODEL_TYPES = {
-        "zaya": (
-            f"{ENGINE_RELEASE}'s Zaya implementation has never taken a Halo weight sync: no loader map or parity "
-            "fixture covers it (agent-docs/models/zaya.md)"
-        ),
+        "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
             f"{ENGINE_RELEASE} registers no Mistral4ForCausalLM and maps no mistral4 model_type, so the "
             "composite loader has no class for the text tower a toolkit export writes "

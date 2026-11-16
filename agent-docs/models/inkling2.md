@@ -62,7 +62,7 @@ Liger covers the weighted RMSNorm (Gemma casting mode) and the cross-entropy. Th
 Environmental GRPO trains LoRA on the release and serves it to vLLM as an adapter (`rollout_adapter_sync`). The server loads the release, NVFP4/MXFP8 experts included, and takes each adapter version by path; the trainer never pushes the base and forms no NCCL group with it ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)). Two GPUs serve and two train:
 
 ```bash
-make build-vllm           # the vLLM image
+make build-vllm-inkling2  # halo:vllm-0.1.dev25249, the vLLM tag that serves Inkling 2
 make up-vllm-inkling2      # download the release once, serve it on GPUs 2,3
 make train-inkling2        # the trainer on GPUs 0,1, through halo launch
 ```
@@ -81,7 +81,7 @@ CUDA_VISIBLE_DEVICES=0,1 halo launch grpo/environmental examples/grpo/environmen
   --nproc 2 --model_name_or_path=<release dir> --rollout_adapter_dir=<adapter dir>
 ```
 
-The server is Halo's vLLM image (`Dockerfile.vllm`), served by `docker-compose.vllm.yml`; `make up-vllm-inkling2` sets its Inkling 2 flags.
+The server is `halo:vllm-0.1.dev25249`, the tag `Dockerfile.vllm` builds on vLLM's Inkling 2 build ([Rollout Servers](../infrastructure/rollout-servers.md#vllm)), run by `docker-compose.vllm.yml`; `make up-vllm-inkling2` sets `VLLM_IMAGE` to it with the Inkling 2 flags. `halo:vllm-0.32.0`, the tag every other family is served from, has no Inkling 2 model.
 
 The configs set three things for this model:
 

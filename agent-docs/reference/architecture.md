@@ -224,7 +224,7 @@ gathered save on [Checkpoints & Resume](checkpoints.md).
 
 ## RL: the rollout engine as a separate container
 
-Online and async GRPO generate on a rollout engine (vLLM 0.1.dev25249, or SGLang 0.5.22 under async GRPO's
+Online and async GRPO generate on a rollout engine (vLLM 0.32.0, or SGLang 0.5.22 under async GRPO's
 `rollout_backend: sglang`) that runs in its own container and is never imported into the training
 environment, since it pins its own torch/transformers stack. The trainer talks to it over HTTP for
 generation and through an NCCL weight-sync client (`halo/weight_sync/`) for weights, which it gathers

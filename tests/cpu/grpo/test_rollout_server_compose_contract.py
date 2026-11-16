@@ -114,6 +114,12 @@ def test_each_compose_takes_remote_code_and_further_flags(compose_path, service,
     assert command.rstrip().endswith(f"${{{prefix}_EXTRA_ARGS:-}}"), "extra flags must come last, to win a repeat"
 
 
+def test_vllm_compose_passes_the_model_runner_through_bare():
+    """An empty value kills the server at startup (int() parse), and a default of 0 would force the V1
+    runner, which R3 refuses and on which thinking budgets misfire; bare, the image's pin holds."""
+    assert "VLLM_USE_V2_MODEL_RUNNER" in _services(VLLM_COMPOSE)["vllm-server"].get("environment", [])
+
+
 def test_vllm_compose_enables_the_weight_transfer_endpoints():
     """Without the nccl weight-transfer config the endpoints the trainer drives do not exist."""
     command = _server_command(VLLM_COMPOSE, "vllm-server")

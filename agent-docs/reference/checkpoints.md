@@ -283,7 +283,7 @@ Each writer reverts the conversions the load recorded (`conversions_to_revert`,
 whose load dequantized fp8/MXFP4 weights, reverts the family's registered mapping. The EP-gathered save
 and the RL weight sync leave out only the per-expert merges (`export_conversions`), since the gather owns
 the expert layout. A revert that fails fails the save on every rank: a chunk written under module names
-would leave two layouts in one checkpoint. vLLM 0.1.dev25249 raises on a SigLIP tower key that lacks its
+would leave two layouts in one checkpoint. vLLM 0.32.0 raises on a SigLIP tower key that lacks its
 `vision_model` level.
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory (`experts.gate_up_proj` /
@@ -303,14 +303,14 @@ no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` na
 
 | Serving loader | Families | Fused `gate_up_proj` / `down_proj` |
 |---|---|---|
-| vLLM 0.1.dev25249 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
-| vLLM 0.1.dev25249 `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | loaded directly, the n-gram table included ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#checkpoints-and-serving)) |
-| vLLM 0.1.dev25249 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
-| vLLM 0.1.dev25249 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises on a fused export), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next's own gathered saves are per-expert already; DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
-| vLLM 0.1.dev25249 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |
-| vLLM 0.1.dev25249 — no model class | Mistral4, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
-| vLLM 0.1.dev25249 `zaya` | Zaya | loaded directly by its stacked-expert loader; unverified end to end ([Zaya](../models/zaya.md)) |
-| vLLM 0.1.dev25249 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
+| vLLM 0.32.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
+| vLLM 0.32.0 `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | loaded directly, the n-gram table included ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#checkpoints-and-serving)) |
+| vLLM 0.32.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
+| vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises on a fused export), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next's own gathered saves are per-expert already; DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
+| vLLM 0.32.0 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |
+| vLLM 0.32.0 — no model class | Mistral4, Ring — its `BailingMoeLinearV2ForCausalLM` matches no registered architecture ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)) | not servable at all ([Mistral4](../models/mistral4.md#serving), [Bailing](../models/bailing.md)) |
+| vLLM 0.32.0 — no native class | Zaya | resolves through vLLM's generic transformers backend; unvalidated ([Zaya](../models/zaya.md)) |
+| vLLM 0.32.0 `inkling` | Inkling | the export writes the hub's fused `w13_weight` under `model.llm.*`; unverified end to end |
 
 SGLang 0.5.22 reads each family's hub layout through its own per-family loader, so the same un-fuse rule
 applies, Cohere2 MoE and DeepSeek-V4 included (their loaders drop the fused pair without an

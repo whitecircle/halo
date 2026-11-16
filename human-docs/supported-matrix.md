@@ -17,7 +17,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
 | flash-linear-attention | 0.4.2 |
-| vLLM | 0.1.dev25249 (vLLM's Inkling 2 build) on Model Runner V2, its own container: rollouts for both online RL methods |
+| vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods. Inkling 2 is served from a second tag, on vLLM's Inkling 2 build (0.1.dev25249) |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
 | Hardware | Image | Status |
@@ -100,7 +100,7 @@ a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says
 otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 `tensor_parallel_size: 2`, and replay is `routing_replay: rollout`.
 
-| Family | vLLM (measured on 0.32.0) | SGLang 0.5.22 | Replay | Ran on this release |
+| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on this release |
 | --- | :---: | :---: | :---: | --- |
 | Dense families | Yes | Yes | No, MoE only | vLLM: online GRPO, SDPG and async GRPO on Qwen3-0.6B. SGLang: a weight push on Qwen3-0.6B, no training loop |
 | GPT-OSS | Yes | Yes | Yes | `unsloth/gpt-oss-20b-BF16`. SGLang: every SGLang mode marked Ran below. vLLM: `ep4`, `ep2` with `tp2` or ETP2, `tp2` and `ep2` at DP2, HSDP, online GRPO at `ep2` |
