@@ -352,7 +352,7 @@ def test_close_and_atexit_terminate_the_sandbox(modal):
 
 def test_missing_modal_sdk_names_the_install(monkeypatch):
     monkeypatch.setitem(sys.modules, "modal", None)
-    with pytest.raises(ImportError, match="pip install modal"):
+    with pytest.raises(ImportError, match=r"pip install 'halo\[modal\]'"):
         ModalSandbox()
 
 

@@ -15,7 +15,7 @@
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, checked at construction); `gcc` / `g++` for C/C++ |
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
-| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits | python, bash, cpp, c (default image) | The Modal SDK (`pip install modal`) and Modal credentials ([Modal](#modal)) |
+| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits | python, bash, cpp, c (default image) | The `modal` extra (`pip install 'halo[modal]'`) and Modal credentials ([Modal](#modal)) |
 
 Coding environments select it in `environment_kwargs`:
 
@@ -71,7 +71,7 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 Run every code execution of an async-GRPO config in Modal with one flag:
 
 ```bash
-pip install modal                     # or: uv pip install modal
+pip install 'halo[modal]'           # or: uv pip install 'halo[modal]'
 export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (modal token new)
 halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
 ```

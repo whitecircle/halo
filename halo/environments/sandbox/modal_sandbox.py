@@ -51,7 +51,7 @@ def _require_modal():
         import modal  # noqa: PLC0415 — optional dependency, absent unless the modal backend is used
     except ImportError as exc:
         raise ImportError(
-            "the 'modal' sandbox backend needs the Modal SDK: pip install modal (or uv pip install modal)"
+            "the 'modal' sandbox backend needs the Modal SDK: install the 'modal' extra (pip install 'halo[modal]')"
         ) from exc
     return modal
 
