@@ -146,36 +146,31 @@ def _split_enable_kwargs(
     return kwargs or None, every_n_layers, offload
 
 
-def _rescope_on_reenable(model: nn.Module) -> None:
-    """A re-enable installs HF's bare checkpoint function, and online GRPO re-enables every step. Both spellings are
-    wrapped: TRL calls ``gradient_checkpointing_enable``, transformers' Trainer ``activation_checkpointing_enable``."""
-    enable = model.gradient_checkpointing_enable
-    if not getattr(enable, "_ep_scoped", False):
+def _scoped_enable(model: nn.Module, enable: Callable, kwargs_name: str) -> Callable:
+    """``enable`` followed by the scope install, taking the checkpoint kwargs first or as ``kwargs_name``."""
 
-        @functools.wraps(enable)
-        def enable_with_scopes(gradient_checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False):
-            kwargs, every_n_layers, offload = _split_enable_kwargs(
-                gradient_checkpointing_kwargs, every_n_layers, offload
-            )
-            result = enable(gradient_checkpointing_kwargs=kwargs, every_n_layers=every_n_layers, offload=offload)
-            install_recompute_scopes(model)
-            return result
-
-        enable_with_scopes._ep_scoped = True
-        model.gradient_checkpointing_enable = enable_with_scopes
-
-    activation_enable = getattr(model, "activation_checkpointing_enable", None)
-    if activation_enable is None or getattr(activation_enable, "_ep_scoped", False):
-        return
-
-    @functools.wraps(activation_enable)
-    def activation_enable_with_scopes(*args, **kwargs):
-        result = activation_enable(*args, **kwargs)
+    @functools.wraps(enable)
+    def enable_with_scopes(checkpointing_kwargs=None, every_n_layers: int = 1, offload: bool = False, **named):
+        checkpointing_kwargs = named.pop(kwargs_name, checkpointing_kwargs)
+        kwargs, every_n_layers, offload = _split_enable_kwargs(checkpointing_kwargs, every_n_layers, offload)
+        result = enable(**{kwargs_name: kwargs}, every_n_layers=every_n_layers, offload=offload, **named)
         install_recompute_scopes(model)
         return result
 
-    activation_enable_with_scopes._ep_scoped = True
-    model.activation_checkpointing_enable = activation_enable_with_scopes
+    enable_with_scopes._ep_scoped = True
+    return enable_with_scopes
+
+
+def _rescope_on_reenable(model: nn.Module) -> None:
+    """A re-enable installs HF's bare checkpoint function, and online GRPO re-enables every step. Both spellings are
+    wrapped: TRL calls ``gradient_checkpointing_enable``, transformers' Trainer ``activation_checkpointing_enable``."""
+    for method, kwargs_name in (
+        ("gradient_checkpointing_enable", "gradient_checkpointing_kwargs"),
+        ("activation_checkpointing_enable", "activation_checkpointing_kwargs"),
+    ):
+        enable = getattr(model, method, None)
+        if enable is not None and not getattr(enable, "_ep_scoped", False):
+            setattr(model, method, _scoped_enable(model, enable, kwargs_name))
 
 
 def enable_scoped_gradient_checkpointing(model: nn.Module, *, gradient_checkpointing_kwargs: dict) -> None:

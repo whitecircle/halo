@@ -16,6 +16,7 @@ from halo.kernels.jit_cache import pin_liger_impls
 from halo.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.upstream_outputs import ensure_folded_output_classes
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.models.introspection.config_access import set_config_field_run_scoped, text_config
 from halo.models.introspection.model_classes import is_remote_code_class
@@ -207,9 +208,11 @@ def sanitize_liger_config(
 ) -> dict:
     """``user_config`` with every kernel the safety rules force off turned off; both Liger applications call this, as a
     rule at one site is undone by the other. Parallelism rules yield to an explicit ``swiglu``/``geglu``, which they
-    make inert. It also pins the Liger implementations, as a model passed to the trainer reaches only the second
-    site."""
+    make inert. It also pins the Liger implementations and supplies the output classes upstream's fused forwards
+    import, as a model passed to the trainer reaches only the second site, where HF Trainer calls upstream's applier
+    itself."""
     pin_liger_impls()
+    ensure_folded_output_classes()
     forced_off = liger_parallelism_overrides(
         has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_layers, model_config),
         tp_size=tp_size,

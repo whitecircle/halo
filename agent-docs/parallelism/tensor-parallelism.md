@@ -96,7 +96,9 @@ the load so the pair stays replicated, warning that those weights cost a full co
 names an untied `embed_tokens` under the no-op `replicate` style whenever the backbone plan leaves it
 out: transformers would otherwise vocab-shard it, and DTensor's embedding backward returns a replicated
 gradient beside the shard, which AdamWBF16 refuses and the norm clip counts `tp_size` times. A tied
-pair keeps both ends sharded, since its head use returns the gradient sharded.
+pair keeps both ends sharded, since its head use returns the gradient sharded. An untied `embed_tokens`
+is whole on every TP rank at any `tp_size`: `vocab_size × hidden_size × 2` bytes in bf16 (1.16 GiB for a
+151,936 × 4,096 table), plus a gradient and each of AdamWBF16's two moments at the same size.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
 
