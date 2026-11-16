@@ -35,7 +35,13 @@ Accuracy is strict: the answer keeps only its text after a GSM8K `####`, both si
 
 A judge reads the `answer` column as its reference. A veto judge (one listing `checks`) is refused at config time; list `requirements` instead.
 
-A `judge` or `reward_model` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
+A `whitecircle` term checks each completion against your White Circle policies ([White Circle](rewards/whitecircle.md)), launched in one line:
+
+```bash
+WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+```
+
+A `judge`, `reward_model` or `whitecircle` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
 
 ## Configuration
 

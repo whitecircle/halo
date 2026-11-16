@@ -61,7 +61,7 @@ class ScoringSample:
     facts: frozenset[str] = frozenset()
 
 
-def _text(content: Any) -> str:
+def content_text(content: Any) -> str:
     """A string as is, a content-part list by its text parts, else its JSON."""
     if content is None:
         return ""
@@ -76,16 +76,16 @@ def _text(content: Any) -> str:
 def final_assistant_text(messages: Sequence[_SampleMessage]) -> str:
     for message in reversed(messages):
         if message.get("role") == "assistant":
-            return _text(message.get("content"))
+            return content_text(message.get("content"))
     return ""
 
 
 def task_text(prompt: Sequence[_SampleMessage]) -> str:
-    return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "user")
+    return "\n\n".join(content_text(message.get("content")) for message in prompt if message.get("role") == "user")
 
 
 def system_text(prompt: Sequence[_SampleMessage]) -> str:
-    return "\n\n".join(_text(message.get("content")) for message in prompt if message.get("role") == "system")
+    return "\n\n".join(content_text(message.get("content")) for message in prompt if message.get("role") == "system")
 
 
 def scored_messages(sample: ScoringSample, view: View) -> list[_SampleMessage]:
@@ -129,7 +129,7 @@ def _argument_text(value: Any, max_chars: int | None) -> str:
     return text if max_chars is None else _head(text, max_chars)
 
 
-def _call_arguments(call: Any) -> Any:
+def call_arguments(call: Any) -> Any:
     """A JSON string decoded (an empty one as ``{}``); text that does not parse stays text."""
     function = call.get("function", call) if isinstance(call, Mapping) else {}
     arguments = function.get("arguments", "")
@@ -142,14 +142,14 @@ def _call_arguments(call: Any) -> Any:
 def _acted_text(message: _SampleMessage, *, digest: bool) -> str:
     """An assistant turn's visible text and its calls' arguments, or a tool result; a user turn (a nudge) has none."""
     role = message.get("role")
-    content = _text(message.get("content"))
+    content = content_text(message.get("content"))
     if role == "tool":
         return cut_middle(content, DIGEST_CHARS) if digest else content
     if role != "assistant":
         return ""
     pieces = [_head(content, DIGEST_CHARS) if digest else content]
     for call in [*(message.get("tool_calls") or []), *(message.get(CUT_TOOL_CALLS_KEY) or [])]:
-        arguments = _call_arguments(call)
+        arguments = call_arguments(call)
         values = arguments.values() if isinstance(arguments, Mapping) else [arguments]
         pieces.extend(_argument_text(value, DIGEST_INLINE_CHARS if digest else None) for value in values)
     return "\n".join(piece for piece in pieces if piece)
@@ -185,12 +185,12 @@ def render_tools(tools: Sequence[dict[str, Any]]) -> str:
     for tool in tools:
         function = tool.get("function", tool) if isinstance(tool, Mapping) else {}
         properties = (function.get("parameters") or {}).get("properties") or {}
-        description = _text(function.get("description"))
+        description = content_text(function.get("description"))
         lines = [
             f"- {function.get('name', '?')}({', '.join(properties)})" + (f": {description}" if description else "")
         ]
         for name, spec in properties.items():
-            detail = _text(spec.get("description")) if isinstance(spec, Mapping) else ""
+            detail = content_text(spec.get("description")) if isinstance(spec, Mapping) else ""
             if detail:
                 lines.append(f"    {name}: {detail}")
         blocks.append("\n".join(lines))
@@ -207,7 +207,7 @@ def _render_call(call: Any, argument_chars: int | None, *, note: str | None = No
     call_id = _call_id(call)
     tags = "; ".join(tag for tag in (f"call {call_id}" if call_id else None, note) if tag)
     head = f"→ {function.get('name', '?')}" + (f" ({tags})" if tags else "")
-    arguments = _call_arguments(call)
+    arguments = call_arguments(call)
     if not isinstance(arguments, Mapping):
         return f"{head}: {_argument_text(arguments, argument_chars)}"
     if not arguments:
@@ -246,7 +246,7 @@ def _render_turn(
         elif reasoning_chars is not None:
             reasoning = cut_middle(reasoning, reasoning_chars)
         lines.append(f"<{_REASONING_TAG}>\n{reasoning}\n</{_REASONING_TAG}>")
-    content = escape_tags(_text(message.get("content")))
+    content = escape_tags(content_text(message.get("content")))
     if content:
         if digest:
             content = _head(content, DIGEST_CHARS) if role == "assistant" else cut_middle(content, DIGEST_CHARS)

@@ -70,6 +70,13 @@ class RewardModelBackend(StrEnum):
     SGLANG = "sglang"
 
 
+class WhiteCircleRegion(StrEnum):
+    """The White Circle API's regional servers, ``https://<region>.whitecircle.com``."""
+
+    US = "us"
+    EU = "eu"
+
+
 def component_key(name: str) -> str:
     return REWARD_COMPONENT_PREFIX + name
 
@@ -409,11 +416,44 @@ class RewardModelTerm(ScoredTerm):
         return math.exp(z) / (1.0 + math.exp(z))
 
 
+@dataclass(frozen=True, kw_only=True)
+class WhiteCircleTerm(ScoredTerm):
+    """The White Circle API's policy check of the completion in its conversation (``POST /api/events``) against the
+    policies of ``environment_id``. With no ``policies`` listed the score is 1 unless the completion was flagged, else 0;
+    with ``policies`` listed (policy ids) it is the fraction of them the completion did not violate. ``max_retries``
+    bounds the retries of a rate-limited or failed request, ``retry_wait`` the first backoff in seconds."""
+
+    source: ClassVar[str] = "whitecircle"
+    views: ClassVar[tuple[View, ...]] = (View.FINAL, View.FULL)
+
+    environment_id: str
+    policies: tuple[str, ...] = ()
+    region: WhiteCircleRegion = WhiteCircleRegion.US
+    max_retries: int = 4
+    retry_wait: float = 1.0
+    request_timeout: float = 30.0
+    max_concurrency: int = 8
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        owner = self.owner
+        require_text(owner, environment_id=self.environment_id)
+        if isinstance(self.policies, str) or not isinstance(self.policies, Sequence):
+            raise ValueError(f"{owner}: policies must be a list of policy ids, got {self.policies!r}")
+        object.__setattr__(self, "policies", tuple(self.policies))
+        for policy in self.policies:
+            require_text(owner, policy=policy)
+        validate_unique_names(f"{owner}: policy", list(self.policies))
+        _coerce_enum(self, "region", WhiteCircleRegion)
+        require_int(owner, ge=0, max_retries=self.max_retries)
+        require_finite(owner, ge=0, retry_wait=self.retry_wait)
+
+
 def sources_of(*term_types: type[RewardTerm]) -> dict[str, type[RewardTerm]]:
     return {term_type.source: term_type for term_type in term_types}
 
 
-ENVIRONMENT_REWARD_SOURCES = sources_of(EnvironmentTerm, JudgeTerm, RewardModelTerm)
+ENVIRONMENT_REWARD_SOURCES = sources_of(EnvironmentTerm, JudgeTerm, RewardModelTerm, WhiteCircleTerm)
 
 
 def read_context_files(raw: Any) -> Any:
