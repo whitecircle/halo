@@ -27,6 +27,7 @@ from halo.environments.rollout_config import resolve_reasoning_end_token_id
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import RolloutManager, ray_init_kwargs
 from halo.environments.rollouts.rollout_pool import RolloutPoolPlan, resolve_rollout_pool
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure, rank_consensus
 from halo.runtime.ranks import (
@@ -47,7 +48,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
-from halo.trainers.grpo.rollout.weight_push import base_push_refusal, sync_trainer_weights
+from halo.trainers.grpo.rollout.weight_push import base_push_refusal, pushes_base, sync_trainer_weights
 from halo.trainers.metrics.world_metrics import world_sums
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
@@ -98,6 +99,8 @@ class AsyncRolloutMixin:
     _adapter_versions: AdapterVersions | None = None
     _adapter_routes: AdapterRoutes | None = None
     _adapter_sync: AdapterSync | None = None
+    # ``False`` for an adapter-synced policy over a base no push carries, which forms no weight-sync group.
+    _pushes_base = True
 
     def _init_async_state(self):
         self._rollout_manager = None
@@ -139,7 +142,7 @@ class AsyncRolloutMixin:
         config = self.async_config
         if not config.rollout_adapter_sync:
             return
-        reject_unadaptable_config(config)
+        reject_unadaptable_config(config, getattr(unwrap_framework_wrappers(self.model), "config", None))
         reject_unadaptable_model(
             self.model, self.parallelism_config, resolve_weight_sync_client(config.rollout_backend)
         )
@@ -150,6 +153,7 @@ class AsyncRolloutMixin:
             backend=config.rollout_backend,
             connection_timeout=config.rollout_connection_timeout,
         )
+        self._pushes_base = pushes_base(self.model, adapter_sync=True)
         self._adapter_versions = AdapterVersions()
         self._adapter_routes = AdapterRoutes(resolve_weight_sync_client(config.rollout_backend).is_adapter_missing)
         self._adapter_sync = AdapterSync(
@@ -287,7 +291,7 @@ class AsyncRolloutMixin:
 
         config = self.async_config
         # A base no push carries needs no group: the servers only load adapters, over HTTP.
-        if self._adapter_sync is None or self._adapter_sync.base_refusal is None:
+        if self._pushes_base:
             # A pool at any server count, so a server restarted between syncs is recovered on one URL too.
             self._weight_sync_client = WeightSyncPool(
                 server_configs=config.rollout_server_configs or [{"url": config.rollout_server_url}],

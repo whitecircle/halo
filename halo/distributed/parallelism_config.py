@@ -62,7 +62,7 @@ class ParallelismConfig:
 
     max_concurrent_loading: int | None = None  # per node; None = half the node width capped at 4, 0 = all
     ep_lazy_loading: bool = True  # every EP path; TP-only MoE ignores it, PP always loads stage-lazily
-    frozen_quantized_experts: bool = False  # the release's NVFP4/MXFP8 experts as a frozen base under expert LoRA
+    frozen_quantized_experts: bool = False  # the release's NVFP4/MXFP8 experts as a frozen base under LoRA
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
 
     # The rows one MoE forward carries per device and the max_length the dispatch-ceiling gate checks;
@@ -159,6 +159,8 @@ class ParallelismConfig:
         if self.frozen_quantized_experts:
             needs = {
                 "expert_parallel_size >= 2": self.ep_size >= 2,
+                # A bank is sliced on the expert axis only, so every expert-TP rank would hold the full FFN width.
+                "expert_tensor_parallel_size: 1": self.expert_tp_size == 1,
                 "ep_lazy_loading: true": self.ep_lazy_loading,
                 "merge_expert_lora_on_save: false": not self.merge_expert_lora_on_save,
             }

@@ -1,13 +1,27 @@
 """Inkling 2's router patch: bitwise the upstream router where the weight is fp32, as transformers pins it, and still
 routing in fp32 where the run dtype cast the weight to bf16, which the upstream router refuses."""
 
+import importlib.util
+
 import pytest
 import torch
 import torch.nn as nn
 from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2TopKRouter
 
-from halo.models.families.inkling2 import UPSTREAM_ROUTER_FORWARD, _router_forward, apply_inkling2_patches
+from halo.models.families.inkling2 import _router_forward, apply_inkling2_patches
+
+
+def _upstream_router_forward():
+    """The router forward transformers ships, off a second execution of its module: the patch replaces the imported
+    class's forward process-wide, so an earlier test in the session may have installed it."""
+    spec = importlib.util.find_spec(Inkling2TopKRouter.__module__)
+    pristine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pristine)
+    return pristine.Inkling2TopKRouter.forward
+
+
+UPSTREAM_ROUTER_FORWARD = _upstream_router_forward()
 
 
 def _router(dtype: torch.dtype) -> Inkling2TopKRouter:
@@ -42,8 +56,11 @@ def test_the_patch_routes_a_run_dtype_weight_in_fp32():
         assert torch.equal(actual, expected)
 
 
-def test_apply_installs_the_patch_once():
+def test_apply_installs_the_patch_once(monkeypatch):
+    # Restores the class's forward on teardown, so the patch does not outlive the test.
+    monkeypatch.setattr(Inkling2TopKRouter, "forward", UPSTREAM_ROUTER_FORWARD)
     apply_inkling2_patches()
+    assert Inkling2TopKRouter.forward is _router_forward
     apply_inkling2_patches()
     assert Inkling2TopKRouter.forward is _router_forward
 

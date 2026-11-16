@@ -15,7 +15,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3_5Config, Qwen3_5ForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from halo.checkpoint.adapters import write_mixed_adapter_config
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, write_mixed_adapter_config
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, MERGED_ADAPTER_CONFIG_DIR, TRAINING_PROVENANCE_FILE
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
@@ -28,6 +28,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
+from tests.common.inkling2 import TINY_INKLING2_TEXT, write_tiny_inkling2_release
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model, word_level_tokenizer
@@ -231,6 +232,48 @@ def test_a_merge_it_cannot_make_is_refused_before_anything_is_written(tmp_path, 
 
     with pytest.raises(ValueError, match=match):
         merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_an_adapter_over_a_base_declaring_quantization_is_refused_by_name(tmp_path):
+    """The fold adds a delta to the stored values, which on a packed tensor are no weight."""
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    config = json.loads((base / "config.json").read_text())
+    (base / "config.json").write_text(json.dumps({**config, "quantization_config": {"quant_method": "modelopt"}}))
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="quantization_config.*'modelopt'.*no merged export"):
+        merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_expert_adapters_over_the_packed_inkling2_release_are_refused_by_name(tmp_path):
+    """Without ``--streaming`` too: a directory holding native expert LoRA always takes the streaming merge."""
+    release, adapter, out = tmp_path / "release", tmp_path / "adapter", tmp_path / "out"
+    write_tiny_inkling2_release(str(release), str(tmp_path / "reference"))
+    adapter.mkdir()
+    experts, hidden, width = (
+        TINY_INKLING2_TEXT[field] for field in ("n_routed_experts", "hidden_size", "moe_intermediate_size")
+    )
+    rank = 8
+    layer = "model.language_model.layers.0.mlp.experts"
+    save_file(
+        {
+            f"{layer}.gate_up_proj.lora_A": torch.randn(experts, hidden, rank),
+            f"{layer}.gate_up_proj.lora_B": torch.randn(experts, rank, 2 * width),
+        },
+        str(adapter / ADAPTER_SAFETENSORS_FILE),
+    )
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {"peft_type": EXPERT_LORA_PEFT_TYPE, "base_model_name_or_path": str(release), "r": rank, "lora_alpha": 16}
+        )
+    )
+
+    with pytest.raises(ValueError, match="quantization_config.*frozen_quantized_experts"):
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
