@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Inkling 2 on ``inkling2_relative_flex``: the tiny model's logits and parameter gradients match the eager path on a
-batch whose rows outrun the sliding window and the relative extent and one of which is left-padded; a packed row of
-three documents scores each document as that document alone, in its logits and its gradients; one Inkling-2-Small
-attention call at 8,192 tokens runs forward and backward faster and in less memory than eager; and at 2,048 tokens its
-bf16 gradients are no further from the fp64 eager attention's than the bf16 eager attention's."""
+batch whose rows outrun the sliding window and the relative extent and one of which is left-padded, at 48 and at 300
+tokens; a packed row of three documents scores each document as that document alone, in its logits and its gradients;
+one Inkling-2-Small attention call at 8,192 tokens runs forward and backward faster and in less memory than eager; and
+at 2,048 tokens its bf16 gradients are no further from the fp64 eager attention's than the bf16 eager attention's."""
 
 import time
 
@@ -23,6 +23,8 @@ from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 DEV = "cuda"
 # Past the tiny config's 16-token window and relative extent.
 LENGTH = 48
+# Past FlexAttention's 128-token tile, where a row's block mask has partial, full and empty blocks.
+SEVERAL_TILES = 300
 DOCUMENTS = (20, 33, 11)
 TOLERANCE = 2e-4
 
@@ -53,10 +55,10 @@ def _max_gap(a: dict, b: dict) -> tuple[str, float]:
     return worst, gaps[worst]
 
 
-def check_matches_eager() -> None:
+def check_matches_eager(length: int = LENGTH) -> None:
     model = _model()
     generator = torch.Generator(device=DEV).manual_seed(1)
-    input_ids = torch.randint(3, model.config.vocab_size, (2, LENGTH), device=DEV, generator=generator)
+    input_ids = torch.randint(3, model.config.vocab_size, (2, length), device=DEV, generator=generator)
     attention_mask = torch.ones_like(input_ids)
     attention_mask[1, :7] = 0
     _use(model, "eager")
@@ -199,7 +201,7 @@ def check_bf16_against_fp64() -> None:
     }
 
     def output_and_gradients(attention, dtype: torch.dtype) -> dict[str, torch.Tensor]:
-        inputs = {name: tensor.to(dtype).requires_grad_() for name, tensor in reference_inputs.items()}
+        inputs = {name: tensor.to(dtype).detach().requires_grad_() for name, tensor in reference_inputs.items()}
         out = attention(**inputs)
         out.double().square().mean().backward()
         return {"output": out.detach().double(), **{name: tensor.grad.double() for name, tensor in inputs.items()}}
@@ -229,6 +231,7 @@ def run(ctx) -> dict:
     register_inkling2_relative_flex()
     checks: dict[str, bool] = {}
     record_check(checks, "matches_eager", check_matches_eager)
+    record_check(checks, "matches_eager_over_several_tiles", lambda: check_matches_eager(SEVERAL_TILES))
     record_check(checks, "packed_documents_stay_apart", check_packed_documents_stay_apart)
     record_check(checks, "speed_and_memory", check_speed_and_memory)
     record_check(checks, "bf16_against_fp64", check_bf16_against_fp64)

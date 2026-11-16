@@ -63,12 +63,13 @@ def _first_keys(position_ids: torch.Tensor, window: int | None, batch: int, leng
 
 
 def _row_block_mask(first: torch.Tensor, valid: torch.Tensor) -> BlockMask:
-    """``first`` and ``valid`` are ``[seq]``. One mask function for every call, so the window and an absent padding
-    mask are no guard of either compiled graph."""
+    """``first`` and ``valid`` are int32 ``[seq]``. One mask function for every call, so the window and an absent
+    padding mask are no guard of either compiled graph. ``valid`` is no bool tensor: with one captured, the fp32
+    kernel's products round to about 1e-3 on a row of several tiles."""
     length = first.shape[0]
 
     def mask_mod(b, h, q_idx, kv_idx):
-        return (kv_idx <= q_idx) & (kv_idx >= first[q_idx]) & valid[kv_idx]
+        return (kv_idx <= q_idx) & (kv_idx >= first[q_idx]) & (valid[kv_idx] > 0)
 
     with torch.no_grad(), torch.autocast(first.device.type, enabled=False):
         return _compiled_block_mask(mask_mod, B=1, H=None, Q_LEN=length, KV_LEN=length, device=first.device)
@@ -90,14 +91,18 @@ def _row_block_masks(
 
     first = _first_keys(position_ids, window, batch, length)
     if padding_mask is None:
-        valid = torch.ones(batch, length, dtype=torch.bool, device=first.device)
+        valid = torch.ones(batch, length, dtype=torch.int32, device=first.device)
     else:
-        valid = padding_mask.bool()
+        valid = padding_mask.bool().to(torch.int32)
     if length < _MIN_ROW_LENGTH:
         tail = torch.arange(length, _MIN_ROW_LENGTH, device=first.device, dtype=first.dtype)
         first = torch.cat([first, tail.expand(batch, -1)], dim=-1)
-        valid = torch.nn.functional.pad(valid, (0, _MIN_ROW_LENGTH - length), value=True)
-    block_masks = [_row_block_mask(row_first, row_valid) for row_first, row_valid in zip(first, valid, strict=True)]
+        valid = torch.nn.functional.pad(valid, (0, _MIN_ROW_LENGTH - length), value=1)
+    # Each row's bounds as tensors of their own: the compiled graph guards on the batch size of a view's base.
+    block_masks = [
+        _row_block_mask(row_first.clone(), row_valid.clone())
+        for row_first, row_valid in zip(first, valid, strict=True)
+    ]
     cache[key] = (padding_mask, block_masks)
     return block_masks
 
