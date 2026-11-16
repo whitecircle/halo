@@ -15,7 +15,7 @@
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, checked at construction); `gcc` / `g++` for C/C++ |
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
-| `baseten` | A Baseten Sandboxes microVM per session, created on first use and deleted on close | python, bash, plus cpp and c when the image has `gcc` / `g++` | `BASETEN_API_KEY`, network to `api.baseten.co` ([Baseten Sandboxes](#baseten-sandboxes)) |
+| `baseten` | A Baseten Sandboxes microVM per session, created on first use and deleted on close, under `local`'s rlimits | python, bash, plus cpp and c when the image has `gcc` / `g++` | `BASETEN_API_KEY`, network to `api.baseten.co` ([Baseten Sandboxes](#baseten-sandboxes)) |
 
 Coding environments select it in `environment_kwargs`:
 
@@ -68,7 +68,7 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 
 ### Baseten Sandboxes
 
-`--halo-rollout-backend baseten` on `halo launch` or `halo run` sets `HALO_SANDBOX_BACKEND=baseten` for the launched process; Ray rollout actors inherit it. The one variable a partner sets is `BASETEN_API_KEY` (a personal or full-access team key):
+`--halo-rollout-backend baseten` on `halo launch` or `halo run` sets `HALO_SANDBOX_BACKEND=baseten` for the launched process and its Ray rollout actors. `ray.init` carries every `HALO_SANDBOX_*` variable to the actors of a shared cluster (`ray_address`); the key is not carried, so each cluster node needs its own. The one variable a partner sets is `BASETEN_API_KEY` (a personal or full-access team key):
 
 ```bash
 BASETEN_API_KEY=... halo launch grpo/environmental <config>.yaml -n 4 --halo-rollout-backend baseten
@@ -81,10 +81,15 @@ The backend (`halo/environments/sandbox/baseten.py`) follows the [Baseten Sandbo
 - **Auth.** The API key mints a 2-hour sandbox access token (`POST /v1/token`), refreshed after 90 minutes. Sandbox calls carry only the token; the key is never logged. A missing key raises at construction.
 - **One sandbox per session.** A session creates its microVM on first use and deletes it on close, so concurrent episodes never share one. A one-shot `run()` (the scratchpad test tool) creates and deletes a sandbox per call. A `TTL_IDLE` expiration (`idle_ttl`, default `30m`) deletes a sandbox whose session was never closed.
 - **Concurrency.** `max_concurrency` (default and maximum 10, Baseten's per-organization sandbox limit) caps live sandboxes per process; a session past it waits for a slot. A value above 10 raises at construction. The limit is per organization, so across Ray actors keep the sum of `max_concurrency` at or below 10.
-- **Execution.** Programs run through `POST /process` with `waitForCompletion`; the service kills a run at its timeout, which reads as `timed_out`. A request outliving the run timeout plus `request_overhead` is an `error`. A session reruns a program without rewriting or rebuilding it while its source is unchanged, and `reset_to_prepared` removes what the last run created.
+- **Execution.** Every call uploads one request and runs the runner (`program_runner.py`, uploaded when the sandbox is created) through `POST /process` with `waitForCompletion`. The runner applies the rlimits and child environment the request carries, `local`'s, and times the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local` (`runner_session.py`); a compiled session reuses its build, and `reset_to_prepared` rides on the session's next call.
+- **The program's user.** The runner runs as root and the program as another user, so a program cannot signal the runner or replace its files. Every process that user still has is killed when a run ends. The image must run as root.
+- **Tampering.** A source or file path the program replaced with a link, directory or FIFO is never written through or read: the next run is the program's runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+- **Faults.** An HTTP failure, a request outliving its deadline (run timeout + compile timeout + 30 s, plus `request_overhead`), and a runner the service reports as anything but completed with exit code 0 are `error` from `run` and `SandboxInfraError` from the file calls. A sandbox its expiration removed (404) is an `error` once; the next call creates a new one and the session continues empty.
 - **Retries.** 429, 5xx and connection errors retry with exponential backoff honoring `Retry-After` (`max_retries` 4, `backoff_factor` 1.0). A read timeout is never retried, so a program never runs twice.
 
-`sandbox_options` keys: `image` (default `baseten/base-image:latest`), `cpu` (default 2), `idle_ttl`, `interpreter` (default `python3`), `request_timeout`, `request_overhead`, `create_timeout`, `max_retries`, `backoff_factor`, `max_concurrency`. Use an image with `gcc` / `g++` for C and C++.
+`sandbox_options` keys: `image` (default `baseten/base-image:latest`), `cpu` (default 2), `idle_ttl`, `interpreter` (default `python3`), `request_timeout`, `request_overhead`, `create_timeout`, `max_retries`, `backoff_factor`, `max_concurrency`, and `local`'s limits (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`). Use an image with `gcc` / `g++` for C and C++.
+
+The backend needs no Baseten package. The `baseten` extra (`pip install 'halo[baseten]'`) installs Baseten's [Truss CLI](https://docs.baseten.co/reference/cli/truss/overview) for work on the Baseten side (`truss login`, `truss push`).
 
 ## Using it from Python
 

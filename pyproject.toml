@@ -77,6 +77,9 @@ flash-optimizers = [
 gigatoken = [
     "gigatoken>=0.9.0,<0.10.0",  # Rust bulk tokenizer backend for dataset preprocessing (pre-1.0 API)
 ]
+baseten = [
+    "truss>=0.18,<0.19",  # Baseten's Truss CLI (truss login / push); the Baseten Sandboxes backend itself needs none
+]
 
 # --- Dev tooling groups (PEP 735). Installed in-image so the image is the test runtime;
 # `ty` is intentionally absent — type-checking is pyright (basic), run via Pylance / a Node install

@@ -106,7 +106,7 @@ help: ## Show this help
 
 check-lock: ## check uv.lock installs into the image (throwaway container; fails on a stale lock)
 	$(DOCKER_RUN_CPU) bash -lc "set -euo pipefail; \
-	  uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers \
+	  uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers --extra baseten \
 	    --format requirements-txt -o /tmp/requirements.txt; \
 	  uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt; \
 	  uv pip install --system --break-system-packages --no-deps -e ."

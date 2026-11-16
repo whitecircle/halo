@@ -1,10 +1,12 @@
 """BasetenSandbox against a local fake of the Baseten Sandboxes API (token, instances, filesystem, process). Each fake
-sandbox runs commands for real under its own root directory, so these tests check the wire contract, per-session
-isolation and the compile/run/reset behavior offline, without Baseten credentials."""
+sandbox runs the real in-sandbox runner under its own root directory, so these tests check the wire contract,
+per-session isolation and the compile/run/reset behavior offline, without Baseten credentials. The runner sets the
+session's user, so they need root."""
 
 import contextlib
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -16,18 +18,31 @@ from urllib.parse import unquote
 
 import pytest
 
-from halo.environments.sandbox.baseten import BASETEN_SANDBOX_LIMIT, BasetenSandbox
+from halo.environments.rollouts.ray_actors import ray_init_kwargs
+from halo.environments.sandbox import runner_session
+from halo.environments.sandbox.baseten import (
+    BASETEN_SANDBOX_LIMIT,
+    REQUEST_PATH,
+    RUNNER_PATH,
+    SESSION_DIR,
+    BasetenSandbox,
+)
 from halo.environments.sandbox.factory import build_sandbox
+from halo.environments.sandbox.languages import require_language
+from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.sandbox.runner_session import RUNNER_SOURCE
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 
 API_KEY = "bt-secret-key-0123456789"
 TOKEN = "sbx-token-1"
-PREFIX = "/tmp/halo"
+
+pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="the runner sets the session's user, which takes root")
 
 
 class FakeBaseten:
-    """Management API under /v1; sandbox ``sbx-N``'s runtime API under /sbx-N, its ``/tmp/halo`` mapped to a private
-    host directory. ``faults`` maps a path prefix to statuses returned once each before the real handler runs."""
+    """Management API under /v1; sandbox ``sbx-N``'s runtime API under /sbx-N, its ``/tmp`` and session directory
+    mapped into a private host directory. ``faults`` maps a path prefix to statuses returned once each before the real
+    handler runs; ``runner_requests`` are the requests the backend handed the runner."""
 
     def __init__(self):
         self.requests: list[dict] = []
@@ -35,6 +50,8 @@ class FakeBaseten:
         self.delay: dict[str, float] = {}
         self.roots: dict[str, str] = {}
         self.deleted: list[str] = []
+        self.runner_requests: list[dict] = []
+        self.process_status: str | None = None
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -74,7 +91,10 @@ class FakeBaseten:
                     return self._reply(401, {"error": "bad token"})
                 if self.path == "/v1/sandboxes/instances":
                     name = f"sbx-{len(fake.roots) + 1}"
-                    fake.roots[name] = tempfile.mkdtemp(prefix=f"fake-{name}-")
+                    # Under /tmp and traversable: the session's user must reach its directory.
+                    fake.roots[name] = tempfile.mkdtemp(prefix=f"fake-{name}-", dir="/tmp")
+                    os.chmod(fake.roots[name], 0o755)
+                    os.makedirs(fake.roots[name] + "/tmp")
                     url = f"http://127.0.0.1:{fake.port}/{name}/"
                     return self._reply(201, {"name": name, "url": url, "status": "DEPLOYED"})
                 if self.path.startswith("/v1/sandboxes/instances/") and self.command == "DELETE":
@@ -86,27 +106,30 @@ class FakeBaseten:
                     return self._reply(404, {"error": "no sandbox"})
 
                 def mapped(text: str) -> str:
-                    return text.replace(PREFIX, root + PREFIX)
+                    return text.replace("/tmp/halo_", root + "/tmp/halo_").replace(SESSION_DIR, root + SESSION_DIR)
 
                 if rest.startswith("filesystem/"):
                     path = mapped(unquote(rest[len("filesystem/") :]))
                     if self.command == "PUT":
                         if not os.path.isdir(os.path.dirname(path)):
                             return self._reply(422, {"error": "parent missing"})
+                        if path.endswith(REQUEST_PATH):
+                            fake.runner_requests.append(json.loads(body["content"]))
                         with open(path, "w") as fh:
-                            fh.write(body["content"])
+                            fh.write(mapped(body["content"]))
                         return self._reply(200, {"message": "File created/updated successfully"})
                     if not os.path.isfile(path):
                         return self._reply(404, {"error": "not found"})
                     with open(path, "rb") as fh:
                         return self._reply(200, raw=fh.read(), ctype="application/octet-stream")
                 if rest == "process":
-                    workdir = mapped(body["workingDir"])
-                    os.makedirs(root + PREFIX, exist_ok=True)
+                    if fake.process_status is not None:
+                        out = {"status": fake.process_status, "exitCode": -1, "stdout": "", "stderr": ""}
+                        return self._reply(200, out)
                     try:
                         proc = subprocess.run(
-                            mapped(body["command"]), shell=True, cwd=workdir, capture_output=True, text=True,
-                            timeout=body["timeout"],
+                            mapped(body["command"]), shell=True, cwd=body["workingDir"], capture_output=True,
+                            text=True, timeout=body["timeout"],
                         )  # fmt: skip
                         out = {"status": "completed", "exitCode": proc.returncode}
                         out |= {"stdout": proc.stdout, "stderr": proc.stderr}
@@ -131,7 +154,7 @@ class FakeBaseten:
         ]
 
     def program_runs(self) -> list[dict]:
-        return [r["body"] for r in self.requests if r["path"].endswith("/process") and "exec " in r["body"]["command"]]
+        return [request for request in self.runner_requests if request["op"] == "run"]
 
 
 @pytest.fixture
@@ -151,7 +174,8 @@ def _sandbox(fake, **kwargs):
 
 
 def test_request_shape_and_auth(fake):
-    result = _sandbox(fake, cpu=4, idle_ttl="10m").run("print('hi')", timeout=7)
+    sandbox = _sandbox(fake, cpu=4, idle_ttl="10m")
+    result = sandbox.run("print('hi')", timeout=7)
 
     assert result.ok and result.stdout == "hi\n"
     (token_req,) = fake.calls("/v1/token")
@@ -163,10 +187,18 @@ def test_request_shape_and_auth(fake):
     assert create["body"]["lifecycle"]["expiration_policies"] == [
         {"type": "TTL_IDLE", "value": "10m", "action": "DELETE"}
     ]
-    (run_call,) = fake.program_runs()
-    assert run_call["waitForCompletion"] is True
-    assert run_call["timeout"] == 7
-    assert run_call["workingDir"] == "/tmp/halo/work"
+    (runner_put,) = fake.calls(f"/sbx-1/filesystem/%2F{RUNNER_PATH.lstrip('/')}", "PUT")
+    assert runner_put["body"] == {"content": RUNNER_SOURCE}
+    (process,) = fake.calls("/sbx-1/process", "POST")
+    assert process["body"] == {
+        "command": f"python3 -I {RUNNER_PATH} {REQUEST_PATH}",
+        "workingDir": "/",
+        "timeout": math.ceil(runner_session.EXCHANGE_OVERHEAD_SECONDS + 7),
+        "waitForCompletion": True,
+    }
+    (run_request,) = fake.program_runs()
+    assert (run_request["timeout"], run_request["workdir"]) == (7, SESSION_DIR)
+    assert run_request["limits"] == sandbox.limits.for_run(require_language("python"), 7)
     # The API key only ever mints the token; every sandbox call carries the token.
     assert all(r["auth"] == f"Bearer {TOKEN}" for r in fake.requests if r["path"] != "/v1/token")
 
@@ -210,14 +242,42 @@ def test_reset_to_prepared_drops_program_output_and_keeps_source(fake):
         assert session.run(code).stdout == "x\n"
 
 
-def test_unchanged_program_is_not_rewritten_or_rebuilt(fake):
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="needs gcc in the image")
+def test_unchanged_compiled_program_is_not_rebuilt(fake):
+    code = '#include <stdio.h>\nint main(){int x; scanf("%d",&x); printf("%d\\n", 2*x); return 0;}'
     with _sandbox(fake).open_session() as session:
-        session.run("print(1)")
-        puts = len(fake.calls("/sbx-1/filesystem", "PUT"))
-        session.run("print(1)", stdin="ignored")
+        assert session.run(code, stdin="21", language="c").stdout == "42\n"
+        assert session.run(code, stdin="5", language="c").stdout == "10\n"
+        assert session.run("import os\nos.remove('main')").ok
+        assert session.run(code, stdin="1", language="c").stdout == "2\n"  # another program ran: built again
 
-        # Only the new stdin is written on the second run.
-        assert len(fake.calls("/sbx-1/filesystem", "PUT")) == puts + 1
+    assert [run["build"] for run in fake.program_runs() if run["compile_argv"]] == [True, False, True]
+
+
+def test_program_runs_under_the_memory_limit(fake):
+    result = _sandbox(fake, memory_limit_mb=256, compile_memory_limit_mb=256).run(
+        "x = bytearray(1024 * 1024 * 1024)\nprint('allocated')"
+    )
+
+    assert result.returncode not in (0, None) and "MemoryError" in result.stderr
+
+
+def test_source_replaced_by_a_directory_is_the_programs_runtime_error(fake):
+    with _sandbox(fake).open_session() as session:
+        assert session.run("import os\nos.remove('main.py')\nos.mkdir('main.py')").ok
+        result = session.run("print(1)")
+
+        assert result.error is None and result.returncode not in (0, None) and "tampered" in result.stderr
+        with pytest.raises(ValueError, match="not a regular file"):
+            session.write_file("main.py", "print(2)")
+
+
+def test_program_cannot_signal_the_runner(fake):
+    probe = "import os\ntry:\n    os.kill(os.getppid(), 9)\nexcept PermissionError:\n    print('refused')"
+
+    result = _sandbox(fake).run(probe)
+
+    assert result.ok and result.stdout == "refused\n"
 
 
 def test_nonzero_exit_is_a_program_verdict(fake):
@@ -261,13 +321,60 @@ def test_failed_create_releases_its_slot(fake):
     assert sb.slots.acquire(timeout=1), "a failed create must give its slot back"
 
 
-def test_program_time_limit_is_killed_server_side(fake):
-    result = _sandbox(fake).run("import time; time.sleep(10)", timeout=1)
+def test_program_past_its_time_limit_is_a_timeout_verdict(fake):
+    start = time.monotonic()
+    result = _sandbox(fake).run("import time; time.sleep(30)", timeout=1)
 
     assert result.timed_out and result.returncode is None and result.error is None
+    assert time.monotonic() - start < 15
 
 
-def test_service_not_answering_is_an_error_and_not_rerun(fake):
+@pytest.mark.parametrize("status", ["killed", "failed"])
+def test_runner_that_did_not_complete_is_an_error_not_a_verdict(fake, status):
+    """The service kills a runner past the exchange deadline; that is never the program's timeout."""
+    fake.process_status = status
+
+    result = _sandbox(fake).run("print(1)")
+
+    assert result.error is not None and status in result.error and not result.timed_out
+
+
+def test_expired_sandbox_is_an_error_then_replaced(fake):
+    sandbox = _sandbox(fake)
+    with sandbox.open_session() as session:
+        session.write_file("note.txt", "kept only while the sandbox lives")
+        assert session.run("print(1)").ok
+        fake.deleted.append("sbx-1")  # the idle expiration removed it
+
+        gone = session.run("print(2)")
+        assert gone.error is not None and "404" in gone.error and gone.returncode is None
+        with pytest.raises(SandboxInfraError):
+            fake.deleted.append("sbx-2")
+            session.write_file("a.txt", "1")
+        again = session.run("import os\nprint(sorted(os.listdir('.')))")
+
+        assert again.ok and again.stdout == "['main.py']\n"
+    assert sandbox.slots.acquire(timeout=1), "the session held one slot across its sandboxes"
+
+
+def test_failed_runner_upload_deletes_the_sandbox(fake):
+    fake.faults[f"/sbx-1/filesystem/%2F{RUNNER_PATH.lstrip('/')}"] = [400]
+    sandbox = _sandbox(fake, max_concurrency=1)
+
+    assert sandbox.run("print(1)").error is not None
+    assert fake.deleted == ["sbx-1"]
+    assert sandbox.slots.acquire(timeout=1)
+
+
+def test_session_file_ops_raise_infra_on_a_backend_failure(fake):
+    fake.faults["/v1/sandboxes/instances"] = [400]
+
+    with _sandbox(fake).open_session() as session, pytest.raises(SandboxInfraError, match="HTTP 400"):
+        session.write_file("a.txt", "1")
+
+
+def test_service_not_answering_is_an_error_and_not_rerun(fake, monkeypatch):
+    monkeypatch.setattr(runner_session, "EXCHANGE_OVERHEAD_SECONDS", 0.0)
     sb = _sandbox(fake, request_overhead=0.2, max_retries=3)
     with sb.open_session() as session:
         session.write_file("warm.txt", "")
@@ -319,6 +426,17 @@ def test_factory_and_env_config_select_baseten(fake, monkeypatch):
 
     assert isinstance(env.sandbox, BasetenSandbox)
     assert env.sandbox.api_url == fake.api_url and env.sandbox.cpu == 4
+
+
+def test_backend_selection_reaches_ray_actors_on_a_shared_cluster(monkeypatch):
+    """Actors on a ``ray_address`` cluster get their environment from the raylet, so the job carries the selection
+    and never the key."""
+    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("BASETEN_API_KEY", API_KEY)
+    assert "runtime_env" not in ray_init_kwargs()
+    monkeypatch.setenv("HALO_SANDBOX_BACKEND", "baseten")
+    assert ray_init_kwargs()["runtime_env"] == {"env_vars": {"HALO_SANDBOX_BACKEND": "baseten"}}
 
 
 def test_factory_refuses_a_sandbox_url_for_baseten(fake, monkeypatch):
