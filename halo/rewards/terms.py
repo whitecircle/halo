@@ -153,6 +153,8 @@ class RewardTerm:
     by; a negative ``weight`` makes a penalty, an ``exponent`` above 1 convex credit."""
 
     source: ClassVar[str]
+    # The term grades against the row's answer column, so a run with it needs that column.
+    reads_answer: ClassVar[bool] = False
 
     name: str
     weight: float = 1.0
@@ -426,6 +428,7 @@ class WhiteCircleTerm(ScoredTerm):
     source: ClassVar[str] = "whitecircle"
     views: ClassVar[tuple[View, ...]] = (View.FINAL, View.FULL)
 
+    name: str = "whitecircle"
     environment_id: str
     policies: tuple[str, ...] = ()
     region: WhiteCircleRegion = WhiteCircleRegion.US

@@ -86,5 +86,16 @@ def test_a_clean_dataset_reaches_the_model_load(tmp_path, script):
         _run_with_the_model_load_failing(tmp_path, script, "", _rows())
 
 
+def test_online_rewards_that_grade_no_answer_need_no_answer_column(tmp_path, monkeypatch):
+    """The default ``accuracy`` term grades against the answer column (refused above when it is missing); a run scored
+    only by White Circle carries none."""
+    monkeypatch.setenv("WHITECIRCLE_API_KEY", "wc-test")
+    split = Dataset.from_dict({"prompt": [_TURNS]})
+    rows = DatasetDict({"train": split, "test": split})
+    rewards = "rewards:\n- source: whitecircle\n  environment_id: env_test\n"
+    with pytest.raises(AssertionError, match="the model was loaded"):
+        _run_with_the_model_load_failing(tmp_path, _ONLINE, rewards, rows)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

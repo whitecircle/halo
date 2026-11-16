@@ -17,6 +17,7 @@ class AccuracyTerm(RewardTerm):
     """The completion's last ``\\boxed{}`` equals the row's answer (1) or not (0)."""
 
     source: ClassVar[str] = "accuracy"
+    reads_answer: ClassVar[bool] = True
 
     name: str = "accuracy"
 
