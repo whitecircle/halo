@@ -13,7 +13,7 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
-from halo.kernels.lowp.deepgemm import deepgemm_available, warm_fp8_wgrad
+from halo.kernels.lowp.deepgemm import GROUP_ROW_ALIGN, deepgemm_available, warm_fp8_wgrad
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
@@ -44,6 +44,9 @@ class EPExpertComputeMixin:
     _lowp_quant_format: QuantFormat | None
     _lowp_native: bool = False
     _lowp_fp8_backward: bool = False
+    # DeepGEMM's grouped operand pads each expert's rows to GROUP_ROW_ALIGN; sorting straight into that layout spares
+    # every projection a gather in and a copy back.
+    _pads_expert_groups: bool = False
     _mok_backend: bool
     _lowp_weight_cacheable: bool
     _expert_lora_attrs: frozenset[str]
@@ -65,6 +68,7 @@ class EPExpertComputeMixin:
             )
         self._lowp_quant_format = LOWP_RECIPES[lowp.precision].quant_format
         self._lowp_native = lowp.native
+        self._pads_expert_groups = lowp.native and not self._mok_backend
         self._lowp_fp8_backward = lowp.backward_precision == "fp8"
         self._lowp_weight_cacheable = weight_cacheable
         return self._use_grouped_mm or self._mok_backend
@@ -177,8 +181,9 @@ class EPExpertComputeMixin:
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
                 if grouped:
                     self._warm_expert_gemm(device, dtype, hidden)
-                    warm_route_sort_kernels(top_k, self.experts_per_rank, device)
-                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
+                    pad = GROUP_ROW_ALIGN if self._pads_expert_groups else None
+                    warm_route_sort_kernels(top_k, self.experts_per_rank, device, pad_align=pad)
+                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype, padded=pad is not None)
                 if dispatched:
                     gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
                     torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
@@ -197,12 +202,16 @@ class EPExpertComputeMixin:
         self._expert_adapters_enabled = True
         try:
             trainable = [param for _, param in self.expert_named_params() if param.requires_grad]
+            # Padded groups reach the FFN whole segments long, with -1 expert ids on the padding rows.
+            padded_rows = (GROUP_ROW_ALIGN,) if self._pads_expert_groups else ()
             with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
-                for rows_per_expert in (1, GROUPED_MM_SMALL_TILE_DIM + 1):
+                for rows_per_expert in (1, GROUPED_MM_SMALL_TILE_DIM + 1, *padded_rows):
                     rows = experts * rows_per_expert
                     tokens = torch.zeros((rows, hidden), device=device, dtype=dtype, requires_grad=True)
                     offs = torch.arange(1, experts + 1, device=device, dtype=torch.int32) * rows_per_expert
                     expert_ids = torch.arange(rows, device=device) // rows_per_expert
+                    if rows_per_expert == GROUP_ROW_ALIGN:
+                        expert_ids[rows_per_expert - 1 :: rows_per_expert] = -1
                     with torch.amp.autocast("cuda", dtype=dtype):
                         out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
                     torch.autograd.grad(out.sum(), [tokens, *trainable], allow_unused=True)
@@ -289,12 +298,13 @@ class EPExpertComputeMixin:
         assignments; DeepEP's -1 padding is dropped (it would misalign the groups). At ``ep_size > 1`` the host-side
         counts size the sort, so it reads nothing back from the device."""
         counts = self._require_recv_counts(recv_counts) if self.ep_size > 1 else None
+        pad_align = GROUP_ROW_ALIGN if self._pads_expert_groups else None
         sorted_token_idx, sorted_weights, sorted_expert_ids, offs, inv_map = sort_routing_by_expert(
-            experts, weights, self.experts_per_rank, counts
+            experts, weights, self.experts_per_rank, counts, pad_align
         )
         # Atomic-free in both directions: the bf16 ``index_add_`` of the default gather backward and the
         # scatter-back is a CAS-loop atomic, ~1.5 ms per call on the gpt-oss-20b ep8 shape.
-        sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+        sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map, self._pads_expert_groups)
         return sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map
 
     def _expert_proj(

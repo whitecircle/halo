@@ -1012,6 +1012,24 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    "parallelism/ep/test_deepgemm_padded_groups.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3", "gptoss"),
+        args_matrix=(
+            "--family qwen3",
+            "--family qwen3_5",
+            "--family gpt_oss",
+            "--family qwen3 --precision mxfp4",
+            Row("--family qwen3 --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3")),
+            Row(
+                "--family gpt_oss --backward bf16 --ep-size 1",
+                nproc=1,
+                markers=("gpu", "core", "1gpu", "ep", "moe", "gptoss"),
+            ),
+            "--family qwen3 --backward bf16",
+        ),
+        timeout=900,
+    ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1500

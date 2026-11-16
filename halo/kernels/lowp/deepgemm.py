@@ -26,7 +26,7 @@ from halo.kernels.lowp.spec import LOWP_RECIPES, QuantFormat
 
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = tuple(r.quant_format for r in LOWP_RECIPES.values() if r.native)
 
-_ALIGN = 128  # the contiguous layout pads each expert's row (M) segment to this
+GROUP_ROW_ALIGN = 128  # the contiguous layout pads each expert's row (M) segment to this
 _FP4_K_ALIGN = 256  # the fp4 kernel's contraction (K) multiple, two e2m1 per byte
 _WGRAD_MAX_GROUPS = 128  # the k-grouped kernel's scale-layout transform takes at most this many experts per call
 # DeepGEMM JIT-compiles a second k-grouped kernel (one TMA store stage) once a call's experts average this many
@@ -48,7 +48,7 @@ def _deep_gemm():
         from deep_gemm.utils import per_block_cast_to_fp8  # noqa: PLC0415, F401  (the public weight cast)
     except Exception:
         return None
-    utils.set_mk_alignment_for_contiguous_layout(_ALIGN)
+    utils.set_mk_alignment_for_contiguous_layout(GROUP_ROW_ALIGN)
     return deep_gemm, utils
 
 
@@ -60,11 +60,12 @@ class _RowLayout(NamedTuple):
     """Each expert's tokens at the start of its own 128-aligned segment of the ``rows``-row operand."""
 
     dst: torch.Tensor  # [T] int64, the operand row of each token
-    src: torch.Tensor  # [rows] int32, the token of each row, -1 on padding
-    m_indices: torch.Tensor  # [rows] int32, the expert of each row, -1 on padding
+    src: torch.Tensor  # [rows] int32, the token of each row, -1 on the rows this layout pads
+    m_indices: torch.Tensor  # [rows] int32, the expert of each row, -1 on the rows this layout pads
     segments: list[int]  # each expert's segment length
     segments_dev: torch.Tensor  # the same, int32 on the device
     rows: int
+    aligned: bool  # every group already a whole number of segments: the operand is the tokens themselves
 
 
 class _Memo:
@@ -101,9 +102,9 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
             f"at T={num_tokens}; got {ends}. Rows outside the covered span are never written and would be "
             f"returned uninitialized."
         )
-    segments = [-(-(b - a) // _ALIGN) * _ALIGN for a, b in zip([0, *ends[:-1]], ends, strict=True)]
+    segments = [-(-(b - a) // GROUP_ROW_ALIGN) * GROUP_ROW_ALIGN for a, b in zip([0, *ends[:-1]], ends, strict=True)]
     counts = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
-    segments_dev = (counts + _ALIGN - 1) // _ALIGN * _ALIGN
+    segments_dev = (counts + GROUP_ROW_ALIGN - 1) // GROUP_ROW_ALIGN * GROUP_ROW_ALIGN
     expert = torch.repeat_interleave(torch.arange(num_experts, device=offs.device), counts, output_size=num_tokens)
     shift = (segments_dev.cumsum(0) - segments_dev) - (counts.cumsum(0) - counts)
     dst = torch.arange(num_tokens, device=offs.device) + shift[expert]
@@ -112,13 +113,19 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
     src[dst] = torch.arange(num_tokens, device=offs.device, dtype=torch.int32)
     m_indices = torch.full((rows,), -1, device=offs.device, dtype=torch.int32)
     m_indices[dst] = expert.to(torch.int32)
-    return _RowLayout(dst, src, m_indices, segments, segments_dev.to(torch.int32), rows)
+    aligned = rows == num_tokens
+    return _RowLayout(dst, src, m_indices, segments, segments_dev.to(torch.int32), rows, aligned)
 
 
 # One host read of ``offs`` per expert FFN, not per projection; the gate and up GEMMs cast the same activation.
 _layouts = _Memo(_row_layout)
 _row_casts = _Memo(lambda x, layout, width: cast_rows_to_fp8(x, layout.src, width))
 _tile_casts = _Memo(lambda x, layout: cast_tiles_to_fp8(x, layout.src))
+
+
+def _token_rows(d: torch.Tensor, layout: _RowLayout) -> torch.Tensor:
+    """The ``[T, N]`` token rows of a ``[rows, N]`` kernel output."""
+    return d if layout.aligned else d.index_select(0, layout.dst)
 
 
 def _launch(kernel, *args, what: str, **kwargs) -> None:
@@ -136,12 +143,12 @@ def _launch(kernel, *args, what: str, **kwargs) -> None:
 def _cast_experts(b: torch.Tensor, cast, align, block_scaled: bool):
     """``(data, scales)`` of ``b`` ``[E, N, K]``, cast over chunks of experts that stay under ``_CAST_CHUNK_BYTES``.
 
-    The MXFP4 cast scales row by row, so experts flatten as they are. The FP8 weight cast scales ``_ALIGN`` x ``_ALIGN``
-    blocks, so each expert's N is zero-padded to a block boundary first: a block then never spans two experts, and the
+    The MXFP4 cast scales row by row, so experts flatten as they are. The FP8 weight cast scales 128 x 128 blocks, so
+    each expert's N is zero-padded to a block boundary first: a block then never spans two experts, and the
     padding is the zeros the per-expert cast would add itself. Outputs are allocated dense and filled by copy, as
     DeepGEMM asserts the weight's expert stride is ``N * K``, which a slice of the padded layout does not keep at E=1."""
     E, N, K = b.shape
-    n_cast = align(N, _ALIGN) if block_scaled else N
+    n_cast = align(N, GROUP_ROW_ALIGN) if block_scaled else N
     step = max(1, _CAST_CHUNK_BYTES // (4 * n_cast * K))
 
     def cast_chunk(start: int):
@@ -190,7 +197,7 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, k_pad: int, cacheable: bool
         cast = (
             (lambda t: dg_utils.per_token_cast_to_fp4(t, use_ue8m0=True, gran_k=32))
             if fmt == "mxfp4"
-            else (lambda t: dg_utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=_ALIGN))
+            else (lambda t: dg_utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=GROUP_ROW_ALIGN))
         )
         operand = _cast_experts(b, cast, dg_utils.align, block_scaled=fmt == "mxfp8")
     if cacheable:
@@ -223,7 +230,7 @@ def _deepgemm_forward(x, w, layout: _RowLayout, fmt: QuantFormat, weight_cacheab
         recipe_b=recipe_b,
         what=f"{fmt} grouped GEMM on M={layout.rows} N={N} K={K} E={E}",
     )
-    return d.index_select(0, layout.dst)
+    return _token_rows(d, layout)
 
 
 def _fp8_dgrad(grad: torch.Tensor, w_fp8, layout: _RowLayout, k: int) -> torch.Tensor:
@@ -238,7 +245,7 @@ def _fp8_dgrad(grad: torch.Tensor, w_fp8, layout: _RowLayout, k: int) -> torch.T
         layout.m_indices,
         what=f"fp8 dgrad on M={layout.rows} N={k} K={grad.shape[1]}",
     )
-    return d.index_select(0, layout.dst)
+    return _token_rows(d, layout)
 
 
 def _launch_wgrad(x_op, g_op, segments: list[int], segments_dev: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
@@ -252,7 +259,7 @@ def _launch_wgrad(x_op, g_op, segments: list[int], segments_dev: torch.Tensor, d
         stop = min(start + _WGRAD_MAX_GROUPS, E)
         ks = segments[start:stop]
         end = row + sum(ks)
-        rows, tiles = slice(row, end), slice(row // _ALIGN, end // _ALIGN)
+        rows, tiles = slice(row, end), slice(row // GROUP_ROW_ALIGN, end // GROUP_ROW_ALIGN)
         _launch(
             deep_gemm.k_grouped_fp8_gemm_tn_contiguous,
             (x_op[0][rows], x_op[1][tiles]),
@@ -261,7 +268,7 @@ def _launch_wgrad(x_op, g_op, segments: list[int], segments_dev: torch.Tensor, d
             ks,
             segments_dev[start:stop],
             None,
-            recipe=(1, 1, _ALIGN),
+            recipe=(1, 1, GROUP_ROW_ALIGN),
             what=f"fp8 wgrad on M={K} N={N} E={stop - start}",
         )
         row = end
@@ -279,12 +286,12 @@ def warm_fp8_wgrad(num_experts: int, k: int, n: int, dtype: torch.dtype, device:
     """Compile the weight-gradient kernel's long-group variant for an ``[num_experts, k, n]`` bank in ``dtype``, on
     zero operands of the fewest rows that select it. A backward over a few rows per expert compiles the other one,
     and the first long receive would otherwise compile this one mid-step."""
-    rows_per_expert = _ALIGN * _WGRAD_LONG_GROUP_BLOCKS.get(dtype, _WGRAD_LONG_GROUP_BLOCKS_DEFAULT)
+    rows_per_expert = GROUP_ROW_ALIGN * _WGRAD_LONG_GROUP_BLOCKS.get(dtype, _WGRAD_LONG_GROUP_BLOCKS_DEFAULT)
 
     def zeros(width: int) -> tuple[torch.Tensor, torch.Tensor]:
         rows = num_experts * rows_per_expert
         data = torch.zeros(rows, width, dtype=torch.uint8, device=device).view(torch.float8_e4m3fn)
-        return data, torch.ones(rows // _ALIGN, width, dtype=torch.float32, device=device)
+        return data, torch.ones(rows // GROUP_ROW_ALIGN, width, dtype=torch.float32, device=device)
 
     segments = [rows_per_expert] * num_experts
     _launch_wgrad(zeros(k), zeros(n), segments, torch.tensor(segments, dtype=torch.int32, device=device), dtype)

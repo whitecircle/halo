@@ -169,7 +169,7 @@ def _dg_operands(ops: Operands, quant_format: str) -> tuple:
     x = F.pad(ops.x, (0, k_pad - k)) if k_pad != k else ops.x
     with torch.no_grad():
         return (
-            utils.per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=deepgemm._ALIGN),
+            utils.per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=deepgemm.GROUP_ROW_ALIGN),
             deepgemm._quant_weight(ops.w, quant_format, k_pad, cacheable=False),
             x,
             k_pad,
@@ -204,7 +204,7 @@ def _dg_kernel(quant_format: str) -> Callable:
 
 def _dg_activation_cast(ops: Operands) -> Callable:
     _, utils = deepgemm._deep_gemm()
-    return lambda: utils.per_token_cast_to_fp8(ops.x, use_ue8m0=True, gran_k=deepgemm._ALIGN)
+    return lambda: utils.per_token_cast_to_fp8(ops.x, use_ue8m0=True, gran_k=deepgemm.GROUP_ROW_ALIGN)
 
 
 def _dg_weight_cast(quant_format: str) -> Callable:

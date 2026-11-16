@@ -38,8 +38,10 @@ from tests.common.rank_log import log
 from tests.common.repo import probe_findings
 from tests.common.route_sort_reference import (
     CASES,
+    PAD_ALIGN,
     case_findings,
     compiled_sort_binaries,
+    padded_argsort,
     pinned_host_requests,
     receive,
     receive_counts,
@@ -196,10 +198,14 @@ def trips_the_detector(fn) -> bool:
     return False
 
 
+def _padded_sort(experts, weights, local_experts, counts):
+    return sort_routing_by_expert(experts, weights, local_experts, counts, PAD_ALIGN)
+
+
 def check_counting_sort(device) -> dict[str, bool]:
     """Each reference case after its layer warm-up: sync-free, bit-identical to the torch construction, served by the
-    warmed binaries, no pinned host block. The receive and reference are built outside the detector, whose host copies
-    sync."""
+    warmed binaries, no pinned host block, and the same with each group padded to whole GEMM segments where receive
+    counts size the sort. The receive and reference are built outside the detector, whose host copies sync."""
     checks = {}
     warm_up_counted = False
     pinned = 0
@@ -226,6 +232,30 @@ def check_counting_sort(device) -> dict[str, bool]:
         checks[f"{case.name}_sync_free"] = True
         checks[f"{case.name}_equals_torch_construction_bitwise"] = not mismatched
         checks[f"{case.name}_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
+        if inputs.counts is None:
+            continue
+        rows = sum(-(-count // PAD_ALIGN) * PAD_ALIGN for count in inputs.counts)
+        generator = torch.Generator(device=device).manual_seed(index)
+        padded_inputs = inputs._replace(upstream=torch.randn(rows, device=device, generator=generator))
+        want = sort_with_grad(padded_argsort, case, padded_inputs)
+        warm_route_sort_kernels(case.top_k, case.local_experts, device, pad_align=PAD_ALIGN)
+        warm = compiled_sort_binaries()
+        torch.cuda.synchronize()
+        requests = pinned_host_requests()
+        try:
+            with cuda_syncs_are_errors():
+                got = sort_with_grad(_padded_sort, case, padded_inputs)
+            torch.cuda.synchronize()
+        except RuntimeError as exc:
+            log(f"[padded counting sort] {case.name} raised {exc}")
+            checks[f"{case.name}_padded_sync_free"] = False
+            continue
+        pinned += pinned_host_requests() - requests
+        mismatched = result_mismatches(case, got, want)
+        log(f"[padded counting sort] {case.name}: {rows} rows; mismatched={mismatched}")
+        checks[f"{case.name}_padded_sync_free"] = True
+        checks[f"{case.name}_padded_equals_torch_construction_bitwise"] = not mismatched
+        checks[f"{case.name}_padded_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
     # The count is not blind: some warm-up compiled a shape no earlier sort had.
     checks["warm_up_compiles_are_counted"] = warm_up_counted
     checks["counting_sort_takes_no_pinned_host_memory"] = pinned == 0
