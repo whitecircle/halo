@@ -108,7 +108,7 @@ The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.
 
 ## Measured
 
-Each frozen bank dequantizes in one fused Triton kernel (`halo/kernels/lowp/dequant_triton.py`), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
+Each frozen bank dequantizes in one [fused Triton kernel](../optimization/low-precision-moe-kernels.md#frozen-expert-banks), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
 
 Inkling-2-Small, LoRA r16 on attention q/k/v/o and the experts, 4× B300 at EP4 with `frozen_quantized_experts`: the load takes ~17 s per rank from local disk. Over 150 steps GSM8K held-out loss goes 0.549 → 0.136, ARC-Challenge `acc_norm` 0.777 → 0.779 and HellaSwag (1k) `acc_norm` 0.752 → 0.756.
 
