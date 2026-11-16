@@ -63,6 +63,9 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
         data, scales, global_scale = (getattr(self, f"{name}{part}", None) for part in _FROZEN_PARTS)
         return FrozenExpertBank(self._frozen_formats[name], data, scales, global_scale)
 
+    def frozen_expert_banks(self) -> tuple[FrozenExpertBank, ...]:
+        return tuple(self.frozen_bank(name) for name in getattr(self, "_frozen_formats", ()))
+
     def start_gather_expert_state_dict(self, **kwargs):
         if self.has_frozen_banks:
             raise ValueError(
