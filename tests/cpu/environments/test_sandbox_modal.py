@@ -417,7 +417,7 @@ def test_planted_link_is_neither_written_through_nor_read(modal, executor, tmp_p
     session = executor.open_session()
     assert session.run(f"import os\nos.symlink({str(target)!r}, 'note.txt')").ok
     assert session.read_file("note.txt") is None
-    with pytest.raises(ValueError, match="is a link"):
+    with pytest.raises(ValueError, match="not a regular file"):
         session.write_file("note.txt", "overwritten")
     assert target.read_text() == "outside"
 
@@ -467,6 +467,15 @@ def test_process_that_left_the_programs_group_does_not_outlive_the_run(executor)
     assert session.run(daemon).ok
     owners = {os.stat(f"/proc/{pid}").st_uid for pid in os.listdir("/proc") if pid.isdigit()}
     assert session.uid not in owners
+
+
+def test_program_owns_the_files_written_for_it(executor):
+    session = executor.open_session()
+    session.write_file("tools/run.sh", "echo ran\n")
+    res = session.run(
+        "import os\nos.chmod('tools/run.sh', 0o755)\nos.chmod('tools', 0o700)\nos.system('./tools/run.sh')"
+    )
+    assert res.ok and res.stdout == "ran\n", res
 
 
 def test_file_content_utf8_cannot_carry_is_written_replaced(executor):

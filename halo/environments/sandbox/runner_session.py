@@ -113,7 +113,18 @@ class RunnerSession(SandboxSession):
         if not built:
             # Any other program may have removed the binary the recorded build left.
             self._build = None
-        request = {
+        request = self._run_request(spec, code, files, stdin, timeout, build=not built)
+        deadline = EXCHANGE_OVERHEAD_SECONDS + timeout + (self.limits.compile_timeout if spec.is_compiled else 0)
+        try:
+            reply = self._ask(request, deadline=deadline)
+        except SandboxInfraError as exc:
+            return SandboxResult(error=str(exc))
+        return self._result(reply, spec, key)
+
+    def _run_request(
+        self, spec: LanguageSpec, code: str, files: dict[str, str], stdin: str, timeout: float, *, build: bool
+    ) -> dict[str, Any]:
+        return {
             "op": "run",
             "source_name": spec.source_name,
             "code": utf8_encodable(code),
@@ -123,15 +134,13 @@ class RunnerSession(SandboxSession):
             "timeout": timeout,
             "limits": self.limits.for_run(spec, timeout),
             "compile_argv": list(spec.compile_argv) if spec.is_compiled else None,
-            "build": not built,
+            "build": build,
             "compile_timeout": self.limits.compile_timeout,
             "compile_limits": self.limits.for_compile(),
         }
-        deadline = EXCHANGE_OVERHEAD_SECONDS + timeout + (self.limits.compile_timeout if spec.is_compiled else 0)
-        try:
-            reply = self._ask(request, deadline=deadline)
-        except SandboxInfraError as exc:
-            return SandboxResult(error=str(exc))
+
+    def _result(self, reply: dict[str, Any], spec: LanguageSpec, key: tuple) -> SandboxResult:
+        """The verdict a run's reply comes to, recording the build and the entries a later reset keeps."""
         if "tampered" in reply:
             # The program's own runtime error, as on ``local``: an infra error would let it void its episode.
             self._build = None

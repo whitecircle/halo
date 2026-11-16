@@ -68,26 +68,64 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 
 ### Modal
 
-Run every code execution of an async-GRPO config in Modal with one flag:
+One flag sends every code execution of an async-GRPO run to Modal:
 
 ```bash
-pip install 'halo[modal]'           # or: uv pip install 'halo[modal]'
+pip install 'halo[modal]'
 export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (modal token new)
 halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
 ```
 
-The flag, on `halo launch` and `halo run`, sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1` for the process, its ranks and its Ray actors. `ray.init` carries every `HALO_SANDBOX_*` variable to the actors of a shared cluster (`ray_address`); credentials are not carried, so each cluster node needs Modal's own. That covers code-contests grading and its test tool, the `swe` tools, and the Python REPL tools, each call of which becomes one remote exec (80 to 330 ms warm, below).
+The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1`, so code-contests grading and its test tool, the `swe` tools and the Python REPL tools all run in Modal.
 
-- **One sandbox per executor.** Created on first use with `cpu` (default 4) and `memory_mb` (default 8192); sessions are directories in it, and `run()` is a throwaway session. At most `max_concurrency` (default `int(cpu)`) runs execute at once; the rest queue before their clock starts. The constructor refuses a `memory_mb` that cannot hold `max_concurrency` builds at `compile_memory_limit_mb`.
-- **One exec per call.** The runner (`program_runner.py`, started as root) applies the rlimits and child environment the request carries, `local`'s, and runs the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local` (`runner_session.py`); a compiled session reuses its build and `reset_to_prepared` rides on the next run.
-- **A user per session.** A session's programs run as a user of its own, in a directory only that user can enter. A program cannot signal the runner or another session's programs, nor open another session's files; world-writable directories of the image (`/tmp`) stay shared. Every process the user still has is killed when a run ends. The image must run as root.
-- **Tampering.** A source or file path the program replaced with a link, directory or FIFO is never written through or read: the next run is the program's runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
-- **Faults.** A sandbox that refuses an exec (its idle timeout or lifetime ended it) is replaced and the exec sent once more, since no runner started. A transport lost after that, a runner crash, and an exec past its deadline (run timeout + compile timeout + 30 s) are `error` and never sent again, since the program may already have run; each drops the sandbox, the next call starts a new one, and a session continues empty. A failed sandbox start is `error` too.
-- **Cleanup.** A closed session's directory is removed by the next exec. `close()` and an `atexit` hook terminate the sandbox; Modal's 5-minute idle timeout reclaims one a killed process left.
+On a shared Ray cluster (`ray_address`) the two variables travel to the actors with the job. Credentials do not: put Modal's on every cluster node.
 
-Options (`sandbox_options`): `app_name` (default `halo-sandbox`), `image` (a registry tag or `modal.Image` with `python3`; default Debian slim with Python 3.12, `gcc` and `g++`), `cpu`, `memory_mb`, `max_concurrency`, `sandbox_timeout` (lifetime, default and maximum 86400 s; runs in flight when it ends are `error`) and `local`'s limits.
+**How it runs**
 
-Measured from a CPU host (default image): first run including sandbox start 0.7 to 1.0 s once the image is built (5.1 s on its first build); warm Python exec 80 to 330 ms median, varying between sandboxes of one run.
+- Each executor (one per environment actor) keeps one sandbox, created on first use.
+- A session is a directory in that sandbox. `run()` is a throwaway session.
+- Each call is one remote exec, about 90 ms warm. The first call also starts the sandbox, about 0.6 s once the image is built.
+- At most `max_concurrency` runs execute at once. The rest wait, and their time limit starts only when they run.
+- Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
+
+**What a program cannot do**
+
+Each session runs as its own user in a directory only that user can enter.
+
+- It cannot read or change another session's files.
+- It cannot signal another session's programs or the process that supervises it.
+- It cannot leave a process behind: every process of its user is killed when the run ends.
+- It cannot make the backend write or read through a link, directory or FIFO it put in a file's place. The next run reports a runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+
+World-writable directories of the image, such as `/tmp`, stay shared between sessions. The image must run as root.
+
+**When something fails**
+
+| What happened | What the caller sees |
+|---|---|
+| Modal ended the sandbox (5 minutes idle, or its lifetime) before the call | Nothing: a new sandbox takes the call |
+| The sandbox cannot be created | `error` |
+| The connection drops after the program may have started | `error`; the call is not sent again |
+| The call passes its deadline (run timeout + compile timeout + 30 s) | `error` |
+
+After an `error` the executor starts a new sandbox, and open sessions continue with an empty directory.
+
+**Cleanup**
+
+`close()` and an `atexit` hook terminate the sandbox. If the process is killed, Modal's idle timeout removes it after 5 minutes.
+
+**Options** (`sandbox_options`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `app_name` | `halo-sandbox` | The Modal app that owns the sandbox |
+| `image` | Debian slim, Python 3.12, `gcc`, `g++` | A registry tag or a `modal.Image` with `python3` |
+| `cpu` / `memory_mb` | 4 / 8192 | What the sandbox reserves |
+| `max_concurrency` | `int(cpu)` | Runs executing at once; `memory_mb` must hold that many at the larger memory limit |
+| `sandbox_timeout` | 86400 s | Sandbox lifetime (Modal's maximum); runs in flight when it ends are `error` |
+| `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
+
+The code is in `halo/environments/sandbox/modal_sandbox.py`; the part that runs inside the sandbox is `halo/environments/sandbox/program_runner.py`.
 
 ## Using it from Python
 
@@ -158,7 +196,7 @@ A grader of your own that calls `sandbox.run()` must handle its host-side except
 A program that drives its own run into an `error` voids its episode. The routes left:
 
 - `remote`: a response the service fails to produce (huge output, service OOM), or one past the client deadline (run timeout + 30 s).
-- `modal`: a run that kills the runner or keeps the exec past its deadline.
+- `modal`: output too large to return before the call's deadline.
 - `local` / `bubblewrap` grading: a host-side exception during a test, such as a `TMPDIR` the program filled.
 - `local` only: a `setsid()` child that outlives the run fills the process table, or, under a root grader, the program deletes the compiler (`compiler not found` for every later build on that host).
 
