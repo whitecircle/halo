@@ -31,7 +31,7 @@ RUN python3 /opt/halo/patch_vllm_source.py
 # Inkling 2's own edits (docker/vllm/patches/patch_vllm_inkling2.py): its tensor-parallel all-reduce, its
 # config.json as the release ships it, and LoRA on its NVFP4/MXFP8 experts. The image keeps the GPU check of the
 # expert LoRA: docker run --gpus 1 --entrypoint python3 halo:vllm-<version> /opt/halo/verify_inkling2_expert_lora.py
-COPY docker/vllm/patches/patch_vllm_inkling2.py docker/vllm/patches/verify_inkling2_expert_lora.py /opt/halo/
+COPY docker/vllm/patches/patch_vllm_inkling2.py docker/vllm/verify_inkling2_expert_lora.py /opt/halo/
 RUN cd /opt/halo && python3 patch_vllm_inkling2.py
 
 COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
