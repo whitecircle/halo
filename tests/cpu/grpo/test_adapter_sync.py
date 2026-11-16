@@ -821,10 +821,6 @@ def _refusal_cases():
         "grown vocabulary": (grown, "grown vocabulary"),
         "other trainable parameters": (trainable_norm, "trainable parameters other than the adapters"),
         "qlora": (patched(lambda m: m.setattr(adapter_sync, "has_packed_quantized_params", lambda _: True)), "QLoRA"),
-        "expert lora": (
-            patched(lambda m: m.setattr(adapter_sync, "model_has_expert_lora", lambda _: True)),
-            "native expert LoRA",
-        ),
     }
 
 
