@@ -22,14 +22,15 @@ run() {  # run <name> <image> <config>
   local NAME=$1 IMG=$2 CFG
   CFG=$(render_config "$BUNDLE/gemma4_sft/axolotl/$3")
   mkdir -p $ROOT/logs $ROOT/out
-  flock ${GPU_LOCK} bash -c "timeout 1800 docker run --rm --name axolotl-$NAME \
+  # shellcheck disable=SC2086  # GPU_FLAGS is intentionally word-split
+  flock "$GPU_LOCK" timeout 1800 docker run --rm --name "axolotl-$NAME" \
     $GPU_FLAGS --ipc=host --ulimit memlock=-1 --shm-size=128g \
     "${BENCH_DOCKER_MOUNTS[@]}" -e HF_TOKEN \
-    -e PYTHONPATH=$BUNDLE/gemma4_sft/axolotl -e TRITON_CACHE_DIR=$ROOT/triton_cache_docker_$(echo $IMG | tr ':/@' '___' | cut -c1-60) \
+    -e PYTHONPATH="$BUNDLE/gemma4_sft/axolotl" -e TRITON_CACHE_DIR="$ROOT/triton_cache_docker_$(echo "$IMG" | tr ':/@' '___' | cut -c1-60)" \
     -e WANDB_DISABLED=true -e WANDB_MODE=disabled -e AXOLOTL_DO_NOT_TRACK=1 \
-    -e BENCH_EXIT_AFTER=1 -e BENCH_OUT=$ROOT/out/$NAME.json \
-    -w $ROOT --entrypoint bash $IMG \
-    -lc 'torchrun --nproc_per_node 2 --master_port 29611 -m axolotl.cli.train $CFG' > $ROOT/logs/$NAME.log 2>&1"
+    -e BENCH_EXIT_AFTER=1 -e BENCH_OUT="$ROOT/out/$NAME.json" \
+    -w "$ROOT" --entrypoint bash "$IMG" \
+    -lc "torchrun --nproc_per_node 2 --master_port 29611 -m axolotl.cli.train $CFG" > "$ROOT/logs/$NAME.log" 2>&1
   echo "exit $?" >> $ROOT/logs/$NAME.log
   echo "$NAME: $(grep -E '^exit' $ROOT/logs/$NAME.log) $(grep -o '\[bench\] RESULT.*' $ROOT/logs/$NAME.log | cut -c1-250)"
 }

@@ -9,7 +9,7 @@
 # the framework's own scripts (e.g. axolotl/stage.sh).
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../paths.env"
 set -euo pipefail
-IMAGE=${IMAGE:-public.ecr.aws/whitecircle/halo:blackwell-1.2.0}
+IMAGE=${IMAGE:-${HALO_IMAGE:-public.ecr.aws/whitecircle/halo:blackwell-1.2.0}}
 # RUNNER=docker (default) runs each step in the Halo image; RUNNER=direct runs it here (already inside that image).
 in_image() {
   if [ "${RUNNER:-docker}" = direct ]; then (cd "$HALO_TREE" && PYTHONPATH="$HALO_TREE" "$@")

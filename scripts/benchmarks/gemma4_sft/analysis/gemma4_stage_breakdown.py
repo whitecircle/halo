@@ -83,6 +83,8 @@ def main() -> None:
     kernels = sorted(
         (e for e in trace["traceEvents"] if e.get("ph") == "X" and e.get("cat") in kinds), key=lambda e: e["ts"]
     )
+    if not kernels:
+        raise SystemExit(f"{path} has no GPU kernel events (a CPU-only profile or the wrong rank file?)")
     windows = optimizer_windows(kernels)
     stages = collections.Counter()
     for e in kernels:

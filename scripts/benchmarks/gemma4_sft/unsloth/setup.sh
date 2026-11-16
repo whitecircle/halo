@@ -10,8 +10,8 @@ B=${BENCH_ROOT}/unsloth
 mkdir -p $B ${BENCH_TMP} ${UV_CACHE_DIR}
 cd $B
 $UV venv -p 3.12 venv
-$UV pip install -p venv/bin/python "unsloth==2026.9.11" "unsloth_zoo==2026.9.7" "torch==2.12.1" \
+# requirements.lock holds the exact versions of the measured environment.
+$UV pip install -p venv/bin/python -r "$BUNDLE/gemma4_sft/unsloth/requirements.lock" \
     --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
-# exact pins: $UV pip install -p venv/bin/python -r requirements.lock --extra-index-url https://download.pytorch.org/whl/cu130 --index-strategy unsafe-best-match
 # Model + data: HF_HOME=${HF_CACHE}, `hf download google/gemma-4-26B-A4B-it` (token via HF_TOKEN env);
 # dataset built by build_dataset.py (copied here).

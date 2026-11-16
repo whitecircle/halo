@@ -51,8 +51,8 @@ attempt() {
   state "start $FW/$name"
   RUN_TIMEOUT=3000 "$@" > "$log" 2>&1; local rc=$?
   echo "exit $rc" >> "$log"
-  if grep -qiE "OutOfMemoryError|CUDA out of memory|CUDA error: out of memory" "$log"; then state "OOM $FW/$name"; return 2; fi
   if [ $rc -eq 0 ] && [ -s "$OUT/$name.json" ]; then state "OK $FW/$name"; return 0; fi
+  if grep -qiE "OutOfMemoryError|CUDA out of memory|CUDA error: out of memory" "$log"; then state "OOM $FW/$name"; return 2; fi
   state "FAILED $FW/$name (exit $rc, see $log)"; tail -20 "$log" >&2; return 1
 }
 
@@ -67,7 +67,12 @@ fit_and_repeat() {
   state "no configuration of $FW fits at $BENCH_SEQ tokens"
 }
 
-model_dir() { ls -d "$HF_CACHE"/hub/models--google--gemma-4-26B-A4B-it/snapshots/*/ | head -1; }
+# model_dir: prints the cached model snapshot; fails when there is none.
+model_dir() {
+  local snapshots=("$HF_CACHE"/hub/models--google--gemma-4-26B-A4B-it/snapshots/*/)
+  [ -d "${snapshots[0]}" ] || { echo "$MODEL_ID is not in $HF_CACHE: run \`hf download $MODEL_ID\` first" >&2; return 1; }
+  echo "${snapshots[0]}"
+}
 
 # ---- Halo (the published image, this checkout mounted) ----
 halo_run() {
@@ -136,12 +141,13 @@ run_megatron_bridge() {
 
 # ---- MS-SWIFT 4.5.3 (official image; FSDP2 full_shard, canonical tokens injected) ----
 ms_swift_run() {
-  local n=$1 ac=$2
+  local n=$1 ac=$2 model
+  model=$(model_dir) || return 1
   attempt "$n" in_image "$SWIFT_IMAGE" "$BENCH_TMP" HF_HUB_OFFLINE=1 MODELSCOPE_CACHE="$BENCH_TMP/modelscope" \
     PYTORCH_ALLOC_CONF=expandable_segments:True BENCH_FSDP_NO_RAM_EFFICIENT=1 BENCH_CANONICAL_INJECT=1 \
     BENCH_TW_HOOK=1 BENCH_OUT="$OUT/$n.json" -- \
     torchrun --nproc_per_node=2 --master_port=29615 "$HERE/ms_swift/run_swift.py" \
-      --model "$(model_dir)" --use_hf true --tuner_type full --torch_dtype bfloat16 --freeze_vit false --freeze_aligner false \
+      --model "$model" --use_hf true --tuner_type full --torch_dtype bfloat16 --freeze_vit false --freeze_aligner false \
       --dataset "$BENCH_MESSAGES" --split_dataset_ratio 0 --dataset_shuffle false --train_dataloader_shuffle false \
       --max_length "$BENCH_SEQ" --truncation_strategy right --per_device_train_batch_size 1 --gradient_accumulation_steps 1 \
       --learning_rate 1e-5 --lr_scheduler_type constant --warmup_ratio 0 --warmup_steps 0 --weight_decay 0 --max_grad_norm 1.0 \
@@ -156,9 +162,10 @@ run_ms_swift() { fit_and_repeat ms_swift_noac ms_swift_ac; }
 
 # ---- Unsloth 2026.9.11 (its own venv, built by setup.sh inside the Halo image: the official image fails on sm_103) ----
 unsloth_run() {
-  local n=$1 gc=$2
+  local n=$1 gc=$2 model
+  model=$(model_dir) || return 1
   attempt "$n" in_image "$HALO_IMAGE" "$BENCH_TMP" HF_HUB_OFFLINE=1 PYTORCH_ALLOC_CONF=expandable_segments:True \
-    UNSLOTH_COMPILE_LOCATION="$BENCH_TMP/unsloth_compiled_$n" BENCH_MODEL="$(model_dir)" BENCH_OUT="$OUT/$n.json" \
+    UNSLOTH_COMPILE_LOCATION="$BENCH_TMP/unsloth_compiled_$n" BENCH_MODEL="$model" BENCH_OUT="$OUT/$n.json" \
     BENCH_OPTIM=adamw_torch_fused BENCH_GC="$gc" BENCH_TW_HOOK=1 -- \
     "$BENCH_ROOT/unsloth/venv/bin/torchrun" --nproc_per_node=2 --master_port=29631 "$HERE/unsloth/train_unsloth.py"
 }

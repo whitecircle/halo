@@ -13,9 +13,11 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+import unsloth  # noqa: F401  (must be imported before torch/transformers/trl, which bench_callback imports)
+
+# isort: split
 import bench_callback
 import torch
-import unsloth  # noqa: F401  (must be imported before transformers/trl)
 from datasets import Dataset
 from trl import SFTConfig, SFTTrainer
 from unsloth import FastModel

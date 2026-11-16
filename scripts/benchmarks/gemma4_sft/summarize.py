@@ -16,8 +16,12 @@ root = Path(sys.argv[1])
 rows = []
 for result in sorted(root.glob("*/*.json")):
     framework, run = result.parent.name, result.stem
-    data = json.loads(result.read_text())
-    tps = data.get("cluster_tokens_per_second")
+    try:
+        data = json.loads(result.read_text())
+    except json.JSONDecodeError as e:
+        print(f"skipping {result}: {e}", file=sys.stderr)
+        continue
+    tps = data.get("cluster_tokens_per_second") if isinstance(data, dict) else None
     if tps is None:
         continue
     losses = data.get("losses") or []

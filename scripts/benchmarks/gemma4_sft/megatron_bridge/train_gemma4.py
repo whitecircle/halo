@@ -115,6 +115,8 @@ def build_config():
     # MCore 0.19 has no GroupedMLP
     m.moe_grouped_gemm = env("MB_GROUPED_GEMM", "1") == "1"
     m.moe_permute_fusion = True
+    if DISPATCHER not in ("alltoall", "allgather", "flex"):
+        raise ValueError(f"MB_DISPATCHER must be alltoall, allgather or flex, got {DISPATCHER!r}")
     m.moe_token_dispatcher_type = DISPATCHER
     if DISPATCHER == "flex":
         m.moe_flex_dispatcher_backend = env("MB_FLEX_BACKEND", "deepep")
@@ -147,6 +149,8 @@ def build_config():
         m.recompute_method = None
         m.recompute_num_layers = None
         m.recompute_modules = RECOMPUTE.split(":", 1)[1].split(",")
+    else:
+        raise ValueError(f"MB_RECOMPUTE must be none, full or selective:<mod1,mod2>, got {RECOMPUTE!r}")
 
     # Text-only SFT: vision tower + projection are not exercised; keep them frozen (recipe freezes the tower)
     m.freeze_language_model = False

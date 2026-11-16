@@ -24,6 +24,8 @@ for ex in ds:
         cur = []
         if len(out) == ROWS:
             break
+if len(out) < ROWS:
+    raise SystemExit(f"the dataset ran out after {len(out)} rows; BENCH_ROWS asks for {ROWS}")
 with open(f"{BENCH_ROOT}/data/ultrachat_gemma4_2k{SUFFIX}.jsonl", "w") as f:
     for r in out:
         f.write(json.dumps(r) + "\n")
