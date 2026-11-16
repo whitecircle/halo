@@ -125,17 +125,19 @@ class WhiteCircleScorer(Scorer):
                     raise
             else:
                 status = response.status_code
-                if (status not in TRANSIENT_CLIENT_ERROR_CODES and status < 500) or attempt == term.max_retries:
+                retryable = status in TRANSIENT_CLIENT_ERROR_CODES or status >= 500
+                if not retryable or attempt == term.max_retries:
                     if response.is_error:
                         raise RuntimeError(f"POST /api/events answered {status}: {response.text[:_ERROR_BODY_CHARS]}")
                     return response.json()
                 retry_after = _retry_after(response)
                 wait = wait if retry_after is None else retry_after
             await asyncio.sleep(wait)
-        raise AssertionError("unreachable")
+        raise RuntimeError("POST /api/events: retries exhausted")  # max_retries >= 0, so the loop always returns
 
     def _verdict(self, results: Sequence[Mapping[str, Any] | None]) -> ScoreResult:
-        """Raises when an event the score reads has no verdict, or a listed policy was checked on none of them."""
+        """Raises when an event the score reads has no verdict, no policy was checked on any of them, or a listed policy
+        was checked on none of them."""
         term = self.term
         for result in results:
             if result is None:
@@ -148,6 +150,9 @@ class WhiteCircleScorer(Scorer):
             for policy, outcome in (result.get("policies") or {}).items():
                 violated[policy] = violated.get(policy, False) or bool(outcome[_FLAGGED])
                 names[policy] = outcome.get("name", policy)
+        if not violated:
+            # The API answers an Event no Condition selected a Policy for as completed and unflagged.
+            raise ValueError(f"no policy was checked on the completion: {results[0].get('note')}")
         flagged = any(result[_FLAGGED] for result in results)
         metrics = {self._key(_FLAGGED): float(flagged)}
         if term.policies:

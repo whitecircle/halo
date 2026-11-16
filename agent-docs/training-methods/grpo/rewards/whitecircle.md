@@ -53,7 +53,8 @@ A timeout, a transport error, a 408, a 429 or a 5xx is retried up to `max_retrie
 A check fails, and the completion gets no verdict, when:
 
 - the retries run out or the API answers an error status;
-- an event of the completion comes back without a verdict (a status other than `completed`, or no `flagged`); the error carries the API's `note`, such as no condition selecting a policy;
+- an event of the completion comes back without a verdict (a status other than `completed`, or no `flagged`);
+- no policy was checked on any event of the completion: the API answers an event no condition selected a policy for as completed and unflagged, with a `note`, which the error carries;
 - a listed policy was checked on none of the completion's events.
 
 Each failure logs a warning and `whitecircle/<name>/scored` 0, and `on_error` prices it. The launch probe checks a one-line conversation, so a bad key, an unknown environment, an environment that selects no policy for an assistant message, or a listed policy id no condition selects fails the launch.

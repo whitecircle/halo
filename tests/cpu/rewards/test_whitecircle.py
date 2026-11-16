@@ -36,7 +36,7 @@ def _result(event: dict) -> dict:
         "type": event["type"],
         "status": "completed",
         "flagged": False,
-        "policies": {},
+        "policies": {"policy_a": {"flagged": False, "name": "Policy A"}},
         "event_id": event["event_id"],
     }
 
@@ -266,7 +266,12 @@ def test_listed_policies_score_the_fraction_not_violated(server):
 @pytest.mark.parametrize(
     ("verdict", "reason"),
     [
-        ({"flagged": None, "note": "No policies or metrics were selected for this Event"}, "No policies"),
+        # What the API answers for an Event no Condition selected a Policy for: completed and unflagged.
+        (
+            {"flagged": False, "policies": {}, "note": "No policies or metrics were selected for this Event"},
+            "No policies",
+        ),
+        ({"flagged": None, "note": "no verdict"}, "no verdict"),
         ({"status": "failed", "flagged": None, "note": "validation failed"}, "validation failed"),
     ],
 )
