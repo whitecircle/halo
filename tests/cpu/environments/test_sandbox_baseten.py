@@ -30,7 +30,8 @@ from halo.environments.sandbox.baseten import (
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import require_language
 from halo.environments.sandbox.results import SandboxInfraError
-from halo.environments.sandbox.runner_session import RUNNER_SOURCE
+from halo.environments.sandbox.runner_messages import Request, RunProgram, decode
+from halo.environments.sandbox.runner_session import runner_source
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 
 API_KEY = "bt-secret-key-0123456789"
@@ -50,7 +51,7 @@ class FakeBaseten:
         self.delay: dict[str, float] = {}
         self.roots: dict[str, str] = {}
         self.deleted: list[str] = []
-        self.runner_requests: list[dict] = []
+        self.runner_requests: list[Request] = []
         self.process_status: str | None = None
         fake = self
 
@@ -114,7 +115,7 @@ class FakeBaseten:
                         if not os.path.isdir(os.path.dirname(path)):
                             return self._reply(422, {"error": "parent missing"})
                         if path.endswith(REQUEST_PATH):
-                            fake.runner_requests.append(json.loads(body["content"]))
+                            fake.runner_requests.append(decode(body["content"]))
                         with open(path, "w") as fh:
                             fh.write(mapped(body["content"]))
                         return self._reply(200, {"message": "File created/updated successfully"})
@@ -153,8 +154,8 @@ class FakeBaseten:
             r for r in self.requests if r["path"].startswith(path_prefix) and (method is None or r["method"] == method)
         ]
 
-    def program_runs(self) -> list[dict]:
-        return [request for request in self.runner_requests if request["op"] == "run"]
+    def program_runs(self) -> list[RunProgram]:
+        return [r.operation for r in self.runner_requests if isinstance(r.operation, RunProgram)]
 
 
 @pytest.fixture
@@ -188,7 +189,7 @@ def test_request_shape_and_auth(fake):
         {"type": "TTL_IDLE", "value": "10m", "action": "DELETE"}
     ]
     (runner_put,) = fake.calls(f"/sbx-1/filesystem/%2F{RUNNER_PATH.lstrip('/')}", "PUT")
-    assert runner_put["body"] == {"content": RUNNER_SOURCE}
+    assert runner_put["body"] == {"content": runner_source()}
     (process,) = fake.calls("/sbx-1/process", "POST")
     assert process["body"] == {
         "command": f"python3 -I {RUNNER_PATH} {REQUEST_PATH}",
@@ -196,9 +197,9 @@ def test_request_shape_and_auth(fake):
         "timeout": math.ceil(runner_session.EXCHANGE_OVERHEAD_SECONDS + 7),
         "waitForCompletion": True,
     }
-    (run_request,) = fake.program_runs()
-    assert (run_request["timeout"], run_request["workdir"]) == (7, SESSION_DIR)
-    assert run_request["limits"] == sandbox.limits.for_run(require_language("python"), 7)
+    (program,) = fake.program_runs()
+    assert fake.runner_requests[-1].workdir == SESSION_DIR
+    assert program.run.timeout == 7 and program.run.limits == sandbox.limits.for_run(require_language("python"), 7)
     # The API key only ever mints the token; every sandbox call carries the token.
     assert all(r["auth"] == f"Bearer {TOKEN}" for r in fake.requests if r["path"] != "/v1/token")
 
@@ -251,7 +252,7 @@ def test_unchanged_compiled_program_is_not_rebuilt(fake):
         assert session.run("import os\nos.remove('main')").ok
         assert session.run(code, stdin="1", language="c").stdout == "2\n"  # another program ran: built again
 
-    assert [run["build"] for run in fake.program_runs() if run["compile_argv"]] == [True, False, True]
+    assert [run.build_requested for run in fake.program_runs() if run.build is not None] == [True, False, True]
 
 
 def test_program_runs_under_the_memory_limit(fake):

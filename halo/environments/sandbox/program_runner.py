@@ -1,39 +1,62 @@
-"""The in-sandbox half of the hosted backends (Modal, Baseten): one JSON request in, one JSON reply out. A backend
-starts it as root, with the request on stdin or in the file its argument names. It is shipped with ``workspace.py``
-as one file (``runner_session.RUNNER_SOURCE``) and uses the standard library only, since it runs on the sandbox
-image's own Python. Limits and the program's environment arrive in the request; the client (``runner_session``) turns
-the reply into a verdict.
+"""The half of the Modal and Baseten backends that runs inside the sandbox. It is started as root once per call,
+reads one Request, and writes one Reply.
 
-Each session has a :class:`Workspace` and a user of its own. Programs run as that user, so they cannot signal this
-runner or another session's programs, nor open another session's files, and none of a session's processes outlives
-its run."""
+Each session has its own directory and its own user. A program runs as that user, so it cannot signal the runner or
+reach another session, and every process of that user is killed when the run ends."""
 
 import functools
-import json
 import os
 import resource
 import signal
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
-from halo.environments.sandbox.workspace import SessionPathError, Workspace, walk_tree
+from halo.environments.sandbox.runner_messages import (
+    Command,
+    FileContent,
+    FileList,
+    FileWritten,
+    Limits,
+    ListFiles,
+    Outcome,
+    ProgramRan,
+    ReadFile,
+    Reply,
+    Request,
+    RunProgram,
+    Tampered,
+    WriteFile,
+    decode,
+    encode,
+)
+from halo.environments.sandbox.workspace import Owner, SessionPathError, Workspace, walk_tree
 
 COMMAND_NOT_FOUND = 127
+DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
-def limit_resources(limits: dict) -> None:
-    """Set the rlimits of the process calling it: the program, between fork and exec."""
-    for name, value in limits.items():
-        kind = getattr(resource, name)
-        hard = resource.getrlimit(kind)[1]
-        value = value if hard == resource.RLIM_INFINITY else min(value, hard)
-        resource.setrlimit(kind, (value, value))
+def set_limit(kind: int, wanted: int) -> None:
+    hard = resource.getrlimit(kind)[1]
+    value = wanted if hard == resource.RLIM_INFINITY else min(wanted, hard)
+    resource.setrlimit(kind, (value, value))
 
 
-def end_processes(uid: int) -> None:
-    """SIGKILL every process user ``uid`` has, wherever it moved to. The signal comes from a child that has become
-    that user, so the kernel picks the targets."""
+def apply_limits(limits: Limits) -> None:
+    set_limit(resource.RLIMIT_CPU, limits.cpu_seconds)
+    set_limit(resource.RLIMIT_FSIZE, limits.file_bytes)
+    set_limit(resource.RLIMIT_CORE, 0)
+    if limits.memory_bytes is not None:
+        set_limit(resource.RLIMIT_AS, limits.memory_bytes)
+    if limits.stack_bytes is not None:
+        set_limit(resource.RLIMIT_STACK, limits.stack_bytes)
+    if limits.processes is not None:
+        set_limit(resource.RLIMIT_NPROC, limits.processes)
+
+
+def kill_processes_of(uid: int) -> None:
+    # A program can leave its process group but not its user: a child that becomes that user signals all of them.
     child = os.fork()
     if child == 0:
         try:
@@ -50,107 +73,103 @@ def text_of(capture) -> str:
     return capture.read().decode("utf-8", errors="replace")
 
 
-def launch(workspace: Workspace, argv: list, *, stdin: str, timeout: float, limits: dict, env: dict) -> dict:
-    """Run ``argv`` in the workspace as its user, under ``limits``, for at most ``timeout`` seconds. Stdio are files,
-    so a process the program leaves behind holds nothing open; no such process outlives the call."""
-    uid, gid = workspace.owner
-    outcome = {"returncode": None, "timed_out": False}
-    with tempfile.TemporaryFile() as feed, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        feed.write(stdin.encode("utf-8"))
-        feed.seek(0)
+def execute(workspace: Workspace, command: Command, stdin: str, env: dict[str, str]) -> Outcome:
+    owner = workspace.owner
+    returncode = None
+    timed_out = False
+    with tempfile.TemporaryFile() as stdin_file, tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        stdin_file.write(stdin.encode("utf-8"))
+        stdin_file.seek(0)
         try:
-            outcome["returncode"] = subprocess.run(
-                argv,
-                stdin=feed,
+            finished = subprocess.run(
+                command.argv,
+                stdin=stdin_file,
                 stdout=out,
                 stderr=err,
-                timeout=timeout,
+                timeout=command.timeout,
+                check=False,
                 cwd=workspace.path,
-                env={"PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"), **env},
+                env={"PATH": os.environ.get("PATH", DEFAULT_PATH), **env},
                 start_new_session=True,
-                user=uid,
-                group=gid,
+                user=owner.uid,
+                group=owner.gid,
                 extra_groups=[],
-                preexec_fn=functools.partial(limit_resources, limits),
-            ).returncode
+                preexec_fn=functools.partial(apply_limits, command.limits),
+            )
+            returncode = finished.returncode
         except subprocess.TimeoutExpired:
-            outcome["timed_out"] = True
+            timed_out = True
         except FileNotFoundError:
-            err.write(f"{argv[0]}: not found".encode())
-            outcome["returncode"] = COMMAND_NOT_FOUND
+            err.write(f"{command.argv[0]}: not found".encode())
+            returncode = COMMAND_NOT_FOUND
         finally:
-            end_processes(uid)
-        return {"stdout": text_of(out), "stderr": text_of(err), **outcome}
+            kill_processes_of(owner.uid)
+        return Outcome(stdout=text_of(out), stderr=text_of(err), returncode=returncode, timed_out=timed_out)
 
 
-def run_program(workspace: Workspace, request: dict, fresh: bool) -> dict:
-    """Write the sources, build when asked or when the directory is new, then run."""
-    for name, content in {**request["files"], request["source_name"]: request["code"]}.items():
-        workspace.write(name, content)
-    reply = {}
-    if request.get("compile_argv") and (request["build"] or fresh):
-        reply["compile"] = launch(
-            workspace,
-            request["compile_argv"],
-            stdin="",
-            timeout=request["compile_timeout"],
-            limits=request["compile_limits"],
-            env=request["env"],
-        )
-        if reply["compile"]["timed_out"] or reply["compile"]["returncode"] != 0:
-            return reply
-    reply["entries"] = sorted(workspace.entries())
-    reply["run"] = launch(
-        workspace,
-        request["run_argv"],
-        stdin=request["stdin"],
-        timeout=request["timeout"],
-        limits=request["limits"],
-        env=request["env"],
-    )
-    return reply
+def run_program(workspace: Workspace, request: RunProgram, new_workspace: bool) -> ProgramRan:
+    for source in request.sources:
+        workspace.write(source.name, source.content)
+
+    build = None
+    if request.build is not None and (request.build_requested or new_workspace):
+        build = execute(workspace, request.build, stdin="", env=request.env)
+        if build.failed:
+            return ProgramRan(build=build, run=None, entries=[])
+
+    entries = sorted(workspace.entries())
+    run = execute(workspace, request.run, stdin=request.stdin, env=request.env)
+    return ProgramRan(build=build, run=run, entries=entries)
 
 
-def handle(request: dict) -> dict:
-    for retired in request.get("remove", ()):
-        walk_tree(retired, remove=True)
-    workspace = Workspace(request["workdir"], (request["uid"], request["uid"]))
-    fresh = not os.path.isdir(workspace.path)
-    if fresh:
-        # A new directory holds no build and no earlier file; only its user can enter it.
-        os.makedirs(workspace.path, mode=0o700)
-        workspace.hand_over()
-    if request.get("reset_to") is not None:
-        workspace.keep_only({tuple(entry) for entry in request["reset_to"]})
-    operation = request["op"]
+def perform(workspace: Workspace, operation, new_workspace: bool):
+    if isinstance(operation, RunProgram):
+        return run_program(workspace, operation, new_workspace)
+    if isinstance(operation, WriteFile):
+        workspace.write(operation.file.name, operation.file.content)
+        return FileWritten()
+    if isinstance(operation, ReadFile):
+        return FileContent(workspace.read(operation.name))
+    if isinstance(operation, ListFiles):
+        return FileList(workspace.files())
+    raise TypeError(f"unknown operation {type(operation).__name__}")
+
+
+def open_workspace(request: Request) -> tuple[Workspace, bool]:
+    workspace = Workspace(request.workdir, Owner(uid=request.uid, gid=request.uid))
+    directory = Path(workspace.path)
+    if directory.is_dir():
+        return workspace, False
+    directory.mkdir(parents=True, mode=0o700)
+    workspace.hand_over()
+    return workspace, True
+
+
+def handle(request: Request) -> Reply:
+    for workdir in request.closed_workdirs:
+        walk_tree(workdir, remove=True)
+
+    workspace, new_workspace = open_workspace(request)
+    if request.keep_only is not None:
+        workspace.keep_only(set(request.keep_only))
+
     try:
-        if operation == "run":
-            reply = run_program(workspace, request, fresh)
-        elif operation == "write":
-            for name, content in request["files"].items():
-                workspace.write(name, content)
-            reply = {}
-        elif operation == "read":
-            reply = {"content": workspace.read(request["path"])}
-        elif operation == "list":
-            reply = {"files": workspace.files()}
-        else:
-            sys.exit(f"unknown op {operation!r}")
-    except (SessionPathError, NotADirectoryError) as exc:
-        # The program put a link, directory, FIFO or file where a session file or its directory belongs.
-        reply = {"tampered": str(exc)}
-    return {**reply, "fresh": fresh}
+        result = perform(workspace, request.operation, new_workspace)
+    except (SessionPathError, NotADirectoryError) as problem:
+        result = Tampered(str(problem))
+    return Reply(new_workspace=new_workspace, result=result)
+
+
+def read_request() -> Request:
+    if len(sys.argv) > 1:
+        return decode(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    return decode(sys.stdin.read())
 
 
 def main() -> None:
     if os.geteuid() != 0:
-        sys.exit("the sandbox image must run as root: the runner gives each session its own user")
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], encoding="utf-8") as fh:
-            request = json.load(fh)
-    else:
-        request = json.load(sys.stdin)
-    sys.stdout.write(json.dumps(handle(request)))
+        sys.exit("the sandbox image must run as root: each session runs as its own user")
+    sys.stdout.write(encode(handle(read_request())))
 
 
 if __name__ == "__main__":

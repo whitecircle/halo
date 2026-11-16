@@ -1,14 +1,14 @@
-"""Baseten Sandboxes backend (https://docs.baseten.co/sandboxes/overview): every session runs in its own Baseten
-microVM, created on first use and deleted on close, and every call is one run of ``program_runner`` in it.
-``BASETEN_API_KEY`` mints the short-lived sandbox access token every sandbox call carries."""
+"""Baseten Sandboxes backend (https://docs.baseten.co/sandboxes/overview). Each session runs in its own Baseten
+microVM, created on first use and deleted on close, and each call is one run of the program runner in it.
+``BASETEN_API_KEY`` mints the short-lived access token that every sandbox call carries."""
 
 import contextlib
-import json
+import logging
 import math
 import os
 import threading
 import time
-from typing import Any
+from dataclasses import dataclass
 from urllib.parse import quote
 
 import requests
@@ -22,20 +22,25 @@ from halo.environments.sandbox.local import (
     SANDBOX_DEFAULT_MEMORY_MB,
 )
 from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.sandbox.runner_messages import Reply, Request, encode
 from halo.environments.sandbox.runner_session import (
-    RUNNER_SOURCE,
     SESSION_UIDS,
     ProgramLimits,
     RunnerSession,
-    parse_runner_reply,
+    decode_reply,
+    runner_source,
 )
+
+logger = logging.getLogger(__name__)
 
 BASETEN_API_URL = "https://api.baseten.co/v1"
 # An organization runs at most 10 sandboxes at once (https://docs.baseten.co/reference/sandbox-api/overview).
 BASETEN_SANDBOX_LIMIT = 10
-# Tokens expire 2 h after issue and cannot be renewed; mint a fresh one well before that.
+# A token expires 2 hours after issue and cannot be renewed.
 TOKEN_REFRESH_SECONDS = 90 * 60
-# In the sandbox: root's files in /tmp, which a program (another user) can read but not replace.
+RETRIED_STATUSES = (429, 500, 502, 503, 504)
+
+# Root's files in the sandbox's /tmp: a program, which runs as another user, can read but not replace them.
 RUNNER_PATH = "/tmp/halo_program_runner.py"
 REQUEST_PATH = "/tmp/halo_runner_request.json"
 SESSION_DIR = "/halo/session"
@@ -45,10 +50,33 @@ class SandboxGone(SandboxInfraError):
     """The sandbox no longer exists: its idle expiration or a delete removed it."""
 
 
+@dataclass(frozen=True)
+class Sandbox:
+    name: str
+    url: str
+
+
+@dataclass(frozen=True)
+class Process:
+    status: str
+    exit_code: int | None
+    stdout: str
+    stderr: str
+
+    @property
+    def completed(self) -> bool:
+        return self.status == "completed" and self.exit_code == 0
+
+    @property
+    def last_error_line(self) -> str:
+        lines = self.stderr.strip().splitlines()
+        return lines[-1] if lines else "no stderr"
+
+
 class BasetenApi:
-    """HTTP to the Baseten management API and to a sandbox's runtime API, as the access token's bearer. 429, 5xx and
-    connection errors retry with exponential backoff honoring ``Retry-After``; a read timeout never does, since
-    sending the request again would run its program again. Every failure raises :class:`SandboxInfraError`."""
+    """HTTP to Baseten's management API and to a sandbox's runtime API. 429, 5xx and connection errors are retried
+    with exponential backoff; a read timeout is not, because sending a request again would run its program again.
+    Every failure raises :class:`SandboxInfraError`."""
 
     def __init__(
         self,
@@ -58,7 +86,7 @@ class BasetenApi:
         request_timeout: float,
         max_retries: int,
         backoff_factor: float,
-        session: requests.Session | None = None,
+        session: requests.Session | None,
     ):
         self.api_key_env = api_key_env
         self.api_url = api_url.rstrip("/")
@@ -67,7 +95,7 @@ class BasetenApi:
             total=max_retries,
             read=False,
             backoff_factor=backoff_factor,
-            status_forcelist=(429, 500, 502, 503, 504),
+            status_forcelist=RETRIED_STATUSES,
             allowed_methods=None,
             raise_on_status=False,
         )
@@ -78,37 +106,60 @@ class BasetenApi:
         self._token: str | None = None
         self._token_refresh_at = 0.0
 
-    def send(
-        self, method: str, url: str, *, timeout: float | None = None, missing_ok: bool = False, **kwargs
-    ) -> requests.Response:
-        """The response to an authenticated request. A 404 raises :class:`SandboxGone` unless ``missing_ok``."""
+    def create_sandbox(self, *, image: str, cpu: int, idle_ttl: str, timeout: float) -> Sandbox:
+        body = {
+            "image": image,
+            "cpu": cpu,
+            "labels": {"app": "halo"},
+            "lifecycle": {"expiration_policies": [{"type": "TTL_IDLE", "value": idle_ttl, "action": "DELETE"}]},
+        }
+        record = self._send("POST", f"{self.api_url}/sandboxes/instances", json=body, timeout=timeout).json()
+        if record.get("status") != "DEPLOYED":
+            raise SandboxInfraError(f"baseten sandbox {record.get('name')!r} is {record.get('status')}, not DEPLOYED")
+        return Sandbox(name=record["name"], url=record["url"].rstrip("/"))
+
+    def delete_sandbox(self, sandbox: Sandbox) -> None:
+        with contextlib.suppress(SandboxGone):
+            self._send(
+                "DELETE", f"{self.api_url}/sandboxes/instances/{sandbox.name}", timeout=self.request_timeout, json=None
+            )
+
+    def write_file(self, sandbox: Sandbox, path: str, content: str) -> None:
+        # The filesystem API takes an absolute path with its leading slash encoded.
+        url = f"{sandbox.url}/filesystem/%2F{quote(path.lstrip('/'))}"
+        self._send("PUT", url, json={"content": content}, timeout=self.request_timeout)
+
+    def run(self, sandbox: Sandbox, command: str, *, deadline: float, timeout: float) -> Process:
+        body = {"command": command, "workingDir": "/", "timeout": math.ceil(deadline), "waitForCompletion": True}
+        record = self._send("POST", f"{sandbox.url}/process", json=body, timeout=timeout).json()
+        return Process(
+            status=record.get("status") or "unknown",
+            exit_code=record.get("exitCode"),
+            stdout=record.get("stdout") or "",
+            stderr=record.get("stderr") or "",
+        )
+
+    def _send(self, method: str, url: str, *, timeout: float, json: dict | None) -> requests.Response:
         try:
             headers = {"Authorization": f"Bearer {self._access_token()}"}
-            response = self.http.request(
-                method, url, headers=headers, timeout=timeout or self.request_timeout, **kwargs
-            )
+            response = self.http.request(method, url, headers=headers, timeout=timeout, json=json)
             if response.status_code == 404:
-                if missing_ok:
-                    return response
                 raise SandboxGone(f"baseten sandbox: HTTP 404 from {method} {url}")
             response.raise_for_status()
             return response
-        except requests.Timeout as exc:
-            raise SandboxInfraError("baseten sandbox request timed out") from exc
-        except requests.HTTPError as exc:
-            detail = exc.response.text[:200]
-            raise SandboxInfraError(f"baseten sandbox: HTTP {exc.response.status_code}: {detail}") from exc
-        except requests.RequestException as exc:
-            raise SandboxInfraError(f"baseten sandbox error: {exc}") from exc
-
-    def put_file(self, sandbox_url: str, path: str, content: str) -> None:
-        # An absolute path takes an encoded leading slash (sandbox API filesystem reference).
-        self.send("PUT", f"{sandbox_url}/filesystem/%2F{quote(path.lstrip('/'))}", json={"content": content})
+        except requests.Timeout as error:
+            raise SandboxInfraError("baseten sandbox request timed out") from error
+        except requests.HTTPError as error:
+            detail = error.response.text[:200]
+            raise SandboxInfraError(f"baseten sandbox: HTTP {error.response.status_code}: {detail}") from error
+        except requests.RequestException as error:
+            raise SandboxInfraError(f"baseten sandbox error: {error}") from error
 
     def _access_token(self) -> str:
         with self._token_lock:
             if self._token is None or time.monotonic() >= self._token_refresh_at:
-                key = os.environ.get(self.api_key_env, "")  # read per mint, never stored or logged
+                # The key is read for each token and never stored or logged.
+                key = os.environ.get(self.api_key_env, "")
                 response = self.http.post(
                     f"{self.api_url}/token",
                     headers={"Authorization": f"Bearer {key}"},
@@ -122,9 +173,8 @@ class BasetenApi:
 
 
 class BasetenSandbox(SandboxExecutor):
-    """``max_concurrency`` caps live sandboxes in this process (a session holds one until closed); a session past it
-    waits. Programs run under ``local``'s limits (``memory_limit_mb``, ``compile_timeout``,
-    ``compile_memory_limit_mb``)."""
+    """``max_concurrency`` caps the sandboxes this process holds at once. A session holds one until it is closed, and
+    a session past the cap waits."""
 
     isolated = True
 
@@ -170,102 +220,98 @@ class BasetenSandbox(SandboxExecutor):
         self.interpreter = interpreter
         self.request_overhead = request_overhead
         self.create_timeout = create_timeout
-        self.limits = ProgramLimits(memory_limit_mb, compile_timeout, compile_memory_limit_mb)
+        self.limits = ProgramLimits(
+            memory_limit_mb=memory_limit_mb,
+            compile_timeout=compile_timeout,
+            compile_memory_limit_mb=compile_memory_limit_mb,
+        )
         self.slots = threading.BoundedSemaphore(max_concurrency)
 
     def open_session(self) -> "BasetenSession":
         return BasetenSession(self)
 
-    def create_sandbox(self) -> tuple[str, str]:
-        """The name and runtime URL of a new sandbox with the runner in place."""
-        body = {
-            "image": self.image,
-            "cpu": self.cpu,
-            "labels": {"app": "halo"},
-            # Deletes a sandbox whose session was never closed.
-            "lifecycle": {"expiration_policies": [{"type": "TTL_IDLE", "value": self.idle_ttl, "action": "DELETE"}]},
-        }
-        url = f"{self.api_url}/sandboxes/instances"
-        record = self.api.send("POST", url, json=body, timeout=self.create_timeout).json()
-        if record.get("status") != "DEPLOYED":
-            raise SandboxInfraError(f"baseten sandbox {record.get('name')!r} is {record.get('status')}, not DEPLOYED")
-        name, sandbox_url = record["name"], record["url"].rstrip("/")
+    def create_sandbox(self) -> Sandbox:
+        """A new sandbox with the runner uploaded."""
+        sandbox = self.api.create_sandbox(
+            image=self.image, cpu=self.cpu, idle_ttl=self.idle_ttl, timeout=self.create_timeout
+        )
         try:
-            self.api.put_file(sandbox_url, RUNNER_PATH, RUNNER_SOURCE)
+            self.api.write_file(sandbox, RUNNER_PATH, runner_source())
         except SandboxInfraError:
-            with contextlib.suppress(SandboxInfraError):
-                self.delete_sandbox(name)
+            self.delete_sandbox(sandbox)
             raise
-        return name, sandbox_url
+        return sandbox
 
-    def delete_sandbox(self, name: str) -> None:
-        self.api.send("DELETE", f"{self.api_url}/sandboxes/instances/{name}", missing_ok=True)
+    def delete_sandbox(self, sandbox: Sandbox) -> None:
+        """Never raises: a sandbox that could not be deleted is removed by its idle expiration."""
+        try:
+            self.api.delete_sandbox(sandbox)
+        except SandboxInfraError as error:
+            logger.debug("baseten sandbox %s was not deleted: %s", sandbox.name, error)
 
 
 class BasetenSession(RunnerSession):
-    """One sandbox, created on first use, whose working directory persists across :meth:`run` calls. A sandbox that
-    expired is replaced on the next call and the session continues empty."""
+    """One sandbox, created on first use. If Baseten removed it, the next call creates another and the session
+    continues with an empty directory."""
 
     def __init__(self, executor: BasetenSandbox):
-        # One session per sandbox, so every session can take the first user.
-        super().__init__(SESSION_DIR, SESSION_UIDS[0], executor.limits, executor.interpreter)
+        # A sandbox holds one session, so every session can use the same user.
+        super().__init__(SESSION_DIR, uid=SESSION_UIDS[0], limits=executor.limits, interpreter=executor.interpreter)
         self.executor = executor
+        self._sandbox: Sandbox | None = None
         self._holds_slot = False
-        self._name: str | None = None
-        self._url: str | None = None
 
-    def exchange(self, request: dict[str, Any], *, deadline: float) -> dict[str, Any]:
-        api, url = self.executor.api, self._sandbox_url()
+    def exchange(self, request: Request, *, deadline: float) -> Reply:
+        api = self.executor.api
+        sandbox = self._current_sandbox()
         try:
-            api.put_file(url, REQUEST_PATH, json.dumps(request))
-            process = api.send(
-                "POST",
-                f"{url}/process",
-                json={
-                    "command": f"{self.interpreter} -I {RUNNER_PATH} {REQUEST_PATH}",
-                    "workingDir": "/",
-                    "timeout": math.ceil(deadline),
-                    "waitForCompletion": True,
-                },
+            api.write_file(sandbox, REQUEST_PATH, encode(request))
+            process = api.run(
+                sandbox,
+                f"{self.interpreter} -I {RUNNER_PATH} {REQUEST_PATH}",
+                deadline=deadline,
                 timeout=deadline + self.executor.request_overhead,
-            ).json()
-        except SandboxGone:
-            self._name = self._url = None
-            raise
-        if process.get("status") != "completed" or process.get("exitCode") != 0:
-            last_line = (process.get("stderr") or "").strip().splitlines()[-1:] or ["no stderr"]
-            raise SandboxInfraError(
-                f"baseten sandbox runner {process.get('status')} with exit code {process.get('exitCode')}: "
-                f"{last_line[0]}"
             )
-        return parse_runner_reply(process.get("stdout") or "")
+        except SandboxGone:
+            self._sandbox = None
+            raise
+        if not process.completed:
+            raise SandboxInfraError(
+                f"baseten sandbox runner {process.status} with exit code {process.exit_code}: "
+                f"{process.last_error_line}"
+            )
+        return decode_reply(process.stdout)
 
     def read_file(self, path: str) -> str | None:
         self.reject_unsafe_path(path)
-        return None if self._url is None else super().read_file(path)
+        if self._sandbox is None:
+            return None
+        return super().read_file(path)
 
     def list_files(self) -> list[str]:
-        return [] if self._url is None else super().list_files()
+        if self._sandbox is None:
+            return []
+        return super().list_files()
 
     def close(self) -> None:
         """Delete the sandbox and free its slot. Idempotent; never raises."""
-        name, self._name, self._url = self._name, None, None
-        if name is not None:
-            with contextlib.suppress(SandboxInfraError):  # the idle expiration deletes it otherwise
-                self.executor.delete_sandbox(name)
+        if self._sandbox is not None:
+            self.executor.delete_sandbox(self._sandbox)
+            self._sandbox = None
         if self._holds_slot:
             self._holds_slot = False
             self.executor.slots.release()
 
-    def _sandbox_url(self) -> str:
-        if self._url is None:
-            if not self._holds_slot:
-                self.executor.slots.acquire()
-                self._holds_slot = True
-            try:
-                self._name, self._url = self.executor.create_sandbox()
-            except BaseException:
-                self._holds_slot = False
-                self.executor.slots.release()
-                raise
-        return self._url
+    def _current_sandbox(self) -> Sandbox:
+        if self._sandbox is not None:
+            return self._sandbox
+        if not self._holds_slot:
+            self.executor.slots.acquire()
+            self._holds_slot = True
+        try:
+            self._sandbox = self.executor.create_sandbox()
+        except BaseException:
+            self._holds_slot = False
+            self.executor.slots.release()
+            raise
+        return self._sandbox
