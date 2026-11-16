@@ -1,6 +1,6 @@
 # Online GRPO on GSM8K, rewarding a correct answer that also passes your White Circle policies.
 # Set environment_id to your White Circle environment, start a vLLM server serving the model, then:
-#   WHITECIRCLE_API_KEY=wc-... python scripts/training/grpo/online.py examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+#   WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
 # See agent-docs/training-methods/grpo/rewards/whitecircle.md.
 
 # --- Model ---

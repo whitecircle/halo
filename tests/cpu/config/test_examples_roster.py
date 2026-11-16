@@ -16,6 +16,7 @@ from datasets import Dataset
 from transformers import Trainer
 from transformers.trainer_pt_utils import BatchRebalanceSampler
 
+from halo.cli import training_methods
 from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.distributed.expert_parallel.deepep.capacity import (
@@ -75,6 +76,9 @@ _EXPANDABLE_SEGMENTS_PREFIX = re.compile(
     r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True\s+(?:\w+=\S*\s+)*(?:python|torchrun|accelerate|halo)\s"
 )
 _HALO_LAUNCH = re.compile(r"\bhalo launch\s")
+# A halo launch names its method, resolved through the CLI's own index, and its width as -n / --nproc.
+_HALO_METHOD = re.compile(r"\bhalo launch\s+(\S+)")
+_HALO_NPROC = re.compile(r"\s(?:-n|--nproc)[= ](\d+)")
 _COMMENT_CONTINUATION = re.compile(r"\\\n\s*#\s*")
 _EXPORT_LINE = re.compile(r"\s*#\s*export\s")
 _ALLOCATOR_DOC = "agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments"
@@ -425,10 +429,16 @@ def test_example_launch_lines_fit_the_config(config):
     commands = launch_commands(config)
     assert commands, "no comment line launches this config"
     for line in commands:
-        assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
-        nproc = _NPROC.search(line)
+        if method := _HALO_METHOD.search(line):
+            script = training_methods().get(method[1])
+            assert script is not None, f"halo launch names no training method: {line}"
+            assert script == REPO_ROOT / "scripts/training" / script_for(config), f"launches another script: {line}"
+            nproc = _HALO_NPROC.search(line)
+        else:
+            assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
+            nproc = _NPROC.search(line)
         if uses_expert_parallelism(raw):
-            assert nproc, f"expert parallelism needs torchrun's width: {line}"
+            assert nproc, f"expert parallelism needs a multi-process width: {line}"
         devices = _VISIBLE_DEVICES.search(line)
         if devices and nproc:
             assert len(devices[1].split(",")) == int(nproc[1]), f"exposes another GPU count than it launches: {line}"
