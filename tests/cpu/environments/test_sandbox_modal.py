@@ -1,6 +1,7 @@
 """The Modal sandbox backend against a fake Modal client whose exec runs the real in-sandbox runner as a local
-subprocess, so limits, verdicts and session state go through the production runner. The live test (one tiny
-program in a real Modal sandbox) runs only with ``HALO_MODAL_LIVE=1``, the Modal SDK and Modal credentials."""
+subprocess, so limits, verdicts and session state go through the production runner. The runner gives each session
+its own user, so these tests need root. The live test (a few programs in a real Modal sandbox) runs only with
+``HALO_MODAL_LIVE=1``, the Modal SDK and Modal credentials."""
 
 import json
 import math
@@ -8,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import types
@@ -16,7 +18,9 @@ import pytest
 
 from halo.cli import ROLLOUT_BACKEND_ENV
 from halo.environments.registry import build_environment
+from halo.environments.rollouts.ray_actors import ray_init_kwargs
 from halo.environments.sandbox import modal_sandbox as ms
+from halo.environments.sandbox import runner_session
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import require_language
 from halo.environments.sandbox.local import (
@@ -29,13 +33,17 @@ from halo.environments.sandbox.local import (
 )
 from halo.environments.sandbox.modal_sandbox import ModalSandbox
 from halo.environments.sandbox.results import SandboxInfraError
+from halo.environments.sandbox.runner_session import RUNNER_SOURCE
 from halo.environments.tasks.coding.grading import run_solution_against_tests
 
 _MIB = 1024 * 1024
 
+pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="the runner sets each session's user, which takes root")
+
 
 class _Stdin:
-    def __init__(self):
+    def __init__(self, modal):
+        self._modal = modal
         self.data = ""
 
     def write(self, text):
@@ -45,7 +53,9 @@ class _Stdin:
         pass
 
     def drain(self):
-        pass
+        if self._modal.fail_next_streams:
+            self._modal.fail_next_streams -= 1
+            raise ConnectionError("stream reset")
 
 
 class _Stream:
@@ -63,7 +73,7 @@ class _FakeProcess:
     def __init__(self, modal, argv, timeout):
         self._modal, self._argv, self._timeout = modal, argv, timeout
         self._done = False
-        self.stdin = _Stdin()
+        self.stdin = _Stdin(modal)
         self.stdout = _Stream(self, "out")
         self.stderr = _Stream(self, "err")
 
@@ -101,7 +111,7 @@ class _FakeSandbox:
         self.terminated = False
 
     def exec(self, *argv, timeout=None):
-        assert argv[:3] == ("python3", "-I", "-c") and argv[3] == ms._RUNNER_SOURCE
+        assert argv[:3] == ("python3", "-I", "-c") and argv[3] == RUNNER_SOURCE
         self.exec_calls += 1
         if self.terminated:
             raise RuntimeError("sandbox terminated")
@@ -121,6 +131,8 @@ def _fake_modal():
         registry_images=[],
         requests=[],
         fail_next_execs=0,
+        fail_next_streams=0,
+        fail_next_creates=0,
         runner_returncode=None,
         lock=threading.Lock(),
         in_flight=0,
@@ -148,6 +160,9 @@ def _fake_modal():
         return types.SimpleNamespace(name=name)
 
     def create(**kwargs):
+        if modal.fail_next_creates:
+            modal.fail_next_creates -= 1
+            raise PermissionError("token rejected")
         modal.sandboxes.append(_FakeSandbox(modal, kwargs))
         return modal.sandboxes[-1]
 
@@ -158,11 +173,15 @@ def _fake_modal():
 
 
 @pytest.fixture
-def modal(monkeypatch, tmp_path):
+def modal(monkeypatch):
     fake = _fake_modal()
-    monkeypatch.setattr(ms, "_require_modal", lambda: fake)
-    monkeypatch.setattr(ms, "_WORKSPACE", str(tmp_path))
-    return fake
+    monkeypatch.setattr(ms, "require_modal", lambda: fake)
+    # Not tmp_path: a session's user must reach its directory, and pytest keeps its root 0700.
+    workspace = tempfile.mkdtemp(prefix="halo-modal-", dir="/tmp")
+    os.chmod(workspace, 0o755)
+    monkeypatch.setattr(ms, "WORKSPACE", workspace)
+    yield fake
+    shutil.rmtree(workspace, ignore_errors=True)
 
 
 @pytest.fixture
@@ -198,15 +217,27 @@ def test_program_timeout_is_its_own_verdict(executor):
 
 def test_exec_deadline_expiry_is_infra_not_a_timeout(modal, executor, monkeypatch):
     # Slack shrunk so the exec deadline (1 s) passes before the runner's own 10 s limit.
-    monkeypatch.setattr(ms, "_EXEC_OVERHEAD_SECONDS", -9.0)
+    monkeypatch.setattr(runner_session, "EXCHANGE_OVERHEAD_SECONDS", -9.0)
     res = executor.run("import time\ntime.sleep(30)", timeout=10)
     assert res.error and "deadline" in res.error and not res.timed_out
 
 
-def test_runner_crash_is_infra(modal, executor):
+def test_exec_deadline_drops_the_sandbox_that_may_still_hold_the_program(modal, executor, monkeypatch):
+    overhead = runner_session.EXCHANGE_OVERHEAD_SECONDS
+    monkeypatch.setattr(runner_session, "EXCHANGE_OVERHEAD_SECONDS", -9.0)
+    assert executor.run("import time\ntime.sleep(30)", timeout=10).error
+    assert modal.sandboxes[0].terminated
+    monkeypatch.setattr(runner_session, "EXCHANGE_OVERHEAD_SECONDS", overhead)
+    assert executor.run("print(1)").stdout == "1\n" and len(modal.sandboxes) == 2
+
+
+def test_runner_crash_is_infra_and_drops_the_sandbox(modal, executor):
     modal.runner_returncode = 1
     res = executor.run("print(1)")
     assert res.error and "runner exited 1" in res.error and res.returncode is None
+    assert modal.sandboxes[0].terminated
+    modal.runner_returncode = None
+    assert executor.run("print(2)").stdout == "2\n" and len(modal.sandboxes) == 2
 
 
 def test_request_carries_the_local_backends_limits_and_env(modal, executor):
@@ -220,8 +251,8 @@ def test_request_carries_the_local_backends_limits_and_env(modal, executor):
         "RLIMIT_NPROC": LOCAL_NPROC_LIMIT,
     }
     assert req["env"] == build_program_env(req["workdir"]) and "PATH" not in req["env"]
-    cpp = executor.run_request(require_language("cpp"), timeout=4, build=True)
-    assert cpp["limits"]["RLIMIT_STACK"] == SANDBOX_DEFAULT_MEMORY_MB * _MIB
+    cpp = executor.limits.for_run(require_language("cpp"), timeout=4)
+    assert cpp["RLIMIT_STACK"] == SANDBOX_DEFAULT_MEMORY_MB * _MIB
 
 
 def test_runner_enforces_the_requested_memory_limit(modal):
@@ -244,9 +275,10 @@ def test_compile_verdicts_and_build_reuse(modal, executor):
     assert [req["build"] for req in builds[-2:]] == [True, False]  # the second run reuses the binary
 
 
-def test_missing_compiler_is_infra_not_a_verdict():
+def test_missing_compiler_is_infra_not_a_verdict(modal):
     step = {"timed_out": False, "returncode": 127, "stdout": "", "stderr": "gcc: not found"}
-    res = ms._compile_verdict(step, require_language("c"), 30.0)
+    session = ModalSandbox().open_session()
+    res = session._compile_verdict(step, require_language("c"))
     assert res.error == "compiler not found: 'gcc'" and not res.compile_failed
 
 
@@ -256,6 +288,7 @@ def test_reset_to_prepared_drops_what_the_run_wrote(executor):
         session.run("import lib\nopen('out.txt', 'w').write(str(lib.X))")
         assert "out.txt" in session.list_files()
         session.reset_to_prepared()
+        assert session.read_file("out.txt") is None  # applied before the next exchange, whatever it is
         res = session.run("import os\nprint(sorted(os.listdir('.')))")
         assert res.stdout.strip() == str(sorted(["lib.py", "main.py"]))
 
@@ -285,33 +318,161 @@ def test_runs_and_sessions_share_one_sandbox_and_closed_dirs_are_removed(modal, 
     assert len(modal.sandboxes) == 1
 
 
-def test_lost_sandbox_is_dropped_and_the_run_not_retried(modal, executor):
+def test_sandbox_lost_after_the_runner_started_is_dropped_and_the_run_not_retried(modal, executor):
     executor.run("print(0)")
-    runs_before = len(modal.requests)
-    modal.fail_next_execs = 1
+    modal.fail_next_streams = 1
     res = executor.run("print(5)")
     assert res.error and "ConnectionError" in res.error and not res.ok
-    assert len(modal.requests) == runs_before  # the program was not run a second time
+    assert _exec_count(modal) == 2  # the program was not sent a second time
     assert modal.sandboxes[0].terminated
     assert executor.run("print(6)").stdout == "6\n" and len(modal.sandboxes) == 2
 
 
+def test_sandbox_that_refuses_the_exec_is_replaced_without_losing_the_run(modal, executor):
+    """Modal ends an idle sandbox; the next exec is refused before any runner starts, so it is safe to send again."""
+    executor.run("print(0)")
+    modal.fail_next_execs = 1
+    res = executor.run("print(5)")
+    assert res.ok and res.stdout == "5\n"
+    assert modal.sandboxes[0].terminated and len(modal.sandboxes) == 2
+    assert [req["code"] for req in modal.requests] == ["print(0)", "print(5)"]  # the program ran once
+
+
+def test_two_refused_execs_are_infra(modal, executor):
+    modal.fail_next_execs = 2
+    res = executor.run("print(5)")
+    assert res.error and "ConnectionError" in res.error and modal.requests == []
+
+
+def test_provisioning_failure_is_infra_for_runs_and_file_ops(modal, executor):
+    modal.fail_next_creates = 2
+    res = executor.run("print(1)")
+    assert res.error and "provisioning failed: PermissionError" in res.error
+    with pytest.raises(SandboxInfraError, match="provisioning failed"):
+        executor.open_session().write_file("a.txt", "1")
+    assert executor.run("print(1)").ok
+
+
 def test_session_file_op_loss_raises_infra(modal, executor):
     session = executor.open_session()
-    modal.fail_next_execs = 1
+    modal.fail_next_streams = 1
     with pytest.raises(SandboxInfraError):
         session.write_file("a.txt", "1")
 
 
+_C_HELLO = '#include <stdio.h>\nint main(){puts("hi");return 0;}'
+
+
 @pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
 def test_compiled_session_rebuilds_on_a_replaced_sandbox(modal, executor):
-    code = '#include <stdio.h>\nint main(){puts("hi");return 0;}'
     session = executor.open_session()
-    assert session.run(code, language="c").stdout == "hi\n"
-    modal.fail_next_execs = 1
-    assert session.run(code, language="c").error
-    res = session.run(code, language="c")
+    assert session.run(_C_HELLO, language="c").stdout == "hi\n"
+    modal.fail_next_streams = 1
+    assert session.run(_C_HELLO, language="c").error
+    shutil.rmtree(session.workdir)  # the replacement sandbox starts without the session's directory
+    res = session.run(_C_HELLO, language="c")
     assert res.ok and res.stdout == "hi\n" and len(modal.sandboxes) == 2
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
+def test_compiled_session_rebuilds_when_a_file_op_reaches_the_replaced_sandbox_first(modal, executor):
+    session = executor.open_session()
+    assert session.run(_C_HELLO, language="c").ok
+    modal.fail_next_streams = 1
+    assert session.run(_C_HELLO, language="c").error
+    shutil.rmtree(session.workdir)
+    assert session.list_files() == []  # recreates the directory, so the runner no longer sees a new one
+    res = session.run(_C_HELLO, language="c")
+    assert res.ok and res.stdout == "hi\n"
+    assert modal.requests[-1]["build"] is True
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
+def test_interpreted_run_drops_the_recorded_build(modal, executor):
+    session = executor.open_session()
+    assert session.run(_C_HELLO, language="c").ok
+    assert session.run("import os\nos.remove('main')").ok
+    res = session.run(_C_HELLO, language="c")
+    assert res.ok and res.stdout == "hi\n", res
+
+
+# ---------------------------------------------------------------------------
+# What a program can do to its session, the runner and other sessions
+# ---------------------------------------------------------------------------
+
+
+def test_source_replaced_by_a_directory_is_the_programs_runtime_error(modal, executor):
+    session = executor.open_session()
+    assert session.run("import os\nos.remove('main.py')\nos.mkdir('main.py')").ok
+    res = session.run("print(1)")
+    assert res.error is None and res.returncode not in (0, None) and "tampered" in res.stderr
+    assert not modal.sandboxes[0].terminated  # a verdict, so the sandbox and its other sessions carry on
+    with pytest.raises(ValueError, match="not a regular file"):
+        session.write_file("main.py", "print(2)")
+
+
+def test_planted_link_is_neither_written_through_nor_read(modal, executor, tmp_path):
+    target = tmp_path / "outside.txt"
+    target.write_text("outside")
+    session = executor.open_session()
+    assert session.run(f"import os\nos.symlink({str(target)!r}, 'note.txt')").ok
+    assert session.read_file("note.txt") is None
+    with pytest.raises(ValueError, match="is a link"):
+        session.write_file("note.txt", "overwritten")
+    assert target.read_text() == "outside"
+
+
+def test_planted_fifo_does_not_block_the_runner(executor):
+    session = executor.open_session()
+    assert session.run("import os\nos.mkfifo('pipe')").ok
+    start = time.monotonic()
+    assert session.read_file("pipe") is None
+    with pytest.raises(ValueError, match="not a regular file"):
+        session.write_file("pipe", "x")
+    assert time.monotonic() - start < 5
+
+
+def test_program_cannot_reach_another_session_or_signal_the_runner(executor):
+    first, second = executor.open_session(), executor.open_session()
+    first.write_file("secret.txt", "s3cret")
+    probe = (
+        "import os\n"
+        "for label, attempt in (\n"
+        f"    ('read', lambda: open({first.workdir + '/secret.txt'!r}).read()),\n"
+        f"    ('list', lambda: os.listdir({first.workdir!r})),\n"
+        "    ('kill', lambda: os.kill(os.getppid(), 9)),\n"
+        "):\n"
+        "    try:\n"
+        "        attempt()\n"
+        "        print(label, 'allowed')\n"
+        "    except PermissionError:\n"
+        "        print(label, 'refused')\n"
+    )
+    res = second.run(probe)
+    assert res.stdout.split("\n")[:3] == ["read refused", "list refused", "kill refused"], res
+    assert first.read_file("secret.txt") == "s3cret"
+
+
+def test_process_that_left_the_programs_group_does_not_outlive_the_run(executor):
+    session = executor.open_session()
+    daemon = (
+        "import os, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    for fd in (0, 1, 2):\n"
+        "        os.close(fd)\n"
+        "    time.sleep(60)\n"
+        "    os._exit(0)\n"
+    )
+    assert session.run(daemon).ok
+    owners = {os.stat(f"/proc/{pid}").st_uid for pid in os.listdir("/proc") if pid.isdigit()}
+    assert session.uid not in owners
+
+
+def test_file_content_utf8_cannot_carry_is_written_replaced(executor):
+    session = executor.open_session()
+    session.write_file("note.txt", "a\udc80b")
+    assert session.read_file("note.txt") == "a?b"
 
 
 def test_concurrent_runs_are_capped_at_max_concurrency(modal):
@@ -330,7 +491,7 @@ def test_sandbox_reserves_cpu_memory_and_reclaims_itself(modal):
     executor.run("print(1)")
     kwargs = modal.sandboxes[0].kwargs
     assert (kwargs["cpu"], kwargs["memory"], kwargs["timeout"]) == (8.0, 16384, 90)
-    assert kwargs["idle_timeout"] == ms._IDLE_TIMEOUT_SECONDS and kwargs["block_network"] is True
+    assert kwargs["idle_timeout"] == ms.IDLE_TIMEOUT_SECONDS and kwargs["block_network"] is True
     executor.close()
 
 
@@ -343,10 +504,10 @@ def test_close_and_atexit_terminate_the_sandbox(modal):
     executor = ModalSandbox()
     executor.run("print(1)")
     executor.close()
-    assert modal.sandboxes[0].terminated and executor not in ms._live_executors
+    assert modal.sandboxes[0].terminated and executor not in ms.live_executors
     other = ModalSandbox()
     other.run("print(1)")
-    ms._close_live_executors()
+    ms.close_live_executors()
     assert modal.sandboxes[1].terminated
 
 
@@ -416,6 +577,15 @@ def test_flag_runs_the_python_repl_tool_on_modal(under_flag):
     assert _exec_count(under_flag) == 1
 
 
+def test_flag_selection_reaches_ray_actors_on_a_shared_cluster(under_flag, monkeypatch):
+    """Actors on a ``ray_address`` cluster get their environment from the raylet, so the job carries the selection."""
+    monkeypatch.setenv("MODAL_TOKEN_SECRET", "never-forwarded")
+    assert ray_init_kwargs()["runtime_env"] == {"env_vars": ROLLOUT_BACKEND_ENV["modal"]}
+    for key in ROLLOUT_BACKEND_ENV["modal"]:
+        monkeypatch.delenv(key)
+    assert "runtime_env" not in ray_init_kwargs()
+
+
 def test_without_the_flag_the_python_repl_stays_in_process(modal, monkeypatch):
     for key in ROLLOUT_BACKEND_ENV["modal"]:
         monkeypatch.delenv(key, raising=False)
@@ -451,6 +621,28 @@ def test_live_modal_sandbox_runs_programs():
         res = executor.run('#include <stdio.h>\nint main(){puts("c ok");return 0;}', language="c")
         assert res.ok and res.stdout == "c ok\n", res
         assert executor.run("import time\ntime.sleep(10)", timeout=1).timed_out
+        with executor.open_session() as first, executor.open_session() as second:
+            first.write_file("secret.txt", "s3cret")
+            assert first.run(_C_HELLO, language="c").stdout == "hi\n"
+            assert first.run("import os\nos.remove('main')").ok
+            assert first.run(_C_HELLO, language="c").stdout == "hi\n"  # rebuilt after the other program's run
+            probe = (
+                "import os\n"
+                f"for attempt in (lambda: open({first.workdir + '/secret.txt'!r}).read(), "
+                "lambda: os.kill(os.getppid(), 9)):\n"
+                "    try:\n"
+                "        attempt()\n"
+                "        print('allowed')\n"
+                "    except PermissionError:\n"
+                "        print('refused')\n"
+                "if os.fork() == 0:\n"
+                "    os.setsid()\n"
+                "    __import__('time').sleep(300)\n"
+            )
+            res = second.run(probe)
+            assert res.ok and res.stdout == "refused\nrefused\n", res
+            own = "import os\nprint(sum(os.stat('/proc/' + p).st_uid == os.getuid() for p in os.listdir('/proc') if p.isdigit()))"
+            assert second.run(own).stdout == "1\n"  # the process that left the group is gone
         print(f"\nmodal live: first run (sandbox start included) {cold:.2f}s; warm exec median {sorted(warm)[2]:.3f}s")
     finally:
         executor.close()

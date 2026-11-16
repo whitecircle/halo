@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 # Engine-paused seconds, or an awaitable of them (a read of the actor's Ray copy).
 _PausedClock = Callable[[], float | Awaitable[float]]
 
+# The sandbox selection the launcher sets (HALO_SANDBOX_BACKEND / _URL / _REPL / ...); never a credential.
+_SANDBOX_ENV_PREFIX = "HALO_SANDBOX_"
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
 _RAY_LINK_PARENT = "/tmp"
@@ -190,6 +192,11 @@ def ray_init_kwargs(**overrides) -> dict:
     # Dashboard off: unused by the RL actors and exposes Ray's jobs-API HTTP surface
     # (CVE-2023-48022 job-submission RCE, CVE-2025-62593 DNS rebinding).
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
+    # An actor on a shared cluster (ray_address) takes its environment from its node's raylet, not from this
+    # process: without the sandbox selection it would run model-written code on the default local backend.
+    sandbox_env = {name: value for name, value in os.environ.items() if name.startswith(_SANDBOX_ENV_PREFIX)}
+    if sandbox_env:
+        kwargs.setdefault("runtime_env", {"env_vars": sandbox_env})
     temp_dir = _short_ray_temp_dir()
     if temp_dir is not None:
         kwargs["_temp_dir"] = temp_dir

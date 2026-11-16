@@ -15,7 +15,7 @@
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, checked at construction); `gcc` / `g++` for C/C++ |
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
-| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits | python, bash, cpp, c (default image) | The `modal` extra (`pip install 'halo[modal]'`) and Modal credentials ([Modal](#modal)) |
+| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits, each session as its own user | python, bash, cpp, c (default image) | The `modal` extra (`pip install 'halo[modal]'`) and Modal credentials ([Modal](#modal)) |
 
 Coding environments select it in `environment_kwargs`:
 
@@ -76,15 +76,16 @@ export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (mo
 halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
 ```
 
-The flag, on `halo launch` and `halo run`, sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1` for the process, its ranks and its Ray actors. That covers code-contests grading and its test tool, the `swe` tools, and the Python REPL tools, each call of which becomes one remote exec (80 to 330 ms warm, below).
+The flag, on `halo launch` and `halo run`, sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1` for the process, its ranks and its Ray actors. `ray.init` carries every `HALO_SANDBOX_*` variable to the actors of a shared cluster (`ray_address`); credentials are not carried, so each cluster node needs Modal's own. That covers code-contests grading and its test tool, the `swe` tools, and the Python REPL tools, each call of which becomes one remote exec (80 to 330 ms warm, below).
 
 - **One sandbox per executor.** Created on first use with `cpu` (default 4) and `memory_mb` (default 8192); sessions are directories in it, and `run()` is a throwaway session. At most `max_concurrency` (default `int(cpu)`) runs execute at once; the rest queue before their clock starts. The constructor refuses a `memory_mb` that cannot hold `max_concurrency` builds at `compile_memory_limit_mb`.
-- **One exec per call.** The runner (`modal_runner.py`) applies the rlimits and child environment the request carries, `local`'s, and runs the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local`; a compiled session reuses its build and `reset_to_prepared` rides on the next run.
-- **Faults.** A lost sandbox or transport, a runner crash, and an exec past its deadline (run timeout + compile timeout + 30 s) are `error`, never retried, since the program may already have run; the next call starts a new sandbox and a session continues empty.
+- **One exec per call.** The runner (`program_runner.py`, started as root) applies the rlimits and child environment the request carries, `local`'s, and runs the program on its own clock, so transport latency is not charged to it. Verdicts are judged as on `local` (`runner_session.py`); a compiled session reuses its build and `reset_to_prepared` rides on the next run.
+- **A user per session.** A session's programs run as a user of its own, in a directory only that user can enter. A program cannot signal the runner or another session's programs, nor open another session's files; world-writable directories of the image (`/tmp`) stay shared. Every process the user still has is killed when a run ends. The image must run as root.
+- **Tampering.** A source or file path the program replaced with a link, directory or FIFO is never written through or read: the next run is the program's runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+- **Faults.** A sandbox that refuses an exec (its idle timeout or lifetime ended it) is replaced and the exec sent once more, since no runner started. A transport lost after that, a runner crash, and an exec past its deadline (run timeout + compile timeout + 30 s) are `error` and never sent again, since the program may already have run; each drops the sandbox, the next call starts a new one, and a session continues empty. A failed sandbox start is `error` too.
 - **Cleanup.** A closed session's directory is removed by the next exec. `close()` and an `atexit` hook terminate the sandbox; Modal's 5-minute idle timeout reclaims one a killed process left.
-- **Shared sandbox.** As on `local`, the programs of concurrent episodes run as one user and can reach each other's directories and processes.
 
-Options (`sandbox_options`): `app_name` (default `halo-sandbox`), `image` (a registry tag or `modal.Image` with `python3`; default Debian slim with Python 3.12, `gcc` and `g++`), `cpu`, `memory_mb`, `max_concurrency`, `sandbox_timeout` (lifetime, default 3600 s) and `local`'s limits.
+Options (`sandbox_options`): `app_name` (default `halo-sandbox`), `image` (a registry tag or `modal.Image` with `python3`; default Debian slim with Python 3.12, `gcc` and `g++`), `cpu`, `memory_mb`, `max_concurrency`, `sandbox_timeout` (lifetime, default and maximum 86400 s; runs in flight when it ends are `error`) and `local`'s limits.
 
 Measured from a CPU host (default image): first run including sandbox start 0.7 to 1.0 s once the image is built (5.1 s on its first build); warm Python exec 80 to 330 ms median, varying between sandboxes of one run.
 
