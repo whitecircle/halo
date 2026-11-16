@@ -87,7 +87,7 @@ flags.
 | `merge-peft-adapters` | merge a LoRA adapter into its base as one checkpoint |
 | `merge-models` | combine models in weight space (linear, SLERP, task arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32 or mixed checkpoint to bf16 for serving |
-| `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights; serving engines do not load its manifest as-is |
+| `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights under Halo's manifest, which serving engines do not load, or with `--export_format compressed-tensors` in the layout vLLM loads |
 | `unfuse-moe-experts` | rewrite fused expert weights to the family's per-expert layout, for a serving loader that reads only that layout |
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the vision tower, the base's untrained MTP head (or keep the one the export trained) and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
