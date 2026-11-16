@@ -110,7 +110,7 @@ The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.
 
 Each frozen bank dequantizes in one fused Triton kernel (`halo/kernels/lowp/dequant_triton.py`), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
 
-One full-attention layer at Inkling-2-Small's shape (48 query and 8 KV heads of 128, relative extent 1024), 8,192 tokens in bf16, forward and backward on one B300: `inkling2_relative_flex` takes 41 ms at a 2.6 GiB peak, eager 166 ms at 61 GiB (`tests/gpu/models/test_inkling2_relative_flex.py`).
+One full-attention layer at Inkling-2-Small's shape (48 query and 8 KV heads of 128, relative extent 1024), 8,192 tokens in bf16, forward and backward on one B300: `inkling2_relative_flex` takes 41 ms at a 2.6 GiB peak, eager 166 ms at 61 GiB (`tests/gpu/models/test_inkling2_relative_flex.py`). A padded batch makes one kernel call per row: 4 rows of 2,048 tokens take 18 ms and 8 rows of 1,024 tokens 18 ms at a 2.0 GiB peak.
 
 Environmental GRPO on DAPO-Math-17k, expert LoRA r8, 8× B300 (two vLLM TP2 engines, EP4 trainer), 32 prompts × 8 samples of up to 4,096 tokens, `packed_microbatch_tokens: 8192`: a step takes 322 s on-policy (rollout 125 s, adapter sync 15 s, forward and backward about 200 s) and 194 s with `enable_prefetch: true`, whose rollout overlaps the previous step's training, so its samples come from the policy one step back. Both are measured on steps 2–4 of a run.
 
