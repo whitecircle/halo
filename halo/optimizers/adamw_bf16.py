@@ -59,8 +59,9 @@ _MAX_TENSORS_PER_LAUNCH = 256
 # B200 and B300, where the multi-tensor launch is measured. Elsewhere each launch steps one tensor at TABLE_SIZE 1,
 # which compiles to a lone tensor's per-element code.
 _MULTI_TENSOR_LAUNCH_CAPABILITIES = frozenset({(10, 0), (10, 3)})
-# A program's lookup and table reads run once for all its blocks, so a block costs about what a lone launch's program
-# does; more would leave a launch of small tensors too few programs to fill the GPU.
+# A program's lookup and table reads run once for all its blocks (the two 1 - beta reads run per block), so a block
+# costs about what a lone launch's program does; more would leave a launch of small tensors too few programs to fill
+# the GPU.
 _BLOCKS_PER_PROGRAM = 16
 # 64K registers over 2,048 threads, a lone tensor's launch's count. Uncapped, the per-tensor scalars a program holds
 # across its blocks take 48, and an SM fits 5 programs instead of 8.
@@ -147,8 +148,6 @@ def _adam_bf16_sr_kernel(
     bc2_sqrt = tl.load(hparam_table + _ROW_BC2_SQRT * num_tensors + tensor)
     eps = tl.load(hparam_table + _ROW_EPS * num_tensors + tensor)
     wd_factor = tl.load(hparam_table + _ROW_WD_FACTOR * num_tensors + tensor)
-    one_minus_beta1 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA1 * num_tensors + tensor)
-    one_minus_beta2 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA2 * num_tensors + tensor)
     if P_ALIGNED:
         p_off = tl.multiple_of(p_off, _DIVISIBILITY // p_base.dtype.element_ty.itemsize)
     if GRAD_ALIGNED:
@@ -172,6 +171,10 @@ def _adam_bf16_sr_kernel(
         ea = tl.load(ea_base + ea_off + offsets, mask=mask).to(tl.float32)
         easq = tl.load(easq_base + easq_off + offsets, mask=mask).to(tl.float32)
 
+        # Read in the loop: hoisted with the scalars above, they change how sm_100/sm_103 pair these ops into f32x2
+        # against the per-parameter kernel, which reads them as arguments (same op totals, different f32x2 pairing).
+        one_minus_beta1 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA1 * num_tensors + tensor)
+        one_minus_beta2 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA2 * num_tensors + tensor)
         ea = beta1 * ea + one_minus_beta1 * grad
         easq = beta2 * easq + one_minus_beta2 * grad * grad
 
