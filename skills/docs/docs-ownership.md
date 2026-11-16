@@ -177,6 +177,7 @@ changes.
 | `halo/models/attention/packed_position_ids.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/mistral4.md`, `agent-docs/models/zaya.md` |
 | `halo/models/attention/remote_flash_attention.py`, `halo/models/attention/tensor_memo.py` | `agent-docs/models/bailing.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/data/collators.md` |
 | `halo/models/attention/sdpa_flex_sliding.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md`, `agent-docs/models/step3p7.md` |
+| `halo/models/attention/inkling2_relative_flex.py` | `agent-docs/models/inkling2.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/data/collators.md` |
 | `halo/models/attention/gpt_oss_sinks.py` | `agent-docs/models/gpt-oss.md`, `agent-docs/reference/configuration-reference.md` |
 | `torch.compile` call sites | `agent-docs/optimization/torch-compile.md` |
 | `halo/model_loading/parallel/{peft_setup,freeze_patterns}.py` | `agent-docs/optimization/peft.md` |

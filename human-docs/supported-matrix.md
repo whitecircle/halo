@@ -45,7 +45,8 @@ Blackwell, FA3 on Hopper and FA2 as the fallback, except:
 | PaliGemma / PaliGemma 2 | SDPA / `flex_attention`; a pinned flash label falls back with a warning |
 | GLM-5 Next, Step-3.7 Flash, Inkling | SDPA, chosen automatically |
 | Qwen3.8-Flash-Next | SDPA, with Halo's tiled kernel on the sparse layers |
-| DeepSeek-V4, Inkling 2 | eager only |
+| DeepSeek-V4 | eager only |
+| Inkling 2 | `inkling2_relative_flex` on CUDA, chosen automatically; eager on CPU or when you pin `attn_implementation: eager` |
 | Laguna with `trust_remote_code: true` | SDPA, and a flash pin is refused |
 | Ling 3.0 | set `attn_implementation: sdpa`; the flash label fails the build |
 | LFM2-VL | SDPA, chosen automatically |
@@ -217,7 +218,7 @@ advanced parallelism. What each family is for:
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP on tiny models only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP on tiny models only; on SDPA, so use `packing`, not `padding_free` |
 | Inkling-Small | Yes | Yes | No | No | Yes | multimodal MoE; LoRA and PP on tiny models only; PP takes the text tower, no packing |
-| Inkling-2-Small | Yes | Yes | No | No | No | eager attention only; the quantized-only release trains as expert LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; full fine-tuning and ETP on tiny models only ([details](../agent-docs/models/inkling2.md) ↗) |
+| Inkling-2-Small | Yes | Yes | No | No | No | runs its own FlexAttention kernel on CUDA; the quantized-only release trains as expert LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; full fine-tuning and ETP on tiny models only ([details](../agent-docs/models/inkling2.md) ↗) |
 | Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
 | Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP on a tiny-model LoRA test only |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
