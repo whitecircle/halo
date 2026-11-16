@@ -55,15 +55,6 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-15 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
-  experts over the release's frozen NVFP4/MXFP8 experts, served to vLLM as an adapter
-  ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
-  - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
-    weights to, such as Inkling 2, is served from its release with no NCCL group.
-  - **Inkling 2 vLLM image:** a second tag, `:vllm-0.1.dev25249` on vLLM's Inkling 2 build, with expert LoRA on the
-    quantized experts in fused Triton kernels. Every other family stays on `:vllm-0.32.0`.
-  - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
-    and train.
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
   Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
   ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
@@ -109,9 +100,9 @@ docker pull public.ecr.aws/whitecircle/halo:blackwell
 docker pull public.ecr.aws/whitecircle/halo:hopper
 ```
 
-Versioned tags (`:blackwell-1.3.0rc2`, `:hopper-1.3.0rc2`) pin the release. There is no `latest` tag, since
+Versioned tags (`:blackwell-1.3.0rc1`, `:hopper-1.3.0rc1`) pin the release. There is no `latest` tag, since
 the images are architecture-specific. The RL inference images are published alongside them
-(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc2` and `:sglang-0.5.22-1.3.0rc2`.
+(`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc1` and `:sglang-0.5.22-1.3.0rc1`.
 
 To build locally instead:
 ```bash
