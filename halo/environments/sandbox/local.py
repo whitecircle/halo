@@ -2,7 +2,6 @@
 No network or filesystem namespace isolation; the bubblewrap and remote backends provide that."""
 
 import contextlib
-import errno
 import math
 import os
 import platform
@@ -28,6 +27,7 @@ from halo.environments.sandbox.results import (
     compile_failure_verdict,
     compile_limit_verdict,
 )
+from halo.environments.sandbox.workspace import EntryKinds, SessionPathError, Workspace
 from halo.hardware import available_cpu_count
 
 _PYTHON_INTERPRETER = sys.executable or "python"
@@ -57,12 +57,8 @@ _SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"
 # A tampered working directory is the program's own runtime error; an infra fault would void the episode.
 TAMPERED_WORKDIR_RETURNCODE = 1
 
-_DIR_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-
 # (language, source text, auxiliary file contents)
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
-# (name, file type) per directory entry; lstat, so a link is a link.
-_EntryKinds = set[tuple[str, int]]
 
 
 def _resolve_execution_slots() -> int:
@@ -90,45 +86,6 @@ class ExecutionGate:
 
 
 sandbox_execution_gate = ExecutionGate(_resolve_execution_slots())
-
-
-class SessionPathError(ValueError):
-    """A session path the host must not touch: a link, a non-regular file, or one resolving outside the workdir."""
-
-
-def _create_owned_dirs(path: str, owner: tuple[int, int] | None) -> None:
-    """``os.makedirs(path, exist_ok=True)``, handing each directory it creates to ``owner``."""
-    if os.path.isdir(path):
-        return
-    _create_owned_dirs(os.path.dirname(path), owner)
-    with contextlib.suppress(FileExistsError):
-        os.mkdir(path)
-        if owner is not None:
-            os.chown(path, *owner, follow_symlinks=False)
-
-
-def _open_member(workdir: str, name: str, flags: int, owner: tuple[int, int] | None = None) -> int:
-    """Open ``<workdir>/<name>`` following no link at any component; what it creates goes to ``owner``.
-    The program can replace any entry between runs with a symlink to a host file, a FIFO or a device; all are
-    refused (:class:`SessionPathError`), and ``O_NONBLOCK`` keeps a FIFO from blocking the host."""
-    dest = os.path.normpath(os.path.join(os.path.realpath(workdir), name))
-    if os.path.realpath(dest) != dest:
-        raise SessionPathError(f"session path {name!r} is a link or resolves outside the working directory")
-    if flags & os.O_CREAT:
-        _create_owned_dirs(os.path.dirname(dest), owner)
-    try:
-        fd = os.open(dest, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o644)
-    except OSError as exc:
-        # ELOOP: a link raced in at the final component; EISDIR: a write met a directory; ENXIO: a write met a FIFO.
-        if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO):
-            raise SessionPathError(f"session path {name!r} is not a regular file") from exc
-        raise
-    if not stat.S_ISREG(os.fstat(fd).st_mode):
-        os.close(fd)
-        raise SessionPathError(f"session path {name!r} is not a regular file")
-    if owner is not None:
-        os.fchown(fd, *owner)
-    return fd
 
 
 def _captured_text(capture) -> str:
@@ -177,104 +134,6 @@ def _start_marker() -> Iterator[tuple[int, int]]:
         os.close(write_fd)
 
 
-def _entry_kinds(workdir: str) -> _EntryKinds:
-    kinds: _EntryKinds = set()
-    for name in os.listdir(workdir):
-        with contextlib.suppress(FileNotFoundError):
-            kinds.add((name, stat.S_IFMT(os.lstat(os.path.join(workdir, name)).st_mode)))
-    return kinds
-
-
-def _grant_owner(name: str, bits: int, dir_fd: int | None = None) -> None:
-    """Add ``bits`` to the owner permissions of the directory or regular file ``name``; an entry that refuses stays.
-    ``fchmodat`` refuses a link raced in after the type check; CPython raises that as ``NotImplementedError``, or as
-    ``ValueError`` relative to a directory descriptor."""
-    with contextlib.suppress(OSError, NotImplementedError, ValueError):
-        mode = os.stat(name, dir_fd=dir_fd, follow_symlinks=False).st_mode
-        if (stat.S_ISDIR(mode) or stat.S_ISREG(mode)) and mode & bits != bits:
-            os.chmod(name, stat.S_IMODE(mode) | bits, dir_fd=dir_fd, follow_symlinks=False)
-
-
-def _identity(fd: int) -> tuple[int, int]:
-    """``(st_dev, st_ino)``, which ``..`` must match on the way back up."""
-    info = os.fstat(fd)
-    return info.st_dev, info.st_ino
-
-
-def _sweep_entries(dir_fd: int, *, remove: bool) -> list[str]:
-    """Give the owner back access to each entry of ``dir_fd``, or with ``remove`` delete each non-directory.
-    Returns the subdirectories' names."""
-    try:
-        with os.scandir(dir_fd) as scan:
-            entries = list(scan)
-    except OSError:
-        return []
-    subdirs = []
-    for entry in entries:
-        try:
-            is_dir = entry.is_dir(follow_symlinks=False)
-        except OSError:
-            continue
-        if is_dir:
-            _grant_owner(entry.name, stat.S_IRWXU, dir_fd)
-            subdirs.append(entry.name)
-        elif remove:
-            with contextlib.suppress(OSError):
-                os.unlink(entry.name, dir_fd=dir_fd)
-        else:
-            _grant_owner(entry.name, stat.S_IRUSR | stat.S_IWUSR, dir_fd)
-    return subdirs
-
-
-def _walk_tree(top: str, *, remove: bool) -> None:
-    """Give the owner back access to ``top`` and everything under it, or with ``remove`` delete it all. Never raises.
-    A program can take those bits away and nest directories past any recursion or descriptor budget, so the walk
-    holds one descriptor at a time, descends by name without following a link and climbs through ``..``, stopping
-    where ``..`` is not the directory it came from (an escaped child moved the tree)."""
-    _grant_owner(top, stat.S_IRWXU)
-    try:
-        fd = os.open(top, _DIR_OPEN_FLAGS)
-    except OSError:
-        return
-    try:
-        # Per directory on the path down: identity, name, subdirectories left.
-        frames = [(_identity(fd), top, _sweep_entries(fd, remove=remove))]
-        while True:
-            pending = frames[-1][2]
-            if pending:
-                name = pending.pop()
-                try:
-                    child = os.open(name, _DIR_OPEN_FLAGS, dir_fd=fd)
-                except OSError:
-                    continue
-                parent, fd = fd, child
-                os.close(parent)
-                frames.append((_identity(fd), name, _sweep_entries(fd, remove=remove)))
-                continue
-            _, name, _ = frames.pop()
-            if not frames:
-                break
-            child, fd = fd, os.open("..", _DIR_OPEN_FLAGS, dir_fd=fd)
-            os.close(child)
-            if _identity(fd) != frames[-1][0]:
-                return
-            if remove:
-                with contextlib.suppress(OSError):
-                    os.rmdir(name, dir_fd=fd)
-    except OSError:
-        return
-    finally:
-        with contextlib.suppress(OSError):
-            os.close(fd)
-    if remove:
-        with contextlib.suppress(OSError):
-            os.rmdir(top)
-
-
-def _restore_owner_access(workdir: str) -> None:
-    _walk_tree(workdir, remove=False)
-
-
 def _stack_limit_kib(stack_mb: int) -> int:
     hard = resource.getrlimit(resource.RLIMIT_STACK)[1]
     kib = stack_mb * 1024
@@ -316,7 +175,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
             ) from exc
 
     def open_session(self) -> "_LocalSession":
-        return _LocalSession(self._new_workdir(), self)
+        workspace = Workspace(tempfile.mkdtemp(prefix="halo_sandbox_"), self.program_owner)
+        workspace.hand_over()
+        return _LocalSession(workspace, self)
 
     def toolchain(self, language: str) -> str | None:
         """A tool description's phrase for ``language``: compile flags, Python runtime, or ``None`` if run off PATH."""
@@ -328,15 +189,6 @@ class LocalSubprocessSandbox(SandboxExecutor):
         if INTERPRETER_PLACEHOLDER in spec.run_argv:
             return f"runs on {_PYTHON_RUNTIME}"
         return None
-
-    def _new_workdir(self) -> str:
-        workdir = tempfile.mkdtemp(prefix="halo_sandbox_")
-        self._hand_over(workdir)
-        return workdir
-
-    def _hand_over(self, path: str) -> None:
-        if self.program_owner is not None:
-            os.chown(path, *self.program_owner, follow_symlinks=False)
 
     def _wrap_command(self, argv: list[str], workdir: str) -> list[str]:
         """Isolation-launcher hook; bubblewrap overrides it."""
@@ -420,7 +272,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         }
 
     def _write_sources(
-        self, workdir: str, spec: LanguageSpec, code: str, files: dict[str, str] | None
+        self, workspace: Workspace, spec: LanguageSpec, code: str, files: dict[str, str] | None
     ) -> SandboxResult | None:
         """Write ``files`` and the source. Returns None, an error for an unsafe path (the caller's fault), or a
         runtime-error verdict when the program replaced or locked a prepared entry (its own fault, never an infra
@@ -431,8 +283,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
         try:
             for name, content in files.items():
-                self._write_member(workdir, name, content)
-            self._write_member(workdir, spec.source_name, code)
+                self._write_member(workspace, name, content)
+            self._write_member(workspace, spec.source_name, code)
         except (SessionPathError, PermissionError) as exc:
             return SandboxResult(stderr=f"working directory tampered: {exc}", returncode=TAMPERED_WORKDIR_RETURNCODE)
         return None
@@ -486,10 +338,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
             timed_out=timed_out or returncode == -signal.SIGXCPU,
         )
 
-    def _write_member(self, workdir: str, name: str, content: str) -> None:
-        flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-        with os.fdopen(_open_member(workdir, name, flags, self.program_owner), "w", encoding="utf-8") as fh:
-            fh.write(utf8_encodable(content))
+    def _write_member(self, workspace: Workspace, name: str, content: str) -> None:
+        # Model-written content can hold a lone surrogate.
+        workspace.write(name, utf8_encodable(content))
 
 
 class _LocalSession(SandboxSession):
@@ -497,13 +348,14 @@ class _LocalSession(SandboxSession):
     binary while language, source and ``files`` stay the same. A removed ``workdir`` is recreated empty; a link or
     file in its place breaks the session (:class:`SandboxAgentFault`), since any path under it could reach the host."""
 
-    def __init__(self, workdir: str, executor: LocalSubprocessSandbox):
-        self.workdir = workdir
+    def __init__(self, workspace: Workspace, executor: LocalSubprocessSandbox):
+        self.workspace = workspace
+        self.workdir = workspace.path
         self._executor = executor
         # Build key and compile verdict (None = built, runnable).
         self._build: tuple[_BuildKey, SandboxResult | None] | None = None
         # What reset_to_prepared keeps; typed so an entry the program swapped for a link is dropped.
-        self._prepared_entries: _EntryKinds | None = None
+        self._prepared_entries: EntryKinds | None = None
 
     def run(
         self,
@@ -534,7 +386,7 @@ class _LocalSession(SandboxSession):
             mode = os.lstat(self.workdir).st_mode
         except FileNotFoundError:
             os.makedirs(self.workdir, mode=0o700, exist_ok=True)
-            self._executor._hand_over(self.workdir)
+            self.workspace.hand_over()
             self._build = None
             self._prepared_entries = None
             return None
@@ -556,8 +408,8 @@ class _LocalSession(SandboxSession):
         if spec.is_compiled and self._build is not None and self._build[0] == key:
             return self._build[1]
         self._build = None
-        _restore_owner_access(self.workdir)
-        refused = self._executor._write_sources(self.workdir, spec, code, files)
+        self.workspace.restore_owner_access()
+        refused = self._executor._write_sources(self.workspace, spec, code, files)
         if refused is not None:
             return refused
         if spec.is_compiled:
@@ -565,49 +417,32 @@ class _LocalSession(SandboxSession):
             self._build = (key, failure)
         else:
             failure = None
-        self._prepared_entries = _entry_kinds(self.workdir)
+        self._prepared_entries = self.workspace.entries()
         return failure
 
     def reset_to_prepared(self) -> None:
         # A replaced working directory lists whatever it now points at; the next run reports the fault.
         if self._ensure_workspace() is not None or self._prepared_entries is None:
             return
-        _restore_owner_access(self.workdir)
-        for name, kind in _entry_kinds(self.workdir) - self._prepared_entries:
-            path = os.path.join(self.workdir, name)
-            if kind == stat.S_IFDIR:
-                _walk_tree(path, remove=True)
-            else:
-                # Refused right after the restore means an escaped child locked it; it stays.
-                with contextlib.suppress(FileNotFoundError, PermissionError):
-                    os.remove(path)
+        self.workspace.keep_only(self._prepared_entries)
 
     def write_file(self, path: str, content: str) -> None:
         self.reject_unsafe_path(path)
         self._require_intact()
         self._build = None
         self._prepared_entries = None
-        self._executor._write_member(self.workdir, path, content)
+        self._executor._write_member(self.workspace, path, content)
 
     def read_file(self, path: str) -> str | None:
         """The file's text, or ``None`` when ``path`` is not a regular file, so a planted link never carries a host
         file into the trajectory. Decoded as UTF-8 with replacement, the encoding the write side uses."""
         self.reject_unsafe_path(path)
         self._require_intact()
-        try:
-            fd = _open_member(self.workdir, path, os.O_RDONLY)
-        except (SessionPathError, FileNotFoundError, NotADirectoryError):
-            return None
-        with os.fdopen(fd, encoding="utf-8", errors="replace") as fh:
-            return fh.read()
+        return self.workspace.read(path)
 
     def list_files(self) -> list[str]:
         self._require_intact()
-        out: list[str] = []
-        for root, _dirs, names in os.walk(self.workdir):
-            for n in names:
-                out.append(os.path.relpath(os.path.join(root, n), self.workdir))
-        return sorted(out)
+        return self.workspace.files()
 
     def close(self) -> None:
         """Remove the workdir, or the link or file in its place. Never raises; what the walk cannot remove stays."""
@@ -616,7 +451,7 @@ class _LocalSession(SandboxSession):
         except OSError:
             return
         if stat.S_ISDIR(mode):
-            _walk_tree(self.workdir, remove=True)
+            self.workspace.remove()
         else:
             with contextlib.suppress(OSError):
                 os.unlink(self.workdir)
