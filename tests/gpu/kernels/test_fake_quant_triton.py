@@ -12,15 +12,14 @@
 Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
 """
 
-import dataclasses
-
 import torch
 import triton
 
 import halo.kernels.lowp.quantization as q
-from halo.kernels.lowp.fake_quant_triton import _launch, _mxfp4_fake_quant_kernel, _mxfp8_fake_quant_kernel
+from halo.kernels.lowp.fake_quant_triton import fake_quant_triton
 from halo.kernels.lowp.quantization import (
     _AMAX_FLOOR,
+    _ELEMENT_MAX,
     E2M1_MAX,
     FORMAT_BLOCK_SIZE,
     _block_round_trip,
@@ -30,7 +29,7 @@ from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
 K = 2880
-# The table ``fake_quant`` dispatches on: format → kernel, element maximum, oldest capability that compiles it.
+# The table ``fake_quant`` dispatches on: format → kernel and the oldest capability that compiles it.
 FUSED = q._FUSED_FAKE_QUANT
 
 
@@ -46,7 +45,7 @@ def _e2m1_grid() -> torch.Tensor:
 
 
 def _cases(fmt: str):
-    format_max = FUSED[fmt].format_max
+    format_max = _ELEMENT_MAX[fmt]
     g = torch.Generator(device=DEV).manual_seed(0)
     bf = torch.bfloat16
     for shape in [(4096, K), (16384, K), (32, K, K), (7, 32), (1, 64)]:
@@ -107,25 +106,23 @@ def _kernel_supported() -> bool:
 
 
 class _Spy:
-    """Counts fast-path calls per format by swapping the kernels in ``_FUSED_FAKE_QUANT``, which
-    ``_FakeQuant`` reads at call time."""
+    """Counts fast-path calls per format by wrapping ``fake_quant_triton`` in the quantization module, which
+    ``_FakeQuant`` looks up at call time; the kernel it is handed names the format."""
 
     def __init__(self):
         self.calls = {fmt: 0 for fmt in FUSED}
-        self._orig = dict(FUSED)
+        self._format_of = {id(fused.kernel): fmt for fmt, fused in FUSED.items()}
 
     def __enter__(self):
-        for fmt, fused in self._orig.items():
+        def spy(kernel, *a, **k):
+            self.calls[self._format_of[id(kernel)]] += 1
+            return fake_quant_triton(kernel, *a, **k)
 
-            def spy(t, *a, _fmt=fmt, _kernel=fused.kernel, **k):
-                self.calls[_fmt] += 1
-                return _kernel(t, *a, **k)
-
-            FUSED[fmt] = dataclasses.replace(fused, kernel=spy)
+        q.fake_quant_triton = spy
         return self
 
     def __exit__(self, *_):
-        FUSED.update(self._orig)
+        q.fake_quant_triton = fake_quant_triton
 
 
 def test_bit_exact_against_eager():
@@ -137,7 +134,7 @@ def test_bit_exact_against_eager():
         n = 0
         for name, t in _cases(fmt):
             ref = _block_round_trip(t, fmt, -1).to(t.dtype)
-            out = fused.kernel(t, FORMAT_BLOCK_SIZE[fmt], fused.format_max, _AMAX_FLOOR)
+            out = fake_quant_triton(fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
             _assert_bits_equal(out, ref, f"{fmt}/{name}")
             n += 1
         print(f"  {fmt}: {n} cases bit-exact — OK")
@@ -195,9 +192,8 @@ def test_no_recompile_across_token_counts():
     a new variant mid-run, where one rank compiling would stall the others at the next collective. Each check runs
     on a fresh copy of the kernel with the same ``do_not_specialize``, so variants that earlier tests compiled
     cannot hide a new one."""
-    kernels = {"mxfp8": _mxfp8_fake_quant_kernel, "mxfp4": _mxfp4_fake_quant_kernel}
-    assert set(kernels) == set(FUSED), "a fused format has no recompile check"
-    for fmt, kernel in kernels.items():
+    for fmt, fused in FUSED.items():
+        kernel = fused.kernel
         if fmt == "mxfp8" and not _kernel_supported():
             print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
             continue
@@ -214,7 +210,7 @@ def test_no_recompile_across_token_counts():
         try:
             for shape in [(64, K), (7, K), (1, 32)]:  # n_blocks 5760 (divisible by 16), 630, 1
                 t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
-                _launch(fresh, t, FORMAT_BLOCK_SIZE[fmt], FUSED[fmt].format_max, _AMAX_FLOOR)
+                fake_quant_triton(fresh, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
         finally:
             triton.knobs.runtime.jit_cache_hook = prev
         assert len(compiled) == 1, f"{fmt}: 3 token counts compiled {len(compiled)} kernel variants, expected 1"

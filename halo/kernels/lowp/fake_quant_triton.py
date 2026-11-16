@@ -1,6 +1,6 @@
 """Fused Triton MX fake quantization: one kernel per format for the quantize-dequantize round trip that
 :func:`~halo.kernels.lowp.quantization.fake_quant` takes on CUDA, contiguous, last-axis tensors, bit-identical to
-the eager :func:`~halo.kernels.lowp.quantization._block_round_trip`."""
+the eager :func:`~halo.kernels.lowp.quantization._block_round_trip`, launched through :func:`fake_quant_triton`."""
 
 import torch
 import triton
@@ -51,7 +51,7 @@ def _e8m0_exponent(x, FMAX: tl.constexpr, TINY: tl.constexpr):
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
-def _mxfp8_fake_quant_kernel(
+def mxfp8_fake_quant_kernel(
     x_ptr, out_ptr, n_blocks, BPP: tl.constexpr, BLOCK: tl.constexpr, FMAX: tl.constexpr, TINY: tl.constexpr
 ):
     """Each program takes ``BPP`` blocks: ``e8m0`` exponent, round to ``e4m3``, rescale, all in registers, so the
@@ -70,7 +70,7 @@ def _mxfp8_fake_quant_kernel(
 
 
 @triton.jit(do_not_specialize=["n_blocks"])
-def _mxfp4_fake_quant_kernel(
+def mxfp4_fake_quant_kernel(
     x_ptr, out_ptr, n_blocks, BPP: tl.constexpr, BLOCK: tl.constexpr, FMAX: tl.constexpr, TINY: tl.constexpr
 ):
     """As the mxfp8 kernel, rounding to ``e2m1`` instead. e2m1 has one mantissa bit, so a magnitude in
@@ -93,10 +93,12 @@ def _mxfp4_fake_quant_kernel(
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
 
-def _launch(
+def fake_quant_triton(
     kernel: JITFunction, t: torch.Tensor, block_size: int, format_max: float, amax_floor: float
 ) -> torch.Tensor:
-    """Run ``kernel`` over ``t`` in blocks of ``block_size`` into a new tensor of the same shape and dtype."""
+    """``kernel``'s round trip of ``t`` in blocks of ``block_size``, into a new tensor of the same shape and dtype.
+    Last-axis, contiguous, CUDA. The caller guarantees ``t.shape[-1] % block_size == 0`` and passes the eager
+    quantizer's element maximum and amax floor, so both paths scale by the same constants."""
     if t.numel() == 0:
         return torch.empty_like(t)
     out = torch.empty_like(t)
@@ -105,14 +107,3 @@ def _launch(
         t, out, n_blocks, BPP=_BPP, BLOCK=block_size, FMAX=format_max, TINY=amax_floor
     )
     return out
-
-
-def fake_quant_mxfp8_triton(t: torch.Tensor, block_size: int, format_max: float, amax_floor: float) -> torch.Tensor:
-    """Last-axis, contiguous, CUDA. Caller guarantees ``t.shape[-1] % block_size == 0`` and passes the eager
-    quantizer's e4m3 maximum and amax floor, so both paths scale by the same constants."""
-    return _launch(_mxfp8_fake_quant_kernel, t, block_size, format_max, amax_floor)
-
-
-def fake_quant_mxfp4_triton(t: torch.Tensor, block_size: int, format_max: float, amax_floor: float) -> torch.Tensor:
-    """As :func:`fake_quant_mxfp8_triton`, with the eager quantizer's e2m1 maximum."""
-    return _launch(_mxfp4_fake_quant_kernel, t, block_size, format_max, amax_floor)
