@@ -6,11 +6,14 @@ import copy
 import pytest
 import torch
 import torch.nn as nn
-from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers import Qwen3MoeConfig
+from transformers.models.inkling2.configuration_inkling2 import Inkling2Config, Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.moe.family_specs import INKLING2, frozen_expert_sidecar_attrs
 from tests.common.inkling2 import NVFP4_OUTER_SCALE_DENOMINATOR, quantize_release_bank
@@ -153,6 +156,7 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group_and_expert_lora():
     ("override", "named"),
     [
         ({"ep_size": 1}, "expert_parallel_size >= 2"),
+        ({"expert_tp_size": 2}, "expert_tensor_parallel_size: 1"),
         ({"ep_lazy_loading": False}, "ep_lazy_loading: true"),
         ({"expert_lora": None}, "lora_target_modules"),
         ({"merge_expert_lora_on_save": True}, "merge_expert_lora_on_save: false"),
@@ -176,6 +180,21 @@ def test_the_per_expert_sidecars_come_from_the_declared_slots():
         "down_proj_scale_inv",
         "w2_weight_amax",
     }
+
+
+def _reject_unsupported_model(model_config) -> None:
+    config = make_parallelism_config(world_size=2, gpus_per_node=2, **_FROZEN_OK)
+    reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True)
+
+
+def test_another_family_is_refused_from_its_config_before_the_load():
+    with pytest.raises(ValueError, match=r"frozen_quantized_experts.*\['inkling2'\].*'qwen3_moe'"):
+        _reject_unsupported_model(Qwen3MoeConfig(num_experts=8))
+
+
+@pytest.mark.parametrize("config_class", [Inkling2TextConfig, Inkling2Config])
+def test_inkling2_passes_the_config_time_family_gate(config_class):
+    _reject_unsupported_model(config_class())
 
 
 if __name__ == "__main__":
