@@ -6,6 +6,8 @@ weight no gradient: a bank is the frozen base under LoRA."""
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 import torch
@@ -13,12 +15,18 @@ import torch.nn.functional as F
 from torch.autograd import Function
 
 from halo.kernels.grouped_mm import grouped_mm_grads
-from halo.kernels.lowp.dequant_triton import FUSED_DEQUANT_BLOCK, dequantize_bank_triton
+from halo.kernels.lowp.dequant_triton import FUSED_DEQUANT_BLOCK, dequantize_bank_triton, supports_fused_dequant
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import QuantFormat
+from halo.log import warn_once
+
+logger = logging.getLogger(__name__)
 
 # ``dequantize`` holds int64 nibble indices and fp32 elements, ~15x its bf16 output, so it runs a few experts at a time.
 _DEQUANT_EXPERT_CHUNK = 4
+
+# (format, K) of the CUDA banks already reported on the eager path.
+_eager_cuda_banks_warned: set[tuple[QuantFormat, int]] = set()
 
 
 @dataclass(frozen=True)
@@ -59,12 +67,23 @@ class FrozenExpertBank:
         """Experts ``[start, end)`` as bf16 ``[E, N, K]``."""
         end = self.num_experts if end is None else end
         # One fused kernel on CUDA, bit-identical to the eager path below.
-        if self.data.is_cuda and self.in_features % FUSED_DEQUANT_BLOCK == 0:
+        if supports_fused_dequant(self.data, self.in_features):
             with torch.profiler.record_function(f"frozen_bank.dequantize_fused[{self.quant_format}]"):
                 global_scale = None if self.global_scale is None else self.global_scale[start:end]
                 return dequantize_bank_triton(
                     self.data[start:end], self.scales[start:end], global_scale, self.quant_format
                 )
+        if self.data.is_cuda:
+            warn_once(
+                logger,
+                _eager_cuda_banks_warned,
+                (self.quant_format, self.in_features),
+                "A CUDA %s frozen expert bank of K=%d dequantizes on the eager path: the fused kernel takes K a "
+                "multiple of %d.",
+                self.quant_format,
+                self.in_features,
+                FUSED_DEQUANT_BLOCK,
+            )
         packed = self.quant_format == "nvfp4"
         out = torch.empty(
             (end - start, self.out_features, self.in_features), dtype=torch.bfloat16, device=self.data.device
@@ -83,6 +102,17 @@ class FrozenExpertBank:
                 )
                 out[lo - start : hi - start] = dequantize(chunk)
         return out
+
+
+def warm_fused_dequant_kernels(banks: Iterable[FrozenExpertBank]) -> None:
+    """Launch the fused dequant on one expert of each format and ``K`` among ``banks``, as a kernel's first launch
+    compiles it. A bank on the eager path launches nothing."""
+    warmed = set()
+    for bank in banks:
+        variant = (bank.quant_format, bank.in_features)
+        if variant not in warmed and supports_fused_dequant(bank.data, bank.in_features):
+            warmed.add(variant)
+            bank.dequantize_linear(0, 1)
 
 
 class _FrozenBankGroupedMM(Function):

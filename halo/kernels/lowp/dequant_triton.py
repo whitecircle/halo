@@ -27,7 +27,9 @@ def _e2m1(code):
     return value * tl.where(code >= 8, -1.0, 1.0)
 
 
-@triton.jit
+# One binary per ``K``: a one-expert slice hands in a 1-row count or a global scale off 16-byte alignment, and
+# neither compiles another.
+@triton.jit(do_not_specialize=["rows_per_expert"], do_not_specialize_on_alignment=["global_ptr"])
 def _nvfp4_bank_kernel(
     data_ptr, scales_ptr, global_ptr, out_ptr, rows_per_expert, K: tl.constexpr, BLOCK_K: tl.constexpr
 ):
@@ -55,15 +57,25 @@ def _mxfp8_bank_kernel(data_ptr, scales_ptr, out_ptr, K: tl.constexpr, BLOCK_K: 
     tl.store(out_ptr + row * K + col0 + tl.arange(0, BLOCK_K), out.to(tl.bfloat16))
 
 
+def supports_fused_dequant(data: torch.Tensor, in_features: int) -> bool:
+    """Whether :func:`dequantize_bank_triton` takes a bank of packed ``data`` and ``in_features`` (``K``) columns:
+    on CUDA, at ``K`` a multiple of :data:`FUSED_DEQUANT_BLOCK`."""
+    return data.is_cuda and in_features % FUSED_DEQUANT_BLOCK == 0
+
+
 def dequantize_bank_triton(
     data: torch.Tensor, scales: torch.Tensor, global_scale: torch.Tensor | None, quant_format: str
 ) -> torch.Tensor:
     """bf16 ``[E, N, K]`` of a bank's contiguous CUDA ``data`` (``[E, N, K/2]`` nibbles or ``[E, N, K]`` e4m3) and
-    ``scales`` (one per block along ``K``); NVFP4 takes its per-expert ``global_scale`` ``[E]``."""
+    ``scales`` (one per block along ``K``); NVFP4 takes its per-expert ``global_scale`` ``[E]``. Raises off
+    :func:`supports_fused_dequant`."""
     num_experts, rows_per_expert = data.shape[:2]
     in_features = data.shape[2] * (2 if quant_format == "nvfp4" else 1)
-    if in_features % FUSED_DEQUANT_BLOCK:
-        raise ValueError(f"the fused dequant takes K a multiple of {FUSED_DEQUANT_BLOCK}, got {in_features}")
+    if not supports_fused_dequant(data, in_features):
+        raise ValueError(
+            f"the fused dequant takes a CUDA bank at K a multiple of {FUSED_DEQUANT_BLOCK}, got K={in_features} on "
+            f"{data.device}"
+        )
     out = torch.empty((num_experts, rows_per_expert, in_features), dtype=torch.bfloat16, device=data.device)
     grid = (num_experts * rows_per_expert, in_features // FUSED_DEQUANT_BLOCK)
     if quant_format == "nvfp4":

@@ -1,11 +1,15 @@
 """Frozen NVFP4/MXFP8 expert banks: dequantization against the release's own arithmetic, and the grouped GEMM against
 the same GEMM over the dequantized bf16 weight, forward and input gradient, bitwise."""
 
+import logging
+
 import pytest
 import torch
 import torch.nn.functional as F
 
-from halo.kernels.lowp.frozen_bank import FrozenExpertBank, frozen_bank_grouped_mm
+from halo.kernels.lowp import frozen_bank
+from halo.kernels.lowp.dequant_triton import FUSED_DEQUANT_BLOCK, dequantize_bank_triton, supports_fused_dequant
+from halo.kernels.lowp.frozen_bank import FrozenExpertBank, frozen_bank_grouped_mm, warm_fused_dequant_kernels
 
 # e2m1 codes 0..15, low nibble first: what the Inkling 2 release, and every engine serving it, decodes.
 _E2M1 = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
@@ -98,6 +102,115 @@ def test_chunked_dequantization_equals_one_pass():
 def test_malformed_banks_are_refused(bad):
     with pytest.raises(ValueError):
         bad()
+
+
+class _CudaTensor(torch.Tensor):
+    """A CPU tensor that reports CUDA, so the bank's CUDA branches run without a GPU; slices keep the class."""
+
+    is_cuda = property(lambda self: True)
+
+
+def _on_fake_cuda(bank: FrozenExpertBank) -> FrozenExpertBank:
+    return FrozenExpertBank(bank.quant_format, bank.data.as_subclass(_CudaTensor), bank.scales, bank.global_scale)
+
+
+@pytest.fixture
+def fused_launches(monkeypatch):
+    """The fused kernel replaced by a recorder of its arguments, which answers with the eager dequantization."""
+    launches = []
+
+    def record(data, scales, global_scale, quant_format):
+        launches.append((data, scales, global_scale, quant_format))
+        plain = FrozenExpertBank(quant_format, data.as_subclass(torch.Tensor), scales, global_scale)
+        return plain.dequantize_linear()
+
+    monkeypatch.setattr(frozen_bank, "dequantize_bank_triton", record)
+    return launches
+
+
+@pytest.mark.parametrize(
+    ("on_cuda", "in_features", "expected"),
+    [
+        (True, FUSED_DEQUANT_BLOCK, True),
+        (True, 18 * FUSED_DEQUANT_BLOCK, True),
+        (True, FUSED_DEQUANT_BLOCK // 2, False),
+        (True, FUSED_DEQUANT_BLOCK + 32, False),
+        (False, FUSED_DEQUANT_BLOCK, False),
+    ],
+)
+def test_the_fused_dequant_takes_cuda_banks_at_a_multiple_of_its_block(on_cuda, in_features, expected):
+    data = torch.zeros((1, 1, in_features // 2), dtype=torch.uint8)
+    assert supports_fused_dequant(data.as_subclass(_CudaTensor) if on_cuda else data, in_features) is expected
+
+
+@pytest.mark.parametrize("in_features", [FUSED_DEQUANT_BLOCK, FUSED_DEQUANT_BLOCK // 2])
+def test_the_fused_launcher_refuses_a_bank_its_predicate_rejects(in_features):
+    """A CPU bank at the fused width is refused by the same rule the bank dispatches on, before any launch."""
+    bank = _random_nvfp4_bank(experts=2, n=2, k=in_features)
+    assert not supports_fused_dequant(bank.data, bank.in_features)
+    with pytest.raises(ValueError, match=f"multiple of {FUSED_DEQUANT_BLOCK}"):
+        dequantize_bank_triton(bank.data, bank.scales, bank.global_scale, "nvfp4")
+
+
+@pytest.mark.parametrize("make_bank", [_random_nvfp4_bank, _random_mxfp8_bank], ids=["nvfp4", "mxfp8"])
+def test_a_cuda_bank_hands_the_fused_kernel_its_expert_slices(make_bank, fused_launches):
+    """Experts ``[2, 5)`` reach the kernel with their own rows of data, block scales and global scale."""
+    plain = make_bank(6, 4, FUSED_DEQUANT_BLOCK)
+    bank = _on_fake_cuda(plain)
+    out = bank.dequantize_linear(2, 5)
+    ((data, scales, global_scale, quant_format),) = fused_launches
+    assert quant_format == plain.quant_format
+    for launched, stored in ((data.as_subclass(torch.Tensor), plain.data), (scales, plain.scales)):
+        assert torch.equal(launched.view(torch.uint8), stored[2:5].view(torch.uint8))
+        assert not torch.equal(stored[2:5].view(torch.uint8), stored[:3].view(torch.uint8))
+    if plain.global_scale is None:
+        assert global_scale is None
+    else:
+        assert torch.equal(global_scale, plain.global_scale[2:5])
+        assert not torch.equal(plain.global_scale[2:5], plain.global_scale[:3])
+    torch.testing.assert_close(out, plain.dequantize_linear()[2:5], rtol=0, atol=0)
+
+
+def test_a_cuda_bank_off_the_fused_width_warns_once_and_dequantizes_eagerly(fused_launches, caplog, monkeypatch):
+    monkeypatch.setattr(frozen_bank, "_eager_cuda_banks_warned", set())
+    plain = _random_nvfp4_bank(experts=3, n=4, k=FUSED_DEQUANT_BLOCK // 2)
+    bank = _on_fake_cuda(plain)
+    with caplog.at_level(logging.WARNING, logger=frozen_bank.__name__):
+        first = bank.dequantize_linear()
+        _on_fake_cuda(plain).dequantize_linear(1, 2)
+    assert not fused_launches
+    torch.testing.assert_close(first, _reference_nvfp4(plain), rtol=0, atol=0)
+    (record,) = caplog.records
+    assert f"K={FUSED_DEQUANT_BLOCK // 2}" in record.getMessage()
+    assert f"multiple of {FUSED_DEQUANT_BLOCK}" in record.getMessage()
+
+
+def test_a_cpu_bank_takes_the_eager_path_without_a_warning(fused_launches, caplog, monkeypatch):
+    monkeypatch.setattr(frozen_bank, "_eager_cuda_banks_warned", set())
+    bank = _random_nvfp4_bank(experts=2, n=4, k=FUSED_DEQUANT_BLOCK // 2)
+    with caplog.at_level(logging.WARNING, logger=frozen_bank.__name__):
+        bank.dequantize_linear()
+    assert not fused_launches and not caplog.records
+
+
+def test_the_warm_up_launches_one_expert_per_format_and_width(fused_launches):
+    """Two layers' banks of one format and width share a binary, so the second launches nothing; an eager bank (CPU,
+    or off the fused width) launches nothing either."""
+    wide, narrow = 2 * FUSED_DEQUANT_BLOCK, FUSED_DEQUANT_BLOCK
+    banks = [
+        _on_fake_cuda(_random_nvfp4_bank(3, 2, wide)),
+        _on_fake_cuda(_random_nvfp4_bank(3, 2, narrow)),
+        _on_fake_cuda(_random_nvfp4_bank(3, 2, wide, seed=1)),
+        _on_fake_cuda(_random_mxfp8_bank(3, 2, narrow)),
+        _random_mxfp8_bank(3, 2, wide),
+        _on_fake_cuda(_random_mxfp8_bank(3, 2, FUSED_DEQUANT_BLOCK // 2)),
+    ]
+    warm_fused_dequant_kernels(iter(banks))
+    launched = [
+        (quant_format, data.shape[0], data.shape[2] * (2 if quant_format == "nvfp4" else 1))
+        for data, _scales, _global_scale, quant_format in fused_launches
+    ]
+    assert launched == [("nvfp4", 1, wide), ("nvfp4", 1, narrow), ("mxfp8", 1, narrow)]
 
 
 def _grouped_inputs(bank: FrozenExpertBank, rows_per_expert: tuple[int, ...]):
