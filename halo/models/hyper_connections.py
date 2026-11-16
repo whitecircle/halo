@@ -12,6 +12,7 @@ import transformers.models.glm5_next.modeling_glm5_next as glm5_next_modeling
 
 from halo.env import env_flag
 from halo.kernels.hyper_connection import collapse_streams, mix_streams, project_streams, sinkhorn_knopp
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import model_type_matches
 from halo.models.moe.family_specs import DEEPSEEK_V4, GLM5_NEXT
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
@@ -124,7 +125,7 @@ def _install(owner: type, fused) -> None:
         return (fused if on_kernels else stock)(self, hidden_states, *args, **kwargs)
 
     setattr(forward, _PATCHED_ATTR, True)
-    owner.forward = forward
+    patch_layer_forward(owner, forward)
     if is_global_main_process():
         logger.info(f"Patched {owner.__name__}.forward onto the hyper-connection kernels")
 
