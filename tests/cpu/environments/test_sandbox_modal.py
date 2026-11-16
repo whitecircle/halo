@@ -362,9 +362,9 @@ def test_missing_modal_sdk_names_the_install(monkeypatch):
 
 
 def test_factory_builds_modal_with_its_options(modal):
-    executor = build_sandbox(backend="modal", app_name="advprop-test", image="python:3.12-slim")
+    executor = build_sandbox(backend="modal", app_name="halo-test", image="python:3.12-slim")
     assert isinstance(executor, ModalSandbox) and executor.isolated
-    assert modal.lookups == [("advprop-test", True)] and modal.registry_images == ["python:3.12-slim"]
+    assert modal.lookups == [("halo-test", True)] and modal.registry_images == ["python:3.12-slim"]
     executor.close()
 
 
@@ -377,9 +377,9 @@ def test_env_var_selects_modal(modal, monkeypatch):
 
 @pytest.mark.parametrize("env_type", ["code_contests", "codeforces", "swe"])
 def test_yaml_sandbox_options_reach_modal(modal, env_type):
-    options = {"app_name": "advprop-yaml", "cpu": 2.0, "memory_mb": 4096}
+    options = {"app_name": "halo-yaml", "cpu": 2.0, "memory_mb": 4096}
     env = build_environment(env_type, {"sandbox_backend": "modal", "sandbox_options": options})
-    assert isinstance(env.sandbox, ModalSandbox) and modal.lookups == [("advprop-yaml", True)]
+    assert isinstance(env.sandbox, ModalSandbox) and modal.lookups == [("halo-yaml", True)]
     assert (env.sandbox.cpu, env.sandbox.memory_mb, env.sandbox.max_concurrency) == (2.0, 4096, 2)
     env.sandbox.close()
 
@@ -432,7 +432,7 @@ def test_without_the_flag_the_python_repl_stays_in_process(modal, monkeypatch):
 @pytest.mark.skipif(os.environ.get("HALO_MODAL_LIVE") != "1", reason="set HALO_MODAL_LIVE=1 to run against Modal")
 def test_live_modal_sandbox_runs_programs():
     executor = ModalSandbox(
-        app_name=os.environ.get("HALO_MODAL_APP", "advprop-halo-sandbox-test"),
+        app_name=os.environ.get("HALO_MODAL_APP", "halo-sandbox-test"),
         cpu=1.0,
         memory_mb=2048,
         sandbox_timeout=600,
