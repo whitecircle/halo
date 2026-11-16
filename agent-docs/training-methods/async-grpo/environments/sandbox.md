@@ -15,15 +15,16 @@
 | `local` (default) | rlimits, throwaway working dir, stripped child env, own process group; no namespaces | python, bash, cpp, c | `pidfd_open` (Linux 5.3+, checked at construction); `gcc` / `g++` for C/C++ |
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
+| `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits, each session as its own user | python, bash, cpp, c (default image) | The `modal` extra (`pip install 'halo[modal]'`) and Modal credentials ([Modal](#modal)) |
 | `baseten` | A Baseten Sandboxes microVM per session, created on first use and deleted on close, under `local`'s rlimits | python, bash, plus cpp and c when the image has `gcc` / `g++` | `BASETEN_API_KEY`, network to `api.baseten.co` ([Baseten Sandboxes](#baseten-sandboxes)) |
 
 Coding environments select it in `environment_kwargs`:
 
 ```yaml
 environment_kwargs:
-  sandbox_backend: remote                 # local (default) | bubblewrap | remote | baseten
+  sandbox_backend: remote                 # local (default) | bubblewrap | remote | modal | baseten
   sandbox_url: http://sandbox-host:8080   # remote only
-  sandbox_options: {}                     # executor constructor arguments, e.g. baseten cpu / image
+  # sandbox_options: {cpu: 8, memory_mb: 16384}   # the backend's constructor arguments
 ```
 
 Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with `local`, `bubblewrap` or `baseten`.
@@ -32,11 +33,11 @@ Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL
 
 A confined program cannot write the host filesystem or reach the network, but can read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`).
 
-- `remote` and `baseten` confine; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
+- `remote`, `modal` and `baseten` confine; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
 - On `local` the program can rewrite what grades it, fetch a solution, and read the trainer's `--env-file` secrets from `/proc/<pid>/environ`.
 - `swe` and `code_contests` log a warning when built on an executor that does not confine.
 
-Use `bubblewrap` without network, `remote` or `baseten` for RL on untrusted code and whenever the trainer's environment carries secrets.
+Use `bubblewrap` without network, `remote`, `modal` or `baseten` for RL on untrusted code and whenever the trainer's environment carries secrets.
 
 Only `bubblewrap` lets a compile error show under code contests' `verdict_detail: outcome` (`COMPILES_WITHOUT_TEST_INPUT`): its build runs before any test and its program cannot force a rebuild ([Grading rules](tasks/code-contests/grading.md#grading-rules)).
 
@@ -66,6 +67,67 @@ docker run --gpus all --init --cap-add SYS_ADMIN --security-opt seccomp=unconfin
 - A program that exits `128 + n` reads as killed by signal `n`.
 - While a jailed run is in flight the host process is a child subreaper, so an orphan of anything else it started meanwhile is reparented to it, and only a jail's init is reaped.
 
+### Modal
+
+One flag sends every code execution of an async-GRPO run to Modal:
+
+```bash
+pip install 'halo[modal]'
+export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (modal token new)
+halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
+```
+
+The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1`, so code-contests grading and its test tool, the `swe` tools and the Python REPL tools all run in Modal.
+
+On a shared Ray cluster (`ray_address`) the two variables travel to the actors with the job. Credentials do not: put Modal's on every cluster node.
+
+**How it runs**
+
+- Each executor (one per environment actor) keeps one sandbox, created on first use.
+- A session is a directory in that sandbox. `run()` is a throwaway session.
+- Each call is one remote exec, about 90 ms warm. The first call also starts the sandbox, about 0.6 s once the image is built.
+- At most `max_concurrency` runs execute at once. The rest wait, and their time limit starts only when they run.
+- Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
+
+**What a program cannot do**
+
+Each session runs as its own user in a directory only that user can enter.
+
+- It cannot read or change another session's files.
+- It cannot signal another session's programs or the process that supervises it.
+- It cannot leave a process behind: every process of its user is killed when the run ends.
+- It cannot make the backend write or read through a link, directory or FIFO it put in a file's place. The next run reports a runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+
+World-writable directories of the image, such as `/tmp`, stay shared between sessions. The image must run as root.
+
+**When something fails**
+
+| What happened | What the caller sees |
+|---|---|
+| Modal ended the sandbox (5 minutes idle, or its lifetime) before the call | Nothing: a new sandbox takes the call |
+| The sandbox cannot be created | `error` |
+| The connection drops after the program may have started | `error`; the call is not sent again |
+| The call passes its deadline (run timeout + compile timeout + 30 s) | `error` |
+
+After an `error` the executor starts a new sandbox, and open sessions continue with an empty directory.
+
+**Cleanup**
+
+`close()` and an `atexit` hook terminate the sandbox. If the process is killed, Modal's idle timeout removes it after 5 minutes.
+
+**Options** (`sandbox_options`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `app_name` | `halo-sandbox` | The Modal app that owns the sandbox |
+| `image` | Debian slim, Python 3.12, `gcc`, `g++` | A registry tag or a `modal.Image` with `python3` |
+| `cpu` / `memory_mb` | 4 / 8192 | What the sandbox reserves |
+| `max_concurrency` | `int(cpu)` | Runs executing at once; `memory_mb` must hold that many at the larger memory limit |
+| `sandbox_timeout` | 86400 s | Sandbox lifetime (Modal's maximum); runs in flight when it ends are `error` |
+| `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
+
+The code is in `halo/environments/sandbox/modal_sandbox.py`. What runs inside the sandbox is `halo/environments/sandbox/program_runner.py` on the working-directory code `local` uses, `halo/environments/sandbox/workspace.py`.
+
 ### Baseten Sandboxes
 
 One flag sends code-contests grading, its test tool and the `swe` tools to Baseten:
@@ -85,6 +147,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 - Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
+- The Python REPL tools stay in process: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox.
 - The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
 
 **Sandbox limit**
@@ -126,7 +189,7 @@ File calls raise `SandboxInfraError` where `run` returns `error`. A sandbox whos
 
 The backend needs no Baseten package. `pip install 'halo[baseten]'` adds Baseten's [Truss CLI](https://docs.baseten.co/reference/cli/truss/overview) (`truss login`, `truss push`).
 
-The code is in `halo/environments/sandbox/baseten.py`; the part that runs inside the sandbox is `halo/environments/sandbox/program_runner.py`.
+The code is in `halo/environments/sandbox/baseten.py`; what runs inside the sandbox is the runner `modal` uses.
 
 ## Using it from Python
 
@@ -149,7 +212,7 @@ with sandbox.open_session() as session:
 
 `close()` deletes the working directory (`remote`: drops the written files), is idempotent and never raises; the context manager calls it.
 
-`environment_kwargs` passes the executor's constructor arguments as `sandbox_options` (`code_contests`, `swe`); `sandbox=` takes a built executor:
+`environment_kwargs` carries `sandbox_backend`, `sandbox_url` and `sandbox_options`, the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`, Modal's and Baseten's options). From Python they also go through `sandbox=`:
 
 ```python
 env = SweEnvironment(sandbox=build_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
@@ -197,6 +260,7 @@ A grader of your own that calls `sandbox.run()` must handle its host-side except
 A program that drives its own run into an `error` voids its episode. The routes left:
 
 - `remote`: a response the service fails to produce (huge output, service OOM), or one past the client deadline (run timeout + 30 s).
+- `modal` / `baseten`: output too large to return before the call's deadline.
 - `local` / `bubblewrap` grading: a host-side exception during a test, such as a `TMPDIR` the program filled.
 - `local` only: a `setsid()` child that outlives the run fills the process table, or, under a root grader, the program deletes the compiler (`compiler not found` for every later build on that host).
 
@@ -206,7 +270,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Languages
 
-`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local` and `bubblewrap` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
+`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local`, `bubblewrap`, `modal` and `baseten` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
 
 | Language | Aliases | Compile | Run |
 |---|---|---|---|
@@ -219,7 +283,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Limits
 
-Rlimits bound each `local` / `bubblewrap` run; `remote` enforces its own.
+Rlimits bound each `local` / `bubblewrap` / `modal` / `baseten` run; `remote` enforces its own.
 
 | Resource | Run step | Compile step | Set by |
 |---|---|---|---|

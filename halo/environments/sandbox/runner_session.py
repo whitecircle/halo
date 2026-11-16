@@ -19,7 +19,6 @@ from halo.environments.sandbox.local import (
     SANDBOX_DEFAULT_COMPILE_TIMEOUT,
     SANDBOX_DEFAULT_MEMORY_MB,
     TAMPERED_WORKDIR_RETURNCODE,
-    SessionPathError,
     build_program_env,
 )
 from halo.environments.sandbox.results import (
@@ -29,8 +28,20 @@ from halo.environments.sandbox.results import (
     compile_failure_verdict,
     compile_limit_verdict,
 )
+from halo.environments.sandbox.workspace import SessionPathError
 
-RUNNER_SOURCE = Path(__file__).with_name("program_runner.py").read_text()
+_WORKSPACE_IMPORT = "from halo.environments.sandbox.workspace import SessionPathError, Workspace, walk_tree\n"
+
+
+def _runner_source() -> str:
+    """``workspace.py`` and ``program_runner.py`` as one file: a sandbox has no ``halo`` package to import from."""
+    workspace, runner = (Path(__file__).with_name(name).read_text() for name in ("workspace.py", "program_runner.py"))
+    if _WORKSPACE_IMPORT not in runner:
+        raise RuntimeError("program_runner.py no longer imports its workspace names on the line this module removes")
+    return workspace + runner.replace(_WORKSPACE_IMPORT, "")
+
+
+RUNNER_SOURCE = _runner_source()
 # Deadline slack over the runner's own limits, for transport and the runner's start.
 EXCHANGE_OVERHEAD_SECONDS = 30.0
 # The users sessions' programs run as. A backend holding several sessions in one sandbox hands them out in turn; one
@@ -81,7 +92,7 @@ class RunnerSession(SandboxSession):
         # The built program's key and compile verdict (None once it is runnable).
         self._build: tuple[tuple, SandboxResult | None] | None = None
         # The directory's entries when the last program started; reset_to_prepared keeps only these.
-        self._prepared: list[str] | None = None
+        self._prepared: list[list] | None = None
         self._reset_pending = False
 
     @abstractmethod

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GLM-5.3-Flash step split</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 420px;
+    --bar-h: 24px;
+    --bar-gap: 4px;
+  }
+
+  body { width: 1600px; }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    margin-left: var(--label-col);
+    margin-bottom: 36px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+  }
+
+  .row + .row { margin-top: 24px; }
+
+  .label {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    height: var(--bar-h);
+  }
+
+  .bar + .bar { margin-top: var(--bar-gap); }
+
+  .bar i {
+    height: 100%;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .bar b {
+    line-height: 1;
+    font-weight: 400;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary);
+  }
+
+  .bar.now b { font-weight: 500; color: var(--text); }
+
+  /* The plot prints its values, so it draws no gridlines: an axis line under the bar column carries the scale. */
+  .axis {
+    position: relative;
+    margin: 20px 0 0 var(--label-col);
+    border-top: 1px solid var(--line);
+  }
+
+  .axis i {
+    position: absolute;
+    top: 0;
+    height: 6px;
+    border-left: 1px solid var(--line);
+    transform: translateX(-50%);
+  }
+
+  .ticks {
+    position: relative;
+    height: 26px;
+    margin: 8px 0 0 var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks span { position: absolute; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Halo’s kernels halve a <span class="nw">GLM-5.3-Flash</span> LoRA step</h1>
+  </header>
+
+  <div class="figure">
+    <div class="key">
+      <span id="key-general" style="--hue: var(--tertiary)"><i></i>General kernels · </span>
+      <span id="key-halo" style="--hue: var(--text)"><i></i>Halo’s kernels · </span>
+    </div>
+    <div class="plot" id="plot"></div>
+    <div class="axis" id="axis"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [part, seconds on the general kernels, seconds on Halo's], drawn by the time on Halo's
+  const PARTS = [
+    ["DSA attention", 21.91, 4.63],
+    ["MoE compute", 4.5, 4.5],
+    ["MoE router, dispatch, combine", 3.99, 3.67],
+    ["KDA conv, projections, gate, output", 3.28, 3.27],
+    ["KDA scan", 3.06, 3.06],
+    ["DSA projections, indexer, mask", 1.84, 1.83],
+    ["Everything else", 1.97, 1.78],
+    ["Hyper-connection weights", 7.17, 1.31],
+    ["Hyper-connection mix", 3.39, 0.44],
+  ];
+
+  // The axis from zero ends where the data ends: at the smallest maximum that holds every mark and its label. Its ticks
+  // take the finest step of 1, 2, 2.5 or 5 × 10^k that leaves at most six up to that maximum, which leaves at least
+  // four. A mark is [value, pixels its label reaches past the value], width the plot's pixels.
+  function fitAxis(marks, width) {
+    const max = Math.max(
+      ...marks.map(([value, past]) => {
+        if (past >= width) {
+          throw new Error(`a label reaching ${past}px past its bar does not fit the ${width}px plot`);
+        }
+
+        return (value * width) / (width - past);
+      }),
+    );
+    const e = Math.floor(Math.log10(max)) - 1;
+    const step = [1, 2, 2.5, 5, 10, 20, 25, 50]
+      .map((m) => (e < 0 ? m / 10 ** -e : m * 10 ** e))
+      .find((s) => Math.floor(max / s + 1e-9) <= 5);
+    const count = Math.floor(max / step + 1e-9) + 1;
+
+    return { max, ticks: Array.from({ length: count }, (_, i) => Number((i * step).toPrecision(12))) };
+  }
+
+  const plot = document.getElementById("plot");
+  const axisLine = document.getElementById("axis");
+  const ticks = document.getElementById("ticks");
+  const marks = [];
+
+  function bar(seconds, hue, className) {
+    const node = el("div", className);
+    const fill = el("i");
+    fill.style.setProperty("--hue", hue);
+    const label = el("b", undefined, seconds.toFixed(2));
+    node.append(fill, label);
+    marks.push({ fill, label, seconds });
+
+    return node;
+  }
+
+  for (const [name, before, after] of [...PARTS].sort((a, b) => b[2] - a[2])) {
+    const row = el("div", "row");
+    const bars = el("div", "bars");
+    bars.append(bar(before, "var(--tertiary)", "bar"), bar(after, "var(--text)", "bar now"));
+    row.append(el("div", "label", name), bars);
+    plot.append(row);
+  }
+
+  // Each fill is still empty here, so its label's right edge is how far the label reaches past the value.
+  const width = axisLine.getBoundingClientRect().width;
+  const axis = fitAxis(
+    marks.map(({ fill, label, seconds }) => [seconds, label.getBoundingClientRect().right - fill.getBoundingClientRect().right]),
+    width,
+  );
+  const pct = (seconds) => `${(seconds / axis.max) * 100}%`;
+
+  for (const { fill, seconds } of marks) {
+    fill.style.width = pct(seconds);
+  }
+
+  for (const tick of axis.ticks) {
+    const mark = el("i");
+    mark.style.left = pct(tick);
+    axisLine.append(mark);
+    const label = el("span", undefined, tick === 0 ? "0 s" : String(tick));
+    ticks.append(label);
+    // Centred on its tick, kept under the axis line.
+    const at = (tick / axis.max) * width - label.offsetWidth / 2;
+    label.style.left = `${Math.min(Math.max(at, 0), width - label.offsetWidth)}px`;
+  }
+
+  const totals = [1, 2].map((i) => PARTS.reduce((sum, part) => sum + part[i], 0));
+  document.getElementById("key-general").append(`${totals[0].toFixed(1)} s`);
+  document.getElementById("key-halo").append(`${totals[1].toFixed(1)} s`);
+  console.log(`totals ${totals.map((t) => t.toFixed(2)).join(" -> ")}`);
+</script>
+</body>
+</html>

@@ -70,11 +70,11 @@ back to the host `.venv`. For Hopper, change `"image"` to `halo:hopper`.
 
 The code does not auto-load `.env` — it is passed with `docker run --env-file .env`. Only the GPU
 `make` targets do this (`DOCKER_RUN`, and only when `ENV_FILE` is non-empty); the CPU targets
-(`check-lock`, `test-cpu`, `seed-hf-cache`, `diagrams`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
+(`check-lock`, `test-cpu`, `seed-hf-cache`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
 `verify-ep` and `verify-cp` at `TIER=cpu`, and `make bench`'s band step) pass no credentials
-at all; `docs` runs on the host.
+at all; `docs` and `diagrams` run on the host.
 
-The CPU targets other than `check-lock` and `diagrams` mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
+The CPU targets other than `check-lock` mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
 `tests/common/tokenizers.py` skips instead, or fails under `HALO_TEST_REQUIRE_HUB_CACHE=1`.
