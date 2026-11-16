@@ -9,7 +9,7 @@ from halo.distributed.expert_parallel.deepep.capacity import (
     reject_oversized_dispatch,
 )
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
-from halo.models.attention.selection import is_flash_attn_implementation
+from halo.models.attention.selection import DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS, isolates_packed_documents
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.grpo.rounds.row_order import reject_microbatch_dependent_objective
@@ -64,11 +64,12 @@ def reject_unpackable_model(model, attn_impl: str | None) -> None:
             f"{knob} is refused for model_type={getattr(config, 'model_type', None)!r}: its attention reads a token's "
             f"row index, which a flattened row changes. Unset {knob}."
         )
-    if not is_flash_attn_implementation(attn_impl):
+    if not isolates_packed_documents(attn_impl):
         raise ValueError(
-            f"{knob} needs a varlen flash attention backend, but this model resolved to attn_implementation="
-            f"{attn_impl!r}: a dense kernel builds an [N, N] mask over the flattened micro-batch and, for several "
-            f"families, attends across its rows. Use flash_attention_2/3/4 or unset {knob}."
+            f"{knob} needs an attention backend that reads the row's documents off its position_ids, but this model "
+            f"resolved to attn_implementation={attn_impl!r}: a dense kernel builds an [N, N] mask over the flattened "
+            f"micro-batch and, for several families, attends across its rows. Use one of "
+            f"{list(DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS)} or unset {knob}."
         )
     reject_multi_document_rows(
         config,

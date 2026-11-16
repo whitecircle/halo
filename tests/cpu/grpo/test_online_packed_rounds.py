@@ -251,7 +251,7 @@ def test_the_online_trainer_refuses_full_logits_and_a_non_flash_backend():
         host._configure_packed_microbatches()
     host = _configured(DistributedOnlineGRPOTrainer)
     host.model.config._attn_implementation = "sdpa"
-    with pytest.raises(ValueError, match="varlen flash attention backend"):
+    with pytest.raises(ValueError, match="needs an attention backend that reads the row.s documents"):
         host._configure_packed_microbatches()
 
 

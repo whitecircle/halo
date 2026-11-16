@@ -361,7 +361,8 @@ class PackedMicrobatchArguments(ValidatedConfig):
             "into bins (a row over the budget keeps a bin of its own), every rank runs the world's bin count in the "
             "last slots of the window and no-ops before them, and row-mean losses are rescaled so the objective is "
             "the per-row one. Null keeps one backbone call per row. Needs use_chunked_grpo_logprobs, "
-            "per_device_train_batch_size 1, a varlen flash backend and a family whose rows isolate; refused at "
+            "per_device_train_batch_size 1, a backend that reads documents off position_ids and a family whose rows "
+            "isolate; refused at "
             "construction otherwise. See "
             "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
         },

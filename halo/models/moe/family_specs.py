@@ -108,6 +108,8 @@ class MoEFamilySpec:
     ep_layer_needs_remote_code: str | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
+    # The toolkit's attention implementation the family runs on CUDA in place of the requested one (eager elsewhere).
+    toolkit_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
@@ -220,11 +222,10 @@ INKLING2 = MoEFamilySpec(
     # Declared so the absent slot registers as None (the block ships none), as LFM-2.
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("inkling2",),
-    unmarked_sequence_mixer="depthwise causal short convolutions (on the projected K/V and around each sublayer)",
-    eager_only_attention=(
-        "every attention layer adds a learned relative-logits bias and a query-conditioned sink, and the class "
-        "declares no SDPA, flash or flex support"
-    ),
+    # Every attention layer adds a learned relative-logits bias and a query-conditioned sink, which only the eager
+    # path and this kernel carry. The short convolutions read the document starts of a packed row through the
+    # family's patches (halo/models/families/inkling2.py).
+    toolkit_attention="inkling2_relative_flex",
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
