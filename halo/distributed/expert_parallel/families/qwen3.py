@@ -13,6 +13,7 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
 
     HF_MODULE_NAMES = ("Qwen3MoeSparseMoeBlock",)
     FAMILY = QWEN3
+    SUPPORTS_MOK = True
 
     # ``Qwen3MoeTopKRouter`` renormalizes with no floor.
     _TOPK_WEIGHT_NORM_EPS = 0.0

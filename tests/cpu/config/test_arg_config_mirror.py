@@ -8,6 +8,7 @@ import inspect
 import re
 import textwrap
 from dataclasses import fields
+from types import SimpleNamespace
 from typing import get_args, get_type_hints
 
 import pytest
@@ -36,6 +37,10 @@ class _LowpTrainer(DistributedTrainerMixin):
     """The mixin's gates with the ``lowp_*`` knobs admitted, as on the SFT path."""
 
     SUPPORTS_LOWP_PRECISION = True
+
+
+# A declared per-forward token budget, which moe_backend='mok' sizes its buffers from.
+_TOKEN_BUDGET = SimpleNamespace(per_device_train_batch_size=1, max_length=1024)
 
 
 def _defaults(cls) -> dict:
@@ -150,6 +155,7 @@ def test_every_same_name_knob_lands_on_the_built_config(arg_field):
     config = parallelism_config_from_args(
         ParallelismArguments(**{arg_field: requested}),
         trainer_cls=_LowpTrainer,
+        training_config=_TOKEN_BUDGET,
     )
 
     assert getattr(config, arg_field) == requested, (

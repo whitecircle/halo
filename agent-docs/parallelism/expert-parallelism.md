@@ -272,6 +272,42 @@ What an EP run has to plan around:
   intranode only. It is rejected at config time for a cross-node group, a dispatch width above 8
   NVLink peers or above `gpus_per_node`, or a rank count DeepEP ships no tuned `Config` for.
 
+## Mixture-of-Kittens backend
+
+`moe_backend: mok` replaces DeepEP and the grouped GEMMs with [Mixture-of-Kittens](https://github.com/cursor/mixture-of-kittens)
+(commit `f3a8bd2`): one megakernel per direction runs the routing exchange, every routed SwiGLU expert and the weighted
+combine over NVLink symmetric memory (`halo/distributed/expert_parallel/mok.py`). The router, bias balancing, routing
+replay and the family's shared expert stay on Halo's path.
+
+- **Families** declare it (`SUPPORTS_MOK`, read off the class itself, never a base): Qwen3 MoE and Qwen3.5/3.6 MoE.
+  Any other EP layer is refused at load, Qwen3-Next's included, as are experts whose hidden or intermediate size is
+  not a multiple of 256 or whose activation is not SiLU, and a model with no MoE block Halo wraps.
+- **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, `use_grouped_gemm: false`, a non-default
+  `ep_buffer_backend` and a run that declares no token budget. DeepEP's own layout rules still apply (several EP
+  groups in one NVLink domain among them); MoK has not been run past them.
+- **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
+  to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
+  batch when the run evaluates and that is larger. Padding rows carry zero router weight and move no output or
+  gradient, but they are dispatched and computed: a batch shorter than the budget pays for the whole of it, and a
+  larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises.
+- **Schedule and ring.** A rank's schedule holds the most rows any routing can send it, each local expert's rounded
+  up to 256 (`_schedule_capacity_multiplier`): MoK traps in its kernel past it, with no message, and its default
+  holds half the group's rows. MoK allocates every routed activation at its ring's size and Halo saves them for the
+  backward, `(hidden + 3 × intermediate) × 2` bytes a row per layer; the ring is twice a rank's even share,
+  `2 × capacity × top_k` rows, and a rank routed more replays it.
+- **Costs Halo adds:** MoK always runs a shared expert, which Halo gives zero weights (about 1/top-k more expert FLOPs);
+  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`). The
+  layer still builds its DeepEP dispatcher, so `deep_ep` must import.
+- **Communication SMs** each way follow the expert width (`_mok_config`): 48 up to an intermediate size of 1024, 42 up
+  to 2048, 36 past it, as narrow experts are communication-bound. MoK's default 40/28 is 4-14% slower on B300.
+- **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
+  Qwen3-30B-A3B's experts at 0.81×, 0.91× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
+  block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.86× and 0.61-0.83×.
+- **Install.** The images do not ship it yet: its build requires nvcc to match torch's CUDA (13.0). In a Blackwell
+  container with that toolkit, `pip install --no-build-isolation --no-deps .` from a recursive clone at `f3a8bd2`;
+  without `--no-deps` it replaces the locked NCCL with torch's metadata pin, which DeepEP's build does not link against.
+
 ## Gradient synchronization
 
 Hybrid sync, with one EP group:

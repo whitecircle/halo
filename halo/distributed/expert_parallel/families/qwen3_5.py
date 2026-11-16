@@ -15,6 +15,7 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
 
     HF_MODULE_NAMES = ("Qwen3_5MoeSparseMoeBlock",)
     FAMILY = QWEN3_5
+    SUPPORTS_MOK = True
 
     # ``SEVERS_AUX_LOSS`` stays False: the EP layer calls the real ``Qwen3_5MoeTopKRouter``, so the recorder still
     # fires for the text-only sibling.

@@ -178,7 +178,13 @@ def reject_unsupported_model(
 
 def reject_ep_without_family(pc: ParallelismConfig, model_config, *, wraps_experts: bool) -> None:
     """Refuse an EP group on a model no EP layer wraps, before ``pc.ep_config()`` builds its process groups. Past here
-    only ``apply_ep_layers`` notices, after the load and with a message written for a family with no layer."""
+    only ``apply_ep_layers`` notices, after the load and with a message written for a family with no layer. ``moe_backend:
+    mok`` is refused on such a model at any EP size, as it would run nothing."""
+    if pc.moe_backend == "mok" and not wraps_experts:
+        raise ValueError(
+            f"moe_backend='mok' runs the routed experts of a MoE block Halo wraps, and {model_config.model_type!r} "
+            f"has none, so the setting would be ignored. Remove moe_backend."
+        )
     if not pc.has_ep_group:
         return
     axes = f"expert_parallel_size={pc.ep_size}, expert_tensor_parallel_size={pc.expert_tp_size}"
