@@ -116,10 +116,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 
 ## Limits
 
-- RL and runs with a frozen reference or teacher keep the BF16 mirror: neither was run from the MXFP4
-  release (`openai/gpt-oss-*`). The 120B release was loaded at EP4 on 4× H200 and matched its mirror, with
-  no training step run from it. A weight sync into an MXFP4 server drops every expert weight
-  without an error, so an RL rollout server serves the BF16 mirror whatever the trainer loaded.
+- The recipes that load a frozen reference or teacher keep the BF16 mirror. A weight sync into an MXFP4
+  server drops every expert weight without an error, so an RL rollout server serves a BF16 checkpoint
+  whatever the trainer loaded ([GPT-OSS model notes](../../agent-docs/models/gpt-oss.md#configs) ↗).
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
