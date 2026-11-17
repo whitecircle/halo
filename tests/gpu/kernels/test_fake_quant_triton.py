@@ -79,6 +79,17 @@ def _cases(fmt: str):
     t = torch.full((64, K), format_max * 2.0**5, device=DEV)
     yield "fp32_ulp_edge", torch.nextafter(t, torch.full_like(t, 1e30))
     yield "near_denorm", torch.full((64, K), 3e-36, device=DEV, dtype=bf)
+    # Random blocks small enough that the MX exponent clamps to -127, where CUDA's exp2(-127) is one ulp below 2^-127.
+    # A constant block hides a scale one ulp off; varied values do not (before #182, mxfp8 eager and its kernel
+    # differed on about 4% of such elements).
+    for amax in (2e-36, 3e-38):
+        tiny = (torch.rand(512, K, device=DEV, generator=g) * 2 - 1) * amax
+        # mxfp4 reaches exponent -127 only below about 3.5e-38, where its eager core still divides by CUDA's exp2(-127)
+        # and so differs from the kernel. Left out until that divide becomes a multiply, as mxfp8's did.
+        if fmt == "mxfp4" and amax < 3.5e-38:
+            continue
+        yield f"tiny_random_{amax:g}", tiny
+        yield f"tiny_random_{amax:g}_bf16", tiny.to(bf)
     # fp32 block maxima where amax / format max lands one ulp apart under true division and under torch's reciprocal
     # multiply, moving the exponent (mxfp8: 0x04600028, mxfp4: 0x20c00011), plus maxima whose quotient is subnormal.
     # The rest of each block steps down to 2^-20 of the max, into the element formats' subnormal range, where an
