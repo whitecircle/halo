@@ -18,13 +18,8 @@ back in, as the checkpoint does not carry them."""
 import argparse
 from typing import get_args
 
-from halo.checkpoint.tools.lowp_export import (
-    DEFAULT_EXCLUDE,
-    DEFAULT_EXPORT_FORMAT,
-    DEFAULT_INCLUDE,
-    ExportFormat,
-    quantize_checkpoint,
-)
+from halo.checkpoint.tools.compressed_tensors_layout import DEFAULT_EXPORT_FORMAT, ExportFormat
+from halo.checkpoint.tools.lowp_export import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, quantize_checkpoint
 from halo.kernels.lowp.quantization import QUANTIZERS
 from halo.kernels.lowp.spec import LowpSpec
 from halo.log import configure_cli_logging

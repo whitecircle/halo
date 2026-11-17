@@ -27,6 +27,7 @@ from halo.checkpoint.tools.compressed_tensors_layout import (
     BLOCK_SCALED,
     COMPRESSED_TENSORS,
     COMPRESSED_TENSORS_FORMAT,
+    DEFAULT_EXPORT_FORMAT,
     ExportFormat,
     compressed_tensors_config,
 )
@@ -353,7 +354,7 @@ def test_the_script_passes_export_format_through(tmp_path):
     with open(out / "config.json") as f:
         assert json.load(f)["quantization_config"]["quant_method"] == "compressed-tensors"
     with mock.patch.object(sys, "argv", argv):
-        assert script.parse_args().export_format == lowp_export.DEFAULT_EXPORT_FORMAT
+        assert script.parse_args().export_format == DEFAULT_EXPORT_FORMAT
 
 
 if __name__ == "__main__":
