@@ -2,6 +2,11 @@
 """Create the policy sets of a JSON file in a White Circle environment and print the matching ``rewards:`` block, one
 ``whitecircle`` term per set.
 
+A set is a list of policies, each a separate verdict, or a checklist: one judgment whose items are checked one by one
+and whose confidence is the fraction of items hit. Each item becomes a policy named under the checklist
+(``Defensive handling · Unvalidated request input``) with the checklist's shared ``allowed_content`` added to its own,
+and its term lists them as ``checklist:``. The judge reads a policy's name, so an item's name states what it checks.
+
     WHITECIRCLE_API_KEY=wc-... halo run create-whitecircle-policies \\
         --environment-id <id> --policies examples/grpo/online/whitecircle/policies.json
 
@@ -77,13 +82,29 @@ def ensure_policies(client: Client, specs: list[dict], existing: dict[str, str],
     return ids
 
 
+def policy_specs(entry: list[dict] | dict) -> list[dict]:
+    """A set's policies; a checklist's items as policies named under it, each with the shared allowed content."""
+    if isinstance(entry, list):
+        return entry
+    shared = entry.get("allowed_content", [])
+    return [
+        {
+            "name": f"{entry['checklist']} · {item['name']}",
+            "flagged_content": item["flagged_content"],
+            "allowed_content": [*item.get("allowed_content", []), *shared],
+        }
+        for item in entry["items"]
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--environment-id", required=True, help="White Circle environment the policies attach to")
     parser.add_argument(
         "--policies",
         required=True,
-        help="JSON mapping each set's name to its policies (name, flagged_content, allowed_content)",
+        help="JSON mapping each set's name to its policies (name, flagged_content, allowed_content) or to a checklist "
+        "(checklist, allowed_content, items of name, flagged_content, allowed_content)",
     )
     parser.add_argument("--region", default="us", choices=["us", "eu"], help="API region (default: us)")
     args = parser.parse_args()
@@ -98,7 +119,7 @@ def main() -> None:
     condition = next((c for c in client.call("GET", "/api/condition/list") if c["name"] == CONDITION_NAME), None)
     owned = set(condition["policy_ids"]) if condition else set()
     existing = {policy["name"]: policy["id"] for policy in client.call("GET", "/api/policy/list")}
-    set_ids = {name: ensure_policies(client, specs, existing, owned) for name, specs in sets.items()}
+    set_ids = {name: ensure_policies(client, policy_specs(entry), existing, owned) for name, entry in sets.items()}
     every_id = [policy_id for ids in set_ids.values() for policy_id in ids]
 
     if condition is None:
@@ -113,7 +134,8 @@ def main() -> None:
     print("rewards:")
     for name, ids in set_ids.items():
         print(f"  - source: whitecircle\n    name: {name}\n    environment_id: {args.environment_id}")
-        print(f"    policies: [{', '.join(ids)}]")
+        field = "policies" if isinstance(sets[name], list) else "checklist"
+        print(f"    {field}: [{', '.join(ids)}]")
 
 
 if __name__ == "__main__":

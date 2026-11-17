@@ -418,12 +418,19 @@ class RewardModelTerm(ScoredTerm):
         return math.exp(z) / (1.0 + math.exp(z))
 
 
+# A checklist's completion counts as flagged once at least this fraction of its items is hit.
+CHECKLIST_FLAG_CONFIDENCE = 0.5
+
+
 @dataclass(frozen=True, kw_only=True)
 class WhiteCircleTerm(ScoredTerm):
     """The White Circle API's policy check of the completion in its conversation (``POST /api/events``) against the
-    policies of ``environment_id``. With no ``policies`` listed the score is 1 unless the completion was flagged, else 0;
-    with ``policies`` listed (policy ids) it is the fraction of them the completion did not violate. ``max_retries``
-    bounds the retries of a rate-limited or failed request, ``retry_wait`` the first backoff in seconds."""
+    policies of ``environment_id``. With nothing listed the score is 1 unless the completion was flagged, else 0; with
+    ``policies`` listed (policy ids) it is the fraction of them the completion did not violate. A ``checklist`` (the
+    policy ids of its items) is one judgment instead: its confidence is the fraction of items hit, its score 1 minus
+    that, and the completion counts as flagged at a confidence of :data:`CHECKLIST_FLAG_CONFIDENCE` or more. A term lists
+    ``policies`` or a ``checklist``, not both. ``max_retries`` bounds the retries of a rate-limited or failed request,
+    ``retry_wait`` the first backoff in seconds."""
 
     source: ClassVar[str] = "whitecircle"
     views: ClassVar[tuple[View, ...]] = (View.FINAL, View.FULL)
@@ -431,6 +438,7 @@ class WhiteCircleTerm(ScoredTerm):
     name: str = "whitecircle"
     environment_id: str
     policies: tuple[str, ...] = ()
+    checklist: tuple[str, ...] = ()
     region: WhiteCircleRegion = WhiteCircleRegion.US
     max_retries: int = 4
     retry_wait: float = 1.0
@@ -441,12 +449,16 @@ class WhiteCircleTerm(ScoredTerm):
         super().__post_init__()
         owner = self.owner
         require_text(owner, environment_id=self.environment_id)
-        if isinstance(self.policies, str) or not isinstance(self.policies, Sequence):
-            raise ValueError(f"{owner}: policies must be a list of policy ids, got {self.policies!r}")
-        object.__setattr__(self, "policies", tuple(self.policies))
-        for policy in self.policies:
-            require_text(owner, policy=policy)
-        validate_unique_names(f"{owner}: policy", list(self.policies))
+        for field in ("policies", "checklist"):
+            ids = getattr(self, field)
+            if isinstance(ids, str) or not isinstance(ids, Sequence):
+                raise ValueError(f"{owner}: {field} must be a list of policy ids, got {ids!r}")
+            object.__setattr__(self, field, tuple(ids))
+            for policy in getattr(self, field):
+                require_text(owner, policy=policy)
+            validate_unique_names(f"{owner}: {field} entry", list(getattr(self, field)))
+        if self.policies and self.checklist:
+            raise ValueError(f"{owner}: list policies or a checklist, not both")
         _coerce_enum(self, "region", WhiteCircleRegion)
         require_int(owner, ge=0, max_retries=self.max_retries)
         require_finite(owner, ge=0, retry_wait=self.retry_wait)

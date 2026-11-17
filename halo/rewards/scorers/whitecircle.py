@@ -12,7 +12,7 @@ from halo.env import env_str
 from halo.inference.openai_client import TRANSIENT_CLIENT_ERROR_CODES
 from halo.rewards.samples import ScoringSample, call_arguments, content_text, scored_messages
 from halo.rewards.scorers.base import Scorer, ScoreResult
-from halo.rewards.terms import View, WhiteCircleTerm
+from halo.rewards.terms import CHECKLIST_FLAG_CONFIDENCE, View, WhiteCircleTerm
 
 API_KEY_VARIABLE = "WHITECIRCLE_API_KEY"
 API_VERSION = "2026-06-01"
@@ -21,6 +21,7 @@ MAX_EVENTS_PER_REQUEST = 50
 # A Retry-After beyond this would hold a training step for longer than any retry is worth.
 MAX_RETRY_AFTER_S = 60.0
 _FLAGGED = "flagged"
+_CONFIDENCE = "confidence"
 _ERROR_BODY_CHARS = 200
 
 
@@ -78,6 +79,8 @@ class WhiteCircleScorer(Scorer):
 
     @property
     def metric_keys(self) -> tuple[str, ...]:
+        if self.term.checklist:
+            return self._key(_FLAGGED), self._key(_CONFIDENCE)
         return (self._key(_FLAGGED), *(self._key(policy) for policy in self.term.policies))
 
     def _connect(self) -> httpx.AsyncClient:
@@ -153,20 +156,29 @@ class WhiteCircleScorer(Scorer):
         if not violated:
             # The API answers an Event no Condition selected a Policy for as completed and unflagged.
             raise ValueError(f"no policy was checked on the completion: {results[0].get('note')}")
-        if term.policies:
-            unchecked = [policy for policy in term.policies if policy not in violated]
+        listed = term.checklist or term.policies
+        if listed:
+            unchecked = [policy for policy in listed if policy not in violated]
             if unchecked:
                 raise ValueError(
                     f"policies {unchecked} were not checked on the completion: no condition selected them"
                 )
             # A listed term reads its own policies only: another term's policies on the same events cost it nothing.
-            read = {policy: violated[policy] for policy in term.policies}
+            read = {policy: violated[policy] for policy in listed}
             score = 1.0 - sum(read.values()) / len(read)
         else:
             read = violated
             score = 0.0 if any(result[_FLAGGED] for result in results) else 1.0
+        broken = [names[policy] for policy, hit in read.items() if hit]
+        if term.checklist:
+            confidence = 1.0 - score
+            metrics = {
+                self._key(_FLAGGED): float(confidence >= CHECKLIST_FLAG_CONFIDENCE),
+                self._key(_CONFIDENCE): confidence,
+            }
+            detail = f"confidence {confidence:.2f}: {', '.join(broken)}" if broken else None
+            return ScoreResult(score, metrics, detail=detail)
         metrics = {self._key(_FLAGGED): float(score < 1.0)}
         if term.policies:
             metrics.update({self._key(policy): float(hit) for policy, hit in read.items()})
-        broken = [names[policy] for policy, hit in read.items() if hit]
         return ScoreResult(score, metrics, detail=f"flagged: {', '.join(broken)}" if broken else None)

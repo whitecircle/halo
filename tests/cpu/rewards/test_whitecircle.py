@@ -18,6 +18,7 @@ from halo.rewards.scorers import whitecircle
 from halo.rewards.scorers.whitecircle import WhiteCircleScorer
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, WhiteCircleTerm, parse_reward_terms, scored_metric_key
 from halo.rewards.trl_reward_functions import ScorerRewardFunction
+from scripts.before_training.create_whitecircle_policies import policy_specs
 
 KEY = "wc-test-secret-key"
 TERM = WhiteCircleTerm(name="policy", environment_id="env_test", retry_wait=0.0)
@@ -272,6 +273,57 @@ def test_a_listed_term_reads_only_its_own_policies(server):
     [result] = _score(term, [_sample()])
     assert result.score == 1.0 and result.detail is None
     assert result.metrics == {"whitecircle/quality/flagged": 0.0, "whitecircle/quality/policy_b": 0.0}
+
+
+CHECKLIST = ("item_1", "item_2", "item_3", "item_4", "item_5")
+
+
+@pytest.mark.parametrize(("hit", "score", "flagged"), [(0, 1.0, 0.0), (2, 0.6, 0.0), (3, 0.4, 1.0), (5, 0.0, 1.0)])
+def test_a_checklist_is_one_judgment_with_a_confidence(server, hit, score, flagged):
+    """Items hit / items is the confidence, 1 minus it the score; it counts as flagged from half the items on, and it
+    reports no per-item metric, as its items are not policies of their own."""
+    policies = {item: {"flagged": i < hit, "name": f"Item {i + 1}"} for i, item in enumerate(CHECKLIST)}
+    policies["other"] = {"flagged": True, "name": "Another term's policy"}
+    server(_assistant({"flagged": True, "policies": policies}))
+    term = WhiteCircleTerm(name="defensive", environment_id="env_test", checklist=CHECKLIST)
+    [result] = _score(term, [_sample()])
+    assert result.score == pytest.approx(score)
+    assert result.metrics == pytest.approx(
+        {"whitecircle/defensive/flagged": flagged, "whitecircle/defensive/confidence": 1.0 - score}
+    )
+    assert (result.detail is None) == (hit == 0)
+
+
+def test_a_term_lists_policies_or_a_checklist_not_both():
+    with pytest.raises(ValueError, match="not both"):
+        WhiteCircleTerm(name="t", environment_id="env_test", policies=["policy_a"], checklist=CHECKLIST)
+    with pytest.raises(ValueError, match="checklist must be a list"):
+        WhiteCircleTerm(name="t", environment_id="env_test", checklist="item_1")
+
+
+def test_a_checklist_set_expands_into_items_named_under_it():
+    entry = {
+        "checklist": "Defensive handling",
+        "allowed_content": ["A reply with no code."],
+        "items": [
+            {"name": "Unvalidated input", "flagged_content": ["A"], "allowed_content": ["a"]},
+            {"name": "Leaked errors", "flagged_content": ["B"]},
+        ],
+    }
+    assert policy_specs(entry) == [
+        {
+            "name": "Defensive handling · Unvalidated input",
+            "flagged_content": ["A"],
+            "allowed_content": ["a", "A reply with no code."],
+        },
+        {
+            "name": "Defensive handling · Leaked errors",
+            "flagged_content": ["B"],
+            "allowed_content": ["A reply with no code."],
+        },
+    ]
+    policies = [{"name": "SQL injection", "flagged_content": ["S"]}]
+    assert policy_specs(policies) is policies
 
 
 @pytest.mark.parametrize(

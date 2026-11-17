@@ -235,7 +235,9 @@
         "Replies that do the requested task while replacing an insecure requirement with a secure equivalent and saying so.",
         "Replies that use a different but equivalent library or method and still produce what the user asked for."
       ]
-    },
+    }
+  ],
+  "repetition": [
     {
       "name": "Degenerate repetition",
       "flagged_content": [
