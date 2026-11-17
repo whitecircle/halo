@@ -256,7 +256,7 @@ changes.
 | `launcher-configs/**` | `agent-docs/infrastructure/{skypilot,nomad}.md`, `human-docs/clusters.md` |
 | `.github/workflows/**`, `.github/scripts/**`, `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` |
 | `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
-| `scripts/diagrams/**` | the page embedding the figure; regenerate it in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
+| `agent-docs/assets/**/*.html` figure pages, `skills/visuals/kit/**` | the page embedding the figure (every embedding page, for a kit change); re-render in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 
 ## Cross-cutting

@@ -1,7 +1,7 @@
 # Environmental GRPO — Inkling-2-Small on WebInstruct-verified (exam QA, closed-book), LoRA r16 on the text tower's
 # attention over the release's frozen NVFP4/MXFP8 experts, EP=2. The policy reaches the server as an adapter
 # (rollout_adapter_sync): the server loads the release itself and is never pushed a base.
-# Serve on the vLLM image (make build-vllm) from a local copy of the release, which the trainer loads too:
+# Serve on the Inkling 2 vLLM image (make build-vllm-inkling2) from a local copy of the release, which the trainer loads too:
 #   make up-vllm-inkling2   # GPUs 2,3, docker-compose.vllm.yml with --tensor-parallel-size 2 --quantization inkling2
 #     --reasoning-parser inkling --enable-auto-tool-choice --tool-call-parser inkling --return-tokens-as-token-ids
 #     --logprobs-mode processed_logprobs --enable-lora --max-loras 2 --max-cpu-loras 4 --max-lora-rank 16 --lora-target-modules qkvr wo_ud

@@ -173,7 +173,7 @@ The release is plain bf16 with no conversion step. Load it natively, `trust_remo
 
 Serve a composite with the release's flags. Both engines boot an untrained reattached export and answer an image prompt and a text prompt. `reattach_vision_tower.py` carries the modules its processor and tokenizer configs' `auto_map` names, which SGLang's boot and `AutoProcessor` with `trust_remote_code=True` read.
 
-- **vLLM, measured on 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. The row that served an export started the image directly with these. `docker-compose.vllm.yml` takes the same flags: `VLLM_TRUST_REMOTE_CODE=1`, `VLLM_TP=2`, `VLLM_TOOL_PARSER=qwen3_coder`, `VLLM_REASONING_PARSER=nemotron_v3`, `VLLM_EXTRA_ARGS="--mamba-ssm-cache-dtype float32"`.
+- **vLLM 0.32.0:** `--trust-remote-code` (without it the boot fails on `vit_hidden_size`), `--mamba-ssm-cache-dtype float32`, `--tensor-parallel-size 2`, `--tool-call-parser qwen3_coder`, `--reasoning-parser nemotron_v3`. The row that served an export started the image directly with these. `docker-compose.vllm.yml` takes the same flags: `VLLM_TRUST_REMOTE_CODE=1`, `VLLM_TP=2`, `VLLM_TOOL_PARSER=qwen3_coder`, `VLLM_REASONING_PARSER=nemotron_v3`, `VLLM_EXTRA_ARGS="--mamba-ssm-cache-dtype float32"`.
 - **SGLang 0.5.22:** `SGLANG_TRUST_REMOTE_CODE=1`, `SGLANG_TP=2`, `SGLANG_TOOL_PARSER=qwen3_coder`, `SGLANG_REASONING_PARSER=nemotron_3` on the compose file. The model card's `--mamba-ssm-dtype` flags are for its dedicated image and raise on this one.
 
 ## RL weight sync

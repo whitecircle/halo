@@ -401,7 +401,9 @@ def test_moe_weight_sync_example_names_the_triton_moe_backend(config):
     layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
     if not layer_classes:
         return
-    if parsed_field(parsed, "rollout_adapter_sync") and any(cls.FAMILY.weight_sync_refusal for cls in layer_classes):
+    # Only the environmental script declares the field.
+    adapter_sync = any(getattr(config_object, "rollout_adapter_sync", False) for config_object in parsed)
+    if adapter_sync and any(cls.FAMILY.weight_sync_refusal for cls in layer_classes):
         return  # a base no push carries: the engine's experts are only read
     comments = comment_block(config)
     assert "--moe-backend triton" in comments or "--moe-runner-backend triton" in comments, (

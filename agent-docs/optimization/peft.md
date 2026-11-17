@@ -338,7 +338,7 @@ model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
 Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
 ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter** unless
-`rollout_adapter_sync` serves the policy as one on SGLang or vLLM ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
+`rollout_adapter_sync` serves the policy as one, on SGLang or, for Inkling 2, on vLLM ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
 
 Otherwise each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
 (PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
@@ -540,7 +540,9 @@ the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` 
 first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
 a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
 grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
-those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
+those in memory. A base whose `config.json` declares a `quantization_config` is refused outright: its tensors are
+stored packed, and a delta folded into the stored values gives no weight
+([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.
 
 ## Tests and benchmarks

@@ -84,26 +84,20 @@ def toolkit_tp_plan(model_class, model_config):
     base_plan = getattr(plan_config, "base_model_tp_plan", None)
     heads, embeddings = _tied_module_names(concrete)
     tied = ties_word_embeddings(model_config) and bool(heads) and bool(embeddings)
-    drop: set[str] = set()
-    keep_embedding_whole = not tied
-    if tied:
-        head_keys = _plan_keys_naming(class_plan or {}, heads)
-        embedding_keys = _plan_keys_naming(class_plan or {}, embeddings) | _plan_keys_naming(
-            base_plan or {}, embeddings
-        )
-        implicit_embedding = (
-            bool(base_plan)
-            and not embedding_keys
-            and _HF_IMPLICIT_EMBEDDING in {module.rsplit(".", 1)[-1] for module in embeddings}
-        )
-        if bool(head_keys) != bool(embedding_keys or implicit_embedding):
-            drop = head_keys or embedding_keys
-            keep_embedding_whole = True
+    head_keys = _plan_keys_naming(class_plan or {}, heads)
+    embedding_keys = _plan_keys_naming(class_plan or {}, embeddings) | _plan_keys_naming(base_plan or {}, embeddings)
+    # An entry, or transformers' own ``embedding_rowwise`` for a planned backbone's unnamed ``embed_tokens``.
+    embedding_planned = bool(embedding_keys) or (
+        bool(base_plan) and _HF_IMPLICIT_EMBEDDING in {module.rsplit(".", 1)[-1] for module in embeddings}
+    )
+    one_ended = tied and bool(head_keys) != embedding_planned
+    drop = (head_keys or embedding_keys) if one_ended else set()
     new_base_plan = base_plan
     if base_plan:
         new_base_plan = {key: value for key, value in base_plan.items() if key not in drop}
-        if keep_embedding_whole and not _plan_keys_naming(new_base_plan, {_HF_IMPLICIT_EMBEDDING}):
-            # Naming it under the no-op style is the only way to keep it whole.
+        # A tied pair planned on both ends or neither keeps the plan it has. Naming ``embed_tokens`` under the no-op
+        # style is the only way to keep it whole.
+        if (not tied or one_ended) and not _plan_keys_naming(new_base_plan, {_HF_IMPLICIT_EMBEDDING}):
             new_base_plan[_HF_IMPLICIT_EMBEDDING] = _HF_KEEP_WHOLE_STYLE
     if not drop and new_base_plan == base_plan:
         yield

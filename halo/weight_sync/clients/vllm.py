@@ -3,9 +3,8 @@ packed broadcasts into a layerwise reload. The vllm package is never imported.""
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from functools import partial
-from pathlib import Path
 from typing import NoReturn
 
 import requests
@@ -19,6 +18,7 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    EngineImage,
     ServedBase,
     ServerFlags,
     WeightSyncClientBase,
@@ -38,20 +38,25 @@ logger = logging.getLogger(__name__)
 _MIN_SERVER_VERSION = (0, 32, 0)
 # The route's first call collects the host's environment, once.
 _SERVER_INFO_TIMEOUT_S = 60.0
-# docker/vllm/patches/vllm_image_identity_patch.py declares it; a test pins the two together.
+# docker/vllm/patches/vllm_image_identity_patch.py declares it, as ``<engine build>|<patch>,<patch>,...``; a test pins
+# the two together.
 _IDENTITY_KEY = "VLLM_HALO_PATCHES"
 # Listed on /server_info as the server reads it; this client never reads its own environment for it.
 _STRICT_TOOL_CALLING_KEY = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
 _TOKEN_ID_PREFIX = "token_id:"
 
-# Loading or unloading an adapter waits out the requests running under the one replaced.
-_ADAPTER_UPDATE_TIMEOUT_S = 120.0
-
 
 class VLLMWeightSyncClient(WeightSyncClientBase):
     BACKEND_KEY = "vllm"
     BACKEND_NAME = "vLLM"
-    ENGINE_RELEASE = "vLLM 0.1.dev25249"
+    ENGINE_RELEASE = "vLLM 0.32.0"
+    # The two tags Dockerfile.vllm builds, with the engine build each one's build asserts (docker/vllm/verify_image.py).
+    # Inkling 2 is served from vLLM's Inkling 2 build alone, and no other family is.
+    IMAGE = EngineImage(tag="halo:vllm-0.32.0", build="0.32.0", make_target="make build-vllm")
+    INKLING2_IMAGE = EngineImage(
+        tag="halo:vllm-0.1.dev25249", build="0.1.dev25249+gb974b306f", make_target="make build-vllm-inkling2"
+    )
+    FAMILY_IMAGES = dict.fromkeys(INKLING2.model_types, INKLING2_IMAGE)
     GROUP_HOST_ENV = "VLLM_GROUP_HOST"
     REPORTS_INSTANCE_ID = True
     CHUNK_STAGER = PackedChunkStager
@@ -72,8 +77,15 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
     TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
     CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
-    ADAPTER_SYNC_REFUSAL = None
+    # Lifted for a family whose spec lists this backend in ``adapter_sync_backends``.
+    ADAPTER_SYNC_REFUSAL = (
+        f"{ENGINE_RELEASE}'s decode with an adapter served ran over 5% slower than the merged weights on the model "
+        f"measured, so it serves as an adapter only a family with no merged alternative that an engine run validated"
+    )
     ADAPTER_NEEDS_DIRECTORY = True
+    # The runtime routes, which the server takes with VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.
+    ADAPTER_DIRECTORY_LOAD_ROUTE = "/v1/load_lora_adapter"
+    ADAPTER_UNLOAD_ROUTE = "/v1/unload_lora_adapter"
     # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     # Inkling 2's quantized experts take an adapter with Halo's source patch (docker/vllm/patches/patch_vllm_inkling2.py).
@@ -81,10 +93,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     # Names the adapter a score request reads through, when the run serves its policy as one.
     adapter_source: Callable[[], str | None] | None = None
     UNSERVABLE_MODEL_TYPES = {
-        "zaya": (
-            f"{ENGINE_RELEASE}'s Zaya implementation has never taken a Halo weight sync: no loader map or parity "
-            "fixture covers it (agent-docs/models/zaya.md)"
-        ),
+        "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
             f"{ENGINE_RELEASE} registers no Mistral4ForCausalLM and maps no mistral4 model_type, so the "
             "composite loader has no class for the text tower a toolkit export writes "
@@ -131,35 +140,14 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     )
 
     @classmethod
+    def image_remedy(cls, model_types: Iterable[str]) -> str:
+        image = cls.image_for(model_types)
+        return f"Serve from {image.tag} ({image.make_target}), and keep its PYTHONPATH, which loads the patches."
+
+    @classmethod
     def adapter_request_model(cls, base_model: str, adapter: str) -> str:
         """vLLM serves a loaded adapter under its own name."""
         return adapter
-
-    def load_adapter(self, name: str, config: dict, payload: str | Path) -> None:
-        """Load the adapter directory ``payload`` (:func:`~halo.weight_sync.adapter_payload.publish_adapter_directory`)
-        as ``name``; the server must run with ``VLLM_ALLOW_RUNTIME_LORA_UPDATING=True``."""
-        if not isinstance(payload, Path):
-            raise ValueError(f"{self.ENGINE_RELEASE} loads an adapter only from a directory: set rollout_adapter_dir")
-        response = self.request(
-            "POST",
-            "/v1/load_lora_adapter",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json={"lora_name": name, "lora_path": str(payload)},
-        )
-        self._require_adapter_update(response, f"load adapter {name!r}")
-
-    def unload_adapter(self, name: str) -> None:
-        response = self.request(
-            "POST",
-            "/v1/unload_lora_adapter",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json={"lora_name": name},
-        )
-        self._require_adapter_update(response, f"unload adapter {name!r}")
 
     def loaded_adapters(self) -> list[str]:
         """The adapters registered on the engine: the model cards that name a parent."""
@@ -181,13 +169,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         """Matches the engine's 404 for a request naming an adapter it does not hold."""
         return re.search(rf"The model `{re.escape(adapter)}` does not exist", error) is not None
 
-    def _require_adapter_update(self, response: requests.Response, what: str) -> None:
-        if response.ok:
-            return
-        raise RuntimeError(
-            f"vLLM {self.base_url} could not {what}: HTTP {response.status_code}, {response.text[:300]}"
-        )
-
     def read_server_flags(self) -> ServerFlags:
         info = self.request(
             "GET", "/server_info", retry=False, timeout=_SERVER_INFO_TIMEOUT_S, params={"config_format": "json"}
@@ -195,8 +176,12 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         env, config = info.get("vllm_env", {}), info.get("vllm_config")
         config = config if isinstance(config, dict) else {}
         model = config.get("model_config", {})
+        build, separator, patches = str(env.get(_IDENTITY_KEY) or "").partition("|")
+        engine_build = build if separator and build and patches else None
         return ServerFlags(
-            toolkit_image=bool(env.get(_IDENTITY_KEY)),
+            # A row that names no build, or a build neither tag pins, is not an image this client's wire is checked on.
+            toolkit_image=engine_build in {image.build for image in (self.IMAGE, *self.FAMILY_IMAGES.values())},
+            engine_build=engine_build,
             moe_backend=config.get("kernel_config", {}).get("moe_backend"),
             reasoning_parser=config.get("structured_outputs_config", {}).get("reasoning_parser"),
             strict_tool_calling=env.get(_STRICT_TOOL_CALLING_KEY),
@@ -259,10 +244,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             # As in the preflights, a report that cannot be read refuses nothing; a group needs the launch id, though.
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
             flags = None
-        # The toolkit's image pins an engine its build checks against this wire; any other server shows it by version.
-        if require and not (flags is not None and flags.toolkit_image):
-            self._check_server_version()
         if require and flags is not None:
+            if flags.engine_build is None:
+                # No identity row: upstream vLLM, which shows the wire it speaks by its version.
+                self._check_server_version()
             self._require_toolkit_image(flags)
             self._group_instance = flags.instance_id
         if require:
@@ -386,6 +371,17 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             float(entry[str(tok)]["logprob"])
             for tok, entry in zip(completion_ids, entries[len(prompt_ids) :], strict=True)
         ]
+
+    def _require_toolkit_image(self, flags: ServerFlags) -> None:
+        """A group forms only for a family whose full weights push, and each of those is served from :attr:`IMAGE`: a
+        family in :attr:`FAMILY_IMAGES` is served as an adapter over a base no push carries."""
+        if flags.engine_build is not None and flags.engine_build != self.IMAGE.build:
+            raise RuntimeError(
+                f"vLLM server {self.base_url} reports the toolkit image of engine build {flags.engine_build!r}, and a "
+                f"weight-sync group forms only with {self.IMAGE.tag}, whose engine build {self.IMAGE.build!r} this "
+                f"client's wire is checked against. {self.IMAGE_REMEDY}"
+            )
+        super()._require_toolkit_image(flags)
 
     def _check_server_version(self) -> None:
         body = self.request("GET", "/version", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()

@@ -29,7 +29,7 @@ The EP SFT round-trip test pins the on-disk keys against a plain `save_pretraine
 
 Nothing restores that layout from a module-spelled file: `scripts/after_training/unfuse_moe_experts.py` refuses the family (its hub layout stores no per-expert tensors), and a transformers load + `save_pretrained` of a module-layout source reverts nothing (the load consumed no conversions). Sharded EP saves (`save_sharded_ep: true`) are refused for the family for the same reason: the offline merge streams key by key and cannot apply the revert.
 
-The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. vLLM 0.1.dev25249 cannot serve the family through transformers' native `step3p7` config class (its config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it) and reads it only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
+The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. vLLM 0.32.0 cannot serve the family through transformers' native `step3p7` config class (its config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it) and reads it only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
 
 transformers 5.23 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
 
@@ -71,7 +71,7 @@ There is no full-model host residency at 198B ([host RAM under the lazy path](..
 
 ## Serving for GRPO (vLLM)
 
-Online and async GRPO sync into vLLM 0.1.dev25249, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any language-model name it does not map (an unmapped vision name raises).
+Online and async GRPO sync into vLLM 0.32.0, which serves the family from the **hub** namespace (`model.layers.N.moe.gate_proj` / `up_proj` / `down_proj` stacks, `moe.gate.weight`, `share_expert.*`, the vendor-namespace vision tower) and silently drops any language-model name it does not map (an unmapped vision name raises).
 
 The sync forwards that namespace: the same save-side revert the gathered save runs rewrites every forwarded key. The fused `experts.gate_up_proj` gather is split into the two hub stacks, the vision q/k/v are fused back into the un-permuted `in_proj`, and the `model.language_model.*` / `mlp.*` spellings return to the hub's, so the served model receives exactly the tensors a gathered checkpoint would carry.
 

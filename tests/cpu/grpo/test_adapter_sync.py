@@ -125,9 +125,10 @@ def base_pushes(monkeypatch, events):
     return pushes
 
 
-def _adapter_sync(model, pool, launch_base=None, base_refusal=None) -> AdapterSync:
+def _adapter_sync(model, pool, launch_base=None, base_refusal=None, adapter_dir=None) -> AdapterSync:
     routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
-    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions(), routes, launch_base, base_refusal)
+    serving = resolve_adapter_serving(model)
+    sync = AdapterSync(serving, AdapterVersions(), routes, launch_base, base_refusal, adapter_dir)
     sync.servers = pool
     return sync
 
@@ -528,6 +529,81 @@ def test_an_unpushable_base_refuses_a_server_on_another_base(launched_as, unpush
     assert foreign.url in str(raised.value) and base_pushes == []
 
 
+def _rebound(sync: AdapterSync, fakes) -> AdapterServers:
+    """The servers a second ``train()`` binds after the first one's ``reset()`` closed its own."""
+    sync.servers = AdapterServers(
+        [fake.url for fake in fakes], client_cls=SGLangWeightSyncClient, connection_timeout=5.0
+    )
+    return sync.servers
+
+
+def test_a_second_train_over_an_unpushable_base_retires_the_version_the_first_left(
+    unpushable_sync_of, servers, base_pushes
+):
+    """No base push marks the second run's first sync, and its ``reset()`` forgot the versions it had loaded."""
+    (sync, trainer), (_, fakes) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    sync.reset()
+    rebound = _rebound(sync, fakes)
+    try:
+        sync.sync(trainer, None)
+        sync.sync(trainer, None)
+    finally:
+        rebound.close()
+
+    assert base_pushes == []
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+def _published(directory) -> list[str]:
+    return sorted(path.name for path in directory.iterdir())
+
+
+@pytest.mark.parametrize("pushable", [True, False], ids=["pushed-base", "unpushable-base"])
+def test_a_version_directory_leaves_with_its_version(pushable, servers, base_pushes, client_pool, tmp_path):
+    """At a later sync, at a second ``train()`` and for a restarted trainer, whose predecessor's versions it finds on
+    the servers."""
+    pool, fakes = servers
+    model = _peft_model()
+    trainer = SimpleNamespace(model=model)
+    launch = (_LAUNCH_BASE, None if pushable else _BASE_REFUSAL)
+    client_pool = client_pool if pushable else None
+    sync = _adapter_sync(model, pool, *launch, adapter_dir=str(tmp_path))
+
+    sync.sync(trainer, client_pool)
+    first = sync.versions.current
+    assert _published(tmp_path) == [first]
+    assert fakes[0].adapters[first][0]["r"] == 8, "the servers loaded the directory by path"
+    sync.sync(trainer, client_pool)
+    assert _published(tmp_path) == [sync.versions.current] and first != sync.versions.current
+
+    sync.reset()
+    rebound = _rebound(sync, fakes)
+    try:
+        sync.sync(trainer, client_pool)
+        assert _published(tmp_path) == [sync.versions.current]
+
+        successor = _adapter_sync(model, rebound, *launch, adapter_dir=str(tmp_path))
+        successor.sync(trainer, client_pool)
+        assert _published(tmp_path) == [successor.versions.current]
+        assert _held_everywhere(fakes) == [[successor.versions.current]] * 2
+    finally:
+        rebound.close()
+
+
+def test_a_load_a_server_refuses_leaves_no_directory(servers, base_pushes, client_pool, tmp_path):
+    pool, [_, refusing] = servers
+    refusing.lora["max_lora_rank"] = 4
+    model = _peft_model()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+
+    with pytest.raises(Exception, match="incompatible with the current LoRA memory pool"):
+        sync.sync(SimpleNamespace(model=model), client_pool)
+
+    assert _published(tmp_path) == []
+    assert sync.versions.current is None
+
+
 def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_of, servers, base_pushes, client_pool):
     """A from-scratch or vocabulary-grown model has no launch base (``None``), whatever the server reports."""
     (sync, trainer), (_, [_, restarted]) = sync_of, servers
@@ -802,23 +878,38 @@ def _config(**overrides):
     return SimpleNamespace(**{**fields, **overrides})
 
 
+_SHARED_DIR = {"rollout_adapter_dir": "/shared/adapters"}
+_INKLING2_CONFIG = SimpleNamespace(model_type="inkling2")
+_DENSE_CONFIG = SimpleNamespace(model_type="qwen3")
+
+
 @pytest.mark.parametrize(
-    ("overrides", "reason"),
+    ("overrides", "model_config", "reason"),
     [
-        ({"rollout_backend": "vllm"}, "loads an adapter only from a directory"),
-        ({"routing_replay": "rollout"}, "R3"),
-        ({"model_name": None}, "must be set and hold no colon"),
-        ({"model_name": "org:policy"}, "must be set and hold no colon"),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, None, "ran over 5% slower than the merged weights"),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, _DENSE_CONFIG, "ran over 5% slower than the merged weights"),
+        ({"rollout_backend": "vllm"}, _INKLING2_CONFIG, "loads an adapter only from a directory"),
+        ({"routing_replay": "rollout"}, None, "R3"),
+        ({"model_name": None}, None, "must be set and hold no colon"),
+        ({"model_name": "org:policy"}, None, "must be set and hold no colon"),
     ],
 )
-def test_a_config_the_engine_cannot_serve_is_refused(overrides, reason):
+def test_a_config_the_engine_cannot_serve_is_refused(overrides, model_config, reason):
     with pytest.raises(ValueError, match=f"rollout_adapter_sync cannot serve this run.*{reason}"):
-        reject_unadaptable_config(_config(**overrides))
+        reject_unadaptable_config(_config(**overrides), model_config)
 
 
-@pytest.mark.parametrize("overrides", [{}, {"rollout_backend": "vllm", "rollout_adapter_dir": "/shared/adapters"}])
-def test_a_servable_config_passes(overrides):
-    reject_unadaptable_config(_config(**overrides))
+@pytest.mark.parametrize(
+    ("overrides", "model_config"),
+    [
+        ({}, None),
+        (_SHARED_DIR, _DENSE_CONFIG),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, _INKLING2_CONFIG),
+    ],
+    ids=["sglang-tensors", "sglang-directory", "vllm-inkling2"],
+)
+def test_a_servable_config_passes(overrides, model_config):
+    reject_unadaptable_config(_config(**overrides), model_config)
 
 
 @pytest.mark.parametrize(("prefetch_depth", "active", "live"), [(3, True, 5), (1, True, 3), (3, False, 2)])

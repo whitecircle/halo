@@ -12,8 +12,6 @@ from halo.models.upstream.upstream_guard import verify_upstream_parameters
 
 # ``Inkling2TopKRouter``'s renormalization floor.
 _TOPK_WEIGHT_NORM_EPS = 1e-20
-# Kept for the parity test: this module is the only one that replaces it.
-UPSTREAM_ROUTER_FORWARD = inkling2_modeling.Inkling2TopKRouter.forward
 
 
 def _router_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

@@ -1,4 +1,5 @@
-"""Publishing an adapter version as a directory the engines load from disk."""
+"""An adapter version as a directory the engines load by path: published whole, loaded on either engine, and named with
+its mount when a server cannot read it."""
 
 import json
 
@@ -8,9 +9,11 @@ from safetensors.torch import load_file
 
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.weight_sync.adapter_payload import publish_adapter_directory, remove_adapter_directory
+from halo.weight_sync import adapter_directory
+from halo.weight_sync.adapter_directory import publish_adapter_directory, remove_adapter_directories
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
-from tests.common.fake_engines import FakeVLLMServer
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
 
 
 def test_a_published_version_is_a_whole_peft_directory_and_leaves_no_stage(tmp_path):
@@ -24,8 +27,20 @@ def test_a_published_version_is_a_whole_peft_directory_and_leaves_no_stage(tmp_p
         tensors["base_model.model.x.lora_A.weight"],
     )
     assert sorted(path.name for path in tmp_path.iterdir()) == ["v1"], "the stage was renamed, not left beside it"
-    remove_adapter_directory(tmp_path, "v1")
+    remove_adapter_directories(tmp_path, ["v1", "never-published"])
     assert not published.exists()
+
+
+def test_a_write_that_raises_leaves_no_staging_directory(tmp_path, monkeypatch):
+    def full_disk(tensors, path):
+        raise OSError("No space left on device")
+
+    monkeypatch.setattr(adapter_directory, "save_file", full_disk)
+
+    with pytest.raises(OSError, match="No space left"):
+        publish_adapter_directory(tmp_path, "v1", {"x.lora_A.weight": torch.zeros(2, 3)}, {"r": 2})
+
+    assert list(tmp_path.iterdir()) == []
 
 
 @pytest.mark.parametrize(
@@ -73,6 +88,56 @@ def test_vllm_refuses_an_adapter_sent_as_tensors_and_names_a_failed_load(vllm_se
         client.load_adapter("halo-adapter-1", {"r": 2}, "c2VyaWFsaXplZA==")
     with pytest.raises(RuntimeError, match="could not load adapter 'halo-adapter-1': HTTP 400"):
         client.load_adapter("halo-adapter-1", {"r": 2}, tmp_path / "never-published")
+
+
+@pytest.fixture
+def sglang_server():
+    server = FakeSGLangServer()
+    server.lora = {"max_lora_rank": 16, "lora_target_modules": ["q_proj"], "max_loaded_loras": 4}
+    yield server
+    server.close()
+
+
+def test_sglang_loads_a_published_directory_by_path_lists_it_and_unloads_it(sglang_server, tmp_path):
+    client = SGLangWeightSyncClient(base_url=sglang_server.url)
+    key = "base_model.model.x.lora_A.weight"
+    tensors = {key: torch.arange(6, dtype=torch.bfloat16).reshape(2, 3)}
+    published = publish_adapter_directory(tmp_path, "halo-adapter-1", tensors, {"r": 2})
+
+    client.load_adapter("halo-adapter-1", {"r": 2}, published)
+
+    [(route, body)] = [(path, body) for path, body in sglang_server.posted if "load_lora_adapter" in path]
+    assert (route, body) == ("/load_lora_adapter", {"lora_name": "halo-adapter-1", "lora_path": str(published)})
+    config, loaded = sglang_server.adapters["halo-adapter-1"]
+    assert config == {"r": 2} and torch.equal(loaded[key], tensors[key])
+    assert client.loaded_adapters() == ["halo-adapter-1"]
+    client.unload_adapter("halo-adapter-1")
+    assert client.loaded_adapters() == []
+
+
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_a_directory_a_server_cannot_read_names_the_setting_and_the_mount(engine, request, tmp_path):
+    server = request.getfixturevalue(f"{engine}_server")
+    client_cls = {"vllm": VLLMWeightSyncClient, "sglang": SGLangWeightSyncClient}[engine]
+    unmounted = tmp_path / "halo-adapter-1"
+
+    with pytest.raises(RuntimeError) as raised:
+        client_cls(base_url=server.url).load_adapter("halo-adapter-1", {"r": 2}, unmounted)
+
+    message = str(raised.value)
+    assert "HTTP 400" in message, "the engine's own answer stays in the error"
+    assert f"reads the adapter from {unmounted}" in message
+    assert (
+        f"mount rollout_adapter_dir ({tmp_path}) at the same path in the trainer and in every rollout server"
+        in message
+    )
+
+
+def test_an_unload_the_engine_refuses_names_no_mount(sglang_server):
+    with pytest.raises(RuntimeError, match="could not unload adapter 'gone'") as raised:
+        SGLangWeightSyncClient(base_url=sglang_server.url).unload_adapter("gone")
+
+    assert "rollout_adapter_dir" not in str(raised.value)
 
 
 def test_vllm_reports_its_lora_launch(vllm_server):

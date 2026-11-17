@@ -167,7 +167,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Export and serve
 
 Gathered saves keep the language-model experts fused, like the hub checkpoints. Transformers and vLLM
-0.1.dev25249 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
+0.32.0 read that layout directly. `halo run unfuse-moe-experts` rewrites it per expert for a loader that
 needs that layout.
 
 Smoke-test with `AutoModelForImageTextToText` and `AutoTokenizer`

@@ -1,21 +1,35 @@
-# vLLM (CUDA 13) server image for RL rollouts and NCCL weight sync (`make build-vllm`), on vLLM's Inkling 2 build:
-# vLLM main of 2026-10-12 with the Inkling 2 model (vllm-project/vllm#67325), which reports version
-# 0.1.dev25249+gb974b306f. Over that base it adds the phased weight-sync protocol the trainer drives, the parser
-# plugins, R3 routed-experts capture (`--enable-return-routed-experts`, needs `--moe-backend
-# triton`), the NCCL wheel at uv.lock's exact pin so both ends load one runtime, and the shared EFA
-# userspace. Serving flags and supported families: agent-docs/infrastructure/rollout-servers.md
-# transformers and tokenizers stay at the base image's own (transformers==5.22.2), inside the range vLLM
-# declares, which the build asserts.
+# vLLM (CUDA 13) server image for RL rollouts and NCCL weight sync, in two tags from this file:
+#   make build-vllm           halo:vllm-0.32.0         VLLM_ENGINE=release, upstream vllm/vllm-openai:v0.32.0
+#   make build-vllm-inkling2  halo:vllm-0.1.dev25249   VLLM_ENGINE=inkling2, vLLM's Inkling 2 build
+# Every family but Inkling 2 is served from the release tag, and Inkling 2 only from its own. Over the base, each
+# tag adds the phased weight-sync protocol the trainer drives, the parser plugins, R3 routed-experts capture
+# (`--enable-return-routed-experts`, needs `--moe-backend triton`), the NCCL wheel at uv.lock's exact pin so both
+# ends load one runtime, and the shared EFA userspace. Serving flags and supported families:
+# agent-docs/infrastructure/rollout-servers.md
+# transformers and tokenizers stay at the base image's own (release: transformers==5.19.0, inkling2:
+# transformers==5.22.2), inside the range vLLM declares, which the build asserts.
 
-# The engine version the base reports, which tags the image (halo:vllm-<version>).
-ARG VLLM_VERSION=0.1.dev25249
-ARG VLLM_BASE_IMAGE=vllm/vllm-openai:inkling-2-small
-FROM ${VLLM_BASE_IMAGE}
+# Which tag this build is: release or inkling2.
+ARG VLLM_ENGINE=release
+ARG VLLM_VERSION=0.32.0
+# vLLM's Inkling 2 build: vLLM main with the Inkling 2 model (vllm-project/vllm#67325). The engine reports
+# VLLM_INKLING2_BUILD, which the build asserts, and VLLM_INKLING2_VERSION tags the image. The base is upstream's
+# inkling-2-small tag at the digest below, since that tag moves.
+ARG VLLM_INKLING2_VERSION=0.1.dev25249
+ARG VLLM_INKLING2_BUILD=0.1.dev25249+gb974b306f
+ARG VLLM_INKLING2_BASE=vllm/vllm-openai@sha256:a710ed3b5eba4e205fa1904cae57444446ead088bac575423f9b4a392a9a80a5
+
+FROM vllm/vllm-openai:v${VLLM_VERSION} AS engine-release
+LABEL org.opencontainers.image.description="vLLM 0.32.0 (cu13) with NCCL weight transfer + routed-experts capture + tool calling"
+
+FROM ${VLLM_INKLING2_BASE} AS engine-inkling2
+LABEL org.opencontainers.image.description="vLLM 0.1.dev25249 (cu13, Inkling 2 build) with NCCL weight transfer + adapter serving + routed-experts capture + tool calling"
+
+FROM engine-${VLLM_ENGINE} AS patched-source
 
 # Static label metadata; the per-build version, date and revision labels are set last.
 LABEL maintainer="White Circle <hello@whitecircle.com>"
 LABEL org.opencontainers.image.title="Halo vLLM Server"
-LABEL org.opencontainers.image.description="vLLM 0.1.dev25249 (cu13, Inkling 2 build) with NCCL weight transfer + adapter serving + routed-experts capture + tool calling"
 LABEL org.opencontainers.image.vendor="White Circle"
 LABEL org.opencontainers.image.source="https://github.com/whitecircle/halo"
 LABEL org.opencontainers.image.licenses="LicenseRef-Halo"
@@ -28,11 +42,26 @@ COPY LICENSE APACHE-2.0.txt /opt/halo-license/
 COPY docker/engine_source_patch.py docker/vllm/patches/patch_vllm_source.py /opt/halo/
 RUN python3 /opt/halo/patch_vllm_source.py
 
+FROM patched-source AS server-release
+
+# The split top-p guard keeps a budget-forced token from being masked with the rest of its row; sitecustomize
+# applies it where the file is present.
+COPY docker/vllm/patches/vllm_topp_split_guard_patch.py /opt/vllm_patches/
+# Model Runner V2, pinned: it enforces thinking budgets incrementally and is the only runner R3 capture
+# runs on, and pinned it fails at startup on a feature it lacks instead of falling back to the V1 runner.
+ENV VLLM_USE_V2_MODEL_RUNNER=1
+
+FROM patched-source AS server-inkling2
+
 # Inkling 2's own edits (docker/vllm/patches/patch_vllm_inkling2.py): its tensor-parallel all-reduce, its
 # config.json as the release ships it, and LoRA on its NVFP4/MXFP8 experts. The image keeps the GPU check of the
-# expert LoRA: docker run --gpus 1 --entrypoint python3 halo:vllm-<version> /opt/halo/verify_inkling2_expert_lora.py
-COPY docker/vllm/patches/patch_vllm_inkling2.py docker/vllm/patches/verify_inkling2_expert_lora.py /opt/halo/
+# expert LoRA: docker run --gpus 1 --entrypoint python3 halo:vllm-0.1.dev25249 /opt/halo/verify_inkling2_expert_lora.py
+COPY docker/vllm/patches/patch_vllm_inkling2.py docker/vllm/verify_inkling2_expert_lora.py /opt/halo/
 RUN cd /opt/halo && python3 patch_vllm_inkling2.py
+# rollout_adapter_sync loads each adapter version at runtime (/v1/load_lora_adapter).
+ENV VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
+
+FROM server-${VLLM_ENGINE}
 
 COPY docker/vllm/plugins/gpt_oss_text_tool_parser.py /opt/gpt_oss_text_tool_parser.py
 
@@ -69,9 +98,9 @@ RUN mkdir -p /opt/nccl_compat/halo/weight_sync/transport \
 # layers that write weights with a direct `param.copy_()` revert on every /update_weights; the re-init
 # patch destroys the NCCL communicator the engine would otherwise leak per trainer that reconnects
 # without a clean shutdown; the two thinking-budget patches let the gpt-oss parser force its whole
-# move into the final channel when an analysis channel overruns its budget. The identity patch names them on
-# /server_info, where the trainer refuses a server without them. `sitecustomize` applies them in the API
-# server and every engine-core worker.
+# move into the final channel when an analysis channel overruns its budget. The identity patch names the
+# engine build and the patches on /server_info, where the trainer refuses a server without them or on the tag
+# another family is served from. `sitecustomize` applies them in the API server and every engine-core worker.
 COPY docker/vllm/patches/vllm_layerwise_reload_patch.py \
      docker/vllm/patches/vllm_weight_transfer_reinit_patch.py \
      docker/vllm/patches/vllm_reasoning_forced_end_patch.py \
@@ -84,8 +113,6 @@ ENV PYTHONPATH="/opt/vllm_patches:/opt/nccl_compat"
 # Off for RL on a hand-run server too, not only under compose: the GLM parsers' default strict level would put a
 # structural-tag grammar over every tool-bearing request, so the served distribution is no longer the policy's.
 ENV VLLM_ENFORCE_STRICT_TOOL_CALLING=0
-# rollout_adapter_sync loads each adapter version at runtime (/v1/load_lora_adapter).
-ENV VLLM_ALLOW_RUNTIME_LORA_UPDATING=True
 
 # Again after the EFA userspace install, which rewrites the loader path.
 RUN python3 /tmp/nccl_pin.py /tmp/uv.lock --verify && rm /tmp/uv.lock /tmp/nccl_pin.py
@@ -95,17 +122,25 @@ RUN python3 /tmp/nccl_pin.py /tmp/uv.lock --verify && rm /tmp/uv.lock /tmp/nccl_
 COPY docker/vllm/parity /tmp/parity
 RUN python3 /tmp/parity/check.py /tmp/parity && rm -rf /tmp/parity
 
-# The stack pins, the runtime patches and the weight-sync contracts (docker/vllm/verify_image.py names
-# why each matters): an upstream change fails the build instead of hanging a group or reverting a sync.
+# The engine build, Model Runner V2, the stack pins, the runtime patches and the weight-sync contracts
+# (docker/vllm/verify_image.py names why each matters): an upstream change fails the build instead of hanging a
+# group or reverting a sync.
+ARG VLLM_ENGINE
+ARG VLLM_VERSION
+ARG VLLM_INKLING2_BUILD
 COPY docker/vllm/verify_image.py /tmp/verify_image.py
-RUN python3 /tmp/verify_image.py && rm /tmp/verify_image.py
+RUN case "${VLLM_ENGINE}" in release) build="${VLLM_VERSION}" ;; inkling2) build="${VLLM_INKLING2_BUILD}" ;; esac \
+    && python3 /tmp/verify_image.py "${VLLM_ENGINE}" "${build}" && rm /tmp/verify_image.py
 
-# Split top-p on a budget-cut row, and both parser plugins with the budget they drive, on the Triton interpreter
-# (no GPU here); they import vLLM, so no test suite covers them.
-COPY docker/vllm/verify_topp_budget_cut.py docker/vllm/plugins/verify_gptoss_plugins.py /tmp/
-RUN cd /tmp && CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 /tmp/verify_topp_budget_cut.py \
+# Split top-p on a budget-cut row (the release tag's guard patch, the Inkling 2 build's own pipeline), and both
+# parser plugins with the budget they drive, on the Triton interpreter (no GPU here); they import vLLM, so no test
+# suite covers them.
+COPY docker/vllm/patches/verify_topp_split_guard.py docker/vllm/verify_topp_budget_cut.py \
+     docker/vllm/plugins/verify_gptoss_plugins.py /tmp/
+RUN case "${VLLM_ENGINE}" in release) topp=verify_topp_split_guard.py ;; inkling2) topp=verify_topp_budget_cut.py ;; esac \
+    && cd /tmp && CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 "/tmp/${topp}" \
     && CUDA_VISIBLE_DEVICES= TRITON_INTERPRET=1 python3 /tmp/verify_gptoss_plugins.py /opt \
-    && rm /tmp/verify_topp_budget_cut.py /tmp/verify_gptoss_plugins.py
+    && rm /tmp/verify_topp_split_guard.py /tmp/verify_topp_budget_cut.py /tmp/verify_gptoss_plugins.py
 
 # Dev mode exposes the /pause -> /resume phased endpoints the weight-sync client drives. A
 # deployment must keep those endpoints off any untrusted network.
@@ -117,9 +152,9 @@ ENTRYPOINT ["vllm", "serve"]
 CMD ["--weight-transfer-config", "{\"backend\": \"nccl\"}", "--moe-backend", "triton", "--enable-auto-tool-choice", "--tool-call-parser", "hermes"]
 
 # Per-build labels, set last: an ARG in scope reaches every later RUN as environment, so a new date or
-# commit above the build steps would re-key their cache. make build-vllm passes all three, and
+# commit above the build steps would re-key their cache. The make targets pass all three, and
 # the base's revision label (its engine's commit) is replaced.
-ARG VERSION=1.3.0rc2
+ARG VERSION=1.3.0rc1
 ARG BUILD_DATE
 ARG SOURCE_REVISION=dev
 LABEL org.opencontainers.image.version="${VERSION}"

@@ -95,6 +95,8 @@ class ServerRequirements(NamedTuple):
     pushes_base: bool = True
     """``False`` for an adapter-synced policy over a base no push may carry: the served weights are never written, so
     their format and MoE runner do not matter."""
+    model_types: tuple[str, ...] = ()
+    """The trained model's ``model_type`` spellings, which pick the toolkit image its family is served from."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -138,10 +140,16 @@ def _server_flag_refusals(
 ) -> list[str]:
     """Each flag a run needs and a server reports wrong; a field the reply does not carry reads as unread."""
     refusals = []
+    image = client_cls.image_for(needs.model_types)
     if not flags.toolkit_image:
         refusals.append(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
-            f"{client_cls.IMAGE_REMEDY}"
+            f"{client_cls.image_remedy(needs.model_types)}"
+        )
+    elif image is not None and flags.engine_build != image.build:
+        refusals.append(
+            f"it is the toolkit image of engine build {flags.engine_build!r}, and this model is served from "
+            f"{image.tag} (engine build {image.build!r}) alone. {client_cls.image_remedy(needs.model_types)}"
         )
     if needs.pushes_base:
         refusals.extend(_quantization_refusals(flags, needs))
@@ -657,8 +665,9 @@ def _verify_engine_prompt_logprobs_on_rank0(
                 f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
                 f"vLLM's V1 model runner with speculative decoding (MTP): the drafter's CUDA graph overwrites the "
                 f"hidden states the prompt log-probs are read from whenever the prefill runs as a graph "
-                f"(vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm builds, which pins Model "
-                f"Runner V2, turn speculative decoding off, or set isr_engine_reference: false."
+                f"(vllm-project/vllm#53488). Serve vLLM from an image Dockerfile.vllm builds, whose build asserts "
+                f"Model Runner V2 is the engine's runner, turn speculative decoding off, or set "
+                f"isr_engine_reference: false."
             )
         logger.info(
             f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "

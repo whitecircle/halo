@@ -349,7 +349,10 @@ accelerate launch \
 
 The two FSDP v2 configs differ in `fsdp_reshard_after_forward`; the full config also sets
 `fsdp_cpu_ram_efficient_loading: true`; every rank still loads the full weights and buffers, so a frozen reference
-or teacher computes the same before and after `accelerator.prepare`.
+or teacher computes the same before and after `accelerator.prepare`. Under that flag transformers leaves a tensor the
+checkpoint lacks (a classification or reward head on a base checkpoint) on the meta device off each node's local
+rank 0, so the toolkit's loads turn it off for the load (`full_weights_on_every_rank` in
+`halo/model_loading/checkpoint_coverage.py`) and every rank initializes the head.
 
 Neither config has a hybrid-shard option; for that use `torchrun` FSDP2 with
 [`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).

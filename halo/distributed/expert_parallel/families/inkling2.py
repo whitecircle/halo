@@ -9,9 +9,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.expert_parallel.moe_layer.expert_lora import ExpertLoraTarget
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import frozen_banks, is_frozen_bank_container
 from halo.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
-from halo.kernels.lowp.frozen_bank import FrozenExpertBank, frozen_bank_grouped_mm
+from halo.kernels.lowp.frozen_bank import FrozenExpertBank, build_frozen_banks, frozen_bank_grouped_mm
 from halo.models.moe.family_specs import INKLING2
 
 # This layer's buffers per frozen projection: packed data, block scales, NVFP4's per-expert global scale.
@@ -26,6 +25,7 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
 
     HF_MODULE_NAMES = ("Inkling2SparseMoeBlock",)
     FAMILY = INKLING2
+    SUPPORTS_FROZEN_BANKS = True
     _SHARED_EXPERT_REQUIRED = False
     # The router has no group limiting and always renormalizes; ``routed_scaling_factor`` stays required.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "num_group", "topk_group", "norm_topk_prob")
@@ -43,10 +43,14 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
         self._fused_glu_mul = experts.act_fn.forward
 
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False) -> None:
-        if not is_frozen_bank_container(experts):
+        slots = self.FAMILY.frozen_expert_slots
+        # The frozen loader registers every slot's scales; a bf16 container holds none.
+        if slots[0].scale not in experts._buffers:
             super()._adopt_expert_params(experts, weights_already_sharded=weights_already_sharded)
             return
-        banks = frozen_banks(experts, self.expert_start, self.expert_end, already_sharded=weights_already_sharded)
+        banks = build_frozen_banks(
+            experts, slots, self.expert_start, self.expert_end, already_sharded=weights_already_sharded
+        )
         self._frozen_formats = {name: bank.quant_format for name, bank in banks.items()}
         for name, bank in banks.items():
             # Not persistent: a bank reloads from the release, and no checkpoint of this layer may carry it.
@@ -58,13 +62,13 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
     def has_frozen_banks(self) -> bool:
         return bool(getattr(self, "_frozen_formats", None))
 
-    def frozen_bank(self, name: str) -> FrozenExpertBank:
+    def build_frozen_bank(self, name: str) -> FrozenExpertBank:
         """The bank over this layer's current buffers, so a device move is seen."""
         data, scales, global_scale = (getattr(self, f"{name}{part}", None) for part in _FROZEN_PARTS)
         return FrozenExpertBank(self._frozen_formats[name], data, scales, global_scale)
 
     def frozen_expert_banks(self) -> tuple[FrozenExpertBank, ...]:
-        return tuple(self.frozen_bank(name) for name in getattr(self, "_frozen_formats", ()))
+        return tuple(self.build_frozen_bank(name) for name in getattr(self, "_frozen_formats", ()))
 
     def start_gather_expert_state_dict(self, **kwargs):
         if self.has_frozen_banks:
@@ -81,20 +85,20 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
     def _expert_intermediate_width(self) -> int:
         if not self.has_frozen_banks:
             return super()._expert_intermediate_width()
-        return self.frozen_bank("down_proj").in_features
+        return self.build_frozen_bank("down_proj").in_features
 
     def _expert_base_proj(
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype
     ) -> torch.Tensor:
         if not self.has_frozen_banks:
             return super()._expert_base_proj(x, weight_attr, offs, out_dtype)
-        return frozen_bank_grouped_mm(x.to(out_dtype), self.frozen_bank(weight_attr), offs=offs)
+        return frozen_bank_grouped_mm(x.to(out_dtype), self.build_frozen_bank(weight_attr), offs=offs)
 
     def _expert_base_proj_single(self, idx: int, x: torch.Tensor, weight_attr: str) -> torch.Tensor:
         if not self.has_frozen_banks:
             return super()._expert_base_proj_single(idx, x, weight_attr)
         with torch.no_grad():
-            weight = self.frozen_bank(weight_attr).dequantize_linear(idx, idx + 1)[0]
+            weight = self.build_frozen_bank(weight_attr).dequantize_linear(idx, idx + 1)[0]
         return x @ weight.to(x.dtype).t()
 
     def _expert_lora_targets(self) -> Iterator[ExpertLoraTarget]:
@@ -104,7 +108,7 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
             yield from super()._expert_lora_targets()
             return
         for name in (root for root in self.FAMILY.expert_weight_roots if root in self._frozen_formats):
-            bank = self.frozen_bank(name)
+            bank = self.build_frozen_bank(name)
             yield ExpertLoraTarget(
                 name, (bank.num_experts, bank.in_features, bank.out_features), torch.bfloat16, bank.data.device
             )

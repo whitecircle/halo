@@ -861,16 +861,46 @@ def test_init_communicator_refuses_a_server_that_reports_no_version(server, monk
     assert "POST /init_weight_transfer_engine" not in server.requests
 
 
-@pytest.mark.parametrize("version", ["0.1.dev25249+gb974b306f", "0.26.0"])
-def test_the_toolkit_image_is_taken_whatever_engine_version_it_reports(server, monkeypatch, version):
-    """The image pins an engine its build checks against the wire, so its version string gates nothing."""
+def test_the_toolkit_image_of_the_pinned_build_is_taken_without_a_version_read(server, monkeypatch):
+    """The image's build asserts its wire against the engine build its identity row names, so /version gates nothing:
+    a version the check would refuse is never read."""
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
-    server.version = version
+    server.version = None
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
 
     handle.read_engine_layout(require=True)
 
     assert "GET /version" not in server.requests
+
+
+@pytest.mark.parametrize("build", ["0.26.0", VLLMWeightSyncClient.INKLING2_IMAGE.build])
+def test_a_toolkit_row_of_another_engine_build_refuses_group_formation(server, monkeypatch, build):
+    """The row's presence proves no wire: an image of another engine, the Inkling 2 tag among them, takes no push."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.identity = f"{build}|vllm_layerwise_reload_patch"
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    with pytest.raises(RuntimeError) as refusal:
+        handle.init_communicator(device="cpu")
+
+    message = str(refusal.value)
+    assert f"engine build {build!r}" in message and VLLMWeightSyncClient.IMAGE.tag in message
+    assert VLLMWeightSyncClient.IMAGE_REMEDY in message
+    assert "POST /init_weight_transfer_engine" not in server.requests
+    assert "GET /version" not in server.requests
+
+
+def test_a_row_that_names_no_engine_build_is_read_as_upstream(server, monkeypatch):
+    """Patches with no build are not an image this client pins: the server shows its wire by version, then is refused."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.identity = "vllm_layerwise_reload_patch"
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    with pytest.raises(RuntimeError, match="does not report the toolkit's image"):
+        handle.init_communicator(device="cpu")
+
+    assert "GET /version" in server.requests
+    assert "POST /init_weight_transfer_engine" not in server.requests
 
 
 def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):

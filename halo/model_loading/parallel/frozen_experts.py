@@ -1,6 +1,7 @@
 """``frozen_quantized_experts`` on the lazy EP load: before planning, each fused expert container on the meta shell
-trades its bf16 ``gate_up_proj`` / ``down_proj`` for buffers in the release's packed layout (``FROZEN_SLOTS``), so each
-rank streams its expert slice of the packed bytes and scales unchanged, a buffer keeping its stored dtype."""
+trades its bf16 expert weights for buffers in the release's packed layout (the family spec's
+``frozen_expert_slots``), so each rank streams its expert slice of the packed bytes and scales unchanged, a buffer
+keeping its stored dtype."""
 
 from __future__ import annotations
 
@@ -11,25 +12,27 @@ import torch.nn as nn
 from safetensors import safe_open
 
 from halo.checkpoint.reading import resolve_checkpoint_weights
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_SLOTS
+from halo.distributed.expert_parallel.families.roster import frozen_bank_families
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
-from halo.models.moe.family_specs import INKLING2, find_moe_family_spec_for_config
+from halo.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec_for_config
 
 logger = logging.getLogger(__name__)
-
-# The families whose release layout these slots spell.
-FROZEN_BANK_FAMILIES = (INKLING2,)
 
 _HEADER_FORMATS = {"U8": "nvfp4", "F8_E4M3": "mxfp8"}
 _SAFETENSORS_DTYPES = {"U8": torch.uint8, "F8_E4M3": torch.float8_e4m3fn, "F32": torch.float32}
 
 
+def supports_frozen_experts(spec: MoEFamilySpec | None) -> bool:
+    """Whether ``spec``'s EP layer holds frozen banks, which the family's ``frozen_expert_slots`` lay out."""
+    return spec in frozen_bank_families()
+
+
 def reject_frozen_experts_family(config) -> None:
-    spec = find_moe_family_spec_for_config(config)
-    if spec not in FROZEN_BANK_FAMILIES:
+    """Refuse ``frozen_quantized_experts`` on a model whose family's EP layer holds no frozen banks."""
+    if not supports_frozen_experts(find_moe_family_spec_for_config(config)):
         raise ValueError(
             f"frozen_quantized_experts keeps a release's NVFP4/MXFP8 expert layout, which is implemented for "
-            f"{[s.model_types[0] for s in FROZEN_BANK_FAMILIES]}; this checkpoint is "
+            f"{[spec.model_types[0] for spec in frozen_bank_families()]}; this checkpoint is "
             f"{getattr(config, 'model_type', None)!r}."
         )
 
@@ -63,15 +66,16 @@ def install_frozen_bank_slots(model: nn.Module, model_path: str) -> int:
     checkpoint's headers; returns the containers converted. A bf16 expert tensor is refused, as there is nothing to
     keep frozen."""
     reject_frozen_experts_family(model.config)
+    slots = find_moe_family_spec_for_config(model.config).frozen_expert_slots
     weights = resolve_checkpoint_weights(model_path)
     disk_to_model, _ = family_key_mapping(model, list(weights.weight_map))
     model_to_disk = {target: disk for disk, target in disk_to_model.items()}
     header = _HeaderReader(model_path)
     converted = 0
     for name, module in model.named_modules():
-        if not all(isinstance(module._parameters.get(slot.weight), nn.Parameter) for slot in FROZEN_SLOTS):
+        if not all(isinstance(module._parameters.get(slot.weight), nn.Parameter) for slot in slots):
             continue
-        for slot in FROZEN_SLOTS:
+        for slot in slots:
             disk_key = model_to_disk.get(f"{name}.{slot.weight}")
             if disk_key is None:
                 raise ValueError(f"frozen_quantized_experts: no checkpoint key loads {name}.{slot.weight}")
