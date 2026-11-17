@@ -45,7 +45,7 @@ def _e8m0_exponent(x, FMAX: tl.constexpr, TINY: tl.constexpr):
     e8m0's [-127, 127]. Torch on CUDA divides by a Python scalar as a multiply by its fp32 reciprocal, which can land
     one ulp from a true division and move the exponent, so the kernel does the same."""
     amax = tl.max(tl.abs(x), axis=1)
-    y = _mul_rn(tl.maximum(amax, TINY), tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX))
+    y = mul_rn(tl.maximum(amax, TINY), tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX))
     se = libdevice.ceil(libdevice.log2(y))
     return tl.minimum(tl.maximum(se, -127.0), 127.0).to(tl.int32)
 
@@ -82,13 +82,13 @@ def mxfp4_fake_quant_kernel(
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     se_i = _e8m0_exponent(x, FMAX, TINY)
 
-    v = _mul_rn(x, _pow2(-se_i)[:, None])
+    v = mul_rn(x, pow2(-se_i)[:, None])
     mag = tl.minimum(tl.abs(v), FMAX)
     e = tl.maximum(((mag.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127, 0)
-    level = _mul_rn(libdevice.rint(_mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
+    level = mul_rn(libdevice.rint(mul_rn(mag, pow2(1 - e))), pow2(e - 1))
     # A multiply, as in eager's ``level x sign``: Triton lowers a float negation to ``0 - x``, which loses -0.0.
-    q = _mul_rn(level, tl.where(v < 0, -1.0, 1.0))
-    out = _mul_rn(q, _pow2(se_i)[:, None])
+    q = mul_rn(level, tl.where(v < 0, -1.0, 1.0))
+    out = mul_rn(q, pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
