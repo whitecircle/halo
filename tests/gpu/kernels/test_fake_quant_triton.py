@@ -303,7 +303,15 @@ def test_nvfp4_weight_round_trip_through_the_kernel():
         _assert_bits_equal(cached.detach().to(torch.bfloat16), ref, f"nvfp4 cached weight {dtype}")
         assert out.is_contiguous() and out.dtype == torch.bfloat16
         assert s.calls["nvfp4"] == 2, f"nvfp4 weight kernel calls {s.calls['nvfp4']}, expected 2"
-    print("  nvfp4 weight round trip on axis 1, direct and cached, through the kernel — OK")
+    # An fp16 weight at fp16's max: nvfp4 rounds 65504 up to 67584, past fp16's range. The round trip returns bf16 as
+    # eager does, so it stays finite instead of passing through an fp16 output and becoming inf.
+    w = torch.randn(2, 64, 32, device=DEV, dtype=torch.float16)
+    w[1, 5, 7] = 65504.0
+    ref = _block_round_trip(w, "nvfp4", 1)
+    out = _round_trip(w, "nvfp4", 1)
+    assert ref.isfinite().all() and ref.abs().max().item() > 65504.0, "fixture: eager no longer rounds past fp16 max"
+    _assert_bits_equal(out, ref, "nvfp4 fp16 weight past fp16 max")
+    print("  nvfp4 weight round trip on axis 1, direct and cached, through the kernel, fp16 past its max — OK")
 
 
 def test_nvfp4_launches_do_not_sync():

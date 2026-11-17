@@ -86,9 +86,17 @@ def _fused_entry(t: torch.Tensor, fmt: QuantFormat, axis: int) -> _FusedFakeQuan
     return None
 
 
-def _fused_round_trip(fused: _FusedFakeQuant, t: torch.Tensor, fmt: QuantFormat) -> torch.Tensor:
+def _fused_round_trip(
+    fused: _FusedFakeQuant, t: torch.Tensor, fmt: QuantFormat, out_dtype: torch.dtype | None = None
+) -> torch.Tensor:
     return fake_quant_triton(
-        fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR, scale_max=fused.scale_max
+        fused.kernel,
+        t,
+        FORMAT_BLOCK_SIZE[fmt],
+        _ELEMENT_MAX[fmt],
+        _AMAX_FLOOR,
+        scale_max=fused.scale_max,
+        out_dtype=out_dtype,
     )
 
 
@@ -301,9 +309,10 @@ def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
         if fused is None:
             return _block_round_trip(t, fmt, axis)
         moved = t.movedim(axis, -1).contiguous()
-        out = _fused_round_trip(fused, moved, fmt)
+        # bf16 out, as eager's dequantize returns: an fp16 output would turn a value rounded past 65504 into inf.
+        out = _fused_round_trip(fused, moved, fmt, out_dtype=torch.bfloat16)
         del moved  # Peak: the moved copy and the kernel output, then the output and the restored layout.
-        return out.movedim(-1, axis).contiguous().to(torch.bfloat16)
+        return out.movedim(-1, axis).contiguous()
     if _compile_failed:
         return _block_round_trip(t, fmt, axis)
     if _compiled_round_trip is None:

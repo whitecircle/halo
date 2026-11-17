@@ -183,15 +183,16 @@ def fake_quant_triton(
     format_max: float,
     amax_floor: float,
     scale_max: float | None = None,
+    out_dtype: torch.dtype | None = None,
 ) -> torch.Tensor:
-    """``kernel``'s round trip of ``t`` in blocks of ``block_size``, into a new tensor of the same shape and dtype.
-    Last-axis, contiguous, CUDA. The caller guarantees ``t.shape[-1] % block_size == 0`` and passes the eager
-    quantizer's element maximum and amax floor, so both paths scale by the same constants. ``scale_max`` (NVFP4's
-    ``E4M3_MAX``) marks a two-level format: a tensor abs-max pass into a device scalar runs first, with no host
-    sync."""
+    """``kernel``'s round trip of ``t`` in blocks of ``block_size``, into a new tensor of the same shape, in ``t``'s
+    dtype unless ``out_dtype`` is given. Last-axis, contiguous, CUDA. The caller guarantees
+    ``t.shape[-1] % block_size == 0`` and passes the eager quantizer's element maximum and amax floor, so both paths
+    scale by the same constants. ``scale_max`` (NVFP4's ``E4M3_MAX``) marks a two-level format: a tensor abs-max pass
+    into a device scalar runs first, with no host sync."""
     if t.numel() == 0:
-        return torch.empty_like(t)
-    out = torch.empty_like(t)
+        return torch.empty_like(t, dtype=out_dtype)
+    out = torch.empty_like(t, dtype=out_dtype)
     n_blocks = t.numel() // block_size
     grid = (triton.cdiv(n_blocks, _BPP),)
     if scale_max is None:
