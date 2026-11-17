@@ -32,7 +32,7 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 | Qwen3-30B-A3B ep8 b8 | 14,063 | 0.294× | 0.098× | 0.425× | 0.369× |
 | Qwen3.5-35B-A3B ep8 b8 | 16,536 | 0.442× | 0.171× | 0.533× | 0.373× |
 
-![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes on 8× B300: simulated fp8 and mxfp4 with the eager activation round trip at 0.10–0.45× (simulated mxfp4 with the fused round trip runs at 0.93–0.99× on 8× H200, not charted) and native fp8 and mxfp4 at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
+![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes on 8× B300: simulated fp8 and mxfp4 with the eager activation round trip at 0.10–0.45× (simulated mxfp4 with the fused round trip runs at 0.93–0.99× on 8× H200, not charted) and native fp8 and mxfp4 on a 1.2.0 development build at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
 
 **Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated path and the 1.2.0 development build's adapter are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
 
