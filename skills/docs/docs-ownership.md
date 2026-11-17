@@ -46,6 +46,7 @@ changes.
 |---|---|
 | `halo/distributed/{parallelism_config,parallelism_rules}.py` | `agent-docs/parallelism/*`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/expert_parallel/` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md`, `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |
+| `halo/distributed/expert_parallel/mok.py`, `halo/kernels/batched_transpose.py` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/expert_parallel/deepep/`, `halo/distributed/rank_uniform_env.py` | `agent-docs/infrastructure/deepep.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/moe/expert_lora_spec.py` | `agent-docs/optimization/peft.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/models/moe/expert_layout.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/models/adding-a-model.md` |
@@ -258,7 +259,7 @@ changes.
 | `launcher-configs/**` | `agent-docs/infrastructure/{skypilot,nomad}.md`, `human-docs/clusters.md` |
 | `.github/workflows/**`, `.github/scripts/**`, `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` |
 | `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
-| `scripts/diagrams/**` | the page embedding the figure; regenerate it in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
+| `agent-docs/assets/**/*.html` figure pages, `skills/visuals/kit/**` | the page embedding the figure (every embedding page, for a kit change); re-render in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 
 ## Cross-cutting

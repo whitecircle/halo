@@ -1,0 +1,17 @@
+version	tokens	round	run	tokens_per_second	peak_alloc_gib	step1_loss	data	order
+1.0.0	2048	1	halo_nogc_r1	8629	101.75	6.976	exact match	exact match
+1.0.0	2048	1	halo_nogc_r2	8711	101.75	6.976	exact match	exact match
+1.0.0	2048	2	halo_nogc_r1	8694	101.75	6.976	exact match	exact match
+1.0.0	2048	2	halo_nogc_r2	8646	101.75	6.976	exact match	exact match
+1.0.0	16384	1	halo_nogc_r1	3981	244.63	6.342	exact match	exact match
+1.0.0	16384	1	halo_nogc_r2	3980	244.58	6.342	exact match	exact match
+1.0.0	16384	2	halo_nogc_r1	3979	244.53	6.342	exact match	exact match
+1.0.0	16384	2	halo_nogc_r2	3978	244.61	6.342	exact match	exact match
+1.2.0	2048	1	halo_nogc_r1	15625	101.86	6.919	exact match	exact match
+1.2.0	2048	1	halo_nogc_r2	15610	101.86	6.919	exact match	exact match
+1.2.0	2048	2	halo_nogc_r1	15549	101.86	6.919	exact match	exact match
+1.2.0	2048	2	halo_nogc_r2	15779	101.86	6.919	exact match	exact match
+1.2.0	16384	1	halo_nogc_r1	16125	225.03	6.351	exact match	exact match
+1.2.0	16384	1	halo_nogc_r2	16135	225.00	6.351	exact match	exact match
+1.2.0	16384	2	halo_nogc_r1	16130	225.06	6.351	exact match	exact match
+1.2.0	16384	2	halo_nogc_r2	16125	225.06	6.351	exact match	exact match

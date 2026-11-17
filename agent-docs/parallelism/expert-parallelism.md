@@ -279,22 +279,27 @@ What an EP run has to plan around:
 combine over NVLink symmetric memory (`halo/distributed/expert_parallel/mok.py`). The router, bias balancing, routing
 replay and the family's shared expert stay on Halo's path.
 
-- **Families** declare it (`SUPPORTS_MOK`, read off the class itself, never a base): Qwen3 MoE and Qwen3.5/3.6 MoE.
-  Any other EP layer is refused at load, Qwen3-Next's included, as are experts whose hidden or intermediate size is
-  not a multiple of 256 or whose activation is not SiLU, and a model with no MoE block Halo wraps.
+- **Families** declare it on their spec (`MoEFamilySpec.supports_mok`): Qwen3 MoE and Qwen3.5/3.6 MoE. Any other
+  family, Qwen3-Next included, a model with no MoE block Halo wraps and a host without the `mok` package are refused
+  before the checkpoint loads; experts whose hidden or intermediate size is not a multiple of 256 or whose activation
+  is not SiLU are refused when the layer is built.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
-  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, `use_grouped_gemm: false`, a non-default `ep_buffer_backend`, a
-  run that declares no token budget, and any low precision on the experts but MoK's MXFP8 recipe below. DeepEP's own
-  layout rules still apply (several EP groups in one NVLink domain among them); MoK has not been run past them.
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, `use_grouped_gemm: false`, a non-default `ep_buffer_backend`,
+  FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`), a run that declares no
+  token budget, and any low precision on the experts but MoK's MXFP8 recipe below. DeepEP's own layout rules still
+  apply (several EP groups in one NVLink domain among them); MoK has not been run past them.
 - **MXFP8.** `lowp_precision: fp8`, `lowp_backend: native`, `lowp_backward_precision: fp8` (and
   `lowp_apply_dense_mlp: false`) run MoK's MXFP8 kernels for the forward, dgrad and wgrad: e4m3 with an e8m0 scale per
-  32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. The expert banks are cast once
-  per optimizer step where Halo owns them (`ep_size > 1`) and every call where FSDP2 does. Any other low-precision
-  setting on the experts is refused. Each bank is cast in the layer's own layout, whose transposed cast is MoK's
-  normal one: the same bits as casting MoK's layout, with no transpose first. The cast and its transposed twin stay
-  cached beside the bf16 bank, one more byte a parameter each. Measured as below, with
-  the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's shapes, 0.93×, 1.02× and 1.13× on
-  the gpt-oss-like one and 0.84×, 1.01× and 1.21× on DeepSeek-V3's.
+  32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. Any other low-precision
+  setting on the experts is refused. Each bank is cast once per optimizer step, in the layer's own layout, whose
+  transposed cast is MoK's normal one: the same bits as casting MoK's layout, with no transpose first. The backward
+  reads the forward's cast from the per-step cache, which holds both layouts beside the bf16 bank, 2 bytes a parameter
+  together. Measured as below, with the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's
+  shapes, 0.93×, 1.02× and 1.13× on the gpt-oss-like one and 0.84×, 1.01× and 1.21× on DeepSeek-V3's.
+- **Memory.** On one layer of DeepSeek-V3's experts at EP 4 (64 local experts, 5.3 GiB of bf16 banks per rank) the
+  MXFP8 cache adds 5.4 GiB. A step peaks at 23.0 GiB under MoK bf16 and 22.4 GiB under MoK MXFP8 at 4,096 tokens per
+  GPU, against 12.0 GiB on DeepEP bf16, and at 33.8, 35.1 and 16.5 GiB at 16,384: MoK's ring holds every routed
+  activation, and the bf16 path transposes every bank on each call.
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
   batch when the run evaluates and that is larger. Padding rows carry zero router weight and move no output or
@@ -306,8 +311,10 @@ replay and the family's shared expert stay on Halo's path.
   backward, `(hidden + 3 × intermediate) × 2` bytes a row per layer; the ring is twice a rank's even share,
   `2 × capacity × top_k` rows, and a rank routed more replays it.
 - **Costs Halo adds:** MoK always runs a shared expert, which Halo gives zero weights (about 1/top-k more expert FLOPs);
-  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`). The
-  layer still builds its DeepEP dispatcher, so `deep_ep` must import.
+  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`).
+- **Lifecycle.** The layer builds `MoKExperts` in place of its DeepEP dispatcher. Its first forward runs one zero token
+  forward and backward through MoK before the `ep.mok` span, so the transposes compile and MoK's kernels load outside
+  it, and `cleanup_ep` releases MoK's workspaces.
 - **Communication SMs** each way follow the expert width (`_mok_config`): 48 up to an intermediate size of 1024, 42 up
   to 2048, 36 past it, as narrow experts are communication-bound. MoK's default 40/28 is 4-14% slower on B300.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
@@ -673,7 +680,7 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `reject_custom_parallelism_under_accelerate` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`, non-reentrant under PP ([rule](../optimization/flash-attention.md#usage)). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
-| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `agree_lazy_load`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
+| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized (except gpt-oss's MXFP4 release, which the lazy loader decodes to bf16 while reading, `lazy_decodes_mxfp4` on its spec: [GPT-OSS](../models/gpt-oss.md#configs)), or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `agree_lazy_load`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |

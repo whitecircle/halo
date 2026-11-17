@@ -194,10 +194,11 @@ def test_the_fp32_peak_key_is_tf32_aware():
         torch.set_float32_matmul_precision(prev)
 
 
-def _lowp_ep_layer(quant_format: str | None, *, grouped: bool = True, native: bool = True) -> EPQwen3MoELayer:
+def _lowp_ep_layer(precision: str | None, *, grouped: bool = True, native: bool = True) -> EPQwen3MoELayer:
     layer = EPQwen3MoELayer.__new__(EPQwen3MoELayer)
     nn.Module.__init__(layer)
-    layer._lowp_quant_format, layer._use_grouped_mm, layer._lowp_native = quant_format, grouped, native
+    layer._use_grouped_mm = grouped
+    layer._lowp = precision and LowpSpec(precision=precision, backend="native" if native else "simulated")
     return layer
 
 
@@ -214,23 +215,21 @@ def test_simulated_compute_scores_against_the_run_dtype(monkeypatch, lowp_precis
     assert callback.gpu_peak_flops == 2250.0e12
 
 
-@pytest.mark.parametrize(
-    ("lowp_precision", "quant_format", "expected"), [("fp8", "mxfp8", "fp8"), ("mxfp4", "mxfp4", "fp4")]
-)
-def test_native_expert_gemms_score_against_the_recipe_peak(lowp_precision, quant_format, expected):
+@pytest.mark.parametrize(("lowp_precision", "expected"), [("fp8", "fp8"), ("mxfp4", "fp4")])
+def test_native_expert_gemms_score_against_the_recipe_peak(lowp_precision, expected):
     """A bf16 peak would charge a kernel issuing at 2-4x that rate, reading MFU 2-4x high."""
-    model = nn.ModuleList([_lowp_ep_layer(quant_format)])
+    model = nn.ModuleList([_lowp_ep_layer(lowp_precision)])
     assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), lowp_precision) == expected
 
 
 @pytest.mark.parametrize(
     ("lowp_precision", "model"),
     [
-        ("fp4", nn.ModuleList([_lowp_ep_layer("nvfp4")])),
+        ("fp4", nn.ModuleList([_lowp_ep_layer("fp4", native=False)])),
         ("fp8", nn.ModuleList([nn.Linear(2, 2)])),
-        ("fp8", nn.ModuleList([_lowp_ep_layer("mxfp8", grouped=False)])),
+        ("fp8", nn.ModuleList([_lowp_ep_layer("fp8", grouped=False)])),
         ("fp8", nn.ModuleList([_lowp_ep_layer(None)])),
-        ("fp8", nn.ModuleList([_lowp_ep_layer("mxfp8", native=False)])),
+        ("fp8", nn.ModuleList([_lowp_ep_layer("fp8", native=False)])),
         ("fp8", None),
     ],
     ids=[
@@ -254,7 +253,7 @@ def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, capl
     )
     with caplog.at_level(logging.WARNING, logger=efficiency.__name__):
         callback.on_init_end(
-            MockTrainingArgs(bf16=True), MockTrainerState(), None, model=nn.ModuleList([_lowp_ep_layer("mxfp8")])
+            MockTrainingArgs(bf16=True), MockTrainerState(), None, model=nn.ModuleList([_lowp_ep_layer("fp8")])
         )
 
     assert callback.gpu_peak_flops is None, "test premise: A100 has no fp8 peak"

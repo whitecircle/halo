@@ -392,6 +392,19 @@ def test_lowp_valid_combos_accepted():
         assert cfg.lowp == lowp
 
 
+def test_guard_lowp_native_with_expert_tp():
+    native = LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False)
+    _expect_reject(
+        "no test runs DeepGEMM on expert-TP shards",
+        lowp=native,
+        ep_size=4,
+        expert_tp_size=2,
+        world_size=8,
+        gpus_per_node=8,
+    )
+    create_config(lowp=LowpSpec(precision="fp8"), ep_size=4, expert_tp_size=2, world_size=8, gpus_per_node=8)
+
+
 def test_guard_lowp_native_fp8_backward_on_the_simulated_backend():
     _expect_reject(
         "needs lowp_backend='native'",

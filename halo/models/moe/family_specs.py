@@ -87,9 +87,14 @@ class MoEFamilySpec:
     # A composite transformers' CausalLM mapping does not name: ``text_only_model`` builds its text sub-config's class.
     text_only_layout: CompositeTextLayout | None = None
     supports_lazy_loading: bool = True
+    # The release stores its experts in MXFP4 (``<proj>_blocks`` / ``<proj>_scales``), which the lazy loaders decode
+    # to bf16 while reading (``Mxfp4Decode``). Any other checkpoint-native quantization takes ``from_pretrained``.
+    lazy_decodes_mxfp4: bool = False
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
+    # Its routed experts are the bias-free SwiGLU ``moe_backend: mok`` computes, proven by a GPU equivalence row.
+    supports_mok: bool = False
     # The special token that ends a rendered tool call, declared where it is no eos of the family's own
     # ``generation_config``, so a served turn runs past the call unless a request stops on it.
     tool_call_terminator: str | None = None
@@ -199,6 +204,7 @@ GPT_OSS = MoEFamilySpec(
     expert_weight_roots=INTERLEAVED_GLU_ROOTS,
     # Matmul convention [E, H, 2M] / [E, M, H]: nothing is transposed on the way out.
     fused_contraction_axis=1,
+    lazy_decodes_mxfp4=True,
 )
 INKLING = MoEFamilySpec(
     # The composite config spells it ``inkling_mm_model``; no bare ``inkling`` spelling exists.
@@ -266,6 +272,7 @@ NEMOTRON_H = MoEFamilySpec(
 QWEN3 = MoEFamilySpec(
     model_types=("qwen3_moe",),
     expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
+    supports_mok=True,
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(
@@ -273,6 +280,7 @@ QWEN3_5 = MoEFamilySpec(
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
     fp8_rollout_refusal=None,
+    supports_mok=True,
 )
 # Qwen3.5-MoE's block with a router that renormalizes only under ``norm_topk_prob``; the hub stores the experts
 # one tensor per expert, which transformers fuses on load.

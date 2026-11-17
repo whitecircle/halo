@@ -354,8 +354,8 @@ Enabled by default where supported:
 
 - **Precision and optimizers.** `AdamWBF16` with stochastic rounding keeps weights and optimizer
   state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
-  supported. FP8/FP4 QAT runs on MoE experts and dense MLPs through a fake-quant path, with an opt-in
-  DeepGEMM forward; `quantize-to-lowp` writes block-scaled mxfp8/mxfp4/nvfp4 weights.
+  supported. FP8/FP4 QAT runs on MoE experts and dense MLPs through a fake-quant path, with opt-in
+  native DeepGEMM expert kernels; `quantize-to-lowp` writes block-scaled mxfp8/mxfp4/nvfp4 weights.
 
 - **Memory and PEFT.** Padding-free packing with `cu_seq_lens`, SFT tree packing, LoRA, and QLoRA. The
   [Qwen3-4B QLoRA example](examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml) peaks at 7.9 GiB (batch 1, 4k)
