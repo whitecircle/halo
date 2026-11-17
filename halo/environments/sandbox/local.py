@@ -283,8 +283,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
         try:
             for name, content in files.items():
-                self._write_member(workspace, name, content)
-            self._write_member(workspace, spec.source_name, code)
+                workspace.write(name, utf8_encodable(content))
+            workspace.write(spec.source_name, utf8_encodable(code))
         except (SessionPathError, PermissionError) as exc:
             return SandboxResult(stderr=f"working directory tampered: {exc}", returncode=TAMPERED_WORKDIR_RETURNCODE)
         return None
@@ -338,10 +338,6 @@ class LocalSubprocessSandbox(SandboxExecutor):
             timed_out=timed_out or returncode == -signal.SIGXCPU,
         )
 
-    def _write_member(self, workspace: Workspace, name: str, content: str) -> None:
-        # Model-written content can hold a lone surrogate.
-        workspace.write(name, utf8_encodable(content))
-
 
 class _LocalSession(SandboxSession):
     """Persistent working directory: source and build survive between turns, and a compiled program reruns from its
@@ -350,12 +346,15 @@ class _LocalSession(SandboxSession):
 
     def __init__(self, workspace: Workspace, executor: LocalSubprocessSandbox):
         self.workspace = workspace
-        self.workdir = workspace.path
         self._executor = executor
         # Build key and compile verdict (None = built, runnable).
         self._build: tuple[_BuildKey, SandboxResult | None] | None = None
         # What reset_to_prepared keeps; typed so an entry the program swapped for a link is dropped.
         self._prepared_entries: set[Entry] | None = None
+
+    @property
+    def workdir(self) -> str:
+        return self.workspace.path
 
     def run(
         self,
@@ -431,7 +430,7 @@ class _LocalSession(SandboxSession):
         self._require_intact()
         self._build = None
         self._prepared_entries = None
-        self._executor._write_member(self.workspace, path, content)
+        self.workspace.write(path, utf8_encodable(content))
 
     def read_file(self, path: str) -> str | None:
         """The file's text, or ``None`` when ``path`` is not a regular file, so a planted link never carries a host
