@@ -32,6 +32,8 @@ def reject_backbone_without_image_inputs(model: torch.nn.Module) -> None:
 
 
 class HiddenStateForwardMixin:
+    """Read a model's last hidden state in place of its logits, inside the wrapper's forward."""
+
     @property
     def _chunked_forward_redirection(self) -> _ForwardRedirection:
         """Reuse TRL's ``_forward_redirection`` if built (only when ``use_liger_kernel``), else make one. A call

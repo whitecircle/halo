@@ -182,11 +182,11 @@ class DistributedTeacherDistillationTrainer(
         )
         reject_topk_covering_vocab(self.args.distill_topk, self._vocab_width, self.model)
         if self.args.use_chunked_distillation_loss:
-            self._verify_chunkable_loss()
+            self._reject_unchunkable_loss()
         if is_global_main_process():
             logger.info(f"Teacher model moved to {device} and set to eval mode")
 
-    def _verify_chunkable_loss(self) -> None:
+    def _reject_unchunkable_loss(self) -> None:
         """Raise where ``use_chunked_distillation_loss`` cannot reproduce the full-logits loss, before the first step.
         Reads module types and configs only, so every rank reaches the same verdict."""
         if self.compute_metrics is not None or self.preprocess_logits_for_metrics is not None:

@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """``use_chunked_distillation_loss`` against the full-logits path of the same trainer, on tiny real models: the loss and
-every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head``, the families' head transforms and
-a composite's image rows."""
+every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head``, a tied head, a vocab-parallel TP
+head, the families' head transforms and a composite's image rows."""
 
 import dataclasses
+import json
 import types
 
 import pytest
@@ -11,16 +12,24 @@ import torch
 import transformers
 from peft import LoraConfig, get_peft_model
 from torch import nn
+from torch.distributed.tensor import DTensor
+from transformers import DistributedConfig
 
 import halo.kernels.logprobs as logprob_kernels
 import halo.trainers.distillation.teacher_distillation as teacher_distillation
 from halo.configs.distillation import TeacherDistillationConfig
+from halo.distributed.fsdp import apply_fsdp2_for_tp
+from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
+from halo.distributed.tensor_parallel import hf_plan
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.finalization import finalize_loaded_model
+from halo.model_loading.parallel import tp as tp_loading
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.head_projection import resolve_output_embedding
 from halo.trainers.hidden_state_forward import reject_backbone_without_image_inputs
 from tests.common.composite_rows import composite_model_and_rows
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_INKLING_CONFIG, TINY_MINICPM3_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.tiny_models import (
     TINY_DENSE_ATTENTION_FAMILIES,
@@ -28,6 +37,7 @@ from tests.common.tiny_models import (
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
     TinyFamily,
+    build_tiny_family_checkpoint,
     tiny_family_model,
 )
 
@@ -35,6 +45,8 @@ TEMPERATURE = 2.0
 # Several chunks per batch and a remainder: 22 supervised positions at 4 rows a chunk.
 CHUNK_ROWS = 4
 TINY = {"num_hidden_layers": 2}
+TIED = {**TINY, "tie_word_embeddings": True}
+TP = 2
 MINICPM3 = TinyFamily(
     lambda overrides: transformers.MiniCPM3ForCausalLM(
         transformers.MiniCPM3Config(**{**TINY_MINICPM3_CONFIG, **overrides})
@@ -195,6 +207,81 @@ def test_a_head_transform_vocabulary_cut_matches_the_full_logits_path():
     _assert_paths_agree(trainer, _batch(cut["unpadded_vocab_size"], RAGGED), rtol=1e-4)
 
 
+def test_a_tied_head_matches_the_full_logits_path():
+    """The head and the input embedding share one parameter, whose gradient sums both uses on either path."""
+    student = _student(TINY_DENSE_FAMILY, peft=False, overrides={"tie_word_embeddings": True})
+    assert student.get_output_embeddings().weight is student.get_input_embeddings().weight
+    trainer = _trainer(student, _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5)
+    batch = _batch(student.config.vocab_size, RAGGED)
+    grads = _assert_paths_agree(trainer, batch)
+    shared = grads["model.embed_tokens.weight"]
+    # Rows of tokens the batch never feeds take their gradient from the head alone.
+    unseen = torch.ones(student.config.vocab_size, dtype=torch.bool)
+    unseen[batch["input_ids"].unique()] = False
+    assert shared[unseen].abs().sum(-1).gt(0).all()
+
+
+def _tp_worker(rank: int, checkpoint: str, dp: int, out_path: str) -> None:
+    """Both paths on a student loaded under HF-native TP (``dp > 1``: also FSDP2-wrapped), its tied head one
+    vocab-parallel DTensor. Writes the loss and each parameter's relative gradient error between the paths."""
+    logprob_kernels.LOGIT_CHUNK_ELEMENTS = CHUNK_ROWS * TINY_QWEN3_CONFIG["vocab_size"]
+    mesh = build_dp_tp_mesh(TP, dp, device_type="cpu")
+    with tp_loading._toolkit_tp_mesh(mesh, tp_submesh(mesh)):
+        student = TINY_DENSE_FAMILY.load_class.from_pretrained(
+            checkpoint, distributed_config=DistributedConfig(tp_plan="auto", tp_size=TP), dtype=torch.float64
+        )
+    finalize_loaded_model(student, weights_dir=checkpoint)
+    hf_plan.finish_hf_tp_load(student, mesh, TP)
+    head = student.get_output_embeddings().weight
+    tied = head is student.get_input_embeddings().weight
+    vocab_parallel = isinstance(head, DTensor) and head.to_local().size(0) < head.size(0)
+    if dp > 1:
+        apply_fsdp2_for_tp(student, mesh, compute_dtype=torch.float64, fp32_reduce=False, dp_size=dp)
+    trainer = _trainer(student.train(), _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5)
+    batch = _batch(TINY_QWEN3_CONFIG["vocab_size"], RAGGED)
+
+    def full(grads):
+        return {name: grad.full_tensor() if isinstance(grad, DTensor) else grad for name, grad in grads.items()}
+
+    full_loss, full_grads, _ = _step(trainer, batch, chunked=False)
+    loss, grads, _ = _step(trainer, batch, chunked=True)
+    full_grads, grads = full(full_grads), full(grads)
+    errors = {
+        name: float((grads[name] - full_grads[name]).norm() / full_grads[name].norm().clamp_min(1e-12))
+        for name in full_grads
+    }
+    result = {
+        "tied": tied,
+        "vocab_parallel": vocab_parallel,
+        "loss": float(loss),
+        "full_loss": float(full_loss),
+        "gradients": sorted(grads),
+        "full_gradients": sorted(full_grads),
+        "errors": errors,
+    }
+    with open(f"{out_path}.{rank}", "w") as fh:
+        json.dump(result, fh)
+
+
+@pytest.mark.parametrize("dp", [1, 2], ids=["tp2", "dp2_tp2"])
+def test_a_vocab_parallel_tp_head_matches_the_full_logits_path(dp, tmp_path):
+    """Under HF-native TP the tied head is sharded on the vocabulary, and the projection reads it whole: a local shard,
+    or a gradient summed over the TP group in place of sliced, moves the loss or the shared gradient."""
+    checkpoint = str(tmp_path / "student")
+    build_tiny_family_checkpoint(TINY_DENSE_FAMILY, checkpoint, overrides=TIED)
+    out = str(tmp_path / "result")
+    run_gloo_ranks(_tp_worker, dp * TP, checkpoint, dp, out)
+    for rank in range(dp * TP):
+        with open(f"{out}.{rank}") as fh:
+            result = json.load(fh)
+        assert result["tied"] and result["vocab_parallel"], f"rank {rank}: the head is not a vocab-parallel tie"
+        assert result["gradients"] == result["full_gradients"], f"rank {rank}"
+        assert "model.embed_tokens.weight" in result["errors"]
+        assert result["loss"] == pytest.approx(result["full_loss"], rel=FP32_RTOL), f"rank {rank}"
+        worst = {name: error for name, error in result["errors"].items() if error >= 10 * FP32_RTOL}
+        assert not worst, f"rank {rank}: relative gradient errors {worst}"
+
+
 def test_a_row_without_supervision_and_padded_vocabulary_rows_match():
     """The teacher carries 5 embedding-padding rows past the student's, cut by the compared width."""
     student = _student(TINY_DENSE_FAMILY, peft=True)
@@ -312,9 +399,9 @@ def test_metrics_reading_evaluation_logits_are_refused():
     trainer = _trainer(_student(TINY_DENSE_FAMILY, peft=True), _teacher(TINY_DENSE_FAMILY))
     trainer.compute_metrics, trainer.preprocess_logits_for_metrics = (lambda prediction: {}), None
     with pytest.raises(ValueError, match="compute_metrics / preprocess_logits_for_metrics"):
-        trainer._verify_chunkable_loss()
+        trainer._reject_unchunkable_loss()
     trainer.compute_metrics = None
-    trainer._verify_chunkable_loss()
+    trainer._reject_unchunkable_loss()
 
 
 if __name__ == "__main__":

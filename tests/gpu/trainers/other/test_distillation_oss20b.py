@@ -1,9 +1,11 @@
 #!/usr/bin/env python
-"""Teacher distillation of GPT-OSS-20B into itself under every parallel layout of the student.
+"""Teacher distillation of GPT-OSS-20B into itself under every parallel layout of the student, on either loss path
+(``--chunked``).
 
 At step 1 teacher and student compute one function, so the KL is zero up to kernel noise, and a mis-combined expert or
 mis-sharded projection shows far above it. Both keep pretrained sinks live: neutralized, the model is far off its
-trained function, and the same noise reaches half a nat per token.
+trained function, and the same noise reaches half a nat per token. After training, the last batch scores alike on both
+loss paths.
 """
 
 import argparse
@@ -31,6 +33,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
+from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
 
 MODEL_NAME = GPT_OSS_20B
@@ -47,6 +50,8 @@ SEED = 42
 STEP1_KL_ATOL = 0.1
 # Past the live-sink noise, so a student whose updates never landed fails it.
 KL_MOVED_MIN = 0.05
+# The two paths differ only in the head GEMM's shape and the chunked reduction order.
+LOSS_PATHS_REL_TOL = TOL.exact_objective_rel
 # Live and frozen, on both models.
 RESET_SINKS = False
 # Resolved per GPU at run time (:func:`sink_carrying_attention`).
@@ -66,6 +71,7 @@ MODES = {
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=sorted(MODES), required=True)
 parser.add_argument("--gpus-per-node", type=int, default=0, help="simulated NVLink domain width (0: the launch's)")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
 ARGS = parser.parse_args()
 WORLD_SIZE, MODE_FIELDS, ATTN_IMPL = MODES[ARGS.mode]
 FIELDS = {**MODE_FIELDS, **({"gpus_per_node": ARGS.gpus_per_node} if ARGS.gpus_per_node else {})}
@@ -119,7 +125,7 @@ def load_teacher(config: TeacherDistillationConfig, attn_implementation: str, lo
     )
 
 
-@gpu_test_main(exact_world_size=WORLD_SIZE, prefix=f"distill_oss20b_{ARGS.mode}")
+@gpu_test_main(exact_world_size=WORLD_SIZE, prefix=f"distill_oss20b_{ARGS.mode}{'_chunked' if ARGS.chunked else ''}")
 def run(ctx) -> dict:
     pc = ParallelismConfig(**FIELDS)
     attn_implementation = sink_carrying_attention(ATTN_IMPL)
@@ -162,6 +168,7 @@ def run(ctx) -> dict:
         distill_loss="kl_divergence",
         distill_temperature=1.0,
         distill_alpha=0.5,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
     teacher_model = load_teacher(config, attn_implementation, ctx.local_rank)
     teacher_function = (stamped_sinks_policy(teacher_model), effective_attn_implementation(teacher_model.config))
@@ -183,7 +190,16 @@ def run(ctx) -> dict:
     expected_function = (SinksPolicy.LIVE, attn_implementation)
     checks["teacher_runs_the_student_sinks_and_kernel"] = teacher_function == student_function == expected_function
 
+    last_batch: dict = {}
+    real_compute_loss = trainer.compute_loss
+
+    def recording_compute_loss(model, inputs, *args, **kwargs):
+        last_batch.update({k: v.detach().clone() for k, v in inputs.items() if torch.is_tensor(v)})
+        return real_compute_loss(model, inputs, *args, **kwargs)
+
+    trainer.compute_loss = recording_compute_loss
     result = trainer.train()
+    trainer.compute_loss = real_compute_loss
     losses = step_losses(trainer)
     kl = [float(e["distillation_loss"]) for e in trainer.state.log_history if "distillation_loss" in e]
     log(f"step losses {losses}; distillation (KL) per step {kl}")
@@ -193,6 +209,16 @@ def run(ctx) -> dict:
     checks["step1_kl_is_the_identical_teacher_zero"] = bool(kl) and abs(kl[0]) < STEP1_KL_ATOL
     checks["kl_moved_off_zero_as_the_student_trained"] = len(kl) > 1 and kl[-1] > max(kl[0], 0.0) + KL_MOVED_MIN
     checks["teacher_still_frozen"] = not any(p.requires_grad for p in trainer.teacher_model.parameters())
+    path_losses = {}
+    with torch.no_grad():
+        for chunked in (False, True):
+            trainer.args.use_chunked_distillation_loss = chunked
+            path_losses[chunked] = float(trainer.compute_loss(trainer.model, dict(last_batch)))
+    trainer.args.use_chunked_distillation_loss = ARGS.chunked
+    log(f"last batch: full-logits loss {path_losses[False]:.6f}, chunked loss {path_losses[True]:.6f}")
+    checks["chunked_loss_matches_the_full_logits_loss"] = abs(path_losses[True] - path_losses[False]) < (
+        LOSS_PATHS_REL_TOL * max(1.0, abs(path_losses[False]))
+    )
     checks |= dp_layout_checks(
         trainer.model,
         FIELDS,
