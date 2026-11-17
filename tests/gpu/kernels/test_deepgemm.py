@@ -174,7 +174,7 @@ import os, sys, torch
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 
-LOWP = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
+LOWP = LowpSpec(precision=sys.argv[3], backend="native", backward_precision=sys.argv[4])
 
 def compiled():
     return sum(len(dirs) for _, dirs, _ in os.walk(os.environ["DG_JIT_CACHE_DIR"]))
@@ -200,10 +200,10 @@ for rows in (3, 129, 1024, 2048, 4096, 8192):
 """
 
 
-def _wgrad_compiles(mode: str, w_dtype: str) -> dict[int, int]:
+def _wgrad_compiles(mode: str, w_dtype: str, precision: str = "fp8", backward: str = "fp8") -> dict[int, int]:
     with tempfile.TemporaryDirectory() as cache:
         out = subprocess.run(
-            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype],
+            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype, precision, backward],
             env={**os.environ, "DG_JIT_CACHE_DIR": cache},
             capture_output=True,
             text=True,
@@ -223,6 +223,10 @@ def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
         warm = _wgrad_compiles("warm", w_dtype)
         assert not any(warm.values()), f"{w_dtype}: a step compiled a kernel after the warm-up, {warm}"
         print(f"  {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
+    # mxfp4's backward is bf16: no weight-gradient kernel, so nothing to warm.
+    cold = _wgrad_compiles("cold", "bfloat16", "mxfp4", "bf16")
+    assert not any(cold.values()), f"mxfp4: a step past the first compiled a kernel, {cold}"
+    print("  mxfp4 compiles nothing past the first step — OK")
 
 
 if __name__ == "__main__":
