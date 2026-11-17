@@ -1,6 +1,9 @@
 # White Circle
 
-A `whitecircle` term checks each completion, in its conversation, against the policies of a White Circle environment through the public API (`POST /api/events`), on both arms. Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
+A `whitecircle` reward term scores each completion with the White Circle API (`POST /api/events`): Halo sends the
+completion and its conversation, the API returns a verdict for each policy of a White Circle environment (flagged or
+not flagged), and Halo converts the verdicts into a score in `[0, 1]`. The term is available in online GRPO,
+environmental GRPO and offline reward scoring. Fields shared by all reward terms, `on_error` and the launch probe: [Reward Terms](README.md).
 
 ```yaml
 rewards:
@@ -9,69 +12,103 @@ rewards:
     name: policy
     weight: 0.5
     environment_id: your_environment_id
-    policies: [policy_a, policy_b]    # optional: read only these policy ids
+    policies: [policy_a, policy_b]    # optional: score only these policy ids
 ```
 
 ```bash
 WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
 ```
 
-The recipe trains Qwen3-4B on GSM8K against a vLLM server started as in [Online GRPO](../online.md); set its `environment_id` first.
+This recipe trains Qwen3-4B on GSM8K with a vLLM server started as in [Online GRPO](../online.md); set its
+`environment_id` first. `halo run create-whitecircle-policies` creates the policies of a JSON file in an environment
+and prints the matching `rewards:` block; `human-docs/cookbooks/halo-whitecircle-cookbook.md` walks through a full run.
 
 ## Score
 
-The score reads only the policy's own events: the completion's assistant text and its calls' arguments. A flagged prompt or tool result costs nothing.
+Only the verdicts on the completion's own events count: its assistant text and the arguments of its tool calls. A
+flagged verdict on the prompt or on a tool output does not lower the score.
 
-- No `policies`: 1 when no event of the completion is flagged, else 0.
-- `policies` listed: the fraction of them that no event of the completion violated. Other policies are ignored.
-- A completion with no text and no call has nothing to check and scores 1, with no request.
+| Term lists | Score | Flagged (`whitecircle/<name>/flagged`) |
+|---|---|---|
+| Neither `policies` nor `checklist` | 1 if no verdict on the completion is flagged, else 0 | Score is 0 |
+| `policies` | Fraction of the listed policies with no flagged verdict on the completion | Score is below 1 |
+| `checklist` | 1 minus the confidence; confidence = fraction of the checklist's items with a flagged verdict on the completion | Confidence is 0.5 or more |
+
+- With `policies` or `checklist`, verdicts of policies outside the list do not affect the score, so several terms
+  can share one environment, each with its own policies.
+- A term lists `policies` or `checklist`, not both.
+- A completion with no text and no tool call scores 1, and Halo sends no request.
+
+### Checklist
+
+A checklist is one assessment split into items. Each item is a White Circle policy; the term's score and metrics
+use one confidence, not one verdict per item. In the policy file of `halo run create-whitecircle-policies`, a checklist is an
+object with `checklist` (its name), `allowed_content` (added to every item) and `items` (each with `name`,
+`flagged_content` and `allowed_content`). Each item's policy is named `<checklist> · <item name>`. The policy name is
+part of the input the White Circle API judges with, so the item name states what the item checks. Write each item
+for a separate fault, so that one fault matches one item.
 
 ## Request
 
-- Each completion is one request under a fresh `external_session_id`: the prompt turns, then the completion's, as events in order, so each event is checked against the ones before it and never against another completion's conversation.
-- The `final` view sends the prompt and one assistant message holding the final answer. `full` sends every turn: an assistant call is a `tool` event with its `arguments`, a tool result a `tool` event with its `output`. `digest` is refused.
-- A conversation over 50 events (the API's cap) goes in consecutive requests of up to 50 under the same session.
-- Headers: `Authorization: Bearer $WHITECIRCLE_API_KEY` and `whitecircle-version: 2026-06-01`. The key is read from the environment when the client is built and is never logged; with it unset, building the scorer raises.
+- Halo sends one request per completion under a new `external_session_id`: the prompt turns and then the completion
+  turns, as events in order. The API evaluates each event with the events before it as context, and never with the
+  conversation of another completion.
+- `view: final` sends the prompt and one assistant message with the final answer. `view: full` sends every turn: an
+  assistant tool call becomes a `tool` event with its `arguments`, a tool output a `tool` event with its `output`.
+  `view: digest` raises an error.
+- A conversation of more than 50 events (the API limit per request) is sent in consecutive requests of at most 50
+  events under the same session.
+- Headers: `Authorization: Bearer $WHITECIRCLE_API_KEY` and `whitecircle-version: 2026-06-01`. Halo reads the key
+  from the environment variable when it creates the HTTP client and never logs it. If the variable is unset,
+  creating the term's scorer raises an error.
 
 ## Options
 
-| Option | Default | Effect |
+| Option | Default | Meaning |
 |---|---|---|
 | `environment_id` | — | The White Circle environment whose policies apply; required |
-| `policies` | `[]` | Policy ids the score reads ([Score](#score)) |
+| `policies` | `[]` | Policy ids to score ([Score](#score)) |
+| `checklist` | `[]` | Policy ids of a checklist's items ([Checklist](#checklist)) |
 | `region` | `us` | `us` (`https://us.whitecircle.com`) or `eu` (`https://eu.whitecircle.com`) |
 | `view` | `final` | `final` or `full` ([Request](#request)) |
-| `request_timeout` | `30` s | Per attempt |
-| `max_retries`, `retry_wait` | `4`, `1.0` s | Retries of one request and its first backoff ([Failures](#failures)) |
-| `max_concurrency` | `8` | Completions in flight per scorer (per rank or actor) |
-| `on_error` | `invalid` | [Outages](README.md#outages) |
+| `request_timeout` | `30` s | Timeout of one request attempt |
+| `max_retries`, `retry_wait` | `4`, `1.0` s | Number of retries of one request, and the wait before the first retry ([Failures](#failures)) |
+| `max_concurrency` | `8` | Maximum completions with a request in progress, per scorer (one scorer per rank or Ray actor) |
+| `on_error` | `invalid` | Reward of a completion without a score ([Outages](README.md#outages)) |
 
 ## Failures
 
-A timeout, a transport error, a 408, a 429 or a 5xx is retried up to `max_retries` times, after the `Retry-After` seconds the server sent (capped at 60) or `retry_wait × 2^attempt`. Any other error status (a 400 for a malformed request, a 401 or 403 for the key) fails at once.
+Halo retries a timeout, a transport error, and an HTTP 408, 429 or 5xx up to `max_retries` times. The wait before
+each retry is the `Retry-After` value of the response (at most 60 s), or else `retry_wait × 2^attempt`. Any other
+error status, such as 400 for a malformed request or 401 or 403 for the key, fails immediately.
 
-A check fails, and the completion gets no verdict, when:
+A completion gets no score when:
 
-- the retries run out or the API answers an error status;
-- an event of the completion comes back without a verdict (a status other than `completed`, or no `flagged`);
-- no policy was checked on any event of the completion: the API answers an event no condition selected a policy for as completed and unflagged, with a `note`, which the error carries;
-- a listed policy was checked on none of the completion's events.
+- the retries are used up, or the API returns an error status;
+- an event of the completion has no verdict (a status other than `completed`, or no `flagged` field);
+- the API returns no policy verdict for any event of the completion. For an event that no condition assigns a
+  policy to, the API returns `completed` and not flagged, with a `note`; Halo includes the note in the error;
+- the API returns no verdict on the completion for a listed policy or checklist item.
 
-Each failure logs a warning and `whitecircle/<name>/scored` 0, and `on_error` prices it. The launch probe checks a one-line conversation, so a bad key, an unknown environment, an environment that selects no policy for an assistant message, or a listed policy id no condition selects fails the launch.
+Each failure logs a warning and `whitecircle/<name>/scored` 0, and `on_error` sets the reward. The launch probe sends
+a one-line conversation, so the launch fails on a wrong key, an unknown environment, an environment that assigns no
+policy to an assistant message, or a listed policy id that no condition assigns.
 
 ## Metrics
 
 | Key | Meaning |
 |---|---|
-| `whitecircle/<name>/scored` | Share of completions with a verdict |
-| `whitecircle/<name>/flagged` | An event of the completion was flagged (1/0) |
-| `whitecircle/<name>/<policy id>` | A listed policy was violated (1/0) |
+| `whitecircle/<name>/scored` | Fraction of completions with a score |
+| `whitecircle/<name>/flagged` | 1 when the completion counts as flagged ([Score](#score)), else 0 |
+| `whitecircle/<name>/<policy id>` | With `policies`: 1 when this policy's verdict on the completion is flagged, else 0 |
+| `whitecircle/<name>/confidence` | With `checklist`: the confidence ([Score](#score)) |
 
-The environment arm saves the names of the violated policies with the trajectory (`reward_details`).
+In environmental GRPO, Halo saves the names of the policies with a flagged verdict in the trajectory (`reward_details`).
 
 ## Offline GRPO
 
-`score_offline_grpo.py` writes an [offline-GRPO](../offline.md) dataset's `rewards` with the `rewards` list of any training YAML, the recipe above included:
+`halo run score-offline-grpo` writes the `rewards` of an [offline GRPO](../offline.md) dataset from the `rewards`
+list of a training YAML, such as the recipe above:
 
 ```bash
 WHITECIRCLE_API_KEY=wc-... halo run score-offline-grpo \
@@ -79,6 +116,10 @@ WHITECIRCLE_API_KEY=wc-... halo run score-offline-grpo \
     --input rows.jsonl --output scored.jsonl --answer_field answer
 ```
 
-- Each row carries `prompt` and `completions`; `--answer_field` names the ground truth an `accuracy` term or a judge reads.
-- A completion's reward is the sum of `weight × score ^ exponent` over the terms, through the same reward functions as the online arm.
-- Every external term is probed first. A completion any term left without a verdict is dropped and counted, not written with a forced reward (under `on_error: neutral` the term prices 0 and the completion stays); a row left with none is dropped.
+- Each row has `prompt` and `completions`. `--answer_field` names the ground-truth column for an `accuracy` term or
+  a judge term.
+- The reward of a completion is the sum of `weight × score ^ exponent` over the terms, computed by the same reward
+  functions as in online GRPO.
+- Halo probes every external term first. A completion that any term cannot score is dropped and counted, not
+  written with a substitute reward; with `on_error: neutral` that term contributes 0 and the completion is kept. A
+  row with no completions left is dropped.
