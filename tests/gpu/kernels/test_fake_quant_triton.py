@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """Fused Triton fake-quant fast paths (mxfp8, mxfp4, nvfp4), verifying that
+- nvfp4's global scale matches eager's on every positive fp32 tensor amax and NaN,
 - each is bit-identical to the eager quantizer (``_block_round_trip``) on CUDA on adversarial inputs: exact
   powers of two, the format-max scale boundary, zeros, -0.0, subnormals, overflow, NaN, inf, rounding
   midpoints, an fp32 one-ulp scale edge, a near-subnormal scale, for mxfp4 every e2m1 level and midpoint of
   both signs at forty scales, and for nvfp4 the same grid over 16-wide blocks, the e4m3 block-scale edges,
-  tensor maxima at and past a global-scale boundary, a lone maximum in the last block and fp32 maxima where
-  the reciprocal multiply and true division disagree,
+  tensor maxima at and past a global-scale boundary, a lone maximum in the last block, fp32 maxima where
+  the reciprocal multiply and true division disagree, and a maximum whose global scale is CUDA's inexact
+  ``exp2(-127)``,
 - ``fake_quant`` routes CUDA / contiguous / last-axis through them and everything else to eager, and to
   eager on GPUs too old for a kernel's types (mxfp8 and nvfp4 below SM 8.9, mxfp4 below SM 8.0),
 - the cached nvfp4 expert-weight round trip on axis 1 goes through its kernel, bit-exact,
@@ -18,6 +20,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
 
 import torch
 import triton
+import triton.language as tl
 
 import halo.kernels.lowp.fake_quant_triton as fq
 import halo.kernels.lowp.quantization as q
@@ -159,6 +162,20 @@ def _nvfp4_cases():
         t = amax * (2.0 ** (-torch.arange(64, device=DEV, dtype=torch.float32) / 4)).reshape(4, 16)
         t[1::2] *= -1.0
         yield f"global_recip_edge_{bits:#010x}", t
+    yield _EXP2_MINUS_127_CASE, _exp2_minus_127_case()
+
+
+# A tensor amax in (2688 x 2^-128, 2688 x 2^-127], about (7.9e-36, 1.58e-35], puts the global scale on exp2(-127), the
+# one exponent where CUDA's exp2 is not an exact power of two and the kernel copies it. One ulp of global scale rarely
+# moves a dequantized element, so this case covers the output path there, and the sweep below pins the scale's bits.
+_EXP2_MINUS_127_CASE = "global_exp2_minus_127"
+
+
+def _exp2_minus_127_case() -> torch.Tensor:
+    amax = torch.tensor(2688.0 * 2.0**-127.5, device=DEV)
+    t = amax * (2.0 ** (-torch.arange(64, device=DEV, dtype=torch.float32) / 4)).reshape(4, 16)
+    t[1::2] *= -1.0
+    return t
 
 
 def _assert_bits_equal(out, ref, name):
@@ -168,6 +185,49 @@ def _assert_bits_equal(out, ref, name):
     # indexing would build int64 indices several GiB large for the 32x2880x2880 case.
     flipped = (torch.signbit(out) != torch.signbit(ref)) & ~torch.isnan(ref)
     assert not flipped.any(), f"{name}: sign bit differs"
+
+
+@triton.jit
+def _global_scale_probe(
+    a_ptr, out_ptr, n, FMAX: tl.constexpr, SMAX: tl.constexpr, TINY: tl.constexpr, B: tl.constexpr
+):
+    offs = tl.program_id(0).to(tl.int64) * B + tl.arange(0, B)
+    a = tl.load(a_ptr + offs, mask=offs < n, other=0.0)
+    tl.store(out_ptr + offs, fq._nvfp4_global_scale(a, FMAX, SMAX, TINY), mask=offs < n)
+
+
+def _kernel_global_scale(amax: torch.Tensor) -> torch.Tensor:
+    out = torch.empty_like(amax)
+    grid = (triton.cdiv(amax.numel(), 1024),)
+    _global_scale_probe[grid](amax, out, amax.numel(), FMAX=E2M1_MAX, SMAX=q.E4M3_MAX, TINY=_AMAX_FLOOR, B=1024)
+    return out
+
+
+def _eager_global_scale(amax: torch.Tensor) -> torch.Tensor:
+    """``_nvfp4_core``'s global scale, elementwise: the CUDA kernels it runs on its 0-d tensor amax."""
+    return torch.exp2(torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / q._NVFP4_GLOBAL_SCALE_DIVISOR)))
+
+
+def test_nvfp4_global_scale_matches_eager_on_every_fp32_amax():
+    """The kernel's global scale against eager's on CUDA, bit for bit, for every positive fp32 tensor amax (inf
+    included) and a NaN. Whole tensors cannot pin it: one ulp of global scale, as at CUDA's inexact ``exp2(-127)``
+    (``0x3FFFFF``), rarely moves a dequantized element, so only the scale's own bits show a kernel that builds the exact
+    power of two there."""
+    chunk = 1 << 26
+    for lo in range(0, 0x7F800001, chunk):
+        hi = min(lo + chunk, 0x7F800001)
+        amax = torch.arange(lo, hi, device=DEV, dtype=torch.int64).to(torch.int32).view(torch.float32)
+        differ = _eager_global_scale(amax).view(torch.int32) != _kernel_global_scale(amax).view(torch.int32)
+        if differ.any():
+            first = int(amax[differ.nonzero()[0, 0]].view(torch.int32))
+            raise AssertionError(
+                f"{int(differ.sum())} amax values in [{lo:#010x}, {hi:#010x}) differ, first {first:#010x}"
+            )
+    nan = torch.tensor([float("nan")], device=DEV)
+    assert _eager_global_scale(nan).isnan().item() and _kernel_global_scale(nan).isnan().item()
+    minus_127 = _eager_global_scale(_exp2_minus_127_case().abs().amax().reshape(1))
+    assert minus_127.view(torch.int32).item() == 0x003FFFFF, "the exp2(-127) case no longer lands on CUDA's 0x3FFFFF"
+    print("  nvfp4 global scale: 2,139,095,041 fp32 maxima and NaN match eager — OK")
 
 
 def _kernel_supported() -> bool:
@@ -382,6 +442,7 @@ def test_ste_backward():
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "bit_exact_against_eager", test_bit_exact_against_eager)
+    record_check(checks, "nvfp4_global_scale_sweep", test_nvfp4_global_scale_matches_eager_on_every_fp32_amax)
     record_check(checks, "routing", test_routing)
     record_check(checks, "pre_sm89_falls_back", test_pre_sm89_falls_back)
     record_check(checks, "nvfp4_weight_round_trip", test_nvfp4_weight_round_trip_through_the_kernel)

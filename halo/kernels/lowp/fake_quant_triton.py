@@ -93,6 +93,8 @@ def _nvfp4_global_scale(amax, FMAX: tl.constexpr, SMAX: tl.constexpr, TINY: tl.c
     is subnormal below a tensor amax of about 3.2e-35, which libdevice's ``log2`` handles as PyTorch's does."""
     floored = tl.where(amax != amax, amax, tl.maximum(amax, TINY))
     y = _mul_rn(floored, tl.math.div_rn(tl.full([], 1.0, tl.float32), SMAX * FMAX))
+    # CUDA's inexact exp2(-127) stays, unlike an MX scale, which is the divisor itself and can be exact: nvfp4 divides by
+    # the e4m3 block scale times this one, so only copying CUDA keeps the kernel bit-identical to eager.
     return _cuda_exp2_of_integer(libdevice.ceil(libdevice.log2(y)))
 
 
