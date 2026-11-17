@@ -11,9 +11,10 @@ from dataclasses import dataclass
 
 import torch
 from torch._dynamo.exc import TorchDynamoException
+from triton.runtime.jit import JITFunction
 
 from halo.env import env_flag
-from halo.kernels.lowp.fake_quant_triton import fake_quant_mxfp8_triton
+from halo.kernels.lowp.fake_quant_triton import fake_quant_triton, mxfp4_fake_quant_kernel, mxfp8_fake_quant_kernel
 from halo.kernels.lowp.spec import QuantFormat
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,30 @@ _NVFP4_GLOBAL_SCALE_DIVISOR = E4M3_MAX * E2M1_MAX
 FORMAT_BLOCK_SIZE: dict[QuantFormat, int] = {"mxfp8": 32, "mxfp4": 32, "nvfp4": 16}
 # e8m0 power-of-two block scales (MX) or e4m3 ones (NVFP4).
 _POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": False}
+# Largest element magnitude per format, which a block's amax scales to. The eager cores and the fused kernels read it.
+_ELEMENT_MAX: dict[QuantFormat, float] = {"mxfp8": E4M3_MAX, "mxfp4": E2M1_MAX, "nvfp4": E2M1_MAX}
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
 # the eager checkpoint quantizer, so it stays eager.
 _COMPILABLE = tuple(fmt for fmt, pow2 in _POW2_SCALE.items() if pow2)
+
+
+@dataclass(frozen=True)
+class _FusedFakeQuant:
+    """A fused Triton round trip, bit-identical to eager: the kernel and the oldest compute capability whose Triton
+    backend compiles it."""
+
+    kernel: JITFunction
+    min_capability: tuple[int, int]
+
+
+# One entry per power-of-two-scale format (test_lowp_spec.py holds the two tables together). NVFP4's tensor-wide
+# global scale needs a pass over the whole tensor first, so it stays eager. The mxfp8 kernel rounds through Triton's
+# fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX converts
+# to from SM 8.0. Older GPUs keep the eager path.
+_FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
+    "mxfp8": _FusedFakeQuant(mxfp8_fake_quant_kernel, min_capability=(8, 9)),
+    "mxfp4": _FusedFakeQuant(mxfp4_fake_quant_kernel, min_capability=(8, 0)),
+}
 
 _compiled_round_trip = None
 _compile_failed = False
@@ -66,9 +88,9 @@ def _device_constant(values: tuple[float, ...], device: torch.device, dtype: tor
 
 
 @functools.cache
-def _fp8_triton_supported(device_index: int) -> bool:
-    """Triton lowers its fp8 type only on SM 8.9 and newer, so older GPUs keep the eager mxfp8 path."""
-    return torch.cuda.get_device_capability(device_index) >= (8, 9)
+def _device_capability(device_index: int) -> tuple[int, int]:
+    """Cached, as ``fake_quant`` asks on every call."""
+    return torch.cuda.get_device_capability(device_index)
 
 
 def _constant_tensor(values: tuple[float, ...], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -106,8 +128,9 @@ def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
 
 def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``blocks`` → (``e4m3`` data, ``e8m0`` biased-exponent scale ``[*, n_block, 1]`` uint8)."""
-    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), E4M3_MAX)
-    data = (blocks / divisor).clamp(-E4M3_MAX, E4M3_MAX).to(torch.float8_e4m3fn)
+    format_max = _ELEMENT_MAX["mxfp8"]
+    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), format_max)
+    data = (blocks / divisor).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
     return data, scales
 
 
@@ -124,7 +147,7 @@ def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
 
 def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
     """``blocks`` → (e2m1 code uint8, ``e8m0`` scale ``[*, n_block, 1]`` uint8, no global scale)."""
-    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), E2M1_MAX)
+    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), _ELEMENT_MAX["mxfp4"])
     return _e2m1_codes(blocks, divisor), scales, None
 
 
@@ -138,7 +161,7 @@ def _nvfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch
     global_scale = torch.exp2(torch.ceil(torch.log2(tensor_amax / _NVFP4_GLOBAL_SCALE_DIVISOR)))
     amax = blocks.abs().amax(dim=-1, keepdim=True)
     # Redundant in exact arithmetic; keeps fp rounding from pushing the scale past e4m3's range (NaN).
-    scale = (amax / E2M1_MAX / global_scale).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
+    scale = (amax / _ELEMENT_MAX["nvfp4"] / global_scale).clamp(max=E4M3_MAX).to(torch.float8_e4m3fn)
     code = _e2m1_codes(blocks, scale.float() * global_scale)
     return code, scale, global_scale
 
@@ -257,15 +280,17 @@ class _FakeQuant(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
+        fused = _FUSED_FAKE_QUANT.get(fmt)
         if (
-            fmt == "mxfp8"
+            fused is not None
             and t.is_cuda
             and t.is_contiguous()
+            and not t.is_complex()  # Triton has no complex type
             and axis in (-1, t.ndim - 1)
             and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
-            and _fp8_triton_supported(t.device.index)
+            and _device_capability(t.device.index) >= fused.min_capability
         ):
-            return fake_quant_mxfp8_triton(t, FORMAT_BLOCK_SIZE[fmt], E4M3_MAX, _AMAX_FLOOR)
+            return fake_quant_triton(fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
         # Eager, as activation shapes vary and a compiled form would recompile constantly.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
