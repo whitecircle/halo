@@ -76,7 +76,7 @@ export MODAL_TOKEN_ID=ak-...  MODAL_TOKEN_SECRET=as-...   # or ~/.modal.toml (mo
 halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
 ```
 
-The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1`, so code-contests grading and its test tool, the `swe` tools and the Python REPL tools all run in Modal.
+The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1`, so code-contests grading and its test tool, the `swe` tools and the Python REPL tools all run in Modal. An explicit `sandbox_backend` in `environment_kwargs` takes precedence over the flag: remove it, or set it to `modal`, before running untrusted code.
 
 On a shared Ray cluster (`ray_address`) the two variables travel to the actors with the job. Credentials do not: put Modal's on every cluster node.
 
