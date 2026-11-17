@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM efficiency by M</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  /* The key names the curve, the peak line and the two parts of the M axis in a column left of the plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 360px minmax(0, 1fr);
+    column-gap: 44px;
+    align-items: start;
+  }
+
+  .key {
+    display: flex;
+    flex-direction: column;
+    gap: var(--group-gap);
+  }
+
+  .key h3 {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key h3 svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+  }
+
+  .key p {
+    margin-top: var(--heading-gap);
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+  svg.patterns { position: absolute; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>GEMM efficiency ramps with M, then ripples</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key">
+      <div>
+        <h3><svg aria-hidden="true"><line x1="2" y1="12" x2="34" y2="12" stroke="var(--halo-blue)" stroke-width="3" stroke-linecap="round" /></svg>Measured efficiency</h3>
+        <p>bf16 GEMM on a B300, a gpt-oss expert at K = N = 2880</p>
+      </div>
+      <div>
+        <h3><svg aria-hidden="true"><line x1="2" y1="12" x2="34" y2="12" stroke="var(--secondary)" stroke-width="1.5" /></svg>Peak</h3>
+        <p>The machine full, 100%</p>
+      </div>
+      <div>
+        <h3><svg aria-hidden="true"><rect x="0.5" y="0.5" width="35" height="23" rx="3" fill="url(#idle)" stroke="var(--tertiary)" /></svg>Small M</h3>
+        <p>Few tiles leave most of the 148 SMs idle, far below peak</p>
+      </div>
+      <div>
+        <h3><svg aria-hidden="true"><rect x="0.5" y="0.5" width="35" height="23" rx="3" fill="var(--bg)" stroke="var(--tertiary)" /></svg>Near peak</h3>
+        <p>Efficiency ripples as tiles repack across the SMs, not a deep sawtooth</p>
+      </div>
+    </div>
+    <svg class="chart" id="chart"></svg>
+  </div>
+
+  <!-- The small-M band is idle capacity, so it is hatched rather than coloured, in the plot and in the key. -->
+  <svg class="patterns" width="0" height="0" aria-hidden="true">
+    <defs>
+      <pattern id="idle" width="12" height="12" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+        <rect width="12" height="12" style="fill: var(--surface)" />
+        <line x1="0" y1="0" x2="0" y2="12" style="stroke: var(--line); stroke-width: 3" />
+      </pattern>
+    </defs>
+  </svg>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [M, % of this shape's peak]: bf16 [M, 2880] @ [2880, 2880] on a B300.
+  const SWEEP = [
+    [64, 5], [128, 11], [192, 17], [256, 21], [320, 27], [384, 31], [448, 38], [512, 42], [576, 47], [640, 53],
+    [704, 54], [768, 64], [832, 53], [896, 74], [960, 80], [1024, 84], [1088, 90], [1152, 94], [1216, 82], [1280, 87],
+    [1344, 85], [1408, 94], [1472, 89], [1536, 90], [1600, 74], [1664, 75], [1728, 79], [1792, 67], [1856, 84], [1920, 86],
+    [1984, 69], [2048, 73], [2112, 80], [2176, 85], [2240, 88], [2304, 87], [2368, 72], [2496, 81], [2560, 81], [2624, 82],
+    [2752, 78], [2880, 84], [2944, 86], [3008, 85], [3072, 86], [3136, 80], [3264, 87], [3328, 85], [3392, 88], [3456, 88],
+    [3520, 73], [3584, 78], [3712, 80], [3840, 77], [3968, 80], [4096, 82], [4224, 76], [4288, 84], [4416, 84], [4480, 84],
+    [4608, 86], [4736, 81], [4800, 84], [4928, 74], [5056, 80], [5184, 79], [5312, 79], [5440, 78], [5568, 77], [5696, 80],
+    [5824, 79], [5952, 80], [6080, 82], [6144, 83], [6272, 79], [6400, 82], [6528, 80], [6656, 78], [6784, 77], [6912, 78],
+    [7040, 81], [7168, 78], [7296, 81], [7424, 81], [7552, 82], [7680, 83], [7808, 78], [7936, 79], [8064, 78], [8192, 79],
+
+  ];
+  /** The efficiency axis is fixed: 0 to the 100% peak line, with room above it for the line's label. */
+  const Y_MAX = 106;
+  const Y_TICKS = [0, 25, 50, 75, 100];
+  const HEIGHT = 700;
+  /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
+  const PAD = { l: 124, r: 0, t: 8, b: 84 };
+
+
+  const chart = document.getElementById("chart");
+  const width = chart.getBoundingClientRect().width;
+  chart.setAttribute("height", HEIGHT);
+  chart.setAttribute("viewBox", `0 0 ${width} ${HEIGHT}`);
+
+  const plot = { l: PAD.l, r: width - PAD.r, t: PAD.t, b: HEIGHT - PAD.b };
+  const sy = (pct) => plot.b - (pct / Y_MAX) * (plot.b - plot.t);
+  const fmt = (v) => v.toLocaleString("en-US");
+  const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+  // The small-M band runs up to where efficiency first reaches its best. The M axis ends just past the sweep's
+  // last point, so the curve's round end stays inside the plot.
+  const best = Math.max(...SWEEP.map(([, pct]) => pct));
+  const rampEnd = SWEEP.find(([, pct]) => pct === best)[0];
+  const lastM = SWEEP.at(-1)[0];
+  const xMax = lastM * 1.01;
+  const xTicks = niceTicks(lastM);
+
+  {
+    const sx = (m) => plot.l + (m / xMax) * (plot.r - plot.l);
+
+    add("rect", { x: plot.l, y: plot.t, width: sx(rampEnd) - plot.l, height: plot.b - plot.t, fill: "url(#idle)" });
+
+    for (const v of Y_TICKS) {
+      if (v > 0 && v < 100) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, v === 0 ? "0" : `${v}%`);
+    }
+
+    for (const v of xTicks) {
+      const tick = add("text", { class: "tick", x: sx(v), y: plot.b + 32, "text-anchor": v === 0 ? "start" : "middle" }, fmt(v));
+
+      // A last tick close to the axis end would run past it centred: right-align it on its tick instead.
+      if (tick.getBBox().x + tick.getBBox().width > plot.r) {
+        tick.setAttribute("text-anchor", "end");
+      }
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "M, output rows (tokens per expert)");
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Efficiency, % of this shape’s peak");
+
+    add("line", { x1: plot.l, x2: plot.r, y1: sy(100), y2: sy(100), stroke: "var(--secondary)", "stroke-width": 1.5 });
+
+    add("polyline", {
+      points: SWEEP.map(([m, pct]) => `${sx(m)},${sy(pct)}`).join(" "),
+      fill: "none",
+      stroke: "var(--halo-blue)",
+      "stroke-width": 3,
+      "stroke-linejoin": "round",
+      "stroke-linecap": "round",
+    });
+
+  }
+</script>
+</body>
+</html>

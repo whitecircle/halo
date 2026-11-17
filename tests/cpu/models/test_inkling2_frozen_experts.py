@@ -1,23 +1,33 @@
 """Inkling 2's EP layer over frozen NVFP4/MXFP8 expert banks: the same function as the upstream block on the
 dequantized weights, LoRA adapters that train exactly as over a bf16 base, and no expert weight left to train."""
 
+import contextlib
 import copy
+from types import SimpleNamespace
 
 import pytest
 import torch
 import torch.nn as nn
-from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers import Qwen3MoeConfig
+from transformers.models.inkling2.configuration_inkling2 import Inkling2Config, Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.configs.parallelism_arguments import reject_frozen_experts_without_adapters
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_SLOTS, is_frozen_bank_container
+from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
+from halo.entrypoints import script
+from halo.model_loading.parallel import whole_model
+from halo.model_loading.parallel.load_rules import reject_unsupported_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import INKLING2, frozen_expert_sidecar_attrs
 from tests.common.inkling2 import NVFP4_OUTER_SCALE_DENOMINATOR, quantize_release_bank
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
 E, H, M, K = 8, 64, 32, 2
 TOKENS = (2, 6)
 FORMATS = ("nvfp4", "mxfp8")
+FROZEN_SLOTS = INKLING2.frozen_expert_slots
 
 
 def _block(dtype: torch.dtype) -> Inkling2SparseMoeBlock:
@@ -60,7 +70,6 @@ def _dequantized_and_frozen(quant_format: str, dtype: torch.dtype):
         if quant_format == "nvfp4":
             experts.register_buffer(slot.amax, stored["_amax"])
             experts.register_buffer(slot.denominator, torch.tensor([NVFP4_OUTER_SCALE_DENOMINATOR]))
-    assert is_frozen_bank_container(experts)
     return reference, frozen
 
 
@@ -141,6 +150,35 @@ def test_frozen_layer_refuses_every_expert_gather_and_keeps_banks_out_of_checkpo
     assert {f"{slot.weight}_lora_{side}" for slot in FROZEN_SLOTS for side in "AB"} <= set(layer.state_dict())
 
 
+@pytest.mark.parametrize("quant_format", FORMATS)
+def test_the_load_warms_every_frozen_bank_behind_the_fence(quant_format, monkeypatch):
+    """The load's warm-up reads the banks of each EP layer in the model, frozen or not, inside the join's barrier."""
+    _reference, frozen = _dequantized_and_frozen(quant_format, torch.float32)
+    frozen_layer = EPInkling2MoELayer(frozen, single_process_ep_config(E))
+    bf16_layer = EPInkling2MoELayer(_block(torch.float32), single_process_ep_config(E))
+    assert bf16_layer.frozen_expert_banks() == ()
+    events = []
+
+    @contextlib.contextmanager
+    def fence(_what):
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    monkeypatch.setattr(whole_model, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(whole_model, "barrier_on_exit", fence)
+    for attention_warm_up in ("warm_fa4_kernels", "warm_flex_sliding_kernels", "warm_masked_matmul_kernels"):
+        monkeypatch.setattr(whole_model, attention_warm_up, lambda *a, **k: None)
+    monkeypatch.setattr(whole_model, "warm_fused_dequant_kernels", lambda banks: events.append(list(banks)))
+    whole_model.warm_attention_kernels(nn.ModuleList([bf16_layer, frozen_layer]), dtype=torch.bfloat16)
+
+    entered, banks, left = events
+    assert (entered, left) == ("enter", "exit")
+    assert [bank.quant_format for bank in banks] == [quant_format] * len(FROZEN_SLOTS)
+    for bank, slot in zip(banks, FROZEN_SLOTS, strict=True):
+        assert bank.data is getattr(frozen_layer, f"{slot.weight}_frozen_data")
+
+
 _FROZEN_OK = {"ep_size": 2, "frozen_quantized_experts": True}
 
 
@@ -155,6 +193,7 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group(expert_lora):
     ("override", "named"),
     [
         ({"ep_size": 1}, "expert_parallel_size >= 2"),
+        ({"expert_tp_size": 2}, "expert_tensor_parallel_size: 1"),
         ({"ep_lazy_loading": False}, "ep_lazy_loading: true"),
         ({"merge_expert_lora_on_save": True}, "merge_expert_lora_on_save: false"),
     ],
@@ -162,6 +201,70 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group(expert_lora):
 def test_frozen_quantized_experts_names_each_missing_requirement(override, named):
     with pytest.raises(ValueError, match=named):
         make_parallelism_config(world_size=2, gpus_per_node=2, **{**_FROZEN_OK, **override})
+
+
+@pytest.mark.parametrize(
+    ("frozen", "use_peft", "refused"),
+    [(True, False, True), (True, True, False), (False, False, False)],
+    ids=["full-fine-tune", "adapters", "bf16-experts"],
+)
+def test_frozen_quantized_experts_trains_adapters_alone(frozen, use_peft, refused):
+    """No save exports the banks, so a full fine-tune over them would fail at its first checkpoint."""
+    dist_args, model_config = SimpleNamespace(frozen_quantized_experts=frozen), SimpleNamespace(use_peft=use_peft)
+    if not refused:
+        reject_frozen_experts_without_adapters(dist_args, model_config)
+        return
+    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
+        reject_frozen_experts_without_adapters(dist_args, model_config)
+
+
+def test_a_training_script_refuses_a_full_fine_tune_over_frozen_banks_before_it_builds_its_config(monkeypatch):
+    def reached(*args, **kwargs):
+        raise AssertionError("the parallelism config was built")
+
+    monkeypatch.setattr(script, "agree_rank_uniform_env", lambda: None)
+    monkeypatch.setattr(script, "_pin_single_process_to_bound_gpu", lambda training_config: None)
+    monkeypatch.setattr(script, "parallelism_config_from_args", reached)
+
+    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
+        script.init_training_script(
+            SimpleNamespace(),
+            SimpleNamespace(),
+            SimpleNamespace(use_peft=False),
+            SimpleNamespace(frozen_quantized_experts=True),
+            script_prefix="sft",
+            trainer_cls=object,
+        )
+
+
+def test_the_frozen_bank_families_are_the_ep_layers_that_declare_them():
+    assert frozen_bank_families() == (INKLING2,)
+    for cls in ep_layer_classes():
+        assert not cls.SUPPORTS_FROZEN_BANKS or cls.FAMILY.frozen_expert_slots, cls.__name__
+
+
+def test_the_per_expert_sidecars_come_from_the_declared_slots():
+    assert set(frozen_expert_sidecar_attrs()) == {
+        "gate_up_proj_scale_inv",
+        "w13_weight_amax",
+        "down_proj_scale_inv",
+        "w2_weight_amax",
+    }
+
+
+def _reject_unsupported_model(model_config) -> None:
+    config = make_parallelism_config(world_size=2, gpus_per_node=2, **_FROZEN_OK)
+    reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True)
+
+
+def test_another_family_is_refused_from_its_config_before_the_load():
+    with pytest.raises(ValueError, match=r"frozen_quantized_experts.*\['inkling2'\].*'qwen3_moe'"):
+        _reject_unsupported_model(Qwen3MoeConfig(num_experts=8))
+
+
+@pytest.mark.parametrize("config_class", [Inkling2TextConfig, Inkling2Config])
+def test_inkling2_passes_the_config_time_family_gate(config_class):
+    _reject_unsupported_model(config_class())
 
 
 if __name__ == "__main__":

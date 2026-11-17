@@ -11,10 +11,10 @@ from transformers import AutoConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2ForConditionalGeneration
 
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
-from halo.distributed.expert_parallel.moe_layer.frozen_banks import FROZEN_SLOTS
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import INKLING2
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.inkling2 import TINY_INKLING2_MXFP8_LAYERS, TINY_INKLING2_TEXT, write_tiny_inkling2_release
@@ -23,6 +23,7 @@ from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
 SEED = 42
+FROZEN_SLOTS = INKLING2.frozen_expert_slots
 BATCH, SEQ = 2, 48
 _EXPERTS_KEY = "model.language_model.layers.{layer}.mlp.experts.{weight}"
 
@@ -75,7 +76,7 @@ def run(ctx):
         index = _layer_index(name)
         expected_format = "mxfp8" if index in TINY_INKLING2_MXFP8_LAYERS else "nvfp4"
         for slot in FROZEN_SLOTS:
-            bank = layer.frozen_bank(slot.weight)
+            bank = layer.build_frozen_bank(slot.weight)
             formats_ok &= bank.quant_format == expected_format
             want = reference_sd[_EXPERTS_KEY.format(layer=index, weight=slot.weight)][
                 layer.expert_start : layer.expert_end

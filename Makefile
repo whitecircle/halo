@@ -9,9 +9,11 @@ SHELL := /bin/bash
 
 IMAGE        ?= halo:blackwell
 # SemVer for the versioned image tags the push targets publish alongside the moving tags.
-VERSION      ?= 1.3.0rc2
+VERSION      ?= 1.3.0rc1
 # The engine release a server image builds, read off its Dockerfile ARG (the one place it is pinned).
+# Dockerfile.vllm builds two tags: vLLM $(VLLM_VERSION) for every family but Inkling 2, and vLLM's Inkling 2 build.
 VLLM_VERSION   := $(shell sed -n 's/^ARG VLLM_VERSION=//p' Dockerfile.vllm)
+VLLM_INKLING2_VERSION := $(shell sed -n 's/^ARG VLLM_INKLING2_VERSION=//p' Dockerfile.vllm)
 SGLANG_VERSION := $(shell sed -n 's/^ARG SGLANG_VERSION=//p' Dockerfile.sglang)
 NPROC        ?= 8
 # Training method name for `make train` (any `halo launch --list` entry).
@@ -82,12 +84,12 @@ EFA_DOCKER_FLAGS = $(if $(filter 1,$(EFA)),--device=/dev/infiniband -e NCCL_NET=
 NO_FABRIC_ENV = $(if $(filter 1,$(EFA)),,-e NCCL_IB_DISABLE=1 -e NCCL_NET=Socket \
   -e NCCL_SOCKET_IFNAME=$(or $(NCCL_SOCKET_IFNAME),$(NO_FABRIC_SOCKET_IFNAME_DEFAULT)))
 NCCL_PROTO_ENV = $(if $(strip $(NCCL_PROTO)),-e NCCL_PROTO=$(NCCL_PROTO),)
-# CPU-only variant (no --gpus): check-lock, the CPU tier, seed-hf-cache and diagrams. The Hugging Face
+# CPU-only variant (no --gpus): check-lock, the CPU tier and seed-hf-cache. The Hugging Face
 # cache is mounted so the tests that load a real tokenizer work without the hub, read-write so
-# seed-hf-cache can fill it; set HF_CACHE= to disable that mount. check-lock and diagrams read no
-# cache, so they run without it and without a scratch volume.
+# seed-hf-cache can fill it; set HF_CACHE= to disable that mount. check-lock reads no cache, so it
+# runs without it and without a scratch volume.
 HF_CACHE ?= $(scratch_dir)/hf
-check-lock diagrams: HF_CACHE =
+check-lock: HF_CACHE =
 DOCKER_RUN_CPU = docker run --rm $(if $(strip $(DOCKER_RUNTIME)),--runtime $(DOCKER_RUNTIME),) \
   $(if $(strip $(HF_CACHE)),-e HF_HOME=$(HF_CACHE) -v $(HF_CACHE):$(HF_CACHE),) \
   -e PYTHONPATH=/workspace $(EQUIVALENCE_DOCKER_FLAGS) $(EXTRA_DOCKER_ENV) -v $(CURDIR):/workspace -w /workspace $(IMAGE)
@@ -96,8 +98,8 @@ EQUIVALENCE_DOCKER_FLAGS =
 
 .DEFAULT_GOAL := help
 .PHONY: help check-lock lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench bench-band \
-        verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
-        ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
+        verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-vllm-inkling2 \
+        build-sglang build-all ecr-public-login push-public-blackwell push-public-hopper push-public-vllm push-public-vllm-inkling2 \
         push-public-sglang push-public-all train up-vllm-inkling2 train-inkling2 clean
 
 help: ## Show this help
@@ -259,13 +261,15 @@ verify-efficiency: ## what the EfficiencyCallback reports, BASE vs HEAD_REF (BAS
 	@test -n "$(BASE)" || { echo "BASE=<commit> is required"; exit 1; }
 	$(DOCKER_RUN_CPU) python -m tests.common.equivalence.efficiency_callback $(COMPARISON_ARGS)
 
-docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown
+docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/ and the root markdown, and no figure stale against its page
 	./scripts/docs/check_links.sh
+	./scripts/docs/figure_manifest.sh check
 
-# One `python` per generator: most write their figures at import time with no `__main__` guard, and
-# `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` / `_chart_style.py` are shared style, not generators.
-diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
-	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
+diagrams: ## re-render each agent-docs/assets figure from the HTML page beside it, refusing one that overflows, optimize each PNG losslessly and record them in agent-docs/assets/figures.sha256 (host: Chrome, the ABC fonts and OptiPNG)
+	@for page in agent-docs/assets/*/*.html; do echo "$$page"; \
+	  out=$$(./skills/visuals/scripts/check.sh "$$page") || { echo "$$out"; exit 1; }; \
+	  ./skills/visuals/scripts/render.sh "$$page" "$${page%.html}.png" >/dev/null || exit 1; done
+	./scripts/docs/figure_manifest.sh write
 
 BUILD_DATE ?= $(shell date -u +%Y-%m-%d)
 
@@ -284,12 +288,17 @@ build-vllm: ## build the vLLM inference image halo:vllm-$(VLLM_VERSION) (credent
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
+build-vllm-inkling2: ## build the Inkling 2 vLLM image halo:vllm-$(VLLM_INKLING2_VERSION), the only tag that serves Inkling 2 (same Dockerfile, VLLM_ENGINE=inkling2)
+	docker build -f Dockerfile.vllm -t halo:vllm-$(VLLM_INKLING2_VERSION) --build-arg VLLM_ENGINE=inkling2 \
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
+
 build-sglang: ## build the SGLang inference image halo:sglang-$(SGLANG_VERSION) (NCCL pinned from uv.lock, matching the training images)
 	docker build -f Dockerfile.sglang -t halo:sglang-$(SGLANG_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
-build-all: build-blackwell build-hopper build-vllm build-sglang ## build all four images
+build-all: build-blackwell build-hopper build-vllm build-vllm-inkling2 build-sglang ## build all five images
 
 # --- Publishing to Amazon ECR Public (gallery.ecr.aws) ----------------------------------
 # Amazon ECR Public images are world-readable.
@@ -327,15 +336,22 @@ push-public-sglang: ecr-public-login ## publish halo:sglang-$(SGLANG_VERSION) ->
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
 
-push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-sglang ## publish all four to ECR Public
+push-public-vllm-inkling2: ecr-public-login ## publish halo:vllm-$(VLLM_INKLING2_VERSION) -> ECR Public (vllm-$(VLLM_INKLING2_VERSION) + -$(VERSION))
+	docker tag halo:vllm-$(VLLM_INKLING2_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)
+	docker tag halo:vllm-$(VLLM_INKLING2_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)-$(VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)-$(VERSION)
+
+push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-vllm-inkling2 push-public-sglang ## publish all five to ECR Public
 
 train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTRA="--expert_parallel_size=8"
 	$(DOCKER_RUN) bash -lc "python -m halo.cli launch $(strip $(METHOD)) $(CONFIG) \
 	  --nproc $(NPROC) -- $(EXTRA)"
 
-# Inkling 2 under rollout_adapter_sync, on the vLLM image (make build-vllm): one release directory and one adapter
-# directory under HALO_SCRATCH, which the server and the trainer mount at the same path. INKLING2_LORA picks LoRA on the
-# text tower's attention or on o_proj and the routed experts; agent-docs/models/inkling2.md#rollouts.
+# Inkling 2 under rollout_adapter_sync, on the Inkling 2 vLLM image (make build-vllm-inkling2): one release directory
+# and one adapter directory under HALO_SCRATCH, which the server and the trainer mount at the same path. INKLING2_LORA
+# picks LoRA on the text tower's attention or on o_proj and the routed experts; agent-docs/models/inkling2.md#rollouts.
+INKLING2_VLLM_IMAGE      ?= halo:vllm-$(VLLM_INKLING2_VERSION)
 INKLING2_DIR             ?= $(scratch_dir)/models/Inkling-2-Small
 INKLING2_ADAPTER_DIR     ?= $(scratch_dir)/adapters
 INKLING2_LORA            ?= attention
@@ -346,20 +362,22 @@ INKLING2_CONFIG           = examples/grpo/environmental/inkling2/vllm/inkling2-s
 INKLING2_LORA_ARGS        = --enable-lora --max-loras 2 --max-cpu-loras 4 \
   $(if $(filter attention,$(INKLING2_LORA)),--max-lora-rank 16 --lora-target-modules qkvr wo_ud,--max-lora-rank 8)
 
-up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it on INKLING2_SERVER_DEVICES (2,3) for train-inkling2
+up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it from INKLING2_VLLM_IMAGE on INKLING2_SERVER_DEVICES (2,3), port VLLM_PORT, for train-inkling2
 	mkdir -p $(INKLING2_ADAPTER_DIR)
 	$(DOCKER_RUN) bash -lc "hf download thinkingmachines/Inkling-2-Small --local-dir $(INKLING2_DIR) --quiet"
-	HALO_SCRATCH=$(scratch_dir) VLLM_MODEL=$(INKLING2_DIR) VLLM_TP=2 VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
+	HALO_SCRATCH=$(scratch_dir) VLLM_IMAGE=$(INKLING2_VLLM_IMAGE) VLLM_MODEL=$(INKLING2_DIR) VLLM_TP=2 \
+	  VLLM_PORT=$(VLLM_PORT) VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
 	  VLLM_TOOL_PARSER=inkling VLLM_REASONING_PARSER=inkling \
 	  VLLM_EXTRA_ARGS="--quantization inkling2 --max-model-len 16384 $(INKLING2_LORA_ARGS)" \
 	  docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 train-inkling2: EXTRA_DOCKER_ENV = -e CUDA_VISIBLE_DEVICES=$(INKLING2_TRAINER_DEVICES)
-train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
-	@curl -sf http://localhost:8000/health >/dev/null || { echo "No Inkling 2 server on :8000: make up-vllm-inkling2 \
-	  INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
+train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2 at VLLM_SERVER_URL, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
+	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No Inkling 2 server at $(VLLM_SERVER_URL): make \
+	  up-vllm-inkling2 INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) --nproc 2 \
-	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) $(EXTRA)"
+	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) \
+	  --rollout_server_url=$(VLLM_SERVER_URL) $(EXTRA)"
 
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.
 clean: ## prune wandb/, the ruff/pytest caches and $(HALO_SCRATCH) test scratch (leaves checkpoints/)

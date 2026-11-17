@@ -127,8 +127,9 @@ Conditions that decide how to read the table:
   main parameters in a distributed optimizer, except the 122B rows (fp16 master, bf16 moments).
 - **Two machines.** Halo and TRL ran on one 8× B300 node, NeMo and Megatron on another of the same type. The difference
   between the two nodes was not measured, so read small gaps between those groups with care.
-- **Measured steps differ.** After warm-up, Halo averages 9 steps, TRL 7, NeMo and Megatron 6. TRL runs on the
-  image's fla, whose Blackwell `num_warps=2` restriction keeps packed rows deterministic.
+- **Measured steps differ.** After warm-up, Halo averages 9 steps, TRL 7, NeMo and Megatron 6. The TRL rows
+  ran with Halo 1.2.0's FLA launch options, the Blackwell `num_warps=2` restriction on the delta rule's state kernel
+  that fla itself applies from 0.5.2: fla 0.4.2, the 1.2.0 image's pin, is not deterministic on packed rows without it.
 - **Peak memory has different sources.** Halo, TRL and NeMo report torch's allocated peak. Megatron's come from
   nvidia-smi, which includes allocator cache and reads 10–20% higher, so do not compare them directly. NeMo's 122B 64k row
   holds 266.1 of 267.7 GiB by nvidia-smi.

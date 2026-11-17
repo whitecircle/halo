@@ -25,8 +25,8 @@ _E2M1_BOUNDARIES = tuple((a + b) / 2 for a, b in zip(_E2M1_LEVELS[:-1], _E2M1_LE
 # Midpoints whose lower level has an odd mantissa code; hardware RNE resolves these ties up (0.75→1.0)
 # while bucketize resolves every tie down, and exact ties are routine at bf16 over power-of-two scales.
 _E2M1_TIES_UP = _E2M1_BOUNDARIES[1::2]
-_E8M0_BIAS = 127  # e8m0 stores (exponent + 127) as uint8
-_E8M0_NAN = 255  # OCP MX: biased exponent 0xFF is e8m0's only non-finite code, and means NaN
+E8M0_BIAS = 127  # e8m0 stores (exponent + 127) as uint8
+E8M0_NAN = 255  # OCP MX: biased exponent 0xFF is e8m0's only non-finite code, and means NaN
 # Keeps log2/divide finite on an all-zero block. A floor above a tensor's real amax would rescale every block and
 # quantize it to zeros, hence the smallest fp32 normal.
 _AMAX_FLOOR = torch.finfo(torch.float32).tiny
@@ -95,13 +95,13 @@ def _restore_axis(t: torch.Tensor, axis: int, ndim: int) -> torch.Tensor:
 def _e8m0_scale(amax: torch.Tensor, format_max: float) -> tuple[torch.Tensor, torch.Tensor]:
     """``(fp32 divisor, biased-exponent uint8)``. A NaN block takes the ``0xFF`` code, as a NaN exponent casts to
     ``uint8`` 0, a finite near-zero block."""
-    scale_exp = torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / format_max)).clamp(-_E8M0_BIAS, _E8M0_BIAS)
-    biased = (scale_exp + _E8M0_BIAS).to(torch.uint8).masked_fill(amax.isnan(), _E8M0_NAN)
+    scale_exp = torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / format_max)).clamp(-E8M0_BIAS, E8M0_BIAS)
+    biased = (scale_exp + E8M0_BIAS).to(torch.uint8).masked_fill(amax.isnan(), E8M0_NAN)
     return torch.exp2(scale_exp), biased
 
 
 def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
-    return torch.exp2(scales.float() - _E8M0_BIAS).masked_fill(scales == _E8M0_NAN, float("nan"))
+    return torch.exp2(scales.float() - E8M0_BIAS).masked_fill(scales == E8M0_NAN, float("nan"))
 
 
 def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

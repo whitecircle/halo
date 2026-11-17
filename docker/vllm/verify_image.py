@@ -3,14 +3,19 @@ weight-sync client relies on (the Triton-interpreter checks live beside their pa
 
 No test suite can run these: they import vLLM, which the training image does not have (ABI-incompatible
 stacks), so the image build is the only gate. Each check fails the build on an upstream change that would
-otherwise surface as a hung group, a silently reverted sync or a wrong serve-time result:
+otherwise surface as a hung group, a silently reverted sync or a wrong serve-time result. ``Dockerfile.vllm`` passes
+the tag it builds and the engine build that tag pins:
 
-    python3 verify_image.py
+    python3 verify_image.py release 0.32.0
+    python3 verify_image.py inkling2 0.1.dev25249+gb974b306f
 """
 
 import asyncio
 import dataclasses
+import importlib
+import importlib.util
 import inspect
+import sys
 import typing
 from importlib.metadata import requires, version
 from unittest.mock import AsyncMock, MagicMock
@@ -47,10 +52,27 @@ from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 
 from halo.weight_sync.transport.nccl_library import ncclUniqueId as shim_unique_id
 
+# Dockerfile.vllm's VLLM_ENGINE values: the release tag every family is served from, and the Inkling 2 tag.
+RELEASE, INKLING2 = "release", "inkling2"
+ENGINE = RELEASE
+# Request fields the Inkling 2 build declares beyond the release's; the client sends none of them.
+INKLING2_INIT_FIELDS = {"use_load_plan", "metadata"}
+INKLING2_UPDATE_FIELDS = {"src"}
+RUNNER_SWITCH = "VLLM_USE_V2_MODEL_RUNNER"
+V1_RUNNER_MODULE = "vllm.v1.worker.gpu_model_runner"
+V2_RUNNER_MODULE = "vllm.v1.worker.gpu.model_runner"
+SPLIT_GUARD_PATCH = "vllm_topp_split_guard_patch"
+
+
+def check_engine_build(build: str) -> None:
+    """The engine is the build this tag pins: the client refuses an identity row that names another one, and the
+    Inkling 2 base is a development build with no release number to tell two of them apart."""
+    assert vllm.__version__ == build, f"the base image runs vLLM {vllm.__version__}, and this tag pins {build}"
+    print(f"vLLM: {vllm.__version__} ({ENGINE})")
+
 
 def check_engine_stack() -> None:
     """transformers and tokenizers stay at the base image's own, inside the range vLLM declares."""
-    print(f"vLLM: {vllm.__version__}")
     reqs = [r for r in map(Requirement, requires("vllm")) if r.name in ("transformers", "tokenizers")]
     bad = [
         f"{r.name} {version(r.name)} not in {r.specifier}"
@@ -116,8 +138,8 @@ def check_weight_transfer_wire_contract() -> None:
     only names, dtypes and shapes, both sides cut chunks at the same byte budget, the consumer reuses its
     streams (per-call streams strand every sync's receive buffers in the caching allocator), and the
     routes exist. Any field change fails here, not as a hung group."""
-    init = {f.name for f in dataclasses.fields(NCCLWeightTransferInitInfo)}
-    assert init == {
+    init = {f.name: f.default for f in dataclasses.fields(NCCLWeightTransferInitInfo)}
+    assert set(init) == {
         "master_address",
         "master_port",
         "rank_offset",
@@ -126,17 +148,16 @@ def check_weight_transfer_wire_contract() -> None:
         "packed",
         "packed_buffer_size_bytes",
         "packed_num_buffers",
-        "use_load_plan",
-        "metadata",
-    }, f"init request fields changed: {sorted(init)}"
-    # The client sends neither load-plan field, so the engine writes each received tensor through load_weights.
-    defaults = {f.name: f.default for f in dataclasses.fields(NCCLWeightTransferInitInfo)}
-    assert (defaults["use_load_plan"], defaults["metadata"]) == (False, None), "the load plan is on by default"
-    update = {f.name for f in dataclasses.fields(NCCLWeightTransferUpdateInfo)}
-    assert update == {"names", "dtype_names", "shapes", "src"}, f"update request fields changed: {sorted(update)}"
-    # The client sends no src: the trainer broadcasts as group rank 0.
-    src = next(f for f in dataclasses.fields(NCCLWeightTransferUpdateInfo) if f.name == "src")
-    assert src.default == 0, "the update's broadcasting rank is not 0 by default"
+    } | (INKLING2_INIT_FIELDS if ENGINE == INKLING2 else set()), f"init request fields changed: {sorted(init)}"
+    update = {f.name: f.default for f in dataclasses.fields(NCCLWeightTransferUpdateInfo)}
+    assert set(update) == {"names", "dtype_names", "shapes"} | (
+        INKLING2_UPDATE_FIELDS if ENGINE == INKLING2 else set()
+    ), f"update request fields changed: {sorted(update)}"
+    if ENGINE == INKLING2:
+        # The client sends neither load-plan field, so the engine writes each received tensor through load_weights.
+        assert (init["use_load_plan"], init["metadata"]) == (False, None), "the load plan is on by default"
+        # The client sends no src: the trainer broadcasts as group rank 0.
+        assert update["src"] == 0, "the update's broadcasting rank is not 0 by default"
     assert (packed_tensor.DEFAULT_PACKED_BUFFER_SIZE_BYTES, packed_tensor.DEFAULT_PACKED_NUM_BUFFERS) == (
         1 << 30,
         2,
@@ -185,10 +206,42 @@ def check_serve_flags() -> None:
     print("serve flags: OK")
 
 
+def check_model_runner_v2() -> None:
+    """Model Runner V2 is the runner the engine starts: it enforces thinking budgets (the completion patch targets its
+    sampler), and it is the only runner R3 capture runs on. The release ships both runners behind a switch, which the
+    image's ENV holds at V2; the Inkling 2 build ships V2 alone."""
+    if RUNNER_SWITCH in envs.environment_variables:
+        assert getattr(envs, RUNNER_SWITCH) is True, f"{RUNNER_SWITCH} selects the V1 runner in this image"
+    else:
+        assert importlib.util.find_spec(V1_RUNNER_MODULE) is None, (
+            f"the engine ships the V1 runner ({V1_RUNNER_MODULE}) with no {RUNNER_SWITCH} to pin V2 by"
+        )
+    assert (RUNNER_SWITCH in envs.environment_variables) == (ENGINE == RELEASE), (
+        f"{RUNNER_SWITCH} is declared on the Inkling 2 build or gone from the release"
+    )
+    runner = importlib.import_module(V2_RUNNER_MODULE)
+    assert ThinkingBudgetState.__module__.startswith(f"{runner.__package__}."), (
+        "the thinking-budget state the completion patch targets is not Model Runner V2's"
+    )
+    worker = importlib.import_module("vllm.v1.worker.gpu_worker")
+    assert f"from {V2_RUNNER_MODULE} import GPUModelRunner" in inspect.getsource(worker), (
+        "the GPU worker does not build Model Runner V2"
+    )
+    print("Model Runner V2: OK")
+
+
 def check_image_identity() -> None:
-    """``/server_info`` names the patches, on the route the trainer reads, or it refuses this image as upstream."""
+    """``/server_info`` names the engine build and the patches, on the route the trainer reads, or it refuses this
+    image as upstream. The split top-p guard is the release tag's alone."""
     listed = _get_vllm_env_vars().get(identity_patch.IDENTITY_KEY, "")
-    assert "vllm_layerwise_reload_patch" in listed.split(","), f"/server_info lists {listed!r} as the image's patches"
+    build, _, patches = listed.partition("|")
+    assert build == vllm.__version__, f"/server_info names engine build {build!r}, not {vllm.__version__!r}"
+    assert "vllm_layerwise_reload_patch" in patches.split(","), (
+        f"/server_info lists {patches!r} as the image's patches"
+    )
+    assert (SPLIT_GUARD_PATCH in patches.split(",")) == (ENGINE == RELEASE), (
+        f"/server_info lists {patches!r} on the {ENGINE} tag"
+    )
     print(f"image identity on /server_info: OK ({listed})")
 
 
@@ -202,6 +255,37 @@ def check_tool_calling_grammar_off() -> None:
         "the tool parser base no longer reads VLLM_ENFORCE_STRICT_TOOL_CALLING"
     )
     print("strict tool calling off: OK")
+
+
+def _check_release_core_pause() -> None:
+    engine = MagicMock()
+    EngineCoreProc.pause_scheduler(engine, mode="keep", clear_cache=True)
+    assert engine._finish_pause.call_args.args == (True,), "a keep pause finishes without the clear_cache it was given"
+    engine = MagicMock()
+    EngineCore._finish_pause(engine, False)
+    assert not engine._reset_caches.called, "clear_cache=false resets"
+    engine = MagicMock()
+    EngineCore._finish_pause(engine, True)
+    assert engine._reset_caches.called, "clear_cache=true does not reset"
+
+
+def _check_inkling2_core_pause() -> None:
+    engine = MagicMock()
+    EngineCoreProc.pause_generation(engine, mode="keep", clear_cache=True)
+    assert engine.pause_scheduler.call_args.args == ("keep", True), "the engine's pause drops mode or clear_cache"
+    assert engine.reject_new_requests is False, "a keep pause rejects the requests it should queue"
+    engine = MagicMock()
+    engine._pause_complete.return_value = True
+    EngineCoreProc.pause_scheduler(engine, mode="keep", clear_cache=True)
+    assert engine._finish_pause.call_args.args[0] is True, "a keep pause finishes without the clear_cache it was given"
+    engine = MagicMock()
+    engine._checkpoint_state = None
+    EngineCore._finish_pause(engine, False, True)
+    assert not engine._reset_caches.called, "clear_cache=false resets"
+    engine = MagicMock()
+    engine._checkpoint_state = None
+    EngineCore._finish_pause(engine, True, True)
+    assert engine._reset_caches.called, "clear_cache=true does not reset"
 
 
 def check_pause_keep_clears_cache() -> None:
@@ -222,33 +306,20 @@ def check_pause_keep_clears_cache() -> None:
         and inner(params["clear_cache"].annotation) is bool
         and params["clear_cache"].default is True
     ), "/pause clear_cache changed"
+    # The engine-core call a keep pause forwards to differs between the two builds.
+    forward = "pause_generation_async" if ENGINE == INKLING2 else "pause_scheduler_async"
     llm = MagicMock()
     llm.renderer.clear_mm_cache_async = AsyncMock()
-    llm.engine_core.pause_generation_async = AsyncMock()
+    setattr(llm.engine_core, forward, AsyncMock())
 
     def forwarded(clear: bool) -> bool:
         asyncio.run(AsyncLLM.pause_generation(llm, mode="keep", clear_cache=clear))
-        return llm.engine_core.pause_generation_async.await_args.kwargs["clear_cache"]
+        return getattr(llm.engine_core, forward).await_args.kwargs["clear_cache"]
 
     assert forwarded(True) is True and forwarded(False) is False, (
         "pause_generation does not forward clear_cache under mode=keep"
     )
-    engine = MagicMock()
-    EngineCoreProc.pause_generation(engine, mode="keep", clear_cache=True)
-    assert engine.pause_scheduler.call_args.args == ("keep", True), "the engine's pause drops mode or clear_cache"
-    assert engine.reject_new_requests is False, "a keep pause rejects the requests it should queue"
-    engine = MagicMock()
-    engine._pause_complete.return_value = True
-    EngineCoreProc.pause_scheduler(engine, mode="keep", clear_cache=True)
-    assert engine._finish_pause.call_args.args[0] is True, "a keep pause finishes without the clear_cache it was given"
-    engine = MagicMock()
-    engine._checkpoint_state = None
-    EngineCore._finish_pause(engine, False, True)
-    assert not engine._reset_caches.called, "clear_cache=false resets"
-    engine = MagicMock()
-    engine._checkpoint_state = None
-    EngineCore._finish_pause(engine, True, True)
-    assert engine._reset_caches.called, "clear_cache=true does not reset"
+    (_check_inkling2_core_pause if ENGINE == INKLING2 else _check_release_core_pause)()
     engine = MagicMock()
     EngineCore._reset_caches(engine)
     assert engine.reset_prefix_cache.call_args.kwargs.get("reset_running_requests") is True, (
@@ -266,6 +337,7 @@ CHECKS = (
     check_weight_transfer_wire_contract,
     check_thinking_budget_patches,
     check_serve_flags,
+    check_model_runner_v2,
     check_image_identity,
     check_tool_calling_grammar_off,
     check_pause_keep_clears_cache,
@@ -273,5 +345,8 @@ CHECKS = (
 
 
 if __name__ == "__main__":
+    ENGINE, pinned_build = sys.argv[1:]
+    assert ENGINE in (RELEASE, INKLING2), f"unknown engine {ENGINE!r}"
+    check_engine_build(pinned_build)
     for check in CHECKS:
         check()

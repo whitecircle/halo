@@ -16,8 +16,8 @@ truth; where a recipe disagrees with this page, this page wins.
 | sentence-transformers | 6.1.0 |
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
-| flash-linear-attention | 0.4.2 |
-| vLLM | 0.1.dev25249 (vLLM's Inkling 2 build) on Model Runner V2, its own container: rollouts for both online RL methods |
+| flash-linear-attention | 0.6.0 |
+| vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods. Inkling 2 is served from a second tag, on vLLM's Inkling 2 build (0.1.dev25249) |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
 | Hardware | Image | Status |
@@ -101,7 +101,7 @@ a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says
 otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 `tensor_parallel_size: 2`, and replay is `routing_replay: rollout`.
 
-| Family | vLLM (measured on 0.32.0) | SGLang 0.5.22 | Replay | Ran on this release |
+| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on this release |
 | --- | :---: | :---: | :---: | --- |
 | Dense families | Yes | Yes | No, MoE only | vLLM: online GRPO, SDPG and async GRPO on Qwen3-0.6B. SGLang: a weight push on Qwen3-0.6B, no training loop |
 | GPT-OSS | Yes | Yes | Yes | `unsloth/gpt-oss-20b-BF16`. SGLang: every SGLang mode marked Ran below. vLLM: `ep4`, `ep2` with `tp2` or ETP2, `tp2` and `ep2` at DP2, HSDP, online GRPO at `ep2` |
@@ -115,7 +115,8 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
 | GLM-5 Next | Yes | Yes | Not run | A tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
-| Inkling, Inkling 2, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
+| Inkling 2 | Adapter sync only | No | No | Inkling-2-Small on 4× B300, served by vLLM's Inkling 2 image: async GRPO at `ep2`, attention LoRA through `rollout_adapter_sync`. No weight push and no online GRPO |
+| Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
 no validated expert layout on either engine and is refused too. Offline GRPO needs no
@@ -218,7 +219,7 @@ advanced parallelism. What each family is for:
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP on tiny models only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP on tiny models only; on SDPA, so use `packing`, not `padding_free` |
 | Inkling-Small | Yes | Yes | No | No | Yes | multimodal MoE; LoRA and PP on tiny models only; PP takes the text tower, no packing |
-| Inkling-2-Small | Yes | Yes | No | No | No | runs its own FlexAttention kernel on CUDA; the quantized-only release trains as expert LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; full fine-tuning and ETP on tiny models only ([details](../agent-docs/models/inkling2.md) ↗) |
+| Inkling-2-Small | Yes | Yes | No | No | No | runs its own FlexAttention kernel on CUDA; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts at EP ≥ 2, run at EP4 on B300; ETP is refused over the frozen experts, so the release takes none; full fine-tuning and ETP run on tiny bf16 models only ([details](../agent-docs/models/inkling2.md) ↗) |
 | Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
 | Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP on a tiny-model LoRA test only |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |

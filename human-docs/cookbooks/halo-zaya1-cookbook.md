@@ -80,8 +80,8 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - No CP or TP. CCA's sequence convolution breaks a sequence split, and its attention has no TP plan.
 - No pipeline parallelism: a stage cut would sever the fp32 residual stream and the router state each
   layer passes to the next.
-- No online RL. No Halo weight sync has been validated into vLLM 0.1.dev25249's native ZAYA1 class, and
-  SGLang 0.5.22's loader reads only the legacy per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
+- No online RL. vLLM 0.32.0 has no native ZAYA1 class, and SGLang 0.5.22's loader reads only the legacy
+  per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
 - No routing replay.
 - The legacy checkpoint `Zyphra/ZAYA1-8B-legacy` doesn't load. Start from hub `main`.
 
@@ -90,8 +90,8 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 The gathered save writes the two native fused expert tensors per layer, which `from_pretrained` reads
 back. `save_sharded_ep: true` works as well, and `halo run merge-ep-shards` rebuilds the same layout.
 
-Neither pinned engine is validated on a Halo export. vLLM's native ZAYA1 class reads the fused expert
-pair but has not served an export here, and SGLang's loader reads only the legacy layout. Run inference with
+Neither pinned engine serves a Halo export. vLLM has only its generic transformers backend, which is
+untested on this family, and SGLang's loader reads only the legacy layout. Run inference with
 transformers and `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)).
 
 ## Reference

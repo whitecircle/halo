@@ -121,7 +121,8 @@ def _hf_named_grads(model_type: str, model_cls: type, config, grads: dict[str, t
 
 
 def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
-    """At ``dtype`` with ``_keep_in_fp32_modules_strict`` kept in fp32, as ``from_pretrained(dtype=bf16)`` builds it."""
+    """At ``dtype`` with ``_keep_in_fp32_modules_strict`` at ``state``'s fp32 values, as ``from_pretrained(dtype=bf16)``
+    builds it."""
     model = model_cls(copy.deepcopy(config)).cuda()
     model.load_state_dict(state)
     model.to(dtype)
@@ -131,7 +132,8 @@ def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
     pinned = fp32_pin_matches((name for name, _ in model.named_parameters()), strict)
     for name, param in model.named_parameters():
         if name in pinned:
-            param.data = param.data.float()
+            # A copy: widening the cast parameter would keep its rounding, and the round-off probe writes in place.
+            param.data = state[name].to(device=param.device, dtype=torch.float32, copy=True)
     return model
 
 

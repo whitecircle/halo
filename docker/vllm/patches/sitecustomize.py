@@ -24,6 +24,11 @@ _PATCHES = {
     "vllm.v1.worker.gpu.sample.thinking_budget": "vllm_thinking_budget_completion_patch",
     "vllm.envs": "vllm_image_identity_patch",
 }
+# The split top-p guard ships on the release tag alone (Dockerfile.vllm): the Inkling 2 build's pipeline keeps a
+# budget-forced token itself.
+_SPLIT_GUARD_PATCH = "vllm_topp_split_guard_patch"
+if importlib.util.find_spec(_SPLIT_GUARD_PATCH) is not None:
+    _PATCHES["vllm.v1.sample.ops.topk_topp_triton"] = _SPLIT_GUARD_PATCH
 
 
 class _PatchOnImport(importlib.abc.MetaPathFinder):

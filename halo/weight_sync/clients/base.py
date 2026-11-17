@@ -6,7 +6,7 @@ import logging
 import socket
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
@@ -43,6 +43,9 @@ SESSION_CLOSE_TIMEOUT_S = 600
 CLEANUP_TIMEOUT_S = 30
 # One prefill of a training row, up to 250k tokens on a server that is also generating.
 RESCORE_TIMEOUT_S = 600.0
+# An adapter load or unload waits for the requests running under the adapter replaced, and a load for its copy to the
+# device.
+ADAPTER_UPDATE_TIMEOUT_S = 120.0
 _RESUME_RETRY_BACKOFF_S = (1.0, 2.0, 4.0)
 # Lets an in-flight server call record its error once the local side failed.
 SERVER_ERROR_GRACE_S = 5.0
@@ -66,6 +69,8 @@ class ServerFlags(NamedTuple):
     as unread, not as wrong."""
 
     toolkit_image: bool
+    # The engine build a toolkit image names in its identity, where the engine's identity carries one.
+    engine_build: str | None = None
     moe_backend: str | None = None
     # Empty when the server runs without one.
     reasoning_parser: str | None = None
@@ -81,6 +86,15 @@ class ServerFlags(NamedTuple):
     pipeline_stages: int | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
     extras: Mapping[str, object] = MappingProxyType({})
+
+
+class EngineImage(NamedTuple):
+    """One toolkit server image: its local tag, the engine build its identity names on ``/server_info``, and the make
+    target that builds it."""
+
+    tag: str
+    build: str
+    make_target: str
 
 
 class ServedBase(NamedTuple):
@@ -140,6 +154,10 @@ class WeightSyncClientBase(UpdateStream, ABC):
     # The open takes the weights away until a close restores them, so a session no close can end leaves no model.
     SESSION_OPEN_UNLOADS_MODEL: bool = False
     SESSION_REQUEST: Mapping[str, object] = {}
+    # The toolkit image every family is served from, ``None`` where the engine's identity names no build, and
+    # ``model_type`` → the image of each family that is served from another engine build.
+    IMAGE: EngineImage | None = None
+    FAMILY_IMAGES: Mapping[str, EngineImage] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
     # Families whose exported router balancing bias the engine's loader drops at serve time.
@@ -157,6 +175,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
     ADAPTER_NEEDS_DIRECTORY = False
     # The model types whose routed experts the engine serves an adapter on, as 3D per-expert tensors.
     ADAPTER_EXPERT_MODEL_TYPES: frozenset[str] = frozenset()
+    # The engine's routes for a load from a published directory and for an unload; ``None`` where it serves no adapter.
+    ADAPTER_DIRECTORY_LOAD_ROUTE: str | None = None
+    ADAPTER_UNLOAD_ROUTE: str | None = None
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.
@@ -386,13 +407,46 @@ class WeightSyncClientBase(UpdateStream, ABC):
         cls._reject_adapter_serving()
 
     def load_adapter(self, name: str, config: dict, payload: str | Path) -> None:
-        """Register the adapter ``payload`` (serialized tensors, or a published directory) as ``name``; raises where the
+        """Register the adapter ``payload`` as ``name``: a directory
+        (:func:`~halo.weight_sync.adapter_directory.publish_adapter_directory`) by its path, or serialized tensors
+        (:func:`~halo.weight_sync.adapter_payload.serialize_adapter_tensors`) in the request body. Raises where the
         engine refuses."""
-        self._reject_adapter_serving()
+        if self.ADAPTER_DIRECTORY_LOAD_ROUTE is None:
+            self._reject_adapter_serving()
+        if isinstance(payload, Path):
+            route, body = self.ADAPTER_DIRECTORY_LOAD_ROUTE, {"lora_name": name, "lora_path": str(payload)}
+            # The engine's own answer to a path it cannot read names neither the setting nor the mount.
+            remedy = (
+                f". The server reads the adapter from {payload}: if it cannot, mount rollout_adapter_dir "
+                f"({payload.parent}) at the same path in the trainer and in every rollout server"
+            )
+        else:
+            route, body = self._tensors_load_request(name, config, payload)
+            remedy = ""
+        self._update_adapter(route, body, f"load adapter {name!r}", remedy)
 
     def unload_adapter(self, name: str) -> None:
-        """Drop the adapter ``name`` once the requests running under it finished."""
-        self._reject_adapter_serving()
+        """Drop the adapter ``name``; the engine first waits for the requests still running under it."""
+        if self.ADAPTER_UNLOAD_ROUTE is None:
+            self._reject_adapter_serving()
+        self._update_adapter(self.ADAPTER_UNLOAD_ROUTE, {"lora_name": name}, f"unload adapter {name!r}")
+
+    def _tensors_load_request(self, name: str, config: dict, payload: str) -> tuple[str, dict]:
+        """The route and body of a load from serialized tensors."""
+        raise ValueError(f"{self.ENGINE_RELEASE} loads an adapter only from a directory: set rollout_adapter_dir")
+
+    def _update_adapter(self, route: str, body: dict, what: str, remedy: str = "") -> None:
+        response = self.request("POST", route, retry=False, timeout=ADAPTER_UPDATE_TIMEOUT_S, check=False, json=body)
+        refusal = self._adapter_update_refusal(response)
+        if refusal is not None:
+            raise RuntimeError(
+                f"{self.BACKEND_NAME} {self.base_url} could not {what}: HTTP {response.status_code}, "
+                f"{refusal.rstrip('.')}{remedy}."
+            )
+
+    def _adapter_update_refusal(self, response: requests.Response) -> str | None:
+        """The engine's reason for refusing an adapter load or unload, ``None`` where it took it."""
+        return None if response.ok else response.text[:300]
 
     def loaded_adapters(self) -> list[str]:
         """The adapters registered on the engine."""
@@ -472,6 +526,16 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def accepts_tool_requests(self) -> bool | None:
         """Whether a request carrying tools is served, ``None`` where the server reports its parser instead."""
         return None
+
+    @classmethod
+    def image_for(cls, model_types: Iterable[str]) -> EngineImage | None:
+        """The toolkit image a model of these types is served from."""
+        return next((cls.FAMILY_IMAGES[each] for each in model_types if each in cls.FAMILY_IMAGES), cls.IMAGE)
+
+    @classmethod
+    def image_remedy(cls, model_types: Iterable[str]) -> str:
+        """The launch a refusal names for a model of these types."""
+        return cls.IMAGE_REMEDY
 
     def _require_toolkit_image(self, flags: ServerFlags) -> None:
         """Refuse a server off the toolkit's image: its routes answer, and its update lands wrong behind a ``200``."""

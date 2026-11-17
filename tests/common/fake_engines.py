@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import torch
+from safetensors.torch import load_file
 from torch.distributed import TCPStore
 
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -204,15 +205,15 @@ class FakeVLLMServer(FakeEngineServer):
             "packed",
             "packed_buffer_size_bytes",
             "packed_num_buffers",
-            "use_load_plan",
-            "metadata",
         }
     )
-    UPDATE_INFO_FIELDS = frozenset({"names", "dtype_names", "shapes", "src"})
+    UPDATE_INFO_FIELDS = frozenset({"names", "dtype_names", "shapes"})
 
     def __init__(self):
         super().__init__()
         self.version = self.VERSION
+        # The image's identity row on /server_info, reported while ``toolkit_image`` is set.
+        self.identity = f"{VLLMWeightSyncClient.IMAGE.build}|vllm_layerwise_reload_patch"
         self.update_open = False
         self.world_size = 1
         self.pp_size = 1
@@ -234,7 +235,7 @@ class FakeVLLMServer(FakeEngineServer):
         if (method, path) == ("GET", "/server_info"):
             env = {"VLLM_ENFORCE_STRICT_TOOL_CALLING": self.strict_tool_calling}
             if self.toolkit_image:
-                env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
+                env["VLLM_HALO_PATCHES"] = self.identity
             config = {
                 **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},
@@ -393,17 +394,26 @@ class FakeSGLangServer(FakeEngineServer):
         self.paused = False
 
     def _load_adapter(self, body: dict) -> tuple[int, dict]:
+        """Both load routes: the tensors of the request body, or the PEFT directory at ``lora_path``."""
         if self.lora is None:
             return 400, {"success": False, "error_message": "LoRA is not enabled. Please set `--enable-lora`."}
         if body["lora_name"] in self.adapters:
             return 400, {"success": False, "error_message": f"{body['lora_name']} is already loaded"}
-        if len(body["serialized_named_tensors"]) < self.tp_size:
-            return 500, {"success": False, "error_message": "one serialized copy per tensor-parallel rank is needed"}
-        raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
-        tensors = _TensorUnpickler(io.BytesIO(raw)).load()
-        if body["config_dict"]["r"] > self.lora["max_lora_rank"]:
+        if "lora_path" in body:
+            directory = pathlib.Path(body["lora_path"])
+            if not (directory / "adapter_config.json").is_file():
+                return 400, {"success": False, "error_message": f"Can't find 'adapter_config.json' at '{directory}'"}
+            config = json.loads((directory / "adapter_config.json").read_text())
+            tensors = load_file(directory / "adapter_model.safetensors")
+        else:
+            if len(body["serialized_named_tensors"]) < self.tp_size:
+                reason = "one serialized copy per tensor-parallel rank is needed"
+                return 500, {"success": False, "error_message": reason}
+            raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
+            config, tensors = body["config_dict"], _TensorUnpickler(io.BytesIO(raw)).load()
+        if config["r"] > self.lora["max_lora_rank"]:
             return 400, {"success": False, "error_message": "incompatible with the current LoRA memory pool"}
-        self.adapters[body["lora_name"]] = (body["config_dict"], tensors)
+        self.adapters[body["lora_name"]] = (config, tensors)
         return 200, {"success": True}
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
@@ -411,7 +421,7 @@ class FakeSGLangServer(FakeEngineServer):
             _, reply = super().answer(method, path, body)
             reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
             return 200, reply
-        if (method, path) == ("POST", "/load_lora_adapter_from_tensors"):
+        if method == "POST" and path in ("/load_lora_adapter", "/load_lora_adapter_from_tensors"):
             return self._load_adapter(body)
         if (method, path) == ("POST", "/unload_lora_adapter"):
             if body["lora_name"] not in self.adapters:

@@ -116,7 +116,9 @@ def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[st
         if path == "/get_world_size":
             return _Response({"world_size": 0})
         if path == "/server_info":
-            return _Response({"vllm_env": {"VLLM_HALO_PATCHES": "vllm_layerwise_reload_patch"}})
+            return _Response(
+                {"vllm_env": {"VLLM_HALO_PATCHES": f"{FakeVLLMServer.VERSION}|vllm_layerwise_reload_patch"}}
+            )
         if path in ("/health", "/end_weight_update"):
             return _Response({})
         server_calls.append(path)

@@ -17,7 +17,6 @@ from halo.models.upstream.upstream_guard import verify_upstream_parameters
 # ``Inkling2TopKRouter``'s renormalization floor.
 _TOPK_WEIGHT_NORM_EPS = 1e-20
 # Kept for the parity tests: this module is the only one that replaces them.
-UPSTREAM_ROUTER_FORWARD = inkling2_modeling.Inkling2TopKRouter.forward
 UPSTREAM_RELATIVE_LOGITS_FORWARD = inkling2_modeling.Inkling2RelativeLogits.forward
 UPSTREAM_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2ShortConvolution.forward
 UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2DynamicShortConvolution.forward

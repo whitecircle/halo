@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Step-3.7 live vLLM weight sync: the served policy must move, and move to the trainer's policy, per weight group.
 
-vLLM's ``step3p5`` loader silently drops names outside the hub namespace, so a sync shipping module-tree names
+vLLM 0.32.0's ``step3p5`` loader silently drops names outside the hub namespace, so a sync shipping module-tree names
 returns ``200 OK`` and changes nothing. The served checkpoint fits vLLM: its clamp takes ``swiglu_limits`` of exactly
 7, its image processor a 728/14 tower.
 
@@ -10,7 +10,7 @@ Prerequisites (the server must own a GPU the trainer does not):
     # all GPUs visible, masked by CUDA_VISIBLE_DEVICES: NCCL P2P to the trainer's GPU needs the peer
     # device present in the server container (``--gpus device=7`` fails init with 'unhandled cuda error')
     docker run -d --gpus all -e CUDA_VISIBLE_DEVICES=7 --network host --ipc host -v $DIR:$DIR \\
-        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL halo:vllm-0.1.dev25249 $DIR --port 8000 \\
+        -e NCCL_IB_DISABLE=1 -e NCCL_P2P_LEVEL=NVL halo:vllm-0.32.0 $DIR --port 8000 \\
         --trust-remote-code --moe-backend triton --weight-transfer-config '{"backend": "nccl"}' \\
         --return-tokens-as-token-ids --max-model-len 1024 --gpu-memory-utilization 0.2 \\
         --max-logprobs 64 --enforce-eager
@@ -65,7 +65,7 @@ MOVE_MIN = 0.3
 NOISE_STD = 0.05
 
 LAYER_TYPES = ["full_attention", "sliding_attention", "full_attention", "sliding_attention"]
-# The vendor spelling the pinned vLLM reads through the repo's own config class.
+# The vendor spelling vLLM 0.32.0 reads through the repo's own config class.
 SERVED_CONFIG = {
     "architectures": ["Step3p7ForConditionalGeneration"],
     "auto_map": {"AutoConfig": "configuration_step3p7.Step3p7Config"},
@@ -149,7 +149,7 @@ def write_checkpoint(out: Path) -> None:
         shutil.copyfile(hf_hub_download(HUB_REPO, name), out / name)
     torch.manual_seed(SEED)
     model = Step3p7ForConditionalGeneration(Step3p7Config.from_pretrained(out)).to(torch.bfloat16)
-    # save_pretrained writes hub-namespace weights but transformers' config spelling, which vLLM can't parse.
+    # save_pretrained writes hub-namespace weights but transformers' config spelling, which vLLM 0.32.0 can't parse.
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
         model.save_pretrained(tmp)
         for part in Path(tmp).glob("*.safetensors*"):

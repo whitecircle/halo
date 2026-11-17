@@ -38,6 +38,7 @@ from halo.checkpoint.reading import (
     detect_model_type,
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
+    read_checkpoint_config,
     reject_partial_checkpoint,
 )
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, copy_training_sidecars
@@ -400,6 +401,21 @@ def _reject_unreplayable_sidecars(adapter_dir: str) -> None:
         )
 
 
+def _reject_packed_base(base_dir: str, adapter_dir: str) -> None:
+    """A base whose config declares a ``quantization_config`` stores packed tensors (NVFP4 nibbles, MXFP8 or fp8 bytes
+    with their scales apart), and a fold adds its delta to the stored values at the stored dtype."""
+    quantization = (read_checkpoint_config(base_dir, missing_ok=True) or {}).get("quantization_config")
+    if not quantization:
+        return
+    raise ValueError(
+        f"The base at {base_dir} declares a quantization_config (quant_method "
+        f"{quantization.get('quant_method')!r}), so its weights are stored packed and a delta folded into the stored "
+        f"values gives no weight. The adapter at {adapter_dir} has no merged export. An adapter trained over a packed "
+        f"release (frozen_quantized_experts) resumes training from its adapter directory; any other adapter merges "
+        f"over the base's bf16 conversion."
+    )
+
+
 def merge_adapter_streaming(
     adapter_dir: str,
     output_dir: str,
@@ -410,8 +426,8 @@ def merge_adapter_streaming(
 ) -> None:
     """Fold ``adapter_dir`` into its base and write ``output_dir``: tensors keep the base's stored dtype and key
     spelling, the base's config and tokenizer files are copied (the adapter's tokenizer replaces them), and the
-    adapter config lands in ``original_adapter_config/``. Every key the adapter rewrites is resolved against the base
-    before the first write, so a refusal leaves no output."""
+    adapter config lands in ``original_adapter_config/``. A packed (quantized) base is refused, and every key the
+    adapter rewrites is resolved against the base before the first write, so a refusal leaves no output."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
     _reject_unreplayable_sidecars(adapter_dir)
@@ -422,6 +438,7 @@ def merge_adapter_streaming(
     base_dir = resolve_checkpoint_source(base_path)
     reject_partial_checkpoint(base_dir)
     reject_in_place_conversion(base_dir, output_dir)
+    _reject_packed_base(base_dir, adapter_dir)
     plan = _plan_merge(adapter_dir, config, base_dir)
 
     shards = checkpoint_shard_files(base_dir)

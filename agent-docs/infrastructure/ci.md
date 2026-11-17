@@ -22,14 +22,15 @@ setup), GitGuardian and CodeRabbit report on every PR from outside `.github/work
   `tests/cpu/conventions/test_hosted_conventions_are_stdlib.py` fails, in the image too, when a listed
   file, a package `__init__.py` or conftest pytest runs for it, or a file one of them imports or loads
   reaches torch, `halo` or any other non-stdlib import. `.github/scripts/locked_version.py` reads each
-  job's tool pin (ruff, pytest, matplotlib) out of `uv.lock`.
+  job's tool pin (ruff, pytest) out of `uv.lock`.
 - **`docs.yml`.** `scripts/docs/check_links.sh` blocks on a broken relative link or heading anchor across
   `agent-docs/`, `human-docs/`, `skills/` and the root markdown (an anchor must be GitHub's slug, so a
   `{#id}` heading fails), and resolves their code: a repo-root path must exist, and a dotted first-party
-  name must name a module and a name it binds, read off the source. Its `diagrams` job re-runs
-  `scripts/diagrams/` in `python:3.12-slim` at `uv.lock`'s matplotlib and byte-compares the result with
-  the committed figures under `agent-docs/assets/`: run `make diagrams` and commit after editing a
-  generator.
+  name must name a module and a name it binds, read off the source. `scripts/docs/figure_manifest.sh
+  check` blocks on a stale figure: `make diagrams` records in `agent-docs/assets/figures.sha256` the
+  SHA-256 of every figure PNG and of what it is rendered from (its page, the data folders the page names,
+  `skills/visuals/kit/`, `render.sh` and `canvas-size.sh`), and any of them changed since, or a page
+  never rendered, fails.
 - **`sensitive-label.yml`.** A PR whose own commits change a path listed in `.github/sensitive-paths` (a
   moved file counts under its old path) fails until it carries the `sensitive` label, which a maintainer
   adds once the change is approved as `CLAUDE.md` requires; a label change re-runs it. It runs on
@@ -38,7 +39,7 @@ setup), GitGuardian and CodeRabbit report on every PR from outside `.github/work
   `tests/cpu/conventions/test_sensitive_label.py` also fails when a listed glob matches no file.
 
 Blocking is the `main` ruleset's **required status checks** (`ruff`, `actionlint`, `build`); a red check
-outside that set, `diagrams` included, still lets a PR merge. `conventions` and `sensitive-label` block
+outside that set still lets a PR merge. `conventions` and `sensitive-label` block
 once a repo admin adds them to the set and creates the `sensitive` label.
 
 `.pre-commit-config.yaml` mirrors the ruff gates on the host at commit time, plus whitespace fixers and
@@ -105,7 +106,7 @@ it in `tests/common/models.py` so the seed carries it.
 
 The scope Halo 1.2.0 is validated on:
 
-- **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (measured on vLLM 0.32.0,
+- **GPU:** 8× B300 machines: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
   SGLang 0.5.22) and the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`).
 - **Throughput band** (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)): on a second
   B300 machine, 8 of 9 rows sat within band over three repeats, and no median moved more than 1.7% from the

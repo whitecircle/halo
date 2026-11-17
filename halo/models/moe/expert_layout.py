@@ -88,6 +88,16 @@ def split_interleaved_gate_up(interleaved: torch.Tensor) -> tuple[torch.Tensor, 
     return interleaved[..., ::2], interleaved[..., 1::2]
 
 
+def to_w13_w2_expert_adapter(attr: str, side: str, tensor: torch.Tensor) -> tuple[str, torch.Tensor]:
+    """One side of a grouped expert adapter (``lora_A`` ``[E, in, r]``, ``lora_B`` ``[E, r, out]``, matmul convention)
+    as the per-expert adapter on a w13/w2 checkpoint's expert weight, ``[E, r, in]`` / ``[E, out, r]``: the weight's
+    name, ``w13_weight`` for ``gate_up_proj`` and ``w2_weight`` for ``down_proj``, and the tensor. The B rows of
+    ``w13_weight`` alternate gate and up, as the checkpoint's w13 rows do."""
+    if attr == "gate_up_proj" and side == "B":
+        tensor = interleave_gate_up(*tensor.chunk(2, dim=-1))
+    return ("w13_weight" if attr == "gate_up_proj" else "w2_weight"), tensor.transpose(1, 2).contiguous()
+
+
 def iter_per_expert_split(banks: Sequence[tuple[torch.Tensor, tuple[str, ...]]]) -> Iterator[tuple[str, torch.Tensor]]:
     """``("<expert>.<name>", view)`` expert by expert, each bank's expert slice split evenly into one view per name."""
     for expert in range(banks[0][0].shape[0]):

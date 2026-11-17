@@ -1,11 +1,18 @@
 #!/usr/bin/env python
 """The fused Triton dequant of a frozen expert bank equals the eager oracle bit for bit, for NVFP4 and MXFP8 banks at
-Inkling 2's expert widths, on every e2m1 code, the NaN and smallest e8m0 scales and subnormal fp8 scales; and it times
-both paths on a real bank."""
+Inkling 2's expert widths, on every e2m1 code, the NaN and smallest e8m0 scales and subnormal fp8 scales; a bank's
+expert slices take the same kernel with their own scales, on the binaries the warm-up compiles; and it times both paths
+on a real bank."""
 
 import torch
 
-from halo.kernels.lowp.dequant_triton import dequantize_bank_triton
+from halo.kernels.lowp.dequant_triton import (
+    _mxfp8_bank_kernel,
+    _nvfp4_bank_kernel,
+    dequantize_bank_triton,
+    supports_fused_dequant,
+)
+from halo.kernels.lowp.frozen_bank import FrozenExpertBank, warm_fused_dequant_kernels
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, BlockScaledTensor, dequantize
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
@@ -65,6 +72,65 @@ def check_bitwise() -> None:
             log(f"  {quant_format} [{n}, {k}]: bit-identical to eager")
 
 
+def _bitwise_difference(actual: torch.Tensor, expected: torch.Tensor) -> int:
+    assert actual.shape == expected.shape, f"shape {list(actual.shape)} against {list(expected.shape)}"
+    return int((actual.view(torch.int16) != expected.view(torch.int16)).sum())
+
+
+def check_bank_slices() -> None:
+    """``FrozenExpertBank.dequantize_linear(start, end)``, the call the expert GEMM and the per-expert loop make: each
+    expert range equals eager on its own rows of data, block scales and global scale."""
+    generator = torch.Generator(device=DEV).manual_seed(2)
+    experts = 5
+    for quant_format in ("nvfp4", "mxfp8"):
+        for n, k in SHAPES:
+            data, scales, global_scale = _bank(quant_format, experts, n, k, generator)
+            bank = FrozenExpertBank(quant_format, data, scales, global_scale)
+            assert supports_fused_dequant(bank.data, bank.in_features), f"{quant_format} K={k} is off the fused path"
+            if global_scale is not None:
+                assert global_scale.unique().numel() == experts, "premise: every expert has its own global scale"
+            for start, end in ((0, experts), (1, 4), (3, experts), (2, 3), (experts - 1, experts)):
+                fused = bank.dequantize_linear(start, end)
+                eager = _eager(
+                    data[start:end],
+                    scales[start:end],
+                    None if global_scale is None else global_scale[start:end],
+                    quant_format,
+                )
+                differing = _bitwise_difference(fused, eager)
+                assert differing == 0, f"{quant_format} [{n}, {k}] experts [{start}, {end}): {differing} bits differ"
+            log(f"  {quant_format} [{n}, {k}]: every expert range is bit-identical to eager")
+
+
+def _compiled_binaries() -> int:
+    device = torch.cuda.current_device()
+    return sum(len(kernel.device_caches[device][0]) for kernel in (_nvfp4_bank_kernel, _mxfp8_bank_kernel))
+
+
+def check_warm_up_leaves_no_compile() -> None:
+    """The load-time warm-up launches one expert per format and ``K``; a whole bank and every one-expert slice, whose
+    global scale sits off 16-byte alignment, run on those binaries."""
+    generator = torch.Generator(device=DEV).manual_seed(3)
+    experts = 5
+    banks = [
+        FrozenExpertBank(quant_format, *_bank(quant_format, experts, n, k, generator))
+        for quant_format in ("nvfp4", "mxfp8")
+        for n, k in SHAPES
+    ]
+    for kernel in (_nvfp4_bank_kernel, _mxfp8_bank_kernel):
+        kernel.device_caches.clear()
+    warm_fused_dequant_kernels(banks)
+    warmed = _compiled_binaries()
+    assert warmed == len(banks), f"{warmed} binaries for {len(banks)} format and K pairs"
+    for bank in banks:
+        bank.dequantize_linear()
+        for expert in range(experts):
+            bank.dequantize_linear(expert, expert + 1)
+    after = _compiled_binaries()
+    log(f"  [warm-up] {warmed} binaries, {after} after every bank and one-expert slice")
+    assert after == warmed, f"{after - warmed} binaries compiled after the warm-up"
+
+
 def check_speed() -> None:
     """A 16-expert NVFP4 gate/up bank, the eager path in its 4-expert chunks as the bank runs it."""
     generator = torch.Generator(device=DEV).manual_seed(1)
@@ -100,6 +166,8 @@ def check_speed() -> None:
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "bitwise", check_bitwise)
+    record_check(checks, "bank_slices", check_bank_slices)
+    record_check(checks, "warm_up_leaves_no_compile", check_warm_up_leaves_no_compile)
     record_check(checks, "speed", check_speed)
     return {"checks": checks}
 
