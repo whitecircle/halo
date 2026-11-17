@@ -92,7 +92,11 @@ tool's help, not the launcher's.
 ```bash
 halo run merge-ep-shards --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
 halo run quantize-to-lowp --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
+halo run quantize-to-lowp --input_dir <bf16-model-dir> --output_dir <vllm-out-dir> --format mxfp4 --export_format compressed-tensors
 ```
+
+`--export_format compressed-tensors` writes the layout vLLM loads instead of
+Halo's own `block_scaled` manifest, which stays the default.
 
 [Writing a config](configuration.md) covers the config file. Every script and
 flag is in the [Scripts reference](../agent-docs/reference/scripts-reference.md) ↗.
