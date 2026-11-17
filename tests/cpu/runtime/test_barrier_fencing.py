@@ -84,6 +84,7 @@ def _fence_outcomes(rank: int, tmp_dir: str) -> None:
     whole_model.warm_fa4_kernels = _fa4_compile_failing_on_one_rank
     whole_model.warm_flex_sliding_kernels = _no_flex_compile
     whole_model._warm_frozen_bank_kernels = lambda model: None
+    whole_model.warm_inkling2_relative_flex_kernels = lambda model, *, dtype: None
     record("warm-up", lambda: whole_model.warm_attention_kernels(None, dtype=torch.bfloat16))
     record("clean", clean_write)
     with open(os.path.join(tmp_dir, f"outcomes_{rank}.json"), "w") as fh:

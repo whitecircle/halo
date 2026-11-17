@@ -313,7 +313,12 @@ def test_every_load_warms_the_kernel_behind_the_fence(monkeypatch):
     warmed = []
     monkeypatch.setattr(whole_model, "get_global_world_size", lambda: 2)
     monkeypatch.setattr(whole_model, "barrier_on_exit", lambda _: contextlib.nullcontext())
-    for other in ("warm_fa4_kernels", "warm_flex_sliding_kernels", "warm_masked_matmul_kernels"):
+    for other in (
+        "warm_fa4_kernels",
+        "warm_flex_sliding_kernels",
+        "warm_masked_matmul_kernels",
+        "_warm_frozen_bank_kernels",
+    ):
         monkeypatch.setattr(whole_model, other, lambda *args, **kwargs: None)
     monkeypatch.setattr(
         whole_model, "warm_inkling2_relative_flex_kernels", lambda model, *, dtype: warmed.append((model, dtype))
