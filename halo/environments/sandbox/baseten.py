@@ -2,12 +2,14 @@
 microVM, created on first use and deleted on close, and each call is one run of the program runner in it.
 ``BASETEN_API_KEY`` mints the short-lived access token that every sandbox call carries."""
 
+import atexit
 import contextlib
 import logging
 import math
 import os
 import threading
 import time
+import weakref
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -16,7 +18,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 from halo.environments.sandbox.base import SandboxExecutor
-from halo.environments.sandbox.local import (
+from halo.environments.sandbox.limits import (
     SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
     SANDBOX_DEFAULT_COMPILE_TIMEOUT,
     SANDBOX_DEFAULT_MEMORY_MB,
@@ -39,11 +41,21 @@ BASETEN_SANDBOX_LIMIT = 10
 # A token expires 2 hours after issue and cannot be renewed.
 TOKEN_REFRESH_SECONDS = 90 * 60
 RETRIED_STATUSES = (429, 500, 502, 503, 504)
+IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE"})
 
 # Root's files in the sandbox's /tmp: a program, which runs as another user, can read but not replace them.
 RUNNER_PATH = "/tmp/halo_program_runner.py"
 REQUEST_PATH = "/tmp/halo_runner_request.json"
 SESSION_DIR = "/halo/session"
+
+
+live_executors: "weakref.WeakSet[BasetenSandbox]" = weakref.WeakSet()
+
+
+@atexit.register
+def close_live_executors() -> None:
+    for executor in list(live_executors):
+        executor.close()
 
 
 class SandboxGone(SandboxInfraError):
@@ -74,9 +86,11 @@ class Process:
 
 
 class BasetenApi:
-    """HTTP to Baseten's management API and to a sandbox's runtime API. 429, 5xx and connection errors are retried
-    with exponential backoff; a read timeout is not, because sending a request again would run its program again.
-    Every failure raises :class:`SandboxInfraError`."""
+    """HTTP to Baseten's management API and to a sandbox's runtime API. Every failure raises
+    :class:`SandboxInfraError`.
+
+    Connection errors, 429 and 5xx are retried with exponential backoff, except where a retry could run a program
+    twice: a sandbox's ``POST /process`` is sent again only when the connection was never made."""
 
     def __init__(
         self,
@@ -91,20 +105,27 @@ class BasetenApi:
         self.api_key_env = api_key_env
         self.api_url = api_url.rstrip("/")
         self.request_timeout = request_timeout
-        retry = Retry(
+        self.http = session or requests.Session()
+        sandbox_calls = HTTPAdapter(max_retries=self._retry(max_retries, backoff_factor, IDEMPOTENT_METHODS))
+        for scheme in ("https://", "http://"):
+            self.http.mount(scheme, sandbox_calls)
+        # Minting a token and creating a sandbox run no program, so every method is retried there.
+        management_calls = HTTPAdapter(max_retries=self._retry(max_retries, backoff_factor, None))
+        self.http.mount(f"{self.api_url}/", management_calls)
+        self._token_lock = threading.Lock()
+        self._token: str | None = None
+        self._token_refresh_at = 0.0
+
+    @staticmethod
+    def _retry(max_retries: int, backoff_factor: float, methods: frozenset[str] | None) -> Retry:
+        return Retry(
             total=max_retries,
             read=False,
             backoff_factor=backoff_factor,
             status_forcelist=RETRIED_STATUSES,
-            allowed_methods=None,
+            allowed_methods=methods,
             raise_on_status=False,
         )
-        self.http = session or requests.Session()
-        for scheme in ("https://", "http://"):
-            self.http.mount(scheme, HTTPAdapter(max_retries=retry))
-        self._token_lock = threading.Lock()
-        self._token: str | None = None
-        self._token_refresh_at = 0.0
 
     def create_sandbox(self, *, image: str, cpu: int, idle_ttl: str, timeout: float) -> Sandbox:
         body = {
@@ -176,7 +197,8 @@ class BasetenSandbox(SandboxExecutor):
     """``max_concurrency`` caps the sandboxes this process holds at once. A session holds one until it is closed, and
     a session past the cap waits."""
 
-    isolated = True
+    # Baseten's API has no setting that blocks a sandbox's outbound network.
+    isolated = False
 
     def __init__(
         self,
@@ -185,7 +207,7 @@ class BasetenSandbox(SandboxExecutor):
         api_url: str = BASETEN_API_URL,
         image: str = "baseten/base-image:latest",
         cpu: int = 2,
-        idle_ttl: str = "30m",
+        idle_ttl: str = "10m",
         interpreter: str = "python3",
         request_timeout: float = 60.0,
         request_overhead: float = 30.0,
@@ -226,6 +248,17 @@ class BasetenSandbox(SandboxExecutor):
             compile_memory_limit_mb=compile_memory_limit_mb,
         )
         self.slots = threading.BoundedSemaphore(max_concurrency)
+        self._live_sandboxes: set[Sandbox] = set()
+        self._lock = threading.Lock()
+        live_executors.add(self)
+
+    def close(self) -> None:
+        """Delete every sandbox this executor still holds. Idempotent; never raises."""
+        with self._lock:
+            sandboxes, self._live_sandboxes = self._live_sandboxes, set()
+        for sandbox in sandboxes:
+            self.delete_sandbox(sandbox)
+        live_executors.discard(self)
 
     def open_session(self) -> "BasetenSession":
         return BasetenSession(self)
@@ -240,10 +273,14 @@ class BasetenSandbox(SandboxExecutor):
         except SandboxInfraError:
             self.delete_sandbox(sandbox)
             raise
+        with self._lock:
+            self._live_sandboxes.add(sandbox)
         return sandbox
 
     def delete_sandbox(self, sandbox: Sandbox) -> None:
         """Never raises: a sandbox that could not be deleted is removed by its idle expiration."""
+        with self._lock:
+            self._live_sandboxes.discard(sandbox)
         try:
             self.api.delete_sandbox(sandbox)
         except SandboxInfraError as error:
@@ -272,15 +309,20 @@ class BasetenSession(RunnerSession):
                 deadline=deadline,
                 timeout=deadline + self.executor.request_overhead,
             )
+            if not process.completed:
+                raise SandboxInfraError(
+                    f"baseten sandbox runner {process.status} with exit code {process.exit_code}: "
+                    f"{process.last_error_line}"
+                )
+            return decode_reply(process.stdout)
         except SandboxGone:
             self._sandbox = None
             raise
-        if not process.completed:
-            raise SandboxInfraError(
-                f"baseten sandbox runner {process.status} with exit code {process.exit_code}: "
-                f"{process.last_error_line}"
-            )
-        return decode_reply(process.stdout)
+        except SandboxInfraError:
+            # The sandbox may still hold the program: the next call gets a new one.
+            self.executor.delete_sandbox(sandbox)
+            self._sandbox = None
+            raise
 
     def read_file(self, path: str) -> str | None:
         self.reject_unsafe_path(path)

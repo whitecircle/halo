@@ -196,7 +196,9 @@ def ray_init_kwargs(**overrides) -> dict:
     # process: without the sandbox selection it would run model-written code on the default local backend.
     sandbox_env = {name: value for name, value in os.environ.items() if name.startswith(_SANDBOX_ENV_PREFIX)}
     if sandbox_env:
-        kwargs.setdefault("runtime_env", {"env_vars": sandbox_env})
+        runtime_env = dict(kwargs.get("runtime_env") or {})
+        runtime_env["env_vars"] = {**sandbox_env, **runtime_env.get("env_vars", {})}
+        kwargs["runtime_env"] = runtime_env
     temp_dir = _short_ray_temp_dir()
     if temp_dir is not None:
         kwargs["_temp_dir"] = temp_dir

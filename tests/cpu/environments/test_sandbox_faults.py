@@ -588,10 +588,10 @@ def test_a_source_write_refused_after_the_restore_is_the_programs_runtime_error(
     """A child that escaped the process group can lock a written file again between the host's restore
     and its write: the refusal is the program's runtime error, never an infra error."""
 
-    def locked(self, workspace, name, content):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(workspace.path, name))
+    def locked(self, name, content):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(self.path, name))
 
-    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", locked)
+    monkeypatch.setattr(Workspace, "write", locked)
     tests = [{"input": "", "output": "1"}] * 2
     grade = run_solution_against_tests("print(1)", tests, sandbox=LocalSubprocessSandbox())
     assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 0), grade.details

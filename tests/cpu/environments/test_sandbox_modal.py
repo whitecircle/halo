@@ -3,6 +3,7 @@ subprocess, so limits, verdicts and session state go through the production runn
 its own user, so these tests need root. The live test (a few programs in a real Modal sandbox) runs only with
 ``HALO_MODAL_LIVE=1``, the Modal SDK and Modal credentials."""
 
+import contextlib
 import math
 import os
 import shutil
@@ -37,8 +38,6 @@ from halo.environments.sandbox.runner_session import runner_source
 from halo.environments.tasks.coding.grading import run_solution_against_tests
 
 _MIB = 1024 * 1024
-
-pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="the runner sets each session's user, which takes root")
 
 
 class _Stdin:
@@ -112,6 +111,8 @@ class _FakeSandbox:
 
     def exec(self, *argv, timeout=None):
         assert argv[:3] == ("python3", "-I", "-c") and argv[3] == runner_source()
+        if os.geteuid() != 0:
+            pytest.skip("the runner sets each session's user, which takes root")
         self.exec_calls += 1
         if self.terminated:
             raise RuntimeError("sandbox terminated")
@@ -494,8 +495,29 @@ def test_process_that_left_the_programs_group_does_not_outlive_the_run(executor)
         "    os._exit(0)\n"
     )
     assert session.run(daemon).ok
-    owners = {os.stat(f"/proc/{pid}").st_uid for pid in os.listdir("/proc") if pid.isdigit()}
-    assert session.uid not in owners
+    assert session.uid not in _process_owners()
+
+
+def _process_owners():
+    owners = set()
+    for pid in os.listdir("/proc"):
+        if pid.isdigit():
+            with contextlib.suppress(FileNotFoundError):  # the process exited after the listing
+                owners.add(os.stat(f"/proc/{pid}").st_uid)
+    return owners
+
+
+def test_an_open_session_never_shares_its_user(modal, monkeypatch):
+    monkeypatch.setattr(ms, "SESSION_UIDS", range(20_000, 20_002))
+    executor = ModalSandbox()
+    long_lived, other = executor.open_session(), executor.open_session()
+    with pytest.raises(SandboxInfraError, match="in use"):
+        executor.open_session()
+    for _ in range(5):
+        other.close()
+        other = executor.open_session()
+        assert other.uid != long_lived.uid
+    executor.close()
 
 
 def test_program_owns_the_files_written_for_it(executor):
@@ -567,6 +589,17 @@ def test_factory_builds_modal_with_its_options(modal):
     executor.close()
 
 
+def test_a_url_is_refused_for_modal_by_name(modal):
+    with pytest.raises(ValueError, match="backend is 'modal', which takes none"):
+        build_sandbox(backend="modal", url="http://sandbox-host:8080")
+    assert modal.lookups == []
+
+
+def test_an_unknown_backend_lists_the_known_ones():
+    with pytest.raises(ValueError, match="expected one of local, bubblewrap, remote, modal"):
+        build_sandbox(backend="nope")
+
+
 def test_env_var_selects_modal(modal, monkeypatch):
     monkeypatch.setenv("HALO_SANDBOX_BACKEND", "modal")
     executor = build_sandbox()
@@ -619,6 +652,11 @@ def test_flag_selection_reaches_ray_actors_on_a_shared_cluster(under_flag, monke
     """Actors on a ``ray_address`` cluster get their environment from the raylet, so the job carries the selection."""
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "never-forwarded")
     assert ray_init_kwargs()["runtime_env"] == {"env_vars": ROLLOUT_BACKEND_ENV["modal"]}
+    merged = ray_init_kwargs(runtime_env={"working_dir": "/job", "env_vars": {"HALO_SANDBOX_REPL": "0", "A": "1"}})
+    assert merged["runtime_env"] == {
+        "working_dir": "/job",
+        "env_vars": {"HALO_SANDBOX_BACKEND": "modal", "HALO_SANDBOX_REPL": "0", "A": "1"},
+    }
     for key in ROLLOUT_BACKEND_ENV["modal"]:
         monkeypatch.delenv(key)
     assert "runtime_env" not in ray_init_kwargs()

@@ -19,7 +19,7 @@ from urllib.parse import unquote
 import pytest
 
 from halo.environments.rollouts.ray_actors import ray_init_kwargs
-from halo.environments.sandbox import runner_session
+from halo.environments.sandbox import baseten, runner_session
 from halo.environments.sandbox.baseten import (
     BASETEN_SANDBOX_LIMIT,
     REQUEST_PATH,
@@ -175,7 +175,7 @@ def _sandbox(fake, **kwargs):
 
 
 def test_request_shape_and_auth(fake):
-    sandbox = _sandbox(fake, cpu=4, idle_ttl="10m")
+    sandbox = _sandbox(fake, cpu=4, idle_ttl="5m")
     result = sandbox.run("print('hi')", timeout=7)
 
     assert result.ok and result.stdout == "hi\n"
@@ -186,7 +186,7 @@ def test_request_shape_and_auth(fake):
     assert create["body"]["cpu"] == 4
     assert create["body"]["image"] == "baseten/base-image:latest"
     assert create["body"]["lifecycle"]["expiration_policies"] == [
-        {"type": "TTL_IDLE", "value": "10m", "action": "DELETE"}
+        {"type": "TTL_IDLE", "value": "5m", "action": "DELETE"}
     ]
     (runner_put,) = fake.calls(f"/sbx-1/filesystem/%2F{RUNNER_PATH.lstrip('/')}", "PUT")
     assert runner_put["body"] == {"content": runner_source()}
@@ -340,6 +340,48 @@ def test_runner_that_did_not_complete_is_an_error_not_a_verdict(fake, status):
     assert result.error is not None and status in result.error and not result.timed_out
 
 
+@pytest.mark.parametrize("status", [502, 504, 429])
+def test_error_status_on_the_program_call_is_never_sent_again(fake, status):
+    """The service may answer 5xx after the runner started; a second send would run the program twice."""
+    with _sandbox(fake, max_retries=3).open_session() as session:
+        session.write_file("warm.txt", "")
+        fake.faults["/sbx-1/process"] = [status]
+        result = session.run("print(1)")
+
+    assert result.error is not None and f"HTTP {status}" in result.error
+    assert len(fake.calls("/sbx-1/process", "POST")) == 2  # one runner call for the file, one for the program
+
+
+def test_failed_call_deletes_the_sandbox_that_may_hold_the_program(fake):
+    sandbox = _sandbox(fake)
+    with sandbox.open_session() as session:
+        fake.process_status = "killed"
+        assert session.run("print(1)").error is not None
+        assert fake.deleted == ["sbx-1"]
+        fake.process_status = None
+
+        assert session.run("print(2)").stdout == "2\n"
+    assert fake.deleted == ["sbx-1", "sbx-2"]
+
+
+def test_exit_deletes_the_sandboxes_still_open(fake):
+    sandbox = _sandbox(fake)
+    first, second = sandbox.open_session(), sandbox.open_session()
+    first.run("print(1)")
+    second.run("print(2)")
+
+    baseten.close_live_executors()
+
+    assert sorted(fake.deleted) == ["sbx-1", "sbx-2"] and sandbox not in baseten.live_executors
+
+
+def test_backend_does_not_claim_to_confine(fake, caplog):
+    with caplog.at_level(logging.WARNING):
+        env = CodeContestsEnvironment(sandbox_backend="baseten", sandbox_options={"api_url": fake.api_url})
+
+    assert not env.sandbox.isolated and "does not confine" in caplog.text
+
+
 def test_expired_sandbox_is_an_error_then_replaced(fake):
     sandbox = _sandbox(fake)
     with sandbox.open_session() as session:
@@ -443,7 +485,7 @@ def test_backend_selection_reaches_ray_actors_on_a_shared_cluster(monkeypatch):
 def test_factory_refuses_a_sandbox_url_for_baseten(fake, monkeypatch):
     monkeypatch.setenv("HALO_SANDBOX_URL", "http://sandboxfusion:8080")
 
-    with pytest.raises(ValueError, match="takes no url"):
+    with pytest.raises(ValueError, match="backend is 'baseten', which takes none"):
         build_sandbox(backend="baseten")
 
 

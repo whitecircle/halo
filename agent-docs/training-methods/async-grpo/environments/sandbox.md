@@ -27,17 +27,17 @@ environment_kwargs:
   # sandbox_options: {cpu: 8, memory_mb: 16384}   # the backend's constructor arguments
 ```
 
-Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with `local`, `bubblewrap` or `baseten`.
+Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with any other backend.
 
 ### Confinement
 
 A confined program cannot write the host filesystem or reach the network, but can read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`).
 
-- `remote`, `modal` and `baseten` confine; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
+- `remote` and `modal` confine; `bubblewrap` confines unless `allow_network`; `local` and `baseten` do not (`SandboxExecutor.isolated`).
 - On `local` the program can rewrite what grades it, fetch a solution, and read the trainer's `--env-file` secrets from `/proc/<pid>/environ`.
 - `swe` and `code_contests` log a warning when built on an executor that does not confine.
 
-Use `bubblewrap` without network, `remote`, `modal` or `baseten` for RL on untrusted code and whenever the trainer's environment carries secrets.
+Use `bubblewrap` without network, or `remote`, for RL on untrusted code and whenever the trainer's environment carries secrets.
 
 Only `bubblewrap` lets a compile error show under code contests' `verdict_detail: outcome` (`COMPILES_WITHOUT_TEST_INPUT`): its build runs before any test and its program cannot force a rebuild ([Grading rules](tasks/code-contests/grading.md#grading-rules)).
 
@@ -139,7 +139,7 @@ BASETEN_API_KEY=... halo launch grpo/environmental <config>.yaml -n 4 --halo-rol
 The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=baseten`. An explicit `sandbox_backend` in `environment_kwargs` takes precedence.
 
 - `BASETEN_API_KEY` is the only credential: a personal or full-access team key. A missing key raises at construction.
-- `HALO_SANDBOX_URL` must be unset. The backend refuses a URL, so a SandboxFusion address never receives Baseten credentials.
+- `HALO_SANDBOX_URL` must be unset: a URL belongs to `remote` only.
 - On a shared Ray cluster (`ray_address`) the backend selection travels to the actors with the job. The key does not: put it on every cluster node.
 
 **How it runs**
@@ -164,30 +164,37 @@ The program runs as a different user from the process that supervises it.
 
 The image must run as root.
 
+**Network**
+
+A Baseten sandbox keeps its outbound network, so a program can fetch from the internet. The backend therefore does not count as confining (`isolated` is false) and coding environments log the warning.
+
 **When something fails**
 
 | What happened | What the caller sees |
 |---|---|
-| 429, 5xx or a connection error | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
+| A connection error, 429 or 5xx on a call that runs no program | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
+| 429 or 5xx on the call that runs the program | `error`; the call is not sent again, so a program never runs twice |
 | The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
-| Baseten deleted the sandbox (`idle_ttl`, default 30 minutes idle) | `error` once; the next call creates a new sandbox and the session continues empty |
+| Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox and the session continues empty |
 
-File calls raise `SandboxInfraError` where `run` returns `error`. A sandbox whose session was never closed is deleted by its `idle_ttl`.
+File calls raise `SandboxInfraError` where `run` returns `error`. After an `error` the sandbox is deleted and the next call creates a new one.
+
+**Cleanup**
+
+Closing a session deletes its sandbox, and an `atexit` hook deletes the ones still open. If the process is killed, Baseten deletes them after `idle_ttl`.
 
 **Options** (`sandbox_options`)
 
 | Option | Default | Meaning |
 |---|---|---|
-| `image` | `baseten/base-image:latest` | Use one with `gcc` / `g++` for C and C++ |
+| `image` | `baseten/base-image:latest` | `latest` moves; name a fixed tag to keep a run reproducible. Use an image with `gcc` / `g++` for C and C++ |
 | `cpu` | 2 | vCPUs of each sandbox |
-| `idle_ttl` | `30m` | Idle time after which Baseten deletes a sandbox |
+| `idle_ttl` | `10m` | Idle time after which Baseten deletes a sandbox |
 | `interpreter` | `python3` | The Python the sandbox runs programs with |
 | `max_concurrency` | 10 | Live sandboxes in this process |
 | `request_timeout`, `request_overhead`, `create_timeout` | 60 s, 30 s, 600 s | HTTP timeouts |
 | `max_retries`, `backoff_factor` | 4, 1.0 | Retry policy |
 | `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
-
-The backend needs no Baseten package. `pip install 'halo[baseten]'` adds Baseten's [Truss CLI](https://docs.baseten.co/reference/cli/truss/overview) (`truss login`, `truss push`).
 
 The code is in `halo/environments/sandbox/baseten.py`; what runs inside the sandbox is the runner `modal` uses.
 
