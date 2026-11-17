@@ -1,46 +1,22 @@
 #!/usr/bin/env python
-"""Every topology a shipped diagram depicts is one ``ParallelismConfig`` accepts. The ``TOPOLOGIES`` literal is read
-via ``ast``, since the module renders both figures at import."""
+"""Every topology a shipped diagram depicts is one ``ParallelismConfig`` accepts, at the DP the figure states."""
 
 from __future__ import annotations
-
-import ast
 
 import pytest
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from tests.common.repo import REPO_ROOT
 
-_GENERATOR = REPO_ROOT / "scripts/diagrams/gen_ep_group_tree.py"
-_FIGURES = ("ep_group_hierarchy", "ep_multi_node_layout")
-
-
-def _source() -> str:
-    return _GENERATOR.read_text(encoding="utf-8")
+# The shapes the PNGs under agent-docs/assets/diagrams draw; redrawing a figure updates its row.
+TOPOLOGIES = {
+    "ep_group_hierarchy": {"nodes": 1, "gpus": 4, "ep": 2, "tp": 1, "scope": "node", "dp": 4},
+    "ep_multi_node_layout": {"nodes": 2, "gpus": 8, "ep": 16, "tp": 8, "scope": "global", "dp": 2},
+}
 
 
-def _topologies() -> dict[str, dict[str, int | str]]:
-    """Importing would overwrite the tracked PNGs."""
-    for node in ast.walk(ast.parse(_source())):
-        if isinstance(node, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "TOPOLOGIES" for t in node.targets
-        ):
-            return ast.literal_eval(node.value)
-    raise AssertionError("gen_ep_group_tree.py declares no TOPOLOGIES literal")
-
-
-def test_generator_declares_a_topology_per_figure_and_titles_from_it():
-    """A hand-typed subtitle would let the drawing drift from the validated shape."""
-    topologies = _topologies()
-    assert set(topologies) == set(_FIGURES), sorted(topologies)
-    source = _source()
-    for figure in _FIGURES:
-        assert f'TOPOLOGIES["{figure}"]' in source, f"{figure}'s subtitle is not formatted from TOPOLOGIES"
-
-
-@pytest.mark.parametrize("figure", _FIGURES)
+@pytest.mark.parametrize("figure", sorted(TOPOLOGIES))
 def test_depicted_topology_is_accepted_by_parallelism_config(figure):
-    shape = _topologies()[figure]
+    shape = TOPOLOGIES[figure]
     gpus_per_node = int(shape["gpus"])
     config = ParallelismConfig(
         ep_size=int(shape["ep"]),

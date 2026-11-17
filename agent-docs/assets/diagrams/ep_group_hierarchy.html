@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>EP group hierarchy</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  .world {
+    padding: 24px 28px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+    text-align: center;
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  /* The EP groups sit side by side under the world bar, each a thin outline around its rank cards. */
+  .groups {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 40px;
+    margin-top: 72px;
+  }
+
+  .group {
+    padding: 24px 28px 24px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .group-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+  }
+
+  .ranks {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 48px;
+    margin-top: 20px;
+  }
+
+  .card {
+    padding: 24px 28px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .card .lines {
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dispatch {
+    margin-top: 18px;
+    text-align: center;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  /* Room under the groups for the two replica lines and the line naming them. */
+  .replicas { height: 176px; }
+
+  .tag {
+    position: absolute;
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Ranks with the same experts are DP replicas</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="world" id="world">World: {gpus} ranks, one NVLink domain</div>
+    <div class="groups" id="groups"></div>
+    <div class="replicas" id="replicas"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">World {gpus} at <span class="nw">ep_size</span> {epSize}: {experts} experts, {perRank} per rank, and every rank reads its own batch, so data parallel {dp}.</span>
+      <span class="s">One dispatch group per NVLink domain: <span class="nw">ep_size</span> &gt; 2 with <span class="nw">ep_group_size</span> below the domain (ep4 on 8) is rejected at config time.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /** Every number on the canvas is drawn from these: ep_size 2 on one 4-GPU NVLink domain, tp 1. */
+  const SETUP = { gpus: 4, epSize: 2, experts: 32 };
+  /** Colour marks the expert slice a rank holds, as in the token-routing figure. */
+  const SLICE_HUES = ["--halo-blue", "--halo-violet"];
+
+  if (SETUP.epSize !== 2 || SETUP.gpus !== 4) {
+    throw new Error("this layout draws two EP groups of two ranks side by side: ep_size 2 on 4 GPUs");
+  }
+
+  if (SETUP.experts % SETUP.epSize !== 0) {
+    throw new Error(`${SETUP.experts} experts do not split evenly over ep_size ${SETUP.epSize}`);
+  }
+
+  const groupCount = SETUP.gpus / SETUP.epSize;
+  const perRank = SETUP.experts / SETUP.epSize;
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    gpus: fmt(SETUP.gpus),
+    epSize: fmt(SETUP.epSize),
+    experts: fmt(SETUP.experts),
+    perRank: fmt(perRank),
+    dp: fmt(SETUP.gpus), // EP never reduces the data parallel size
+  };
+  const sliceOf = (slot) => `${fmt(slot * perRank)}–${fmt((slot + 1) * perRank - 1)}`;
+  const groups = Array.from({ length: groupCount }, (_, g) => ({
+    group: g,
+    ranks: Array.from({ length: SETUP.epSize }, (_, slot) => ({ rank: g * SETUP.epSize + slot, slot })),
+  }));
+
+  fillValues(VALUES);
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const groupsEl = document.getElementById("groups");
+  const frames = [];
+  const cards = groups.map(() => []);
+  const dispatchLines = [];
+
+  groups.forEach((g, gi) => {
+    const frame = el("div", "group");
+    frame.append(el("div", "group-head", `EP group ${g.group}: ranks ${g.ranks.map((r) => r.rank).join(", ")}`));
+    const row = el("div", "ranks");
+
+    for (const r of g.ranks) {
+      const card = el("div", "card");
+      const name = el("div", "name");
+      const dot = el("i");
+      dot.style.setProperty("--hue", `var(${SLICE_HUES[r.slot]})`);
+      name.append(dot, `R${r.rank}`);
+      const lines = el("div", "lines");
+      lines.append(el("div", undefined, `Experts ${sliceOf(r.slot)}`), el("div", undefined, `Batch b${r.rank}`));
+      card.append(name, lines);
+      row.append(card);
+      cards[gi].push(card);
+    }
+
+    const dispatch = el("div", "dispatch", "DeepEP all-to-all in this group");
+    frame.append(row, dispatch);
+    groupsEl.append(frame);
+    frames.push(frame);
+    dispatchLines.push(dispatch);
+  });
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const centre = (node) => {
+    const b = box(node);
+
+    return (b.l + b.r) / 2;
+  };
+
+  // The world splits into the groups: one arrow from the bar down to the middle of each group's top edge.
+  const world = box(document.getElementById("world"));
+
+  for (const frame of frames) {
+    const x = centre(frame);
+    arrow(wires, x, world.b + 1, x, box(frame).t - 1, token("--secondary"));
+  }
+
+  // The dispatch line names the exchange between a group's two cards, so it sits between their drop lines.
+  for (const [gi, line] of dispatchLines.entries()) {
+    const text = document.createRange();
+    text.selectNodeContents(line);
+    const { width } = text.getBoundingClientRect();
+
+    if (width > centre(cards[gi][1]) - centre(cards[gi][0]) - 24) {
+      throw new Error(`"${line.textContent}" is wider than the space between its group's replica lines: widen the cards' gap`);
+    }
+  }
+
+  // Replica lines: each expert slice drops from its card in every group to one shared line below the groups,
+  // the second slice's line under the first, each named on the stretch no other drop line crosses.
+  const groupsBottom = box(groupsEl).b;
+  const levels = [groupsBottom + 56, groupsBottom + 124];
+  const dotR = 4;
+
+  for (let slot = 0; slot < SETUP.epSize; slot += 1) {
+    const hue = token(SLICE_HUES[slot]);
+    const y = levels[slot];
+    const xs = cards.map((column) => centre(column[slot]));
+    const dash = { stroke: hue, "stroke-width": 2, "stroke-dasharray": "7 6" };
+
+    for (const [gi, column] of cards.entries()) {
+      wires.append(svgEl("line", { x1: xs[gi], y1: box(column[slot]).b + 1, x2: xs[gi], y2: y, ...dash }));
+      wires.append(svgEl("circle", { cx: xs[gi], cy: y, r: dotR, fill: hue }));
+    }
+
+    wires.append(svgEl("line", { x1: xs[0], y1: y, x2: xs[xs.length - 1], y2: y, ...dash }));
+
+    const [clearL, clearR] = slot === 0 ? [xs[0], centre(cards[0][1])] : [centre(cards[cards.length - 1][0]), xs[xs.length - 1]];
+    const tag = el("div", "tag", `Experts ${sliceOf(slot)}`);
+    figure.append(tag);
+    tag.style.left = `${(clearL + clearR - tag.offsetWidth) / 2}px`;
+    tag.style.top = `${y - tag.offsetHeight - 6}px`;
+  }
+
+  const caption = el("div", "tag", "The ranks on one line are DP replicas of that slice: their expert grads are averaged after the backward");
+  figure.append(caption);
+  caption.style.left = `${(box(groupsEl).l + box(groupsEl).r - caption.offsetWidth) / 2}px`;
+  caption.style.top = `${levels[levels.length - 1] + 20}px`;
+</script>
+</body>
+</html>

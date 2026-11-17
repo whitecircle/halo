@@ -1,0 +1,386 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The pipeline bubble</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --forward: var(--halo-blue);
+    --backward: var(--halo-violet);
+    --label-col: 100px;
+    --live-col: 172px;
+    --cell-h: 46px;
+  }
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  /* Stage label, the slots, then the live-microbatch count, in one grid per schedule. */
+  .schedule {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--slots), 1fr) var(--live-col);
+    grid-auto-rows: var(--cell-h);
+    gap: 4px;
+  }
+
+  .phases + .head { margin-top: var(--group-gap); }
+
+  .head {
+    display: grid;
+    grid-template-columns: 1fr var(--live-col);
+    align-items: baseline;
+    margin-bottom: var(--heading-gap);
+  }
+
+  .head .name {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    white-space: nowrap;
+    font-variant-numeric: lining-nums;
+  }
+
+  .head span {
+    font-size: 22px;
+    color: var(--secondary);
+  }
+
+  .head .live-head {
+    text-align: center;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .stage {
+    align-self: center;
+    font-size: 21px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .slot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: #000;
+  }
+
+  .slot.F { background: var(--forward); }
+
+  .slot.B { background: var(--backward); }
+
+  .slot.idle { background: var(--surface); border: 1px solid var(--line); }
+
+  .live {
+    align-self: center;
+    text-align: center;
+    font-size: 25px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+  }
+
+  /* Fill and drain marks sit under the 1F1B grid, with the steady state named between them. */
+  .phases {
+    position: relative;
+    height: 40px;
+    margin-top: 12px;
+    font-size: 21px;
+    line-height: 1.3;
+    color: var(--secondary);
+  }
+
+  .phases .mark {
+    position: absolute;
+    top: 0;
+    height: 2px;
+    background: var(--secondary);
+  }
+
+  .phases span {
+    position: absolute;
+    top: 12px;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  .foot {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 44px;
+  }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .key i {
+    width: 30px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--fill);
+    border: 1px solid var(--edge, transparent);
+  }
+
+  .formula {
+    font-size: 23px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+    <p class="subtitle" id="subtitle"></p>
+  </header>
+
+  <div class="figure" id="figure"></div>
+
+  <footer>
+    <p>
+      <span class="s">More microbatches shrink the bubble but thin every GEMM’s M, and more stages widen fill and drain.</span>
+      <span class="s" id="shipped"></span>
+      <span class="s">Live microbatches is the most a stage holds between a forward and its backward.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const P = 4;
+  const M = 8;
+  /** The shipped recipes' pipeline, quoted in the notes. */
+  const SHIPPED = { p: 2, m: 8 };
+  /** The least space, in px, between neighbouring slot labels before every slot drops its letter. */
+  const MIN_LABEL_GAP = 12;
+
+  /** Schedule1F1B's order per stage: p-1-s warmup forwards, one forward per backward, then the cooldown. */
+  function oneFOneB(p, m) {
+    return Array.from({ length: p }, (_, s) => {
+      const warmup = p - 1 - s;
+      const ops = [];
+
+      for (let k = 0; k < warmup; k += 1) {
+        ops.push(["F", k]);
+      }
+
+      for (let k = warmup; k < m; k += 1) {
+        ops.push(["F", k], ["B", k - warmup]);
+      }
+
+      for (let k = m - warmup; k < m; k += 1) {
+        ops.push(["B", k]);
+      }
+
+      return ops;
+    });
+  }
+
+  /** ScheduleGPipe's order on every stage: all forwards, then all backwards. */
+  function gpipe(p, m) {
+    return Array.from({ length: p }, () => [
+      ...Array.from({ length: m }, (_, k) => ["F", k]),
+      ...Array.from({ length: m }, (_, k) => ["B", k]),
+    ]);
+  }
+
+  /** The op this one waits for: the stage above for a forward, the stage below for a backward. */
+  function dependency(s, kind, k, p) {
+    if (kind === "F") {
+      return s > 0 ? `${s - 1}F${k}` : null;
+    }
+
+    return s < p - 1 ? `${s + 1}B${k}` : `${s}F${k}`;
+  }
+
+  /** Place every op in the first slot where its stage is free and its dependency has finished. */
+  function simulate(order, p) {
+    const next = Array(p).fill(0);
+    const free = Array(p).fill(0);
+    const done = new Map();
+    const placed = [];
+
+    while (next.some((n, s) => n < order[s].length)) {
+      let progressed = false;
+
+      for (let s = 0; s < p; s += 1) {
+        if (next[s] >= order[s].length) {
+          continue;
+        }
+
+        const [kind, k] = order[s][next[s]];
+        const dep = dependency(s, kind, k, p);
+
+        if (dep !== null && !done.has(dep)) {
+          continue;
+        }
+
+        const start = Math.max(free[s], dep !== null ? done.get(dep) : 0);
+        free[s] = start + 1;
+        done.set(`${s}${kind}${k}`, free[s]);
+        placed.push({ s, kind, k, start });
+        next[s] += 1;
+        progressed = true;
+      }
+
+      if (!progressed) {
+        throw new Error("pipeline schedule deadlocked");
+      }
+    }
+
+    return { placed, slots: Math.max(...free) };
+  }
+
+  /** Each stage's idle slots in a simulated step. */
+  const idlePerStage = ({ placed, slots }, p) => Array.from({ length: p }, (_, s) => slots - placed.filter((op) => op.s === s).length);
+  const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
+
+  /** The most microbatches one stage holds at once: forward run, backward not yet. */
+  function mostLive(ops) {
+    let live = 0;
+    let peak = 0;
+
+    for (const [kind] of ops) {
+      live += kind === "F" ? 1 : -1;
+      peak = Math.max(peak, live);
+    }
+
+    return peak;
+  }
+
+  const SCHEDULES = [
+    { name: "1F1B, the default", order: oneFOneB(P, M) },
+    { name: "GPipe", order: gpipe(P, M) },
+  ];
+
+  for (const schedule of SCHEDULES) {
+    Object.assign(schedule, simulate(schedule.order, P));
+  }
+
+  const SLOTS = SCHEDULES[0].slots;
+  const idle = SCHEDULES.flatMap((schedule) => idlePerStage(schedule, P));
+  const IDLE = idle[0];
+
+  if (SCHEDULES[1].slots !== SLOTS || idle.some((n) => n !== IDLE) || IDLE * (M + P - 1) !== (P - 1) * SLOTS) {
+    throw new Error("simulated bubble differs between stages or disagrees with (p-1)/(m+p-1)");
+  }
+
+  const shipped = simulate(oneFOneB(SHIPPED.p, SHIPPED.m), SHIPPED.p);
+  const shippedIdle = idlePerStage(shipped, SHIPPED.p)[0];
+  const divisor = gcd(shippedIdle, shipped.slots);
+  document.getElementById("title").textContent = `Every stage idles ${IDLE} of the step’s ${SLOTS} slots`;
+  document.getElementById("subtitle").textContent = `Two schedules at p = ${P} stages and m = ${M} microbatches, one slot per forward or backward`;
+  document.getElementById("shipped").textContent =
+    `The shipped p = ${SHIPPED.p}, m = ${SHIPPED.m} recipes idle ${shippedIdle / divisor}/${shipped.slots / divisor} of a step.`;
+
+  SCHEDULES[0].note = `One optimizer step is ${SLOTS} slots`;
+  SCHEDULES[1].note = `All forwards, then all backwards: the same ${SLOTS} slots`;
+
+  const figure = document.getElementById("figure");
+  figure.style.setProperty("--slots", SLOTS);
+  let firstGrid;
+
+  SCHEDULES.forEach((schedule, i) => {
+    const head = el("div", "head");
+    const name = el("div", "name");
+    name.append(el("h2", undefined, schedule.name), el("span", undefined, schedule.note));
+    head.append(name, el("div", "live-head", i === 0 ? "Live microbatches" : ""));
+
+    const grid = el("div", "schedule");
+    const cells = Array.from({ length: P }, () => Array(SLOTS).fill(null));
+
+    for (const op of schedule.placed) {
+      cells[op.s][op.start] = op;
+    }
+
+    for (let s = 0; s < P; s += 1) {
+      grid.append(el("div", "stage", `Stage ${s}`));
+
+      for (const op of cells[s]) {
+        grid.append(op === null ? el("div", "slot idle") : el("div", `slot ${op.kind}`, `${op.kind}${op.k + 1}`));
+      }
+
+      grid.append(el("div", "live", String(mostLive(schedule.order[s]))));
+    }
+
+    figure.append(head, grid);
+
+    if (i === 0) {
+      firstGrid = grid;
+      figure.append(el("div", "phases"));
+    }
+  });
+
+  const foot = el("div", "foot");
+  const key = el("div", "key");
+  key.innerHTML = [
+    '<span style="--fill: var(--forward)"><i></i>Forward</span>',
+    '<span style="--fill: var(--backward)"><i></i>Backward</span>',
+    '<span style="--fill: var(--surface); --edge: var(--line)"><i></i>Idle</span>',
+  ].join("");
+  const share = Math.round((100 * IDLE) / SLOTS);
+  foot.append(key, el("div", "formula", `Idle = ${IDLE} of ${SLOTS} slots per stage = (p − 1)/(m + p − 1) = ${share}%`));
+  figure.append(foot);
+
+  // Fill and drain each cover the first or last p - 1 slots of the 1F1B grid.
+  const phases = figure.querySelector(".phases");
+  const slotsRow = [...firstGrid.children].filter((n) => n.classList.contains("slot")).slice(0, SLOTS);
+  const base = phases.getBoundingClientRect().left;
+  const left = (i) => slotsRow[i].getBoundingClientRect().left - base;
+  const right = (i) => slotsRow[i].getBoundingClientRect().right - base;
+  const marks = [
+    [0, P - 2, "Fill"],
+    [SLOTS - (P - 1), SLOTS - 1, "Drain"],
+  ];
+
+  for (const [a, b, text] of marks) {
+    const mark = el("div", "mark");
+    mark.style.left = `${left(a)}px`;
+    mark.style.width = `${right(b) - left(a)}px`;
+    const label = el("span", undefined, text);
+    label.style.left = `${(left(a) + right(b)) / 2}px`;
+    phases.append(mark, label);
+  }
+
+  const steady = el("span", undefined, "Steady state: one forward and one backward per stage, per pair of slots");
+  steady.style.left = `${(left(0) + right(SLOTS - 1)) / 2}px`;
+  phases.append(steady);
+
+  // A slot too narrow for its letter keeps only the microbatch number: its colour and the key name the pass.
+  const labelled = [...figure.querySelectorAll(".slot.F, .slot.B")];
+  const textWidth = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+
+    return range.getBoundingClientRect().width;
+  };
+
+  if (left(1) - left(0) - Math.max(...labelled.map(textWidth)) < MIN_LABEL_GAP) {
+    for (const slot of labelled) {
+      slot.textContent = slot.textContent.slice(1);
+    }
+  }
+</script>
+</body>
+</html>
