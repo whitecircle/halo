@@ -294,7 +294,7 @@ def first_step_cancellation_mismatches() -> list[str]:
     findings = []
     for beta2 in (0.999, 0.9999):
         worst = _first_step(beta2, fused=True).abs().max().item()
-        if worst > FIRST_STEP_TOLERANCE:
+        if not math.isfinite(worst) or worst > FIRST_STEP_TOLERANCE:
             findings.append(f"beta2={beta2}: the fused first step lands {worst:.3e} lr from 0")
     return findings
 
@@ -302,7 +302,7 @@ def first_step_cancellation_mismatches() -> list[str]:
 def first_step_eager_mismatches() -> list[str]:
     """The fused first step at beta2 0.99999 against the eager one, which takes 1 - beta from the float64 betas."""
     gap = (_first_step(0.99999, fused=True) - _first_step(0.99999, fused=False)).abs().max().item()
-    if gap > FIRST_STEP_TOLERANCE:
+    if not math.isfinite(gap) or gap > FIRST_STEP_TOLERANCE:
         return [f"beta2=0.99999: the fused and eager first steps differ by {gap:.3e} lr"]
     return []
 
