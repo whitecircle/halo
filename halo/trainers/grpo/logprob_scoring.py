@@ -14,7 +14,6 @@ import torch.nn.functional as F
 from torch import nn
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
-from trl.models.utils import _ForwardRedirection
 
 from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
 from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
@@ -25,10 +24,8 @@ from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
-from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.module_tree import embedding_module, find_module_path, hidden_state_backbone
-from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.segment_markers import segment_markers_for
@@ -38,6 +35,7 @@ from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.construction.training_args_overrides import uses_evaluation
 from halo.trainers.grpo.packed_forward import build_packed_rows
+from halo.trainers.hidden_state_forward import HiddenStateForwardMixin
 
 logger = logging.getLogger(__name__)
 
@@ -161,7 +159,7 @@ def rows_forward_densely(model, batch_size: int) -> bool:
     )
 
 
-class LogprobScoringMixin:
+class LogprobScoringMixin(HiddenStateForwardMixin):
     """Hosts provide ``temperature``, ``accelerator``, ``args``, ``model``, ``ref_model`` and
     ``_use_chunked_grpo_logprobs``."""
 
@@ -326,15 +324,6 @@ class LogprobScoringMixin:
             model, unwrapped, self._cp_chunked_logps_impl, wrapper, input_ids, attention_mask, labels
         )
 
-    @property
-    def _chunked_forward_redirection(self) -> _ForwardRedirection:
-        """Reuse TRL's ``_forward_redirection`` if built (only when ``use_liger_kernel``), else make one."""
-        fr = getattr(self, "_forward_redirection", None)
-        if fr is None:
-            fr = _ForwardRedirection()
-            self._forward_redirection = fr
-        return fr
-
     def _chunked_logps_impl(
         self, unwrapped_model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy
     ):
@@ -462,19 +451,6 @@ class LogprobScoringMixin:
         ]
         return torch.cat(rows), widths
 
-    def _backbone_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Open its own EP capacity scope: it enters the backbone directly, past the pre-hook that scopes the shared
-        DeepEP arena, and each dense row carries its own length."""
-        bump_forward_generation()
-        return self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
-
-    def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Forward the backbone, drop the final position (the causal next-token shift), keep the last
-        ``logits_to_keep``."""
-        backbone = hidden_state_backbone(unwrapped_model)
-        hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
-        return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
-
     def _cp_chunked_logps_impl(self, unwrapped_model, input_ids, attention_mask, labels):
         if labels.shape != input_ids.shape:
             raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
@@ -528,16 +504,6 @@ class LogprobScoringMixin:
                 "Remove lm_head from the adapter's target_modules or disable use_chunked_grpo_logprobs."
             )
         self._lm_head_adapter_checked = True
-
-    def _head_transform(self, unwrapped_model) -> HeadTransform:
-        """Resolved once per model, since the verification builds a meta-device shell of the model's class."""
-        base = base_transformers_model(unwrapped_model)
-        transforms = getattr(self, "_head_transforms", None)
-        if transforms is None:
-            transforms = self._head_transforms = {}
-        if id(base) not in transforms:
-            transforms[id(base)] = resolve_head_transform(base)
-        return transforms[id(base)]
 
 
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:

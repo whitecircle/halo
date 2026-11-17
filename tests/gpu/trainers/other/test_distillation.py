@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""DistributedTeacherDistillationTrainer end to end, with the logged loss pinned to its exact objective.
+"""DistributedTeacherDistillationTrainer end to end, with the logged loss pinned to its exact objective, which the
+full logits of both models score on either loss path (``--chunked``).
 
 ``alpha * KL(teacher_T || student_T) * T^2 + (1 - alpha) * CE``, each term one mean over the supervised positions. A
 dropped ``T^2``, reversed KL, ignored ``alpha``, per-row mean or unused teacher all keep the loss finite. Teacher and
@@ -159,6 +160,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
 parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
 parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
 ARGS = parser.parse_args()
 
 
@@ -197,6 +199,7 @@ def run(ctx):
         distill_loss="kl_divergence",
         distill_temperature=TEMPERATURE,
         distill_alpha=ALPHA,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
 
     trainer = DistributedTeacherDistillationTrainer(

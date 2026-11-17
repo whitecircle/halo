@@ -66,7 +66,15 @@ The loss shrinks toward the endpoints, to about `β·KL(q ‖ p)` near 0 and `(1
 
 `distill_topk: k` scores the loss on the teacher's top-k tokens plus one tail bin holding the rest of each distribution's mass. The config refuses it with any loss but `kl_divergence` and `soft_cross_entropy`, the two weighted by the teacher's probabilities alone. `k` must be below the compared vocabulary width: the script refuses one that covers it before any teacher weight loads, and the trainer again at construction, since `null` is the full-vocab loss.
 
-It approximates the full-vocab objective. Merging tokens into one bin never increases a divergence, so the top-k loss is a lower bound on the full-vocab loss. Both forwards still return full-vocab logits, so it saves no memory. The tail bin sums the off-support probabilities rather than taking one minus the support mass, which keeps its gradient where a student's support mass rounds to 1 in fp32. The sum builds an extra fp32 copy of each side's log-probs, one token chunk at a time.
+It approximates the full-vocab objective. Merging tokens into one bin never increases a divergence, so the top-k loss is a lower bound on the full-vocab loss. The teacher's top k are picked from its full-vocab logits, so it saves no memory. The tail bin sums the off-support probabilities rather than taking one minus the support mass, which keeps its gradient where a student's support mass rounds to 1 in fp32. The sum builds an extra fp32 copy of each side's log-probs, one token chunk at a time.
+
+### Chunked loss
+
+`use_chunked_distillation_loss: true` (default off) computes every term without either model's `[tokens, vocab]` logits. Both models run to their last hidden state and keep only the supervised positions. Each token chunk of those positions (sized as the divergence's own chunks) is projected through both output embeddings, scored and dropped under a checkpoint, so the backward projects the chunk again. The student's backbone and the chunk loop run inside the student's own forward call, as the chunked GRPO scorer's do, so FSDP2 gathers the output embedding once for the forward and once for the backward, and a rank with no supervised position still runs its backward.
+
+A LoRA adapter on `lm_head` trains through it: each chunk adds `lora_B(lora_A(dropout(x))) · scaling` to the base weight's logits, the dropout drawn over the whole hidden state as PEFT's own forward draws it. The family's head transform applies as on the [chunked GRPO path](../../models/adding-a-model.md#declare-the-head-transform). Refused at construction: a DoRA or other variant adapter on `lm_head`, a family whose head transform does not verify, and `compute_metrics` or `preprocess_logits_for_metrics`, which read evaluation logits this path never builds.
+
+The default path holds about three bf16 `[tokens, vocab]` planes beyond the models (both models' logits and the student logits' gradient), about 22 GiB at the shipped recipe's 16,384 tokens and 248,320 vocabulary. On one RTX 5070 Ti (Qwen3.5-0.8B from Qwen3.5-2B, LoRA on `lm_head`) the chunked path fit 16,384-token rows where the default path stopped at 4,096. With every position supervised it ran 5–7% fewer tokens/s; with half of each row supervised, as `train_on_completions_only` leaves a prompt, it ran about 35% more, since prompt positions are never projected.
 
 ## Launch
 
@@ -92,7 +100,7 @@ torchrun --nproc_per_node=2 scripts/training/distillation/teacher_distill.py <co
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_distillation.py`, `test_distillation_oss20b.py` and `tests/gpu/trainers/lora/test_lora_teacher_distill.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu` (the chunked loss against the default path in `test_teacher_distillation_chunked_loss.py`), `tests/gpu/trainers/other/test_distillation.py`, `test_distillation_oss20b.py` and `tests/gpu/trainers/lora/test_lora_teacher_distill.py`.
 
 ## What to watch
 
@@ -105,5 +113,5 @@ Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/te
 Failure signatures:
 
 - A tokenizer-mismatch raise before the teacher loads (repeated at construction) — the teacher is from another tokenizer family, or `added_special_tokens` grew the student's tokenizer; a raise naming fewer logit rows than the tokenizer — one model's embedding is smaller than the tokenizer.
-- OOM on the first step — both models are resident, beside the student's and the teacher's `[tokens, vocab]` logits ([memory](README.md)). Use PEFT on the student, gradient checkpointing, or a smaller `max_length`.
+- OOM on the first step — both models are resident, beside the student's and the teacher's `[tokens, vocab]` logits ([memory](README.md)). Set `use_chunked_distillation_loss: true` ([Chunked loss](#chunked-loss)), use PEFT on the student and gradient checkpointing, or lower `max_length`.
 - Most rows dropped at prep — `max_length` drops over-length conversations rather than truncating them.

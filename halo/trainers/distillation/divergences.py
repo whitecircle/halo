@@ -4,13 +4,19 @@ in fp32: bf16 cancellation in ``log p - log q`` can flip its sign."""
 import functools
 import inspect
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
 import torch
 from torch.nn.functional import cosine_similarity, cross_entropy, log_softmax, mse_loss
 
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX, at_least_fp32, map_token_chunks
+from halo.kernels.logprobs import (
+    LABEL_IGNORE_INDEX,
+    at_least_fp32,
+    checkpointed_chunks,
+    logit_chunk_rows,
+    map_token_chunks,
+)
 from halo.model_loading.parallel.frozen_models import place_and_freeze
 
 # Floor for a -inf logit (vocab padding, a top-k-truncated teacher). Its probability stays an exact 0
@@ -302,6 +308,42 @@ def hard_labels_coefficient(
 ) -> torch.Tensor:
     """Detached gold-token gate ``(1 - p[y]) * q[y]`` at ``T = 1``, one token chunk at a time."""
     return map_token_chunks(_hard_labels_gate, student_logits, teacher_logits, hard_labels)
+
+
+def projected_distillation_terms(
+    loss_fn: Callable,
+    student_logits: Callable[..., torch.Tensor],
+    student_rows: Sequence[torch.Tensor],
+    teacher_logits: Callable[..., torch.Tensor],
+    teacher_rows: Sequence[torch.Tensor],
+    hard_labels: torch.Tensor,
+    temperature: float,
+    *,
+    vocab: int,
+    trains_cross_entropy: bool,
+    gates: bool,
+) -> torch.Tensor:
+    """``[N, 3]``: per row the vocab-summed divergence, the hard-label cross-entropy (with a gradient only when
+    ``trains_cross_entropy``) and the detached gold-token gate (``1`` unless ``gates``). Each callable projects its
+    aligned ``[N, ...]`` rows to ``[rows, vocab]`` logits one chunk at a time under a non-reentrant checkpoint, so no
+    ``[N, vocab]`` plane outlives its chunk; both run again in the backward's recompute."""
+    student_inputs = len(student_rows)
+
+    def per_row(labels: torch.Tensor, *rows: torch.Tensor) -> torch.Tensor:
+        student = student_logits(*rows[:student_inputs])
+        with torch.no_grad():
+            teacher = teacher_logits(*rows[student_inputs:])
+        divergence = _vocab_summed_divergence(loss_fn, student, teacher, temperature, labels)
+        cross_entropy = _token_cross_entropy(student if trains_cross_entropy else student.detach(), labels)
+        gate = _hard_labels_gate(student, teacher, labels) if gates else torch.ones_like(divergence)
+        terms = (divergence, cross_entropy, gate)
+        dtype = functools.reduce(torch.promote_types, (term.dtype for term in terms))
+        return torch.stack([term.to(dtype) for term in terms], dim=-1)
+
+    chunks = checkpointed_chunks(
+        per_row, hard_labels, *student_rows, *teacher_rows, chunk_rows=logit_chunk_rows(vocab)
+    )
+    return torch.cat(list(chunks))
 
 
 def masked_token_mean(

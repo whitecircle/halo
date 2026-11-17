@@ -1997,7 +1997,14 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/lora/test_lora_teacher_distill.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss", "qwen3"),
-        args_matrix=("--mode lora", "--mode qlora", "--mode lora_ep", "--mode expert_lora"),
+        args_matrix=(
+            "--mode lora",
+            "--mode qlora",
+            "--mode lora_ep",
+            "--mode expert_lora",
+            "--mode lora --chunked",
+            "--mode lora_ep --chunked",
+        ),
         timeout=1500,
     ),
     "trainers/lora/test_qlora_grad_sweep.py": TestSpec(
@@ -2123,6 +2130,10 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--world 1", nproc=1, markers=("gpu", "full", "1gpu", "qwen3")),
             Row("--zero3", markers=("gpu", "full", "2gpu", "qwen3")),
             Row("--hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3")),
+            "--chunked",
+            Row("--chunked --world 1", nproc=1, markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--chunked --zero3", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--chunked --hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3")),
         ),
         timeout=600,
     ),
