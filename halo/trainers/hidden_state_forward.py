@@ -1,6 +1,8 @@
 """A model's last hidden state, read past its own forward by a path that applies the output embedding itself: the
 redirection that keeps the wrapper's forward hooks firing, the EP capacity scope and the verified head transform."""
 
+import inspect
+
 import torch
 from trl.models.utils import _ForwardRedirection
 
@@ -8,6 +10,25 @@ from halo.distributed.expert_parallel.deepep.capacity import bump_forward_genera
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.introspection.module_tree import hidden_state_backbone
 from halo.models.introspection.unwrapping import base_transformers_model
+
+
+def _takes_pixel_values(module: torch.nn.Module) -> bool:
+    return "pixel_values" in inspect.signature(module.forward).parameters
+
+
+def reject_backbone_without_image_inputs(model: torch.nn.Module) -> None:
+    """Refuse a model whose forward takes images its :func:`hidden_state_backbone` does not: that forward builds the
+    image features into the text model's inputs itself, so a path entering the backbone would drop every image. Reads
+    signatures only, so every rank reaches the same verdict."""
+    base = base_transformers_model(model)
+    backbone = hidden_state_backbone(base)
+    if _takes_pixel_values(base) and not _takes_pixel_values(backbone):
+        raise ValueError(
+            f"{type(base).__name__} builds its image features into the inputs of its text model "
+            f"{type(backbone).__name__}, which takes no pixel_values, and the hidden-state path enters that text "
+            f"model directly, so it would drop every image. Set use_chunked_distillation_loss: false, or load the "
+            f"text model alone for a text-only run (text_only_model: true)."
+        )
 
 
 class HiddenStateForwardMixin:

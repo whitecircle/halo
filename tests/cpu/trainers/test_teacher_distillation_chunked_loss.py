@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""``use_chunked_distillation_loss`` against the full-logits path of the same trainer, on tiny real models in fp64: the
-loss and every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head`` and a softcapped head."""
+"""``use_chunked_distillation_loss`` against the full-logits path of the same trainer, on tiny real models: the loss and
+every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head``, the families' head transforms and
+a composite's image rows."""
 
 import dataclasses
 import types
@@ -18,11 +19,14 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.head_projection import resolve_output_embedding
+from halo.trainers.hidden_state_forward import reject_backbone_without_image_inputs
+from tests.common.composite_rows import composite_model_and_rows
 from tests.common.models import TINY_INKLING_CONFIG, TINY_MINICPM3_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.tiny_models import (
     TINY_DENSE_ATTENTION_FAMILIES,
     TINY_DENSE_FAMILY,
     TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
     TinyFamily,
     tiny_family_model,
 )
@@ -117,6 +121,10 @@ def _assert_paths_agree(trainer, batch, rtol: float = FP32_RTOL):
     torch.testing.assert_close(loss, full_loss, rtol=rtol, atol=1e-9)
     assert grads.keys() == full_grads.keys()
     for name, grad in grads.items():
+        # A merged or disabled adapter takes no gradient on the full path, and must take none here either.
+        if full_grads[name] is None:
+            assert grad is None, f"{name} got a gradient the full-logits path does not give it"
+            continue
         assert grad is not None, f"{name} got no gradient on the chunked path"
         error = (grad - full_grads[name]).norm() / full_grads[name].norm().clamp_min(1e-12)
         assert error < 10 * rtol, f"{name}: relative gradient error {error:.3g}"
@@ -226,6 +234,70 @@ def test_backward_holds_no_vocabulary_wide_tensor():
     assert saved, "the hooks saw nothing, so the check would pass vacuously"
     planes = [shape for shape in saved if shape and shape[-1] == vocab]
     assert not planes, f"vocabulary-wide tensors held for backward: {planes}"
+
+
+def _trainer_with_a_trainable_norm():
+    """With every adapter merged or disabled, the final norm is what carries a gradient through the head."""
+    trainer = _trainer(_student(TINY_DENSE_FAMILY, peft=True), _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5)
+    trainer.model.get_base_model().model.norm.weight.requires_grad_(True)
+    return trainer
+
+
+def test_a_merged_head_adapter_matches_the_full_logits_path():
+    """Merged, the adapters are in the base weights and PEFT's forward adds no delta, so neither path does."""
+    trainer = _trainer_with_a_trainable_norm()
+    trainer.model.merge_adapter()
+    _assert_paths_agree(trainer, _batch(trainer.model.config.vocab_size, RAGGED))
+
+
+def test_disabled_adapters_match_the_full_logits_path():
+    trainer = _trainer_with_a_trainable_norm()
+    with trainer.model.disable_adapter():
+        _assert_paths_agree(trainer, _batch(trainer.model.config.vocab_size, RAGGED))
+
+
+def test_a_head_adapter_merged_then_disabled_is_refused():
+    """PEFT's forward unmerges it before scoring the base weight; the projection would score the merged weight."""
+    trainer = _trainer(_student(TINY_DENSE_FAMILY, peft=True), _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5)
+    head = trainer.model.get_output_embeddings()
+    head.merge()
+    head.enable_adapters(False)
+    trainer.args.use_chunked_distillation_loss = True
+    with pytest.raises(RuntimeError, match="merged into its base weight while adapters are disabled"):
+        trainer.compute_loss(trainer.model, _batch(trainer.model.config.vocab_size, RAGGED))
+
+
+@pytest.mark.parametrize("family", ["qwen3_5", "gemma4"])
+def test_image_rows_match_the_full_logits_path(family):
+    """A composite's backbone takes its image inputs, so an image row scores as through the composite's forward. The
+    same row without its pixels scores differently, so the comparison sees the image. In fp32: the composites' vision
+    and expert kernels take no fp64."""
+    torch.manual_seed(0)
+    student, image_row, _ = composite_model_and_rows(family)
+    torch.manual_seed(0)
+    teacher, _, _ = composite_model_and_rows(family)
+    with torch.no_grad():
+        for param in teacher.parameters():
+            param.add_(0.05 * torch.randn_like(param))
+    student = get_peft_model(student, LoraConfig(r=4, lora_dropout=0.25, target_modules=["lm_head"]))
+    with torch.no_grad():
+        student.get_output_embeddings().lora_B["default"].weight.normal_(std=0.5)
+    trainer = _trainer(student.train(), teacher.eval().requires_grad_(False), distill_alpha=0.5)
+    _assert_paths_agree(trainer, image_row, rtol=1e-4)
+    text_only = {key: value for key, value in image_row.items() if key in ("input_ids", "attention_mask", "labels")}
+    without_pixels, _, _ = _step(trainer, text_only, chunked=True)
+    with_pixels, _, _ = _step(trainer, image_row, chunked=True)
+    assert (with_pixels - without_pixels).abs() > 1e-3
+
+
+def test_a_composite_that_builds_its_image_inputs_itself_is_refused():
+    """Nemotron 3.5 Super VL embeds its images before its text model, which the hidden-state path enters directly."""
+    torch.manual_seed(0)
+    omni = tiny_family_model(TINY_MOE_VLM_FAMILIES["nemotron_h_omni"])
+    with pytest.raises(ValueError, match="takes no pixel_values"):
+        reject_backbone_without_image_inputs(omni)
+    torch.manual_seed(0)
+    reject_backbone_without_image_inputs(composite_model_and_rows("qwen3_5")[0])
 
 
 def test_dora_on_the_head_is_refused():

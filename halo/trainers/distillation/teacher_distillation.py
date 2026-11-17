@@ -47,7 +47,7 @@ from halo.trainers.distillation.divergences import (
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.head_projection import HeadProjector, OutputEmbedding, resolve_output_embedding
-from halo.trainers.hidden_state_forward import HiddenStateForwardMixin
+from halo.trainers.hidden_state_forward import HiddenStateForwardMixin, reject_backbone_without_image_inputs
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
@@ -200,6 +200,8 @@ class DistributedTeacherDistillationTrainer(
         """Resolved once, as each lookup unwraps a model through its whole module tree. Raises where the projection
         cannot reproduce a model's output embedding."""
         if self._chunked_loss_modules is None:
+            reject_backbone_without_image_inputs(self.model)
+            reject_backbone_without_image_inputs(self.teacher_model)
             self._chunked_loss_modules = _ChunkedLossModules(
                 student_backbone=hidden_state_backbone(self.model),
                 student_head=resolve_output_embedding(self.model, self._head_transform(self.model)),

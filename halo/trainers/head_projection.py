@@ -87,6 +87,12 @@ class OutputEmbedding:
             return None if tensor is None else materialize_dtensor(tensor)[rows]
 
         tuner = self.tuner
+        if tuner is not None and tuner.disable_adapters and tuner.merged:
+            raise RuntimeError(
+                "The LoRA adapter on the output embedding is merged into its base weight while adapters are disabled. "
+                "PEFT's own forward unmerges it first, and the chunked head projection reads the base weight as it is, "
+                "so it would score the adapted head. Unmerge the adapter (unmerge_adapter()) before disabling it."
+            )
         adapters = ()
         if tuner is not None:
             adapters = tuple(
