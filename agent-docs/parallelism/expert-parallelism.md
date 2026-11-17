@@ -295,7 +295,7 @@ replay and the family's shared expert stay on Halo's path.
   transposed cast is MoK's normal one: the same bits as casting MoK's layout, with no transpose first. The backward
   reads the forward's cast from the per-step cache, which holds both layouts beside the bf16 bank, 2 bytes a parameter
   together. Measured as below, with the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's
-  shapes, 0.93×, 1.02× and 1.13× on the gpt-oss-like one and 0.84×, 1.01× and 1.21× on DeepSeek-V3's.
+  shapes, 0.93×, 1.02× and 1.15× on the gpt-oss-like one and 0.84×, 1.04× and 1.19× on DeepSeek-V3's.
 - **Memory.** On one layer of DeepSeek-V3's experts at EP 4 (64 local experts, 5.3 GiB of bf16 banks per rank) the
   MXFP8 cache adds 5.4 GiB. A step peaks at 23.0 GiB under MoK bf16 and 22.4 GiB under MoK MXFP8 at 4,096 tokens per
   GPU, against 12.0 GiB on DeepEP bf16, and at 33.8, 35.1 and 16.5 GiB at 16,384: MoK's ring holds every routed
@@ -318,8 +318,8 @@ replay and the family's shared expert stay on Halo's path.
 - **Communication SMs** each way follow the expert width (`_mok_config`): 48 up to an intermediate size of 1024, 42 up
   to 2048, 36 past it, as narrow experts are communication-bound. MoK's default 40/28 is 4-14% slower on B300.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
-  Qwen3-30B-A3B's experts at 0.81×, 0.91× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
-  block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.86× and 0.61-0.83×.
+  Qwen3-30B-A3B's experts at 0.81×, 0.90× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
+  block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.87× and 0.61-0.82×.
 - **Install.** The images do not ship it yet: its build requires nvcc to match torch's CUDA (13.0). In a Blackwell
   container with that toolkit, `pip install --no-build-isolation --no-deps .` from a recursive clone at `f3a8bd2`;
   without `--no-deps` it replaces the locked NCCL with torch's metadata pin, which DeepEP's build does not link against.
