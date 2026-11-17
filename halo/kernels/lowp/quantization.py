@@ -115,11 +115,11 @@ def _restore_axis(t: torch.Tensor, axis: int, ndim: int) -> torch.Tensor:
 
 
 def _e8m0_scale(amax: torch.Tensor, format_max: float) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(fp32 divisor, biased-exponent uint8)``. A NaN block takes the ``0xFF`` code, as a NaN exponent casts to
+    """``(fp32 exponent, biased-exponent uint8)``. A NaN block takes the ``0xFF`` code, as a NaN exponent casts to
     ``uint8`` 0, a finite near-zero block."""
     scale_exp = torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / format_max)).clamp(-_E8M0_BIAS, _E8M0_BIAS)
     biased = (scale_exp + _E8M0_BIAS).to(torch.uint8).masked_fill(amax.isnan(), _E8M0_NAN)
-    return torch.exp2(scale_exp), biased
+    return scale_exp, biased
 
 
 def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
@@ -129,8 +129,13 @@ def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
 def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``blocks`` → (``e4m3`` data, ``e8m0`` biased-exponent scale ``[*, n_block, 1]`` uint8)."""
     format_max = _ELEMENT_MAX["mxfp8"]
-    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), format_max)
-    data = (blocks / divisor).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
+    scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), format_max)
+    # A multiply by exp2(-scale_exp), never a divide by exp2(scale_exp): the exponent clamps to -127 for an all-zero
+    # or tiny block, and exp2(-127) is an fp32 subnormal a flush-to-zero graph (the compiled _round_trip on CUDA)
+    # turns into 0, so the divide gave 0/0 = NaN. exp2(-scale_exp) is a normal power of two for every exponent a
+    # finite fp32 amax can reach, and the product equals the quotient bit for bit. Dequantizing still multiplies by the
+    # stored scale, so under such a graph a block with amax below ~2.6e-36 (scale 2^-127) round-trips to 0.
+    data = (blocks * torch.exp2(-scale_exp)).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
     return data, scales
 
 
@@ -147,8 +152,8 @@ def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
 
 def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
     """``blocks`` → (e2m1 code uint8, ``e8m0`` scale ``[*, n_block, 1]`` uint8, no global scale)."""
-    divisor, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), _ELEMENT_MAX["mxfp4"])
-    return _e2m1_codes(blocks, divisor), scales, None
+    scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), _ELEMENT_MAX["mxfp4"])
+    return _e2m1_codes(blocks, torch.exp2(scale_exp)), scales, None
 
 
 def _nvfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

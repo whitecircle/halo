@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """The block-scale quantizers (MXFP8 / MXFP4 / NVFP4) in ``halo/kernels/lowp/quantization.py``."""
 
+import contextlib
 import warnings
 
 import pytest
@@ -208,6 +209,54 @@ def test_compiled_round_trip_matches_eager_without_tracing_the_cache(fmt):
         compiled = torch.compile(quantization._block_round_trip, dynamic=True)(x, fmt, -1)
     assert torch.equal(compiled, quantization._block_round_trip(x, fmt, -1))
     assert not [w for w in caught if "lru_cache" in str(w.message)]
+
+
+@contextlib.contextmanager
+def _flushed_denormals():
+    """CPU flush-to-zero, as a compiled CUDA graph applies it, restored on exit."""
+    if not torch.set_flush_denormal(True):
+        pytest.skip("this CPU cannot flush denormals")
+    try:
+        # The flush must reach the scale the bug came from, or the test proves nothing.
+        assert torch.exp2(torch.tensor(-127.0)).item() == 0.0
+        yield
+    finally:
+        torch.set_flush_denormal(False)
+
+
+def _with_zero_blocks() -> torch.Tensor:
+    """The repro from #151: one expert's first 32 rows zero, so each of its columns has an all-zero block on axis 1."""
+    torch.manual_seed(0)
+    w = torch.randn(4, 64, 32, dtype=torch.bfloat16) * 0.05
+    w[1, :32, :] = 0
+    return w
+
+
+@pytest.mark.parametrize("fmt", ["mxfp8", "mxfp4"])
+def test_an_all_zero_block_round_trips_to_zero_under_flushed_denormals(fmt):
+    """The block's exponent clamps to -127, and exp2(-127) is a subnormal a flushing graph turns into 0: dividing by it
+    gave 0/0 = NaN for mxfp8 (1024 NaNs on this tensor). Under the flush the round trip has no NaN, the block is
+    exactly 0, and every value equals the unflushed round trip's."""
+    w = _with_zero_blocks()
+    unflushed = quantization._block_round_trip(w, fmt, 1)
+    with _flushed_denormals():
+        flushed = quantization._block_round_trip(w, fmt, 1)
+    assert not flushed.isnan().any()
+    assert torch.equal(flushed[1, :32, :], torch.zeros(32, 32, dtype=flushed.dtype))
+    assert torch.equal(flushed, unflushed)
+
+
+def test_mxfp8_keeps_a_tiny_blocks_codes_and_scale_under_flushed_denormals():
+    """A block with amax below ~2.6e-36 takes scale 2^-127 too. The quantizer multiplies by the normal 2^127, so its
+    codes and scale match the unflushed ones; only the dequantize's 2^-127 multiply is left to the flush."""
+    x = torch.randn(4, 64)
+    x[1, :32] = 1e-37
+    unflushed = quantize_mxfp8(x, axis=-1)
+    with _flushed_denormals():
+        flushed = quantize_mxfp8(x, axis=-1)
+    assert torch.equal(flushed.data.view(torch.uint8), unflushed.data.view(torch.uint8))
+    assert torch.equal(flushed.scales, unflushed.scales)
+    assert unflushed.scales[1, 0].item() == 0 and unflushed.data[1, :32].float().abs().min() > 0
 
 
 @pytest.fixture
