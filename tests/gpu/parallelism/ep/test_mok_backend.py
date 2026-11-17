@@ -224,6 +224,6 @@ def run(ctx) -> dict:
 
 if __name__ == "__main__":
     if not is_mok_available():
-        log("SKIP: mok absent (no image ships it yet)")
+        log("SKIP: mok absent (Blackwell image only)")
         sys.exit(0)
     run()
