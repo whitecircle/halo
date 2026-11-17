@@ -332,10 +332,14 @@ checkpointing when that runs out of memory:
   weights stochastically; from step 5 on it tracks the fp32-master frameworks.
 
 Per-run tokens/s, memory and step-1 loss: `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_2048.tsv`
-and `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_16384.tsv`. The protocol, the result JSONs and the harness are in the
-[benchmark gist](https://gist.github.com/advpropsys/0de3c36fd118a5ad18e4883ac15404a2); after `bash unpack.sh`,
-`BENCH_ROOT=<dir> HALO_TREE=<halo checkout> [BENCH_SEQ=16384 BENCH_STEPS=50] bash <gist>/scripts/benchmarks/gemma4_sft/reproduce.sh`
+and `agent-docs/assets/benchmarks/gemma4-sft-2026-09/summary_16384.tsv`. The protocol and the harness are in `scripts/benchmarks/gemma4_sft/`.
+`BENCH_ROOT=<dir> [BENCH_SEQ=16384 BENCH_STEPS=50] bash scripts/benchmarks/gemma4_sft/reproduce.sh`
 runs the data build, every framework and the summary.
+
+Halo 1.2.0 against Halo 1.0.0 on this protocol, four runs per version on one host
+(`scripts/benchmarks/gemma4_sft/results/halo_1.0.0_vs_1.2.0.tsv`): 15,641 against 8,670 cluster tok/s at 2,048 tokens
+and 16,129 against 3,980 at 16,384. Each rate is the mean of the four runs. Each peak is the largest of the four:
+101.9 against 101.8 GiB at 2,048 tokens and 225.1 against 244.6 GiB at 16,384.
 
 The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
 

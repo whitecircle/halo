@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pipeline parallel throughput</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --model-col: 132px;
+    --layout-col: 118px;
+    --col-gap: 18px;
+    --track-left: calc(var(--model-col) + var(--layout-col) + 2 * var(--col-gap));
+    --row-h: 44px;
+    --bar-h: 24px;
+  }
+
+  body { width: 1200px; }
+
+  /* Under the key, a group gap plus the room a row leaves under its bar, so the first heading sits as far below
+     the key as each later heading below its group's last bar. */
+  .key {
+    display: flex;
+    gap: 24px;
+    margin: 0 0 calc(var(--group-gap) + (var(--row-h) - var(--bar-h)) / 2) var(--track-left);
+    font-size: 16px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 8px; }
+
+  .key i {
+    width: 12px;
+    height: 12px;
+    border-radius: 3px;
+    background: var(--hue);
+  }
+
+  .panel + .panel { margin-top: var(--group-gap); }
+
+  .panel-head {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: var(--heading-gap);
+    white-space: nowrap;
+  }
+
+  .panel-head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 25px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .panel-head p {
+    font-size: 16px;
+    color: var(--secondary);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--model-col) var(--layout-col) 1fr;
+    column-gap: var(--col-gap);
+    align-items: center;
+    height: var(--row-h);
+  }
+
+  .row.next-model { margin-top: 10px; }
+
+  .model {
+    font-size: 19px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .layout {
+    font-size: 19px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    height: 100%;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .value {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    margin-left: 10px;
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .value b { font-weight: 400; color: var(--text); }
+
+  .value.pp { color: var(--body); }
+
+  /* A failed arm's reason starts where its bar would. */
+  .value.failed { margin-left: 0; color: var(--danger); }
+
+  /* The axis, under the bar column: a line along the plot's bottom edge, a short mark under it at each tick, and
+     the tick's value below. */
+  .ticks {
+    position: relative;
+    height: 30px;
+    margin: 12px 0 0 var(--track-left);
+    font-size: 15px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ticks i {
+    position: absolute;
+    top: 0;
+    height: 7px;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticks span { position: absolute; top: 10px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span:first-of-type { transform: none; }
+
+</style>
+</head>
+<body class="square">
+<div class="canvas">
+  <header>
+    <h1>PP leads only where traffic or memory binds</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key">
+      <span style="--hue: var(--tertiary)"><i></i>Without PP</span>
+      <span style="--hue: var(--halo-blue)"><i></i>With PP, two stages</span>
+    </div>
+    <div id="panels"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [panel, setting, rows]. A row is [model, layout, tokens/s/GPU or why it has none, [index, name] of each row a PP row compares with].
+  const PANELS = [
+    ["Two 8-GPU machines, fast link", "4,096 tokens on Qwen3-8B, 8,192 on gpt-oss-20b · 8 microbatches", [
+      ["Qwen3-8B", "dp16", 18337, []],
+      ["Qwen3-8B", "pp2 × dp8", 17608, [[0, "dp16"], [2, "dp8 × tp2"]]],
+      ["Qwen3-8B", "dp8 × tp2", 10780, []],
+      ["gpt-oss-20b", "ep8 with DP", 18685, []],
+      ["gpt-oss-20b", "pp2 × ep8", 15715, [[3, "ep8 with DP"], [5, "ep16"]]],
+      ["gpt-oss-20b", "ep16 global", 4115, []],
+    ]],
+    ["The same machines on plain TCP sockets", "4,096 tokens · 8 microbatches", [
+      ["Qwen3-8B", "dp16", 1117, []],
+      ["Qwen3-8B", "pp2 × dp8", 15414, [[0, "dp16"]]],
+    ]],
+    ["One 8-GPU machine, stages over shared memory", "8,192 tokens · 16 microbatches", [
+      ["Qwen3-8B", "dp8", 21359, []],
+      ["Qwen3-8B", "pp2 × dp4", 19537, [[0, "dp8"]]],
+      ["gpt-oss-20b", "ep8", 19989, []],
+      ["gpt-oss-20b", "pp2 × ep4", 21836, [[2, "ep8"]]],
+    ]],
+    ["GLM-5.3-Flash full fine-tune, two machines", "8,192 tokens · 8 microbatches", [
+      ["GLM-5.3-Flash", "ep8 with DP", "Out of memory in the first optimizer step", []],
+      ["GLM-5.3-Flash", "ep16 global", 1504, []],
+      ["GLM-5.3-Flash", "pp2 × ep8", 2423, [[1, "ep16"]]],
+    ]],
+  ];
+
+  const panels = document.getElementById("panels");
+  const tickRow = document.getElementById("ticks");
+  const isPP = (layout) => layout.startsWith("pp");
+
+  /** A far layout as a multiple, a close one as a percentage above or below. */
+  function gap(rate, other) {
+    const ratio = rate / other;
+
+    if (ratio >= 1.5) {
+      return `${ratio.toPrecision(3)}×`;
+    }
+
+    return `${(Math.abs(ratio - 1) * 100).toFixed(1)}% ${ratio < 1 ? "below" : "above"}`;
+  }
+
+  /** Lays the panels out on an axis from zero to `max`. */
+  function draw(max) {
+    const pct = (rate) => `${(rate / max) * 100}%`;
+    panels.replaceChildren();
+
+    for (const [title, setting, rows] of PANELS) {
+      const panel = el("section", "panel");
+      const head = el("div", "panel-head");
+      head.append(el("h2", undefined, title), el("p", undefined, setting));
+      const body = el("div");
+      let lastModel;
+
+      for (const [model, layout, rate, compared] of rows) {
+        const row = el("div", "row");
+
+        if (lastModel !== undefined && model !== lastModel) {
+          row.classList.add("next-model");
+        }
+
+        const track = el("div", "track");
+
+        if (typeof rate === "string") {
+          track.append(el("div", "value failed", rate));
+        } else {
+          const bar = el("div", "bar");
+          bar.style.width = pct(rate);
+          bar.style.setProperty("--hue", isPP(layout) ? "var(--halo-blue)" : "var(--tertiary)");
+          const value = el("div", isPP(layout) ? "value pp" : "value");
+          value.style.left = pct(rate);
+          value.append(el("b", undefined, rate.toLocaleString("en-US")));
+
+          if (compared.length > 0) {
+            value.append(` · ${compared.map(([i, name]) => `${gap(rate, rows[i][2])} ${name}`).join(", ")}`);
+          }
+
+          track.append(bar, value);
+        }
+
+        row.append(el("div", "model", model === lastModel ? "" : model), el("div", "layout", layout), track);
+        body.append(row);
+        lastModel = model;
+      }
+
+      panel.append(head, body);
+      panels.append(panel);
+    }
+  }
+
+  // Every bar and value ends inside the plot, whose right edge is the tick row's.
+  const rates = PANELS.flatMap(([, , rows]) => rows.map((row) => row[2]).filter((rate) => typeof rate === "number"));
+  const axis = niceAxis(Math.max(...rates), (max) => {
+    draw(max);
+    const right = tickRow.getBoundingClientRect().right;
+
+    return [...document.querySelectorAll(".bar, .value")].every((node) => node.getBoundingClientRect().right <= right);
+  });
+
+  drawAxis(tickRow, axis, (tick) => (tick === 0 ? "0 tok/s" : `${tick / 1000}k`));
+</script>
+</body>
+</html>

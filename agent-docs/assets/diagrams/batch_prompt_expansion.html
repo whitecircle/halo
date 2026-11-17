@@ -1,0 +1,291 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Batch prompt expansion</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 64px;
+    --count-col: 150px;
+    --col-gap: 24px;
+    --cell-gap: 4px;
+    --r0-height: 56px;
+    --thin-height: 28px;
+  }
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  .group-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .caption {
+    margin-top: 8px;
+    font-size: 23px;
+    color: var(--secondary);
+  }
+
+  /* Rank labels, one column per prompt group, then the row counts. */
+  .round {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--groups), 1fr) var(--count-col);
+    column-gap: var(--col-gap);
+    row-gap: 8px;
+    align-items: center;
+    margin-top: var(--heading-gap);
+  }
+
+  .chip {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 76px;
+    border-radius: 10px;
+    background: var(--halo-violet);
+    color: #000;
+    line-height: 1.25;
+    white-space: nowrap;
+  }
+
+  .chip b {
+    font-weight: 400;
+    font-size: 25px;
+  }
+
+  .chip span { font-size: 21px; }
+
+  .rank {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .rank.thin {
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .block {
+    display: grid;
+    grid-template-columns: repeat(var(--generations), 1fr);
+    gap: var(--cell-gap);
+    height: 100%;
+  }
+
+  .block i {
+    border-radius: 7px;
+    background: var(--halo-blue);
+  }
+
+  .block.thin i { border-radius: 5px; }
+
+  .count {
+    font-size: 25px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .units {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 40px;
+    margin-top: var(--group-gap);
+  }
+
+  .card {
+    padding: 24px 28px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 12px;
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .card p {
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Each prompt’s {generations} rows stay on one rank</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="group-head">One rank’s generation round</div>
+    <p class="caption">TRL’s RepeatSampler delivers each prompt’s {generations} rows consecutively, rank-local.</p>
+    <div class="round" id="round"></div>
+
+    <div class="units">
+      <div class="card">
+        <div class="name"><i style="--hue: var(--halo-blue)"></i>Row</div>
+        <p>One episode, one trajectory</p>
+        <p>Its turns share one advantage</p>
+      </div>
+      <div class="card">
+        <div class="name"><i style="--hue: var(--halo-violet)"></i>Group</div>
+        <p>num_generations = {generations} rows</p>
+        <p>One prompt, rank-local</p>
+      </div>
+      <div class="card">
+        <div class="name">Optimizer step</div>
+        <p>{total} rows = {prompts} prompts × {generations}</p>
+        <p>{stepsPerGeneration} micro-batches of bs {batchSize}</p>
+      </div>
+    </div>
+
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">A step is {ranks} ranks × batch size {batchSize} × {stepsPerGeneration} steps per generation = {total} rows.</span>
+      <span class="s">A group never straddles ranks: per_device_train_batch_size × steps_per_generation must divide by num_generations.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /** The code-contests stage-1 recipe. Every number on the canvas is drawn from these. */
+  const SETUP = { ranks: 6, batchSize: 1, stepsPerGeneration: 24, generations: 8 };
+
+  const ROUND = SETUP.batchSize * SETUP.stepsPerGeneration;
+  const GROUPS = ROUND / SETUP.generations;
+  const TOTAL = SETUP.ranks * ROUND;
+
+  if (!Number.isInteger(GROUPS)) {
+    throw new Error(`batch size × steps per generation (${ROUND}) must divide by num_generations (${SETUP.generations}), or a group straddles ranks`);
+  }
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    ranks: fmt(SETUP.ranks),
+    batchSize: fmt(SETUP.batchSize),
+    stepsPerGeneration: fmt(SETUP.stepsPerGeneration),
+    generations: fmt(SETUP.generations),
+    total: fmt(TOTAL),
+    prompts: fmt(TOTAL / SETUP.generations),
+  };
+
+  fillValues(VALUES);
+
+  const round = document.getElementById("round");
+  round.style.setProperty("--groups", GROUPS);
+  round.style.setProperty("--generations", SETUP.generations);
+  // Prompts, a spacer for their arrows, R0, a spacer, then the thinner rows of the other ranks.
+  round.style.gridTemplateRows = [
+    "auto",
+    "40px",
+    "var(--r0-height)",
+    "12px",
+    ...Array(SETUP.ranks - 1).fill("var(--thin-height)"),
+  ].join(" ");
+
+  const rowCells = (rank) => Array.from({ length: GROUPS }, (_, g) => {
+    const block = el("div", "block");
+    block.style.gridRow = rank === 0 ? "3" : `${4 + rank}`;
+    block.style.gridColumn = `${g + 2}`;
+
+    for (let i = 0; i < SETUP.generations; i += 1) {
+      block.append(el("i"));
+    }
+
+    return block;
+  });
+
+  const chips = Array.from({ length: GROUPS }, (_, g) => {
+    const chip = el("div", "chip");
+    chip.style.gridRow = "1";
+    chip.style.gridColumn = `${g + 2}`;
+    chip.append(el("b", undefined, `Prompt ${g + 1}`), el("span", undefined, `Group ${g + 1}`));
+    round.append(chip);
+
+    return chip;
+  });
+
+  const r0 = el("div", "rank", "R0");
+  r0.style.gridRow = "3";
+  round.append(r0);
+  const r0Blocks = rowCells(0);
+  round.append(...r0Blocks);
+  const r0Count = el("div", "count", `${fmt(ROUND)} rows`);
+  r0Count.style.gridRow = "3";
+  r0Count.style.gridColumn = `${GROUPS + 2}`;
+  round.append(r0Count);
+
+  for (let r = 1; r < SETUP.ranks; r += 1) {
+    const label = el("div", "rank thin", `R${r}`);
+    label.style.gridRow = `${4 + r}`;
+    round.append(label);
+
+    for (const block of rowCells(r)) {
+      block.classList.add("thin");
+      round.append(block);
+    }
+  }
+
+  if (SETUP.ranks > 1) {
+    const ranks = el("div", "count", `× ${fmt(SETUP.ranks)} ranks`);
+    ranks.style.gridRow = `5 / span ${SETUP.ranks - 1}`;
+    ranks.style.gridColumn = `${GROUPS + 2}`;
+    round.append(ranks);
+  }
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  // Each prompt's arrow runs from its chip down into its group's block of R0.
+  chips.forEach((chip, g) => {
+    const from = box(chip);
+    const to = box(r0Blocks[g]);
+    const x = (from.l + from.r) / 2;
+    arrow(wires, x, from.b + 6, x, to.t - 6, grey);
+  });
+</script>
+</body>
+</html>
