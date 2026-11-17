@@ -34,9 +34,9 @@ The two `crossnode-ep` files are **not** interchangeable: beyond `cloud`/`region
 |---|---|---|---|
 | GPT-OSS 120B | both | none (the default) | as shipped |
 | Qwen3.5-122B-A10B | both | `CONFIG_PATH=examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml`, `MODEL=Qwen/Qwen3.5-122B-A10B`, `OUTPUT_DIR=/data/checkpoints/qwen35-122b`, `WANDB_PROJECT=halo-qwen35-122b` | as shipped |
-| GPT-OSS 20B | `nodelocal-ep` | `CONFIG_PATH=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`, `MODEL=unsloth/gpt-oss-20b-BF16`, `OUTPUT_DIR=/data/checkpoints/oss-20b`, `WANDB_PROJECT=halo-20b-nodelocal` | `--num-nodes 2 --network-tier best`, `--gpus H100:8` (AWS) or `H200:8` (Nebius), `--image-id docker:public.ecr.aws/whitecircle/halo:hopper`; `--memory 256+ --disk-size 1500` suffice |
+| GPT-OSS 20B | `nodelocal-ep` | `CONFIG_PATH=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`, `MODEL=openai/gpt-oss-20b`, `OUTPUT_DIR=/data/checkpoints/oss-20b`, `WANDB_PROJECT=halo-20b-nodelocal` | `--num-nodes 2 --network-tier best`, `--gpus H100:8` (AWS) or `H200:8` (Nebius), `--image-id docker:public.ecr.aws/whitecircle/halo:hopper`; `--memory 256+ --disk-size 1500` suffice |
 
-The 120B and 122B models run `nodelocal-ep` on Blackwell only (B200's 180 GB/GPU is the minimum, B300 has headroom; lower `max_length` on OOM) and need the shipped `memory: 512+` and `disk_size: 3000`. The gpt-oss defaults point `MODEL` at a BF16-dequantized mirror — EP cannot load the MXFP4 `openai/gpt-oss-*` ([GPT-OSS → Precision and kernels](../models/gpt-oss.md#precision-and-kernels)). The 20B preset keeps EP inside each node and adds cross-node data parallelism over the fabric, hence `--network-tier best` ([RDMA fabric](#rdma-fabric-aws-efa-vs-nebius-infiniband)).
+The 120B and 122B models run `nodelocal-ep` on Blackwell only (B200's 180 GB/GPU is the minimum, B300 has headroom; lower `max_length` on OOM) and need the shipped `memory: 512+` and `disk_size: 3000`. Both gpt-oss presets load the release as OpenAI ships it, `openai/gpt-oss-120b` by default and `openai/gpt-oss-20b` for the 20B row, its experts decoded at load ([GPT-OSS → Configs](../models/gpt-oss.md#configs)). The 20B preset keeps EP inside each node and adds cross-node data parallelism over the fabric, hence `--network-tier best` ([RDMA fabric](#rdma-fabric-aws-efa-vs-nebius-infiniband)).
 
 ## Cross-node expert parallelism
 
