@@ -13,6 +13,7 @@ import threading
 import time
 
 from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.sandbox.workspace import Owner
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +187,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
                 "package (newuidmap, newgidmap) and a range for root in /etc/subuid and /etc/subgid, which the "
                 "training image ships. Otherwise use the 'local' or 'remote' sandbox backend."
             )
-        self.program_owner = ids
+        self.program_owner = Owner(*ids)
         self._verify_can_sandbox()
 
     @property
@@ -202,7 +203,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
         except PermissionError as exc:
             raise RuntimeError(
                 f"bubblewrap sandbox cannot hand its working directory under {tempfile.gettempdir()} to the jail's "
-                f"root, uid {self.program_owner[0]} ({exc}): that filesystem refuses root's chown (a root-squashed "
+                f"root, uid {self.program_owner.uid} ({exc}): that filesystem refuses root's chown (a root-squashed "
                 "NFS mount, a user-namespace-remapped runtime). Point TMPDIR at a local filesystem, or use the "
                 "'local' or 'remote' sandbox backend."
             ) from exc
@@ -220,7 +221,7 @@ class BubblewrapSandbox(LocalSubprocessSandbox):
             )
         if _BIND_SOURCE_UNREACHABLE in tail:
             raise RuntimeError(
-                f"bubblewrap's jail cannot reach a path it binds ({tail}): its root is uid {self.program_owner[0]}, "
+                f"bubblewrap's jail cannot reach a path it binds ({tail}): its root is uid {self.program_owner.uid}, "
                 "not this process's, so every directory above a bound path must be searchable by other users, "
                 f"as /tmp is. The working directories live under {tempfile.gettempdir()}: point TMPDIR at such a "
                 "directory, or use the 'local' or 'remote' sandbox backend."

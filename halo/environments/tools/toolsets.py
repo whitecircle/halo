@@ -120,9 +120,9 @@ def build_python_tools(
 
 
 def build_search_tools(backend: str | None = None) -> NativeToolRegistry:
-    """``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, then keyless DuckDuckGo); ``mock``
-    also needs ``HALO_ALLOW_MOCK_SEARCH=1``. Validated here, so an environment never runs every episode on a backend it
-    cannot select."""
+    """``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, Keenable, then keyless DuckDuckGo);
+    ``mock`` also needs ``HALO_ALLOW_MOCK_SEARCH=1``. Validated here, so an environment never runs every episode on a
+    backend it cannot select."""
     validate_search_backend(backend)
     registry = NativeToolRegistry()
     registry.register(

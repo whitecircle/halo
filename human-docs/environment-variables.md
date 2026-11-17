@@ -39,9 +39,9 @@ or set it in the repo-root `.env`, to choose the volume yourself.
 `.env` holds the ones you need: `HF_TOKEN` (gated models and datasets),
 `WANDB_API_KEY`, the `AWS_*` trio for `s3://` (or a mounted `~/.aws`),
 `OPENAI_API_KEY` / `OPENROUTER_API_KEY` for the external-LLM judge and the
-generation scripts, `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` for the
-matching web-search backend (`duckduckgo` needs none), and `VLLM_API_KEY` for a
-keyed OpenAI-compatible endpoint.
+generation scripts, `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` /
+`KEENABLE_API_KEY` for the matching web-search backend (`duckduckgo` needs none),
+and `VLLM_API_KEY` for a keyed OpenAI-compatible endpoint.
 
 ## When to set the others
 

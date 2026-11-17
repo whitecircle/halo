@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Low-precision whole step</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 460px;
+    --row-h: 96px;
+    --split: 44px;
+    --ref-head: 38px;
+    --tick: 6px;
+  }
+
+  body { width: 1600px; }
+
+  .key {
+    display: flex;
+    gap: 30px;
+    margin-left: var(--label-col);
+    margin-bottom: 36px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; white-space: nowrap; }
+
+  .key svg { width: 22px; height: 22px; overflow: visible; }
+
+  /* The plot's top holds the bf16 name over its line. */
+  .plot {
+    position: relative;
+    padding-top: var(--ref-head);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+    height: var(--row-h);
+  }
+
+  .row.split { margin-top: var(--split); }
+
+  .label .shape {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .note {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: 100%;
+  }
+
+  .track svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .hollow { fill: var(--bg); stroke: var(--hue); stroke-width: 3; }
+
+  /* A filled mark's dark rim keeps it apart from a mark it overlaps. */
+  .filled { fill: var(--hue); stroke: var(--bg); stroke-width: 2; }
+
+  .value {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 23px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  /* The bf16 line is data: it runs from under its name down through the axis line to the end of its tick. */
+  .overlay {
+    position: absolute;
+    top: 0;
+    bottom: calc(-1 * var(--tick));
+    left: var(--label-col);
+    right: 0;
+  }
+
+  .overlay .ref {
+    position: absolute;
+    top: calc(var(--ref-head) - 10px);
+    bottom: 0;
+    border-left: 2px solid var(--body);
+    transform: translateX(-1px);
+  }
+
+  .overlay .ref-name {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    font-size: 21px;
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .ticks {
+    position: relative;
+    height: 34px;
+    margin-left: var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis { position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: var(--tick); border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: calc(var(--tick) + 4px); transform: translateX(-50%); white-space: nowrap; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>No low-precision path Halo ships beats bf16</h1>
+    <p class="subtitle">Whole-step tokens/s per GPU as a ratio to bf16 on the same shape</p>
+  </header>
+
+  <div class="figure">
+    <div class="key" id="key"></div>
+    <div class="plot" id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [shape, bf16 tok/s/GPU, simulated fp8, simulated mxfp4, native fp8, native mxfp4]
+  const SHAPES = [
+    ["gpt-oss-20b, batch 4", 13399, 0.449, 0.183, 0.539, 0.531],
+    ["Qwen3-30B-A3B, batch 8", 14063, 0.294, 0.098, 0.425, 0.369],
+    ["Qwen3.5-35B-A3B, batch 8", 16536, 0.442, 0.171, 0.533, 0.373],
+  ];
+  // [shape, ratio to bf16]
+  const TORCHAO = ["gpt-oss-20b, batch 4", 1.133];
+  // [key name, mark shape, hollow, hue] in the order of a SHAPES row's ratios, then torchao's.
+  const ARMS = [
+    ["simulated fp8", "circle", true, "var(--halo-blue)"],
+    ["simulated mxfp4", "diamond", true, "var(--halo-violet)"],
+    ["native fp8", "circle", false, "var(--halo-blue)"],
+    ["native mxfp4", "diamond", false, "var(--halo-violet)"],
+  ];
+  const TORCHAO_ARM = ["torchao MXFP8", "square", false, "var(--tertiary)"];
+  /** A mark's reach from its centre: a circle's radius, a diamond's half diagonal, a square's half side. */
+  const REACH = { circle: 10, diamond: 12, square: 9 };
+  /** Distance from a mark's edge to its value. */
+  const LABEL_GAP = 10;
+  /** Room every value keeps from the bf16 line. */
+  const REF_CLEARANCE = 10;
+
+  /** A mark centred on (cx, cy): a circle, a diamond or a square, its ring in `hue` when hollow, filled otherwise. */
+  function mark(shape, hollow, hue, cx, cy) {
+    const r = REACH[shape];
+    const attrs = { class: hollow ? "hollow" : "filled", style: `--hue: ${hue}` };
+
+    if (shape === "circle") {
+      return svgEl("circle", { ...attrs, cx, cy, r: hollow ? r - 1.5 : r });
+    }
+
+    if (shape === "square") {
+      return svgEl("rect", { ...attrs, x: cx - r, y: cy - r, width: 2 * r, height: 2 * r, rx: 2 });
+    }
+
+    const d = hollow ? r - 2 : r;
+
+    return svgEl("polygon", { ...attrs, points: `${cx},${cy - d} ${cx + d},${cy} ${cx},${cy + d} ${cx - d},${cy}` });
+  }
+
+  const key = document.getElementById("key");
+
+  for (const [name, shape, hollow, hue] of [...ARMS, TORCHAO_ARM]) {
+    const item = el("span");
+    const icon = svgEl("svg", { viewBox: "0 0 22 22" });
+    icon.append(mark(shape, hollow, hue, 11, 11));
+    item.append(icon, name);
+    key.append(item);
+  }
+
+  // Rows: one per shape, then torchao's apart from them.
+  const plot = document.getElementById("plot");
+  const rows = [
+    ...SHAPES.map(([shape, , ...ratios]) => ({ shape, note: undefined, marks: ratios.map((ratio, i) => [ratio, ARMS[i]]) })),
+    { shape: `${TORCHAO[0]}, torchao MXFP8`, note: "Not adopted in Halo", marks: [[TORCHAO[1], TORCHAO_ARM]], split: true },
+  ];
+
+  for (const row of rows) {
+    const line = el("div", row.split ? "row split" : "row");
+    const label = el("div", "label");
+    label.append(el("div", "shape", row.shape));
+
+    if (row.note !== undefined) {
+      label.append(el("div", "note", row.note));
+    }
+
+    row.track = el("div", "track");
+    line.append(label, row.track);
+    plot.append(line);
+  }
+
+  const overlay = el("div", "overlay");
+  const ref = el("div", "ref");
+  const refName = el("span", "ref-name", "bf16");
+  overlay.append(ref, refName);
+  plot.append(overlay);
+
+  const width = rows[0].track.clientWidth;
+
+  /** Draws every row on an axis to `max`: its marks, and its best ratio past its rightmost mark, moved past the bf16 line when it would meet it. */
+  function draw(max) {
+    const x = (ratio) => (ratio / max) * width;
+    const line = x(1);
+    ref.style.left = `${line}px`;
+    refName.style.left = `${line}px`;
+
+    for (const row of rows) {
+      const cy = row.track.clientHeight / 2;
+      const svg = svgEl("svg", {});
+      row.track.replaceChildren(svg);
+
+      // Hollow marks first, then filled ones from the smallest ratio up, so of two marks that overlap the larger shows whole.
+      for (const [ratio, [, shape, hollow, hue]] of [...row.marks].sort((a, b) => b[1][2] - a[1][2] || a[0] - b[0])) {
+        svg.append(mark(shape, hollow, hue, x(ratio), cy));
+      }
+
+      const best = Math.max(...row.marks.map(([ratio]) => ratio));
+      const reach = Math.max(...row.marks.map(([ratio, [, shape]]) => x(ratio) + REACH[shape]));
+      const value = el("div", "value", `${best.toFixed(2)}×`);
+      row.track.append(value);
+      let left = reach + LABEL_GAP;
+
+      if (left < line + 1 + REF_CLEARANCE && left + value.offsetWidth > line - 1 - REF_CLEARANCE) {
+        left = line + 1 + REF_CLEARANCE;
+      }
+
+      value.style.left = `${left}px`;
+    }
+  }
+
+  // The axis from zero holds the bf16 line and its name, and ends at the smallest maximum that holds every mark and value.
+  const axis = niceAxis(Math.max(1, ...rows.flatMap((row) => row.marks.map(([ratio]) => ratio))), (max) => {
+    draw(max);
+    const right = rows[0].track.getBoundingClientRect().right;
+
+    return [refName, ...rows.flatMap((row) => [...row.track.querySelectorAll("svg > *, .value")])].every((node) => node.getBoundingClientRect().right <= right);
+  });
+
+  drawAxis(document.getElementById("ticks"), axis, (tick) => (tick === 0 ? "0" : tick.toFixed(axis.digits)));
+
+  const simulated = SHAPES.flatMap((s) => [s[2], s[3]]);
+  const native = SHAPES.flatMap((s) => [s[4], s[5]]);
+  const range = (xs) => `${Math.min(...xs).toFixed(2)}–${Math.max(...xs).toFixed(2)}`;
+  console.log(`simulated ${range(simulated)} native ${range(native)} torchao ${TORCHAO[1].toFixed(2)}`);
+</script>
+</body>
+</html>

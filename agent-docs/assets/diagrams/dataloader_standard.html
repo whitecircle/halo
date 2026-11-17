@@ -1,0 +1,237 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Standard dataloader path</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 132px;
+    --cell-gap: 4px;
+  }
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .card .lines {
+    margin-top: 14px;
+    font-size: 23px;
+    line-height: 1.45;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .gate { padding: 24px 28px 26px; }
+
+  /* Four stage cards, each as wide as its lines, with what is left between them for the arrows. */
+  .stages {
+    display: grid;
+    grid-template-columns: repeat(4, auto);
+    justify-content: space-between;
+    column-gap: 36px;
+    margin-top: 56px;
+  }
+
+  .stages .card { padding: 24px 28px 26px; }
+
+  .strip-head {
+    margin-top: var(--group-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .strip {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--ranks), 1fr);
+    column-gap: var(--cell-gap);
+    row-gap: 10px;
+    margin-top: var(--heading-gap);
+    align-items: center;
+  }
+
+  .row-label {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 25px;
+    color: var(--body);
+  }
+
+  .row-label i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .cell {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 52px;
+    border-radius: 9px;
+    font-size: 22px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell.rank {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--body);
+  }
+
+  .cell.batch {
+    background: var(--halo-blue);
+    color: var(--bg);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Each of the {ranks} ranks reads its own batch</h1>
+    <p class="subtitle">Standard dataloader path at {ranks} ranks under DDP, FSDP or EP alone: data parallel size = world = {dp}</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="card gate" id="gate"></div>
+    <div class="stages" id="stages"></div>
+    <div class="strip-head" id="strip-head"></div>
+    <div class="strip" id="strip"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">EP stays on this path: DeepEP returns every token to its origin rank, so EP never reduces data_parallel_size.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /** Every number on the canvas is drawn from these. */
+  const SETUP = { ranks: 16 };
+
+  /** Every rank reads its own batch: data parallel size = world. */
+  const dp = SETUP.ranks;
+  const fmt = (n) => n.toLocaleString("en-US");
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = { ranks: fmt(SETUP.ranks), dp: fmt(dp) };
+  const PATH = {
+    gate: {
+      name: "_needs_custom_dataloader() → False",
+      lines: ["non_dp_replication_factor > 1 · _dataset_presharded: neither holds"],
+    },
+    stages: [
+      { name: "Trainer (HF / TRL)", lines: ["get_train_dataloader()", "accelerator.prepare(dl)"] },
+      { name: "Sampler (not distributed)", lines: ["_get_train_sampler()", "→ RandomSampler"] },
+      { name: "Accelerate prepare", lines: [`num_processes = ${fmt(dp)}`, "process_index = rank"] },
+      { name: "Batch sharding", lines: ["BatchSamplerShard", `idx % ${fmt(dp)} == rank`] },
+    ],
+    stripHead: `What each rank reads: ${fmt(dp)} distinct batches per step`,
+  };
+
+  function fillCard(card, name, lines) {
+    const body = el("div", "lines");
+
+    for (const line of lines) {
+      body.append(el("div", undefined, line));
+    }
+
+    card.append(el("div", "name", name), body);
+  }
+
+  fillValues(VALUES);
+
+  fillCard(document.getElementById("gate"), PATH.gate.name, PATH.gate.lines);
+
+  const stages = document.getElementById("stages");
+  const cards = PATH.stages.map((stage) => {
+    const card = el("div", "card");
+    fillCard(card, stage.name, stage.lines);
+    stages.append(card);
+
+    return card;
+  });
+
+  document.getElementById("strip-head").textContent = PATH.stripHead;
+
+  const strip = document.getElementById("strip");
+  strip.style.setProperty("--ranks", SETUP.ranks);
+  strip.append(el("div", "row-label", "Rank"));
+
+  for (let r = 0; r < SETUP.ranks; r += 1) {
+    strip.append(el("div", "cell rank", String(r)));
+  }
+
+  const batchLabel = el("div", "row-label");
+  const dot = el("i");
+  dot.style.setProperty("--hue", "var(--halo-blue)");
+  batchLabel.append(dot, "Batch");
+  strip.append(batchLabel);
+
+  for (let b = 0; b < dp; b += 1) {
+    const cell = el("div", "cell batch", String(b));
+    cell.style.gridColumn = String(2 + b);
+    strip.append(cell);
+  }
+
+  console.log(`ranks ${SETUP.ranks} · batches ${dp}`);
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const ink = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+
+  /** A straight line from the right edge of `from` to the left edge of `to`, at their middles. */
+  function connect(from, to, hue) {
+    const a = box(from);
+    const z = box(to);
+    arrow(wires, a.r, (a.t + a.b) / 2, z.l - 1, (z.t + z.b) / 2, hue);
+  }
+
+  // The gate hands the loader to the trainer: straight down into the first stage's middle.
+  const gate = box(document.getElementById("gate"));
+  const first = box(cards[0]);
+  const mid = (first.l + first.r) / 2;
+  arrow(wires, mid, gate.b, mid, first.t - 1, ink);
+
+  for (let i = 0; i + 1 < cards.length; i += 1) {
+    connect(cards[i], cards[i + 1], ink);
+  }
+</script>
+</body>
+</html>
