@@ -1,11 +1,15 @@
 #!/usr/bin/env python
-"""Fused Triton MX fake-quant fast paths (mxfp8, mxfp4), verifying that
-- each is bit-identical to the eager quantizer (``_block_round_trip``) on adversarial inputs: exact
+"""Fused Triton fake-quant fast paths (mxfp8, mxfp4, nvfp4), verifying that
+- each is bit-identical to the eager quantizer (``_block_round_trip``) on CUDA on adversarial inputs: exact
   powers of two, the format-max scale boundary, zeros, -0.0, subnormals, overflow, NaN, inf, rounding
-  midpoints, an fp32 one-ulp scale edge, a near-subnormal scale, and for mxfp4 every e2m1 level and
-  midpoint of both signs at forty scales,
-- ``fake_quant`` routes CUDA / contiguous / last-axis / MX through them and everything else to eager,
-  and to eager on GPUs too old for a kernel's types (mxfp8 below SM 8.9, mxfp4 below SM 8.0),
+  midpoints, an fp32 one-ulp scale edge, a near-subnormal scale, for mxfp4 every e2m1 level and midpoint of
+  both signs at forty scales, and for nvfp4 the same grid over 16-wide blocks, the e4m3 block-scale edges,
+  tensor maxima at and past a global-scale boundary, a lone maximum in the last block and fp32 maxima where
+  the reciprocal multiply and true division disagree,
+- ``fake_quant`` routes CUDA / contiguous / last-axis through them and everything else to eager, and to
+  eager on GPUs too old for a kernel's types (mxfp8 and nvfp4 below SM 8.9, mxfp4 below SM 8.0),
+- the cached nvfp4 expert-weight round trip on axis 1 goes through its kernel, bit-exact,
+- nvfp4's two launches never sync with the host,
 - a new token count never compiles a new kernel variant, which under EP would stall the other ranks,
 - the straight-through backward is unchanged.
 
@@ -15,6 +19,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_fake_quant_triton.py
 import torch
 import triton
 
+import halo.kernels.lowp.fake_quant_triton as fq
 import halo.kernels.lowp.quantization as q
 from halo.kernels.lowp.fake_quant_triton import fake_quant_triton
 from halo.kernels.lowp.quantization import (
@@ -23,6 +28,8 @@ from halo.kernels.lowp.quantization import (
     E2M1_MAX,
     FORMAT_BLOCK_SIZE,
     _block_round_trip,
+    _round_trip,
+    cached_fake_quant,
     fake_quant,
 )
 from tests.common.harness import gpu_test_main, record_check
@@ -88,6 +95,59 @@ def _cases(fmt: str):
     yield "fp32", torch.randn(64, K, device=DEV, dtype=torch.float32)
     if fmt == "mxfp4":
         yield "e2m1_grid", _e2m1_grid()
+    if fmt == "nvfp4":
+        yield from _nvfp4_cases()
+
+
+def _nvfp4_cases():
+    """NVFP4's own edges: the e2m1 grid over 16-wide blocks, the e4m3 block-scale edges, tensor maxima on and one ulp
+    past a power-of-two boundary of 2688 (E4M3_MAX x E2M1_MAX), a lone maximum in the last block, and fp32 maxima
+    where eager's reciprocal multiply and a true division give different global scales (the sweep over all positive
+    fp32 in the PR finds them)."""
+    bf = torch.bfloat16
+    # 16-wide blocks led by 6 x 2^j, so each block scale is exactly 2^j for j in [-8, 8] (the tensor amax gives a
+    # global scale of 1), then every multiple of 1/8 in [-6, 6] at that scale.
+    grid = torch.arange(-48, 49, device=DEV, dtype=torch.float32) / 8
+    body = grid.repeat(2)[: 7 * 15].reshape(7, 15)
+    row = torch.cat([torch.full((7, 1), E2M1_MAX, device=DEV), body], dim=1).reshape(-1)
+    scales = 2.0 ** torch.arange(-8, 9, device=DEV, dtype=torch.float32)
+    yield "e2m1_grid16", (row[None, :] * scales[:, None]).to(bf)
+    # Block maxima 6 x v under a global scale near 1: v on e4m3 subnormals, ties between neighbours, values that round
+    # to 0, and the top of the range, where the scale is clamped at 448. fp32 input, so each v is exact.
+    edges = [
+        448.0,
+        2.0**-9,
+        3 * 2.0**-9,
+        2.0**-10,
+        1.5 * 2.0**-10,
+        2.0**-11,
+        1.0625,
+        1.1875,
+        248.0,
+        440.0,
+        447.0,
+        448.0,
+    ]
+    lead = torch.tensor(edges, device=DEV)[:, None] * E2M1_MAX
+    steps = 2.0 ** (-torch.arange(1, 16, device=DEV) / 1.5) * (-1.0) ** torch.arange(1, 16, device=DEV)
+    yield "e4m3_scale_edges", torch.cat([lead, lead * steps], dim=1)
+    for k in (-10, 0, 12):
+        boundary = torch.tensor(2688.0 * 2.0**k, device=DEV)
+        for name, top in (("on", boundary), ("ulp_past", torch.nextafter(boundary, torch.tensor(1e30, device=DEV)))):
+            t = torch.randn(8, 64, device=DEV) * 2.0**k
+            t[3, 17] = top
+            yield f"global_{name}_2688x2^{k}", t
+    t = torch.full((8, 64), 2688.0, device=DEV, dtype=bf)
+    t[5, 5] = 2704.0  # one bf16 ulp past
+    yield "global_ulp_past_bf16", t
+    t = torch.randn(1024, K, device=DEV, dtype=bf) * 0.01
+    t[-1, -1] = 50.0
+    yield "max_in_last_block", t
+    for bits in (0x00A80540, 0x0328002A, 0x05A8001E, 0x2528000F, 0x2928000F):
+        amax = torch.tensor([bits], dtype=torch.int32).view(torch.float32).to(DEV)
+        t = amax * (2.0 ** (-torch.arange(64, device=DEV, dtype=torch.float32) / 4)).reshape(4, 16)
+        t[1::2] *= -1.0
+        yield f"global_recip_edge_{bits:#010x}", t
 
 
 def _assert_bits_equal(out, ref, name):
@@ -100,14 +160,18 @@ def _assert_bits_equal(out, ref, name):
 
 
 def _kernel_supported() -> bool:
-    """Stated here and read from the device, not from the table's ``min_capability``, so a wrong entry or a wrong
-    guard on SM 8.9+ fails the tests."""
+    """Whether this GPU runs the fp8 kernels (mxfp8 and nvfp4 round through Triton's fp8 type). Stated here and read
+    from the device, not from the table's ``min_capability``, so a wrong entry or a wrong guard on SM 8.9+ fails the
+    tests."""
     return torch.cuda.get_device_capability() >= (8, 9)
+
+
+_FP8_FORMATS = ("mxfp8", "nvfp4")
 
 
 class _Spy:
     """Counts fast-path calls per format by wrapping ``fake_quant_triton`` in the quantization module, which
-    ``_FakeQuant`` looks up at call time; the kernel it is handed names the format."""
+    ``_FakeQuant`` and ``_round_trip`` look up at call time; the kernel it is handed names the format."""
 
     def __init__(self):
         self.calls = {fmt: 0 for fmt in FUSED}
@@ -125,25 +189,37 @@ class _Spy:
         q.fake_quant_triton = fake_quant_triton
 
 
+def _launch(fused, fmt: str, t: torch.Tensor, kernel=None) -> torch.Tensor:
+    return fake_quant_triton(
+        kernel or fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR, scale_max=fused.scale_max
+    )
+
+
 def test_bit_exact_against_eager():
-    """Each kernel reproduces the eager quantizer bit-for-bit, NaN blocks and signed zeros included."""
+    """Each kernel reproduces the CUDA eager quantizer bit-for-bit, NaN blocks and signed zeros included."""
     for fmt, fused in FUSED.items():
-        if fmt == "mxfp8" and not _kernel_supported():
-            print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
+        if fmt in _FP8_FORMATS and not _kernel_supported():
+            print(f"  {fmt}: below SM 8.9, the fp8 kernel cannot compile — skipped")
             continue
         n = 0
         for name, t in _cases(fmt):
+            if t.numel() == 0 and fused.scale_max is not None:
+                # Eager nvfp4 cannot take an empty tensor (its tensor amax reduces over no dim), so there is nothing to
+                # match: the kernel returns an empty tensor of the input's shape, as the MX kernels do.
+                out = _launch(fused, fmt, t)
+                assert out.shape == t.shape and out.dtype == t.dtype, f"{fmt}/{name}"
+                continue
             ref = _block_round_trip(t, fmt, -1).to(t.dtype)
-            out = fake_quant_triton(fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
-            _assert_bits_equal(out, ref, f"{fmt}/{name}")
+            _assert_bits_equal(_launch(fused, fmt, t), ref, f"{fmt}/{name}")
             n += 1
         print(f"  {fmt}: {n} cases bit-exact — OK")
 
 
 def test_routing():
-    """fake_quant takes the fast path only for CUDA / contiguous / real / last-axis / MX / K % 32 == 0."""
+    """fake_quant takes the fast path only for CUDA / contiguous / real / last-axis / K % block size == 0."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
-    expected = {"mxfp8": int(_kernel_supported()), "mxfp4": 1}  # below SM 8.9 mxfp8 runs eager
+    fp8 = int(_kernel_supported())  # below SM 8.9 mxfp8 and nvfp4 run eager
+    expected = {"mxfp8": fp8, "mxfp4": 1, "nvfp4": fp8}
     with _Spy() as s:
         for fmt in FUSED:
             _assert_bits_equal(fake_quant(t, fmt), _block_round_trip(t, fmt, -1), f"{fmt} wired")
@@ -154,22 +230,30 @@ def test_routing():
             fake_quant(t.cpu(), fmt)  # CPU → eager
             c = t.to(torch.complex64)  # complex → eager, which keeps the real part
             assert torch.equal(fake_quant(c, fmt), _block_round_trip(c, fmt, -1).to(c.dtype)), f"{fmt}: complex"
-        fake_quant(t, "nvfp4")  # tensor-wide scale → eager
         assert s.calls == expected, f"fallback cases took the fast path: {s.calls}"
+        # K = 48 divides into nvfp4's 16-wide blocks but not MX's 32-wide ones.
+        t48 = torch.randn(8, 48, device=DEV, dtype=torch.bfloat16)
+        _assert_bits_equal(fake_quant(t48, "nvfp4"), _block_round_trip(t48, "nvfp4", -1), "nvfp4 K=48")
+        assert s.calls["nvfp4"] == 2 * fp8, f"nvfp4 K=48 did not take the fast path: {s.calls}"
     for fmt in FUSED:
-        try:
-            fake_quant(torch.randn(8, 33, device=DEV, dtype=torch.bfloat16), fmt)
-            raise AssertionError(f"{fmt}: non-divisible K did not raise")
-        except ValueError:
-            pass
+        bad = [torch.randn(8, 33, device=DEV, dtype=torch.bfloat16)]
+        if fmt != "nvfp4":
+            bad.append(t48)
+        for x in bad:
+            try:
+                fake_quant(x, fmt)
+                raise AssertionError(f"{fmt}: K={x.shape[-1]} did not raise")
+            except ValueError:
+                pass
     print("  routing and fallbacks — OK")
 
 
 def test_pre_sm89_falls_back():
-    """A GPU below SM 8.9 cannot compile Triton's fp8 type, so mxfp8 runs eager there. mxfp4 uses no fp8 type and
-    keeps its kernel down to SM 8.0, the oldest with a bf16 conversion. The capability is faked, so this checks the
-    routing, not what Triton does on those GPUs."""
+    """A GPU below SM 8.9 cannot compile Triton's fp8 type, so mxfp8 and nvfp4 run eager there. mxfp4 uses no fp8
+    type and keeps its kernel down to SM 8.0, the oldest with a bf16 conversion. The capability is faked, so this
+    checks the routing, not what Triton does on those GPUs."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
+    w = torch.randn(4, 64, 32, device=DEV, dtype=torch.bfloat16)
     orig = torch.cuda.get_device_capability
     try:
         for capability, mxfp4_calls in [((8, 0), 1), ((7, 5), 0)]:
@@ -177,8 +261,11 @@ def test_pre_sm89_falls_back():
             torch.cuda.get_device_capability = lambda *_, _c=capability: _c
             sm = f"SM {capability[0]}.{capability[1]}"
             with _Spy() as s:
-                _assert_bits_equal(fake_quant(t, "mxfp8"), _block_round_trip(t, "mxfp8", -1), f"{sm} mxfp8")
-                assert s.calls["mxfp8"] == 0, f"{sm} took the fp8 Triton path"
+                for fmt in _FP8_FORMATS:
+                    _assert_bits_equal(fake_quant(t, fmt), _block_round_trip(t, fmt, -1), f"{sm} {fmt}")
+                    assert s.calls[fmt] == 0, f"{sm} took the fp8 Triton path for {fmt}"
+                _assert_bits_equal(_round_trip(w, "nvfp4", 1), _block_round_trip(w, "nvfp4", 1), f"{sm} nvfp4 weight")
+                assert s.calls["nvfp4"] == 0, f"{sm} took the nvfp4 kernel for a weight"
                 _assert_bits_equal(fake_quant(t, "mxfp4"), _block_round_trip(t, "mxfp4", -1), f"{sm} mxfp4")
                 assert s.calls["mxfp4"] == mxfp4_calls, f"{sm}: {s.calls['mxfp4']} mxfp4 kernel calls"
     finally:
@@ -187,33 +274,78 @@ def test_pre_sm89_falls_back():
     print("  pre-SM 8.9 eager fallback — OK")
 
 
+def test_nvfp4_weight_round_trip_through_the_kernel():
+    """EP expert weights quantize on axis 1 of ``[E, K, N]`` through ``_round_trip``, which nvfp4 cannot take
+    compiled: it moves the axis last, takes the kernel and moves it back, bit-exact with eager, for a bf16 weight and
+    an fp32 master, directly and through ``cached_fake_quant``."""
+    if not _kernel_supported():
+        print("  nvfp4 weights: below SM 8.9 — skipped")
+        return
+    torch.manual_seed(0)
+    for dtype in (torch.bfloat16, torch.float32):
+        w = torch.nn.Parameter(torch.randn(4, 2880, 1024, device=DEV, dtype=dtype) * 0.02)
+        ref = _block_round_trip(w.detach(), "nvfp4", 1)
+        with _Spy() as s:
+            out = _round_trip(w.detach(), "nvfp4", 1)
+            cached = cached_fake_quant(w, "nvfp4", 1)
+        _assert_bits_equal(out, ref, f"nvfp4 weight {dtype}")
+        _assert_bits_equal(cached.detach().to(torch.bfloat16), ref, f"nvfp4 cached weight {dtype}")
+        assert out.is_contiguous() and out.dtype == torch.bfloat16
+        assert s.calls["nvfp4"] == 2, f"nvfp4 weight kernel calls {s.calls['nvfp4']}, expected 2"
+    print("  nvfp4 weight round trip on axis 1, direct and cached, through the kernel — OK")
+
+
+def test_nvfp4_launches_do_not_sync():
+    """The tensor amax stays on the device: neither launch, nor the weight path's axis moves, syncs with the host."""
+    if not _kernel_supported():
+        print("  nvfp4 sync: below SM 8.9 — skipped")
+        return
+    t = torch.randn(256, K, device=DEV, dtype=torch.bfloat16)
+    w = torch.randn(4, 64, 32, device=DEV, dtype=torch.bfloat16)
+    fake_quant(t, "nvfp4")  # compile both kernels first
+    _round_trip(w, "nvfp4", 1)
+    torch.cuda.synchronize()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        fake_quant(t, "nvfp4")
+        _round_trip(w, "nvfp4", 1)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    torch.cuda.synchronize()
+    print("  nvfp4: no host sync — OK")
+
+
 def test_no_recompile_across_token_counts():
-    """Under EP the token count changes every step. ``n_blocks`` is not specialized, so a new count never compiles
-    a new variant mid-run, where one rank compiling would stall the others at the next collective. Each check runs
-    on a fresh copy of the kernel with the same ``do_not_specialize``, so variants that earlier tests compiled
-    cannot hide a new one."""
+    """Under EP the token count changes every step. ``n_blocks`` (and the amax pass's ``n``) is not specialized, so
+    a new count never compiles a new variant mid-run, where one rank compiling would stall the others at the next
+    collective. Each check runs on fresh copies of the kernels with the same ``do_not_specialize``, so variants that
+    earlier tests compiled cannot hide a new one."""
     for fmt, fused in FUSED.items():
-        kernel = fused.kernel
-        if fmt == "mxfp8" and not _kernel_supported():
-            print("  mxfp8: below SM 8.9, the fp8 kernel cannot compile — skipped")
+        if fmt in _FP8_FORMATS and not _kernel_supported():
+            print(f"  {fmt}: below SM 8.9, the fp8 kernel cannot compile — skipped")
             continue
-        fresh = triton.jit(kernel.fn, do_not_specialize=kernel.do_not_specialize)
+        fresh = triton.jit(fused.kernel.fn, do_not_specialize=fused.kernel.do_not_specialize)
+        amax_kernel = fq.tensor_abs_max_bits_kernel
+        fresh_amax = triton.jit(amax_kernel.fn, do_not_specialize=amax_kernel.do_not_specialize)
         compiled = []
 
-        def hook(*, fn, _fresh=fresh, _compiled=compiled, **_):
-            if fn.jit_function is _fresh:
+        def hook(*, fn, _watched=(fresh, fresh_amax), _compiled=compiled, **_):
+            if fn.jit_function in _watched:
                 _compiled.append(fn.name)
             return False  # a truthy return would skip the compile
 
         prev = triton.knobs.runtime.jit_cache_hook
         triton.knobs.runtime.jit_cache_hook = hook
+        fq.tensor_abs_max_bits_kernel = fresh_amax
         try:
-            for shape in [(64, K), (7, K), (1, 32)]:  # n_blocks 5760 (divisible by 16), 630, 1
+            for shape in [(64, K), (7, K), (1, 32)]:  # n_blocks 5760 (divisible by 16), 630, 1 at 32 wide
                 t = torch.randn(*shape, device=DEV, dtype=torch.bfloat16)
-                fake_quant_triton(fresh, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
+                _launch(fused, fmt, t, kernel=fresh)
         finally:
             triton.knobs.runtime.jit_cache_hook = prev
-        assert len(compiled) == 1, f"{fmt}: 3 token counts compiled {len(compiled)} kernel variants, expected 1"
+            fq.tensor_abs_max_bits_kernel = amax_kernel
+        expected = 2 if fused.scale_max is not None else 1
+        assert len(compiled) == expected, f"{fmt}: 3 token counts compiled {compiled}, expected {expected} variant(s)"
         print(f"  {fmt}: no recompile across token counts — OK")
 
 
@@ -233,6 +365,8 @@ def run(ctx) -> dict:
     record_check(checks, "bit_exact_against_eager", test_bit_exact_against_eager)
     record_check(checks, "routing", test_routing)
     record_check(checks, "pre_sm89_falls_back", test_pre_sm89_falls_back)
+    record_check(checks, "nvfp4_weight_round_trip", test_nvfp4_weight_round_trip_through_the_kernel)
+    record_check(checks, "nvfp4_launches_do_not_sync", test_nvfp4_launches_do_not_sync)
     record_check(checks, "no_recompile_across_token_counts", test_no_recompile_across_token_counts)
     record_check(checks, "ste_backward", test_ste_backward)
     return {"checks": checks}
