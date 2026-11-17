@@ -1,5 +1,5 @@
-"""Pluggable web search backends, auto-selected by available API key: Serper, Brave, Tavily, then keyless DuckDuckGo.
-Each raw result is ``{"title", "url", "snippet"}``."""
+"""Pluggable web search backends, auto-selected by available API key: Serper, Brave, Tavily, Keenable, then keyless
+DuckDuckGo. Each raw result is ``{"title", "url", "snippet"}``."""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -15,6 +15,8 @@ from halo.env import env_flag, env_str
 _SEARCH_TIMEOUT = 15.0
 DEFAULT_MAX_RESULTS = 5
 _ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
+# Keenable's snippet is page text, often thousands of characters, where the other backends return a sentence or two.
+_KEENABLE_SNIPPET_CHARS = 500
 
 
 def _format_results(results: list[dict[str, Any]], max_results: int) -> str:
@@ -146,6 +148,25 @@ _BACKENDS: dict[str, _SearchBackend] = {
             },
             parse=lambda data: [
                 {"title": r.get("title", ""), "url": r.get("url", ""), "snippet": r.get("content", "")}
+                for r in data.get("results", [])
+            ],
+        )
+    ),
+    "keenable": _http_backend(
+        _HttpSearchSpec(
+            method="POST",
+            url="https://api.keenable.ai/v1/search",
+            env_key="KEENABLE_API_KEY",
+            build=lambda query, max_results, key: {
+                "json": {"query": query, "max_results": max_results},
+                "headers": {"X-API-Key": key},
+            },
+            parse=lambda data: [
+                {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "snippet": " ".join((r.get("snippet") or "").split())[:_KEENABLE_SNIPPET_CHARS],
+                }
                 for r in data.get("results", [])
             ],
         )

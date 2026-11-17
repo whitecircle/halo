@@ -45,7 +45,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 Each of these ran on B300 and did not pay off; its page holds the shapes.
 
-- **Halo's fp8/fp4 paths** — QAT, not a speedup: whole steps run at 0.10–0.54× bf16 at ep8: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
+- **Halo's fp8/fp4 paths** — QAT, not a speedup: whole steps at ep8 ran at 0.10–0.54× bf16 on B300 with the eager activation round trip, and simulated mxfp4 with the fused one runs at 0.93–0.99× on H200: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
 - **DeepGEMM adapter** — whole steps at 0.37–0.54× bf16, since casts and row copies cost more than the kernel saves: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
 - **torch.compile on EP MoE** — at most 1%, and `reduce-overhead` is slower: [Benchmark results](torch-compile.md#benchmark-results).
 - **Sub-bf16 master weights** — parameters, checkpoints and optimizer state never go below bf16; bf16 with stochastic rounding is the floor: [BF16 optimizer](bf16-optimizer.md).
