@@ -121,9 +121,8 @@ def reject_inert_std_floor(scale_rewards: str | bool | None, std_floor: float) -
         )
 
 
-def reject_conflicting_maxrl(scale_rewards: str | bool | None, std_floor: float, *, rlrr: bool) -> None:
-    """MaxRL owns the advantage divisor, so a std scaling, a floor on that std, and RLRR's wholesale replacement would
-    each cancel it or be cancelled by it."""
+def reject_conflicting_maxrl(scale_rewards: str | bool | None, std_floor: float) -> None:
+    """MaxRL owns the advantage divisor, so a std scaling would cancel it and a floor on that std would do nothing."""
     if scales_rewards(scale_rewards):
         raise ValueError(
             f"use_maxrl with scale_rewards={scale_rewards!r}: MaxRL divides each advantage by its group's mean reward, "
@@ -133,11 +132,6 @@ def reject_conflicting_maxrl(scale_rewards: str | bool | None, std_floor: float,
         raise ValueError(
             f"use_maxrl with scale_rewards_std_floor={std_floor}: the floor bounds a std divisor MaxRL does not use, "
             "so it would silently do nothing. Drop the floor."
-        )
-    if rlrr:
-        raise ValueError(
-            "use_maxrl and use_rlrr cannot be combined: RLRR replaces the group-normalized advantages wholesale with "
-            "relative-ranking ones, so the MaxRL divisor would never apply. Set only one."
         )
 
 
@@ -176,11 +170,16 @@ def reject_conflicting_advantage_hooks(
     """Refuse the online advantage hooks the GRPO config or another hook cancels or diverges from."""
     # Ahead of the inert-floor check, which a floor beside MaxRL would also trip with a less direct message.
     if use_maxrl:
-        reject_conflicting_maxrl(grpo_args.scale_rewards, std_floor, rlrr=rlrr_config is not None)
+        reject_conflicting_maxrl(grpo_args.scale_rewards, std_floor)
     reject_inert_std_floor(grpo_args.scale_rewards, std_floor)
     if balance_token_mass:
         reject_unbalanceable_token_mass(grpo_args)
     if rlrr_config is not None:
+        if use_maxrl:
+            raise ValueError(
+                "use_maxrl and use_rlrr cannot be combined: RLRR replaces the group-normalized advantages wholesale "
+                "with relative-ranking ones, so the MaxRL divisor would never apply. Set only one."
+            )
         if std_floor > 0:
             raise ValueError(
                 "scale_rewards_std_floor and rlrr_config cannot be combined: RLRR replaces the "

@@ -8,6 +8,7 @@ for a group whose mean is 0.
 - Every conflicting knob is refused with its own message; score centering, the degenerate-group drop and the token-mass
   balance resolve beside it."""
 
+import ast
 import math
 import types
 from collections import defaultdict, deque
@@ -27,6 +28,9 @@ from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks, re
 from halo.trainers.grpo.objective.advantages import group_relative_advantages, maxrl_zero_mean_groups
 from halo.trainers.grpo.objective.loss_inputs import MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.repo import REPO_ROOT
+
+ONLINE_SCRIPT = REPO_ROOT / "scripts/training/grpo/online.py"
 
 
 def _maxrl(rewards, num_generations, valid=None):
@@ -93,7 +97,7 @@ def test_a_group_with_no_success_gets_zero_and_counts_as_zero_mean():
     advantages = _maxrl(rewards, 4)
     assert torch.equal(advantages[:4], torch.zeros(4, dtype=torch.float64))
     assert torch.isfinite(advantages).all()
-    assert maxrl_zero_mean_groups(rewards, 4).tolist() == [True, False]
+    assert maxrl_zero_mean_groups(rewards, 4, torch.ones(8, dtype=torch.bool)).tolist() == [True, False]
 
 
 def test_a_negative_reward_raises_but_not_on_a_placeholder():
@@ -205,6 +209,16 @@ def test_online_resolves_beside_the_degenerate_drop_and_the_token_mass_balance()
     _resolve_online(_online_args(), drop=True, balance=True)
 
 
+def test_the_online_script_hands_use_maxrl_to_the_trainer():
+    """A script that drops it from the trainer call parses ``--use_maxrl`` and trains on TRL's std advantages."""
+    tree = ast.parse(ONLINE_SCRIPT.read_text())
+    call = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.Call) and getattr(node.func, "id", "") == "trainer_cls"
+    )
+    passed = {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg}
+    assert passed.get("use_maxrl") == "args.use_maxrl", passed
+
+
 # --------------------------------------------------------------------------------------------------- environmental
 
 
@@ -261,21 +275,11 @@ def test_the_environmental_step_keeps_the_mean_baseline_without_the_knob():
         (True, 0.2, "use_maxrl with reasoning_price and reasoning_floor on: they subtract"),
     ],
 )
-def test_environmental_refuses_the_reasoning_terms_that_subtract_from_the_reward(price_on, floor, match):
-    config = types.SimpleNamespace(use_maxrl=True, reasoning_floor=floor)
+def test_the_reasoning_term_refusal_names_each_term_that_is_on(price_on, floor, match):
+    """The construction path is pinned in ``test_env_trainer_wiring.py``. This pins the wording per term."""
     with pytest.raises(ValueError, match=match):
-        reject_negative_reward_terms_under_maxrl(config, price_on=price_on)
-    reject_negative_reward_terms_under_maxrl(
-        types.SimpleNamespace(use_maxrl=False, reasoning_floor=floor), price_on=price_on
-    )
-
-
-def test_environmental_refuses_a_std_scaling_and_a_floor():
-    with pytest.raises(ValueError, match=r"use_maxrl with scale_rewards='group'"):
-        reject_conflicting_maxrl("group", 0.0, rlrr=False)
-    with pytest.raises(ValueError, match=r"use_maxrl with scale_rewards_std_floor=0.05"):
-        reject_conflicting_maxrl("none", 0.05, rlrr=False)
-    reject_conflicting_maxrl("none", 0.0, rlrr=False)
+        reject_negative_reward_terms_under_maxrl(types.SimpleNamespace(reasoning_floor=floor), price_on=price_on)
+    reject_negative_reward_terms_under_maxrl(types.SimpleNamespace(reasoning_floor=0.0), price_on=False)
 
 
 def test_score_centering_resolves_beside_maxrl_and_the_advantages_stay_maxrls():
@@ -290,7 +294,7 @@ def test_score_centering_resolves_beside_maxrl_and_the_advantages_stay_maxrls():
         use_maxrl=True,
     )
     reject_unsupported_score_centering(config)
-    reject_conflicting_maxrl("none", config.scale_rewards_std_floor, rlrr=False)
+    reject_conflicting_maxrl("none", config.scale_rewards_std_floor)
     advantages, _fractions = _env_step(torch.tensor([1.0, 0.0, 0.0, 0.0]), 4, "train")
     assert advantages.tolist() == pytest.approx([3.0, -1.0, -1.0, -1.0])
 

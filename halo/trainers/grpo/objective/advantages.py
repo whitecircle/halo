@@ -160,16 +160,10 @@ def _verify_non_negative(rewards: torch.Tensor, valid_mask: torch.Tensor | None)
     )
 
 
-def maxrl_zero_mean_groups(
-    rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor | None = None
-) -> torch.Tensor:
+def maxrl_zero_mean_groups(rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor) -> torch.Tensor:
     """``[groups]``, True where the valid members' mean reward is not positive: under MaxRL such a group (no success
     on a pass/fail reward) gets advantage 0 and so no gradient."""
-    if valid_mask is None:
-        group_mean = _grouped(rewards, num_generations).mean(dim=1)
-    else:
-        group_mean = valid_group_stats(rewards, num_generations, valid_mask)[0].squeeze(1)
-    return group_mean <= 0
+    return valid_group_stats(rewards, num_generations, valid_mask)[0].squeeze(1) <= 0
 
 
 def group_relative_advantages(

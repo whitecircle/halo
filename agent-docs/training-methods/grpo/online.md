@@ -243,6 +243,7 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
+- `sampling/maxrl_zero_mean_group_frac`: under `use_maxrl`, share of groups whose mean reward is not positive, which get advantage 0 and so no gradient.
 - `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
 - `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
 - Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, which TRL counts while it builds the round; SDPG's teacher forward is not counted) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).

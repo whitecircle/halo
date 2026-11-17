@@ -108,11 +108,9 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
 
 
 def reject_negative_reward_terms_under_maxrl(async_config, *, price_on: bool) -> None:
-    """MaxRL divides by the group mean reward, which assumes non-negative rewards. The reasoning price and floor
+    """Called only under ``use_maxrl``. MaxRL divides by the group mean reward, which assumes non-negative rewards. The reasoning price and floor
     subtract from an episode's reward, so a priced or floored run can go negative by design; every step checks the
     rewards anyway, and this catches the cases the config already decides."""
-    if not async_config.use_maxrl:
-        return
     terms = [
         name
         for name, on in (("reasoning_price", price_on), ("reasoning_floor", async_config.reasoning_floor > 0))

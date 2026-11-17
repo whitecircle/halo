@@ -154,7 +154,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         )
         reject_answerless_datasets(self._rollout_env, self.train_dataset, self.eval_dataset)
         reject_inert_reasoning_terms(self.async_config, self._rollout_env, self._level_reasoning_terms)
-        reject_negative_reward_terms_under_maxrl(self.async_config, price_on=self._reasoning_price_on)
         self._configure_rollout_state()
         self._configure_importance_sampling()
         reject_unread_grpo_knobs(self.args)
@@ -186,6 +185,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
+        if cfg.use_maxrl:
+            # First, since a floor beside MaxRL would also trip the inert-floor check, with a less direct message.
+            reject_conflicting_maxrl(self.args.scale_rewards, cfg.scale_rewards_std_floor)
+            reject_negative_reward_terms_under_maxrl(cfg, price_on=self._reasoning_price_on)
         self._rollout_backend = cfg.rollout_backend
         self._rollout_weight_precision = cfg.rollout_weight_precision
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
@@ -200,9 +203,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._rows_over_cap = 0
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
-        if cfg.use_maxrl:
-            # Ahead of the inert-floor check, which a floor beside MaxRL would also trip with a less direct message.
-            reject_conflicting_maxrl(self.args.scale_rewards, cfg.scale_rewards_std_floor, rlrr=False)
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
         reject_unsupported_score_centering(cfg)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
