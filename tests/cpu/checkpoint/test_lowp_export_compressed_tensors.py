@@ -318,6 +318,47 @@ def test_a_scoped_weight_that_cannot_be_blocked_is_refused_before_any_write(tmp_
     assert not out.exists()
 
 
+@pytest.mark.parametrize(
+    ("scope", "left_out"),
+    [
+        # Gate only: the dense up and every expert's up and down stay in high precision.
+        (
+            {"include": r"gate_proj\.weight$"},
+            [
+                "model.layers.0.mlp.experts.0.down_proj",
+                "model.layers.0.mlp.experts.0.up_proj",
+                "model.layers.0.mlp.experts.1.down_proj",
+                "model.layers.0.mlp.experts.1.up_proj",
+                "model.layers.0.mlp.up_proj",
+            ],
+        ),
+        # One expert's down_proj excluded: its gate and up are quantized under the scheme vLLM gives all three.
+        (
+            {"exclude": lowp_export.DEFAULT_EXCLUDE + r"|experts\.1\.down_proj"},
+            ["model.layers.0.mlp.experts.1.down_proj"],
+        ),
+    ],
+)
+def test_a_partly_selected_fused_layer_is_refused_before_any_write(tmp_path, scope, left_out):
+    """vLLM takes one scheme per fused layer: a dense MLP's gate with its up, and an expert's three projections."""
+    src, out = _write(tmp_path / "src", _weights(blocks=1)), tmp_path / "out"
+    match = rf"leaves {len(left_out)} of its modules in high precision \(first few: {re.escape(str(left_out[:4]))}\)"
+    with pytest.raises(ValueError, match=match):
+        quantize_checkpoint(src, str(out), "mxfp8", export_format=COMPRESSED_TENSORS, **scope)
+    assert not out.exists()
+    quantize_checkpoint(src, str(out), "mxfp8", export_format=BLOCK_SCALED, **scope)  # Halo's own layout takes it
+
+
+def test_a_dense_down_proj_left_out_on_its_own_still_exports(tmp_path):
+    """A dense ``down_proj`` is a layer of its own, so leaving it in high precision splits nothing."""
+    src, out = _write(tmp_path / "src", _weights(blocks=1)), tmp_path / "out"
+    exclude = lowp_export.DEFAULT_EXCLUDE + r"|mlp\.down_proj"
+    quantize_checkpoint(src, str(out), "mxfp8", export_format=COMPRESSED_TENSORS, exclude=exclude)
+    saved = load_file(str(out / "model.safetensors"))
+    assert saved["model.layers.0.mlp.down_proj.weight"].dtype == torch.bfloat16
+    assert "model.layers.0.mlp.gate_proj.weight_scale" in saved
+
+
 def test_targets_that_reach_an_unquantized_module_are_refused_before_any_write(tmp_path):
     """A vision tower spelling its MLP like the text backbone's stays bf16, and the targets must not name it."""
     ckpt = _weights(blocks=1)

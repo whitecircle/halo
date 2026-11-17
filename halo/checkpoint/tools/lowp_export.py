@@ -317,11 +317,48 @@ def _reject_empty_export(plan: _ExportPlan) -> None:
     )
 
 
+def _fused_layer_siblings(module: str) -> tuple[str, ...]:
+    """The modules an engine loads into one layer with ``module``, itself included: a dense MLP's gate and up, or all
+    three projections of one expert (vLLM's MoE methods take one scheme for w13 and w2). A dense ``down_proj`` and any
+    other module stand alone."""
+    owner, _, projection = module.rpartition(".")
+    for gate, up, down in _MERGED_PAIRS:
+        if projection not in (gate, up, down):
+            continue
+        if _PER_EXPERT_SEGMENT.search(f"{module}.") is not None:
+            return tuple(f"{owner}.{part}" for part in (gate, up, down))
+        if projection in (gate, up):
+            return (f"{owner}.{gate}", f"{owner}.{up}")
+    return (module,)
+
+
+def _reject_partial_fused_layers(quantized: list[str], modules: list[str]) -> None:
+    """Refuse a selection that quantizes part of a layer an engine fuses (``--include`` naming only ``gate_proj``, or
+    ``--exclude`` taking one expert's ``down_proj``): the rest would stay in high precision under a scheme the engine
+    applies to the whole layer, so the export would not load."""
+    quantized_set, present = set(quantized), set(modules)
+    left_out = sorted(
+        {
+            sibling
+            for module in quantized
+            for sibling in _fused_layer_siblings(module)
+            if sibling in present and sibling not in quantized_set
+        }
+    )
+    if left_out:
+        raise ValueError(
+            f"This selection quantizes part of a fused layer and leaves {len(left_out)} of its modules in high precision "
+            f"(first few: {left_out[:4]}). vLLM takes one scheme per fused layer, a dense MLP's gate with "
+            f"its up and all three projections of an expert, so the export would not load. Widen --include or narrow "
+            f"--exclude to whole layers, or export with --export_format {BLOCK_SCALED}."
+        )
+
+
 def _engine_loadable_modules(plan: _ExportPlan) -> tuple[list[str], list[str]]:
     """``(modules this export quantizes, every module holding a 2-D-or-wider ``*.weight``)`` for a compressed-tensors
     export, refusing what its engines cannot load quantized: a fused 3-D expert bank, where they read one Linear per
-    expert, and a selected weight left in high precision, where they take one scheme per fused layer. Headers only,
-    ahead of the output directory."""
+    expert, and a selected weight left in high precision or a fused layer selected in part, where they take one scheme
+    per fused layer. Headers only, ahead of the output directory."""
     block = FORMAT_BLOCK_SIZE[plan.fmt]
     quantized: list[str] = []
     modules: list[str] = []
@@ -346,6 +383,7 @@ def _engine_loadable_modules(plan: _ExportPlan) -> tuple[list[str], list[str]]:
                 f"leave its whole layer out, or export with --export_format {BLOCK_SCALED}."
             )
         quantized.append(name[: -len(".weight")])
+    _reject_partial_fused_layers(quantized, modules)
     return quantized, modules
 
 
