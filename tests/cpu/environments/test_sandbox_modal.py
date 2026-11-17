@@ -80,6 +80,9 @@ class _FakeProcess:
         if self._done:
             return
         self._done = True
+        if self._modal.resume is not None:
+            self._modal.reached.set()
+            self._modal.resume.wait(timeout=30)
         if self._modal.runner_returncode is not None:
             self.out, self.err, self.code = "", "Traceback: boom", self._modal.runner_returncode
             return
@@ -135,6 +138,8 @@ def _fake_modal():
         fail_next_streams=0,
         fail_next_creates=0,
         runner_returncode=None,
+        resume=None,
+        reached=threading.Event(),
         lock=threading.Lock(),
         in_flight=0,
         peak_in_flight=0,
@@ -521,6 +526,28 @@ def test_an_open_session_never_shares_its_user(modal, monkeypatch):
         other = executor.open_session()
         assert other.uid != long_lived.uid
         assert other.run("import os\nprint(sorted(os.listdir('.')))").stdout == "['main.py']\n"
+    executor.close()
+
+
+def test_a_closed_sessions_user_stays_taken_while_its_directory_is_being_removed(modal, monkeypatch):
+    monkeypatch.setattr(ms, "SESSION_UIDS", range(20_000, 20_002))
+    executor = ModalSandbox()
+    long_lived, other = executor.open_session(), executor.open_session()
+    other.run("print(1)")
+    other.close()
+
+    modal.resume = threading.Event()  # the exec that carries the removal stops before the runner runs
+    removal = threading.Thread(target=long_lived.list_files)
+    removal.start()
+    assert modal.reached.wait(timeout=10)
+    with pytest.raises(SandboxInfraError, match="in use"):
+        executor.open_session()
+    assert os.path.isdir(other.workdir)
+
+    modal.resume.set()
+    removal.join(timeout=30)
+    assert not os.path.exists(other.workdir)
+    assert executor.open_session().uid == other.uid
     executor.close()
 
 
