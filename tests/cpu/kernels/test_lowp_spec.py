@@ -4,6 +4,11 @@ from typing import get_args
 
 import pytest
 
+from halo.checkpoint.tools.compressed_tensors_layout import (
+    COMPRESSED_TENSORS_ARGS,
+    COMPRESSED_TENSORS_FORMAT,
+    DYNAMIC_ACTIVATION_FORMATS,
+)
 from halo.checkpoint.tools.lowp_export import _VERIFY_RELERR_TOL
 from halo.hardware import GPU_PEAK_FLOPS
 from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
@@ -33,7 +38,10 @@ def test_the_kernel_tables_are_keyed_on_the_quant_formats():
     assert set(_POW2_SCALE) == set(get_args(QuantFormat))
     assert set(_VERIFY_RELERR_TOL) == set(get_args(QuantFormat))
     assert set(_ELEMENT_MAX) == set(get_args(QuantFormat))
+    assert set(COMPRESSED_TENSORS_FORMAT) == set(get_args(QuantFormat))
+    assert set(COMPRESSED_TENSORS_ARGS) == set(get_args(QuantFormat))
     assert set(DEEPGEMM_FORMATS) <= set(get_args(QuantFormat))
+    assert set(DYNAMIC_ACTIVATION_FORMATS) <= set(get_args(QuantFormat))
 
 
 def test_the_fused_fake_quant_table_covers_the_pow2_scale_formats():
