@@ -11,7 +11,6 @@ import torch
 from trl import GRPOTrainer
 
 from halo.configs.grpo import RLRRConfig
-from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask
 from halo.trainers.grpo.objective.loss_inputs import MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
 from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
@@ -19,20 +18,15 @@ from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
 NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum", scale_rewards="group")
+UNSCALED = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="none")
 
 
 def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRPOTrainer:
-    """Pre-super hook adoption and refusals only, since TRL's ctor needs a live server."""
+    """Pre-super hook adoption and refusals only, through the trainer's own methods, since TRL's ctor needs a live
+    server."""
     trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer._adopt_advantage_hooks(kwargs)
-    reject_conflicting_advantage_hooks(
-        grpo_args,
-        trainer._rlrr_config,
-        std_floor=trainer._scale_rewards_std_floor,
-        drop_degenerate_groups=trainer._drop_degenerate_groups,
-        balance_token_mass=trainer._balance_token_mass,
-        recomputes_from_gathered_rewards=trainer._recomputes_from_gathered_rewards,
-    )
+    trainer._reject_conflicting_advantage_hooks(grpo_args)
     return trainer
 
 
@@ -46,6 +40,25 @@ def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRP
 def test_rlrr_refuses_every_hook_that_would_cancel_it(extra, match):
     with pytest.raises(ValueError, match=match):
         _resolve({"rlrr_config": RLRRConfig(), **extra})
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "grpo_args", "match"),
+    [
+        ({"use_maxrl": True, "rlrr_config": RLRRConfig()}, UNSCALED, "use_maxrl and use_rlrr cannot be combined"),
+        ({"use_maxrl": True}, SUM_THEN_NORMALIZE, r"use_maxrl with scale_rewards='group'"),
+        ({"use_maxrl": True, "scale_rewards_std_floor": 0.05}, UNSCALED, "use_maxrl with scale_rewards_std_floor"),
+    ],
+    ids=["rlrr", "std-scaling", "std-floor"],
+)
+def test_maxrl_conflicts_are_refused_through_the_trainers_own_call(kwargs, grpo_args, match):
+    """A trainer that stops passing ``use_maxrl`` would accept RLRR beside it, and MaxRL would overwrite RLRR."""
+    with pytest.raises(ValueError, match=match):
+        _resolve(kwargs, grpo_args)
+
+
+def test_maxrl_alone_resolves():
+    assert _resolve({"use_maxrl": True}, UNSCALED)._use_maxrl
 
 
 def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_rlrr():

@@ -103,15 +103,7 @@ class DistributedOnlineGRPOTrainer(
         reject_tool_calling_loop(args, kwargs)
         reject_unshared_rollout_func(self.parallelism_config, args, kwargs)
         self._adopt_advantage_hooks(kwargs)
-        reject_conflicting_advantage_hooks(
-            grpo_args,
-            self._rlrr_config,
-            std_floor=self._scale_rewards_std_floor,
-            drop_degenerate_groups=self._drop_degenerate_groups,
-            balance_token_mass=self._balance_token_mass,
-            recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
-            use_maxrl=self._use_maxrl,
-        )
+        self._reject_conflicting_advantage_hooks(grpo_args)
         # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
         early_stop = build_early_stop_callback(
             kwargs.pop("early_stop", EarlyStopConfig()),
@@ -162,6 +154,19 @@ class DistributedOnlineGRPOTrainer(
         self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
         self._use_maxrl: bool = kwargs.pop("use_maxrl", False)
         self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
+
+    def _reject_conflicting_advantage_hooks(self, grpo_args) -> None:
+        """The adopted hooks' refusals, each from this trainer's own field, so a hook left out of the call is
+        accepted beside the one it conflicts with."""
+        reject_conflicting_advantage_hooks(
+            grpo_args,
+            self._rlrr_config,
+            std_floor=self._scale_rewards_std_floor,
+            drop_degenerate_groups=self._drop_degenerate_groups,
+            balance_token_mass=self._balance_token_mass,
+            recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
+            use_maxrl=self._use_maxrl,
+        )
 
     @staticmethod
     @contextlib.contextmanager
