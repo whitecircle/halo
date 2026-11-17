@@ -515,9 +515,31 @@ def test_an_open_session_never_shares_its_user(modal, monkeypatch):
         executor.open_session()
     for _ in range(5):
         other.close()
+        with pytest.raises(SandboxInfraError, match="in use"):
+            executor.open_session()  # the closed session's directory still exists under its user
+        long_lived.list_files()  # this exec removes the directory
         other = executor.open_session()
         assert other.uid != long_lived.uid
+        assert other.run("import os\nprint(sorted(os.listdir('.')))").stdout == "['main.py']\n"
     executor.close()
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
+def test_executable_the_program_locked_is_its_runtime_error(modal, executor):
+    lock = '#include <sys/stat.h>\n#include <stdio.h>\nint main(){chmod("main", 0600); puts("hi"); return 0;}'
+    session = executor.open_session()
+    assert session.run(lock, language="c").stdout == "hi\n"
+    res = session.run(lock, language="c")
+    assert res.error is None and res.returncode == 126 and "cannot execute" in res.stderr
+    assert not modal.sandboxes[0].terminated
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
+def test_auxiliary_file_named_like_the_executable_does_not_replace_a_reused_build(executor):
+    session = executor.open_session()
+    for _ in range(2):
+        res = session.run(_C_HELLO, language="c", files={"main": "seed"})
+        assert res.ok and res.stdout == "hi\n", res
 
 
 def test_program_owns_the_files_written_for_it(executor):
@@ -650,6 +672,9 @@ def test_flag_runs_the_python_repl_tool_on_modal(under_flag):
 
 def test_flag_selection_reaches_ray_actors_on_a_shared_cluster(under_flag, monkeypatch):
     """Actors on a ``ray_address`` cluster get their environment from the raylet, so the job carries the selection."""
+    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
+        if name not in ROLLOUT_BACKEND_ENV["modal"]:
+            monkeypatch.delenv(name)
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "never-forwarded")
     assert ray_init_kwargs()["runtime_env"] == {"env_vars": ROLLOUT_BACKEND_ENV["modal"]}
     merged = ray_init_kwargs(runtime_env={"working_dir": "/job", "env_vars": {"HALO_SANDBOX_REPL": "0", "A": "1"}})

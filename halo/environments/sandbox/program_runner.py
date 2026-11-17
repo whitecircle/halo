@@ -4,6 +4,7 @@ reads one Request, and writes one Reply.
 Each session has its own directory and its own user. A program runs as that user, so it cannot signal the runner or
 reach another session, and every process of that user is killed when the run ends."""
 
+import errno
 import functools
 import os
 import resource
@@ -34,6 +35,7 @@ from halo.environments.sandbox.runner_messages import (
 from halo.environments.sandbox.workspace import Owner, SessionPathError, Workspace, walk_tree
 
 COMMAND_NOT_FOUND = 127
+COMMAND_NOT_EXECUTABLE = 126
 DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
@@ -102,17 +104,25 @@ def execute(workspace: Workspace, command: Command, stdin: str, env: dict[str, s
         except FileNotFoundError:
             err.write(f"{command.argv[0]}: not found".encode())
             returncode = COMMAND_NOT_FOUND
+        except OSError as error:
+            # A program can make its own executable unrunnable; anything else is the sandbox's failure.
+            if error.errno not in (errno.EACCES, errno.ENOEXEC):
+                raise
+            err.write(f"{command.argv[0]}: cannot execute: {error.strerror}".encode())
+            returncode = COMMAND_NOT_EXECUTABLE
         finally:
             kill_processes_of(owner.uid)
         return Outcome(stdout=text_of(out), stderr=text_of(err), returncode=returncode, timed_out=timed_out)
 
 
 def run_program(workspace: Workspace, request: RunProgram, new_workspace: bool) -> ProgramRan:
-    for source in request.sources:
-        workspace.write(source.name, source.content)
+    building = request.build is not None and (request.build_requested or new_workspace)
+    if request.build is None or building:
+        for source in request.sources:
+            workspace.write(source.name, source.content)
 
     build = None
-    if request.build is not None and (request.build_requested or new_workspace):
+    if building:
         build = execute(workspace, request.build, stdin="", env=request.env)
         if build.failed:
             return ProgramRan(build=build, run=None, entries=[])
@@ -148,6 +158,10 @@ def open_workspace(request: Request) -> tuple[Workspace, bool]:
 def handle(request: Request) -> Reply:
     for workdir in request.closed_workdirs:
         walk_tree(workdir, remove=True)
+        if os.path.lexists(workdir):
+            # What could not be removed is closed to every user, since a later session may get this one's.
+            os.chown(workdir, 0, 0, follow_symlinks=False)
+            os.chmod(workdir, 0)
 
     workspace, new_workspace = open_workspace(request)
     if request.keep_only is not None:

@@ -62,6 +62,11 @@ class SessionUids:
             self._taken.discard(uid)
 
 
+class ClosedSession(NamedTuple):
+    workdir: str
+    uid: int
+
+
 class RunnerExec(NamedTuple):
     sandbox: Any
     process: Any
@@ -131,7 +136,7 @@ class ModalSandbox(SandboxExecutor):
         self.run_slots = threading.BoundedSemaphore(self.max_concurrency)
         self._lock = threading.Lock()
         self._sandbox: Any = None
-        self._closed_workdirs: list[str] = []
+        self._closed_sessions: list[ClosedSession] = []
         self.session_uids = SessionUids(SESSION_UIDS)
         live_executors.add(self)
 
@@ -146,10 +151,11 @@ class ModalSandbox(SandboxExecutor):
             self._terminate(sandbox)
         live_executors.discard(self)
 
-    def remove_later(self, workdir: str) -> None:
-        """Queue a closed session's directory for removal by the next exec, so closing makes no remote call."""
+    def remove_later(self, session: ClosedSession) -> None:
+        """Queue a closed session's directory for removal by the next exec, so closing makes no remote call. Its
+        user is free again once that exec has finished."""
         with self._lock:
-            self._closed_workdirs.append(workdir)
+            self._closed_sessions.append(session)
 
     def exec_runner(self, request: Request, *, deadline: float) -> Reply:
         """Run the runner once on the sandbox, which is created on first use. Every failure raises
@@ -157,9 +163,19 @@ class ModalSandbox(SandboxExecutor):
         second time once the runner has started: the program may have run."""
         sandbox, process = self._start_runner(deadline)
         with self._lock:
-            closed_workdirs, self._closed_workdirs = self._closed_workdirs, []
+            closed, self._closed_sessions = self._closed_sessions, []
         try:
-            process.stdin.write(encode(replace(request, closed_workdirs=closed_workdirs)))
+            return self._exchange(
+                sandbox, process, replace(request, closed_workdirs=[s.workdir for s in closed]), deadline
+            )
+        finally:
+            # Their directories are removed, or gone with a dropped sandbox.
+            for session in closed:
+                self.session_uids.give_back(session.uid)
+
+    def _exchange(self, sandbox: Any, process: Any, request: Request, deadline: float) -> Reply:
+        try:
+            process.stdin.write(encode(request))
             process.stdin.write_eof()
             process.stdin.drain()
             stdout = process.stdout.read()
@@ -219,7 +235,9 @@ class ModalSandbox(SandboxExecutor):
                     )
                 except Exception as exc:
                     raise SandboxInfraError(f"modal sandbox provisioning failed: {type(exc).__name__}: {exc}") from exc
-                self._closed_workdirs.clear()
+                for session in self._closed_sessions:
+                    self.session_uids.give_back(session.uid)
+                self._closed_sessions.clear()
             return self._sandbox
 
     def _drop(self, sandbox: Any) -> None:
@@ -252,5 +270,4 @@ class ModalSession(RunnerSession):
         if self._closed:
             return
         self._closed = True
-        self.executor.remove_later(self.workdir)
-        self.executor.session_uids.give_back(self.uid)
+        self.executor.remove_later(ClosedSession(self.workdir, self.uid))
