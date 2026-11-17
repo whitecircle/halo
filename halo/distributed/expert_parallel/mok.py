@@ -86,9 +86,8 @@ def require_mok():
     functional = _mok()
     if functional is None:
         raise RuntimeError(
-            "moe_backend='mok' needs the mok package, which no image ships (its kernels are SM100/SM103): install "
-            "it in a Blackwell container (agent-docs/parallelism/expert-parallelism.md#mixture-of-kittens-backend), "
-            "or set moe_backend='deepep'."
+            "moe_backend='mok' needs the mok package, built into the Blackwell image only (its kernels are "
+            "SM100/SM103). Run on that image, or set moe_backend='deepep'."
         )
     return functional
 

@@ -1,7 +1,7 @@
 """``moe_backend: mok`` is refused at config time wherever its kernels cannot run the configuration, and at layer build
 for a block whose experts they would compute wrong; the padded token count covers the declared budget, no routing
 overflows the schedule MoK traps on, and the adapter hands MoK the layer's experts in MoK's layouts and back (against
-an eager stand-in for its kernels, as no image ships the package)."""
+an eager stand-in for its kernels, as the package runs on Blackwell GPUs only)."""
 
 import dataclasses
 import math
