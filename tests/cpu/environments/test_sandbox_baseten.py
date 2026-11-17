@@ -52,6 +52,9 @@ class FakeBaseten:
         self.roots: dict[str, str] = {}
         self.deleted: list[str] = []
         self.named: dict[str, str] = {}
+        self.fail_after_create: list[int] = []
+        self.delay_after_create = 0.0
+        self.create_status = "DEPLOYED"
         self.runner_requests: list[Request] = []
         self.process_status: str | None = None
         fake = self
@@ -103,9 +106,16 @@ class FakeBaseten:
                     os.chmod(fake.roots[name], 0o755)
                     os.makedirs(fake.roots[name] + "/tmp")
                     url = f"http://127.0.0.1:{fake.port}/{name}/"
-                    return self._reply(201, {"name": name, "url": url, "status": "DEPLOYED"})
+                    time.sleep(fake.delay_after_create)
+                    if fake.fail_after_create:
+                        return self._reply(fake.fail_after_create.pop(0), {"error": "injected"})
+                    return self._reply(201, {"name": name, "url": url, "status": fake.create_status})
                 if self.path.startswith("/v1/sandboxes/instances/") and self.command == "DELETE":
-                    fake.deleted.append(self.path.rsplit("/", 1)[-1])
+                    requested = self.path.rsplit("/", 1)[-1]
+                    name = fake.named.get(requested, requested)
+                    if name not in fake.roots:
+                        return self._reply(404, {"error": "no sandbox"})
+                    fake.deleted.append(name)
                     return self._reply(202, {"status": "DELETING"})
                 name, _, rest = self.path.lstrip("/").partition("/")
                 root = fake.roots.get(name)
@@ -302,19 +312,46 @@ def test_retries_5xx_then_succeeds(fake):
     assert len(fake.calls("/v1/sandboxes/instances", "POST")) == 3
 
 
-def test_retried_create_asks_for_the_same_sandbox(fake):
-    """A 5xx can follow a create that succeeded; the retry must not leave a second sandbox behind."""
-    fake.faults["/v1/sandboxes/instances"] = [502]
-    sandbox = _sandbox(fake)
+def test_create_answered_with_an_error_after_it_succeeded_leaves_one_sandbox(fake):
+    """The service can create the sandbox and still answer 5xx; the retry must return that sandbox."""
+    fake.fail_after_create = [502]
 
-    first = sandbox.api.create_sandbox(image="img", cpu=1, idle_ttl="5m", timeout=10)
-    bodies = [call["body"] for call in fake.calls("/v1/sandboxes/instances", "POST")]
-    again = sandbox.api.http.post(
-        f"{fake.api_url}/sandboxes/instances", json=bodies[0], headers={"Authorization": f"Bearer {TOKEN}"}
-    ).json()
+    result = _sandbox(fake).run("print('ok')")
 
-    assert bodies[0]["name"] == bodies[1]["name"] and bodies[0]["create_if_not_exists"] is True
-    assert again["name"] == first.name and len(fake.roots) == 1
+    assert result.stdout == "ok\n"
+    creates = [call["body"] for call in fake.calls("/v1/sandboxes/instances", "POST")]
+    assert len(creates) == 2 and creates[0]["name"] == creates[1]["name"] and creates[0]["create_if_not_exists"]
+    assert list(fake.roots) == ["sbx-1"] and fake.deleted == ["sbx-1"]
+
+
+def test_sandbox_that_is_not_deployed_is_deleted(fake):
+    fake.create_status = "DEPLOYING"
+    sandbox = _sandbox(fake, max_concurrency=1)
+
+    result = sandbox.run("print(1)")
+
+    assert result.error is not None and "DEPLOYING, not DEPLOYED" in result.error
+    assert fake.deleted == ["sbx-1"] and sandbox.slots.acquire(timeout=1)
+
+
+def test_create_whose_answer_is_lost_is_deleted_by_name(fake):
+    fake.delay_after_create = 1.0
+    sandbox = _sandbox(fake, create_timeout=0.3, max_concurrency=1)
+
+    result = sandbox.run("print(1)")
+
+    assert result.error is not None and "timed out" in result.error
+    assert fake.deleted == ["sbx-1"] and sandbox.slots.acquire(timeout=1)
+
+
+def test_waiting_for_a_slot_ends_with_an_error_naming_the_cap(fake):
+    sandbox = _sandbox(fake, max_concurrency=1, slot_timeout=0.2)
+    with sandbox.open_session() as held:
+        assert held.run("print(1)").ok
+
+        waiting = sandbox.run("print(2)")
+
+    assert waiting.error is not None and "max_concurrency=1" in waiting.error
 
 
 def test_retry_budget_on_429_is_bounded_and_reported(fake):
@@ -508,6 +545,23 @@ def test_factory_refuses_a_sandbox_url_for_baseten(fake, monkeypatch):
 
     with pytest.raises(ValueError, match="backend is 'baseten', which takes none"):
         build_sandbox(backend="baseten")
+
+
+@pytest.mark.skipif(
+    os.environ.get("HALO_BASETEN_LIVE") != "1", reason="set HALO_BASETEN_LIVE=1 to run against Baseten"
+)
+def test_live_baseten_sandbox_runs_programs():
+    """Create, run and delete against the real service; needs ``BASETEN_API_KEY``."""
+    sandbox = BasetenSandbox(max_concurrency=1)
+    try:
+        with sandbox.open_session() as session:
+            first = session.run("import sys\nprint(int(sys.stdin.read()) * 2)", stdin="21")
+            assert first.ok and first.stdout == "42\n", first
+            session.write_file("note.txt", "kept")
+            assert session.read_file("note.txt") == "kept"
+            assert session.run("import time\ntime.sleep(10)", timeout=1).timed_out
+    finally:
+        sandbox.close()
 
 
 if __name__ == "__main__":

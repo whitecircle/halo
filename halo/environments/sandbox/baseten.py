@@ -129,25 +129,33 @@ class BasetenApi:
         )
 
     def create_sandbox(self, *, image: str, cpu: int, idle_ttl: str, timeout: float) -> Sandbox:
+        # The name makes a retried create return the sandbox the first attempt made, and lets a failed create be
+        # undone without the service's answer.
+        name = f"halo-{uuid.uuid4().hex[:16]}"
         body = {
-            # The name makes a retried create return the sandbox the first attempt made.
-            "name": f"halo-{uuid.uuid4().hex[:16]}",
+            "name": name,
             "create_if_not_exists": True,
             "image": image,
             "cpu": cpu,
             "labels": {"app": "halo"},
             "lifecycle": {"expiration_policies": [{"type": "TTL_IDLE", "value": idle_ttl, "action": "DELETE"}]},
         }
-        record = self._send("POST", f"{self.api_url}/sandboxes/instances", json=body, timeout=timeout).json()
-        if record.get("status") != "DEPLOYED":
-            raise SandboxInfraError(f"baseten sandbox {record.get('name')!r} is {record.get('status')}, not DEPLOYED")
+        try:
+            record = self._send("POST", f"{self.api_url}/sandboxes/instances", json=body, timeout=timeout).json()
+            if record.get("status") != "DEPLOYED":
+                raise SandboxInfraError(f"baseten sandbox {name!r} is {record.get('status')}, not DEPLOYED")
+        except SandboxInfraError:
+            # The service may hold the sandbox although the create failed here, and it would keep one of the
+            # organization's slots until its idle expiration.
+            if self._token is not None:
+                with contextlib.suppress(SandboxInfraError):
+                    self.delete_sandbox(name)
+            raise
         return Sandbox(name=record["name"], url=record["url"].rstrip("/"))
 
-    def delete_sandbox(self, sandbox: Sandbox) -> None:
+    def delete_sandbox(self, name: str) -> None:
         with contextlib.suppress(SandboxGone):
-            self._send(
-                "DELETE", f"{self.api_url}/sandboxes/instances/{sandbox.name}", timeout=self.request_timeout, json=None
-            )
+            self._send("DELETE", f"{self.api_url}/sandboxes/instances/{name}", timeout=self.request_timeout, json=None)
 
     def write_file(self, sandbox: Sandbox, path: str, content: str) -> None:
         # The filesystem API takes an absolute path with its leading slash encoded.
@@ -219,6 +227,7 @@ class BasetenSandbox(SandboxExecutor):
         max_retries: int = 4,
         backoff_factor: float = 1.0,
         max_concurrency: int = BASETEN_SANDBOX_LIMIT,
+        slot_timeout: float = 600.0,
         memory_limit_mb: int = SANDBOX_DEFAULT_MEMORY_MB,
         compile_timeout: float = SANDBOX_DEFAULT_COMPILE_TIMEOUT,
         compile_memory_limit_mb: int = SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
@@ -251,6 +260,8 @@ class BasetenSandbox(SandboxExecutor):
             compile_timeout=compile_timeout,
             compile_memory_limit_mb=compile_memory_limit_mb,
         )
+        self.max_concurrency = max_concurrency
+        self.slot_timeout = slot_timeout
         self.slots = threading.BoundedSemaphore(max_concurrency)
         self._live_sandboxes: set[Sandbox] = set()
         self._lock = threading.Lock()
@@ -263,6 +274,14 @@ class BasetenSandbox(SandboxExecutor):
         for sandbox in sandboxes:
             self.delete_sandbox(sandbox)
         live_executors.discard(self)
+
+    def take_slot(self) -> None:
+        if not self.slots.acquire(timeout=self.slot_timeout):
+            raise SandboxInfraError(
+                f"no baseten sandbox became free in {self.slot_timeout:g} s: max_concurrency={self.max_concurrency} "
+                f"sessions hold one each. Close sessions that are done, or raise max_concurrency within the "
+                f"organization's limit of {BASETEN_SANDBOX_LIMIT}."
+            )
 
     def open_session(self) -> "BasetenSession":
         return BasetenSession(self)
@@ -286,7 +305,7 @@ class BasetenSandbox(SandboxExecutor):
         with self._lock:
             self._live_sandboxes.discard(sandbox)
         try:
-            self.api.delete_sandbox(sandbox)
+            self.api.delete_sandbox(sandbox.name)
         except SandboxInfraError as error:
             logger.debug("baseten sandbox %s was not deleted: %s", sandbox.name, error)
 
@@ -352,7 +371,7 @@ class BasetenSession(RunnerSession):
         if self._sandbox is not None:
             return self._sandbox
         if not self._holds_slot:
-            self.executor.slots.acquire()
+            self.executor.take_slot()
             self._holds_slot = True
         try:
             self._sandbox = self.executor.create_sandbox()

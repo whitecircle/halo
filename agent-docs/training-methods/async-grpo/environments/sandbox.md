@@ -130,6 +130,8 @@ The code is in `halo/environments/sandbox/modal_sandbox.py`. What runs inside th
 
 ### Baseten Sandboxes
 
+Experimental: the backend is checked against a local fake of Baseten's API, not against the service. `HALO_BASETEN_LIVE=1 pytest tests/cpu/environments/test_sandbox_baseten.py -k live` runs a create, run and delete against it with your `BASETEN_API_KEY`.
+
 One flag sends code-contests grading, its test tool and the `swe` tools to Baseten:
 
 ```bash
@@ -145,7 +147,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 **How it runs**
 
 - Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
-- A sandbox is created under a name the backend chooses, so a create that is retried returns the same sandbox.
+- A sandbox is created under a name the backend chooses, so a create that is retried returns the same sandbox, and a create that fails or is not `DEPLOYED` is deleted by that name.
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
 - The Python REPL tools stay in process: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox.
@@ -153,7 +155,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 
 **Sandbox limit**
 
-Baseten runs at most 10 sandboxes per organization. `max_concurrency` (default and maximum 10) caps live sandboxes per process; a session past it waits for a slot. Across Ray actors, keep the sum of `max_concurrency` at or below 10.
+Baseten runs at most 10 sandboxes per organization. `max_concurrency` (default and maximum 10) caps live sandboxes per process; a session past it waits for a slot, and after `slot_timeout` (default 600 s) its call is an `error` naming the cap. Across Ray actors, keep the sum of `max_concurrency` at or below 10.
 
 **What a program cannot do**
 
@@ -193,6 +195,7 @@ Closing a session deletes its sandbox, and an `atexit` hook deletes the ones sti
 | `idle_ttl` | `10m` | Idle time after which Baseten deletes a sandbox |
 | `interpreter` | `python3` | The Python the sandbox runs programs with |
 | `max_concurrency` | 10 | Live sandboxes in this process |
+| `slot_timeout` | 600 s | How long a session waits for a free sandbox |
 | `request_timeout`, `request_overhead`, `create_timeout` | 60 s, 30 s, 600 s | HTTP timeouts |
 | `max_retries`, `backoff_factor` | 4, 1.0 | Retry policy |
 | `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
