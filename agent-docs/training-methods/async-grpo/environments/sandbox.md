@@ -26,7 +26,7 @@ environment_kwargs:
   # sandbox_options: {cpu: 8, memory_mb: 16384}   # the backend's constructor arguments
 ```
 
-Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with `local` or `bubblewrap`.
+Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then `local` (`build_sandbox()` in `factory.py`). `remote` with no URL raises, and so does a URL with any other backend.
 
 ### Confinement
 

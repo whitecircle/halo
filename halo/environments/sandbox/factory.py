@@ -17,6 +17,14 @@ logger = logging.getLogger(__name__)
 _unisolated_warned: set[Hashable] = set()
 
 
+BACKENDS: dict[str, type[SandboxExecutor]] = {
+    "local": LocalSubprocessSandbox,
+    "bubblewrap": BubblewrapSandbox,
+    "remote": RemoteSandbox,
+    "modal": ModalSandbox,
+}
+
+
 def build_sandbox(
     backend: str | None = None,
     url: str | None = None,
@@ -24,25 +32,20 @@ def build_sandbox(
 ) -> SandboxExecutor:
     backend = (backend or env_str("HALO_SANDBOX_BACKEND") or "local").lower()
     url = url or env_str("HALO_SANDBOX_URL")
-    if backend != "remote" and url:
-        # Ignoring a url would run model-generated code in the training container, not the expected sandbox service.
-        raise ValueError(
-            f"A sandbox url is set ({url!r}) but the backend is {backend!r}, which executes code "
-            f"locally — the url would be ignored and untrusted code would run in this container. "
-            f"Set sandbox_backend='remote' (or HALO_SANDBOX_BACKEND=remote) to use it, or unset "
-            f"the url to run locally on purpose."
-        )
-    if backend == "local":
-        return LocalSubprocessSandbox(**kwargs)
-    if backend == "bubblewrap":
-        return BubblewrapSandbox(**kwargs)
+    if backend not in BACKENDS:
+        raise ValueError(f"unknown sandbox backend {backend!r} (expected one of {', '.join(BACKENDS)})")
     if backend == "remote":
         if not url:
             raise ValueError("remote sandbox requires a url (pass url= or set HALO_SANDBOX_URL)")
         return RemoteSandbox(url, **kwargs)
-    if backend == "modal":
-        return ModalSandbox(**kwargs)
-    raise ValueError(f"unknown sandbox backend {backend!r} (expected 'local', 'bubblewrap', 'remote', or 'modal')")
+    if url:
+        # Ignoring the url would run model-written code somewhere other than the service it names.
+        raise ValueError(
+            f"A sandbox url is set ({url!r}) but the backend is {backend!r}, which takes none: the url would be "
+            f"ignored and code would run on {backend!r}. Set sandbox_backend='remote' (or "
+            f"HALO_SANDBOX_BACKEND=remote) to use the url, or unset it."
+        )
+    return BACKENDS[backend](**kwargs)
 
 
 def warn_if_unisolated(sandbox: SandboxExecutor, consumer: str) -> None:

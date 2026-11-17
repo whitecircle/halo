@@ -11,7 +11,7 @@ from pathlib import Path
 
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxSession
 from halo.environments.sandbox.languages import INTERPRETER_PLACEHOLDER, LanguageSpec, require_language, utf8_encodable
-from halo.environments.sandbox.local import (
+from halo.environments.sandbox.limits import (
     LOCAL_FSIZE_LIMIT,
     LOCAL_NPROC_LIMIT,
     RLIMIT_CPU_SLACK_SECONDS,

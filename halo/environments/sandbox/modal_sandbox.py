@@ -14,7 +14,7 @@ from dataclasses import replace
 from typing import Any, NamedTuple
 
 from halo.environments.sandbox.base import SandboxExecutor
-from halo.environments.sandbox.local import (
+from halo.environments.sandbox.limits import (
     SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
     SANDBOX_DEFAULT_COMPILE_TIMEOUT,
     SANDBOX_DEFAULT_MEMORY_MB,
@@ -38,6 +38,28 @@ IDLE_TIMEOUT_SECONDS = 300
 MAX_LIFETIME_SECONDS = 86400
 # What Modal's ContainerProcess.wait() returns when the exec timeout expires. No real exit code is negative.
 EXEC_DEADLINE_RETURNCODE = -1
+
+
+class SessionUids:
+    """Hands each open session a user no other open session has."""
+
+    def __init__(self, uids: range):
+        self._uids = uids
+        self._next = itertools.cycle(uids)
+        self._taken: set[int] = set()
+        self._lock = threading.Lock()
+
+    def take(self) -> int:
+        with self._lock:
+            if len(self._taken) == len(self._uids):
+                raise SandboxInfraError(f"all {len(self._uids)} session users of the modal sandbox are in use")
+            uid = next(uid for uid in self._next if uid not in self._taken)
+            self._taken.add(uid)
+            return uid
+
+    def give_back(self, uid: int) -> None:
+        with self._lock:
+            self._taken.discard(uid)
 
 
 class RunnerExec(NamedTuple):
@@ -110,11 +132,11 @@ class ModalSandbox(SandboxExecutor):
         self._lock = threading.Lock()
         self._sandbox: Any = None
         self._closed_workdirs: list[str] = []
-        self._session_uids = itertools.cycle(SESSION_UIDS)
+        self.session_uids = SessionUids(SESSION_UIDS)
         live_executors.add(self)
 
     def open_session(self) -> "ModalSession":
-        return ModalSession(self, uid=next(self._session_uids))
+        return ModalSession(self, uid=self.session_uids.take())
 
     def close(self) -> None:
         """Terminate the sandbox. Idempotent; never raises."""
@@ -218,6 +240,7 @@ class ModalSession(RunnerSession):
     def __init__(self, executor: ModalSandbox, uid: int):
         super().__init__(f"{WORKSPACE}/{uuid.uuid4().hex}", uid=uid, limits=executor.limits, interpreter="python3")
         self.executor = executor
+        self._closed = False
 
     def exchange(self, request: Request, *, deadline: float) -> Reply:
         if not isinstance(request.operation, RunProgram):
@@ -226,4 +249,8 @@ class ModalSession(RunnerSession):
             return self.executor.exec_runner(request, deadline=deadline)
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         self.executor.remove_later(self.workdir)
+        self.executor.session_uids.give_back(self.uid)
