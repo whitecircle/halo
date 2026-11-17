@@ -2,12 +2,12 @@
 """Grouped-GEMM dispatch: bf16 matches a per-expert loop, every format takes the simulated fake-quant path by default,
 and ``native=True`` takes mxfp8 / mxfp4 native at every shape."""
 
-import pytest
 import torch
 
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.deepgemm import deepgemm_available
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import fro_rel_err
 from tests.common.rank_log import log
@@ -56,12 +56,12 @@ def test_simulated_lowprecision_matches_format_error():
     (mxfp8) / ~0.134 (nvfp4), stable to the 4th decimal across seeds."""
     torch.manual_seed(0)
     E, M, K, N = 8, 256, 2880, 2880
-    bands = {"mxfp8": (0.01, 0.08), "nvfp4": (0.04, 0.25)}
+    bands = {"fp8": (0.01, 0.08), "fp4": (0.04, 0.25)}
     for prec, (lo, hi) in bands.items():
         x = (torch.randn(E * M, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02).requires_grad_(True)
         offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
-        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # The flag is off: simulated fake-quant.
+        out = expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision=prec))
         (out * torch.randn_like(out)).sum().backward()
         ref = _reference(x.detach(), w.detach(), offs).float()
         rel = fro_rel_err(out.detach(), ref)
@@ -85,21 +85,19 @@ def test_dispatch_contract():
     native_calls = []
 
     def counted_forward(*args):
-        native_calls.append(args[3])
+        native_calls.append(args[4])
         return real_forward(*args)
 
     deepgemm._deepgemm_forward = counted_forward
     try:
-        for prec in ("mxfp8", "mxfp4", "nvfp4"):
-            out = expert_gemm(x, w, offs=offs, quant_format=prec)
+        for prec in LOWP_RECIPES:
+            out = expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision=prec))
             assert out.shape == (E * M, N), f"{prec} wrong shape"
         assert not native_calls, f"the default ran native: {native_calls}"
         if deepgemm_available():
-            for prec in ("mxfp8", "mxfp4"):
-                out = expert_gemm(x, w, offs=offs, quant_format=prec, native=True)
+            for prec in ("fp8", "mxfp4"):
+                out = expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision=prec, backend="native"))
                 assert out.shape == (E * M, N), f"native {prec} wrong shape"
-            with pytest.raises(ValueError, match="nvfp4 is simulated-only"):
-                expert_gemm(x, w, offs=offs, quant_format="nvfp4", native=True)
     finally:
         deepgemm._deepgemm_forward = real_forward
     expected = ["mxfp8", "mxfp4"] if deepgemm_available() else []

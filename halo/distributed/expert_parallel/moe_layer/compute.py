@@ -14,7 +14,7 @@ from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
 from halo.kernels.lowp.deepgemm import warm_fp8_wgrad
-from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
+from halo.kernels.lowp.spec import LowpSpec
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
 from halo.models.moe.expert_layout import ExpertLayoutKind
@@ -41,9 +41,7 @@ class EPExpertComputeMixin:
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     _use_grouped_mm: bool
     _expert_kernels_warmed: bool
-    _lowp_quant_format: QuantFormat | None
-    _lowp_native: bool = False
-    _lowp_fp8_backward: bool = False
+    _lowp: LowpSpec | None
     _lowp_weight_cacheable: bool
     _expert_lora_attrs: frozenset[str]
     _expert_adapters_enabled: bool
@@ -56,10 +54,7 @@ class EPExpertComputeMixin:
     def set_lowp_compute(self, lowp: LowpSpec, *, weight_cacheable: bool) -> bool:
         """Set this layer's expert-compute precision from ``lowp``; return whether it applies, False on the
         per-expert loop, where the grouped kernels and their fake-quant never run."""
-        self._lowp_quant_format = LOWP_RECIPES[lowp.precision].quant_format
-        self._lowp_native = lowp.native
-        self._lowp_fp8_backward = lowp.backward_precision == "fp8"
-        self._lowp_weight_cacheable = weight_cacheable
+        self._lowp, self._lowp_weight_cacheable = lowp, weight_cacheable
         return self._use_grouped_mm
 
     def _resolve_activation(self, source: nn.Module, *, original_layer: nn.Module) -> None:
@@ -199,7 +194,7 @@ class EPExpertComputeMixin:
                     with torch.amp.autocast("cuda", dtype=dtype):
                         out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
                     torch.autograd.grad(out.sum(), [tokens, *trainable], allow_unused=True)
-            if self._lowp_native and self._lowp_fp8_backward:
+            if self._lowp is not None and self._lowp.native and self._lowp.backward_precision == "fp8":
                 for _, bank in self._base_expert_named_params():
                     if bank.ndim == 3 and bank.requires_grad:  # [E, K, N]; a bias has no GEMM of its own
                         warm_fp8_wgrad(*bank.shape, dtype, device)
@@ -317,9 +312,7 @@ class EPExpertComputeMixin:
             mat_a,
             mat_b,
             offs=offs,
-            quant_format=self._lowp_quant_format if lowp else None,
-            native=self._lowp_native,
-            fp8_backward=self._lowp_fp8_backward,
+            lowp=self._lowp if lowp else None,
             weight_cacheable=self._lowp_weight_cacheable,
         )
 

@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SMPO pipeline</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --gutter: 120px;
+  }
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  /* Two bands of three cards: the first reads left to right, the second right to left under it. Each column is as
+   * wide as its widest card, and what is left widens the gutters. */
+  .bands {
+    display: grid;
+    grid-template-columns: repeat(3, auto);
+    justify-content: space-between;
+    column-gap: var(--gutter);
+    align-items: start;
+  }
+
+  .band-head {
+    grid-column: 1 / -1;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .band-head.next { margin-top: var(--group-gap); }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--body);
+  }
+
+  .key span {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .key i,
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .card {
+    padding: 24px 26px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .card .lines {
+    margin-top: 14px;
+    font-size: 23px;
+    line-height: 1.45;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  sub, sup {
+    font-size: 0.78em;
+    line-height: 0;
+  }
+
+  .hop {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Only the margin term sees clipped <span class="nw">log-probs</span></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="bands" id="bands"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">The margin term is exactly zero once z clears 0, where a sigmoid loss keeps pushing, while the anchors train both sides.</span>
+      <span class="s">Numbers are the config defaults.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const KEY = [{ name: "Policy", hue: "var(--halo-blue)" }];
+  const BANDS = ["Margin term", "SFT anchors"];
+  /** Each card sits in a band (0 or 1) and a column (1 to 3), spanning `span` columns, its lines one under another.
+   * A line may carry <sub> and <sup> markup. */
+  const CARDS = [
+    {
+      id: "forward", band: 0, col: 1, name: "One forward: the pair", hue: "var(--halo-blue)",
+      lines: ["the pair concatenated, 2N rows", "chosen rows first, then rejected", "labels −100 over the prompt", "shift + mask, then log-softmax", "→ per-token log p, [2N, T]"],
+    },
+    {
+      id: "clip", band: 0, col: 2, name: "Percentile clip: margin path",
+      lines: ["runs on the per-token log p", "rejected tail → 2% token quantile", "chosen tail capped (upper, off)", "then min_log_prob −2.3, rejected", "one detached bound per half"],
+    },
+    {
+      id: "margin", band: 0, col: 3, name: "Per-sequence mean → margin",
+      lines: [
+        "logp<sub>c/r</sub> = fp32 Σ ÷ tokens",
+        "z = logp<sub>c</sub> − logp<sub>r</sub> − margin",
+        "L<sub>margin</sub> = relu(−β · z)<sup>2</sup>",
+        "loss_type smooth_lower_bound",
+        "β = 1.2 · margin 0.01 → 0.35",
+      ],
+    },
+    {
+      id: "anchors", band: 1, col: 1, name: "Anchors: pre-clip",
+      lines: ["mean NLL over completion tokens", "taken before the clip, both sides"],
+    },
+    {
+      id: "total", band: 1, col: 2, span: 2, name: "Total",
+      lines: [
+        "L<sub>total</sub> = mean<sub>pairs</sub> L<sub>margin</sub> + α · CE(chosen) + (1 − α) · CE(rejected)",
+        "α = chosen_sft_ratio 0.8 · no reference model",
+      ],
+    },
+  ];
+  /** `down` leaves the source's bottom at `at` of its width, or at the middle of the span it shares with the target,
+   * label to its right. `back` climbs from the source's top at `at` to the target's bottom at `toAt`, label above its
+   * lane. */
+  const ARROWS = [
+    { from: "forward", to: "clip", dir: "right", label: "token log p" },
+    { from: "clip", to: "margin", dir: "right", label: "clipped" },
+    { from: "forward", to: "anchors", dir: "down", at: 0.66, label: "per-token NLL" },
+    { from: "margin", to: "total", dir: "down", label: "L<sub>margin</sub>" },
+    { from: "anchors", to: "total", dir: "right", label: "CE terms" },
+  ];
+
+  function dot(hue) {
+    const node = el("i");
+    node.style.setProperty("--hue", hue);
+
+    return node;
+  }
+
+  const bands = document.getElementById("bands");
+  const cards = {};
+
+  BANDS.forEach((text, b) => {
+    const head = el("div", b === 0 ? "band-head" : "band-head next");
+    head.style.gridRow = String(2 * b + 1);
+    head.append(el("span", undefined, text));
+
+    if (b === 0) {
+      const key = el("div", "key");
+
+      for (const item of KEY) {
+        const entry = el("span");
+        entry.append(dot(item.hue), item.name);
+        key.append(entry);
+      }
+
+      head.append(key);
+    }
+
+    bands.append(head);
+  });
+
+  for (const spec of CARDS) {
+    const card = el("div", "card");
+    const name = el("div", "name");
+    card.style.gridRow = String(2 * spec.band + 2);
+    card.style.gridColumn = `${spec.col} / span ${spec.span ?? 1}`;
+
+    if (spec.hue !== undefined) {
+      name.append(dot(spec.hue));
+    }
+
+    name.append(spec.name);
+    const lines = el("div", "lines");
+
+    for (const line of spec.lines) {
+      const row = el("div");
+      row.innerHTML = line;
+      lines.append(row);
+    }
+
+    card.append(name, lines);
+    bands.append(card);
+    cards[spec.id] = card;
+  }
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const tone = (hue) => getComputedStyle(document.documentElement).getPropertyValue(hue.slice(4, -1)).trim();
+
+  /** Straight segments through `points`, the last one ending in a small head. */
+  function connect(points, hue) {
+    const [x1, y1] = points[points.length - 2];
+    const [x2, y2] = points[points.length - 1];
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const len = 8;
+    const half = 5;
+    const bx = x2 - len * Math.cos(angle);
+    const by = y2 - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    const path = points.map(([x, y]) => `${x},${y}`).join(" ");
+    wires.append(svgEl("polyline", { points: path, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linejoin": "miter" }));
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x2},${y2} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  function hop(text, place) {
+    const label = el("div", "hop");
+    label.innerHTML = text;
+    figure.append(label);
+    place(label, label.getBoundingClientRect());
+  }
+
+  for (const arrow of ARROWS) {
+    const a = box(cards[arrow.from]);
+    const z = box(cards[arrow.to]);
+    const hue = tone(arrow.hue ?? "var(--secondary)");
+
+    if (arrow.dir === "back") {
+      // From the second band up to the first, along a lane at the middle of the second band's heading.
+      const head = box(document.querySelector(".band-head.next"));
+      const lane = (head.t + head.b) / 2;
+      const x1 = a.l + arrow.at * (a.r - a.l);
+      const x2 = z.l + arrow.toAt * (z.r - z.l);
+      connect([[x1, a.t], [x1, lane], [x2, lane], [x2, z.b + 1]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${(x1 + x2 - r.width) / 2}px`;
+        label.style.top = `${lane - 8 - r.height}px`;
+      });
+    } else if (arrow.dir === "down") {
+      const x = arrow.at !== undefined ? a.l + arrow.at * (a.r - a.l) : (Math.max(a.l, z.l) + Math.min(a.r, z.r)) / 2;
+      connect([[x, a.b], [x, z.t - 1]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${x + 14}px`;
+        label.style.top = `${(a.b + z.t - r.height) / 2}px`;
+      });
+    } else {
+      // Cards are as tall as their lines: the arrow runs at the middle of the span the two cards share.
+      const y = (Math.max(a.t, z.t) + Math.min(a.b, z.b)) / 2;
+      const [x1, x2] = arrow.dir === "right" ? [a.r, z.l - 1] : [a.l, z.r + 1];
+      connect([[x1, y], [x2, y]], hue);
+      hop(arrow.label, (label, r) => {
+        label.style.left = `${(x1 + x2 - r.width) / 2}px`;
+        label.style.top = `${y - 10 - r.height}px`;
+      });
+    }
+  }
+</script>
+</body>
+</html>
