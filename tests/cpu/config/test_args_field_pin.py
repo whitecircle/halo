@@ -138,6 +138,7 @@ _EXPECTED = {
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
         "use_chunked_grpo_logprobs": "False",
+        "use_maxrl": "False",
         "use_rlrr": "False",
         "use_sdpg": "False",
     },

@@ -86,6 +86,8 @@ class DistributedOnlineGRPOTrainer(
     _rollout_backend = VLLM_BACKEND
     # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
     first_push_verified: bool = False
+    # MaxRL advantages; off unless ``_adopt_advantage_hooks`` reads ``use_maxrl``.
+    _use_maxrl: bool = False
 
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
