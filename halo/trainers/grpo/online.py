@@ -27,10 +27,15 @@ from halo.trainers.grpo.grpo_rules import (
 )
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.loss_forward_seam import LOSS_FORWARD_KNOB
-from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
+from halo.trainers.grpo.objective.advantages import (
+    degenerate_group_mask,
+    group_relative_advantages,
+    maxrl_zero_mean_groups,
+)
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
 from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
+    MAXRL_ZERO_MEAN_GROUP_FRAC_KEY,
     gathered_num_items,
     narrow_loss_masks,
     record_token_mass,
@@ -103,6 +108,7 @@ class DistributedOnlineGRPOTrainer(
             drop_degenerate_groups=self._drop_degenerate_groups,
             balance_token_mass=self._balance_token_mass,
             recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
+            use_maxrl=self._use_maxrl,
         )
         # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
         early_stop = build_early_stop_callback(
@@ -152,6 +158,7 @@ class DistributedOnlineGRPOTrainer(
         self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
         self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
         self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
+        self._use_maxrl: bool = kwargs.pop("use_maxrl", False)
         self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
 
     @staticmethod
@@ -225,7 +232,12 @@ class DistributedOnlineGRPOTrainer(
 
     @property
     def _recomputes_from_gathered_rewards(self) -> bool:
-        return self._rlrr_config is not None or self._drop_degenerate_groups or self._scale_rewards_std_floor > 0
+        return (
+            self._rlrr_config is not None
+            or self._drop_degenerate_groups
+            or self._scale_rewards_std_floor > 0
+            or self._use_maxrl
+        )
 
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
@@ -237,6 +249,7 @@ class DistributedOnlineGRPOTrainer(
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.
         self._apply_rlrr_advantages(result)
         self._apply_std_floor_advantages(result)
+        self._apply_maxrl_advantages(result)
         self._apply_degenerate_group_drop(result)
         self._apply_token_mass_balance(result)
         # Consumed: the next generation batch must stash its own rewards, never reuse these.
@@ -309,6 +322,29 @@ class DistributedOnlineGRPOTrainer(
         advantages_full = advantages_full.masked_fill(unscorable, 0.0)  # match TRL's unscorable handling
         self._install_advantages(result, advantages_full, "scale_rewards_std_floor")
 
+    def _apply_maxrl_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """Replace advantages with MaxRL's, divided by the group mean, on the full gathered set; TRL has no mean
+        divisor. Every rank holds the same gathered set, so the non-negative check agrees. Train mode only."""
+        if not self._use_maxrl:
+            return
+        gathered = self._gathered_rewards()
+        if gathered is None:
+            return
+        rewards, unscorable = gathered
+        valid = ~unscorable
+        advantages_full = group_relative_advantages(
+            rewards.float(),
+            self.num_generations,
+            self.args.scale_rewards,
+            valid_mask=valid,
+            already_gathered=True,
+            normalizer="mean",
+        )
+        advantages_full = advantages_full.masked_fill(unscorable, 0.0)  # match TRL's unscorable handling
+        zero_mean = maxrl_zero_mean_groups(rewards.float(), self.num_generations, valid_mask=valid)
+        self._metrics["train"][MAXRL_ZERO_MEAN_GROUP_FRAC_KEY].append(zero_mean.float().mean().item())
+        self._install_advantages(result, advantages_full, "use_maxrl")
+
     def _apply_degenerate_group_drop(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Mask all-equal-reward groups out of the loss: their advantage is 0, but their tokens would inflate the DAPO
         normalizer and dilute the groups that carry signal. Train mode only."""
@@ -379,7 +415,7 @@ class DistributedOnlineGRPOTrainer(
             return None
         if self._last_rewards_per_func is None:
             raise RuntimeError(
-                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor) is armed "
+                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor / use_maxrl) is armed "
                 "but no gathered rewards were stashed for this generation batch: TRL's scoring no "
                 "longer goes through _calculate_rewards, so the hook would silently leave TRL's "
                 "advantages in place."

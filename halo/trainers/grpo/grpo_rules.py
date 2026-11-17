@@ -121,6 +121,26 @@ def reject_inert_std_floor(scale_rewards: str | bool | None, std_floor: float) -
         )
 
 
+def reject_conflicting_maxrl(scale_rewards: str | bool | None, std_floor: float, *, rlrr: bool) -> None:
+    """MaxRL owns the advantage divisor, so a std scaling, a floor on that std, and RLRR's wholesale replacement would
+    each cancel it or be cancelled by it."""
+    if scales_rewards(scale_rewards):
+        raise ValueError(
+            f"use_maxrl with scale_rewards={scale_rewards!r}: MaxRL divides each advantage by its group's mean reward, "
+            "which replaces the std divisor. Set scale_rewards: none."
+        )
+    if std_floor > 0:
+        raise ValueError(
+            f"use_maxrl with scale_rewards_std_floor={std_floor}: the floor bounds a std divisor MaxRL does not use, "
+            "so it would silently do nothing. Drop the floor."
+        )
+    if rlrr:
+        raise ValueError(
+            "use_maxrl and use_rlrr cannot be combined: RLRR replaces the group-normalized advantages wholesale with "
+            "relative-ranking ones, so the MaxRL divisor would never apply. Set only one."
+        )
+
+
 def reject_unbalanceable_token_mass(args) -> None:
     """Two masks inside TRL's loss drop tokens after the balance has weighed them: the entropy quantile and the
     off-policy sequence mask, which drops negative sequences alone and so turns the net push positive."""
@@ -151,8 +171,12 @@ def reject_conflicting_advantage_hooks(
     drop_degenerate_groups: bool,
     balance_token_mass: bool,
     recomputes_from_gathered_rewards: bool,
+    use_maxrl: bool = False,
 ) -> None:
     """Refuse the online advantage hooks the GRPO config or another hook cancels or diverges from."""
+    # Ahead of the inert-floor check, which a floor beside MaxRL would also trip with a less direct message.
+    if use_maxrl:
+        reject_conflicting_maxrl(grpo_args.scale_rewards, std_floor, rlrr=rlrr_config is not None)
     reject_inert_std_floor(grpo_args.scale_rewards, std_floor)
     if balance_token_mass:
         reject_unbalanceable_token_mass(grpo_args)
@@ -172,7 +196,7 @@ def reject_conflicting_advantage_hooks(
     # Every hook re-derives its values from the gathered rewards summed as TRL's sum_then_normalize branch does.
     if recomputes_from_gathered_rewards and grpo_args.multi_objective_aggregation != "sum_then_normalize":
         raise ValueError(
-            "RLRR / drop_degenerate_groups / scale_rewards_std_floor recompute rewards "
+            "RLRR / drop_degenerate_groups / scale_rewards_std_floor / use_maxrl recompute rewards "
             "with TRL's sum_then_normalize aggregation; multi_objective_aggregation="
             f"{grpo_args.multi_objective_aggregation!r} would silently diverge."
         )
