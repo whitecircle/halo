@@ -72,9 +72,10 @@ All off by default.
 | `drop_degenerate_groups` | Masks all-equal-reward groups out of the loss and normalizer | — |
 | `balance_token_mass` | Cancels each generation round's net token-weighted push ([Token-mass balance](../async-grpo/objective.md#token-mass-balance)) | `loss_type` `cispo`, `dapo` or `dr_grpo`; `top_entropy_quantile: 1.0`; no `off_policy_mask_threshold` |
 | `use_rlrr` | Intra-group ranking advantages ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) | Neither the std floor nor the drop |
+| `use_maxrl` | MaxRL advantages, divided by the group's mean reward ([MaxRL](../async-grpo/objective.md#advantages)) | `scale_rewards: none`, non-negative rewards; neither the std floor nor RLRR |
 | `use_sdpg` | [Online SDPG](../distillation/online-sdpg.md) | — |
 
-The std floor, the drop and RLRR also require `multi_objective_aggregation: sum_then_normalize`.
+The std floor, the drop, RLRR and MaxRL also require `multi_objective_aggregation: sum_then_normalize`.
 
 The `rlrr_*` tunables are range-validated always and refused at a non-default value with `use_rlrr` off. `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` runs RLRR at these defaults:
 
