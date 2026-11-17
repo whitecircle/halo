@@ -14,6 +14,7 @@ from torch.distributed.tensor import DTensor
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.lowp import quantization
 from halo.kernels.lowp.quantization import cached_fake_quant, fake_quant
+from halo.kernels.lowp.spec import LowpSpec
 from tests.common.harness import gpu_test_main
 
 # Numerically identical to the compiled path, skipping the per-rank compile warm-up.
@@ -76,7 +77,7 @@ class _Experts(nn.Module):
         self.weight = nn.Parameter(torch.randn(4, 64, 32, device=device, dtype=torch.bfloat16) * 0.05)
 
     def forward(self, x, offs, cacheable):
-        return expert_gemm(x, self.weight, offs=offs, quant_format="mxfp8", weight_cacheable=cacheable)
+        return expert_gemm(x, self.weight, offs=offs, lowp=LowpSpec(precision="fp8"), weight_cacheable=cacheable)
 
 
 def _local(w: torch.Tensor) -> torch.Tensor:

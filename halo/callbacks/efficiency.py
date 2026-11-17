@@ -174,8 +174,7 @@ def _runs_native_expert_gemms(model: torch.nn.Module | None, lowp_precision: str
     if recipe is None or not recipe.native or model is None:
         return False
     return any(
-        layer._use_grouped_mm and layer._lowp_native and layer._lowp_quant_format == recipe.quant_format
-        for _, layer in named_ep_layers(model)
+        layer._use_grouped_mm and layer._lowp is not None and layer._lowp.native for _, layer in named_ep_layers(model)
     )
 
 

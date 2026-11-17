@@ -356,6 +356,12 @@ def _reject_expert_tp(pc: ParallelismConfig) -> None:
     if pc.expert_tp_size > 1:
         if pc.expert_lora is not None:
             reject_expert_lora_with_expert_tp()
+        if pc.lowp.native:
+            raise ValueError(
+                f"lowp_backend='native' is not supported with expert_tensor_parallel_size={pc.expert_tp_size}: no "
+                "test runs DeepGEMM on expert-TP shards. Use lowp_backend='simulated', or "
+                "expert_tensor_parallel_size: 1."
+            )
         if pc.nvlink_domain_size % pc.expert_tp_size != 0:
             raise ValueError(
                 f"expert_tensor_parallel_size ({pc.expert_tp_size}) must divide the NVLink domain "

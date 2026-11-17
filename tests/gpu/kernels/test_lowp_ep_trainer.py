@@ -47,6 +47,7 @@ parser.add_argument("--native", action="store_true", help="Train with lowp_backe
 parser.add_argument(
     "--backward", choices=("bf16", "fp8"), default="bf16", help="lowp_backward_precision under --native"
 )
+parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2, help="1 trains FSDP2-managed experts")
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -64,8 +65,7 @@ def _native_entry_is_current(weight: torch.Tensor) -> bool | None:
     entry = deepgemm._weight_cache.get(weight, (weight._version, QUANT_FORMAT))
     if entry is None:
         return None
-    k_pad = entry[0].shape[-1] * 2 if QUANT_FORMAT == "mxfp4" else weight.shape[CONTRACTION_AXIS]
-    fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, k_pad, cacheable=False)
+    fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, cacheable=False)
     # As floats, the one read of fp8 elements the production path itself runs on CUDA.
     return all(torch.equal(served.float(), recast.float()) for served, recast in zip(entry, fresh, strict=True))
 
@@ -110,7 +110,7 @@ def _train(
     ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None
 ) -> tuple[list[float], _ExpertVersions, bool]:
     """The run's losses, the expert version counters and weight-cache checks it saw, and whether AdamWBF16 stepped it."""
-    pc = ParallelismConfig(ep_size=2, lowp=lowp or LowpSpec(precision=ARGS.precision))
+    pc = ParallelismConfig(ep_size=ARGS.ep_size, lowp=lowp or LowpSpec(precision=ARGS.precision))
     model, _ = load_distributed_model(
         checkpoint, pc, torch.bfloat16, trust_remote_code=False, attn_implementation="eager", use_liger_kernel=False
     )
@@ -164,7 +164,10 @@ def _shared_checks(versions: _ExpertVersions, adamw_bf16: bool) -> dict[str, boo
     return {
         "fused_adamw_bf16_stepped_the_run": adamw_bf16,
         "expert_weight_versions_advance_every_step_on_every_rank": world_all(_versions_advanced(versions)),
-        "cached_entries_were_compared_on_every_rank": world_all(versions.compared > 0),
+        # FSDP2 manages the experts at ep_size 1 and pins their version counter, so nothing of theirs is cached.
+        "cached_entries_were_compared_wherever_weights_are_cached": world_all(
+            (versions.compared > 0) == (ARGS.ep_size > 1)
+        ),
         "cached_entries_quantize_the_current_weight": world_all(versions.stale == 0),
     }
 
@@ -219,7 +222,8 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
 
 
 @gpu_test_main(
-    exact_world_size=2, prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}"
+    exact_world_size=2,
+    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}",
 )
 def run(ctx):
     torch.cuda.set_device(ctx.device)

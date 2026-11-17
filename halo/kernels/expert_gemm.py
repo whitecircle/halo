@@ -8,7 +8,7 @@ import torch
 from halo.kernels.grouped_mm import grouped_mm
 from halo.kernels.lowp.deepgemm import deepgemm_grouped_gemm
 from halo.kernels.lowp.quantization import cached_fake_quant, fake_quant
-from halo.kernels.lowp.spec import QuantFormat
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 
 
 def expert_gemm(
@@ -16,25 +16,17 @@ def expert_gemm(
     mat_b: torch.Tensor,
     *,
     offs: torch.Tensor | None = None,
-    quant_format: QuantFormat | None = None,
-    native: bool = False,
-    fp8_backward: bool = False,
+    lowp: LowpSpec | None = None,
     weight_cacheable: bool = True,
 ) -> torch.Tensor:
-    """``[total_tokens, K]`` activations stacked by expert times ``[num_experts, K, N]`` weights. ``weight_cacheable``
-    is False for FSDP2-managed weights, as FSDP2 pins the unsharded param's version counter and a cache keyed on it
+    """``[total_tokens, K]`` activations stacked by expert times ``[num_experts, K, N]`` weights, bf16 without a
+    ``lowp``. ``weight_cacheable`` is False for FSDP2-managed weights, as FSDP2 pins the unsharded param's version counter and a cache keyed on it
     would serve the step-0 quantization forever."""
-    if quant_format is None:
+    if lowp is None or not lowp.enabled:
         return grouped_mm(mat_a, mat_b, offs=offs)
-    if native:
-        return deepgemm_grouped_gemm(
-            mat_a,
-            mat_b,
-            offs=offs,
-            quant_format=quant_format,
-            fp8_backward=fp8_backward,
-            weight_cacheable=weight_cacheable,
-        )
+    if lowp.native:
+        return deepgemm_grouped_gemm(mat_a, mat_b, offs=offs, lowp=lowp, weight_cacheable=weight_cacheable)
+    quant_format = LOWP_RECIPES[lowp.precision].quant_format
     quantize_weight = cached_fake_quant if weight_cacheable else fake_quant
     # mat_b is [E, K, N]: the contraction is axis 1.
     return grouped_mm(

@@ -3,6 +3,7 @@ call whatever its shape, a kernel rejection raises, the 4-bit route casts MXFP4,
 cast that hides it, and the FP8 backward runs dgrad on the forward's weight and wgrad on 128-token tiles."""
 
 import re
+import sys
 import types
 import weakref
 
@@ -15,9 +16,15 @@ from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.deepgemm_cast_triton import GRADIENT_AMAX_FLOOR, REFERENCE_AMAX_FLOOR
 from halo.kernels.lowp.quantization import fake_quant
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 
 E, K, N, T = 4, 8, 16, 40
 _E2M1_MIDPOINTS = (0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0)
+
+
+def _native(quant_format: str, backward: str = "bf16") -> LowpSpec:
+    precision = next(p for p, recipe in LOWP_RECIPES.items() if recipe.quant_format == quant_format)
+    return LowpSpec(precision=precision, backend="native", backward_precision=backward)
 
 
 def _align(value: int, alignment: int) -> int:
@@ -81,7 +88,7 @@ def native(monkeypatch):
         k_grouped_fp8_gemm_tn_contiguous=wgrad,
     )
     utils = types.SimpleNamespace(
-        align=_align,
+        set_mk_alignment_for_contiguous_layout=lambda align: None,
         per_token_cast_to_fp8=_identity_cast,
         per_channel_cast_to_fp8=_identity_cast,
         per_block_cast_to_fp8=_block_cast,
@@ -184,14 +191,12 @@ def _forward_on_a_kernel_raising(monkeypatch, error: Exception):
     def kernel(*args, **kwargs):
         raise error
 
-    utils = types.SimpleNamespace(align=_align)
-    monkeypatch.setattr(
-        deepgemm, "_deep_gemm", lambda: (types.SimpleNamespace(m_grouped_fp8_gemm_nn_contiguous=kernel), utils)
-    )
+    kernels = types.SimpleNamespace(m_grouped_fp8_gemm_nn_contiguous=kernel)
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (kernels, None))
     monkeypatch.setattr(deepgemm, "_quant_weight", lambda *args, **kwargs: None)
-    monkeypatch.setattr(deepgemm, "cast_rows_to_fp8", lambda x, src, width: (x, None))
+    x = torch.zeros(T, K)
     return deepgemm._deepgemm_forward(
-        torch.zeros(T, K), torch.zeros(E, K, N), _layout([10, 20, 30, T]), "mxfp8", False
+        x, torch.zeros(E, K, N), _layout([10, 20, 30, T]), types.SimpleNamespace(rows=(x, None)), "mxfp8", False
     )
 
 
@@ -206,15 +211,27 @@ def test_a_direct_call_without_deep_gemm_raises_import_error(monkeypatch):
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
     with pytest.raises(ImportError, match="deep_gemm"):
         deepgemm.deepgemm_grouped_gemm(
-            torch.zeros(T, K), torch.zeros(E, K, N), offs=torch.tensor([10, 20, 30, T]), quant_format="mxfp8"
+            torch.zeros(T, K), torch.zeros(E, K, N), offs=torch.tensor([10, 20, 30, T]), lowp=_native("mxfp8")
         )
+
+
+def test_only_an_absent_package_reads_unavailable_and_a_broken_install_raises(monkeypatch):
+    monkeypatch.setitem(sys.modules, "deep_gemm", types.ModuleType("deep_gemm"))  # imports, and has no ``utils``
+    deepgemm._deep_gemm.cache_clear()
+    try:
+        with pytest.raises(ImportError, match="utils"):
+            deepgemm.deepgemm_available()
+        monkeypatch.setitem(sys.modules, "deep_gemm", None)  # ``import deep_gemm`` raises ModuleNotFoundError
+        assert not deepgemm.deepgemm_available()
+    finally:
+        deepgemm._deep_gemm.cache_clear()
 
 
 def test_a_direct_call_without_offs_raises(native):
     """The kernel's ``m_indices`` are built from the group ends; ``F.grouped_mm`` alone can run without them."""
     x, w, _ = _operands(8, 64, 64)
     with pytest.raises(ValueError, match="needs offs"):
-        expert_gemm(x, w, quant_format="mxfp8", native=True)
+        expert_gemm(x, w, lowp=_native("mxfp8"))
 
 
 @pytest.mark.parametrize(
@@ -226,7 +243,7 @@ def test_a_direct_call_without_offs_raises(native):
 def test_native_runs_every_shape_native(native, quant_format, rows_per_expert, n):
     """A gate on tokens per expert or width flips one expert's numerics between forwards as routing moves."""
     x, w, offs = _operands(rows_per_expert, 64, n)
-    out = expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True)
+    out = expert_gemm(x, w, offs=offs, lowp=_native(quant_format))
     assert out.shape == (x.shape[0], n)
     assert len(native.kernel_calls) == 1
     assert not native.simulated
@@ -234,17 +251,9 @@ def test_native_runs_every_shape_native(native, quant_format, rows_per_expert, n
 
 def test_simulated_runs_at_a_shape_native_would_take(native):
     x, w, offs = _operands(1024, 64, 4096)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8")
+    expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision="fp8"))
     assert not native.kernel_calls
     assert len(native.simulated) == 1
-
-
-def test_nvfp4_has_no_native_kernel(native):
-    """No kernel takes its e4m3 weight scales; ``LowpSpec.validate`` refuses the config before this."""
-    x, w, offs = _operands(8, 64, 64)
-    with pytest.raises(ValueError, match="nvfp4 is simulated-only"):
-        expert_gemm(x, w, offs=offs, quant_format="nvfp4", native=True)
-    assert not native.kernel_calls
 
 
 def test_an_absent_package_raises_rather_than_run_simulated(native, monkeypatch):
@@ -252,7 +261,7 @@ def test_an_absent_package_raises_rather_than_run_simulated(native, monkeypatch)
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
     x, w, offs = _operands(8, 64, 64)
     with pytest.raises(ImportError, match="deep_gemm"):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
+        expert_gemm(x, w, offs=offs, lowp=_native("mxfp8"))
     assert not native.simulated
 
 
@@ -267,17 +276,18 @@ def test_a_kernel_rejection_raises_naming_the_shape(native, quant_format):
     native.kernels.m_grouped_fp8_fp4_gemm_nt_contiguous = reject
     x, w, offs = _operands(8, 64, 32)
     with pytest.raises(RuntimeError, match=rf"{quant_format} grouped GEMM on M=256 N=32 K=64 E=2: narrow N"):
-        expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True)
+        expert_gemm(x, w, offs=offs, lowp=_native(quant_format))
     assert not native.simulated
 
 
 def test_the_4bit_route_casts_mxfp4_and_not_nvfp4(real_casts):
-    """Equals Halo's ``mxfp4`` element for element, e2m1 midpoints included (both round ties to even), and differs from
-    ``nvfp4`` nearly everywhere."""
+    """Equals Halo's ``mxfp4`` element for element, e2m1 midpoints included (both round ties to even), on blocks
+    whose largest element is at least 1e-4: DeepGEMM floors a block's scale there and ``fake_quant`` at float32's
+    tiny. It differs from ``nvfp4`` nearly everywhere."""
     experts, k, n = 2, 2880, 64
     w = _spread_weight(experts, k, n)
     x, _, offs = _operands(8, k, n)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True)
+    expert_gemm(x, w, offs=offs, lowp=_native("mxfp4"))
 
     assert len(real_casts.kernel_calls) == 1
     call = real_casts.kernel_calls[0]
@@ -301,7 +311,7 @@ def test_the_4bit_route_casts_mxfp4_and_not_nvfp4(real_casts):
 def test_the_8bit_route_keeps_128_by_128_weight_blocks(real_casts):
     x, _, offs = _operands(8, 256, 256)
     w = _spread_weight(2, 256, 256)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
+    expert_gemm(x, w, offs=offs, lowp=_native("mxfp8"))
     data, scales = real_casts.kernel_calls[0]["b"]
     assert data.dtype == torch.float8_e4m3fn
     assert scales.shape == (2, 2, 2), "one scale per 128x128 block of each expert's weight"
@@ -316,7 +326,7 @@ def test_a_non_finite_weight_raises_before_the_mxfp4_cast(native, poison, weight
     x, w, offs = _operands(8, 64, 64)
     w[1, 3, 5] = poison
     with pytest.raises(ValueError, match="Non-finite expert weight"):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True, weight_cacheable=weight_cacheable)
+        expert_gemm(x, w, offs=offs, lowp=_native("mxfp4"), weight_cacheable=weight_cacheable)
     assert not native.kernel_calls
 
 
@@ -334,7 +344,7 @@ def test_the_fp8_route_needs_no_guard_as_its_cast_keeps_nan(real_casts):
     w = _spread_weight(2, 128, 128)
     w[0, 0, 0] = float("nan")
     x, _, offs = _operands(8, 128, 128)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True)
+    expert_gemm(x, w, offs=offs, lowp=_native("mxfp8"))
     assert real_casts.kernel_calls[0]["b"][0].float().isnan().any()
 
 
@@ -347,7 +357,7 @@ def test_an_fsdp2_managed_weight_never_reads_the_cache(native, quant_format):
     def weights_the_kernel_saw(weight_cacheable: bool) -> tuple:
         native.kernel_calls.clear()
         for _ in range(2):
-            expert_gemm(x, w, offs=offs, quant_format=quant_format, native=True, weight_cacheable=weight_cacheable)
+            expert_gemm(x, w, offs=offs, lowp=_native(quant_format), weight_cacheable=weight_cacheable)
         return tuple(call["b"] for call in native.kernel_calls)
 
     first, second = weights_the_kernel_saw(True)
@@ -360,13 +370,13 @@ def test_an_fsdp2_managed_weight_never_reads_the_cache(native, quant_format):
 def test_the_weight_cache_requantizes_after_the_write_and_only_then(real_casts, fmt):
     k = 256
     w = nn.Parameter(_spread_weight(2, k, 64))
-    first = deepgemm._quant_weight(w, fmt, k)
-    assert deepgemm._quant_weight(w, fmt, k) is first, "a second call in the step must reuse the cast"
+    first = deepgemm._quant_weight(w, fmt)
+    assert deepgemm._quant_weight(w, fmt) is first, "a second call in the step must reuse the cast"
 
     with torch.no_grad():
         w.mul_(2.0).add_(0.01)
-    second = deepgemm._quant_weight(w, fmt, k)
-    fresh = deepgemm._quant_weight(w, fmt, k, cacheable=False)
+    second = deepgemm._quant_weight(w, fmt)
+    fresh = deepgemm._quant_weight(w, fmt, cacheable=False)
     assert second is not first, "the version bump must miss the cache"
     assert fresh is not second, "cacheable=False must not read the cache"
     for served, recast in zip(second, fresh, strict=True):
@@ -420,9 +430,7 @@ def test_the_batched_weight_cast_is_bitwise_the_per_expert_loop(real_casts, monk
     monkeypatch.setattr(deepgemm, "_CAST_CHUNK_BYTES", chunk_bytes)
     torch.manual_seed(0)
     w = torch.randn(experts, _WEIGHT_K, n, dtype=torch.bfloat16)
-    _assert_same_operand(
-        deepgemm._quant_weight(w, fmt, _WEIGHT_K, cacheable=False), _per_expert_loop(w, fmt, real_casts.utils)
-    )
+    _assert_same_operand(deepgemm._quant_weight(w, fmt, cacheable=False), _per_expert_loop(w, fmt, real_casts.utils))
 
 
 def _recording(cast, rows: list[int]):
@@ -446,7 +454,7 @@ def test_the_batched_cast_pads_chunks_and_copies_back_without_deep_gemm(
     torch.manual_seed(0)
     w = torch.randn(experts, _WEIGHT_K, n, dtype=torch.bfloat16)
 
-    batched = deepgemm._quant_weight(w, fmt, _WEIGHT_K, cacheable=False)
+    batched = deepgemm._quant_weight(w, fmt, cacheable=False)
     batched_rows, rows[:] = list(rows), []
     _assert_same_operand(batched, _per_expert_loop(w, fmt, native.utils))
 
@@ -473,14 +481,14 @@ def test_a_chunk_is_copied_out_and_freed_before_the_next_is_cast(native, monkeyp
 
     for name in ("per_block_cast_to_fp8", "per_token_cast_to_fp4"):
         monkeypatch.setattr(native.utils, name, recording(getattr(native.utils, name)))
-    deepgemm._quant_weight(torch.randn(4, _WEIGHT_K, 100, dtype=torch.bfloat16), fmt, _WEIGHT_K, cacheable=False)
+    deepgemm._quant_weight(torch.randn(4, _WEIGHT_K, 100, dtype=torch.bfloat16), fmt, cacheable=False)
     assert live_at_each_cast == [0, 0, 0, 0]
 
 
 def _fp8_backward(native, x, w, offs):
     x.requires_grad_(True)
     w.requires_grad_(True)
-    expert_gemm(x, w, offs=offs, quant_format="mxfp8", native=True, fp8_backward=True).sum().backward()
+    expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8")).sum().backward()
 
 
 def test_the_fp8_dgrad_runs_on_the_forward_weight_operand(native):
@@ -503,9 +511,7 @@ def test_an_uncached_weight_is_cast_again_for_the_dgrad_and_never_held_in_the_gr
     x, w, offs = _operands(8, 128, 256)
     x.requires_grad_(True)
     w.requires_grad_(True)
-    out = expert_gemm(
-        x, w, offs=offs, quant_format="mxfp8", native=True, fp8_backward=True, weight_cacheable=weight_cacheable
-    )
+    out = expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8"), weight_cacheable=weight_cacheable)
     assert {t.dtype for t in out.grad_fn.saved_tensors} <= {x.dtype, w.dtype, offs.dtype}, "an FP8 operand is saved"
     assert len(out.grad_fn.saved_tensors) == 3
     out.sum().backward()
@@ -519,11 +525,25 @@ def test_the_gradient_casts_drop_the_reference_floor_and_the_activation_casts_ke
     _fp8_backward(native, x, w, offs)
     assert native.cast_floors == [
         ("rows", REFERENCE_AMAX_FLOOR),  # the forward's activation
+        ("tiles", REFERENCE_AMAX_FLOOR),  # the wgrad's activation
         ("rows", GRADIENT_AMAX_FLOOR),  # the dgrad's gradient
         ("tiles", GRADIENT_AMAX_FLOOR),  # the wgrad's gradient
-        ("tiles", REFERENCE_AMAX_FLOOR),  # and its activation
     ]
     assert GRADIENT_AMAX_FLOOR == 0.0 < REFERENCE_AMAX_FLOOR
+
+
+def test_an_activations_fp8_casts_are_dropped_after_their_last_reader(native):
+    """Gate and up read one activation: its tiles are cast once, and nothing outlives the second backward."""
+    x, w, offs = _operands(8, 128, 256)
+    banks = [w.clone().requires_grad_(True) for _ in range(2)]
+    gate_out, up_out = (expert_gemm(x, bank, offs=offs, lowp=_native("mxfp8", "fp8")) for bank in banks)
+    casts = gate_out.grad_fn.casts
+    assert up_out.grad_fn.casts is casts and casts.rows is not None
+    gate_out.sum().backward()
+    assert casts.rows is None and casts.tiles is not None
+    up_out.sum().backward()
+    assert casts.tiles is None
+    assert [kind for kind, floor in native.cast_floors if floor == REFERENCE_AMAX_FLOOR] == ["rows", "tiles"]
 
 
 def test_the_memo_derives_once_per_contents_and_pins_no_graph():
@@ -564,12 +584,6 @@ def test_the_fp8_wgrad_takes_128_experts_per_call_on_whole_token_tiles(native):
     )
     assert first["recipe"] == (1, 1, 128)
     assert w.grad.shape == (experts, 64, 32)
-
-
-def test_the_fp8_backward_needs_an_fp8_forward_weight(native):
-    x, w, offs = _operands(8, 64, 64)
-    with pytest.raises(ValueError, match="reuses the forward's fp8 weight"):
-        expert_gemm(x, w, offs=offs, quant_format="mxfp4", native=True, fp8_backward=True)
 
 
 if __name__ == "__main__":
