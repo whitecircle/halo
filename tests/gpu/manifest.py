@@ -579,6 +579,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--precision mxfp4 --native",
             "--precision fp8 --native --backward fp8",
             "--precision mxfp4 --native --backward fp8",
+            "--precision fp8 --native --backward fp8 --ep-size 1",
         ),
         timeout=900,
     ),
@@ -994,9 +995,29 @@ MANIFEST: dict[str, TestSpec] = {
     # Nemotron-H's level drop and per-expert banks.
     "parallelism/ep/test_lazy_load_converted.py": TestSpec(
         nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "nemotron", "step3p7"),
+        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "gptoss", "nemotron", "step3p7"),
         timeout=900,
-        args_matrix=("--family glm5_next", "--family nemotron_h_omni", "--family step3p7"),
+        args_matrix=("--family glm5_next", "--family gpt_oss_mxfp4", "--family nemotron_h_omni", "--family step3p7"),
+    ),
+    # A tiny native MXFP4 gpt-oss through load, train, resume, gathered and sharded save, merge and a stock reload.
+    "parallelism/ep/test_native_mxfp4_roundtrip.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
+    ),
+    # The same life under the layouts with a load and save path of their own.
+    "parallelism/ep/test_native_mxfp4_layouts.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"),
+        timeout=1200,
+        args_matrix=(
+            Row("--layout pp2", nproc=4, markers=("gpu", "full", "4gpu", "pp", "moe", "gptoss")),
+            Row("--layout ep2_etp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss")),
+            Row("--layout ep1", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss")),
+        ),
+    ),
+    # openai/gpt-oss-20b as released (MXFP4) at EP=8: the decoded layers and the loss against a dequantized
+    # from_pretrained on rank 0.
+    "parallelism/ep/test_gptoss_native_mxfp4_ep8.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=2400
     ),
     "parallelism/ep/test_mok_backend.py": TestSpec(
         nproc=4,
@@ -1015,18 +1036,20 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_deepgemm_padded_groups.py": TestSpec(
         nproc=4,
         markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3", "gptoss"),
-        args_matrix=(
-            "--family qwen3",
-            "--family qwen3_5",
-            "--family gpt_oss",
-            "--family qwen3 --precision mxfp4",
-            Row("--family qwen3 --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3")),
-            Row(
-                "--family gpt_oss --backward bf16 --ep-size 1",
-                nproc=1,
-                markers=("gpu", "core", "1gpu", "ep", "moe", "gptoss"),
-            ),
-            "--family qwen3 --backward bf16",
+        # Each argument set at EP 4 and at EP 1, where the padded sort is sized by a count readback.
+        args_matrix=tuple(
+            row
+            for args in (
+                "--family qwen3",
+                "--family qwen3_5",
+                "--family gpt_oss",
+                "--family qwen3 --precision mxfp4",
+                "--family qwen3 --backward bf16",
+            )
+            for row in (
+                args,
+                Row(f"{args} --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3", "gptoss")),
+            )
         ),
         timeout=900,
     ),

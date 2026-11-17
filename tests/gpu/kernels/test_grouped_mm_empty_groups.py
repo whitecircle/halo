@@ -10,6 +10,7 @@ import torch.nn.functional as F
 
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.grouped_mm import grouped_mm
+from halo.kernels.lowp.spec import LowpSpec
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import fro_rel_err
 from tests.common.rank_log import log
@@ -127,10 +128,9 @@ def test_the_precision_dispatch_survives_empty_groups():
     x_ref, w_ref = _operands(SKEWED_COUNTS)
     reference = _reference(x_ref, w_ref, offs).float()
 
-    for quant_format in (None, "mxfp8", "nvfp4"):
-        label = quant_format or "bf16"
+    for label in ("bf16", "fp8", "fp4"):
         x, w = _operands(SKEWED_COUNTS, requires_grad=True)
-        out = expert_gemm(x, w, offs=offs, quant_format=quant_format)
+        out = expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision=label))
         (out * torch.randn_like(out)).sum().backward()
 
         assert out.shape == (sum(SKEWED_COUNTS), N)

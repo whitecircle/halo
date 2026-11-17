@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Dedicated rollout nodes</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --name-size: 33px;
+    /* Between the blocks of a column, a group gap clear of the next node's name on its top edge. */
+    --column-gap: calc(var(--group-gap) + var(--name-size) / 2);
+  }
+
+  body { width: 1600px; }
+
+  /* The top padding holds the half of the node names above the outline's top edge. */
+  .figure {
+    position: relative;
+    padding-top: calc(var(--name-size) / 2);
+  }
+
+  /* Training node over the actor tier on the left, inference nodes over the config on the right, a gutter for
+     the lines. Each column spreads its two blocks over the taller column's height. */
+  .layout {
+    display: grid;
+    grid-template-columns: 660px 1fr 600px;
+  }
+
+  .column {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    row-gap: var(--column-gap);
+  }
+
+  .column.right { grid-column: 3; }
+
+  /* A node is a thin outline with its serif name on the top edge: the top padding holds the half of the name
+     below the edge, then the heading gap. */
+  .node {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    row-gap: 24px;
+    padding: calc(var(--name-size) / 2 + var(--heading-gap)) 24px 24px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .node-name {
+    position: absolute;
+    top: 0;
+    left: 18px;
+    padding: 0 10px;
+    transform: translateY(-50%);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: var(--name-size);
+    line-height: 1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    background: var(--bg);
+  }
+
+  .card {
+    padding: 24px 28px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .card .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .card .lines {
+    margin-top: 12px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  /* A config line nested under the key before it. */
+  .card .lines .nested { padding-left: 24px; }
+
+  .wire-label {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.3;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Each inference node gets its own sync group</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="layout">
+      <div class="column" id="left"></div>
+      <div class="column right" id="right"></div>
+    </div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const TRAINER = "var(--halo-blue)";
+  const ENGINE = "var(--halo-violet)";
+  const ACTORS = "var(--halo-indigo)";
+
+  /** The inference nodes, one rollout_server_configs entry each. */
+  const SERVERS = [{ host: "inf1" }, { host: "inf2" }];
+  const SERVER_PORT = 8000;
+  const GROUP_PORT = 51216;
+  const RAY_HEAD = "ray-head:6379";
+  const ACTOR_BUDGET = 64;
+  const urlOf = (i) => `http://${SERVERS[i].host}:${SERVER_PORT}`;
+  const groupPort = (i) => GROUP_PORT + i;
+
+  const TRAINER_CARD = {
+    name: "Trainer: torchrun ranks",
+    hue: TRAINER,
+    lines: [
+      "model + optimizer, FSDP2 / EP / TP",
+      "WeightSyncPool on the main process",
+      "one NCCL group per server, trainer is rank 0",
+      "each group port is bound on this host",
+      "a push pauses every server, then resumes",
+    ],
+  };
+  const ACTORS_CARD = {
+    name: "Ray actors: no GPU needed",
+    hue: ACTORS,
+    lines: [
+      "rollout_actor_budget ÷ rollout ranks, cluster-wide",
+      "soft-pinned to the rank’s node, then spills",
+      "each holds the environment and its tools",
+      "POST /v1/chat/completions, round-robin",
+      "inherit the ray start env, not the trainer’s",
+    ],
+  };
+  const SERVER_CARDS = SERVERS.map((_, i) => ({
+    name: `Inference node ${i + 1}: vLLM or SGLang`,
+    hue: ENGINE,
+    lines: [`url: ${urlOf(i)}`, `group_port: ${groupPort(i)}`],
+  }));
+  /** The config, a line per entry: a string, or [line] for one nested under the key before it. */
+  const CONFIG_CARD = {
+    name: "Config",
+    lines: [
+      `ray_address: "${RAY_HEAD}"`,
+      `rollout_actor_budget: ${ACTOR_BUDGET}`,
+      "rollout_server_configs:",
+      ...SERVERS.map((_, i) => [`- {url: "${urlOf(i)}", group_port: ${groupPort(i)}}`]),
+      "enable_prefetch: true",
+    ],
+  };
+  const WIRES = {
+    sync: (i) => `NCCL ${groupPort(i)}`,
+    ray: `Ray · ray_address: ${RAY_HEAD}`,
+    http: "HTTP per turn",
+  };
+  /** Where the Ray link crosses from the training node to the actor tier, as a share of the column's width. */
+  const RAY_AT = 0.42;
+  /** How far a label stands off the line it names, and a link's end off a frame's rounded corner. */
+  const CLEAR = 10;
+  const CORNER = 16;
+
+  function buildCard(spec) {
+    const card = el("div", "card");
+    const name = el("div", "name");
+
+    if (spec.hue !== undefined) {
+      const dot = el("i");
+      dot.style.setProperty("--hue", spec.hue);
+      name.append(dot);
+    }
+
+    name.append(spec.name);
+    const lines = el("div", "lines");
+
+    for (const line of spec.lines) {
+      lines.append(Array.isArray(line) ? el("div", "nested", line[0]) : el("div", undefined, line));
+    }
+
+    card.append(name, lines);
+
+    return card;
+  }
+
+  function buildNode(name, cards) {
+    const node = el("div", "node");
+    node.append(el("div", "node-name", name), ...cards);
+
+    return node;
+  }
+
+  const trainer = buildCard(TRAINER_CARD);
+  const actors = buildCard(ACTORS_CARD);
+  const servers = SERVER_CARDS.map(buildCard);
+  const trainingNode = buildNode("Training node", [trainer]);
+  const actorTier = buildNode("Actor tier: GPU-less CPU nodes", [actors]);
+  const inferenceNodes = buildNode("Inference nodes", servers);
+  document.getElementById("left").append(trainingNode, actorTier);
+  document.getElementById("right").append(inferenceNodes, buildCard(CONFIG_CARD));
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const css = (value) => getComputedStyle(document.documentElement).getPropertyValue(value.slice(4, -1)).trim();
+
+  function label(text) {
+    const node = el("div", "wire-label", text);
+    figure.append(node);
+
+    return node;
+  }
+
+  /** Centres a label over the line from (x1, y1) to (x2, y2), clear of it above or below wherever the label spans. */
+  function labelLine(text, [x1, y1], [x2, y2], side) {
+    const node = label(text);
+    const left = (x1 + x2) / 2 - node.offsetWidth / 2;
+    const yAt = (x) => y1 + ((y2 - y1) * (x - x1)) / (x2 - x1);
+    const ends = [yAt(left), yAt(left + node.offsetWidth)];
+    node.style.left = `${left}px`;
+    node.style.top = side === "above"
+      ? `${Math.min(...ends) - CLEAR - node.offsetHeight}px`
+      : `${Math.max(...ends) + CLEAR}px`;
+  }
+
+  const tn = box(trainingNode);
+  const at = box(actorTier);
+  const inf = box(inferenceNodes);
+  const t = box(trainer);
+  const engine = css(ENGINE);
+
+  // Each sync leaves the training node level with its share of the trainer card and lands on its server's middle.
+  servers.forEach((server, i) => {
+    const s = box(server);
+    const from = [tn.r, t.t + ((i + 1) * (t.b - t.t)) / (servers.length + 1)];
+    const to = [inf.l - 1, (s.t + s.b) / 2];
+    arrow(wires, ...from, ...to, engine);
+    labelLine(WIRES.sync(i), from, to, "above");
+  });
+
+  // The requests reach the inference nodes as a whole, round-robin over the servers.
+  const httpFrom = [at.r, at.t + CORNER];
+  const httpTo = [inf.l - 1, inf.b - CORNER];
+  arrow(wires, ...httpFrom, ...httpTo, css(ACTORS));
+  labelLine(WIRES.http, httpFrom, httpTo, "below");
+
+  // Ray joins the actor tier to the training node: the line stops short of the tier's name on its top edge.
+  const tierName = box(actorTier.querySelector(".node-name"));
+  const rayX = tn.l + RAY_AT * (tn.r - tn.l);
+  const rayEnd = tierName.t - CLEAR;
+  arrow(wires, rayX, tn.b, rayX, rayEnd, css("var(--tertiary)"));
+  const ray = label(WIRES.ray);
+  ray.style.left = `${rayX + 14}px`;
+  ray.style.top = `${(tn.b + rayEnd) / 2 - ray.offsetHeight / 2}px`;
+</script>
+</body>
+</html>

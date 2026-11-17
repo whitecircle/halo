@@ -231,7 +231,8 @@ class MoEExpertBiasGather(torch.autograd.Function):
     """``bias[eids]`` to expert-sorted tokens. The default index_add_ backward is a bf16 atomic scatter that
     serializes, as all of an expert's tokens hit one bias row; here ``grad_bias`` is the one GEMM
     ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias). ``padded``: ``eids``
-    holds -1 padding rows, which take a zero bias and give it no gradient."""
+    holds -1 padding rows, which take a zero bias and give it no gradient; a flag, so the dense path keeps its one
+    ``index_select``."""
 
     @staticmethod
     def forward(ctx, bias: torch.Tensor, eids: torch.Tensor, padded: bool = False):

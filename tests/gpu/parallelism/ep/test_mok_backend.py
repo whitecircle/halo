@@ -14,16 +14,20 @@ import sys
 
 import torch
 import torch.nn as nn
+import triton
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+from halo.distributed.expert_parallel import mok as mok_module
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.distributed.expert_parallel.mok import mok_available
+from halo.distributed.expert_parallel.mok import MoKExperts, is_mok_available
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.batched_transpose import transpose_last_two
 from halo.kernels.lowp.spec import LowpSpec
+from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.harness import gpu_test_main
 from tests.common.numerics import cos_sim, fro_rel_err
 from tests.common.rank_log import log
@@ -59,6 +63,7 @@ def _ep_layer(block: nn.Module, backend: str, ep_size: int, lowp: LowpSpec | Non
         moe_backend=backend,
         ep_rows_per_device=1,
         ep_declared_max_length=TOKENS,
+        fsdp_shard_ep1_experts=False,
         lowp=lowp or LowpSpec(),
     )
     holder = nn.Module()
@@ -104,6 +109,58 @@ def _recording_expert_load(self, experts):
 
 EPMoELayerBase._record_expert_load = _recording_expert_load
 
+warm_ups = []  # one entry per MoK warm-up that returned
+compiled_past_the_warm_up = []  # Triton kernels the MoK step compiled after it
+_warm = MoKExperts.warm
+
+
+def _recording_warm(self, banks, top_k, mxfp8):
+    _warm(self, banks, top_k, mxfp8)
+    warm_ups.append(top_k)
+
+
+MoKExperts.warm = _recording_warm
+
+
+def _record_compile(*, fn, **_):
+    if warm_ups:
+        compiled_past_the_warm_up.append(fn.name)
+    return False  # a truthy return would skip the compile
+
+
+def _bits_equal(left: tuple[torch.Tensor, ...], right: tuple[torch.Tensor, ...]) -> bool:
+    return all(
+        torch.equal(a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8))
+        for a, b in zip(left, right, strict=True)
+    )
+
+
+def _mxfp8_cast_checks(layer: nn.Module) -> dict[str, bool]:
+    """The cast the layer's layout takes is MoK's own of the transposed bank, bit for bit, and the per-step cache
+    serves a cast of the weights as they are after a fused AdamWBF16 step and after a ``load_state_dict``."""
+    weights = tuple(param for _, param in layer.expert_named_params())
+    quantize = mok_module._mxfp8_quantize()
+
+    def cache_is_current() -> bool:
+        served = mok_module._mxfp8_banks(weights).backward[0]
+        return _bits_equal(served, mok_module._mxfp8_layer_cast(mok_module._layer_banks(weights)[0]))
+
+    gate = mok_module._layer_banks(weights)[0]
+    checks = {
+        "the_layer_layout_cast_is_mok_s_cast_of_the_transposed_bank": _bits_equal(
+            mok_module._mxfp8_layer_cast(gate), quantize(transpose_last_two(gate.detach()).contiguous(), True, True)
+        ),
+        "the_cache_served_the_step_s_cast": cache_is_current(),
+    }
+    served = [tuple(t.clone() for t in mok_module._mxfp8_banks(weights).backward[0])]
+    AdamWBF16(layer.expert_named_params(), lr=1e-2).step()
+    served.append(tuple(t.clone() for t in mok_module._mxfp8_banks(weights).backward[0]))
+    checks["an_adamw_bf16_step_recasts_the_banks"] = cache_is_current() and not _bits_equal(*served)
+    layer.load_state_dict({name: value * 0.75 for name, value in layer.state_dict().items()})
+    recast = not _bits_equal(served[1], mok_module._mxfp8_banks(weights).backward[0])
+    checks["a_load_state_dict_recasts_the_banks"] = cache_is_current() and recast
+    return checks
+
 
 _VARIANT = f"{'_mxfp8' if ARGS.mxfp8 else ''}{'_skew' if ARGS.skew else ''}"
 
@@ -121,7 +178,15 @@ def run(ctx) -> dict:
         x = _route_to_rank_0(block, x, ctx.world_size)
 
     reference = _step(_ep_layer(block, "deepep", ctx.world_size), x, grad)
-    mok = _step(_ep_layer(block, "mok", ctx.world_size, MXFP8 if ARGS.mxfp8 else None), x, grad)
+    previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, _record_compile
+    try:
+        mok_layer = _ep_layer(block, "mok", ctx.world_size, MXFP8 if ARGS.mxfp8 else None)
+        if ARGS.mxfp8:  # an evaluation first: its cast, made under inference mode, serves the training step's backward
+            with torch.inference_mode():
+                mok_layer(x)
+        mok = _step(mok_layer, x, grad)
+    finally:
+        triton.knobs.runtime.jit_cache_hook = previous
 
     # A bank no token reached has no gradient on the DeepEP path and a zero one from MoK's kernels.
     unreached = reference.keys() ^ mok.keys()
@@ -131,11 +196,17 @@ def run(ctx) -> dict:
             not (reference.get(name, mok.get(name))).any() for name in unreached
         ),
         "the_output_is_finite_and_nonzero": bool(reference["output"].isfinite().all() and reference["output"].any()),
+        "the_warm_up_leaves_the_step_no_triton_kernel_to_compile": warm_ups == [TOP_K]
+        and not compiled_past_the_warm_up,
     }
     if ARGS.skew:
         local = EXPERTS // ctx.world_size
-        checks["every_token_routed_to_rank_0"] = len(routed) == 2 and all(bool((ids < local).all()) for ids in routed)
+        checks["every_token_routed_to_rank_0"] = len(routed) == 2 + ARGS.mxfp8 and all(
+            bool((ids < local).all()) for ids in routed
+        )
         checks["only_rank_0_takes_expert_gradients"] = (ctx.rank == 0) == ("grad_down_proj" in reference)
+    if ARGS.mxfp8:
+        checks |= _mxfp8_cast_checks(mok_layer)
     metrics = {}
     for name, expected in reference.items():
         if name in unreached:
@@ -152,7 +223,7 @@ def run(ctx) -> dict:
 
 
 if __name__ == "__main__":
-    if not mok_available():
+    if not is_mok_available():
         log("SKIP: mok absent (no image ships it yet)")
         sys.exit(0)
     run()

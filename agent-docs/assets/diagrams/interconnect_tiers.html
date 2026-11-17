@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Interconnect bandwidth ladder</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 330px;
+    --read-col: 410px;
+    --row-pad: 14px;
+  }
+
+  body { width: 1600px; }
+
+  .figure { position: relative; }
+
+  .chart {
+    position: relative;
+    z-index: 1;
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr var(--read-col);
+    column-gap: 48px;
+    align-items: center;
+  }
+
+  .section {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .section i {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  /* A row's own padding counts toward the gaps around a heading. */
+  .section { margin-bottom: calc(var(--heading-gap) - var(--row-pad)); }
+
+  .section.later { margin-top: calc(var(--group-gap) - var(--row-pad)); }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 3px solid var(--body);
+  }
+
+  .key .filled i { background: var(--body); }
+
+  .name {
+    font-size: 25px;
+    line-height: 1.3;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .sub {
+    margin-top: 2px;
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .row { padding-block: var(--row-pad); }
+
+  .track { height: 2px; }
+
+  .ticks {
+    position: relative;
+    height: 30px;
+    margin-top: 14px;
+    font-size: 21px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  svg.marks {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  svg.marks.front { z-index: 2; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+    <p class="subtitle">Bandwidth per GPU, on a log scale</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <svg class="marks" id="grid"></svg>
+    <div class="chart" id="chart"></div>
+    <svg class="marks front" id="marks"></svg>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // GB/s per GPU: measured where a run recorded it, spec otherwise (null when there is none). A reading
+  // writes the row's values and its gaps below other rows, named by id.
+  const SECTIONS = [
+    {
+      name: "Inside a node",
+      hue: "--halo-blue",
+      rows: [
+        { id: "hbm", link: "HBM", joins: "A GPU and its own memory", measured: 6600, spec: 8000, reading: (r) => [`${r.measured} measured`, `Spec ${r.spec}`] },
+        { id: "nvlink", link: "NVLink 5 / NVSwitch", joins: "GPU to GPU", measured: null, spec: 1800, reading: (r) => [`${r.spec} spec`, `About ${r.below("hbm")} below HBM`] },
+        { id: "pcie", link: "PCIe Gen5 ×16", joins: "CPU to GPU", measured: null, spec: 64, reading: (r) => [`${r.spec} spec`, `Per direction, about ${r.below("hbm")} below HBM`] },
+      ],
+    },
+    {
+      name: "Across nodes",
+      hue: "--halo-violet",
+      rows: [
+        { id: "allreduce", link: "NCCL all-reduce", joins: "16 GPUs on 2 nodes", measured: 767, spec: null, reading: (r) => [`${r.measured} measured`, "Bus bandwidth"] },
+        { id: "efa", link: "EFA on B300", joins: "Node to node", measured: 93, spec: 100, reading: (r) => [`${r.measured} measured`, `Spec about ${r.spec}, ${r.below("nvlink")} below NVLink`] },
+        { id: "ib", link: "InfiniBand NDR", joins: "Node to node", measured: null, spec: 50, reading: (r) => [`About ${r.spec} spec`, `About ${r.below("nvlink")} below NVLink, ${r.below("hbm")} below HBM`] },
+      ],
+    },
+  ];
+
+  const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  const bandwidth = (gbps) => (gbps >= 1000 ? `${gbps / 1000} TB/s` : `${gbps} GB/s`);
+  const rows = SECTIONS.flatMap((section) => section.rows);
+  const byId = Object.fromEntries(rows.map((row) => [row.id, row]));
+
+  /** How many times below `ref` a row runs, taken conservatively: ref's measured rate over the row's spec. */
+  const gap = (ref, row) => (ref.measured ?? ref.spec) / (row.spec ?? row.measured);
+  /** A gap as written: a whole number, kept to two significant figures from 100 up. */
+  function roundGap(ratio) {
+    const unit = 10 ** Math.max(0, Math.floor(Math.log10(ratio)) - 1);
+
+    return Math.round(ratio / unit) * unit;
+  }
+
+  const times = (ratio) => `${roundGap(ratio).toLocaleString("en-US")}×`;
+
+  /** A row's two reading lines, its values and gaps written in. */
+  const reading = (row) =>
+    row.reading({
+      measured: bandwidth(row.measured),
+      spec: bandwidth(row.spec),
+      below: (id) => times(gap(byId[id], row)),
+    });
+
+  // The title's range: each node-to-node link's gap below NVLink.
+  const nodeGaps = rows.filter((row) => row.joins === "Node to node").map((row) => roundGap(gap(byId.nvlink, row)));
+
+  if (nodeGaps.length === 0) {
+    throw new Error("The title compares node-to-node links, and no row has joins: Node to node.");
+  }
+
+  const [lowGap, highGap] = [Math.min(...nodeGaps), Math.max(...nodeGaps)].map((n) => n.toLocaleString("en-US"));
+  document.getElementById("title").append(el("span", "nw", "Node-to-node"), ` links run ${lowGap === highGap ? lowGap : `${lowGap}–${highGap}`}× below NVLink`);
+
+  // Whole decades covering every value, a tick on each.
+  const values = rows.flatMap((row) => [row.measured, row.spec]).filter((v) => v !== null);
+  const lowDecade = Math.floor(Math.log10(Math.min(...values)) + 1e-9);
+  const highDecade = Math.ceil(Math.log10(Math.max(...values)) - 1e-9);
+  const decades = Array.from({ length: highDecade - lowDecade + 1 }, (_, i) => 10 ** (lowDecade + i));
+  const share = (gbps) => (Math.log10(gbps) - lowDecade) / (highDecade - lowDecade);
+
+  const chart = document.getElementById("chart");
+  const tracks = [];
+
+  SECTIONS.forEach((section, i) => {
+    const head = el("div", i === 0 ? "section" : "section later");
+    const dot = el("i");
+    dot.style.setProperty("--hue", `var(${section.hue})`);
+    head.append(dot, section.name);
+    chart.append(head);
+
+    if (i === 0) {
+      const key = el("div", "key");
+      key.innerHTML = '<span class="filled"><i></i>Measured</span><span><i></i>Spec</span>';
+      chart.append(key, el("div"));
+    } else {
+      chart.append(el("div"), el("div"));
+    }
+
+    for (const row of section.rows) {
+      const label = el("div", "row");
+      label.append(el("div", "name", row.link), el("div", "sub", row.joins));
+      const track = el("div", "track");
+      const lines = reading(row);
+      const read = el("div", "row");
+      read.append(el("div", "name", lines[0]), el("div", "sub", lines[1]));
+      chart.append(label, track, read);
+      tracks.push({ label, track, row, hue: css(section.hue) });
+    }
+  });
+
+  const ticks = el("div", "ticks");
+  chart.append(el("div"), ticks, el("div"));
+
+  for (const tick of decades) {
+    const label = el("span", undefined, bandwidth(tick));
+    label.style.left = `${share(tick) * 100}%`;
+    ticks.append(label);
+  }
+
+  const figure = document.getElementById("figure");
+  const grid = document.getElementById("grid");
+  const marks = document.getElementById("marks");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+
+  const first = box(tracks[0].track);
+  const plotTop = box(tracks[0].label).t;
+  const plotBottom = box(ticks).t - 10;
+  const x = (gbps) => first.l + share(gbps) * (first.r - first.l);
+  const line = css("--line");
+  const bg = css("--bg");
+
+  for (const tick of decades) {
+    grid.append(svgEl("line", { x1: x(tick), y1: plotTop, x2: x(tick), y2: plotBottom, stroke: line, "stroke-width": 1 }));
+  }
+
+  for (const { track, row, hue } of tracks) {
+    const t = box(track);
+    const y = (t.t + t.b) / 2;
+    grid.append(svgEl("line", { x1: t.l, y1: y, x2: t.r, y2: y, stroke: line, "stroke-width": 1 }));
+
+    if (row.measured !== null && row.spec !== null) {
+      marks.append(svgEl("line", { x1: x(row.measured), y1: y, x2: x(row.spec), y2: y, stroke: hue, "stroke-width": 3 }));
+    }
+
+    if (row.measured !== null) {
+      marks.append(svgEl("circle", { cx: x(row.measured), cy: y, r: 11, fill: hue }));
+    }
+
+    if (row.spec !== null) {
+      marks.append(svgEl("circle", { cx: x(row.spec), cy: y, r: 9.5, fill: row.measured === null ? bg : "none", stroke: hue, "stroke-width": 3 }));
+    }
+  }
+</script>
+</body>
+</html>

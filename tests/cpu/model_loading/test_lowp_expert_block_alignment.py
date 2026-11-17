@@ -155,7 +155,7 @@ def test_native_without_deep_gemm_is_refused_at_load(family, monkeypatch):
         apply_lowp_compute(
             model, LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False), expert_weight_cacheable=False
         )
-    assert not model.layers[0].mlp._lowp_native
+    assert model.layers[0].mlp._lowp is None
 
 
 @pytest.mark.parametrize("family", list(FAMILIES))
@@ -165,12 +165,7 @@ def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatc
     model = _Model(_layer(family, ALIGNED_M, grouped=True))
     lowp = LowpSpec(precision="fp8", backend="native", backward_precision=backward, apply_dense_mlp=False)
     assert apply_lowp_compute(model, lowp, expert_weight_cacheable=False)["moe_layers"] == 1
-    layer = model.layers[0].mlp
-    assert (layer._lowp_quant_format, layer._lowp_native, layer._lowp_fp8_backward) == (
-        "mxfp8",
-        True,
-        backward == "fp8",
-    )
+    assert model.layers[0].mlp._lowp is lowp
 
 
 @pytest.mark.parametrize("family", list(FAMILIES))

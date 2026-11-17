@@ -23,13 +23,11 @@ from halo.configs.parallelism_arguments import ParallelismArguments, parallelism
 from halo.distributed.expert_parallel import mok
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
-from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
-from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from halo.distributed.expert_parallel.moe_layer import layer as layer_module
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel import load_rules
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.ep_stubs import stubbed_rank_ep_layer
 from tests.common.parallelism import create_config
@@ -44,14 +42,14 @@ def _mok(**kw):
 MXFP8 = LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False)
 
 
-@pytest.mark.parametrize("ep_size", [1, 4])
+@pytest.mark.parametrize("overrides", [{}, {"ep_size": 1, "fsdp_shard_ep1_experts": False}])
 @pytest.mark.parametrize(
     "lowp",
     [LowpSpec(), MXFP8, LowpSpec(precision="fp8", apply_moe_experts=False)],
     ids=["bf16", "mxfp8", "simulated_on_the_dense_mlps_alone"],
 )
-def test_pure_node_local_ep_with_a_budget_is_accepted(ep_size, lowp):
-    assert _mok(ep_size=ep_size, lowp=lowp).lowp == lowp
+def test_pure_node_local_ep_with_a_budget_is_accepted(overrides, lowp):
+    assert _mok(**overrides, lowp=lowp).lowp == lowp
 
 
 @pytest.mark.parametrize(
@@ -61,6 +59,9 @@ def test_pure_node_local_ep_with_a_budget_is_accepted(ep_size, lowp):
         ({"world_size": 16, "gpus_per_node": 8, "ep_size": 16}, "spans NVLink domains"),
         ({"world_size": 8, "gpus_per_node": 8, "ep_size": 4, "expert_tp_size": 2}, "expert_tensor_parallel_size=2"),
         ({"ep_size": 1, "cp_size": 4}, "context_parallel_size=4"),
+        ({"world_size": 8, "gpus_per_node": 8, "ep_size": 8, "tp_size": 2}, "tensor_parallel_size=2"),
+        ({"world_size": 16, "gpus_per_node": 8, "ep_size": 8, "pp_size": 2}, "pipeline_parallel_size=2"),
+        ({"ep_size": 1}, "FSDP2-managed experts"),
         ({"expert_lora": ExpertLoraSpec(r=8, alpha=16)}, "expert LoRA"),
         ({"ep_fp32_experts": True}, "fp32_experts"),
         ({"lowp": LowpSpec(precision="fp8")}, "lowp_backend='simulated'"),
@@ -98,7 +99,7 @@ def test_the_token_capacity_is_the_budget_padded_to_mok_shapes(tokens, capacity)
 @pytest.fixture
 def mok_config(monkeypatch):
     """``_mok_config`` over a stand-in ``MoKConfig`` that keeps its fields."""
-    monkeypatch.setattr(mok, "_mok", lambda: (SimpleNamespace(MoKConfig=SimpleNamespace), None))
+    monkeypatch.setattr(mok, "_mok", lambda: SimpleNamespace(MoKConfig=SimpleNamespace))
     mok._mok_config.cache_clear()
     yield mok._mok_config
     mok._mok_config.cache_clear()
@@ -168,7 +169,7 @@ def mok_import():
 
 def test_an_absent_package_reads_as_unavailable(mok_import):
     sys.modules["mok"] = None  # the import system's marker for a module that is not there
-    assert not mok.mok_available()
+    assert not mok.is_mok_available()
 
 
 def test_an_installed_package_that_does_not_import_raises(mok_import):
@@ -177,14 +178,14 @@ def test_an_installed_package_that_does_not_import_raises(mok_import):
     package.__path__ = []  # installed, with a ``functional`` that fails to import
     sys.modules["mok"] = package
     with pytest.raises(ImportError):
-        mok.mok_available()
+        mok.is_mok_available()
 
 
 def test_a_model_with_no_wrapped_moe_block_is_refused():
     """At ``expert_parallel_size`` 1 nothing else would notice: the setting would run nothing."""
     dense = SimpleNamespace(model_type="qwen3")
     with pytest.raises(ValueError, match="moe_backend='mok' runs the routed experts .* would be ignored"):
-        load_rules.reject_ep_without_family(_mok(ep_size=1), dense, wraps_experts=False)
+        load_rules.reject_ep_without_family(_mok(ep_size=1, fsdp_shard_ep1_experts=False), dense, wraps_experts=False)
 
 
 @pytest.mark.parametrize(("backend", "rows"), [("mok", 8), ("deepep", 1)])
@@ -196,7 +197,9 @@ def test_an_evaluating_run_sizes_mok_buffers_for_its_eval_batch(backend, rows, c
     )
     with caplog.at_level("WARNING", logger="halo.configs.parallelism_arguments"):
         config = parallelism_config_from_args(
-            ParallelismArguments(moe_backend=backend), trainer_cls=DistributedTrainerMixin, training_config=training
+            ParallelismArguments(moe_backend=backend, fsdp_shard_ep1_experts=False),
+            trainer_cls=DistributedTrainerMixin,
+            training_config=training,
         )
     assert (config.ep_rows_per_device, config.ep_declared_max_length) == (rows, 1024)
     warned = [r.getMessage() for r in caplog.records if "pads every forward" in r.getMessage()]
@@ -209,7 +212,9 @@ def test_an_eval_batch_no_larger_than_the_training_one_warns_nothing(caplog):
     )
     with caplog.at_level("WARNING", logger="halo.configs.parallelism_arguments"):
         parallelism_config_from_args(
-            ParallelismArguments(moe_backend="mok"), trainer_cls=DistributedTrainerMixin, training_config=training
+            ParallelismArguments(moe_backend="mok", fsdp_shard_ep1_experts=False),
+            trainer_cls=DistributedTrainerMixin,
+            training_config=training,
         )
     assert not caplog.records
 
@@ -223,18 +228,19 @@ def _gpt_oss_block() -> nn.Module:
 
 
 def _build(layer_cls, block, monkeypatch, *, available: bool = True):
-    monkeypatch.setattr(layer_module, "mok_available", lambda: available)
+    monkeypatch.setattr(mok, "_mok", lambda: object() if available else None)
     return stubbed_rank_ep_layer(layer_cls, block, 1, 1, 0, grouped=True, moe_backend="mok")
 
 
 def test_a_supported_block_builds(monkeypatch):
-    assert _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)._mok_backend
+    layer = _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)
+    assert isinstance(layer.dispatcher, mok.MoKExperts)
 
 
 @pytest.mark.parametrize(
     ("layer_cls", "block", "message"),
     [
-        (EPGptOssMoELayer, _gpt_oss_block, "EPGptOssMoELayer does not declare SUPPORTS_MOK"),
+        (EPGptOssMoELayer, _gpt_oss_block, "EPGptOssMoELayer's family does not declare supports_mok"),
         (EPQwen3MoELayer, lambda: _qwen3_block(192), "intermediate 192 not multiples of 256"),
     ],
     ids=["biased-clamped-experts", "misaligned-intermediate"],
@@ -244,51 +250,75 @@ def test_experts_mok_would_compute_wrong_are_refused_at_build(monkeypatch, layer
         _build(layer_cls, block(), monkeypatch)
 
 
-def test_only_a_family_declaring_it_itself_supports_mok():
-    """Qwen3-Next and its subclass inherit Qwen3.5's EP layer; no MoK equivalence test covers them."""
-    declaring = {cls.__name__ for cls in MOE_LAYER_MAP.values() if vars(cls).get("SUPPORTS_MOK", False)}
-    assert declaring == {"EPQwen3MoELayer", "EPQwen3_5MoELayer"}
-    assert EPQwen3NextMoELayer.SUPPORTS_MOK, "premise: the attribute alone is inherited"
+def test_only_the_families_with_an_equivalence_row_support_mok():
+    """Qwen3-Next and Qwen3.8-Flash-Next run Qwen3.5's EP layer under specs of their own, which declare nothing."""
+    assert {spec.model_types[0] for spec in MOE_FAMILY_SPECS if spec.supports_mok} == {"qwen3_moe", "qwen3_5_moe"}
 
 
-def test_an_inherited_declaration_is_refused_at_build(monkeypatch):
-    class Subclassed(EPQwen3MoELayer):
-        pass
+@pytest.mark.parametrize(
+    ("model_type", "message"), [("qwen3_next", "does not declare supports_mok"), ("qwen3_moe", "")]
+)
+def test_an_unsupported_family_and_an_absent_package_are_refused_before_the_load(monkeypatch, model_type, message):
+    config = SimpleNamespace(model_type=model_type)
+    monkeypatch.setattr(mok, "_mok", lambda: None)
+    expected = (
+        pytest.raises(ValueError, match=message) if message else pytest.raises(RuntimeError, match="needs the mok")
+    )
+    with expected:
+        load_rules.reject_ep_without_family(_mok(), config, wraps_experts=True)
+    monkeypatch.setattr(mok, "_mok", object)
+    if not message:
+        load_rules.reject_ep_without_family(_mok(), config, wraps_experts=True)
 
-    with pytest.raises(ValueError, match="Subclassed does not declare SUPPORTS_MOK"):
-        _build(Subclassed, _qwen3_block(256), monkeypatch)
+
+def test_destroying_the_layers_backend_releases_mok_workspaces(monkeypatch):
+    """``cleanup_ep`` destroys every EP layer's ``dispatcher``, which under mok is the MoK backend."""
+    layer = _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)
+    released = []
+    monkeypatch.setattr(mok, "_mok", lambda: SimpleNamespace(clear_workspace_cache=lambda: released.append(True)))
+    layer.dispatcher.destroy()
+    assert released == [True]
 
 
 def test_mxfp8_under_mok_needs_no_deep_gemm(monkeypatch):
     """MoK's own kernels run the native recipe; the DeepGEMM gate is for the DeepEP path."""
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
     layer = _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)
-    assert layer.set_lowp_compute(MXFP8, weight_cacheable=True) and layer._lowp_native
+    assert layer.set_lowp_compute(MXFP8, weight_cacheable=True) and layer._lowp is MXFP8
 
 
-def test_the_mxfp8_cast_is_redone_after_an_optimizer_write_and_only_then(monkeypatch):
-    """The backward and every grad-accumulation microbatch reuse one cast per step; a stale one trains old weights."""
+def test_the_mxfp8_cast_is_redone_after_a_write_to_a_bank_and_only_then(monkeypatch):
+    """The backward and every grad-accumulation microbatch reuse one cast per step; a stale one trains old weights. An
+    optimizer step, a ``load_state_dict`` and a rebound bank each cast anew."""
     casts = []
 
     def quantize(w, normal, transposed):
         casts.append(w)
         return w, w, w, w
 
-    monkeypatch.setattr(mok, "_mok", lambda: (None, quantize))
-    banks = tuple(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
-    first = mok._mxfp8_weights(banks, cacheable=True)
-    assert mok._mxfp8_weights(banks, cacheable=True) is first and len(casts) == 3
-    with torch.no_grad():
-        banks[1].add_(1.0)
-    assert mok._mxfp8_weights(banks, cacheable=True) is not first and len(casts) == 6
-    mok._mxfp8_weights(banks, cacheable=False)
-    assert len(casts) == 9, "an FSDP2-managed bank is cast on every call"
+    monkeypatch.setattr(mok, "_mxfp8_quantize", lambda: quantize)
+    holder = nn.ParameterList(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
+    banks = tuple(holder)
+    first = mok._mxfp8_banks(banks)
+    assert mok._mxfp8_banks(banks).forward[0][0] is first.forward[0][0] and len(casts) == 3
+
+    for bank in banks:
+        bank.grad = torch.ones_like(bank)
+    torch.optim.SGD(holder, lr=0.1).step()
+    mok._mxfp8_banks(banks), mok._mxfp8_banks(banks)
+    assert len(casts) == 6, "an optimizer step"
+
+    holder.load_state_dict({name: torch.zeros_like(bank) for name, bank in holder.state_dict().items()})
+    mok._mxfp8_banks(banks), mok._mxfp8_banks(banks)
+    assert len(casts) == 9 and not casts[-1].any(), "a load_state_dict"
+
     rebound = (banks[0], nn.Parameter(banks[1].detach().clone()))
     with torch.no_grad():
         rebound[1].add_(0.0)
+        rebound[1].add_(0.0)
     assert rebound[1]._version == banks[1]._version, "premise: another tensor at the same version"
-    mok._mxfp8_weights(banks, cacheable=True)
-    assert mok._mxfp8_weights(rebound, cacheable=True) is not first and len(casts) == 12, "a rebound bank is cast"
+    mok._mxfp8_banks(rebound)
+    assert len(casts) == 12, "a rebound bank"
 
 
 def test_an_absent_package_is_refused_at_build(monkeypatch):
@@ -369,7 +399,7 @@ def test_the_adapter_runs_the_layers_experts_through_mok_layouts_and_back(monkey
     local expert ids only, and the config is sized for this group."""
     torch.manual_seed(0)
     functional = _EagerMoK()
-    monkeypatch.setattr(mok, "_mok", lambda: (functional, None))
+    monkeypatch.setattr(mok, "_mok", lambda: functional)
     monkeypatch.setattr(mok, "transpose_last_two", _transpose)
     monkeypatch.setattr(mok.dist, "get_world_size", lambda group: 1)
     mok._mok_config.cache_clear()
@@ -383,9 +413,8 @@ def test_the_adapter_runs_the_layers_experts_through_mok_layouts_and_back(monkey
     banks = tuple(bank.requires_grad_(True) for bank in (*glu, down))
     seed_grad = _bf16_exact(tokens, hidden)
 
-    out = mok.mok_routed_experts(
-        x, top_experts, router_weights, banks, capacity=capacity, group=None, num_experts=experts
-    )
+    ep_config = SimpleNamespace(mok_token_capacity=capacity, dispatch_ep_group=None)
+    out = mok.MoKExperts(ep_config, experts, hidden)(x, top_experts, router_weights, banks)
     out.backward(seed_grad)
     got = [out.detach(), x.grad, router_weights.grad, *(bank.grad for bank in banks)]
     mok._mok_config.cache_clear()
@@ -418,10 +447,9 @@ def test_the_adapter_runs_the_layers_experts_through_mok_layouts_and_back(monkey
 def test_a_forward_past_the_capacity_raises_before_any_kernel(monkeypatch):
     monkeypatch.setattr(mok, "_mok", lambda: pytest.fail("the over-capacity forward reached MoK"))
     with pytest.raises(RuntimeError, match="sized its buffers to 512 tokens per rank .* a forward carried 513"):
-        mok.mok_routed_experts(
-            torch.zeros(513, 8), torch.zeros(513, 2, dtype=torch.long), torch.zeros(513, 2), (), capacity=512,
-            group=None, num_experts=4,
-        )  # fmt: skip
+        mok.MoKExperts(SimpleNamespace(mok_token_capacity=512), 4, 8)(
+            torch.zeros(513, 8), torch.zeros(513, 2, dtype=torch.long), torch.zeros(513, 2), ()
+        )
 
 
 if __name__ == "__main__":

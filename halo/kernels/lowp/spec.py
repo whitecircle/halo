@@ -13,6 +13,9 @@ LowpBackwardPrecision = Literal["bf16", "fp8"]
 # Block-scaled: mxfp8 = e4m3 + e8m0/32, mxfp4 = e2m1 + e8m0/32, nvfp4 = e2m1 + e4m3/16 (two-level).
 QuantFormat = Literal["mxfp8", "mxfp4", "nvfp4"]
 
+# DeepGEMM's contiguous layout: each expert's rows fill whole segments of this many, one FP8 scale tile each.
+GROUP_ROW_ALIGN = 128
+
 # Attention q/k/v/o stay bf16 in training, as small GEMMs are FA4's domain.
 MLP_PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 ATTENTION_PROJECTIONS = ("q_proj", "k_proj", "v_proj", "o_proj")

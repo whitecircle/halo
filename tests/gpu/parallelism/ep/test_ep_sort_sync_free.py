@@ -38,7 +38,7 @@ from tests.common.rank_log import log
 from tests.common.repo import probe_findings
 from tests.common.route_sort_reference import (
     CASES,
-    PAD_ALIGN,
+    GROUP_ROW_ALIGN,
     case_findings,
     compiled_sort_binaries,
     padded_argsort,
@@ -199,7 +199,7 @@ def trips_the_detector(fn) -> bool:
 
 
 def _padded_sort(experts, weights, local_experts, counts):
-    return sort_routing_by_expert(experts, weights, local_experts, counts, PAD_ALIGN)
+    return sort_routing_by_expert(experts, weights, local_experts, counts, GROUP_ROW_ALIGN)
 
 
 def check_counting_sort(device) -> dict[str, bool]:
@@ -234,11 +234,11 @@ def check_counting_sort(device) -> dict[str, bool]:
         checks[f"{case.name}_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
         if inputs.counts is None:
             continue
-        rows = sum(-(-count // PAD_ALIGN) * PAD_ALIGN for count in inputs.counts)
+        rows = sum(-(-count // GROUP_ROW_ALIGN) * GROUP_ROW_ALIGN for count in inputs.counts)
         generator = torch.Generator(device=device).manual_seed(index)
         padded_inputs = inputs._replace(upstream=torch.randn(rows, device=device, generator=generator))
         want = sort_with_grad(padded_argsort, case, padded_inputs)
-        warm_route_sort_kernels(case.top_k, case.local_experts, device, pad_align=PAD_ALIGN)
+        warm_route_sort_kernels(case.top_k, case.local_experts, device, pad_align=GROUP_ROW_ALIGN)
         warm = compiled_sort_binaries()
         torch.cuda.synchronize()
         requests = pinned_host_requests()

@@ -15,6 +15,7 @@ from halo.distributed.expert_parallel.families import gpt_oss as gpt_oss_layer
 from halo.distributed.expert_parallel.moe_layer import compute
 from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.kernels import fused_glu, moe_permute, moe_route_sort
+from halo.kernels.lowp.spec import LowpSpec
 from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.grouped_gemm_layers import (
@@ -59,7 +60,7 @@ class _RecordingLayer(StubEPLayerBase):
         self._capture_routing = False
         self._expert_kernels_warmed = False
         self._use_grouped_mm = True
-        self._lowp_quant_format = None
+        self._lowp = None
         self._lowp_weight_cacheable = True
         self._expert_adapters_enabled = True
         self._perf = lambda _label: contextlib.nullcontext()
@@ -251,7 +252,7 @@ def test_a_layer_padding_its_expert_groups_warms_the_padded_sort_gather_and_ffn(
     meets whole 128-row groups with -1 expert ids on their padding (a zero bias row, on GPT-OSS): each compiles or
     loads on its first launch, which must be the warm-up's. A dense layer warms none of them."""
     layer = gemm_layer(family, "ep2", "defaults")
-    layer._pads_expert_groups = pads
+    layer._uses_padded_groups = pads
     sorts, permutes, ffns = [], [], []
     monkeypatch.setattr(compute, "warm_route_sort_kernels", lambda *args, **kwargs: sorts.append(kwargs))
     monkeypatch.setattr(compute, "warm_permute_kernels", lambda *args, **kwargs: permutes.append(kwargs))
@@ -512,11 +513,11 @@ def test_the_native_fp8_backward_warms_each_trainable_banks_long_group_wgrad(mon
     banks[0][1].requires_grad_(False)
     device = torch.device("cpu")
 
-    layer._lowp_native = True
+    layer._lowp = LowpSpec(precision="fp8", backend="native")
     layer._warm_expert_gemm(device, torch.bfloat16, layer.hidden_dim)
     assert warmed == [], "a bf16 backward runs no DeepGEMM weight gradient"
 
-    layer._lowp_fp8_backward = True
+    layer._lowp = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
     layer._warm_expert_gemm(device, torch.bfloat16, layer.hidden_dim)
     assert warmed == [(*bank.shape, torch.bfloat16, device) for _, bank in banks[1:]]
 

@@ -634,7 +634,7 @@ class GroupedSortLayer(SimpleNamespace):
     """A stand-in with only what ``EPMoELayerBase._sort_tokens_for_grouped_mm`` reads off ``self``."""
 
     _require_recv_counts = EPMoELayerBase._require_recv_counts
-    _pads_expert_groups = False
+    _uses_padded_groups = False
 
 
 def received_expert_ids(num_tokens: int, top_k: int, experts_per_rank: int, ep_size: int, seed: int) -> torch.Tensor:

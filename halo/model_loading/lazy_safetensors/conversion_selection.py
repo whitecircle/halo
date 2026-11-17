@@ -11,7 +11,11 @@ from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
 from halo.model_loading.dtype import is_packed_4bit_parameter
-from halo.model_loading.lazy_safetensors.conversion import ConvertTargets, lazy_key_mapping
+from halo.model_loading.lazy_safetensors.conversion import (
+    ConvertTargets,
+    lazy_key_mapping,
+    mxfp4_dequantize_conversions,
+)
 from halo.models.introspection.config_access import text_config
 from halo.models.moe.family_specs import find_moe_family_spec
 
@@ -43,10 +47,11 @@ def _registry_conversions(model: nn.Module) -> list:
 
 
 def family_key_mapping(
-    model: nn.Module, disk_keys: list[str], *, replay_loaded: bool = False
+    model: nn.Module, disk_keys: list[str], *, replay_loaded: bool = False, native_mxfp4: bool = False
 ) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
     """:func:`.conversion.lazy_key_mapping` planned through the family's whole mapping, or with ``replay_loaded`` the
-    conversions an eager load recorded."""
+    conversions an eager load recorded. ``native_mxfp4`` adds the dequantize entries ``from_pretrained`` takes for a
+    native MXFP4 release, which a shell built without its ``quantization_config`` does not carry."""
     if replay_loaded:
         # transformers records the broad Bnb4bitDeserialize template (target "weight"), which also matches
         # ordinary norms and embeddings as an identity; packed Params4bit are never masters, so it is skipped.
@@ -64,6 +69,8 @@ def family_key_mapping(
         ]
     else:
         conversions = _registry_conversions(model)
+    if native_mxfp4:
+        conversions = [*mxfp4_dequantize_conversions(), *conversions]
     plan = build_key_plan(
         disk_keys, model.state_dict(), conversions, getattr(model, "base_model_prefix", None) or None
     )

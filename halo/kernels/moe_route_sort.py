@@ -272,39 +272,10 @@ def _argsort_routing(
     return sorted_token_idx, flat_weights[order], sorted_expert_ids, offs, inv_map
 
 
-def pad_routing_groups(
-    sorted_token_idx: torch.Tensor,
-    sorted_weights: torch.Tensor,
-    sorted_expert_ids: torch.Tensor,
-    offs: torch.Tensor,
-    inv_map: torch.Tensor,
-    align: int,
-    counts: tuple[int, ...] | None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """:func:`sort_routing_by_expert`'s outputs with each expert's group zero-padded to a multiple of ``align`` rows:
-    a padding row holds token -1, weight 0 and expert -1, ``offs`` are the padded group ends and ``inv_map`` points
-    each slot at its padded row, with the padded row count as its sentinel. ``counts`` (host-side) sizes the output;
-    None reads the group ends back once."""
-    if counts is None:
-        ends = offs.tolist()
-        counts = tuple(b - a for a, b in zip([0, *ends[:-1]], ends, strict=True))
-    rows = sum(-(-c // align) * align for c in counts)
-    n_sorted = sorted_token_idx.shape[0]
-    group = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
-    padded = (group + align - 1) // align * align
-    # Counts that disagree with the sorted groups would place rows past the output they sized.
-    torch._assert_async(padded.sum() == rows, RECEIVE_COUNTS_DISAGREE)
-    shift = (padded.cumsum(0) - padded) - (group.cumsum(0) - group)
-    pos = torch.arange(n_sorted, device=offs.device) + shift.index_select(0, sorted_expert_ids.long())
-    token_idx = sorted_token_idx.new_full((rows,), -1).index_copy_(0, pos, sorted_token_idx)
-    weights = sorted_weights.new_zeros(rows).index_copy(0, pos, sorted_weights)
-    expert_ids = sorted_expert_ids.new_full((rows,), -1).index_copy_(0, pos, sorted_expert_ids)
-    if n_sorted:
-        slot_rows = pos.index_select(0, inv_map.clamp(max=n_sorted - 1).reshape(-1)).view_as(inv_map)
-        inv_map = torch.where(inv_map < n_sorted, slot_rows, rows)
-    else:
-        inv_map = torch.full_like(inv_map, rows)
-    return token_idx, weights, expert_ids, padded.cumsum(0).to(torch.int32), inv_map
+def local_expert_counts(experts: torch.Tensor, num_local_experts: int) -> tuple[int, ...]:
+    """Each local expert's slot count, read back from the device: what sizes a padded sort where no receive counts
+    exist (``ep_size`` 1, every id local)."""
+    return tuple(torch.bincount(experts.flatten(), minlength=num_local_experts).tolist())
 
 
 def sort_routing_by_expert(
@@ -315,34 +286,36 @@ def sort_routing_by_expert(
     pad_align: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Each local expert's slots in slot order, ids outside ``[0, num_local_experts)`` (DeepEP's ``-1``) dropped,
-    ``offs`` the int32 group ends; ``pad_align`` pads each group as :func:`pad_routing_groups` does. ``counts[e]`` is
-    the host-side slot count of expert ``e``, None when every id is local; counts whose total, or whose padded groups'
-    total, disagrees with the ids trip a device-side assert. On CUDA nothing is read back and the kernels take only unspecialized launch scalars, so one
-    compile serves every receive, where the torch argsort picks kernels by slot count; with counts the counting sort
-    places the padded groups itself. A per-sort copy of the counts would stage through a pinned host block and grow
-    the pinned pool. Both paths return the same integers in the same order."""
+    ``offs`` the int32 group ends. ``counts[e]`` is the host-side slot count of expert ``e``, None when every id is
+    local; counts that disagree with the ids trip a device-side assert. ``pad_align`` (CUDA, with counts) places each
+    group in whole multiples of it: a padding row holds token -1, weight 0 and expert -1, ``offs`` are the padded group
+    ends and ``inv_map``'s sentinel the padded row count. On CUDA nothing is read back and the kernels take only
+    unspecialized launch scalars, so one compile serves every receive, where the torch argsort picks kernels by slot
+    count. A per-sort copy of the counts would stage through a pinned host block and grow the pinned pool. Unpadded,
+    both paths return the same integers in the same order."""
     if counts is not None and len(counts) != num_local_experts:
         raise ValueError(f"{len(counts)} receive counts for {num_local_experts} local experts")
-    if pad_align is not None and pad_align < 1:
+    if pad_align is None:
+        sort = _counting_sort if experts.is_cuda else _argsort_routing
+        return sort(experts, weights, num_local_experts, counts)
+    if pad_align < 1:
         raise ValueError(f"pad_align must be a positive row count, got {pad_align}")
-    if experts.is_cuda and (pad_align is None or counts is not None):
-        return _counting_sort(experts, weights, num_local_experts, counts, pad_align)
-    sort = _counting_sort if experts.is_cuda else _argsort_routing
-    routing = sort(experts, weights, num_local_experts, counts)
-    return routing if pad_align is None else pad_routing_groups(*routing, pad_align, counts)
+    if not experts.is_cuda:
+        raise ValueError("padded groups are placed by the CUDA counting sort; the CPU sort has no padded layout")
+    return _counting_sort(experts, weights, num_local_experts, counts, pad_align)
 
 
 def warm_route_sort_kernels(
     top_k: int, num_local_experts: int, device: torch.device, pad_align: int | None = None
 ) -> None:
     """Sort one synthetic receive forward and backward with grad enabled; one call covers every receive size, with
-    counts or without, and padded to ``pad_align`` rows per group when the expert GEMM pads. The ids and weights carry
-    the dtypes the expert compute is handed: int64 (DeepEP's ``topk_idx_t``, the routers' top-k) and fp32 (DeepEP's,
-    and every family's routing casts to it)."""
+    counts or without, and padded to ``pad_align`` rows per group when the expert GEMM pads, with the count readback
+    an ``ep_size`` 1 layer sizes it by. The ids and weights carry the dtypes the expert compute is handed: int64
+    (DeepEP's ``topk_idx_t``, the routers' top-k) and fp32 (DeepEP's, and every family's routing casts to it)."""
     experts = torch.zeros((1, top_k), dtype=torch.long, device=device)
     weights = torch.zeros((1, top_k), dtype=torch.float32, device=device, requires_grad=True)
-    counts = (top_k,) + (0,) * (num_local_experts - 1)
-    loss = sort_routing_by_expert(experts, weights, num_local_experts, counts, pad_align)[1].sum()
-    if pad_align is not None:  # ep_size 1 has no counts and pads after the sort, through pad_routing_groups
-        loss = loss + sort_routing_by_expert(experts, weights, num_local_experts, None, pad_align)[1].sum()
-    torch.autograd.grad(loss, weights)
+    counts = (
+        local_expert_counts(experts, num_local_experts) if pad_align else (top_k,) + (0,) * (num_local_experts - 1)
+    )
+    sorted_weights = sort_routing_by_expert(experts, weights, num_local_experts, counts, pad_align)[1]
+    torch.autograd.grad(sorted_weights.sum(), weights)

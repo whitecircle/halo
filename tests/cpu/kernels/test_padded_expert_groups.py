@@ -1,20 +1,21 @@
 #!/usr/bin/env python
-"""Expert groups padded to whole DeepGEMM row segments (``pad_routing_groups``): each slot keeps its token, weight and
+"""Expert groups padded to whole DeepGEMM row segments, in the torch reference of the layout: each slot keeps its token, weight and
 expert at its padded row, padding rows are token -1 / weight 0 / expert -1, and the permute, expert-bias gather and
 weighted unpermute through the padded layout give the dense layout's outputs and gradients."""
 
 import pytest
 import torch
 
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_permute import (
     MoEExpertBiasGather,
     MoEGatherPermute,
     MoEWeightedUnpermute,
     gather_padded_rows,
 )
-from halo.kernels.moe_route_sort import pad_routing_groups, sort_routing_by_expert
+from halo.kernels.moe_route_sort import sort_routing_by_expert
+from tests.common.route_sort_reference import pad_routing_groups
 
-ALIGN = 128
 LOCAL = 5
 
 
@@ -43,9 +44,9 @@ def test_each_slot_keeps_its_token_weight_and_expert_at_its_padded_row(case, hos
     experts, weights = _routing(counts, top_k=4, seed=0)
     routing = sort_routing_by_expert(experts, weights, LOCAL, counts)
     idx, w, eids, offs, inv = routing
-    p_idx, p_w, p_eids, p_offs, p_inv = pad_routing_groups(*routing, ALIGN, counts if host_counts else None)
+    p_idx, p_w, p_eids, p_offs, p_inv = pad_routing_groups(*routing, GROUP_ROW_ALIGN, counts if host_counts else None)
 
-    segments = [-(-c // ALIGN) * ALIGN for c in counts]
+    segments = [-(-c // GROUP_ROW_ALIGN) * GROUP_ROW_ALIGN for c in counts]
     assert p_offs.tolist() == torch.tensor(segments).cumsum(0).tolist()
     assert p_idx.numel() == sum(segments) and p_offs.dtype == torch.int32
     real = inv < idx.numel()
@@ -80,7 +81,7 @@ def test_the_padded_layout_permutes_and_unpermutes_as_the_dense_one(case):
         b = bias.clone().requires_grad_(True)
         routing = sort_routing_by_expert(experts, w, LOCAL, counts)
         if padded:
-            routing = pad_routing_groups(*routing, ALIGN, counts)
+            routing = pad_routing_groups(*routing, GROUP_ROW_ALIGN, counts)
         idx, sw, eids, offs, inv = routing
         x = MoEGatherPermute.apply(t, idx, inv, padded)
         groups = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long)).tolist()
@@ -138,14 +139,11 @@ def test_a_non_positive_padding_is_refused(pad_align):
         sort_routing_by_expert(experts, weights, LOCAL, (3, 0, 5, 1, 2), pad_align)
 
 
-def test_host_counts_that_move_a_padded_group_are_refused():
-    """127 and 129 slots under counts of 128 each: the total holds, and the second group would end a segment past the
-    rows the counts sized."""
+def test_a_padded_sort_off_cuda_is_refused():
+    """Only the counting sort's kernels place padded groups; the CPU argsort would return the dense layout."""
     experts = torch.tensor([0] * 127 + [1] * 129).view(-1, 1)
-    weights = torch.rand(256, 1)
-    with pytest.raises(RuntimeError, match="receive counts disagree"):
-        sort_routing_by_expert(experts, weights, 2, (128, 128), ALIGN)
-    sort_routing_by_expert(experts, weights, 2, (127, 129), ALIGN)
+    with pytest.raises(ValueError, match="placed by the CUDA counting sort"):
+        sort_routing_by_expert(experts, torch.rand(256, 1), 2, (127, 129), GROUP_ROW_ALIGN)
 
 
 if __name__ == "__main__":

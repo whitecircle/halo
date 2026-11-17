@@ -29,7 +29,7 @@ from halo.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
 
 # What ``_sort_tokens_for_grouped_mm`` reads off the layer: one EP rank holding every expert.
-_LAYER = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS, _pads_expert_groups=False)
+_LAYER = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS, _uses_padded_groups=False)
 
 
 def time_ms(fn, warmup: int = 5, iters: int = 25) -> float:

@@ -23,6 +23,7 @@ from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.grouped_mm import grouped_mm, grouped_mm_grads
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.quantization import BlockScaledTensor, quantize_mxfp4, quantize_mxfp8, quantize_nvfp4
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from tests.common.numerics import fro_rel_err
 from tests.gpu.profiling.benchmark_grouped_mm import _median_per_iter
 
@@ -122,16 +123,19 @@ def _forward_and_step(name: str, forward_of: Callable[[Operands], Callable]) -> 
     }
 
 
+_PRECISION = {recipe.quant_format: precision for precision, recipe in LOWP_RECIPES.items()}
+
+
 def _simulated(quant_format: str, *, cacheable: bool = True) -> Callable:
-    return lambda ops: lambda x, w: expert_gemm(
-        x, w, offs=ops.offs, quant_format=quant_format, weight_cacheable=cacheable
-    )
+    lowp = LowpSpec(precision=_PRECISION[quant_format])
+    return lambda ops: lambda x, w: expert_gemm(x, w, offs=ops.offs, lowp=lowp, weight_cacheable=cacheable)
 
 
 def _adapter(quant_format: str, *, fp8_backward: bool = False) -> Callable:
-    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(
-        x, w, offs=ops.offs, quant_format=quant_format, fp8_backward=fp8_backward
+    lowp = LowpSpec(
+        precision=_PRECISION[quant_format], backend="native", backward_precision="fp8" if fp8_backward else "bf16"
     )
+    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(x, w, offs=ops.offs, lowp=lowp)
 
 
 def _torchao():
@@ -165,12 +169,12 @@ def _dg_operands(ops: Operands, quant_format: str) -> tuple:
     """The padded activation cast and the weight cast, for a kernel timed alone."""
     _, utils = deepgemm._deep_gemm()
     k = ops.w.shape[1]
-    k_pad = utils.align(k, deepgemm._FP4_K_ALIGN) if quant_format == "mxfp4" else k
+    k_pad = deepgemm._contraction_width(k, quant_format)
     x = F.pad(ops.x, (0, k_pad - k)) if k_pad != k else ops.x
     with torch.no_grad():
         return (
-            utils.per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=deepgemm.GROUP_ROW_ALIGN),
-            deepgemm._quant_weight(ops.w, quant_format, k_pad, cacheable=False),
+            utils.per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=deepgemm.TILE),
+            deepgemm._quant_weight(ops.w, quant_format, cacheable=False),
             x,
             k_pad,
         )
@@ -204,7 +208,7 @@ def _dg_kernel(quant_format: str) -> Callable:
 
 def _dg_activation_cast(ops: Operands) -> Callable:
     _, utils = deepgemm._deep_gemm()
-    return lambda: utils.per_token_cast_to_fp8(ops.x, use_ue8m0=True, gran_k=deepgemm.GROUP_ROW_ALIGN)
+    return lambda: utils.per_token_cast_to_fp8(ops.x, use_ue8m0=True, gran_k=deepgemm.TILE)
 
 
 def _dg_weight_cast(quant_format: str) -> Callable:
@@ -213,7 +217,7 @@ def _dg_weight_cast(quant_format: str) -> Callable:
 
         @torch.no_grad()
         def step() -> None:
-            deepgemm._quant_weight(ops.w, quant_format, k_pad, cacheable=False)
+            deepgemm._quant_weight(ops.w, quant_format, cacheable=False)
 
         return step
 

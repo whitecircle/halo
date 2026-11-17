@@ -6,8 +6,8 @@ receive order varies run to run, so the dense path's own weight gradients differ
 they must stay within that spread. ``--family qwen3`` stores separate GLU banks, ``qwen3_5`` a fused ``gate_up_proj``,
 ``gpt_oss`` expert biases, whose padding rows must take a zero bias. An expert bias's gradient is one GEMM over every
 row, which the zero rows reassociate: it matches to its dtype's rounding. The padded layer's GEMMs must take the sorted
-tokens as their operand (an aligned layout, with no gather back), the dense layer's never, and a second receive of
-another size must compile no Triton kernel in either.
+tokens as their operand (an aligned layout the sort hands them, with no gather back and no group end read back), the
+dense layer's never, and a second receive of another size must compile no Triton kernel in either.
 
 Run: torchrun --nproc_per_node=4 tests/gpu/parallelism/ep/test_deepgemm_padded_groups.py --family qwen3
 """
@@ -31,7 +31,7 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.deepgemm import deepgemm_available
-from halo.kernels.lowp.spec import LowpSpec
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN, LowpSpec
 from tests.common.harness import gpu_test_main
 from tests.common.numerics import fro_rel_err
 from tests.common.rank_log import log
@@ -79,8 +79,8 @@ def _ep_layer(block: nn.Module, ep_size: int, padded: bool) -> nn.Module:
     holder.mlp = copy.deepcopy(block)
     layer = apply_ep_layers(holder, pc.ep_config()).mlp
     assert layer.set_lowp_compute(LOWP, weight_cacheable=True)
-    assert layer._pads_expert_groups, "native DeepGEMM compute sorts into padded groups"
-    layer._pads_expert_groups = padded
+    assert layer._uses_padded_groups, "native DeepGEMM compute sorts into padded groups"
+    layer._uses_padded_groups = padded
     return layer
 
 
@@ -94,6 +94,17 @@ def _recorded_sort(experts, weights, num_local_experts, counts, pad_align=None):
 
 
 compute.sort_routing_by_expert = _recorded_sort
+
+layout_readbacks = []  # the token count of every row layout the adapter derived by reading group ends back
+_row_layout = deepgemm._row_layout
+
+
+def _recorded_row_layout(offs, num_tokens, num_experts):
+    layout_readbacks.append(num_tokens)
+    return _row_layout(offs, num_tokens, num_experts)
+
+
+deepgemm._layouts._derive = _recorded_row_layout
 
 aligned_layouts = []  # of every native GEMM output: whether its layout was the sorted tokens' own
 _token_rows = deepgemm._token_rows
@@ -115,7 +126,8 @@ def _step(layer: nn.Module, x: torch.Tensor, grad: torch.Tensor) -> dict[str, to
     return {
         "output": out.detach(),
         "grad_tokens": x.grad,
-        **{f"grad_{name}": param.grad for name, param in layer.named_parameters() if param.grad is not None},
+        # Clones: a later step accumulates into the parameters' own gradients.
+        **{f"grad_{name}": param.grad.clone() for name, param in layer.named_parameters() if param.grad is not None},
     }
 
 
@@ -149,8 +161,9 @@ def run(ctx) -> dict:
     previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, hook
     try:
         aligned_layouts.clear()
+        layout_readbacks.clear()
         _step(dense_layer, second_x, second_grad)
-        dense_layouts = list(aligned_layouts)
+        dense_layouts, dense_readbacks = list(aligned_layouts), len(layout_readbacks)
         _step(padded_layer, second_x, second_grad)
         padded_layouts = aligned_layouts[len(dense_layouts) :]
     finally:
@@ -160,9 +173,11 @@ def run(ctx) -> dict:
         "launched_at_the_rows_ep_size": ARGS.ep_size in (None, ctx.world_size),
         "every_expert_and_router_gradient_reached": expected <= dense.keys() == padded.keys() and bool(router_grads),
         "the_dense_layer_never_pads": bool(dense_sorts) and all(align is None for align, _ in dense_sorts),
-        "the_padded_layer_pads_its_receive": bool(padded_sorts) and all(align == 128 for align, _ in padded_sorts),
+        "the_padded_layer_pads_its_receive": bool(padded_sorts)
+        and all(align == GROUP_ROW_ALIGN for align, _ in padded_sorts),
         "the_dense_layers_gemms_gather_their_rows_back": bool(dense_layouts) and not any(dense_layouts),
         "the_padded_layers_gemms_run_on_the_sorted_tokens": bool(padded_layouts) and all(padded_layouts),
+        "only_the_dense_layers_gemms_read_group_ends_back": 0 < dense_readbacks == len(layout_readbacks),
         "a_second_receive_size_compiles_no_triton_kernel": not compiled,
     }
     if compiled:
