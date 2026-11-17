@@ -23,14 +23,14 @@ from halo.environments.sandbox import modal_sandbox as ms
 from halo.environments.sandbox import runner_session
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import require_language
-from halo.environments.sandbox.local import (
+from halo.environments.sandbox.limits import (
     LOCAL_FSIZE_LIMIT,
     LOCAL_NPROC_LIMIT,
     RLIMIT_CPU_SLACK_SECONDS,
     SANDBOX_DEFAULT_MEMORY_MB,
-    LocalSubprocessSandbox,
     build_program_env,
 )
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.modal_sandbox import ModalSandbox
 from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.sandbox.runner_messages import Limits, Outcome, RunProgram, decode
