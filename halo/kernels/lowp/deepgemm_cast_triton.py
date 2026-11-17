@@ -215,7 +215,7 @@ def cast_weight_blocks_to_fp8(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
 
 def cast_weight_rows_to_mxfp4(w: torch.Tensor, k_pad: int) -> tuple[torch.Tensor, torch.Tensor]:
     """``w`` ``[E, K, N]`` (any strides) as MXFP4 ``[E, N, k_pad / 2]`` int8 (two e2m1 codes a byte, low nibble first)
-    over the contraction zero-padded to ``k_pad`` (a multiple of 128), and its fp32 scales ``[E, N, k_pad / 32]``.
+    over the contraction zero-padded to ``k_pad`` (a multiple of 32), and its fp32 scales ``[E, N, k_pad / 32]``.
     Raises on a NaN or inf weight: e2m1 has no NaN code and a NaN amax becomes a 2^127 scale, so the block would decode
     as finite zeros. The raise is local to this rank; its EP peers wait in the DeepEP combine until it times out."""
     experts, k, n = w.shape
