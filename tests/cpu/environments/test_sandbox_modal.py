@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import types
+from pathlib import Path
 
 import pytest
 
@@ -182,6 +183,8 @@ def _fake_modal():
 def modal(monkeypatch):
     fake = _fake_modal()
     monkeypatch.setattr(ms, "require_modal", lambda: fake)
+    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
+        monkeypatch.delenv(name)
     # Not tmp_path: a session's user must reach its directory, and pytest keeps its root 0700.
     workspace = tempfile.mkdtemp(prefix="halo-modal-", dir="/tmp")
     os.chmod(workspace, 0o755)
@@ -504,10 +507,15 @@ def test_process_that_left_the_programs_group_does_not_outlive_the_run(executor)
 
 
 def _process_owners():
+    """The users of the processes still running. A killed process stays in /proc as a zombie until its parent
+    reaps it, which a pytest running as PID 1 never does."""
     owners = set()
     for pid in os.listdir("/proc"):
-        if pid.isdigit():
-            with contextlib.suppress(FileNotFoundError):  # the process exited after the listing
+        if not pid.isdigit():
+            continue
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError):  # the process exited after the listing
+            status = Path(f"/proc/{pid}/status").read_text(encoding="utf-8")
+            if "\nState:\tZ" not in status:
                 owners.add(os.stat(f"/proc/{pid}").st_uid)
     return owners
 
@@ -699,9 +707,6 @@ def test_flag_runs_the_python_repl_tool_on_modal(under_flag):
 
 def test_flag_selection_reaches_ray_actors_on_a_shared_cluster(under_flag, monkeypatch):
     """Actors on a ``ray_address`` cluster get their environment from the raylet, so the job carries the selection."""
-    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
-        if name not in ROLLOUT_BACKEND_ENV["modal"]:
-            monkeypatch.delenv(name)
     monkeypatch.setenv("MODAL_TOKEN_SECRET", "never-forwarded")
     assert ray_init_kwargs()["runtime_env"] == {"env_vars": ROLLOUT_BACKEND_ENV["modal"]}
     merged = ray_init_kwargs(runtime_env={"working_dir": "/job", "env_vars": {"HALO_SANDBOX_REPL": "0", "A": "1"}})
