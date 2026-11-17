@@ -51,6 +51,7 @@ class FakeBaseten:
         self.delay: dict[str, float] = {}
         self.roots: dict[str, str] = {}
         self.deleted: list[str] = []
+        self.named: dict[str, str] = {}
         self.runner_requests: list[Request] = []
         self.process_status: str | None = None
         fake = self
@@ -91,7 +92,12 @@ class FakeBaseten:
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     return self._reply(401, {"error": "bad token"})
                 if self.path == "/v1/sandboxes/instances":
+                    name = fake.named.get(body["name"]) if body.get("create_if_not_exists") else None
+                    if name is not None:
+                        url = f"http://127.0.0.1:{fake.port}/{name}/"
+                        return self._reply(201, {"name": name, "url": url, "status": "DEPLOYED"})
                     name = f"sbx-{len(fake.roots) + 1}"
+                    fake.named[body["name"]] = name
                     # Under /tmp and traversable: the session's user must reach its directory.
                     fake.roots[name] = tempfile.mkdtemp(prefix=f"fake-{name}-", dir="/tmp")
                     os.chmod(fake.roots[name], 0o755)
@@ -294,6 +300,21 @@ def test_retries_5xx_then_succeeds(fake):
 
     assert result.stdout == "ok\n"
     assert len(fake.calls("/v1/sandboxes/instances", "POST")) == 3
+
+
+def test_retried_create_asks_for_the_same_sandbox(fake):
+    """A 5xx can follow a create that succeeded; the retry must not leave a second sandbox behind."""
+    fake.faults["/v1/sandboxes/instances"] = [502]
+    sandbox = _sandbox(fake)
+
+    first = sandbox.api.create_sandbox(image="img", cpu=1, idle_ttl="5m", timeout=10)
+    bodies = [call["body"] for call in fake.calls("/v1/sandboxes/instances", "POST")]
+    again = sandbox.api.http.post(
+        f"{fake.api_url}/sandboxes/instances", json=bodies[0], headers={"Authorization": f"Bearer {TOKEN}"}
+    ).json()
+
+    assert bodies[0]["name"] == bodies[1]["name"] and bodies[0]["create_if_not_exists"] is True
+    assert again["name"] == first.name and len(fake.roots) == 1
 
 
 def test_retry_budget_on_429_is_bounded_and_reported(fake):

@@ -9,6 +9,7 @@ import math
 import os
 import threading
 import time
+import uuid
 import weakref
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -109,7 +110,7 @@ class BasetenApi:
         sandbox_calls = HTTPAdapter(max_retries=self._retry(max_retries, backoff_factor, IDEMPOTENT_METHODS))
         for scheme in ("https://", "http://"):
             self.http.mount(scheme, sandbox_calls)
-        # Minting a token and creating a sandbox run no program, so every method is retried there.
+        # Minting a token and creating a named sandbox can be repeated, so every method is retried there.
         management_calls = HTTPAdapter(max_retries=self._retry(max_retries, backoff_factor, None))
         self.http.mount(f"{self.api_url}/", management_calls)
         self._token_lock = threading.Lock()
@@ -129,6 +130,9 @@ class BasetenApi:
 
     def create_sandbox(self, *, image: str, cpu: int, idle_ttl: str, timeout: float) -> Sandbox:
         body = {
+            # The name makes a retried create return the sandbox the first attempt made.
+            "name": f"halo-{uuid.uuid4().hex[:16]}",
+            "create_if_not_exists": True,
             "image": image,
             "cpu": cpu,
             "labels": {"app": "halo"},

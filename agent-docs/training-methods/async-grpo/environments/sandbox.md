@@ -145,6 +145,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 **How it runs**
 
 - Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
+- A sandbox is created under a name the backend chooses, so a create that is retried returns the same sandbox.
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
 - The Python REPL tools stay in process: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox.
