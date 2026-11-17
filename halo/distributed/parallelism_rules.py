@@ -454,6 +454,11 @@ def _reject_mok(pc: ParallelismConfig) -> None:
         refusals.append("expert LoRA adapters, which MoK's kernels do not apply")
     if pc.ep_fp32_experts:
         refusals.append("fp32_experts, as MoK's kernels take bf16 expert weights")
+    if pc.experts_fsdp_managed:
+        refusals.append(
+            "FSDP2-managed experts at expert_parallel_size=1, which no MoK test trains (set "
+            "fsdp_shard_ep1_experts: false)"
+        )
     if pc.lowp.enabled:
         refusals.append(f"lowp_precision={pc.lowp.precision!r}, as MoK runs its own kernels on the experts")
     if pc.ep_rows_per_device <= 0 or pc.ep_declared_max_length <= 0:

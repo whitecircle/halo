@@ -69,7 +69,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 Every MoE family shares three settings:
 
-- **Distribution** — [EP](../parallelism/expert-parallelism.md) (DeepEP) shards experts across GPUs, orthogonal to data parallelism. Add [ETP](../parallelism/expert-tensor-parallelism.md) (expert-FFN sharding) or [TP](../parallelism/tensor-parallelism.md) (attention) for more headroom.
+- **Distribution** — [EP](../parallelism/expert-parallelism.md) (DeepEP, or Mixture-of-Kittens on Qwen3 and Qwen3.5/3.6 MoE under [`moe_backend: mok`](../parallelism/expert-parallelism.md#mixture-of-kittens-backend)) shards experts across GPUs, orthogonal to data parallelism. Add [ETP](../parallelism/expert-tensor-parallelism.md) (expert-FFN sharding) or [TP](../parallelism/tensor-parallelism.md) (attention) for more headroom.
 - **Expert compute** — [Grouped GEMM](../optimization/grouped-gemm.md) (`use_grouped_gemm`, default on at SM90+) batches the per-expert matmuls.
 - **Load balancing** — `moe_balancing`: `auto` (default), `aux_loss`, `bias_update` (DeepSeek-V3 auxiliary-loss-free bias, step size `router_balancing_rate`), `bias_update_transient`, or `none`.
 

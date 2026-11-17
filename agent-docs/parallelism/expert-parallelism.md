@@ -279,12 +279,14 @@ What an EP run has to plan around:
 combine over NVLink symmetric memory (`halo/distributed/expert_parallel/mok.py`). The router, bias balancing, routing
 replay and the family's shared expert stay on Halo's path.
 
-- **Families** declare it (`SUPPORTS_MOK`, read off the class itself, never a base): Qwen3 MoE and Qwen3.5/3.6 MoE.
-  Any other EP layer is refused at load, Qwen3-Next's included, as are experts whose hidden or intermediate size is
-  not a multiple of 256 or whose activation is not SiLU, and a model with no MoE block Halo wraps.
+- **Families** declare it on their spec (`MoEFamilySpec.supports_mok`): Qwen3 MoE and Qwen3.5/3.6 MoE. Any other
+  family, Qwen3-Next included, a model with no MoE block Halo wraps and a host without the `mok` package are refused
+  before the checkpoint loads; experts whose hidden or intermediate size is not a multiple of 256 or whose activation
+  is not SiLU are refused when the layer is built.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
   TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, `use_grouped_gemm: false`, a non-default
-  `ep_buffer_backend` and a run that declares no token budget. DeepEP's own layout rules still apply (several EP
+  `ep_buffer_backend`, FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`) and a
+  run that declares no token budget. DeepEP's own layout rules still apply (several EP
   groups in one NVLink domain among them); MoK has not been run past them.
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
@@ -297,8 +299,10 @@ replay and the family's shared expert stay on Halo's path.
   backward, `(hidden + 3 × intermediate) × 2` bytes a row per layer; the ring is twice a rank's even share,
   `2 × capacity × top_k` rows, and a rank routed more replays it.
 - **Costs Halo adds:** MoK always runs a shared expert, which Halo gives zero weights (about 1/top-k more expert FLOPs);
-  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`). The
-  layer still builds its DeepEP dispatcher, so `deep_ep` must import.
+  the expert banks are transposed to MoK's layout and back on every call (`halo/kernels/batched_transpose.py`).
+- **Lifecycle.** The layer builds `MoKExperts` in place of its DeepEP dispatcher. Its first forward runs one zero token
+  forward and backward through MoK before the `ep.mok` span, so the transposes compile and MoK's kernels load outside
+  it, and `cleanup_ep` releases MoK's workspaces.
 - **Communication SMs** each way follow the expert width (`_mok_config`): 48 up to an intermediate size of 1024, 42 up
   to 2048, 36 past it, as narrow experts are communication-bound. MoK's default 40/28 is 4-14% slower on B300.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs

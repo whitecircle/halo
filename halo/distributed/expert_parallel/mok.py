@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -13,17 +14,17 @@ from torch.autograd.function import once_differentiable
 
 from halo.kernels.batched_transpose import transpose_last_two
 
+if TYPE_CHECKING:
+    from halo.distributed.expert_parallel.config import EPConfig
+
 MOK_EP_SIZES = (1, 4, 8, 16, 32, 64)  # the EP sizes MoK's schedule is built for
 MOK_ALIGN = 256  # MoK's hidden and intermediate multiple
 # Its route buffer, tokens x top_k x 4 bytes, must split into 2048-byte chunks for any top_k.
 _TOKEN_ALIGN = 512
 
 
-# Comm SMs each way by expert intermediate size, fastest in halo's EP4 layer on B300 at 4k-16k tokens per rank: a
-# token's dispatch and combine scale with the hidden size, its expert compute with hidden x intermediate, so narrow
-# experts are communication-bound and want more of the SMs. Qwen3-30B-A3B (768) runs 15% faster at 48 than at 36,
-# DeepSeek-V3 (2048) is fastest at 42, a 3072-wide gpt-oss-like block at 36; MoK's default 40/28 is 4-14%
-# slower.
+# Comm SMs each way by expert intermediate size: a token's dispatch and combine scale with the hidden size and its
+# expert compute with hidden x intermediate, so narrow experts are communication-bound and want more of the SMs.
 _COMM_SMS_BY_INTERMEDIATE = ((1024, 48), (2048, 42))
 _COMM_SMS_WIDE, _MAX_MINIBATCH = 36, 8192
 _EXPERT_PADDING = 256  # MoK's schedule rounds each local expert's rows up to this (csrc/scheduler.cuh)
@@ -76,8 +77,20 @@ def _mok_config(capacity: int, intermediate: int, top_k: int, ep_size: int, loca
     )
 
 
-def mok_available() -> bool:
+def is_mok_available() -> bool:
     return _mok() is not None
+
+
+def require_mok():
+    """``mok.functional``; raises where the package is not installed."""
+    functional = _mok()
+    if functional is None:
+        raise RuntimeError(
+            "moe_backend='mok' needs the mok package, which no image ships (its kernels are SM100/SM103): install "
+            "it in a Blackwell container (agent-docs/parallelism/expert-parallelism.md#mixture-of-kittens-backend), "
+            "or set moe_backend='deepep'."
+        )
+    return functional
 
 
 def mok_token_capacity(tokens_per_rank: int) -> int:
@@ -142,19 +155,20 @@ class _MoKFn(torch.autograd.Function):
         shared = _zero_shared_expert(gate.shape[1], hidden, x.device)
         out, context = functional.forward(config, workspace, schedule, x_pad, weights_pad, *shared, gate, up, down)
 
-        ctx.mok = (config, workspace, group, tokens, len(weights) == 2)
-        ctx.save_for_backward(x_pad, weights_pad, *_field_values(schedule), *_field_values(context), *weights)
+        schedule_fields, context_fields = _field_values(schedule), _field_values(context)
+        ctx.mok = (config, workspace, group, tokens, len(weights) == 2, len(schedule_fields), len(context_fields))
+        ctx.save_for_backward(x_pad, weights_pad, *schedule_fields, *context_fields, *weights)
         return out[:tokens].to(x.dtype)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
         functional = _mok()
-        config, workspace, group, tokens, fused = ctx.mok
+        config, workspace, group, tokens, fused, n_schedule, n_context = ctx.mok
         x_pad, weights_pad, *saved = ctx.saved_tensors
-        schedule = functional.MoKSchedule(*saved[:4])
-        context = functional.MoKForwardContext(*saved[4:11])
-        weights = saved[11:]
+        schedule = functional.MoKSchedule(*saved[:n_schedule])
+        context = functional.MoKForwardContext(*saved[n_schedule : n_schedule + n_context])
+        weights = saved[n_schedule + n_context :]
         grad_pad = grad_output.new_zeros(x_pad.shape, dtype=torch.bfloat16)
         grad_pad[:tokens] = grad_output
         gate, up, down = _mok_weights(weights)
@@ -174,23 +188,45 @@ class _MoKFn(torch.autograd.Function):
         )
 
 
-def mok_routed_experts(
-    x: torch.Tensor,
-    top_experts: torch.Tensor,
-    router_weights: torch.Tensor,
-    weights: tuple[torch.Tensor, ...],
-    *,
-    capacity: int,
-    group: dist.ProcessGroup,
-    num_experts: int,
-) -> torch.Tensor:
-    """COLLECTIVE over ``group``. ``x`` ``[T, H]``'s routed-expert output ``[T, H]``, each token's ``top_experts`` (global
-    ids, ``[T, k]``) weighted by ``router_weights``; ``weights`` are this rank's expert banks in the layer's layout.
-    Raises when ``T`` exceeds ``capacity``, the token count every rank's buffers were sized to."""
-    if x.shape[0] > capacity:
-        raise RuntimeError(
-            f"moe_backend='mok' sized its buffers to {capacity} tokens per rank from the run's declared budget (the "
-            f"larger of the train and eval batch's rows x max_length), but a forward carried {x.shape[0]}. Raise "
-            f"max_length to the longest row the run feeds."
-        )
-    return _MoKFn.apply(x, router_weights, top_experts, capacity, group, num_experts, *weights)
+class MoKExperts:
+    """A layer's routed experts on MoK, built in place of its DeepEP dispatcher."""
+
+    def __init__(self, ep_config: EPConfig, num_experts: int, hidden_dim: int):
+        self._ep_config, self._num_experts, self._hidden_dim = ep_config, num_experts, hidden_dim
+
+    def __call__(
+        self,
+        x: torch.Tensor,
+        top_experts: torch.Tensor,
+        router_weights: torch.Tensor,
+        banks: tuple[torch.Tensor, ...],
+    ) -> torch.Tensor:
+        """COLLECTIVE over the EP group. ``x`` ``[T, H]``'s routed-expert output ``[T, H]``, each token's
+        ``top_experts`` (global ids, ``[T, k]``) weighted by ``router_weights``; ``banks`` are this rank's expert
+        weights in the layer's layout. Raises when ``T`` exceeds the token count every rank's buffers were sized to."""
+        capacity = self._ep_config.mok_token_capacity
+        if x.shape[0] > capacity:
+            raise RuntimeError(
+                f"moe_backend='mok' sized its buffers to {capacity} tokens per rank from the run's declared budget "
+                f"(the larger of the train and eval batch's rows x max_length), but a forward carried {x.shape[0]}. "
+                f"Raise max_length to the longest row the run feeds."
+            )
+        group = self._ep_config.dispatch_ep_group
+        return _MoKFn.apply(x, router_weights, top_experts, capacity, group, self._num_experts, *banks)
+
+    def warm(self, banks: tuple[torch.Tensor, ...], top_k: int) -> None:
+        """COLLECTIVE over the EP group. One forward and backward over a zero token, so the bank transposes compile and
+        MoK's kernels load before the first step's span."""
+        device = banks[0].device
+        # Grad on, inference mode off and identity saved-tensor hooks: a first forward under no_grad, inference mode
+        # or a non-reentrant checkpoint still has to launch the backward's kernels.
+        identity_hooks = torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t)
+        with torch.inference_mode(False), torch.enable_grad(), identity_hooks:
+            x = torch.zeros(1, self._hidden_dim, device=device, dtype=torch.bfloat16, requires_grad=True)
+            experts = torch.arange(top_k, device=device).view(1, top_k) % self._num_experts
+            out = self(x, experts, torch.zeros(1, top_k, device=device), banks)
+            torch.autograd.grad(out.sum(), x)
+
+    def destroy(self) -> None:
+        """COLLECTIVE. Release every MoK workspace of the process; a no-op once released."""
+        _mok().clear_workspace_cache()

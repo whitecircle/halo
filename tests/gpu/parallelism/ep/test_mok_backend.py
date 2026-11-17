@@ -13,13 +13,14 @@ import sys
 
 import torch
 import torch.nn as nn
+import triton
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeTextConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.distributed.expert_parallel.mok import mok_available
+from halo.distributed.expert_parallel.mok import MoKExperts, is_mok_available
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
@@ -47,7 +48,13 @@ ARGS = parser.parse_args()
 
 
 def _ep_layer(block: nn.Module, backend: str, ep_size: int) -> nn.Module:
-    pc = ParallelismConfig(ep_size=ep_size, moe_backend=backend, ep_rows_per_device=1, ep_declared_max_length=TOKENS)
+    pc = ParallelismConfig(
+        ep_size=ep_size,
+        moe_backend=backend,
+        ep_rows_per_device=1,
+        ep_declared_max_length=TOKENS,
+        fsdp_shard_ep1_experts=False,
+    )
     holder = nn.Module()
     holder.mlp = copy.deepcopy(block)
     return apply_ep_layers(holder, pc.ep_config()).mlp
@@ -88,6 +95,24 @@ def _recording_expert_load(self, experts):
 
 EPMoELayerBase._record_expert_load = _recording_expert_load
 
+warm_ups = []  # one entry per MoK warm-up that returned
+compiled_past_the_warm_up = []  # Triton kernels the MoK step compiled after it
+_warm = MoKExperts.warm
+
+
+def _recording_warm(self, banks, top_k):
+    _warm(self, banks, top_k)
+    warm_ups.append(top_k)
+
+
+MoKExperts.warm = _recording_warm
+
+
+def _record_compile(*, fn, **_):
+    if warm_ups:
+        compiled_past_the_warm_up.append(fn.name)
+    return False  # a truthy return would skip the compile
+
 
 @gpu_test_main(prefix=f"mok_backend_{ARGS.family}{'_skew' if ARGS.skew else ''}", partial_state=False)
 def run(ctx) -> dict:
@@ -102,7 +127,11 @@ def run(ctx) -> dict:
         x = _route_to_rank_0(block, x, ctx.world_size)
 
     reference = _step(_ep_layer(block, "deepep", ctx.world_size), x, grad)
-    mok = _step(_ep_layer(block, "mok", ctx.world_size), x, grad)
+    previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, _record_compile
+    try:
+        mok = _step(_ep_layer(block, "mok", ctx.world_size), x, grad)
+    finally:
+        triton.knobs.runtime.jit_cache_hook = previous
 
     # A bank no token reached has no gradient on the DeepEP path and a zero one from MoK's kernels.
     unreached = reference.keys() ^ mok.keys()
@@ -112,6 +141,8 @@ def run(ctx) -> dict:
             not (reference.get(name, mok.get(name))).any() for name in unreached
         ),
         "the_output_is_finite_and_nonzero": bool(reference["output"].isfinite().all() and reference["output"].any()),
+        "the_warm_up_leaves_the_step_no_triton_kernel_to_compile": warm_ups == [TOP_K]
+        and not compiled_past_the_warm_up,
     }
     if ARGS.skew:
         local = EXPERTS // ctx.world_size
@@ -130,7 +161,7 @@ def run(ctx) -> dict:
 
 
 if __name__ == "__main__":
-    if not mok_available():
+    if not is_mok_available():
         log("SKIP: mok absent (no image ships it yet)")
         sys.exit(0)
     run()
