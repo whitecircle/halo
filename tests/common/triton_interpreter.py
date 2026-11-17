@@ -7,7 +7,7 @@ import triton.language as tl
 
 INTERPRETER_MESSAGE = (
     "the CPU tier needs the image's Triton build (make test-cpu): this Triton's interpreter cannot run a kernel with a "
-    "runtime loop bound, so the interpreted tests of such kernels (the route sort, the fused AdamWBF16 step) fail"
+    "runtime loop bound, so the interpreted tests of such kernels fail"
 )
 _LENGTH = 10
 _CHUNK = 4
