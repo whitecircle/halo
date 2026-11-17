@@ -320,9 +320,10 @@ replay and the family's shared expert stay on Halo's path.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
   Qwen3-30B-A3B's experts at 0.81×, 0.90× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
   block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.87× and 0.61-0.82×.
-- **Install.** The images do not ship it yet: its build requires nvcc to match torch's CUDA (13.0). In a Blackwell
-  container with that toolkit, `pip install --no-build-isolation --no-deps .` from a recursive clone at `f3a8bd2`;
-  without `--no-deps` it replaces the locked NCCL with torch's metadata pin, which DeepEP's build does not link against.
+- **Install.** The Blackwell image builds it at `f3a8bd2`. Its build refuses an nvcc that is not torch's CUDA (13.0)
+  while the image ships the 13.2 toolkit, so the Dockerfile installs the 13.0 compiler for that step and removes it
+  again; `--no-deps` keeps the locked NCCL, which pip would replace with torch's metadata pin and DeepEP's build does
+  not link against.
 
 ## Gradient synchronization
 
