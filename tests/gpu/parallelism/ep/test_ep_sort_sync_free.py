@@ -21,6 +21,7 @@ from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.kernels import moe_route_sort
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_permute import MoEExpertBiasGather, MoEGatherPermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import sort_routing_by_expert, warm_route_sort_kernels
 from tests.common.ep_reference import (
@@ -38,7 +39,6 @@ from tests.common.rank_log import log
 from tests.common.repo import probe_findings
 from tests.common.route_sort_reference import (
     CASES,
-    GROUP_ROW_ALIGN,
     case_findings,
     compiled_sort_binaries,
     padded_argsort,
