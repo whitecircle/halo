@@ -7,11 +7,13 @@ place of Halo's ``block_scaled`` manifest, which it refuses.
   nvfp4 ``gate_proj`` + ``up_proj`` pair the way vLLM decodes its merged layer, under one global scale.
 - ``config.json`` carries the ``quantization_config`` compressed-tensors itself serializes for the format, with
   targets that match exactly the quantized modules under the engine's matching rule.
-- What an engine cannot load quantized is refused before any write.
+- What an engine cannot load quantized is refused before any write. An nvfp4 pair whose shared scale rounds is
+  written rounded, with the largest change logged, and refused only past the --verify tolerance.
 The decoders and the expected config mirror compressed-tensors 0.17.0 and vLLM 0.32.0, the releases in the
 ``vllm-0.32.0`` image, which the training image does not install."""
 
 import json
+import logging
 import os
 import re
 import sys
@@ -32,7 +34,7 @@ from halo.checkpoint.tools.compressed_tensors_layout import (
     compressed_tensors_config,
 )
 from halo.checkpoint.tools.lowp_export import quantize_checkpoint
-from halo.kernels.lowp.quantization import fake_quant, quantize_nvfp4
+from halo.kernels.lowp.quantization import E2M1_MAX, fake_quant, quantize_nvfp4
 from halo.kernels.lowp.spec import QuantFormat
 from tests.common.repo import load_script_module
 
@@ -238,14 +240,42 @@ def test_nvfp4_gate_and_up_decode_under_the_merged_layers_one_global_scale(tmp_p
             )
 
 
-def test_a_pair_that_cannot_share_one_nvfp4_global_scale_exactly_is_refused_before_any_write(tmp_path):
-    """``up_proj`` 2^-16 of ``gate_proj``: under the gate's global scale its block scales fall to e4m3 subnormals and
-    round, which would serve another weight than QAT trained. The pre-pass finds it, so no shard is written."""
+def _pair_whose_shared_scale_rounds() -> dict[str, torch.Tensor]:
+    """``up_proj`` 2^-16 of ``gate_proj``: under the gate's global scale its block scales fall below e4m3's normals."""
     ckpt = _weights(blocks=1)
     gate = ckpt["model.layers.0.mlp.gate_proj.weight"]
     ckpt["model.layers.0.mlp.up_proj.weight"] = (gate.float() * 2**-16).to(torch.bfloat16)
-    src, out = _write(tmp_path / "src", ckpt), tmp_path / "out"
-    with pytest.raises(ValueError, match=r"mlp\.up_proj\.weight.*one nvfp4 global scale.*rounds \d+ of its"):
+    return ckpt
+
+
+def test_a_pair_whose_shared_scale_rounds_is_written_rounded_and_the_largest_change_logged(tmp_path, caplog):
+    """The stepped-down block scales round to e4m3 subnormals. The export writes them rounded and logs the largest
+    change, which stays within half a subnormal scale step times the e2m1 max of the shared global scale, and the gate,
+    whose scale is the shared one, decodes exactly to the QAT forward's weight."""
+    with caplog.at_level(logging.INFO, logger=lowp_export.__name__):
+        source, saved, _config, _manifest = _export(tmp_path, "nvfp4", ckpt=_pair_whose_shared_scale_rounds())
+    assert re.search(
+        r"of them round some e4m3 block scales, the largest served-weight change .*mlp\.up_proj", caplog.text
+    )
+    gate, up = "model.layers.0.mlp.gate_proj", "model.layers.0.mlp.up_proj"
+    torch.testing.assert_close(
+        _compressed_tensors_dequant(saved, gate, "nvfp4"),
+        fake_quant(source[f"{gate}.weight"], "nvfp4"),
+        rtol=0,
+        atol=0,
+    )
+    shared_global = 1.0 / saved[f"{up}.weight_global_scale"].item()
+    change = (
+        _compressed_tensors_dequant(saved, up, "nvfp4").float() - fake_quant(source[f"{up}.weight"], "nvfp4").float()
+    )
+    assert 0 < change.abs().max().item() <= E2M1_MAX * 2.0**-10 * shared_global
+
+
+def test_a_shared_scale_change_past_the_verify_tolerance_is_refused_before_any_write(tmp_path, monkeypatch):
+    """The tolerance is the --verify one; a zero tolerance makes any rounding refuse, before the output exists."""
+    monkeypatch.setitem(lowp_export._VERIFY_RELERR_TOL, "nvfp4", 0.0)
+    src, out = _write(tmp_path / "src", _pair_whose_shared_scale_rounds()), tmp_path / "out"
+    with pytest.raises(ValueError, match=r"mlp\.up_proj\.weight.*past the nvfp4 --verify tolerance 0\.0"):
         quantize_checkpoint(src, str(out), "nvfp4", export_format=COMPRESSED_TENSORS)
     assert not out.exists()
     quantize_checkpoint(src, str(out), "nvfp4", export_format=BLOCK_SCALED)  # Halo's own layout keeps each scale
