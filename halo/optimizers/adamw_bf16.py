@@ -171,8 +171,7 @@ def _adam_bf16_sr_kernel(
         ea = tl.load(ea_base + ea_off + offsets, mask=mask).to(tl.float32)
         easq = tl.load(easq_base + easq_off + offsets, mask=mask).to(tl.float32)
 
-        # Read in the loop: hoisted with the scalars above, they change how sm_100/sm_103 pair these ops into f32x2
-        # against the per-parameter kernel, which reads them as arguments (same op totals, different f32x2 pairing).
+        # Read here: hoisted, they change sm_100/sm_103's f32x2 pairing against the per-parameter kernel.
         one_minus_beta1 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA1 * num_tensors + tensor)
         one_minus_beta2 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA2 * num_tensors + tensor)
         ea = beta1 * ea + one_minus_beta1 * grad
