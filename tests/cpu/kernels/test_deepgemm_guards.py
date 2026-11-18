@@ -2,6 +2,7 @@
 call whatever its shape, a kernel rejection raises, the 4-bit route casts MXFP4, a non-finite weight never reaches the
 cast that hides it, and the FP8 backward runs dgrad on the forward's weight and wgrad on 128-token tiles."""
 
+import contextlib
 import re
 import sys
 import types
@@ -195,9 +196,7 @@ def _forward_on_a_kernel_raising(monkeypatch, error: Exception):
     monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (kernels, None))
     monkeypatch.setattr(deepgemm, "_quant_weight", lambda *args, **kwargs: None)
     x = torch.zeros(T, K)
-    return deepgemm._deepgemm_forward(
-        x, torch.zeros(E, K, N), _layout([10, 20, 30, T]), types.SimpleNamespace(rows=(x, None)), "mxfp8", False
-    )
+    return deepgemm._deepgemm_forward(x, torch.zeros(E, K, N), _layout([10, 20, 30, T]), (x, None), "mxfp8", False)
 
 
 def test_an_oom_in_the_native_kernel_is_not_taken_for_a_rejected_shape(monkeypatch):
@@ -503,15 +502,24 @@ def test_the_fp8_dgrad_runs_on_the_forward_weight_operand(native):
     assert x.grad.shape == x.shape and w.grad.shape == w.shape and w.grad.dtype == w.dtype
 
 
-@pytest.mark.parametrize(("weight_cacheable", "casts"), [(True, 1), (False, 2)], ids=["cached", "fsdp2-managed"])
-def test_an_uncached_weight_is_cast_again_for_the_dgrad_and_never_held_in_the_graph(native, weight_cacheable, casts):
-    """An FP8 copy saved for the backward would hold half a bf16 bank per projection for as long as the graph lives."""
+@pytest.mark.parametrize(
+    ("weight_cacheable", "hooks", "casts"),
+    [(True, False, 1), (False, False, 2), (True, True, 1)],
+    ids=["cached", "fsdp2-managed", "cached-under-saved-tensor-hooks"],
+)
+def test_an_uncached_weight_is_cast_again_for_the_dgrad_and_never_held_in_the_graph(
+    native, weight_cacheable, hooks, casts
+):
+    """An FP8 copy saved for the backward would hold half a bf16 bank per projection for as long as the graph lives.
+    Saved-tensor hooks (a non-reentrant checkpoint) hand the backward another object for the weight, which must not
+    read as an uncached one."""
     cast, weight_casts = native.utils.per_block_cast_to_fp8, []
     native.utils.per_block_cast_to_fp8 = lambda t, **kwargs: weight_casts.append(t.shape) or cast(t, **kwargs)
     x, w, offs = _operands(8, 128, 256)
     x.requires_grad_(True)
     w.requires_grad_(True)
-    out = expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8"), weight_cacheable=weight_cacheable)
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t) if hooks else contextlib.nullcontext():
+        out = expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8"), weight_cacheable=weight_cacheable)
     assert {t.dtype for t in out.grad_fn.saved_tensors} <= {x.dtype, w.dtype, offs.dtype}, "an FP8 operand is saved"
     assert len(out.grad_fn.saved_tensors) == 3
     out.sum().backward()
@@ -533,16 +541,17 @@ def test_the_gradient_casts_drop_the_reference_floor_and_the_activation_casts_ke
 
 
 def test_an_activations_fp8_casts_are_dropped_after_their_last_reader(native):
-    """Gate and up read one activation: its tiles are cast once, and nothing outlives the second backward."""
+    """Gate and up read one activation: each cast runs once, only the memo holds the forward's rows, and the tiles
+    do not outlive the second backward."""
     x, w, offs = _operands(8, 128, 256)
     banks = [w.clone().requires_grad_(True) for _ in range(2)]
     gate_out, up_out = (expert_gemm(x, bank, offs=offs, lowp=_native("mxfp8", "fp8")) for bank in banks)
-    casts = gate_out.grad_fn.casts
-    assert up_out.grad_fn.casts is casts and casts.rows is not None
+    shared = gate_out.grad_fn.tiles
+    assert up_out.grad_fn.tiles is shared and shared.tiles is None
     gate_out.sum().backward()
-    assert casts.rows is None and casts.tiles is not None
+    assert deepgemm._row_casts._value is None and shared.tiles is not None
     up_out.sum().backward()
-    assert casts.tiles is None
+    assert shared.tiles is None
     assert [kind for kind, floor in native.cast_floors if floor == REFERENCE_AMAX_FLOOR] == ["rows", "tiles"]
 
 
@@ -604,3 +613,19 @@ def test_the_mxfp4_dgrad_runs_on_an_fp8_block_cast_kept_beside_the_forward_cast(
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
+
+
+def test_a_bf16_backward_holds_no_fp8_operand_in_the_graph(native):
+    x, w, offs = _operands(8, 128, 256)
+    w.requires_grad_(True)
+    node = expert_gemm(x, w, offs=offs, lowp=_native("mxfp8")).grad_fn
+    assert node.tiles is None and node.w_fp8 is None
+
+
+def test_a_format_no_kernel_takes_is_refused_at_the_entry(native):
+    """A direct caller's spec has not been validated: nvfp4 would run as FP8 on the wrong weight layout."""
+    x, w, offs = _operands(8, 128, 256)
+    with pytest.raises(ValueError, match="deepgemm_grouped_gemm takes"):
+        deepgemm.deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision="fp4", backend="native"))
+    assert not native.kernel_calls
+

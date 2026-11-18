@@ -80,10 +80,7 @@ from halo.models.introspection.context_window import resolve_model_context_windo
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.environmental.environmental_rules import (
-    reject_prefetch_past_retry_budget,
-    reject_unsupported_score_centering,
-)
+from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_score_centering
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
@@ -97,7 +94,6 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_turn_deadline,
 )
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
-from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -315,9 +311,6 @@ def main():
         )
     # The trainer refuses the same configs at construction; checked here, before the model load and the server
     # preflights.
-    reject_prefetch_past_retry_budget(
-        resolve_weight_sync_client(async_config.rollout_backend), async_config, grpo_config
-    )
     reject_unsupported_score_centering(async_config)
 
     # A throwaway env for the startup checks, built before any load so an unknown environment_type or a refused

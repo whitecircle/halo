@@ -132,8 +132,8 @@ rollout_server_configs:
   in flight finishes on the adapter version it started with, and rounds drawn later name the newest
   ([Adapter sync](../../infrastructure/rollout-servers.md#adapter-sync)).
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
-  rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
-  and the actors re-issue them, losing the decode they had done.
+  rounds in flight wait out the push, then resume under the new weights with the tokens they hold (vLLM freezes them,
+  SGLang requeues them).
 - Prefetch runs **`prefetch_depth` rounds deep** (default `1`): a step pops the oldest submitted round, then submits
   its own prompts. The worker collects every pending round at once and delivers them in submission order, so a round
   trains `prefetch_depth` rounds after it was drawn.
@@ -142,13 +142,6 @@ rollout_server_configs:
 - Raise `prefetch_depth` when every step misses while the servers drain at each round's tail; the next round's
   episodes fill them. Each round in flight holds its own `max_concurrent_rollouts`, so the servers carry up to
   `prefetch_depth` rounds' KV, every sync lands on all of them, and an eval round shares the servers with them.
-- A round spans up to `ceil(prefetch_depth × steps_per_generation × num_iterations ÷ (gradient_accumulation_steps ×
-  sync_weights_every_n_steps))` syncs, a bound never below 1, plus one for an eval between cadence pushes when
-  `sync_weights_every_n_steps` is above 1. On SGLang a turn aborted at each of them needs that
-  many re-issues, so a span above `max_retries` is refused before the model load, and again at trainer
-  construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
-  `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with
-  `(1 + max_retries) × request_timeout` still within `episode_timeout`.
 - `rollout_actor_budget` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
   `1` is refused where prefetch is off, naming `enable_prefetch: false` or the opt-in a one-server run left unset.
 

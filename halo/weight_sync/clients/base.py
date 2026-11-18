@@ -78,6 +78,10 @@ class ServerFlags(NamedTuple):
     instance_id: str | None = None
     # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
     pipeline_stages: int | None = None
+    # A cap on the engine's waiting queue, which a pause that re-queues running requests can overflow.
+    queued_request_cap: int | None = None
+    # The engine's prefill/decode disaggregation role; "null" where it serves both.
+    disaggregation_mode: str | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
     extras: Mapping[str, object] = MappingProxyType({})
 
@@ -131,8 +135,6 @@ class WeightSyncClientBase(UpdateStream, ABC):
     PAUSE_REQUEST: Mapping[str, object] = {}
     RESUME_ENDPOINT: str
     RESUME_REQUEST: Mapping[str, object] = {}
-    # True when the pause drops in-flight requests, so every turn a sync lands on is re-issued (``max_retries``).
-    PAUSE_ABORTS_IN_FLIGHT: bool
     # The session the engine brackets an update with, inside the quiesce.
     SESSION_OPEN_ENDPOINT: str
     SESSION_CLOSE_ENDPOINT: str
