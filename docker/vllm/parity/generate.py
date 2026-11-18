@@ -44,6 +44,8 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+    TINY_QWEN4_EXP_VISION_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
 )
 
@@ -145,6 +147,13 @@ FIXTURES = (
         "Glm5NextForConditionalGeneration",
         TINY_GLM5_CONFIG,
         sub_configs={"vision_config": TINY_GLM5_VISION_CONFIG},
+    ),
+    Fixture(
+        "qwen4_exp",
+        "qwen4_exp",
+        "Qwen4ExpForConditionalGeneration",
+        TINY_QWEN4_EXP_CONFIG,
+        sub_configs={"vision_config": TINY_QWEN4_EXP_VISION_CONFIG},
     ),
     Fixture("laguna", "laguna", "LagunaForCausalLM", TINY_LAGUNA_CONFIG),
     Fixture("lfm2_moe", "lfm2_moe", "Lfm2MoeForCausalLM", TINY_LFM2_MOE_CONFIG),
