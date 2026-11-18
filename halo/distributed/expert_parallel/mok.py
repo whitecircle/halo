@@ -32,6 +32,7 @@ _mxfp8_cache = WeightVersionCache()  # expert bank -> its MXFP8 casts, re-quanti
 _COMM_SMS_BY_INTERMEDIATE = ((1024, 48), (2048, 42))
 _COMM_SMS_WIDE, _MAX_MINIBATCH = 36, 8192
 _EXPERT_PADDING = 256  # MoK's schedule rounds each local expert's rows up to this (csrc/scheduler.cuh)
+_BUILT_FOR = (10, 3)  # the image builds mok at its default arch, SM103, whose code an SM100 GPU cannot run
 # MoK's ring of routed rows, in a rank's even share of the group's: every routed activation is allocated at the
 # ring's size and saved for the backward, and a rank routed more than the ring holds replays it.
 _RING_SHARES = 2
@@ -86,12 +87,18 @@ def is_mok_available() -> bool:
 
 
 def require_mok():
-    """``mok.functional``; raises where the package is not installed."""
+    """``mok.functional``; raises where the package is not installed or this GPU is not the one it is built for."""
     functional = _mok()
     if functional is None:
         raise RuntimeError(
-            "moe_backend='mok' needs the mok package, built into the Blackwell image only (its kernels are "
-            "SM100/SM103). Run on that image, or set moe_backend='deepep'."
+            "moe_backend='mok' needs the mok package, built into the Blackwell image only (its kernels are SM103). "
+            "Run on that image, or set moe_backend='deepep'."
+        )
+    if torch.cuda.is_available() and torch.cuda.get_device_capability() != _BUILT_FOR:
+        major, minor = torch.cuda.get_device_capability()
+        raise RuntimeError(
+            f"moe_backend='mok' runs on SM103 (B300) only: the image builds mok for it, and this GPU is "
+            f"SM{major}{minor}. Set moe_backend='deepep'."
         )
     return functional
 

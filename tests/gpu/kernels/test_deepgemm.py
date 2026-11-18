@@ -177,7 +177,7 @@ import os, sys, torch
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 
-LOWP = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
+LOWP = LowpSpec(precision=sys.argv[3], backend="native", backward_precision="fp8")
 
 def compiled():
     return sum(len(dirs) for _, dirs, _ in os.walk(os.environ["DG_JIT_CACHE_DIR"]))
@@ -203,10 +203,10 @@ for rows in (3, 129, 1024, 2048, 4096, 8192):
 """
 
 
-def _wgrad_compiles(mode: str, w_dtype: str) -> dict[int, int]:
+def _wgrad_compiles(mode: str, w_dtype: str, precision: str) -> dict[int, int]:
     with tempfile.TemporaryDirectory() as cache:
         out = subprocess.run(
-            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype],
+            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype, precision],
             env={**os.environ, "DG_JIT_CACHE_DIR": cache},
             capture_output=True,
             text=True,
@@ -220,12 +220,12 @@ def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
     """On an empty JIT cache, a forward and backward past one step and ``warm_fp8_wgrad`` compile nothing at any rows
     per expert. Without the warm-up the first long receive compiles a kernel mid-step, which stalls every EP peer: the control, and what tells
     a DeepGEMM pin whose heuristic no longer needs the warm-up."""
-    for w_dtype in ("bfloat16", "float32"):
-        cold = _wgrad_compiles("cold", w_dtype)
-        assert sum(cold.values()) > 0, f"{w_dtype}: no long-group kernel to warm, {cold}"
-        warm = _wgrad_compiles("warm", w_dtype)
-        assert not any(warm.values()), f"{w_dtype}: a step compiled a kernel after the warm-up, {warm}"
-        print(f"  {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
+    for precision, w_dtype in (("fp8", "bfloat16"), ("fp8", "float32"), ("mxfp4", "bfloat16")):
+        cold = _wgrad_compiles("cold", w_dtype, precision)
+        assert sum(cold.values()) > 0, f"{precision} {w_dtype}: no long-group kernel to warm, {cold}"
+        warm = _wgrad_compiles("warm", w_dtype, precision)
+        assert not any(warm.values()), f"{precision} {w_dtype}: a step compiled a kernel after the warm-up, {warm}"
+        print(f"  {precision:5s} {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
 
 
 if __name__ == "__main__":
