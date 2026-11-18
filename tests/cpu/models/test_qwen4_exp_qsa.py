@@ -3,7 +3,6 @@
 loop over a dense ``[B, 1, T, T]`` mask."""
 
 import functools
-from dataclasses import dataclass
 
 import pytest
 import torch
@@ -20,37 +19,13 @@ from halo.models.families.qwen4_exp.sparse_attention import (
     tiled_qsa_attention,
 )
 from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
-from tests.common.qwen4_exp import (
-    QSA_LAYER_IDX,
-    LargestTensor,
-    packed_positions,
-    packed_seq_idx,
-    rotary_embeddings,
-    selection_keys,
-    tiny_qwen4_exp_text_config,
-)
+from tests.common.qwen4_exp import QSA_LAYER_IDX, LargestTensor, selection_keys, tiny_qwen4_exp_text_config
+from tests.common.qwen4_exp_qsa import ROWS, Inputs, Rows, build_inputs
 
 SEED = 1234
 TOLERANCE = 1e-6
 # Wide enough that the tiled path's largest tensor (a projection of the row) stays well under T x T.
 ALLOCATION_ROW = 2048
-
-
-@dataclass(frozen=True)
-class Rows:
-    """Each row's document lengths; in ``padding``, ``+n`` pads the last n tokens and ``-n`` the first n."""
-
-    documents: tuple[tuple[int, ...], ...]
-    padding: tuple[int, ...] | None = None
-
-
-ROWS = {
-    "one-document": Rows(((300,),)),
-    "packed": Rows(((13, 150, 77, 60),)),
-    "packed-two-rows": Rows(((100, 200), (300,))),
-    "right-padded": Rows(((300,), (300,)), padding=(80, 0)),
-    "left-padded": Rows(((300,), (300,)), padding=(-80, 0)),
-}
 
 
 @pytest.fixture(scope="module")
@@ -70,41 +45,6 @@ def attention(config):
     return module
 
 
-@dataclass(frozen=True)
-class Inputs:
-    hidden: torch.Tensor
-    position_embeddings: tuple[torch.Tensor, torch.Tensor]
-    padding_mask: torch.Tensor | None
-    seq_idx: torch.Tensor | None
-    dense_mask: torch.Tensor
-
-
-def _inputs(config, rows: Rows, hidden: torch.Tensor | None = None) -> Inputs:
-    """Packed rows isolate their documents through ``position_ids``, padded rows through the 2-D mask."""
-    position_ids = packed_positions([list(lengths) for lengths in rows.documents])
-    batch, length = position_ids.shape
-    if hidden is None:
-        torch.manual_seed(SEED + 1)
-        hidden = torch.randn(batch, length, config.hidden_size)
-    padding_mask, seq_idx = None, packed_seq_idx(position_ids)
-    if rows.padding is not None:
-        padding_mask, seq_idx = torch.ones(batch, length, dtype=torch.long), None
-        for row, pad in enumerate(rows.padding):
-            if pad > 0:
-                padding_mask[row, length - pad :] = 0
-            elif pad < 0:
-                padding_mask[row, :-pad] = 0
-    dense_mask = create_causal_mask(
-        config=config,
-        inputs_embeds=hidden,
-        attention_mask=padding_mask,
-        past_key_values=None,
-        position_ids=position_ids,
-        allow_is_causal_skip=False,
-    )
-    return Inputs(hidden, rotary_embeddings(config, hidden, position_ids), padding_mask, seq_idx, dense_mask)
-
-
 def _transformers_keys(attention, inputs: Inputs) -> torch.Tensor:
     """``[batch, length, length]``: the keys transformers' indexer and mask let each query attend."""
     with torch.no_grad():
@@ -119,7 +59,7 @@ def _assert_same_keys(expected: torch.Tensor, actual: torch.Tensor) -> None:
 
 @pytest.mark.parametrize("rows", ROWS.values(), ids=ROWS.keys())
 def test_selection_matches_transformers_per_query(attention, config, rows):
-    inputs = _inputs(config, rows)
+    inputs = build_inputs(config, rows)
     batch, length = inputs.hidden.shape[:2]
     selection = select_qsa_keys(
         attention.indexer, inputs.hidden, inputs.position_embeddings, inputs.seq_idx, inputs.padding_mask
@@ -136,7 +76,7 @@ def test_tie_rows_resolve_in_transformers_order(attention, config, monkeypatch):
     hidden = torch.zeros(1, 256, config.hidden_size)
     for block in (3, 9, 30, 41):
         hidden[0, 4 * block : 4 * block + 4] = torch.randn(4, config.hidden_size)
-    inputs = _inputs(config, rows, hidden=hidden)
+    inputs = build_inputs(config, rows, hidden=hidden)
     rescored = []
     rescore = sparse_attention._rescore_like_transformers
 
@@ -163,7 +103,7 @@ def _max_relative_difference(expected, actual) -> float:
 
 @pytest.mark.parametrize("rows", ROWS.values(), ids=ROWS.keys())
 def test_attention_core_matches_sdpa_under_the_dense_mask(attention, config, rows):
-    inputs = _inputs(config, rows)
+    inputs = build_inputs(config, rows)
     batch, length = inputs.hidden.shape[:2]
     selection = select_qsa_keys(
         attention.indexer, inputs.hidden, inputs.position_embeddings, inputs.seq_idx, inputs.padding_mask
@@ -192,7 +132,7 @@ def test_attention_core_matches_sdpa_under_the_dense_mask(attention, config, row
 @pytest.mark.parametrize("rows", ROWS.values(), ids=ROWS.keys())
 def test_attention_forward_matches_transformers(attention, config, rows):
     """The whole layer, gradients included; the indexer gets none in either."""
-    inputs = _inputs(config, rows)
+    inputs = build_inputs(config, rows)
     parameters = list(attention.parameters())
     torch.manual_seed(SEED + 4)
     upstream = torch.randn_like(inputs.hidden)
@@ -214,7 +154,7 @@ def test_attention_forward_matches_transformers(attention, config, rows):
 
 def test_each_tile_reads_its_document_keys_up_to_the_tile_end(attention, config, monkeypatch):
     rows = ROWS["packed"]
-    inputs = _inputs(config, rows)
+    inputs = build_inputs(config, rows)
     tiles = []
     attend = sparse_attention._attend_tile
 
@@ -234,7 +174,7 @@ def test_each_tile_reads_its_document_keys_up_to_the_tile_end(attention, config,
 
 
 def test_no_tensor_grows_with_the_square_of_the_row(attention, config):
-    inputs = _inputs(config, Rows(((ALLOCATION_ROW,),)))
+    inputs = build_inputs(config, Rows(((ALLOCATION_ROW,),)))
     hidden = inputs.hidden.clone().requires_grad_()
     with LargestTensor() as tiled:
         output, _ = qsa_attention_forward(attention, hidden, inputs.position_embeddings, seq_idx=inputs.seq_idx)
@@ -257,7 +197,7 @@ def test_no_tensor_grows_with_the_square_of_the_row(attention, config):
 
 def test_recompute_attends_the_forward_selection(attention, config, monkeypatch):
     """A recompute whose input drifted (an inexact replay) still attends the keys the forward selected."""
-    inputs = _inputs(config, ROWS["packed"])
+    inputs = build_inputs(config, ROWS["packed"])
     torch.manual_seed(SEED + 5)
     drift = 3.0 * torch.randn_like(inputs.hidden)
     attended = []
@@ -286,7 +226,7 @@ def test_recompute_attends_the_forward_selection(attention, config, monkeypatch)
 
 
 def test_a_no_grad_pass_through_a_checkpoint_keeps_no_selection(attention, config):
-    inputs = _inputs(config, ROWS["one-document"])
+    inputs = build_inputs(config, ROWS["one-document"])
     scoped = scoped_checkpoint_func(functools.partial(checkpoint, use_reentrant=True))
     kept = []
 
@@ -310,7 +250,7 @@ def test_a_no_grad_pass_through_a_checkpoint_keeps_no_selection(attention, confi
     ],
 )
 def test_refusals(attention, config, change, message):
-    inputs = _inputs(config, ROWS["one-document"])
+    inputs = build_inputs(config, ROWS["one-document"])
     kwargs = {"attention_mask": None, "seq_idx": inputs.seq_idx}
     module = attention
     if change == "dense-mask":

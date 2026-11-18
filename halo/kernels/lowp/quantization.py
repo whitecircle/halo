@@ -14,7 +14,12 @@ from torch._dynamo.exc import TorchDynamoException
 from triton.runtime.jit import JITFunction
 
 from halo.env import env_flag
-from halo.kernels.lowp.fake_quant_triton import fake_quant_triton, mxfp4_fake_quant_kernel, mxfp8_fake_quant_kernel
+from halo.kernels.lowp.fake_quant_triton import (
+    fake_quant_triton,
+    mxfp4_fake_quant_kernel,
+    mxfp8_fake_quant_kernel,
+    nvfp4_fake_quant_kernel,
+)
 from halo.kernels.lowp.spec import QuantFormat
 
 logger = logging.getLogger(__name__)
@@ -41,27 +46,59 @@ _POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": F
 # Largest element magnitude per format, which a block's amax scales to. The eager cores and the fused kernels read it.
 _ELEMENT_MAX: dict[QuantFormat, float] = {"mxfp8": E4M3_MAX, "mxfp4": E2M1_MAX, "nvfp4": E2M1_MAX}
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
-# the eager checkpoint quantizer, so it stays eager.
+# the eager checkpoint quantizer, so its weights take the fused kernel instead.
 _COMPILABLE = tuple(fmt for fmt, pow2 in _POW2_SCALE.items() if pow2)
 
 
 @dataclass(frozen=True)
 class _FusedFakeQuant:
-    """A fused Triton round trip, bit-identical to eager: the kernel and the oldest compute capability whose Triton
-    backend compiles it."""
+    """A fused Triton round trip, bit-identical to eager on CUDA: the kernel, the oldest compute capability whose
+    Triton backend compiles it, and for a two-level format the largest block scale (NVFP4's ``E4M3_MAX``), which
+    also marks the tensor abs-max pass it needs first."""
 
     kernel: JITFunction
     min_capability: tuple[int, int]
+    scale_max: float | None = None
 
 
-# One entry per power-of-two-scale format (test_lowp_spec.py holds the two tables together). NVFP4's tensor-wide
-# global scale needs a pass over the whole tensor first, so it stays eager. The mxfp8 kernel rounds through Triton's
-# fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX converts
-# to from SM 8.0. Older GPUs keep the eager path.
+# One entry per format (test_lowp_spec.py holds the tables together). The mxfp8 and nvfp4 kernels round through
+# Triton's fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX
+# converts to from SM 8.0. Older GPUs keep the eager path.
 _FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
     "mxfp8": _FusedFakeQuant(mxfp8_fake_quant_kernel, min_capability=(8, 9)),
     "mxfp4": _FusedFakeQuant(mxfp4_fake_quant_kernel, min_capability=(8, 0)),
+    "nvfp4": _FusedFakeQuant(nvfp4_fake_quant_kernel, min_capability=(8, 9), scale_max=E4M3_MAX),
 }
+
+
+def _fused_entry(t: torch.Tensor, fmt: QuantFormat, axis: int) -> _FusedFakeQuant | None:
+    """The fused round trip for ``t`` when one applies: CUDA, real, ``axis`` divisible by the format's block size and a
+    GPU new enough for the kernel. Contiguity and the axis's position are the caller's to check."""
+    fused = _FUSED_FAKE_QUANT.get(fmt)
+    if (
+        fused is not None
+        and t.is_cuda
+        and not t.is_complex()  # Triton has no complex type
+        and t.shape[axis] % FORMAT_BLOCK_SIZE[fmt] == 0
+        and _device_capability(t.device.index) >= fused.min_capability
+    ):
+        return fused
+    return None
+
+
+def _fused_round_trip(
+    fused: _FusedFakeQuant, t: torch.Tensor, fmt: QuantFormat, out_dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    return fake_quant_triton(
+        fused.kernel,
+        t,
+        FORMAT_BLOCK_SIZE[fmt],
+        _ELEMENT_MAX[fmt],
+        _AMAX_FLOOR,
+        scale_max=fused.scale_max,
+        out_dtype=out_dtype,
+    )
+
 
 _compiled_round_trip = None
 _compile_failed = False
@@ -264,9 +301,19 @@ def _warn_compile_disabled(exc: Exception) -> None:
 
 
 def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-    """Compiled for the power-of-two-scale formats (fixed-shape weights), eager otherwise."""
+    """Compiled for the power-of-two-scale formats (fixed-shape weights). NVFP4 cannot compile bit-exact, so on a GPU
+    that runs its kernel it moves ``axis`` last, takes the fused round trip and moves it back; eager otherwise."""
     global _compiled_round_trip, _compile_failed
-    if fmt not in _COMPILABLE or _compile_failed:
+    if fmt not in _COMPILABLE:
+        fused = _fused_entry(t, fmt, axis)
+        if fused is None:
+            return _block_round_trip(t, fmt, axis)
+        moved = t.movedim(axis, -1).contiguous()
+        # bf16 out, as eager's dequantize returns: an fp16 output would turn a value rounded past 65504 into inf.
+        out = _fused_round_trip(fused, moved, fmt, out_dtype=torch.bfloat16)
+        del moved  # Peak: the moved copy and the kernel output, then the output and the restored layout.
+        return out.movedim(-1, axis).contiguous()
+    if _compile_failed:
         return _block_round_trip(t, fmt, axis)
     if _compiled_round_trip is None:
         try:
@@ -289,18 +336,10 @@ class _FakeQuant(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-        fused = _FUSED_FAKE_QUANT.get(fmt)
-        if (
-            fused is not None
-            and t.is_cuda
-            and t.is_contiguous()
-            and not t.is_complex()  # Triton has no complex type
-            and axis in (-1, t.ndim - 1)
-            and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
-            and _device_capability(t.device.index) >= fused.min_capability
-        ):
-            return fake_quant_triton(fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
-        # Eager, as activation shapes vary and a compiled form would recompile constantly.
+        if axis in (-1, t.ndim - 1) and t.is_contiguous() and (fused := _fused_entry(t, fmt, -1)) is not None:
+            return _fused_round_trip(fused, t, fmt)
+        # Eager, as activation shapes vary and a compiled form would recompile constantly. A non-last axis (an ep1
+        # expert weight under FSDP2) stays eager for every format.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
     @staticmethod

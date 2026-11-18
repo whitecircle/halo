@@ -84,7 +84,6 @@ EP surface. The table is pinned against the specs and classes by
 | Nemotron-H | RL weight sync — both pinned engines serve the release, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | training the composite through the release's modeling file — its forward hands the text tower no `seq_idx` and reads no `image_grid_hw` | `FAMILY.remote_composite_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
-| Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and on SM100-family GPUs SGLang 0.5.22 caches a padded copy of each hyper-connection mix-up weight that an update leaves stale ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for

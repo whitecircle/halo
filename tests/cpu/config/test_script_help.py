@@ -16,17 +16,17 @@ from unittest.mock import patch
 
 import pytest
 
+from halo.cli import BENCHMARK_HARNESS_ROOT
 from tests.common.repo import REPO_ROOT
 
 _SCRIPTS_DIR = REPO_ROOT / "scripts"
-_SCRIPTS = sorted(
-    path for path in _SCRIPTS_DIR.rglob("*.py") if "parse_script_args(" in path.read_text(encoding="utf-8")
-)
+_TOOLKIT_FILES = [
+    path for path in _SCRIPTS_DIR.rglob("*.py") if not path.is_relative_to(REPO_ROOT / BENCHMARK_HARNESS_ROOT)
+]
+_SCRIPTS = sorted(path for path in _TOOLKIT_FILES if "parse_script_args(" in path.read_text(encoding="utf-8"))
 # Built on argparse, so the sweep above never reaches them.
 _TOOLS = sorted(
-    path
-    for path in _SCRIPTS_DIR.rglob("*.py")
-    if path not in _SCRIPTS and "__main__" in path.read_text(encoding="utf-8")
+    path for path in _TOOLKIT_FILES if path not in _SCRIPTS and "__main__" in path.read_text(encoding="utf-8")
 )
 
 
