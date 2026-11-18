@@ -77,7 +77,8 @@ def _scan_kernel(
     # ok = the local slots number n_valid, their groups end at n_sorted and, weighted by expert, sum to n_weighted
     # (31 bits; -1 unpadded), the host counts that sized the outputs and the padded layout: padded, one
     # count off by a slot can move its group a whole segment with the total unchanged, and two can trade segments
-    # with the padded total unchanged too.
+    # with the padded total unchanged too. The two sums are a checksum, not an equality with the host layout: three
+    # groups moving by (+1, -2, +1) segments keep both.
     e = tl.arange(0, E_PAD)
     totals = tl.zeros((E_PAD,), dtype=tl.int32)
     for b0 in range(0, n_blocks, CHUNK):
