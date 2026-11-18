@@ -84,8 +84,10 @@ peers have entered (a negative count raises on every rank once the ranks agree),
 which rank gives up on a join first (the survivors then die on the next collective and blame it) and how
 long each rank looks for the filesystem probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
 fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), the flex-sliding
-switch an SDPA run's backend, the matmul precision whether a rank's fp32 matmuls round through TF32, and the
-rest are wire parameters both ends of the all-to-all share.
+switch an SDPA run's backend, the matmul precision whether a rank's fp32 matmuls round through TF32, the
+writers-per-node count which ranks retain which chunks of a gathered save, the weight-sync gather-ahead the
+order in which a push issues its expert gathers, the parity probe whether a rank runs the first push's probe
+forward, and the rest are wire parameters both ends of the all-to-all share.
 
 `agree_rank_uniform_env` (`halo/distributed/rank_uniform_env.py`) gathers them after the device bind and
 **before the weight load**, and `load_distributed_model` repeats it as a latched backstop; a mismatch

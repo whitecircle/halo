@@ -209,8 +209,8 @@ the rank *not* in a collective is the culprit.
 For the definitive "which collective did rank K miss?", enable the NCCL flight recorder
 (`TORCH_NCCL_TRACE_BUFFER_SIZE`, `TORCH_NCCL_DUMP_ON_TIMEOUT`).
 
-One class of hang is refused up front instead: a job whose ranks disagree on an EP, timeout, save, attention
-or matmul-precision knob (`HALO_EP_CAPACITY_DEDUP`, the DeepEP wire parameters, `HALO_GRAD_BUCKET_MB`,
+One class of hang is refused up front instead: a job whose ranks disagree on an EP, timeout, save, attention,
+matmul-precision or weight-sync knob (`HALO_EP_CAPACITY_DEDUP`, the DeepEP wire parameters, `HALO_GRAD_BUCKET_MB`,
 `HALO_CHECKPOINT_WRITE_THREADS`, `HALO_CHECKPOINT_WRITERS_PER_NODE`, `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`,
 `DIST_FS_PROBE_TIMEOUT_SECONDS`, `FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`,
 `HALO_FP32_MATMUL_PRECISION`, `HALO_WEIGHT_SYNC_GATHER_AHEAD`, `HALO_WEIGHT_SYNC_PARITY_PROBE`) raises

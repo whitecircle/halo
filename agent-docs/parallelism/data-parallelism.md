@@ -310,7 +310,7 @@ replica for the whole run while every loss looks normal.
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
   (`parallelism_rules._reject_hsdp`).
 
-    TP and EP+TP build their own `(dp, tp)` mesh and Expert-TP shards through the EP path's 1-D FSDP; the 2D HSDP mesh is wired into neither.
+    TP and EP+TP shard on their own `(dp, tp)` mesh, and an Expert-TP run keeps its non-expert parameters on the EP path's 1-D FSDP.
     Multi-group EP already shards over the EP group, and a single global EP group must keep 1D FSDP
     so its backward collectives share the DeepEP combine's membership.
 

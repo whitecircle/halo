@@ -102,7 +102,7 @@ M ≈ (batch × seq × top_k) / num_experts
 `batch × seq` is the token count the EP group dispatches — EP relocates experts across ranks, it does
 not change how many tokens reach one expert.
 
-A fine-grained MoE (many narrow experts, high top-k — Qwen3.6 has 256) puts few tokens on each one, deep in the bandwidth-bound regime. There the per-expert loop fires hundreds of tiny launches, so grouped GEMM's single batched launch wins big. It also collapses hundreds of autograd nodes, each pinning its own saved activations, into two.
+A fine-grained MoE (many narrow experts, high top-k — Qwen3.6 has 256) puts few tokens on each one, at the small-M end of the table above, where the limit is the few tiles in flight (§1), not the memory. There the per-expert loop fires hundreds of tiny launches, so grouped GEMM's single batched launch wins big. It also collapses hundreds of autograd nodes, each pinning its own saved activations, into two.
 
 A coarse MoE (gpt-oss: 32–128 experts, `2880²`) gives each expert more tokens and bigger matmuls that a single cuBLAS call already handles, so the grouped win shrinks ([Grouped GEMM](../optimization/grouped-gemm.md)).
 

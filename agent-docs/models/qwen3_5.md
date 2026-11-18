@@ -83,7 +83,7 @@ Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGat
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train without CP (the 35B recipe runs 33K rows at EP=8, and 65,536-token rows have trained on one 8× B300 node), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
 
 ## TP and ETP
 

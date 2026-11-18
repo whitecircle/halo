@@ -339,7 +339,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 
 ## Optimizations
 
-Built in. The attention and kernel selections apply by default where supported; the rest is set per run in the config:
+Built in. Most apply by default where supported; QAT, the Muon and FlashAdamW optimizers, LoRA and QLoRA, and the packing modes are set per run in the config:
 
 - **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
   CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4 and Nemotron-H take torch's fused RMSNorm instead),
