@@ -33,6 +33,12 @@ from tests.common.parallelism import create_config
 BUDGET = {"ep_rows_per_device": 2, "ep_declared_max_length": 4096}
 
 
+@pytest.fixture(autouse=True)
+def no_visible_gpu(monkeypatch):
+    """``require_mok`` refuses a visible GPU that is not SM103, which the CPU tier's container can be handed."""
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+
 def _mok(**kw):
     return create_config(moe_backend="mok", **{"world_size": 4, "gpus_per_node": 4, "ep_size": 4, **BUDGET, **kw})
 
@@ -60,6 +66,11 @@ def test_pure_node_local_ep_with_a_budget_is_accepted(overrides):
         ({"ep_size": 1, "use_grouped_gemm": False}, "use_grouped_gemm=False"),
         ({"world_size": 8, "gpus_per_node": 8, "ep_size": 8, "ep_buffer_backend": "legacy"}, "ep_buffer_backend"),
         ({"ep_declared_max_length": 0}, "no declared token budget"),
+        # DeepEP's refusal of the same layout offers expert_parallel_size=2 and expert TP, which MoK refuses next.
+        (
+            {"world_size": 8, "gpus_per_node": 8},
+            "2 concurrent EP groups on one 8-GPU NVLink domain",
+        ),
     ],
 )
 def test_a_configuration_mok_cannot_run_is_refused(overrides, message):

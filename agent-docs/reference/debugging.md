@@ -55,7 +55,8 @@ Each selected rank writes into `profiler_output_dir`; artifacts carry a `-cycleN
 | `<label>-cycleN-rankNN.top_ops.txt` (top 25 ops by self-CUDA) | eyeball |
 
 Traces label the toolkit's own phases as named ranges: `ep.dispatch` / `ep.expert_compute` /
-`ep.combine` around the DeepEP spans of every EP layer, and `grad_sync.reduce_bucketed` around the
+`ep.combine` around the DeepEP spans of every EP layer (one `ep.mok` span under `moe_backend: mok`, whose kernel
+fuses the three), and `grad_sync.reduce_bucketed` around the
 post-backward grad-sync sweep — so the EP and grad-sync fractions read off the timeline directly. A rank's
 `ep.combine` includes its wait for the slowest rank, so it is not wire time.
 

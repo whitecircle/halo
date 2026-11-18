@@ -9,7 +9,7 @@ Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert co
 every expert GEMM:
 [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
-EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
+EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP), or on B300 the opt-in [`moe_backend: mok`](#mixture-of-kittens-backend) — there is no NCCL fallback.
 Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router gradients
 sync via the EP layer's own backward hooks and expert gradients via the trainer's post-backward sweep,
 which takes the routers too when there is more than one EP group
@@ -285,14 +285,15 @@ replay and the family's shared expert stay on Halo's path.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
   TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, `use_grouped_gemm: false`, a non-default
   `ep_buffer_backend`, FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`) and a
-  run that declares no token budget. DeepEP's own layout rules still apply (several EP
-  groups in one NVLink domain among them); MoK has not been run past them.
+  run that declares no token budget. Several EP groups in one NVLink domain are refused as under DeepEP: no MoK test
+  runs them, and the remedy is one group (`expert_parallel_size` at the domain's size, or a job of that many GPUs).
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
   batch when the config schedules an evaluation (`eval_strategy`, `eval_on_start`) and that is larger. Padding rows carry zero router weight and move no output or
   gradient, but they are dispatched and computed: a batch shorter than the budget pays for the whole of it, and a
   larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises, an
-  unscheduled `evaluate()` on a larger batch included.
+  unscheduled `evaluate()` on a larger batch included. A packed GRPO micro-batch carries several rows, so a
+  `packed_microbatch_tokens` past the budget is refused at construction.
 - **Schedule and ring.** A rank's schedule holds the most rows any routing can send it, each local expert's rounded
   up to 256 (`_schedule_capacity_multiplier`): MoK traps in its kernel past it, with no message, and its default
   holds half the group's rows. MoK allocates every routed activation at its ring's size and Halo saves them for the
@@ -310,7 +311,7 @@ replay and the family's shared expert stay on Halo's path.
   block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.87× and 0.61-0.82×.
   One layer at DeepSeek-V3's shape peaks at 23.0 and 33.8 GiB per rank at 4,096 and 16,384 tokens per GPU, against
   DeepEP bf16's 12.0 and 16.5.
-- **Install.** The Blackwell image builds it at `f3a8bd2` for SM103, MoK's default and one arch per build, so `mok`
+- **Install.** The Blackwell image builds it at `f3a8bd2` for SM103 (`MOK_ARCH`, one arch per build), so `mok`
   is refused on B200 (SM100). Its build refuses an nvcc that is not torch's CUDA (13.0)
   while the image ships the 13.2 toolkit, so the Dockerfile installs the 13.0 compiler for that step and removes it
   again; `--no-deps` keeps the locked NCCL, which pip would replace with torch's metadata pin and DeepEP's build does

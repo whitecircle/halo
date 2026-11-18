@@ -1047,6 +1047,9 @@ MANIFEST: dict[str, TestSpec] = {
             "--family qwen3_5",
             "--family qwen3 --skew",
             Row("--family qwen3 --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3")),
+            Row(
+                "--family qwen3 --ep-size 1 --ranks 2", nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")
+            ),
         ),
         timeout=900,
     ),

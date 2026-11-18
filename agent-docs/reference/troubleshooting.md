@@ -235,7 +235,7 @@ Full procedure: [Debugging §4](debugging.md#4-diagnosing-multi-node-hangs).
 
 ## DeepEP build / runtime faults
 
-DeepEP is required for EP — there is no NCCL fallback. The recurring failure modes:
+DeepEP is required for EP (the opt-in `moe_backend: mok` aside) — there is no NCCL fallback. The recurring failure modes:
 
 - **`import deep_ep` fails (NVSHMEM / undefined symbol).** On Blackwell + PyTorch 2.11+cu130,
   NVSHMEM ships as `nvidia-nvshmem-cu13`; installing `nvidia-nvshmem-cu12` clobbers the headers. Use
