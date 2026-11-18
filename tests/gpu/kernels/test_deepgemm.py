@@ -229,25 +229,28 @@ def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
 
 
 def test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read():
-    """The cast decodes a NaN weight as zeros and flags it on the device; the read raises, cached weight or not."""
+    """The cast gives a NaN weight a finite code and flags it on the device; the read raises, cached weight or not,
+    and again at the next forward of a cached one."""
     lowp = LowpSpec(precision="mxfp4", backend="native")
-    x = torch.randn(256, 256, device=DEV, dtype=torch.bfloat16)
+    generator = torch.Generator(device=DEV).manual_seed(0)
+    x = torch.randn(256, 256, device=DEV, generator=generator).to(torch.bfloat16)
     offs = torch.tensor([128, 256], device=DEV, dtype=torch.int32)
     for cacheable in (True, False):
-        w = torch.randn(2, 256, 256, device=DEV, dtype=torch.bfloat16) / 16
+        w = (torch.randn(2, 256, 256, device=DEV, generator=generator) / 16).to(torch.bfloat16)
         deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
-        deepgemm.raise_on_non_finite_weight()
+        deepgemm.verify_finite_mxfp4_weights()
         w[1, 3, 5] = float("nan")
-        out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
-        assert out.isfinite().all(), "premise: the output hides the NaN weight"
-        try:
-            deepgemm.raise_on_non_finite_weight()
-        except ValueError as exc:
-            assert "Non-finite expert weight" in str(exc)
-        else:
-            raise AssertionError(f"a NaN weight (cacheable={cacheable}) passed the flag read")
-        deepgemm.raise_on_non_finite_weight()  # the raise cleared the flag
-    print("  mxfp4 NaN weight: finite output, raised at the flag read, cached and uncached — OK")
+        for forward in ("first", "caught and run again"):
+            out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
+            assert out.isfinite().all(), "premise: the output hides the NaN weight"
+            try:
+                deepgemm.verify_finite_mxfp4_weights([("bank", w)])
+            except ValueError as exc:
+                assert "Non-finite expert weight bank: " in str(exc)
+            else:
+                raise AssertionError(f"a NaN weight (cacheable={cacheable}, {forward}) passed the flag read")
+            deepgemm.verify_finite_mxfp4_weights()  # the raise cleared the flag
+    print("  mxfp4 NaN weight: finite output, raised at every flag read, cached and uncached — OK")
 
 
 if __name__ == "__main__":

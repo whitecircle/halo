@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Grouped-GEMM dispatch: bf16 matches a per-expert loop, every format takes the simulated fake-quant path by default,
-and ``native=True`` takes mxfp8 / mxfp4 native at every shape."""
+and ``lowp_backend: native`` takes mxfp8 / mxfp4 native at every shape."""
 
 import torch
 

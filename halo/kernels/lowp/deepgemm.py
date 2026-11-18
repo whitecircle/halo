@@ -7,6 +7,7 @@ up their activation casts, so each is built once per pass."""
 from __future__ import annotations
 
 import functools
+from collections.abc import Iterable
 from typing import NamedTuple
 
 import torch
@@ -136,15 +137,16 @@ class _SharedTiles:
 
     def __init__(self, *_activation):
         self.tiles = None
-        self.readers = 0
+        self.readers = self.left = 0
 
     def take(self, x: torch.Tensor, layout: _RowLayout, wanted: bool):
         """A reader's backward: the tiles when it runs a wgrad, cast by the first that does."""
         if wanted and self.tiles is None:
             self.tiles = cast_tiles_to_fp8(x, layout.src)
         tiles = self.tiles if wanted else None
-        self.readers -= 1
-        if not self.readers:
+        # Counted per pass: a second backward over a retained graph casts and drops them again.
+        self.left = (self.left or self.readers) - 1
+        if not self.left:
             self.tiles = None
         return tiles
 
@@ -199,20 +201,27 @@ def _cast_experts(b: torch.Tensor, cast, block_scaled: bool):
     return data, sf
 
 
-_NON_FINITE_WEIGHT = "Non-finite expert weight: DeepGEMM's MXFP4 cast decodes it as zeros."
+_NON_FINITE_WEIGHT = (
+    "Non-finite expert weight{}: e2m1 has no NaN code, so the MXFP4 cast gives a NaN or inf element a finite one and "
+    "the run would train on it. The checkpoint or an optimizer step wrote it: check the loaded weights, or resume "
+    "from an earlier save at a lower learning rate."
+)
 # Set on the device by an MXFP4 cast of a NaN or inf weight. Read once per model forward: a read per cast would sync
 # the host with the GPU at every expert GEMM of an uncached weight.
 _nonfinite_weight: dict[torch.device, torch.Tensor] = {}
 
 
-def raise_on_non_finite_weight(*_hook_args) -> None:
-    """One host read for every MXFP4 weight cast since the last call; ``apply_lowp_compute`` registers it as the
-    model's forward hook. The raise is local to this rank; its EP peers wait in their next collective until it times
-    out."""
+def verify_finite_mxfp4_weights(named_weights: Iterable[tuple[str, torch.Tensor]] = ()) -> None:
+    """One host read for every MXFP4 weight cast since the last call, which ``apply_lowp_compute`` hooks after the
+    last converted layer. The raise names the non-finite ones of ``named_weights`` and drops the cached casts, so a
+    caller that catches it cannot run on them. It is local to this rank; its EP peers wait in their next collective
+    until it times out."""
     for flag in _nonfinite_weight.values():
         if flag.item():
             flag.zero_()
-            raise ValueError(_NON_FINITE_WEIGHT)
+            _weight_caches["mxfp4"] = WeightVersionCache()
+            names = [name for name, weight in named_weights if not weight.isfinite().all()]
+            raise ValueError(_NON_FINITE_WEIGHT.format(f" {', '.join(names)}" if names else ""))
 
 
 def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
@@ -238,7 +247,7 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
     else:  # DeepGEMM's reference casts: the FP8 operand keeps the weight's [E, K, N], the MXFP4 one is [E, N, K]
         # e2m1 has no NaN code and the cast turns a NaN amax into a 2^127 scale: the block would decode as zeros.
         if fmt == "mxfp4" and not w.isfinite().all():
-            raise ValueError(_NON_FINITE_WEIGHT)
+            raise ValueError(_NON_FINITE_WEIGHT.format(f" of shape {tuple(w.shape)}"))
         b = w.contiguous() if fmt == "mxfp8" else w.transpose(-2, -1).contiguous()
         b = F.pad(b, (0, _contraction_width(b.shape[2], fmt) - b.shape[2]))
         cast = (
@@ -389,11 +398,14 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
 
 def deepgemm_grouped_gemm(x, w, *, offs, lowp: LowpSpec, weight_cacheable: bool = True):
     """Native forward at ``lowp.precision``, with the bf16 or FP8 backward ``lowp.backward_precision`` names. On
-    CUDA a non-finite MXFP4 weight raises in :func:`raise_on_non_finite_weight`, not here."""
+    CUDA a non-finite MXFP4 weight raises in :func:`verify_finite_mxfp4_weights`, not here."""
     if not deepgemm_available():
         raise ImportError("deepgemm_grouped_gemm needs the deep_gemm package (Blackwell image only)")
     if offs is None:
         raise ValueError("deepgemm_grouped_gemm needs offs: the kernel's m_indices are built from the group ends")
+    if x.shape[1] != w.shape[1]:
+        # The row cast writes the weight's K columns, so a wider activation would be truncated, not rejected.
+        raise ValueError(f"x is [T, {x.shape[1]}] but w contracts over K={w.shape[1]}; the two must match.")
     ensure_contiguous_alignment()
     fmt, fp8_backward = LOWP_RECIPES[lowp.precision].quant_format, lowp.backward_precision == "fp8"
     # Any other format would run as FP8 on the wrong weight layout; a direct caller has not been through
