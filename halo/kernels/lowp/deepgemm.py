@@ -21,7 +21,6 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
     cast_tiles_to_fp8,
     cast_weight_blocks_to_fp8,
     cast_weight_rows_to_mxfp4,
-    non_finite_weight_error,
 )
 from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import GROUP_ROW_ALIGN, LOWP_RECIPES, LowpSpec, QuantFormat
@@ -150,16 +149,15 @@ def _aligned_row_layout(offs: torch.Tensor, segments: list[int]) -> _RowLayout:
     return _RowLayout(row, row, m_indices, segments, segments_dev, rows, aligned=True)
 
 
-class _ActivationCasts:
-    """One activation's FP8 casts, shared by the projections that read it (gate and up): the forward's 1x128 rows
-    and the fp8 wgrad's 128x1 tiles, each dropped after its last reader."""
+class _SharedTiles:
+    """One activation's 128x1 FP8 cast for the fp8 wgrad, shared by the projections that read it (gate and up) and
+    dropped after the last one's backward."""
 
-    def __init__(self, x: torch.Tensor, layout: _RowLayout, width: int):
-        self.rows = cast_rows_to_fp8(x, layout.src, width)
+    def __init__(self, *_activation):
         self.tiles = None
         self.readers = 0
 
-    def take_tiles(self, x: torch.Tensor, layout: _RowLayout, wanted: bool):
+    def take(self, x: torch.Tensor, layout: _RowLayout, wanted: bool):
         """A reader's backward: the tiles when it runs a wgrad, cast by the first that does."""
         if wanted and self.tiles is None:
             self.tiles = cast_tiles_to_fp8(x, layout.src)
@@ -170,7 +168,8 @@ class _ActivationCasts:
         return tiles
 
 
-# One host read of ``offs`` per expert FFN, not per projection; the gate and up GEMMs cast the same activation.
+# One host read of ``offs`` per expert FFN, not per projection; the gate and up GEMMs cast the same activation. The
+# memo alone holds the forward's 1x128 rows, so no graph keeps an FP8 copy of an activation.
 _layouts = _Memo(_row_layout)
 
 
@@ -180,7 +179,8 @@ def seed_aligned_layout(offs: torch.Tensor, segments: list[int]) -> None:
     _layouts.put(_aligned_row_layout(offs, segments), offs, sum(segments), len(segments))
 
 
-_activation_casts = _Memo(_ActivationCasts)
+_row_casts = _Memo(lambda x, layout, width: cast_rows_to_fp8(x, layout.src, width))
+_shared_tiles = _Memo(_SharedTiles)
 
 
 def _token_rows(d: torch.Tensor, layout: _RowLayout) -> torch.Tensor:
@@ -231,6 +231,22 @@ def _cast_experts(b: torch.Tensor, cast, block_scaled: bool):
     return data, sf
 
 
+_NON_FINITE_WEIGHT = "Non-finite expert weight: DeepGEMM's MXFP4 cast decodes it as zeros."
+# Set on the device by an MXFP4 cast of a NaN or inf weight. Read once per model forward: a read per cast would sync
+# the host with the GPU at every expert GEMM of an uncached weight.
+_nonfinite_weight: dict[torch.device, torch.Tensor] = {}
+
+
+def raise_on_non_finite_weight(*_hook_args) -> None:
+    """One host read for every MXFP4 weight cast since the last call; ``apply_lowp_compute`` registers it as the
+    model's forward hook. The raise is local to this rank; its EP peers wait in their next collective until it times
+    out."""
+    for flag in _nonfinite_weight.values():
+        if flag.item():
+            flag.zero_()
+            raise ValueError(_NON_FINITE_WEIGHT)
+
+
 def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
     """Cached per optimizer step unless ``cacheable`` is False, as FSDP2's pinned version counter would serve the
     step-0 quantization forever."""
@@ -243,16 +259,18 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
         cached = _weight_caches[fmt].get(w, fingerprint)
         if cached is not None:
             return cached
-    if w.is_cuda:  # the MXFP4 cast raises on a non-finite weight itself
-        operand = (
-            cast_weight_blocks_to_fp8(w)
-            if fmt == "mxfp8"
-            else cast_weight_rows_to_mxfp4(w, _contraction_width(w.shape[1], fmt))
-        )
+    if w.is_cuda:
+        if fmt == "mxfp8":
+            operand = cast_weight_blocks_to_fp8(w)
+        else:
+            flag = _nonfinite_weight.get(w.device)
+            if flag is None:
+                flag = _nonfinite_weight[w.device] = torch.zeros(1, device=w.device, dtype=torch.int32)
+            operand = cast_weight_rows_to_mxfp4(w, _contraction_width(w.shape[1], fmt), flag)
     else:  # DeepGEMM's reference casts: the FP8 operand keeps the weight's [E, K, N], the MXFP4 one is [E, N, K]
         # e2m1 has no NaN code and the cast turns a NaN amax into a 2^127 scale: the block would decode as zeros.
         if fmt == "mxfp4" and not w.isfinite().all():
-            raise non_finite_weight_error(w)
+            raise ValueError(_NON_FINITE_WEIGHT)
         b = w.contiguous() if fmt == "mxfp8" else w.transpose(-2, -1).contiguous()
         b = F.pad(b, (0, _contraction_width(b.shape[2], fmt) - b.shape[2]))
         cast = (
@@ -266,11 +284,10 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
     return operand
 
 
-def _deepgemm_forward(x, w, layout: _RowLayout, casts: _ActivationCasts, fmt: QuantFormat, weight_cacheable: bool):
-    """bf16 ``[T, N]``; both kernels take an fp8 activation."""
+def _deepgemm_forward(x, w, layout: _RowLayout, a_op, fmt: QuantFormat, weight_cacheable: bool):
+    """bf16 ``[T, N]``; both kernels take an fp8 activation, ``a_op``."""
     deep_gemm, _ = _deep_gemm()
     E, K, N = w.shape
-    a_op = casts.rows
     b_op = _quant_weight(w, fmt, cacheable=weight_cacheable)
     d = x.new_empty(layout.rows, N, dtype=torch.bfloat16)
     kernel, recipe_a, recipe_b = (
@@ -361,28 +378,33 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, w, offs, fmt, fp8_backward, weight_cacheable):
         layout = _layouts(offs, x.shape[0], w.shape[0])
-        casts = _activation_casts(x, layout, _contraction_width(w.shape[1], fmt))
-        out = _deepgemm_forward(x, w, layout, casts, fmt, weight_cacheable)
-        casts.readers += fp8_backward
-        ctx.layout, ctx.casts, ctx.fp8_backward, ctx.weight_cacheable = layout, casts, fp8_backward, weight_cacheable
+        rows = _row_casts(x, layout, _contraction_width(w.shape[1], fmt))
+        out = _deepgemm_forward(x, w, layout, rows, fmt, weight_cacheable)
+        ctx.layout, ctx.tiles, ctx.w_fp8 = layout, None, None
+        if fp8_backward:
+            ctx.tiles = _shared_tiles(x, layout)
+            ctx.tiles.readers += 1
+            # The dgrad's weight is the forward's cast under fp8, a cache hit here, and an FP8 cast of its own under
+            # mxfp4, once per step. The backward cannot ask the cache: under saved-tensor hooks (a non-reentrant
+            # checkpoint) its saved weight is another object. An uncached weight (FSDP2's, an fp32 master's bf16
+            # copy) is cast again there, which costs less than holding an FP8 copy of every bank in the graph.
+            if weight_cacheable and w.is_leaf:
+                ctx.w_fp8 = _quant_weight(w, "mxfp8")
         ctx.save_for_backward(x, w, offs)
         return out.to(x.dtype)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
-        _activation_casts.clear()
-        ctx.casts.rows = None  # the forward's operand, not held through the backward
+        _row_casts.clear()
+        _shared_tiles.clear()
         x, w, offs = ctx.saved_tensors
         needs_x, needs_w = ctx.needs_input_grad[:2]
-        if ctx.fp8_backward:
+        if ctx.tiles is not None:
             grad_x = grad_w = None
-            x_op = ctx.casts.take_tiles(x, ctx.layout, needs_w)
+            x_op = ctx.tiles.take(x, ctx.layout, needs_w)
             if needs_x:
-                # The forward's cast under fp8 and one of its own under mxfp4, whose forward weight has no FP8 copy,
-                # either from the per-step cache; an uncached weight (FSDP2's, an fp32 master's bf16 copy) is
-                # cast again, which costs less than holding an FP8 copy of every bank in the graph.
-                w_fp8 = _quant_weight(w, "mxfp8", cacheable=ctx.weight_cacheable)
+                w_fp8 = ctx.w_fp8 or _quant_weight(w, "mxfp8", cacheable=False)
                 grad_x = _fp8_dgrad(grad_output, w_fp8, ctx.layout, w.shape[1])
             if needs_w:
                 grad_w = _fp8_wgrad(x_op, grad_output, ctx.layout, w.dtype)
@@ -398,13 +420,16 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
 
 
 def deepgemm_grouped_gemm(x, w, *, offs, lowp: LowpSpec, weight_cacheable: bool = True):
-    """Native forward at ``lowp.precision``, with the bf16 or FP8 backward ``lowp.backward_precision`` names."""
+    """Native forward at ``lowp.precision``, with the bf16 or FP8 backward ``lowp.backward_precision`` names. On
+    CUDA a non-finite MXFP4 weight raises in :func:`raise_on_non_finite_weight`, not here."""
     if not deepgemm_available():
         raise ImportError("deepgemm_grouped_gemm needs the deep_gemm package (Blackwell image only)")
     if offs is None:
         raise ValueError("deepgemm_grouped_gemm needs offs: the kernel's m_indices are built from the group ends")
     ensure_contiguous_alignment()
-    fmt = LOWP_RECIPES[lowp.precision].quant_format
-    return _DeepGEMMGroupedFn.apply(
-        x, w, offs.to(torch.int32), fmt, lowp.backward_precision == "fp8", weight_cacheable
-    )
+    fmt, fp8_backward = LOWP_RECIPES[lowp.precision].quant_format, lowp.backward_precision == "fp8"
+    # Any other format would run as FP8 on the wrong weight layout; a direct caller has not been through
+    # ``LowpSpec.validate``.
+    if fmt not in DEEPGEMM_FORMATS:
+        raise ValueError(f"deepgemm_grouped_gemm takes {DEEPGEMM_FORMATS}, got {fmt!r}.")
+    return _DeepGEMMGroupedFn.apply(x, w, offs.to(torch.int32), fmt, fp8_backward, weight_cacheable)

@@ -19,6 +19,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels import expert_gemm
 from halo.kernels.lowp import deepgemm, quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
+from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.trainers.sft import DistributedSFTTrainer
@@ -106,8 +107,18 @@ def _count_calls(module, name: str) -> list[int]:
     return calls
 
 
+class _CallsBeforeTheLastStep(TrainerCallback):
+    """``calls`` as the last step begins: the first forward's kernel warm-up runs the counted backward itself."""
+
+    def __init__(self, calls: list[int]):
+        self.calls, self.count = calls, 0
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self.count = self.calls[0]
+
+
 def _train(
-    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None
+    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None, callbacks=()
 ) -> tuple[list[float], _ExpertVersions, bool]:
     """The run's losses, the expert version counters and weight-cache checks it saw, and whether AdamWBF16 stepped it."""
     pc = ParallelismConfig(ep_size=ARGS.ep_size, lowp=lowp or LowpSpec(precision=ARGS.precision))
@@ -140,7 +151,8 @@ def _train(
         parallelism_config=pc,
     )
     versions = _ExpertVersions(trainer.model, entry_is_current)
-    trainer.add_callback(versions)
+    for callback in (versions, *callbacks):
+        trainer.add_callback(callback)
     trainer.train()
     optimizer = getattr(trainer.optimizer, "optimizer", trainer.optimizer)
     losses = step_losses(trainer)
@@ -208,12 +220,20 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     native_calls = _count_calls(deepgemm, "_deepgemm_forward")
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
-    losses, versions, adamw_bf16 = _train(ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp)
+    flag_reads = _count_calls(lowp_compute, "raise_on_non_finite_weight")
+    warmed = _CallsBeforeTheLastStep(wgrad_calls)
+    losses, versions, adamw_bf16 = _train(
+        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed,)
+    )
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
-    checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > 0) == (ARGS.backward == "fp8"))
+    # The MXFP4 weight cast only flags a NaN weight on the device: the model's forward hook is its one read.
+    checks["mxfp4_reads_its_non_finite_flag_every_forward"] = world_all(
+        (flag_reads[0] >= TOTAL_STEPS) == (ARGS.precision == "mxfp4")
+    )
+    checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(
         f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "
         f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated"

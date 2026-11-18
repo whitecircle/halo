@@ -153,7 +153,7 @@ def _mxfp8_layer_cast(w: torch.Tensor) -> tuple[torch.Tensor, ...]:
 def _mxfp8_banks(weights: tuple[torch.Tensor, ...]) -> _Banks:
     """Each bank cast to MXFP8 in both layouts, ``(data, scales, data_t, scales_t)``: the forward reads the first
     pair, the backward gate/up all four and down the transposed pair. Cached per optimizer step, keyed on the first
-    bank and every bank's identity and version, so the backward reads the forward's cast."""
+    bank and every bank's identity and version."""
     fingerprint = tuple((id(w), w._version) for w in weights)
     casts = _mxfp8_cache.get(weights[0], fingerprint)
     if casts is None:
@@ -221,7 +221,10 @@ class _MoKFn(torch.autograd.Function):
         out, context = functional.forward(config, workspace, schedule, x_pad, weights_pad, *shared, *banks.forward)
 
         schedule_fields, context_fields = _flatten(schedule), _flatten(context)
-        ctx.mok = (config, workspace, group, tokens, mxfp8, schedule_fields[1], context_fields[1])
+        # The MXFP8 backward reads the forward's casts from here, which the cache holds for the step anyway: under
+        # saved-tensor hooks (a non-reentrant checkpoint) its saved weights are other objects and would miss the cache.
+        mxfp8_backward = banks.backward if mxfp8 else None
+        ctx.mok = (config, workspace, group, tokens, mxfp8_backward, schedule_fields[1], context_fields[1])
         ctx.save_for_backward(x_pad, weights_pad, *schedule_fields[0], *context_fields[0], *weights)
         return out[:tokens].to(x.dtype)
 
@@ -229,16 +232,16 @@ class _MoKFn(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, grad_output):
         functional = _mok()
-        config, workspace, group, tokens, mxfp8, schedule_arity, context_arity = ctx.mok
+        config, workspace, group, tokens, mxfp8_backward, schedule_arity, context_arity = ctx.mok
         x_pad, weights_pad, *saved = ctx.saved_tensors
         schedule, saved = _unflatten(functional.MoKSchedule, saved, schedule_arity)
         context, weights = _unflatten(functional.MoKForwardContext, saved, context_arity)
         grad_pad = grad_output.new_zeros(x_pad.shape, dtype=torch.bfloat16)
         grad_pad[:tokens] = grad_output
-        banks = (_mxfp8_banks if mxfp8 else _bf16_banks)(weights)
+        banks = mxfp8_backward or _bf16_banks(weights).backward
         shared = _zero_shared_expert(weights[-1].shape[1], x_pad.shape[1], x_pad.device)
         d_x, d_router, d_gate, d_up, d_down, *_ = functional.backward(
-            config, workspace, schedule, context, grad_pad, x_pad, weights_pad, *shared, *banks.backward
+            config, workspace, schedule, context, grad_pad, x_pad, weights_pad, *shared, *banks
         )
         grads = _layer_grads(len(weights) == 2, d_gate, d_up, d_down)
         return (
@@ -271,8 +274,9 @@ class MoKExperts:
         if x.shape[0] > capacity:
             raise RuntimeError(
                 f"moe_backend='mok' sized its buffers to {capacity} tokens per rank from the run's declared budget "
-                f"(the larger of the train and eval batch's rows x max_length), but a forward carried {x.shape[0]}. "
-                f"Raise max_length to the longest row the run feeds."
+                f"(max_length x the training batch's rows, or the eval batch's where eval_strategy or eval_on_start "
+                f"schedules an evaluation), but a forward carried {x.shape[0]}. Raise max_length to the longest row "
+                f"the run feeds, and keep an unscheduled evaluation's batch within the training batch's rows."
             )
         group = self._ep_config.dispatch_ep_group
         return _MoKFn.apply(x, router_weights, top_experts, capacity, group, self._num_experts, mxfp8, *banks)

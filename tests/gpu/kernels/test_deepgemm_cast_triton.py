@@ -137,24 +137,23 @@ def test_mxfp4_weight_cast_bitwise_deepgemm_reference():
             for e in range(len(w))
         ]
         ref = tuple(torch.stack(parts) for parts in zip(*reference, strict=True))
-        _assert_bits_equal(cast_weight_rows_to_mxfp4(w, k_pad), ref, f"{name} mxfp4 rows")
+        flag = torch.zeros(1, device=DEV, dtype=torch.int32)
+        _assert_bits_equal(cast_weight_rows_to_mxfp4(w, k_pad, flag), ref, f"{name} mxfp4 rows")
+        assert not flag.item(), f"{name}: a finite weight set the non-finite flag"
         print(f"  {name:11s} mxfp4 weight rows bitwise DeepGEMM's reference — OK")
 
 
-def test_mxfp4_weight_cast_raises_on_a_non_finite_weight():
+def test_mxfp4_weight_cast_flags_a_non_finite_weight():
     """e2m1 has no NaN code: a NaN or inf anywhere in the bank, the last row and column of an off-grid one included,
-    raises instead of decoding as finite zeros; the cast's own flag finds it, with no separate pass over the weight."""
+    sets the cast's flag instead of only decoding as finite zeros, with no separate pass over the weight."""
     for poison in (float("nan"), float("inf"), float("-inf")):
         for e, k, n in ((0, 0, 0), (2, 199, 99), (1, 37, 64)):
             w = torch.randn(3, 200, 100, device=DEV, dtype=torch.bfloat16)
             w[e, k, n] = poison
-            try:
-                cast_weight_rows_to_mxfp4(w, 256)
-            except ValueError as exc:
-                assert "Non-finite expert weight" in str(exc)
-            else:
-                raise AssertionError(f"{poison} at {(e, k, n)} was cast without raising")
-    print("  mxfp4 weight cast raises on NaN / +-inf anywhere in the bank — OK")
+            flag = torch.zeros(1, device=DEV, dtype=torch.int32)
+            cast_weight_rows_to_mxfp4(w, 256, flag)
+            assert flag.item() == 1, f"{poison} at {(e, k, n)} was cast without setting the flag"
+    print("  mxfp4 weight cast flags NaN / +-inf anywhere in the bank — OK")
 
 
 def test_gradient_casts_scale_by_the_groups_own_amax():
@@ -235,7 +234,7 @@ def run(ctx) -> dict:
         checks, "mxfp4_weight_cast_bitwise_deepgemm_reference", test_mxfp4_weight_cast_bitwise_deepgemm_reference
     )
     record_check(
-        checks, "mxfp4_weight_cast_raises_on_a_non_finite_weight", test_mxfp4_weight_cast_raises_on_a_non_finite_weight
+        checks, "mxfp4_weight_cast_flags_a_non_finite_weight", test_mxfp4_weight_cast_flags_a_non_finite_weight
     )
     record_check(
         checks, "gradient_casts_scale_by_the_groups_own_amax", test_gradient_casts_scale_by_the_groups_own_amax
