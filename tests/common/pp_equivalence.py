@@ -170,10 +170,10 @@ def token_ce_sums(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 
 def baseline_grads(model, input_ids: torch.Tensor, labels: torch.Tensor, microbatch_rows: int | None = None):
     """The batch's mean loss, logits and grads. ``microbatch_rows`` accumulates them over row slices of that size, the
-    shapes a pipeline schedule runs, for a kernel whose rounding follows the batch shape; on rows of equal length the
-    mean is unchanged."""
+    shapes a pipeline schedule runs, for a kernel whose rounding follows the batch shape; the mean is unchanged when
+    every slice holds the same number of loss tokens."""
     rows = input_ids.shape[0]
-    step = microbatch_rows or rows
+    step = rows if microbatch_rows is None else microbatch_rows
     assert rows % step == 0, (rows, step)
     losses, logits = [], []
     for start in range(0, rows, step):
