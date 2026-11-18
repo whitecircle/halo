@@ -163,34 +163,47 @@ def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
     return torch.exp2(scales.float() - _E8M0_BIAS).masked_fill(scales == _E8M0_NAN, float("nan"))
 
 
+def _e8m0_scale_down(blocks: torch.Tensor, scale_exp: torch.Tensor) -> torch.Tensor:
+    """``blocks x 2^-scale_exp``, rounded once, as the fused MX kernels compute it, for every ``e8m0`` exponent.
+
+    Never a divide by ``exp2(scale_exp)``: the exponent clamps to -127 for an all-zero or tiny block, and CUDA's
+    ``exp2(-127)`` is one ulp below 2^-127 (``0x3FFFFF``, exact on CPU), a subnormal that a flush-to-zero graph (the
+    compiled ``_round_trip`` on CUDA) turns into 0. ``exp2(-scale_exp)`` is an exact normal power of two up to exponent
+    126. Only a block holding an inf reaches 127, where ``exp2(-127)`` has both faults again, so such a block is halved
+    first and scaled by the normal 2^-126: halving a normal fp32 is exact, and a subnormal one gives 0 either way.
+    Dequantizing still multiplies by the stored scale, so under a flushing graph a block with scale 2^-127 round-trips
+    to 0."""
+    inf_block = scale_exp == _E8M0_BIAS
+    return blocks * torch.where(inf_block, 0.5, 1.0) * torch.exp2(inf_block.float() - scale_exp)
+
+
 def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``blocks`` → (``e4m3`` data, ``e8m0`` biased-exponent scale ``[*, n_block, 1]`` uint8)."""
     format_max = _ELEMENT_MAX["mxfp8"]
     scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), format_max)
-    # A multiply by exp2(-scale_exp), never a divide by exp2(scale_exp): the exponent clamps to -127 for an all-zero
-    # or tiny block, and exp2(-127) is an fp32 subnormal a flush-to-zero graph (the compiled _round_trip on CUDA)
-    # turns into 0, so the divide gave 0/0 = NaN. exp2(-scale_exp) is a normal power of two for every exponent a
-    # finite fp32 amax can reach, and the product equals the quotient bit for bit. Dequantizing still multiplies by the
-    # stored scale, so under such a graph a block with amax below ~2.6e-36 (scale 2^-127) round-trips to 0.
-    data = (blocks * torch.exp2(-scale_exp)).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
+    data = _e8m0_scale_down(blocks, scale_exp).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
     return data, scales
 
 
-def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
-    """``uint8`` codes, ``sign << 3 | magnitude-level``. Only an exactly-zero divisor is substituted, as an epsilon
-    floor would corrupt every tensor whose real scales sit below it."""
-    scaled = blocks / divisor.masked_fill(divisor == 0, 1.0)
+def _e2m1_round(scaled: torch.Tensor) -> torch.Tensor:
+    """``uint8`` codes, ``sign << 3 | magnitude-level``, of block values already brought to ``e2m1``'s range."""
     sign = (scaled < 0).to(torch.uint8)
     mag = scaled.abs().clamp(max=E2M1_MAX)
-    codes = torch.bucketize(mag, _constant_tensor(_E2M1_BOUNDARIES, blocks.device, mag.dtype)).to(torch.uint8)
-    ties_up = torch.isin(mag, _constant_tensor(_E2M1_TIES_UP, blocks.device, mag.dtype))
+    codes = torch.bucketize(mag, _constant_tensor(_E2M1_BOUNDARIES, scaled.device, mag.dtype)).to(torch.uint8)
+    ties_up = torch.isin(mag, _constant_tensor(_E2M1_TIES_UP, scaled.device, mag.dtype))
     return (codes + ties_up.to(torch.uint8)) | (sign << 3)
+
+
+def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
+    """NVFP4's codes, ``blocks / divisor`` rounded, as its divisor is no power of two. Only an exactly-zero divisor is
+    substituted, as an epsilon floor would corrupt every tensor whose real scales sit below it."""
+    return _e2m1_round(blocks / divisor.masked_fill(divisor == 0, 1.0))
 
 
 def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
     """``blocks`` → (e2m1 code uint8, ``e8m0`` scale ``[*, n_block, 1]`` uint8, no global scale)."""
     scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), _ELEMENT_MAX["mxfp4"])
-    return _e2m1_codes(blocks, torch.exp2(scale_exp)), scales, None
+    return _e2m1_round(_e8m0_scale_down(blocks, scale_exp)), scales, None
 
 
 def nvfp4_global_scale(amax: torch.Tensor) -> torch.Tensor:

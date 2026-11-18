@@ -78,19 +78,24 @@ def _cases(fmt: str):
     t[0, 0] = float("inf")
     t[1, 0] = float("-inf")
     yield "inf", t
+    # An inf puts its block on exponent 127, where CUDA's exp2(-127) is one ulp below 2^-127 again. Finite values large
+    # enough to land near a rounding boundary once scaled by 2^-127 show that (eager mxfp8 multiplied by exp2(-127) and
+    # differed from its kernel on about 1% of such elements).
+    t = torch.exp2(torch.rand(512, K, device=DEV, generator=g) * 19 + 108)
+    t = torch.where(torch.rand(512, K, device=DEV, generator=g) < 0.5, -t, t)
+    t[:, ::32] = float("inf")
+    t[::2, ::64] = float("-inf")
+    yield "inf_beside_large_values", t
+    yield "inf_beside_large_values_bf16", t.to(bf)
     yield "midpoints", torch.randn(64, K, device=DEV, dtype=bf) * 1.0625
     t = torch.full((64, K), format_max * 2.0**5, device=DEV)
     yield "fp32_ulp_edge", torch.nextafter(t, torch.full_like(t, 1e30))
     yield "near_denorm", torch.full((64, K), 3e-36, device=DEV, dtype=bf)
     # Random blocks small enough that the MX exponent clamps to -127, where CUDA's exp2(-127) is one ulp below 2^-127.
-    # A constant block hides a scale one ulp off; varied values do not (before #182, mxfp8 eager and its kernel
-    # differed on about 4% of such elements).
+    # A constant block hides a scale one ulp off; varied values do not (eager differed from the kernel on about 4% of
+    # such elements for mxfp8 before #182, and 1.5% for mxfp4 before #185). mxfp4 reaches -127 only below about 3.5e-38.
     for amax in (2e-36, 3e-38):
         tiny = (torch.rand(512, K, device=DEV, generator=g) * 2 - 1) * amax
-        # mxfp4 reaches exponent -127 only below about 3.5e-38, where its eager core still divides by CUDA's exp2(-127)
-        # and so differs from the kernel. Left out until that divide becomes a multiply, as mxfp8's did.
-        if fmt == "mxfp4" and amax < 3.5e-38:
-            continue
         yield f"tiny_random_{amax:g}", tiny
         yield f"tiny_random_{amax:g}_bf16", tiny.to(bf)
     # fp32 block maxima where amax / format max lands one ulp apart under true division and under torch's reciprocal
