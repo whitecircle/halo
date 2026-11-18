@@ -134,15 +134,16 @@ class _SharedTiles:
 
     def __init__(self, *_activation):
         self.tiles = None
-        self.readers = 0
+        self.readers = self.left = 0
 
     def take(self, x: torch.Tensor, layout: _RowLayout, wanted: bool):
         """A reader's backward: the tiles when it runs a wgrad, cast by the first that does."""
         if wanted and self.tiles is None:
             self.tiles = cast_tiles_to_fp8(x, layout.src)
         tiles = self.tiles if wanted else None
-        self.readers -= 1
-        if not self.readers:
+        # Counted per pass: a second backward over a retained graph casts and drops them again.
+        self.left = (self.left or self.readers) - 1
+        if not self.left:
             self.tiles = None
         return tiles
 
@@ -369,6 +370,9 @@ def deepgemm_grouped_gemm(x, w, *, offs, lowp: LowpSpec, weight_cacheable: bool 
         raise ImportError("deepgemm_grouped_gemm needs the deep_gemm package (Blackwell image only)")
     if offs is None:
         raise ValueError("deepgemm_grouped_gemm needs offs: the kernel's m_indices are built from the group ends")
+    if x.shape[1] != w.shape[1]:
+        # The row cast writes the weight's K columns, so a wider activation would be truncated, not rejected.
+        raise ValueError(f"x is [T, {x.shape[1]}] but w contracts over K={w.shape[1]}; the two must match.")
     ensure_contiguous_alignment()
     fmt, fp8_backward = LOWP_RECIPES[lowp.precision].quant_format, lowp.backward_precision == "fp8"
     # Any other format would run as FP8 on the wrong weight layout, and an fp8 backward of mxfp4 on a weight the

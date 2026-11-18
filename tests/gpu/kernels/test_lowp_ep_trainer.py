@@ -4,7 +4,7 @@
 ``cached_fake_quant`` keys on ``weight._version``. The fused kernel writes through raw pointers ATen never sees, so
 only ``increment_version`` advances the key; without it the cache serves the step-0 quantization for the whole run.
 ``--native`` runs the same step through the DeepGEMM kernel, whose cast keeps the same per-version cache; the Hopper
-image has no ``deep_gemm``, so there the flag must stay inert.
+image has no ``deep_gemm``, so there the load must refuse ``lowp_backend: native``.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import is_blackwell_gpu
 from halo.kernels import expert_gemm
 from halo.kernels.lowp import deepgemm, quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
@@ -214,7 +215,8 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
         else:
             refused = False
         log(f"  {ARGS.precision} native without deep_gemm: refused at load={refused}")
-        return {"checks": {"refused_without_deep_gemm": world_all(refused)}, "metrics": {}}
+        # The Blackwell image ships the wheel, so a refusal there is a broken image, not a pass.
+        return {"checks": {"refused_without_deep_gemm": world_all(refused and not is_blackwell_gpu())}, "metrics": {}}
 
     native_calls = _count_calls(deepgemm, "_deepgemm_forward")
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
@@ -227,6 +229,10 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
+    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM; the cache itself must stay empty.
+    checks["fsdp2_managed_experts_cache_no_cast"] = world_all(
+        (len(deepgemm._weight_cache) == 0) == (ARGS.ep_size == 1)
+    )
     checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(
         f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "

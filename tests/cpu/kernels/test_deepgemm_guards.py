@@ -522,6 +522,7 @@ def test_an_uncached_weight_is_cast_again_for_the_dgrad_and_never_held_in_the_gr
         out = expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8"), weight_cacheable=weight_cacheable)
     assert {t.dtype for t in out.grad_fn.saved_tensors} <= {x.dtype, w.dtype, offs.dtype}, "an FP8 operand is saved"
     assert len(out.grad_fn.saved_tensors) == 3
+    assert (out.grad_fn.w_fp8 is None) == (not weight_cacheable), "only a cached cast rides on the node"
     out.sum().backward()
     assert len(weight_casts) == casts
 
@@ -553,6 +554,45 @@ def test_an_activations_fp8_casts_are_dropped_after_their_last_reader(native):
     up_out.sum().backward()
     assert shared.tiles is None
     assert [kind for kind, floor in native.cast_floors if floor == REFERENCE_AMAX_FLOOR] == ["rows", "tiles"]
+
+
+def test_no_node_holds_the_forwards_fp8_activation_rows(native):
+    """A non-reentrant checkpoint never frees a node's attributes, so the rows live in the one-entry memo alone:
+    the next activation's cast replaces them while the first graph is still alive."""
+    rows = []
+    cast = native.utils.per_token_cast_to_fp8
+
+    def cast_rows(tensor, **kwargs):
+        data = tensor.clone()
+        rows.append(weakref.ref(data))
+        return data, cast(tensor, **kwargs)[1]
+
+    native.utils.per_token_cast_to_fp8 = cast_rows
+    _, w, offs = _operands(8, 128, 256)
+    w.requires_grad_(True)
+    outs = [
+        expert_gemm(torch.full((16, 128), fill, dtype=torch.bfloat16), w, offs=offs, lowp=_native("mxfp8", "fp8"))
+        for fill in (1.0, 2.0)
+    ]
+    native.kernel_calls.clear()  # the recording kernel holds its operands
+    assert len(rows) == 2 and rows[0]() is None and rows[1]() is not None
+    assert all(out.grad_fn is not None for out in outs)
+
+
+def test_a_second_backward_over_a_retained_graph_drops_the_tiles_again(native):
+    x, w, offs = _operands(8, 128, 256)
+    banks = [w.clone().requires_grad_(True) for _ in range(2)]
+    gate_out, up_out = (expert_gemm(x, bank, offs=offs, lowp=_native("mxfp8", "fp8")) for bank in banks)
+    loss = gate_out.sum() + up_out.sum()
+    loss.backward(retain_graph=True)
+    loss.backward()
+    assert gate_out.grad_fn.tiles.tiles is None
+
+
+def test_an_activation_wider_than_the_weights_contraction_is_refused(native):
+    x, w, offs = _operands(8, 256, 128)
+    with pytest.raises(ValueError, match="contracts over K=128"):
+        deepgemm.deepgemm_grouped_gemm(x, w[:, :128], offs=offs, lowp=_native("mxfp8"))
 
 
 def test_the_memo_derives_once_per_contents_and_pins_no_graph():
