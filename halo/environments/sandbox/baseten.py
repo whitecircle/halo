@@ -86,6 +86,24 @@ class Process:
         return lines[-1] if lines else "no stderr"
 
 
+def service_message(response: requests.Response) -> str:
+    """The sentence Baseten put in an error body, or the start of a body that has none."""
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:200]
+    error = body.get("error", body) if isinstance(body, dict) else body
+    message = error.get("message") if isinstance(error, dict) else None
+    return message or response.text[:200]
+
+
+def is_registry_reference(image: str) -> bool:
+    """``docker.io/library/python:3.12`` names a registry host; ``baseten/base-image:latest`` and
+    ``sandbox/my-image:tag`` name images Baseten already holds."""
+    host, slash, _ = image.partition("/")
+    return bool(slash) and ("." in host or ":" in host or host == "localhost")
+
+
 class BasetenApi:
     """HTTP to Baseten's management API and to a sandbox's runtime API. Every failure raises
     :class:`SandboxInfraError`.
@@ -177,7 +195,7 @@ class BasetenApi:
             headers = {"Authorization": f"Bearer {self._access_token()}"}
             response = self.http.request(method, url, headers=headers, timeout=timeout, json=json)
             if response.status_code == 404:
-                raise SandboxGone(f"baseten sandbox: HTTP 404 from {method} {url}")
+                raise SandboxGone(f"baseten sandbox: HTTP 404 from {method} {url}: {service_message(response)}")
             response.raise_for_status()
             return response
         except requests.Timeout as error:
@@ -235,6 +253,12 @@ class BasetenSandbox(SandboxExecutor):
     ):
         if not os.environ.get(api_key_env):
             raise ValueError(f"the baseten sandbox backend needs the {api_key_env} environment variable")
+        if is_registry_reference(image):
+            raise ValueError(
+                f"image={image!r} is a registry reference, which Baseten imports again for every sandbox. Import it "
+                f"once (baseten sandbox image push --name <name> --registry-image {image} --wait) and pass "
+                f"image='sandbox/<name>:<tag>'."
+            )
         if not 1 <= max_concurrency <= BASETEN_SANDBOX_LIMIT:
             raise ValueError(
                 f"max_concurrency={max_concurrency} must be within 1..{BASETEN_SANDBOX_LIMIT}: each live session holds "

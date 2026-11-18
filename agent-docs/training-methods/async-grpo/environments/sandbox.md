@@ -130,8 +130,6 @@ The code is in `halo/environments/sandbox/modal_sandbox.py`. What runs inside th
 
 ### Baseten Sandboxes
 
-Experimental: the backend is checked against a local fake of Baseten's API, not against the service. `HALO_BASETEN_LIVE=1 pytest tests/cpu/environments/test_sandbox_baseten.py -k live` runs a create, run and delete against it with your `BASETEN_API_KEY`.
-
 One flag sends code-contests grading, its test tool and the `swe` tools to Baseten:
 
 ```bash
@@ -149,6 +147,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 - Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
 - A sandbox is created under a name the backend chooses, so a create that is retried returns the same sandbox, and a create that fails or is not `DEPLOYED` is deleted by that name.
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
+- A sandbox answers its first call about 4 s after the session's first use; a later call adds about 0.3 s to the program's own time.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
 - The Python REPL tools stay in process: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox.
 - The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
@@ -165,7 +164,20 @@ The program runs as a different user from the process that supervises it.
 - It cannot leave a process behind: every process of its user is killed when the run ends.
 - It cannot make the backend write or read through a link, directory or FIFO it put in a file's place. The next run reports a runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
 
-The image must run as root.
+**Images**
+
+`image` names an image Baseten holds: a built-in one (`baseten/<name>:latest`) or one stored in your team (`sandbox/<name>:<tag>`). It must run as root and have `python3`.
+
+- The default, `baseten/base-image:latest`, is Alpine with Python 3.12 and no compiler, so it runs python and bash. A built-in image has no tag but `latest`, which moves.
+- For C and C++, or for an image that stays the same across runs, import a registry image once and name the tag Baseten gave it:
+
+    ```bash
+    baseten sandbox image push --name halo-cpp --registry-image docker.io/library/python:3.12 --wait
+    baseten sandbox image list-tags --name halo-cpp
+    ```
+
+    Then set `image: sandbox/halo-cpp:<tag>` in `sandbox_options`.
+- A registry reference (`docker.io/...`) as `image` raises at construction: Baseten would import it again for every sandbox and keep one stored image per sandbox.
 
 **Network**
 
@@ -190,8 +202,8 @@ Closing a session deletes its sandbox, and an `atexit` hook deletes the ones sti
 
 | Option | Default | Meaning |
 |---|---|---|
-| `image` | `baseten/base-image:latest` | `latest` moves; name a fixed tag to keep a run reproducible. Use an image with `gcc` / `g++` for C and C++ |
-| `cpu` | 2 | vCPUs of each sandbox |
+| `image` | `baseten/base-image:latest` | The sandbox's [image](#baseten-sandboxes) |
+| `cpu` | 2 | vCPUs of each sandbox; Baseten gives it 8 GiB of memory per vCPU |
 | `idle_ttl` | `10m` | Idle time after which Baseten deletes a sandbox |
 | `interpreter` | `python3` | The Python the sandbox runs programs with |
 | `max_concurrency` | 10 | Live sandboxes in this process |
@@ -200,7 +212,7 @@ Closing a session deletes its sandbox, and an `atexit` hook deletes the ones sti
 | `max_retries`, `backoff_factor` | 4, 1.0 | Retry policy |
 | `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
 
-The code is in `halo/environments/sandbox/baseten.py`; what runs inside the sandbox is the runner `modal` uses.
+The code is in `halo/environments/sandbox/baseten.py`; what runs inside the sandbox is the runner `modal` uses. `HALO_BASETEN_LIVE=1 pytest tests/cpu/environments/test_sandbox_baseten.py -k live` runs a create, run and delete against the service with your `BASETEN_API_KEY`; the other tests use a local fake of Baseten's API.
 
 ## Using it from Python
 

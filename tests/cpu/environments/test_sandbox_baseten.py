@@ -36,6 +36,7 @@ from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 
 API_KEY = "bt-secret-key-0123456789"
 TOKEN = "sbx-token-1"
+UNKNOWN_IMAGE = "sandbox/never-pushed:latest"
 
 pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="the runner sets the session's user, which takes root")
 
@@ -95,6 +96,9 @@ class FakeBaseten:
                 if self.headers.get("Authorization") != f"Bearer {TOKEN}":
                     return self._reply(401, {"error": "bad token"})
                 if self.path == "/v1/sandboxes/instances":
+                    if body["image"] == UNKNOWN_IMAGE:
+                        message = f"Image '{UNKNOWN_IMAGE}' not found. Create and deploy a template sandbox."
+                        return self._reply(404, {"code": "NOT_FOUND", "message": message})
                     name = fake.named.get(body["name"]) if body.get("create_if_not_exists") else None
                     if name is not None:
                         url = f"http://127.0.0.1:{fake.port}/{name}/"
@@ -120,7 +124,8 @@ class FakeBaseten:
                 name, _, rest = self.path.lstrip("/").partition("/")
                 root = fake.roots.get(name)
                 if root is None or name in fake.deleted:
-                    return self._reply(404, {"error": "no sandbox"})
+                    message = f"Resource '{name}' is currently not available."
+                    return self._reply(404, {"error": {"code": "WORKLOAD_UNAVAILABLE", "message": message}})
 
                 def mapped(text: str) -> str:
                     return text.replace("/tmp/halo_", root + "/tmp/halo_").replace(SESSION_DIR, root + SESSION_DIR)
@@ -449,6 +454,7 @@ def test_expired_sandbox_is_an_error_then_replaced(fake):
 
         gone = session.run("print(2)")
         assert gone.error is not None and "404" in gone.error and gone.returncode is None
+        assert "Resource 'sbx-1' is currently not available." in gone.error
         with pytest.raises(SandboxInfraError):
             fake.deleted.append("sbx-2")
             session.write_file("a.txt", "1")
@@ -504,6 +510,19 @@ def test_missing_api_key_refused_at_construction(monkeypatch):
 
     with pytest.raises(ValueError, match="BASETEN_API_KEY"):
         BasetenSandbox()
+
+
+def test_registry_reference_refused_at_construction(fake):
+    with pytest.raises(ValueError, match="image='sandbox/<name>:<tag>'"):
+        _sandbox(fake, image="docker.io/library/python:3.12")
+    for held_by_baseten in ("baseten/base-image:latest", "sandbox/with-gcc:b019fe15", "with-gcc:b019fe15"):
+        _sandbox(fake, image=held_by_baseten).close()
+
+
+def test_unknown_image_error_carries_the_services_sentence(fake):
+    result = _sandbox(fake, image=UNKNOWN_IMAGE).run("print(1)")
+
+    assert result.error is not None and f"Image '{UNKNOWN_IMAGE}' not found" in result.error
 
 
 def test_concurrency_past_the_org_limit_refused_at_construction(fake):
