@@ -64,8 +64,9 @@ tail -f checkpoints/sft-qwen3-4b-ultrachat/log/run.log
 ```
 
 Most examples set `report_to: wandb`. With `WANDB_API_KEY` in your `.env`, the
-run shows up in Weights & Biases with loss and learning rate; MoE metrics log by
-default on a MoE model and throughput metrics are opt-in. See [Monitoring](monitoring.md).
+run shows up in Weights & Biases with loss and learning rate; MoE load metrics log by
+default on a MoE model (under pipeline parallelism only with `moe_balancing: bias_update`) and throughput
+metrics are opt-in. See [Monitoring](monitoring.md).
 
 ## 4. Use the result
 

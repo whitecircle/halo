@@ -47,7 +47,7 @@ Context and pipeline parallelism take full fine-tuning only, and pipeline parall
 - `positive/logps_mean` should hold steady or rise, and `negative/logps_mean` fall.
 - `positive/pg_objective_mean` falling through training means the policy drifted from the distribution
   the data was collected under: set `kl_beta: 0.05` or lower the learning rate.
-- A loss that goes NaN comes from low-probability tokens on negative-advantage rows: raise
+- A loss that goes NaN usually comes from low-probability tokens on negative-advantage rows: raise
   `min_log_prob` toward 0 (default `-3.0`) or lower `max_grad_norm` below its `1.0` default.
 
 Every knob, the advantage formulas and the reference-model rules:

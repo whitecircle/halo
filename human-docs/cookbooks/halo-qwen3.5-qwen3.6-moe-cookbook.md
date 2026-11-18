@@ -105,7 +105,8 @@ The other configs in `examples/grpo/environmental/qwen3_5/vllm/` change the envi
 the EP size. The full fine-tune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
 `-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint. Their headers give
 the launch: six trainer GPUs, two TP=1 servers on GPUs 6 and 7, `DIST_NCCL_TIMEOUT_MINUTES=120`. Stages 2 and 3
-read the previous stage under `checkpoints/`, so pass `--model_name_or_path` when it was saved elsewhere.
+name a placeholder checkpoint of the previous stage under `checkpoints/`: pass `--model_name_or_path` with your
+own run's checkpoint.
 
 The `sglang/` configs (ep1) run on SGLang. The full fine-tune expects two TP=1 servers on GPUs 6 and 7
 and a six-GPU trainer:

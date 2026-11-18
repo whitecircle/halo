@@ -51,7 +51,7 @@ CP computes loss per chunk with two corrections:
 2. **Globally-normalized sum loss** — completion-only training distributes tokens unevenly across
    chunks, so per-rank `reduction='mean'` biases gradients. Each rank computes
    `loss_i = cp_size * local_sum / global_tokens` with `global_tokens` the all-reduced non-masked
-   token count. After FSDP2's gradient averaging over the `data_parallel_size × cp_size` ranks every token contributes equally. The
+   token count. FSDP2's gradient average over the CP ranks cancels the `cp_size` factor, so every token of a CP group's rows weighs the same. The
    fp32 `local_sum` runs over checkpointed chunks of the rank's logits (`chunked_token_sum`, as the
    pipeline's last stage scores them), so no fp32 copy of the chunk's logits plane is built.
 

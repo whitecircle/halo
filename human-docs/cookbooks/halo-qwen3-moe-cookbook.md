@@ -81,9 +81,9 @@ halo launch sft qwen3-moe-sft.yaml -n 4 \
   --output_dir=/data/checkpoints/qwen3-30b-a3b-lora
 ```
 
-To adapt the experts as well, add `gate_proj,up_proj,down_proj` and `--merge_expert_lora_on_save=true`.
-Under EP they train as grouped expert adapters, which `halo run merge-peft-adapters` merges
-afterwards.
+To adapt the experts as well, add `gate_proj,up_proj,down_proj`. Under EP they train as grouped expert
+adapters: `--merge_expert_lora_on_save=true` saves a merged checkpoint, and without it
+`halo run merge-peft-adapters` merges the saved adapter afterwards.
 
 ### GRPO
 

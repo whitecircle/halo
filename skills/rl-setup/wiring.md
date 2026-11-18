@@ -89,7 +89,7 @@ rollout_server_url: "http://localhost:8000"
 rollout_group_port: 51216       # NCCL weight-sync group port, bound on the trainer host
 rollout_connection_timeout: 120.0
 sync_weights_every_n_steps: 1
-rollout_actor_budget: 16        # per node, split across its rollout ranks; under 4 per rank warns
+rollout_actor_budget: 16        # per node (cluster-wide with ray_address), split across its rollout ranks; under 4 per rank warns
 rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 512         # per-turn generation cap; the script pins max_completion_length to it
