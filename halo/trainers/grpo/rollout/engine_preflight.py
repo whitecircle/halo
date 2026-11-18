@@ -160,6 +160,18 @@ def _server_flag_refusals(
         )
     if needs.captures_routing and flags.torch_compile:
         refusals.append("routing_replay: rollout under --enable-torch-compile returns corrupt rows. Turn it off.")
+    if flags.queued_request_cap is not None:
+        refusals.append(
+            f"it caps its waiting queue at {flags.queued_request_cap} (--max-queued-requests), and a weight push "
+            f"re-queues every running request, which the engine aborts with a 503 once the queue is full. Serve "
+            f"without the cap."
+        )
+    if flags.disaggregation_mode not in (None, "null"):
+        refusals.append(
+            f"it runs disaggregated as {flags.disaggregation_mode}, which the weight sync does not cover: a pause "
+            f"keeps a prefill server's chunked request live, and the cache flush after the update then fails. Serve "
+            f"without --disaggregation-mode."
+        )
     if needs.reasoning_consumers and flags.reasoning_parser == "":
         refusals.append(
             f"it has no reasoning parser and the run reads reasoning ({', '.join(needs.reasoning_consumers)}): a "

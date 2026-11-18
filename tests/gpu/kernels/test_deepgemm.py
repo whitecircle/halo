@@ -228,6 +228,28 @@ def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
         print(f"  {precision:5s} {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
 
 
+def test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read():
+    """The cast decodes a NaN weight as zeros and flags it on the device; the read raises, cached weight or not."""
+    lowp = LowpSpec(precision="mxfp4", backend="native")
+    x = torch.randn(256, 256, device=DEV, dtype=torch.bfloat16)
+    offs = torch.tensor([128, 256], device=DEV, dtype=torch.int32)
+    for cacheable in (True, False):
+        w = torch.randn(2, 256, 256, device=DEV, dtype=torch.bfloat16) / 16
+        deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
+        deepgemm.raise_on_non_finite_weight()
+        w[1, 3, 5] = float("nan")
+        out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
+        assert out.isfinite().all(), "premise: the output hides the NaN weight"
+        try:
+            deepgemm.raise_on_non_finite_weight()
+        except ValueError as exc:
+            assert "Non-finite expert weight" in str(exc)
+        else:
+            raise AssertionError(f"a NaN weight (cacheable={cacheable}) passed the flag read")
+        deepgemm.raise_on_non_finite_weight()  # the raise cleared the flag
+    print("  mxfp4 NaN weight: finite output, raised at the flag read, cached and uncached — OK")
+
+
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("SKIP: no CUDA")
@@ -243,4 +265,6 @@ if __name__ == "__main__":
     test_weight_cache_across_steps()
     print("test_the_wgrad_warm_up_compiles_the_long_group_kernel")
     test_the_wgrad_warm_up_compiles_the_long_group_kernel()
+    print("test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read")
+    test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read()
     print("ALL PASS")

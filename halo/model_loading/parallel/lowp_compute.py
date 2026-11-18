@@ -11,6 +11,7 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_p
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
 from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, install_local_forward
+from halo.kernels.lowp.deepgemm import raise_on_non_finite_weight
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
@@ -213,6 +214,10 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
             f"The run would silently train in bf16. For MoE experts, EP layers with the grouped-GEMM "
             f"path are required (use_grouped_gemm: true)."
         )
+
+    if lowp.native and quant_format == "mxfp4":
+        # The MXFP4 weight cast flags a NaN or inf weight on the device; this is its one host read per forward.
+        model.register_forward_hook(raise_on_non_finite_weight)
 
     logger.info(
         "Mixed-precision compute enabled: precision=%s backend=%s backward=%s | MoE layers=%d, dense MLP linears=%d, "

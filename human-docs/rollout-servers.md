@@ -179,8 +179,8 @@ index) and `vllm_group_port` for online GRPO
 
 After an optimizer step the trainer streams the whole model into the running
 engine over NCCL: no restart, no checkpoint on disk. Every server pauses for the
-push. vLLM freezes in-flight requests and resumes them; SGLang drops them and the
-rollout actor re-issues the turn.
+push. In-flight requests keep their tokens and resume under the new weights: vLLM
+freezes them, SGLang requeues them.
 
 A LoRA run on SGLang can send only the adapter instead: `rollout_adapter_sync: true`
 pushes the frozen base once, then loads the small adapter after each step without

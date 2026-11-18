@@ -84,7 +84,7 @@ def precompute_resume_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_rows(kind: str, n: int, start: int = 0) -> dict:
+def build_text_rows(kind: str, n: int, start: int = 0) -> dict:
     """Text rows with ragged completions, so rows and a swapped reference score differently; ``start`` keeps each
     split's rows its own."""
     ids = range(start, start + n)
@@ -189,10 +189,10 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         shutil.rmtree(shared, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(shared, ignore_errors=True))
         # Built once for every rank and phase, so each tokenizes the same rows.
-        Dataset.from_dict(_build_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
+        Dataset.from_dict(build_text_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
         start = N_ROWS
         for name, n in EVAL_SPLITS.items():
-            Dataset.from_dict(_build_rows(kind, n, start)).save_to_disk(dataset_dirs[name])
+            Dataset.from_dict(build_text_rows(kind, n, start)).save_to_disk(dataset_dirs[name])
             start += n
     ctx.barrier()
     pc = ParallelismConfig(**config_fields(mode))

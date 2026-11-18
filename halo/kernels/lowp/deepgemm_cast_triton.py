@@ -162,10 +162,6 @@ def _fp4_rows_kernel(
     tl.store(sf_ptr + rows[:, None] * (k_pad // GROUP) + group[None, :], scale, mask=(rn < n)[:, None])
 
 
-def non_finite_weight_error(w: torch.Tensor) -> ValueError:
-    return ValueError(f"Non-finite expert weight {tuple(w.shape)}: DeepGEMM's MXFP4 cast would hide it as zeros.")
-
-
 def cast_rows_to_fp8(
     x: torch.Tensor, src: torch.Tensor, width: int, amax_floor: float = REFERENCE_AMAX_FLOOR
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -213,21 +209,20 @@ def cast_weight_blocks_to_fp8(w: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     return out, sf
 
 
-def cast_weight_rows_to_mxfp4(w: torch.Tensor, k_pad: int) -> tuple[torch.Tensor, torch.Tensor]:
+def cast_weight_rows_to_mxfp4(
+    w: torch.Tensor, k_pad: int, nonfinite: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
     """``w`` ``[E, K, N]`` (any strides) as MXFP4 ``[E, N, k_pad / 2]`` int8 (two e2m1 codes a byte, low nibble first)
     over the contraction zero-padded to ``k_pad`` (a multiple of 32), and its fp32 scales ``[E, N, k_pad / 32]``.
-    Raises on a NaN or inf weight: e2m1 has no NaN code and a NaN amax becomes a 2^127 scale, so the block would decode
-    as finite zeros. The raise is local to this rank; its EP peers wait in the DeepEP combine until it times out."""
+    A NaN or inf weight sets ``nonfinite`` (int32 ``[1]`` on ``w``'s device), which the caller must read: e2m1 has no
+    NaN code and a NaN amax becomes a 2^127 scale, so the block decodes as finite zeros."""
     experts, k, n = w.shape
     out = w.new_empty(experts, n, k_pad // 2, dtype=torch.int8)
     group = FORMAT_BLOCK_SIZE["mxfp4"]
     sf = w.new_empty(experts, n, k_pad // group, dtype=torch.float32)
-    nonfinite = torch.zeros(1, device=w.device, dtype=torch.int32)
     grid = (triton.cdiv(n, _FP4_BN), k_pad // _FP4_BK, experts)
     _fp4_rows_kernel[grid](
         w, out, sf, nonfinite, k, n, k_pad, *w.stride(), BK=_FP4_BK, BN=_FP4_BN, GROUP=group,
         FLOOR=REFERENCE_AMAX_FLOOR, FMAX=E2M1_MAX, num_warps=_FP4_WARPS,
     )  # fmt: skip
-    if nonfinite.item():
-        raise non_finite_weight_error(w)
     return out, sf

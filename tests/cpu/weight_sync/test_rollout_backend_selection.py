@@ -96,13 +96,13 @@ def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
 
 
 @pytest.mark.parametrize("backend", rollout_backends())
-def test_each_client_declares_whether_the_pause_it_sends_aborts_the_turns_in_flight(backend):
-    """The env-GRPO retry-budget refusal reads ``PAUSE_ABORTS_IN_FLIGHT``. SGLang's ``abort`` mode drops the requests
-    in flight, vLLM's ``keep`` freezes them."""
-    client = resolve_weight_sync_client(backend)
-    request = client.PAUSE_REQUEST
+def test_no_client_pause_drops_the_turns_in_flight(backend):
+    """A pause that aborts in-flight turns has them re-issued from scratch, which biases each round toward the turns
+    that finished before the push: the short ones. vLLM's ``keep`` freezes them, SGLang's ``retract`` requeues them
+    with their tokens."""
+    request = resolve_weight_sync_client(backend).PAUSE_REQUEST
     mode = {**request.get("json", {}), **request.get("params", {})}["mode"]
-    assert client.PAUSE_ABORTS_IN_FLIGHT is (mode == "abort"), f"{client.__name__} pauses with mode={mode!r}"
+    assert mode == {"vllm": "keep", "sglang": "retract"}[backend]
 
 
 def test_every_registered_backend_is_a_selectable_config_value():
