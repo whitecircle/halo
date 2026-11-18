@@ -145,14 +145,21 @@ def test_mxfp4_weight_cast_bitwise_deepgemm_reference():
 
 def test_mxfp4_weight_cast_flags_a_non_finite_weight():
     """e2m1 has no NaN code: a NaN or inf anywhere in the bank, the last row and column of an off-grid one included,
-    sets the cast's flag instead of only decoding as finite zeros, with no separate pass over the weight."""
+    sets the cast's flag, with no separate pass over the weight. The flag is the only guard: a NaN element among
+    finite ones keeps its group's scale and takes a finite non-zero code."""
     for poison in (float("nan"), float("inf"), float("-inf")):
         for e, k, n in ((0, 0, 0), (2, 199, 99), (1, 37, 64)):
-            w = torch.randn(3, 200, 100, device=DEV, dtype=torch.bfloat16)
+            w = torch.zeros(3, 200, 100, device=DEV, dtype=torch.bfloat16)
             w[e, k, n] = poison
             flag = torch.zeros(1, device=DEV, dtype=torch.int32)
             cast_weight_rows_to_mxfp4(w, 256, flag)
             assert flag.item() == 1, f"{poison} at {(e, k, n)} was cast without setting the flag"
+    w = torch.full((1, 32, 1), 0.5, device=DEV, dtype=torch.bfloat16)
+    clean = cast_weight_rows_to_mxfp4(w, 32, flag)
+    w[0, 0, 0] = float("nan")
+    data, scale = cast_weight_rows_to_mxfp4(w, 32, flag)
+    assert torch.equal(scale, clean[1]) and data[0, 0, 0] & 0xF, "premise: the cast alone hides a NaN element"
+    assert torch.equal(data[0, 0, 1:], clean[0][0, 0, 1:])
     print("  mxfp4 weight cast flags NaN / +-inf anywhere in the bank — OK")
 
 

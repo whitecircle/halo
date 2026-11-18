@@ -215,8 +215,9 @@ def cast_weight_rows_to_mxfp4(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``w`` ``[E, K, N]`` (any strides) as MXFP4 ``[E, N, k_pad / 2]`` int8 (two e2m1 codes a byte, low nibble first)
     over the contraction zero-padded to ``k_pad`` (a multiple of 32), and its fp32 scales ``[E, N, k_pad / 32]``.
-    A NaN or inf weight sets ``nonfinite`` (int32 ``[1]`` on ``w``'s device), which the caller must read: e2m1 has no
-    NaN code and a NaN amax becomes a 2^127 scale, so the block decodes as finite zeros."""
+    A NaN or inf weight sets ``nonfinite`` (int32 ``[1]`` on ``w``'s device), the only guard, which the caller must
+    read. e2m1 has no NaN code: the element takes a finite one, under its group's own scale for a NaN (the amax drops
+    it) and under a 2^127 scale for an inf."""
     experts, k, n = w.shape
     out = w.new_empty(experts, n, k_pad // 2, dtype=torch.int8)
     group = FORMAT_BLOCK_SIZE["mxfp4"]

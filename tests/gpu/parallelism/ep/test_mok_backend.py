@@ -23,7 +23,7 @@ from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBl
 
 from halo.distributed.expert_parallel import mok as mok_module
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.distributed.expert_parallel.mok import MoKExperts, is_mok_available
+from halo.distributed.expert_parallel.mok import MoKExperts, require_mok
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.batched_transpose import transpose_last_two
@@ -55,6 +55,7 @@ parser.add_argument("--family", choices=tuple(FAMILIES), default="qwen3")
 parser.add_argument("--skew", action="store_true")
 parser.add_argument("--ep-size", type=int, help="The EP ranks this row launches at, checked against the launcher's")
 parser.add_argument("--mxfp8", action="store_true", help="Run MoK's MXFP8 forward and backward")
+parser.add_argument("--ranks", type=int, help="The ranks an --ep-size 1 row launches, each its own EP group")
 ARGS = parser.parse_args()
 
 
@@ -206,20 +207,22 @@ def run(ctx) -> dict:
         x = _route_to_rank_0(block, x, ctx.world_size)
 
     mok_ops = importlib.import_module("mok.ops")
-    reference = _step(_ep_layer(block, "deepep", ctx.world_size), x, grad)
+    ep_size = 1 if ARGS.ranks else ctx.world_size
+    reference = _step(_ep_layer(block, "deepep", ep_size), x, grad)
     previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, _record_compile
     mok_ops._C = _RecordedEntryPoints(mok_ops._C)
     try:
-        mok_layer = _ep_layer(block, "mok", ctx.world_size, MXFP8 if ARGS.mxfp8 else None)
+        mok_layer = _ep_layer(block, "mok", ep_size, MXFP8 if ARGS.mxfp8 else None)
         # An evaluation first: its cast, made under inference mode, serves the training step. The step runs under
         # saved-tensor hooks, as in a non-reentrant checkpoint, which hand its backward other objects for the weights.
+        bank_casts = _count_calls(mok_module, "_mxfp8_layer_cast")
         if ARGS.mxfp8:
             with torch.inference_mode():
                 mok_layer(x)
-        bank_casts = _count_calls(mok_module, "_mxfp8_layer_cast")
+        evaluation_casts = bank_casts[0]
         with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
             mok = _step(mok_layer, x, grad)
-        step_casts = bank_casts[0]
+        step_casts = bank_casts[0] - evaluation_casts
     finally:
         triton.knobs.runtime.jit_cache_hook = previous
         mok_ops._C = mok_ops._C._compiled
@@ -227,7 +230,7 @@ def run(ctx) -> dict:
     # A bank no token reached has no gradient on the DeepEP path and a zero one from MoK's kernels.
     unreached = reference.keys() ^ mok.keys()
     checks = {
-        "launched_at_the_rows_ep_size": ARGS.ep_size in (None, ctx.world_size),
+        "launched_at_the_rows_ep_size": (ARGS.ranks or ARGS.ep_size) in (None, ctx.world_size),
         "a_gradient_only_one_path_returns_is_zero": all(
             not (reference.get(name, mok.get(name))).any() for name in unreached
         ),
@@ -244,7 +247,8 @@ def run(ctx) -> dict:
         )
         checks["only_rank_0_takes_expert_gradients"] = (ctx.rank == 0) == ("grad_down_proj" in reference)
     if ARGS.mxfp8:
-        checks["the_step_casts_no_bank_the_evaluation_cast"] = step_casts == 0
+        # Three banks cast once: a layer that stayed on bf16 would cast none, and pass a bare "no cast in the step".
+        checks["the_step_casts_no_bank_the_evaluation_cast"] = evaluation_casts == 3 and step_casts == 0
         checks |= _mxfp8_cast_checks(mok_layer)
     metrics = {}
     for name, expected in reference.items():
@@ -262,7 +266,9 @@ def run(ctx) -> dict:
 
 
 if __name__ == "__main__":
-    if not is_mok_available():
-        log("SKIP: mok absent (Blackwell image only)")
+    try:
+        require_mok()
+    except RuntimeError as exc:  # absent (Hopper image) or built for another GPU (B200)
+        log(f"SKIP: {exc}")
         sys.exit(0)
     run()

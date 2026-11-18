@@ -265,19 +265,22 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
 # that is not torch's CUDA (13.0) and the base ships 13.2, so the 13.0 compiler and the headers torch's own include
 # are installed for the build and purged after it: the extension links cudart statically. --no-deps keeps the
 # locked NCCL, which pip would otherwise replace with torch's metadata pin.
+ARG MOK_COMMIT=f3a8bd2432457c5a2a2ea13915f0dcd0224581e4
+ARG CUDA_KEYRING_SHA256=d2a6b11c096396d868758b86dab1823b25e14d70333f1dfa74da5ddaf6a06dba
 RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Installing Mixture-of-Kittens (moe_backend: mok, SM103) ===" \
       && curl -fsSL -o /tmp/cuda-keyring.deb \
            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb \
+      && echo "${CUDA_KEYRING_SHA256}  /tmp/cuda-keyring.deb" | sha256sum -c - \
       && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
       && apt-get update && apt-get install -y --no-install-recommends \
            cuda-nvcc-13-0 cuda-cudart-dev-13-0 cuda-cccl-13-0 \
            libcusparse-dev-13-0 libcublas-dev-13-0 libcusolver-dev-13-0 \
       && git clone --recursive https://github.com/cursor/mixture-of-kittens.git /tmp/mok \
       && cd /tmp/mok \
-      && git checkout f3a8bd2 \
+      && git checkout ${MOK_COMMIT} \
       && git submodule update --init --recursive \
-      && NVCC=/usr/local/cuda-13.0/bin/nvcc MOK_NVCC=/usr/local/cuda-13.0/bin/nvcc \
+      && MOK_ARCH=SM103 NVCC=/usr/local/cuda-13.0/bin/nvcc MOK_NVCC=/usr/local/cuda-13.0/bin/nvcc \
            pip install --no-build-isolation --no-deps . \
       && cd / && rm -rf /tmp/mok \
       && apt-get purge -y '*-13-0' cuda-toolkit-13-0-config-common cuda-keyring \
