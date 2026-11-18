@@ -290,9 +290,10 @@ replay and the family's shared expert stay on Halo's path.
   groups in one NVLink domain among them); MoK has not been run past them.
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
-  batch when the run evaluates and that is larger. Padding rows carry zero router weight and move no output or
+  batch when the config schedules an evaluation (`eval_strategy`, `eval_on_start`) and that is larger. Padding rows carry zero router weight and move no output or
   gradient, but they are dispatched and computed: a batch shorter than the budget pays for the whole of it, and a
-  larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises.
+  larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises, an
+  unscheduled `evaluate()` on a larger batch included.
 - **Schedule and ring.** A rank's schedule holds the most rows any routing can send it, each local expert's rounded
   up to 256 (`_schedule_capacity_multiplier`): MoK traps in its kernel past it, with no message, and its default
   holds half the group's rows. MoK allocates every routed activation at its ring's size and Halo saves them for the
