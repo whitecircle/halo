@@ -10,6 +10,7 @@ sized to the group's rows alone overflows (MoK then traps in its kernel), and mo
 
 import argparse
 import copy
+import importlib
 import sys
 
 import torch
@@ -122,6 +123,21 @@ def _recording_warm(self, banks, top_k, mxfp8):
 MoKExperts.warm = _recording_warm
 
 
+launched_in_the_warm_up, launched_past_it = set(), set()  # MoK's compiled entry points, by name
+
+
+class _RecordedEntryPoints:
+    """Stands in for ``mok.ops._C``. MoK compiles nothing at run time and CUDA loads each of its kernels at that
+    kernel's first launch, so the step is warm when every entry point it calls ran in the warm-up."""
+
+    def __init__(self, compiled):
+        self._compiled = compiled
+
+    def __getattr__(self, name):
+        (launched_past_it if warm_ups else launched_in_the_warm_up).add(name)
+        return getattr(self._compiled, name)
+
+
 def _record_compile(*, fn, **_):
     if warm_ups:
         compiled_past_the_warm_up.append(fn.name)
@@ -177,8 +193,10 @@ def run(ctx) -> dict:
     if ARGS.skew:
         x = _route_to_rank_0(block, x, ctx.world_size)
 
+    mok_ops = importlib.import_module("mok.ops")
     reference = _step(_ep_layer(block, "deepep", ctx.world_size), x, grad)
     previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, _record_compile
+    mok_ops._C = _RecordedEntryPoints(mok_ops._C)
     try:
         mok_layer = _ep_layer(block, "mok", ctx.world_size, MXFP8 if ARGS.mxfp8 else None)
         if ARGS.mxfp8:  # an evaluation first: its cast, made under inference mode, serves the training step's backward
@@ -187,6 +205,7 @@ def run(ctx) -> dict:
         mok = _step(mok_layer, x, grad)
     finally:
         triton.knobs.runtime.jit_cache_hook = previous
+        mok_ops._C = mok_ops._C._compiled
 
     # A bank no token reached has no gradient on the DeepEP path and a zero one from MoK's kernels.
     unreached = reference.keys() ^ mok.keys()
@@ -198,6 +217,8 @@ def run(ctx) -> dict:
         "the_output_is_finite_and_nonzero": bool(reference["output"].isfinite().all() and reference["output"].any()),
         "the_warm_up_leaves_the_step_no_triton_kernel_to_compile": warm_ups == [TOP_K]
         and not compiled_past_the_warm_up,
+        "the_step_calls_only_entry_points_the_warm_up_ran": bool(launched_past_it)
+        and launched_past_it <= launched_in_the_warm_up,
     }
     if ARGS.skew:
         local = EXPERTS // ctx.world_size

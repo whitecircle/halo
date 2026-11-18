@@ -181,6 +181,19 @@ def test_an_installed_package_that_does_not_import_raises(mok_import):
         mok.is_mok_available()
 
 
+def test_a_gpu_the_image_does_not_build_mok_for_is_refused(mok_import, monkeypatch):
+    """The image's mok is SM103 code, which a B200 (SM100) cannot run."""
+    package = types.ModuleType("mok")
+    package.functional = sys.modules["mok.functional"] = types.ModuleType("mok.functional")
+    sys.modules["mok"] = package
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (10, 0))
+    with pytest.raises(RuntimeError, match="SM103 .* this GPU is SM100"):
+        mok.require_mok()
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda: (10, 3))
+    assert mok.require_mok() is package.functional
+
+
 def test_a_model_with_no_wrapped_moe_block_is_refused():
     """At ``expert_parallel_size`` 1 nothing else would notice: the setting would run nothing."""
     dense = SimpleNamespace(model_type="qwen3")
