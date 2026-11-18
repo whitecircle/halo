@@ -5,6 +5,7 @@ head, the families' head transforms and a composite's image rows."""
 
 import dataclasses
 import json
+import math
 import types
 
 import pytest
@@ -278,7 +279,11 @@ def test_a_vocab_parallel_tp_head_matches_the_full_logits_path(dp, tmp_path):
         assert result["gradients"] == result["full_gradients"], f"rank {rank}"
         assert "model.embed_tokens.weight" in result["errors"]
         assert result["loss"] == pytest.approx(result["full_loss"], rel=FP32_RTOL), f"rank {rank}"
-        worst = {name: error for name, error in result["errors"].items() if error >= 10 * FP32_RTOL}
+        worst = {
+            name: error
+            for name, error in result["errors"].items()
+            if not math.isfinite(error) or error >= 10 * FP32_RTOL
+        }
         assert not worst, f"rank {rank}: relative gradient errors {worst}"
 
 
