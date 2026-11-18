@@ -149,8 +149,7 @@ next round with the update, training each round one step stale (the importance r
 
 With two or more, list them in `rollout_server_configs`, each with its own `group_port`. Prefetch is
 then on by default. `prefetch_depth` (default 1) collects that many rounds ahead, at that many steps of
-staleness. On SGLang every sync aborts the turns in flight, so `max_retries` must cover the syncs a
-prefetched round spans; the trainer refuses a smaller value.
+staleness.
 
 ## Run
 

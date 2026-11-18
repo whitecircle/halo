@@ -168,6 +168,16 @@ def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatc
     assert model.layers[0].mlp._lowp is lowp
 
 
+@pytest.mark.parametrize(("precision", "hooked"), [("mxfp4", True), ("fp8", False)])
+def test_native_mxfp4_reads_its_non_finite_weight_flag_after_every_forward(precision, hooked, monkeypatch):
+    """The device-side cast only sets a flag: without this hook a NaN expert weight would train on as zeros."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (object(), object()))
+    model = _Model(_layer(next(iter(FAMILIES)), ALIGNED_M, grouped=True))
+    lowp = LowpSpec(precision=precision, backend="native", apply_dense_mlp=False)
+    apply_lowp_compute(model, lowp, expert_weight_cacheable=False)
+    assert (deepgemm.raise_on_non_finite_weight in model._forward_hooks.values()) is hooked
+
+
 @pytest.mark.parametrize("family", list(FAMILIES))
 def test_the_refusal_guards_a_forward_that_fails(family):
     """The premise: past the load, the first grouped forward fails inside the quantizer."""
