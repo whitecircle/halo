@@ -46,11 +46,16 @@ from halo.trainers.distillation.divergences import (
     uses_hard_labels,
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth, verify_full_logits_fit
 from halo.trainers.head_projection import HeadProjector, OutputEmbedding, resolve_output_embedding
 from halo.trainers.hidden_state_forward import HiddenStateForwardMixin, reject_backbone_without_image_inputs
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
+
+# Bytes per logit the full-logits path holds at its peak: both models' bf16 logits, and the student's bf16 gradient
+# plane in the backward.
+_FULL_LOGITS_BYTES_PER_LOGIT = 6
 
 
 @dataclass(frozen=True)
@@ -183,6 +188,7 @@ class DistributedTeacherDistillationTrainer(
         reject_topk_covering_vocab(self.args.distill_topk, self._vocab_width, self.model)
         if self.args.use_chunked_distillation_loss:
             self._reject_unchunkable_loss()
+        self._verify_full_logits_fit()
         if is_global_main_process():
             logger.info(f"Teacher model moved to {device} and set to eval mode")
 
@@ -195,6 +201,23 @@ class DistributedTeacherDistillationTrainer(
                 "read the evaluation logits. Drop them, or set use_chunked_distillation_loss: false."
             )
         self._resolve_chunked_loss_modules()
+
+    def _verify_full_logits_fit(self) -> None:
+        """COLLECTIVE when it runs, after the teacher is placed. Skipped on the chunked path, with no CUDA device or
+        with no ``max_length`` to bound the width."""
+        args = self.args
+        if args.use_chunked_distillation_loss or not torch.cuda.is_available() or (args.max_length or 0) <= 0:
+            return
+        vocab = self._vocab_width or self.accelerator.unwrap_model(self.model).get_output_embeddings().weight.shape[0]
+        verify_full_logits_fit(
+            args,
+            LogitsWidth(args.max_length, "max_length"),
+            vocab,
+            self.accelerator.device,
+            bytes_per_logit=_FULL_LOGITS_BYTES_PER_LOGIT,
+            loss="distillation loss",
+            remedy="Set use_chunked_distillation_loss: true to project the logits a chunk of positions at a time",
+        )
 
     def _resolve_chunked_loss_modules(self) -> _ChunkedLossModules:
         """Resolved once, as each lookup unwraps a model through its whole module tree. Raises where the projection
@@ -302,19 +325,25 @@ class DistributedTeacherDistillationTrainer(
         student_terms = functools.partial(
             self._projected_student_terms, teacher_head=teacher_head, teacher_rows=teacher_rows
         )
+        # Keyword arguments only: the wrapper's forward pre-hooks read the batch, the no-image refusal included.
         terms = self._chunked_forward_redirection(
-            model, unwrapped, student_terms, model_inputs, hard_labels[rows, columns], positions
+            model,
+            unwrapped,
+            student_terms,
+            hard_labels=hard_labels[rows, columns],
+            positions=positions,
+            **model_inputs,
         )
         return terms.unbind(-1)
 
     def _projected_student_terms(
         self,
-        model_inputs,
+        *,
         hard_labels: torch.Tensor,
         positions: torch.Tensor,
-        *,
         teacher_head: HeadProjector,
         teacher_rows: list[torch.Tensor],
+        **model_inputs,
     ) -> torch.Tensor:
         """Run inside the redirected forward, where FSDP2 has gathered the student's head; the projector holds those
         tensors for the backward's recompute."""

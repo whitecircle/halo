@@ -17,6 +17,7 @@ from halo.diagnostics.phase_timers import Phase
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth
 from halo.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from halo.trainers.grpo.grpo_rules import (
     reject_conflicting_advantage_hooks,
@@ -24,7 +25,7 @@ from halo.trainers.grpo.grpo_rules import (
     reject_unshared_rollout_func,
     require_vllm_server_mode,
 )
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
+from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.loss_forward_seam import LOSS_FORWARD_KNOB
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts

@@ -1,11 +1,16 @@
 #!/usr/bin/env python
 """``use_chunked_distillation_loss`` against the full-logits path of the same trainer, on tiny real models: the loss and
-every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head``, a tied head, a vocab-parallel TP
-head, the families' head transforms and a composite's image rows."""
+every trainable gradient agree, with a LoRA adapter (and its dropout) on ``lm_head``, a ``modules_to_save`` head, a tied
+head, a vocab-parallel TP head, the families' head transforms, a composite's image rows and in eval mode. A batch the
+default path refuses is refused here too, and the default path's logits plane is weighed at construction."""
 
+import ast
 import dataclasses
+import inspect
 import json
+import logging
 import math
+import textwrap
 import types
 
 import pytest
@@ -18,14 +23,18 @@ from transformers import DistributedConfig
 
 import halo.kernels.logprobs as logprob_kernels
 import halo.trainers.distillation.teacher_distillation as teacher_distillation
+import halo.trainers.full_logits_memory as full_logits_memory
 from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.fsdp import apply_fsdp2_for_tp
 from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from halo.distributed.tensor_parallel import hf_plan
+from halo.entrypoints import data_setup
+from halo.entrypoints.data_setup import apply_vision_options
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel import tp as tp_loading
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
+from halo.models.introspection.module_tree import embedding_module
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.head_projection import resolve_output_embedding
 from halo.trainers.hidden_state_forward import reject_backbone_without_image_inputs
@@ -206,6 +215,45 @@ def test_a_head_transform_vocabulary_cut_matches_the_full_logits_path():
     trainer = _trainer(student, _teacher(inkling, cut, dtype=torch.float32), distill_alpha=0.5)
     assert trainer._head_transform(trainer.model).vocab_size == cut["unpadded_vocab_size"]
     _assert_paths_agree(trainer, _batch(cut["unpadded_vocab_size"], RAGGED), rtol=1e-4)
+
+
+def test_a_modules_to_save_head_matches_the_full_logits_path():
+    """PEFT trains a copy of the head, set apart here from the frozen original, so the projection must read the copy."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_DENSE_FAMILY, overrides=TINY)
+    config = LoraConfig(r=4, lora_dropout=0.25, target_modules=["q_proj", "v_proj"], modules_to_save=["lm_head"])
+    model = get_peft_model(model, config)
+    with torch.no_grad():
+        copy = model.get_output_embeddings().modules_to_save["default"].weight
+        copy.add_(0.5 * torch.randn_like(copy))
+    trainer = _trainer(model.to(torch.float64).train(), _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5)
+    grads = _assert_paths_agree(trainer, _batch(trainer.model.config.vocab_size, RAGGED))
+    head_copy = [name for name in grads if "lm_head.modules_to_save" in name]
+    assert head_copy and all(grads[name].abs().sum() > 0 for name in head_copy)
+
+
+def test_an_evaluation_step_matches_the_full_logits_path():
+    """Eval mode turns the LoRA dropout off, and the row padding an eval split's final round leaves both losses."""
+    trainer = _trainer(
+        _student(TINY_DENSE_FAMILY, peft=True), _teacher(TINY_DENSE_FAMILY), distill_alpha=0.5, apply_hard_labels=True
+    )
+    trainer.model.eval()
+    batch = _batch(trainer.model.config.vocab_size, RAGGED)
+
+    def evaluate(*, chunked: bool, real_rows: int):
+        trainer.args.use_chunked_distillation_loss = chunked
+        trainer.eval_split_rows = lambda rows: real_rows
+        with torch.no_grad():
+            return trainer.compute_loss(trainer.model, dict(batch)), dict(trainer.stored)
+
+    full_loss, full_metrics = evaluate(chunked=False, real_rows=1)
+    loss, metrics = evaluate(chunked=True, real_rows=1)
+    torch.testing.assert_close(loss, full_loss, rtol=FP32_RTOL, atol=1e-9)
+    assert metrics.keys() == full_metrics.keys()
+    for key, value in metrics.items():
+        torch.testing.assert_close(value, full_metrics[key], rtol=FP32_RTOL, atol=1e-9)
+    padded_loss, _ = evaluate(chunked=True, real_rows=2)
+    assert (padded_loss - loss).abs() > 1e-6, "the padding row must move the loss, or the comparison sees nothing"
 
 
 def test_a_tied_head_matches_the_full_logits_path():
@@ -390,6 +438,112 @@ def test_a_composite_that_builds_its_image_inputs_itself_is_refused():
         reject_backbone_without_image_inputs(omni)
     torch.manual_seed(0)
     reject_backbone_without_image_inputs(composite_model_and_rows("qwen3_5")[0])
+
+
+def test_a_batch_holding_no_image_is_refused_on_both_paths(monkeypatch):
+    """A rank whose batch holds no image while the tower trains under data parallelism would hang in the reduce, so
+    the wrapper's forward pre-hook refuses it; the chunked path reaches that forward too. A frozen input embedding
+    with checkpointing off is a setup the reduces cannot pair in. One process stands in for the data-parallel axis,
+    whose mesh is all the refusal reads of it."""
+    torch.manual_seed(0)
+    student, image_row, text_row = composite_model_and_rows("qwen3_5")
+    torch.manual_seed(0)
+    teacher, _, _ = composite_model_and_rows("qwen3_5")
+    embedding_module(student, "input").requires_grad_(False)
+    apply_vision_options(
+        types.SimpleNamespace(freeze_vision_tower=False, min_pixels=None, max_pixels=None),
+        student,
+        types.SimpleNamespace(use_peft=False, lora_target_modules=None),
+        None,
+        is_vlm=True,
+    )
+    wide_mesh = types.SimpleNamespace(mesh_info=types.SimpleNamespace(mesh=types.SimpleNamespace(size=lambda: 2)))
+    monkeypatch.setattr(data_setup, "fsdp2_param_groups", lambda model: [wide_mesh])
+    trainer = _trainer(student, teacher.eval().requires_grad_(False), distill_alpha=0.5)
+    for chunked in (False, True):
+        trainer.args.use_chunked_distillation_loss = chunked
+        with pytest.raises(ValueError, match="This rank's batch holds no image"):
+            trainer.compute_loss(student, dict(text_row))
+        assert trainer.compute_loss(student, dict(image_row)).isfinite()
+
+
+_GIB = 1024**3
+
+
+def _memory_host(*, chunked: bool = False, max_length: int | None = 1024):
+    """A trainer's state the full-logits check reads: 2 rows × 1024 tokens × 2**17 vocab × 6 B is 1.5 GiB."""
+    return types.SimpleNamespace(
+        args=types.SimpleNamespace(
+            use_chunked_distillation_loss=chunked,
+            max_length=max_length,
+            per_device_train_batch_size=2,
+            per_device_eval_batch_size=1,
+            eval_strategy="no",
+            eval_on_start=False,
+        ),
+        _vocab_width=2**17,
+        accelerator=types.SimpleNamespace(device="cuda:3"),
+    )
+
+
+@pytest.fixture
+def free_memory(monkeypatch):
+    """Pretend a CUDA device with ``free`` bytes available; records the device each read asked about."""
+    asked: list = []
+
+    def _set(free: int):
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device=None: asked.append(device) or (free, 8 * free))
+        return asked
+
+    return _set
+
+
+def test_a_full_logits_plane_within_half_the_free_memory_stays_quiet(free_memory, caplog):
+    asked = free_memory(3 * _GIB)
+    with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
+        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+    assert not caplog.records
+    assert asked == ["cuda:3"], "free memory must be read on the trainer's own device"
+
+
+def test_a_full_logits_plane_past_half_the_free_memory_warns(free_memory, caplog):
+    free_memory(2 * _GIB)
+    with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
+        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1 and "1.5 GiB" in messages[0] and "75%" in messages[0], messages
+    assert "use_chunked_distillation_loss: true" in messages[0] and "max_length" in messages[0]
+
+
+def test_a_full_logits_plane_past_the_free_memory_refuses_the_run(free_memory):
+    free_memory(_GIB)
+    with pytest.raises(RuntimeError, match="use_chunked_distillation_loss: true"):
+        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+
+
+@pytest.mark.parametrize(
+    "host", [_memory_host(chunked=True), _memory_host(max_length=None)], ids=["chunked", "no_max_length"]
+)
+def test_the_chunked_path_or_an_unbounded_width_skip_the_check(free_memory, host):
+    free_memory(1)
+    DistributedTeacherDistillationTrainer._verify_full_logits_fit(host)
+
+
+def _call_lines(fn, name: str) -> list[int]:
+    tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and name in (getattr(node.func, "attr", None), getattr(node.func, "id", None))
+    ]
+
+
+def test_construction_weighs_the_plane_after_the_teacher_is_placed():
+    """The free memory read must already exclude the teacher's weights."""
+    checks = _call_lines(DistributedTeacherDistillationTrainer.__init__, "_verify_full_logits_fit")
+    placements = _call_lines(DistributedTeacherDistillationTrainer.__init__, "place_frozen_scorer")
+    assert checks and placements and min(checks) > max(placements)
 
 
 def test_dora_on_the_head_is_refused():

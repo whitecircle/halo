@@ -5,7 +5,6 @@ import inspect
 import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from enum import IntEnum
 from typing import ClassVar
 
@@ -33,7 +32,7 @@ from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.construction.training_args_overrides import uses_evaluation
+from halo.trainers.full_logits_memory import LogitsWidth, verify_full_logits_fit
 from halo.trainers.grpo.packed_forward import build_packed_rows
 from halo.trainers.hidden_state_forward import HiddenStateForwardMixin
 
@@ -42,39 +41,6 @@ logger = logging.getLogger(__name__)
 # Bytes per logit the full-logits loss forward holds at its peak: an fp32 plane, or the bf16 logits
 # plus the bf16 log-softmax TRL's selective_log_softmax saves for backward.
 _FULL_LOGITS_BYTES_PER_LOGIT = 4
-# Share of the device memory free at trainer init above which the full-logits plane warns. At init the
-# optimizer state, gradients and activations the same step needs are not allocated yet.
-_FULL_LOGITS_WARN_FRACTION = 0.5
-
-
-@dataclass(frozen=True)
-class LogitsWidth:
-    tokens: int
-    set_by: str
-
-
-def full_logits_verdict(
-    rows: int, rows_set_by: str, width: LogitsWidth, vocab: int, free_bytes: int
-) -> tuple[bool, str] | None:
-    """``(fatal, message)``: fatal when the plane cannot fit, a warning past :data:`_FULL_LOGITS_WARN_FRACTION`,
-    ``None`` when it fits comfortably."""
-    plane = rows * width.tokens * vocab * _FULL_LOGITS_BYTES_PER_LOGIT
-    if plane <= _FULL_LOGITS_WARN_FRACTION * free_bytes:
-        return None
-    gib = 1024**3
-    fatal = plane > free_bytes
-    share = (
-        f"more than the {free_bytes / gib:.1f} GiB this device has free"
-        if fatal
-        else f"{plane / free_bytes:.0%} of the {free_bytes / gib:.1f} GiB free before the optimizer state and "
-        f"activations are allocated"
-    )
-    return fatal, (
-        f"The GRPO loss forward materializes full logits: {rows} rows × {width.tokens} tokens × {vocab} vocab × "
-        f"{_FULL_LOGITS_BYTES_PER_LOGIT} B = {plane / gib:.1f} GiB, {share}. Set use_chunked_grpo_logprobs: true "
-        f"to compute the log-probs in vocab chunks instead, or lower {rows_set_by} ({rows}) or "
-        f"{width.set_by}, which sets the {width.tokens}-token width."
-    )
 
 
 class RowSpan(IntEnum):
@@ -214,23 +180,15 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
                 "GRPO scores completions through the model's output embedding, and this model reports none "
                 "(get_output_embeddings() is None)."
             )
-        vocab = head.weight.shape[0]
-        args = self.args
-        rows, rows_set_by = args.per_device_train_batch_size, "per_device_train_batch_size"
-        if uses_evaluation(args) and args.per_device_eval_batch_size > rows:
-            rows, rows_set_by = args.per_device_eval_batch_size, "per_device_eval_batch_size"
-        free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
-        verdict = full_logits_verdict(rows, rows_set_by, width, vocab, free_bytes)
-        fatal = verdict is not None and verdict[0]
-        if not rank_consensus(not fatal).all_ok:
-            raise RuntimeError(
-                verdict[1]
-                if fatal
-                else "Another rank's full-logits plane cannot fit in its free device memory "
-                "(its error states the size); set use_chunked_grpo_logprobs: true."
-            )
-        if verdict is not None and self.accelerator.is_main_process:
-            logger.warning(verdict[1])
+        verify_full_logits_fit(
+            self.args,
+            width,
+            head.weight.shape[0],
+            self.accelerator.device,
+            bytes_per_logit=_FULL_LOGITS_BYTES_PER_LOGIT,
+            loss="GRPO loss",
+            remedy="Set use_chunked_grpo_logprobs: true to compute the log-probs in vocab chunks instead",
+        )
 
     def _warm_scoring_pass(self, input_ids: torch.Tensor, logits_to_keep: int, *, compute_entropy: bool) -> None:
         """COLLECTIVE. One train-mode forward and backward of ``input_ids`` through the trainer's own scorer, so the
