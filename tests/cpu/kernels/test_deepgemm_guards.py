@@ -611,10 +611,6 @@ def test_the_mxfp4_dgrad_runs_on_an_fp8_block_cast_kept_beside_the_forward_cast(
     assert w.grad.shape == w.shape
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 def test_a_bf16_backward_holds_no_fp8_operand_in_the_graph(native):
     x, w, offs = _operands(8, 128, 256)
     w.requires_grad_(True)
@@ -637,3 +633,7 @@ def test_the_non_finite_flag_raises_once_at_its_one_read():
     with pytest.raises(ValueError, match="Non-finite expert weight"):
         deepgemm.raise_on_non_finite_weight()
     deepgemm.raise_on_non_finite_weight()
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
