@@ -6,7 +6,7 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `entropy` climbing for tens of steps, reasoning shrinking, `sampling/logratio_mean` widening until `sampling/update_skipped` holds at 1 | A KL-free run (`beta: 0`) whose failures outlast its solves (`advantage/net_token_mass` stays negative) | `balance_token_mass: true` ([Token-mass balance](objective.md#token-mass-balance)); arm the [early stop](monitoring.md#early-stop); resume from the last checkpoint before the drift |
+| `entropy` climbing for tens of steps, reasoning shrinking, `sampling/logratio_mean` widening until `sampling/update_skipped` holds at 1 | A KL-free run (`beta: 0`) whose failures outlast its solves (`advantage/net_token_mass` stays negative) | Arm the [early stop](monitoring.md#early-stop); resume from the last checkpoint before the drift. `balance_token_mass: true` cancels the net push, whose measured entropy effect is small ([Token-mass balance](objective.md#token-mass-balance)) |
 
 ## Servers and weight sync
 
