@@ -181,6 +181,7 @@ def test_the_warmup_draws_no_random_numbers():
         (moe_route_sort._scan_kernel, "n_blocks"),
         (moe_route_sort._scan_kernel, "n_valid"),
         (moe_route_sort._scan_kernel, "n_sorted"),
+        (moe_route_sort._scan_kernel, "n_weighted"),
         (moe_route_sort._scan_kernel, "align"),
         (moe_route_sort._place_kernel, "n_rows"),
         (moe_route_sort._place_kernel, "n_sorted"),

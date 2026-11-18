@@ -16,6 +16,7 @@ _BLOCK_SLOTS = 1024
 _LANE_BITS = (_BLOCK_SLOTS - 1).bit_length()
 # Elements of one scan tile, blocks x padded local experts.
 _SCAN_TILE = 2048
+_CHECKSUM_MASK = 0x7FFFFFFF  # the scan's group checksum stays an int32 launch scalar at any receive size
 RECEIVE_COUNTS_DISAGREE = "DeepEP receive counts disagree with the received expert ids"
 # At ep_size 1 no dispatch pads, so an id outside the local range came from the routing itself.
 NONLOCAL_EXPERT_ID_MESSAGE = (
@@ -55,7 +56,7 @@ def _histogram_kernel(
 
 
 # ``align`` is 1, or the expert GEMM's row segment when it pads the groups: one binary serves both.
-@triton.jit(do_not_specialize=["n_blocks", "n_valid", "n_sorted", "align"])
+@triton.jit(do_not_specialize=["n_blocks", "n_valid", "n_sorted", "n_weighted", "align"])
 def _scan_kernel(
     hist_ptr,
     offs_ptr,
@@ -65,6 +66,7 @@ def _scan_kernel(
     n_local,
     n_valid,
     n_sorted,
+    n_weighted,
     align,
     E_PAD: tl.constexpr,
     CHUNK: tl.constexpr,
@@ -72,8 +74,10 @@ def _scan_kernel(
     # offs[e] = the end of expert e's group, its slots and every lower expert's summed over the blocks, each group
     # rounded up to a multiple of align.
     # shift[b, e] = where block b's first expert-e slot lands, minus that slot's position in the block's sorted order.
-    # ok = the local slots number n_valid and their groups end at n_sorted, the host counts that sized the outputs:
-    # padded, one expert's count off by a slot can move its group a whole segment with the total unchanged.
+    # ok = the local slots number n_valid, their groups end at n_sorted and, weighted by expert, sum to n_weighted
+    # (31 bits; -1 unpadded), the host counts that sized the outputs and the padded layout: padded, one
+    # count off by a slot can move its group a whole segment with the total unchanged, and two can trade segments
+    # with the padded total unchanged too.
     e = tl.arange(0, E_PAD)
     totals = tl.zeros((E_PAD,), dtype=tl.int32)
     for b0 in range(0, n_blocks, CHUNK):
@@ -94,6 +98,7 @@ def _scan_kernel(
         tl.store(shift_ptr + tile, block_start - first_in_block, mask=in_range)
         running += tl.sum(h, axis=0)
     ok = (tl.sum(totals, axis=0) == n_valid) & (tl.sum(groups, axis=0) == n_sorted)
+    ok &= (n_weighted < 0) | ((tl.sum(groups * (e + 1), axis=0) & 0x7FFFFFFF) == n_weighted)
     tl.store(ok_ptr, ok.to(tl.int32))
 
 
@@ -161,7 +166,9 @@ class _CountingSort(torch.autograd.Function):
         n_blocks = triton.cdiv(n_rows, rows)
         n_valid = n_rows * top_k if counts is None else sum(counts)
         align = 1 if pad_align is None else pad_align
-        n_sorted = n_valid if pad_align is None else sum(-(-c // align) * align for c in counts)
+        groups = None if pad_align is None else [-(-c // align) * align for c in counts]
+        n_sorted = n_valid if groups is None else sum(groups)
+        n_weighted = -1 if groups is None else sum(e * g for e, g in enumerate(groups, 1)) & _CHECKSUM_MASK
         experts, weights = experts.contiguous(), weights.contiguous()
         hist = torch.empty((n_blocks, e_pad), dtype=torch.int32, device=device)
         shift = torch.empty_like(hist)
@@ -188,6 +195,7 @@ class _CountingSort(torch.autograd.Function):
             num_local_experts,
             n_valid,
             n_sorted,
+            n_weighted,
             align,
             E_PAD=e_pad,
             CHUNK=max(1, _SCAN_TILE // e_pad),

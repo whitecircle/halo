@@ -151,12 +151,14 @@ def pad_routing_groups(
     if counts is None:
         ends = offs.tolist()
         counts = tuple(b - a for a, b in zip([0, *ends[:-1]], ends, strict=True))
-    rows = sum(-(-c // align) * align for c in counts)
+    segments = [-(-c // align) * align for c in counts]
+    rows = sum(segments)
     n_sorted = sorted_token_idx.shape[0]
     group = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
     padded = (group + align - 1) // align * align
-    # Counts that disagree with the sorted groups would place rows past the output they sized.
-    torch._assert_async(padded.sum() == rows, RECEIVE_COUNTS_DISAGREE)
+    # Counts that disagree with the sorted groups would place rows past the output they sized, or describe a layout
+    # other than the placed one.
+    torch._assert_async((padded == padded.new_tensor(segments)).all(), RECEIVE_COUNTS_DISAGREE)
     shift = (padded.cumsum(0) - padded) - (group.cumsum(0) - group)
     pos = torch.arange(n_sorted, device=offs.device) + shift.index_select(0, sorted_expert_ids.long())
     token_idx = sorted_token_idx.new_full((rows,), -1).index_copy_(0, pos, sorted_token_idx)
@@ -251,6 +253,12 @@ def control_findings() -> list[str]:
         except RuntimeError as exc:
             if RECEIVE_COUNTS_DISAGREE not in str(exc):
                 findings.append(f"padded {name}: a slot moved across a segment boundary raised something else: {exc}")
+        try:  # both totals kept, the two groups' segments traded: the layout seeded from the counts would be wrong
+            sort(split, weights, 2, (129, 127))
+            findings.append(f"padded {name}: two groups trading segments was not refused")
+        except RuntimeError as exc:
+            if RECEIVE_COUNTS_DISAGREE not in str(exc):
+                findings.append(f"padded {name}: two groups trading segments raised something else: {exc}")
         moved_within, true_counts = sort(split, weights, 2, (126, 130)), sort(split, weights, 2, (127, 129))
         if not all(torch.equal(got, want) for got, want in zip(moved_within, true_counts, strict=True)):
             findings.append(f"padded {name}: a slot moved within the padded segments changed the sort")
