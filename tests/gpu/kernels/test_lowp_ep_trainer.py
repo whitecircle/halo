@@ -118,6 +118,16 @@ class _CallsBeforeTheLastStep(TrainerCallback):
         self.count = self.calls[0]
 
 
+class _ModelForwards(TrainerCallback):
+    """How many forwards the trained model ran."""
+
+    def __init__(self):
+        self.count = 0
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        model.register_forward_hook(lambda *_: setattr(self, "count", self.count + 1))
+
+
 def _train(
     ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None, callbacks=()
 ) -> tuple[list[float], _ExpertVersions, bool]:
@@ -222,18 +232,18 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     native_calls = _count_calls(deepgemm, "_deepgemm_forward")
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
-    flag_reads = _count_calls(lowp_compute, "raise_on_non_finite_weight")
-    warmed = _CallsBeforeTheLastStep(wgrad_calls)
+    flag_reads = _count_calls(lowp_compute, "verify_finite_mxfp4_weights")
+    warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _ModelForwards()
     losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed,)
+        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed, forwards)
     )
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
-    # The MXFP4 weight cast only flags a NaN weight on the device: the model's forward hook is its one read.
-    checks["mxfp4_reads_its_non_finite_flag_every_forward"] = world_all(
-        (flag_reads[0] >= TOTAL_STEPS) == (ARGS.precision == "mxfp4")
+    # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward, and none under fp8.
+    checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
+        forwards.count >= 2 * TOTAL_STEPS and flag_reads[0] == (forwards.count if ARGS.precision == "mxfp4" else 0)
     )
     # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM; the caches themselves must stay empty.
     checks["fsdp2_managed_experts_cache_no_cast"] = world_all(

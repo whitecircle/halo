@@ -640,14 +640,15 @@ def test_the_mxfp4_dgrad_runs_on_an_fp8_block_cast_kept_beside_the_forward_cast(
     finer of the two. Each format keeps its own cache entry, or every microbatch would evict the other's."""
     x, w, offs = _operands(8, 256, 256)
     w = nn.Parameter(_spread_weight(2, 256, 256))
+    operands = []
     for _ in range(2):
         native.kernel_calls.clear()
         _fp8_backward(native, x, w, offs, quant_format="mxfp4")
         forward, dgrad = native.kernel_calls
         assert forward["recipe_b"] == (1, 32) and forward["b"][0].shape == (2, 256, 128), "MXFP4, two e2m1 per byte"
         assert dgrad["b"][0].shape == (2, 256, 256) and dgrad["b"][1].shape == (2, 2, 2), "FP8 in 128x128 blocks"
-        assert dgrad["b"] is deepgemm._weight_caches["mxfp8"].get(w, w._version)
-        assert forward["b"] is deepgemm._weight_caches["mxfp4"].get(w, w._version)
+        operands.append((forward["b"], dgrad["b"]))
+    assert operands[1][0] is operands[0][0] and operands[1][1] is operands[0][1], "the second microbatch recast"
     assert w.grad.shape == w.shape
 
 
@@ -666,13 +667,18 @@ def test_a_format_no_kernel_takes_is_refused_at_the_entry(native):
     assert not native.kernel_calls
 
 
-def test_the_non_finite_flag_raises_once_at_its_one_read():
+def test_the_non_finite_flag_raises_once_at_its_one_read_and_drops_the_cached_casts():
+    """A caller that catches the raise must not find the non-finite weight's cast in the cache at its next forward."""
     flag = deepgemm._nonfinite_weight.setdefault(torch.device("cpu"), torch.zeros(1, dtype=torch.int32))
-    deepgemm.raise_on_non_finite_weight()
+    weight = nn.Parameter(torch.zeros(1, 32, 32))
+    deepgemm._weight_caches["mxfp4"].put(weight, weight._version, object())
+    deepgemm.verify_finite_mxfp4_weights()
+    assert len(deepgemm._weight_caches["mxfp4"]) == 1
     flag.fill_(1)
-    with pytest.raises(ValueError, match="Non-finite expert weight"):
-        deepgemm.raise_on_non_finite_weight()
-    deepgemm.raise_on_non_finite_weight()
+    with pytest.raises(ValueError, match="Non-finite expert weight bad: "):
+        deepgemm.verify_finite_mxfp4_weights([("bad", torch.tensor(float("inf"))), ("fine", torch.zeros(1))])
+    assert len(deepgemm._weight_caches["mxfp4"]) == 0
+    deepgemm.verify_finite_mxfp4_weights()
 
 
 if __name__ == "__main__":

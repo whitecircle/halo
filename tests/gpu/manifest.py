@@ -591,6 +591,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--precision fp8 --native --backward fp8",
             "--precision mxfp4 --native --backward fp8",
             "--precision fp8 --native --backward fp8 --ep-size 1",
+            "--precision mxfp4 --native --backward fp8 --ep-size 1",
         ),
         timeout=900,
     ),
