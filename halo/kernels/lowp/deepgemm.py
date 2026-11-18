@@ -21,7 +21,6 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
     cast_tiles_to_fp8,
     cast_weight_blocks_to_fp8,
     cast_weight_rows_to_mxfp4,
-    non_finite_weight_error,
 )
 from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
@@ -200,6 +199,22 @@ def _cast_experts(b: torch.Tensor, cast, block_scaled: bool):
     return data, sf
 
 
+_NON_FINITE_WEIGHT = "Non-finite expert weight: DeepGEMM's MXFP4 cast decodes it as zeros."
+# Set on the device by an MXFP4 cast of a NaN or inf weight. Read once per model forward: a read per cast would sync
+# the host with the GPU at every expert GEMM of an uncached weight.
+_nonfinite_weight: dict[torch.device, torch.Tensor] = {}
+
+
+def raise_on_non_finite_weight(*_hook_args) -> None:
+    """One host read for every MXFP4 weight cast since the last call; ``apply_lowp_compute`` registers it as the
+    model's forward hook. The raise is local to this rank; its EP peers wait in their next collective until it times
+    out."""
+    for flag in _nonfinite_weight.values():
+        if flag.item():
+            flag.zero_()
+            raise ValueError(_NON_FINITE_WEIGHT)
+
+
 def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
     """Cached per optimizer step unless ``cacheable`` is False, as FSDP2's pinned version counter would serve the
     step-0 quantization forever."""
@@ -212,16 +227,18 @@ def _quant_weight(w: torch.Tensor, fmt: QuantFormat, cacheable: bool = True):
         cached = _weight_caches[fmt].get(w, fingerprint)
         if cached is not None:
             return cached
-    if w.is_cuda:  # the MXFP4 cast raises on a non-finite weight itself
-        operand = (
-            cast_weight_blocks_to_fp8(w)
-            if fmt == "mxfp8"
-            else cast_weight_rows_to_mxfp4(w, _contraction_width(w.shape[1], fmt))
-        )
+    if w.is_cuda:
+        if fmt == "mxfp8":
+            operand = cast_weight_blocks_to_fp8(w)
+        else:
+            flag = _nonfinite_weight.get(w.device)
+            if flag is None:
+                flag = _nonfinite_weight[w.device] = torch.zeros(1, device=w.device, dtype=torch.int32)
+            operand = cast_weight_rows_to_mxfp4(w, _contraction_width(w.shape[1], fmt), flag)
     else:  # DeepGEMM's reference casts: the FP8 operand keeps the weight's [E, K, N], the MXFP4 one is [E, N, K]
         # e2m1 has no NaN code and the cast turns a NaN amax into a 2^127 scale: the block would decode as zeros.
         if fmt == "mxfp4" and not w.isfinite().all():
-            raise non_finite_weight_error(w)
+            raise ValueError(_NON_FINITE_WEIGHT)
         b = w.contiguous() if fmt == "mxfp8" else w.transpose(-2, -1).contiguous()
         b = F.pad(b, (0, _contraction_width(b.shape[2], fmt) - b.shape[2]))
         cast = (
@@ -371,7 +388,8 @@ class _DeepGEMMGroupedFn(torch.autograd.Function):
 
 
 def deepgemm_grouped_gemm(x, w, *, offs, lowp: LowpSpec, weight_cacheable: bool = True):
-    """Native forward at ``lowp.precision``, with the bf16 or FP8 backward ``lowp.backward_precision`` names."""
+    """Native forward at ``lowp.precision``, with the bf16 or FP8 backward ``lowp.backward_precision`` names. On
+    CUDA a non-finite MXFP4 weight raises in :func:`raise_on_non_finite_weight`, not here."""
     if not deepgemm_available():
         raise ImportError("deepgemm_grouped_gemm needs the deep_gemm package (Blackwell image only)")
     if offs is None:

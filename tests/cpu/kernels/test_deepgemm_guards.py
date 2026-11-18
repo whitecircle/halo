@@ -629,3 +629,11 @@ def test_a_format_no_kernel_takes_is_refused_at_the_entry(native):
         deepgemm.deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision="fp4", backend="native"))
     assert not native.kernel_calls
 
+
+def test_the_non_finite_flag_raises_once_at_its_one_read():
+    flag = deepgemm._nonfinite_weight.setdefault(torch.device("cpu"), torch.zeros(1, dtype=torch.int32))
+    deepgemm.raise_on_non_finite_weight()
+    flag.fill_(1)
+    with pytest.raises(ValueError, match="Non-finite expert weight"):
+        deepgemm.raise_on_non_finite_weight()
+    deepgemm.raise_on_non_finite_weight()
