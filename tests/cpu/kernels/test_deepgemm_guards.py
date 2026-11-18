@@ -595,10 +595,6 @@ def test_the_fp8_wgrad_takes_128_experts_per_call_on_whole_token_tiles(native):
     assert w.grad.shape == (experts, 64, 32)
 
 
-if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-v"]))
-
-
 def test_a_bf16_backward_holds_no_fp8_operand_in_the_graph(native):
     x, w, offs = _operands(8, 128, 256)
     w.requires_grad_(True)
@@ -616,3 +612,7 @@ def test_a_spec_no_kernel_takes_is_refused_at_the_entry(native, precision, backw
             x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native", backward_precision=backward)
         )
     assert not native.kernel_calls
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
