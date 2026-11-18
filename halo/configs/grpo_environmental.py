@@ -453,8 +453,7 @@ class AsyncRolloutConfig(
             "per optimizer step at the default steps_per_generation), which the sampling-logprob IS ratio corrects. "
             "Raise it when the trainer waits on rollouts every step while the engines drain at each round's tail. "
             "Costs staleness, engine KV for every round in flight, and this many cold rounds when a run starts. "
-            "An int >= 1; above 1 it needs a run that prefetches. On SGLang, whose every sync aborts the turns in "
-            "flight, a round may span at most max_retries syncs (refused before the model load). "
+            "An int >= 1; above 1 it needs a run that prefetches. "
             "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."
         },
     )
