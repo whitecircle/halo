@@ -31,8 +31,8 @@ put all four on it; unset, they pick the local mount other than `/` with the
 most free space.
 The compose `training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`,
 and the vLLM compose file refuses to start without it, even for the server
-alone; its HF cache follows the host's `HF_HOME`. Export `HALO_SCRATCH` once,
-or set it in the repo-root `.env`, to choose the volume yourself.
+alone; its HF cache follows the host's `HF_HOME`. Export `HALO_SCRATCH` in the shell
+to choose the volume yourself: `make` does not read `.env`, so a value set only there moves compose alone.
 
 ## Secrets
 

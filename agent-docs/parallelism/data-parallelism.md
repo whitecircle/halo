@@ -310,7 +310,7 @@ replica for the whole run while every loss looks normal.
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
   (`parallelism_rules._reject_hsdp`).
 
-    TP / EP+TP / Expert-TP build their own `(dp, tp)` mesh the 2D HSDP mesh is not wired into.
+    TP and EP+TP build their own `(dp, tp)` mesh and Expert-TP shards through the EP path's 1-D FSDP; the 2D HSDP mesh is wired into neither.
     Multi-group EP already shards over the EP group, and a single global EP group must keep 1D FSDP
     so its backward collectives share the DeepEP combine's membership.
 
@@ -320,8 +320,9 @@ replica for the whole run while every loss looks normal.
 
 ```bash
 # Multi-node pure-DP with HSDP: non-expert params shard within each node
-# and replicate across nodes.
-torchrun --nnodes=2 --nproc_per_node=8 \
+# and replicate across nodes. Run on each node with its own NODE_RANK.
+torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+    --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \
     scripts/training/sft.py config.yaml --use_hsdp=true
 ```
 

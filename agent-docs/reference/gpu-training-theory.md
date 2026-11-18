@@ -85,13 +85,13 @@ Sweeping `M` (tokens routed to one expert) at the gpt-oss square-expert shape `K
 
 | M | TFLOP/s | AI | regime |
 |---|---|---|---|
-| 128 | 180 | 118 | below ridge → **weight-bandwidth-bound** |
+| 128 | 180 | 118 | below ridge, and far below the memory ceiling too → **occupancy-bound** |
 | 512 | 548 | 378 | above ridge → compute-bound |
 | 8192 | 1375 | 1225 | compute-bound |
 
 The crossover at M≈256–512 is fixed by the shape. Absolute TFLOP/s vary ±10–20% with clocks, more so at the smallest M, whose ~12 µs runtime sits near the launch floor.
 
-At `M=128` the kernel hits ~180 TFLOP/s, about 10% of the 1818 TFLOP/s measured ceiling. ~92% of its bytes are the `2880×2880` weight (16 MB bf16), streamed in full while only 128 token-rows multiply, so the tensor cores finish and idle. Growing `M` amortizes that one weight load over more rows.
+At `M=128` the kernel hits ~180 TFLOP/s, about 10% of the 1818 TFLOP/s measured ceiling. ~92% of its bytes are the `2880×2880` weight (16 MB bf16), streamed in full while only 128 token-rows multiply; that stream is about a quarter of HBM bandwidth, so the limit is the few tiles in flight (§1), not the memory. Growing `M` amortizes that one weight load over more rows.
 
 Per-expert `M` is set by routing:
 

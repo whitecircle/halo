@@ -6,8 +6,8 @@ It covers one prompt, one answer, one turn: math, structured output and anything
 Multi-turn tool use belongs on [Async GRPO with Environments](async-grpo-environments.md), and
 pre-scored data on [Offline GRPO](offline-grpo.md).
 
-Generation runs on a **separate vLLM container** that receives the updated weights over NCCL after each
-optimizer step. Start it first, on GPUs no trainer rank uses ([Rollout Servers](../rollout-servers.md)).
+Generation runs on a **separate vLLM container** that receives the updated weights over NCCL before each
+generation. Start it first, on GPUs no trainer rank uses ([Rollout Servers](../rollout-servers.md)).
 
 ## Data
 

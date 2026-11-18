@@ -82,7 +82,8 @@ halo launch sft qwen3-moe-sft.yaml -n 4 \
 ```
 
 To adapt the experts as well, add `gate_proj,up_proj,down_proj` and `--merge_expert_lora_on_save=true`.
-Under EP they train as grouped expert adapters, which no tool merges afterwards.
+Under EP they train as grouped expert adapters, which `halo run merge-peft-adapters` merges
+afterwards.
 
 ### GRPO
 

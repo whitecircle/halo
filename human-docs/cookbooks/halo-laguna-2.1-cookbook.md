@@ -56,8 +56,8 @@ halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/laguna-s-2.1-lora
 ```
 
-These targets adapt attention and the experts. No tool merges expert adapters afterwards, so
-`merge_expert_lora_on_save` folds them into each save.
+These targets adapt attention and the experts. `halo run merge-peft-adapters` merges expert
+adapters afterwards; `merge_expert_lora_on_save` folds them into each save instead.
 
 ### GRPO
 

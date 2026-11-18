@@ -174,7 +174,8 @@ class ParallelismArguments(ValidatedConfig):
     tensor_parallel_size: int = field(
         default=ParallelismConfig.tp_size,
         metadata={
-            "help": "Tensor-parallel size for attention, embeddings and lm_head (> 1 enables TP); it must divide "
+            "help": "Tensor-parallel size (> 1 enables TP): attention, MLP and a tied embedding/lm_head vocab dim "
+            "on a dense model, attention only on a MoE; it must divide "
             "the NVLink domain, and FSDP2 data-parallelizes across the TP groups. Not compatible with context, "
             "expert-tensor or pipeline parallelism, or with any LoRA."
         },

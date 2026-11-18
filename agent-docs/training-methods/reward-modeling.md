@@ -103,4 +103,4 @@ Once trained, score fresh generations or build preference pairs with `scripts/in
 Failure signatures:
 
 - Rows vanishing at prep — `max_length` filters rather than truncates, and the text path drops them silently (only the VLM path reports a count). Compare the split sizes, then raise it or shorten the pairs.
-- Accuracy pinned near 0.5 under LoRA — the score head is freshly initialized, so it must be in `lora_modules_to_save`.
+- Accuracy pinned near 0.5 under LoRA — the score head is freshly initialized, so it must train: set `lora_task_type: SEQ_CLS`, under which PEFT trains and saves it, or add it to `lora_modules_to_save`.

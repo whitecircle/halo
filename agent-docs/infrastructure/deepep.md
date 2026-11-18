@@ -76,7 +76,7 @@ before the process starts. It does not make the racy single-domain multi-group s
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`, `HALO_CHECKPOINT_WRITERS_PER_NODE`,
 `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
-`FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`. A divergence is a hang
+`FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`, `HALO_WEIGHT_SYNC_GATHER_AHEAD`, `HALO_WEIGHT_SYNC_PARITY_PROBE`. A divergence is a hang
 or a silent drift, not a slow run: the dedup changes how many
 collectives a rank runs, the grad-bucket size sets the chunk boundaries of the bucketed gradient
 reductions (EP, TP and QLoRA alike), the write-thread count decides whether a rank refuses a save its

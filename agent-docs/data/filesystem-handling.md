@@ -231,7 +231,7 @@ contents still require a resume, `overwrite_output_dir: true`, or a different ou
 Put read-only models and datasets on shared storage; put the HF cache and temp files on local NVMe.
 
 ```bash
-export DIST_SHARED_FILESYSTEM=1          # 0 for per-node local storage
+export DIST_INPUT_SHARED_FILESYSTEM=0    # the caches are per-node; outputs keep the shared default
 export HF_HOME=/local/hf_cache
 export HF_DATASETS_CACHE=/local/hf_cache/datasets
 export TMPDIR=/local/tmp

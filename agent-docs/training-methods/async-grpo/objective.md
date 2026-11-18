@@ -118,7 +118,7 @@ A group's advantages sum to zero, but their token-weighted sum does not: where f
 
 - The balance sums the trainable rows' positive and negative mass, `P` and `N` (advantage × IS-weighted trained tokens), and the [untrainable-turn](#untrainable-turns) rows' negative mass `U`, over every rank. It shrinks the heavier side, `P` or `N + U`, by their ratio, never up, keeping every row's sign and within-sign order, so the whole round nets to zero.
 - Where cut turns carry much of the negative mass, the balance shrinks their negative advantage with the rest, and the trainable rows alone keep a push up.
-- The scale falls continuously to 0 as the lighter side empties, so a one-sign round trains nothing on those advantages. Balanced rows pull at `1 - |net|` of their unbalanced strength.
+- The scale falls continuously to 0 as the lighter side empties, so a one-sign round trains nothing on those advantages. With no untrainable rows the heavier sign then pulls at `(1 - |net|) / (1 + |net|)` of its unbalanced strength.
 
 | Metric | Meaning |
 |---|---|

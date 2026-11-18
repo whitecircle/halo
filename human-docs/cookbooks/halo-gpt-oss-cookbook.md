@@ -60,8 +60,9 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/gpt-oss-20b-lora
 ```
 
-The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which no tool merges
-afterwards, so `merge_expert_lora_on_save` folds the adapters into each save.
+The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which
+`halo run merge-peft-adapters` merges afterwards; `merge_expert_lora_on_save` folds the adapters into each
+save instead.
 
 ### GRPO
 

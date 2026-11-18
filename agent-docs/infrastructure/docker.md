@@ -48,7 +48,7 @@ docker run -d --rm --name <job> --gpus all \
 
 Load-bearing flags:
 
-- `--env-file .env` supplies `WANDB_API_KEY` / `HF_TOKEN` / `AWS_DEFAULT_REGION`. Nothing auto-loads
+- `--env-file .env` supplies `WANDB_API_KEY` / `HF_TOKEN`, and `AWS_DEFAULT_REGION` once you uncomment it with a value. Nothing auto-loads
   `.env`; start from the template (`cp .env.example .env`), which the GPU `make` targets and the dev
   container require.
 - `HF_HOME` / `HF_DATASETS_CACHE` / `TMPDIR` / `HALO_DATA_ROOT` move the caches, temp files and the

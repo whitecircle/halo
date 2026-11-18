@@ -18,7 +18,7 @@ and V swaps that to the full `S` tokens but `H/cp_size` heads for the attention 
 swaps the output back. The backward runs the same two in reverse.
 Multi-head attention is independent across heads, which is what makes this exact.
 
-Packing Q, K and V into one exchange takes two collectives per layer each way where one per tensor takes three. On
+Packing Q, K and V into one exchange takes two collectives per layer each way where one per tensor takes four. On
 8× B300 (1.2.0, three rounds) that runs Qwen3-8B CP2 at s4096 4.4% and gpt-oss-20b ep8 × cp2 3.7% faster, and leaves
 long sequences flat (cp4 at s16384 −0.4%, ep8 × cp8 at s32768 −0.1%).
 
@@ -51,7 +51,7 @@ CP computes loss per chunk with two corrections:
 2. **Globally-normalized sum loss** — completion-only training distributes tokens unevenly across
    chunks, so per-rank `reduction='mean'` biases gradients. Each rank computes
    `loss_i = cp_size * local_sum / global_tokens` with `global_tokens` the all-reduced non-masked
-   token count. After FSDP2's `1/cp_size` gradient averaging every token contributes equally. The
+   token count. After FSDP2's gradient averaging over the `data_parallel_size × cp_size` ranks every token contributes equally. The
    fp32 `local_sum` runs over checkpointed chunks of the rank's logits (`chunked_token_sum`, as the
    pipeline's last stage scores them), so no fp32 copy of the chunk's logits plane is built.
 
@@ -193,7 +193,8 @@ block — different points in the forward pass, no conflict.
 
 CP always requires gradient sync when `world_size > 1`, even at DP=1 — each rank holds partial
 gradients from its chunk. `DistributedTrainerMixin` applies FSDP2 across all ranks; for EP+CP the
-same wrapper runs with EP params in `ignored_params`.
+same wrapper runs with EP params in `ignored_params`, and across several NVLink domains it shards over
+the EP group with the cross-replica average deferred ([Topology rules](README.md#topology-rules)).
 
 EP+CP needs node-local EP filling the NVLink domain: on 8 GPUs ep8/cp2 → DP4, ep8/cp4 → DP2,
 ep8/cp8 → DP1 ([Topology rules](README.md#topology-rules)).
