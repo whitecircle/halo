@@ -470,12 +470,15 @@ def test_a_batch_holding_no_image_is_refused_on_both_paths(monkeypatch):
 _GIB = 1024**3
 
 
-def _memory_host(*, chunked: bool = False, max_length: int | None = 1024):
-    """A trainer's state the full-logits check reads: 2 rows × 1024 tokens × 2**17 vocab × 6 B is 1.5 GiB."""
+def _memory_host(*, chunked: bool = False, max_length: int | None = 1024, precision: str = "bf16"):
+    """A trainer's state the full-logits check reads: in bf16, 2 rows × 1024 tokens × 2**17 vocab × 3 planes × 2 B is
+    1.5 GiB."""
     return types.SimpleNamespace(
         args=types.SimpleNamespace(
             use_chunked_distillation_loss=chunked,
             max_length=max_length,
+            bf16=precision == "bf16",
+            fp16=precision == "fp16",
             per_device_train_batch_size=2,
             per_device_eval_batch_size=1,
             eval_strategy="no",
@@ -507,12 +510,18 @@ def test_a_full_logits_plane_within_half_the_free_memory_stays_quiet(free_memory
     assert asked == ["cuda:3"], "free memory must be read on the trainer's own device"
 
 
-def test_a_full_logits_plane_past_half_the_free_memory_warns(free_memory, caplog):
-    free_memory(2 * _GIB)
+@pytest.mark.parametrize(
+    ("precision", "bytes_per_logit"), [("bf16", 6), ("fp16", 6), ("fp32", 12)], ids=["bf16", "fp16", "fp32"]
+)
+def test_a_full_logits_plane_past_half_the_free_memory_warns(free_memory, caplog, precision, bytes_per_logit):
+    """The three planes are in the run's precision, so an fp32 run weighs twice a bf16 one."""
+    plane_gib = 1.5 * bytes_per_logit / 6
+    free_memory(int(plane_gib / 0.75 * _GIB))
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
-        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host(precision=precision))
     messages = [record.getMessage() for record in caplog.records]
-    assert len(messages) == 1 and "1.5 GiB" in messages[0] and "75%" in messages[0], messages
+    assert len(messages) == 1 and "75%" in messages[0], messages
+    assert f"× {bytes_per_logit} B = {plane_gib:.1f} GiB" in messages[0], messages
     assert "use_chunked_distillation_loss: true" in messages[0] and "max_length" in messages[0]
 
 

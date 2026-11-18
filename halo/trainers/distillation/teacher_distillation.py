@@ -21,6 +21,7 @@ from transformers.trainer_callback import TrainerCallback
 from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
@@ -53,9 +54,9 @@ from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
 
-# Bytes per logit the full-logits path holds at its peak: both models' bf16 logits, and the student's bf16 gradient
-# plane in the backward.
-_FULL_LOGITS_BYTES_PER_LOGIT = 6
+# Logits planes the full-logits path holds at its peak, each in the run's precision: both models' logits, and the
+# student's gradient plane in the backward.
+_FULL_LOGITS_PLANES = 3
 
 
 @dataclass(frozen=True)
@@ -214,7 +215,7 @@ class DistributedTeacherDistillationTrainer(
             LogitsWidth(args.max_length, "max_length"),
             vocab,
             self.accelerator.device,
-            bytes_per_logit=_FULL_LOGITS_BYTES_PER_LOGIT,
+            bytes_per_logit=_FULL_LOGITS_PLANES * resolve_training_dtype(args).itemsize,
             loss="distillation loss",
             remedy="Set use_chunked_distillation_loss: true to project the logits a chunk of positions at a time",
         )
