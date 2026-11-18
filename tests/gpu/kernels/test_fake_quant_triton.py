@@ -203,29 +203,24 @@ def _kernel_global_scale(amax: torch.Tensor) -> torch.Tensor:
     return out
 
 
-def _eager_global_scale(amax: torch.Tensor) -> torch.Tensor:
-    """``_nvfp4_core``'s global scale, elementwise: the CUDA kernels it runs on its 0-d tensor amax."""
-    return torch.exp2(torch.ceil(torch.log2(amax.clamp(min=_AMAX_FLOOR) / q._NVFP4_GLOBAL_SCALE_DIVISOR)))
-
-
 def test_nvfp4_global_scale_matches_eager_on_every_fp32_amax():
-    """The kernel's global scale against eager's on CUDA, bit for bit, for every positive fp32 tensor amax (inf
-    included) and a NaN. Whole tensors cannot pin it: one ulp of global scale, as at CUDA's inexact ``exp2(-127)``
-    (``0x3FFFFF``), rarely moves a dequantized element, so only the scale's own bits show a kernel that builds the exact
-    power of two there."""
+    """The kernel's global scale against eager's ``nvfp4_global_scale`` (the one ``_nvfp4_core`` and the export call)
+    on CUDA, bit for bit, for every positive fp32 tensor amax (inf included) and a NaN. Whole tensors cannot pin it:
+    one ulp of global scale, as at CUDA's inexact ``exp2(-127)`` (``0x3FFFFF``), rarely moves a dequantized element, so
+    only the scale's own bits show a kernel that builds the exact power of two there."""
     chunk = 1 << 26
     for lo in range(0, 0x7F800001, chunk):
         hi = min(lo + chunk, 0x7F800001)
         amax = torch.arange(lo, hi, device=DEV, dtype=torch.int64).to(torch.int32).view(torch.float32)
-        differ = _eager_global_scale(amax).view(torch.int32) != _kernel_global_scale(amax).view(torch.int32)
+        differ = q.nvfp4_global_scale(amax).view(torch.int32) != _kernel_global_scale(amax).view(torch.int32)
         if differ.any():
             first = int(amax[differ.nonzero()[0, 0]].view(torch.int32))
             raise AssertionError(
                 f"{int(differ.sum())} amax values in [{lo:#010x}, {hi:#010x}) differ, first {first:#010x}"
             )
     nan = torch.tensor([float("nan")], device=DEV)
-    assert _eager_global_scale(nan).isnan().item() and _kernel_global_scale(nan).isnan().item()
-    minus_127 = _eager_global_scale(_exp2_minus_127_case().abs().amax().reshape(1))
+    assert q.nvfp4_global_scale(nan).isnan().item() and _kernel_global_scale(nan).isnan().item()
+    minus_127 = q.nvfp4_global_scale(_exp2_minus_127_case().abs().amax().reshape(1))
     assert minus_127.view(torch.int32).item() == 0x003FFFFF, "the exp2(-127) case no longer lands on CUDA's 0x3FFFFF"
     print("  nvfp4 global scale: 2,139,095,041 fp32 maxima and NaN match eager — OK")
 
