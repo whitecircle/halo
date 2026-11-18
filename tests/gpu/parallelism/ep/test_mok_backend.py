@@ -215,13 +215,14 @@ def run(ctx) -> dict:
         mok_layer = _ep_layer(block, "mok", ep_size, MXFP8 if ARGS.mxfp8 else None)
         # An evaluation first: its cast, made under inference mode, serves the training step. The step runs under
         # saved-tensor hooks, as in a non-reentrant checkpoint, which hand its backward other objects for the weights.
+        bank_casts = _count_calls(mok_module, "_mxfp8_layer_cast")
         if ARGS.mxfp8:
             with torch.inference_mode():
                 mok_layer(x)
-        bank_casts = _count_calls(mok_module, "_mxfp8_layer_cast")
+        evaluation_casts = bank_casts[0]
         with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
             mok = _step(mok_layer, x, grad)
-        step_casts = bank_casts[0]
+        step_casts = bank_casts[0] - evaluation_casts
     finally:
         triton.knobs.runtime.jit_cache_hook = previous
         mok_ops._C = mok_ops._C._compiled
@@ -246,7 +247,8 @@ def run(ctx) -> dict:
         )
         checks["only_rank_0_takes_expert_gradients"] = (ctx.rank == 0) == ("grad_down_proj" in reference)
     if ARGS.mxfp8:
-        checks["the_step_casts_no_bank_the_evaluation_cast"] = step_casts == 0
+        # Three banks cast once: a layer that stayed on bf16 would cast none, and pass a bare "no cast in the step".
+        checks["the_step_casts_no_bank_the_evaluation_cast"] = evaluation_casts == 3 and step_casts == 0
         checks |= _mxfp8_cast_checks(mok_layer)
     metrics = {}
     for name, expected in reference.items():

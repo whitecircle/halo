@@ -24,8 +24,6 @@ MOK_ALIGN = 256  # MoK's hidden and intermediate multiple
 # Its route buffer, tokens x top_k x 4 bytes, must split into 2048-byte chunks for any top_k.
 _TOKEN_ALIGN = 512
 
-_mxfp8_cache = WeightVersionCache()  # expert bank -> its MXFP8 casts, re-quantized once per optimizer step
-
 
 # Comm SMs each way by expert intermediate size: a token's dispatch and combine scale with the hidden size and its
 # expert compute with hidden x intermediate, so narrow experts are communication-bound and want more of the SMs.
@@ -36,6 +34,8 @@ _BUILT_FOR = (10, 3)  # the Dockerfile's MOK_ARCH=SM103, whose code an SM100 GPU
 # MoK's ring of routed rows, in a rank's even share of the group's: every routed activation is allocated at the
 # ring's size and saved for the backward, and a rank routed more than the ring holds replays it.
 _RING_SHARES = 2
+
+_mxfp8_cache = WeightVersionCache()  # expert bank -> its MXFP8 casts, re-quantized once per optimizer step
 
 
 @functools.lru_cache(maxsize=1)
