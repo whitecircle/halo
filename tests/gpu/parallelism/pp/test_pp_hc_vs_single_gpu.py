@@ -85,7 +85,10 @@ def run(ctx):
     pin_fla_autotune_first_fit(ctx)
     torch.cuda.empty_cache()
     input_ids, labels = ppeq.build_unmasked_batch(vocab, GLOBAL_BATCH, device=device)
-    ref_loss, _, ref_grads = ppeq.baseline_grads(build_model(device), input_ids, labels)
+    # The baseline runs the pipeline's microbatches: GLM-5's fla kernels round by batch shape, which alone moves its
+    # full-batch grads past GRAD_TOLERANCE.
+    micro_rows = GLOBAL_BATCH // (config.data_parallel_size * N_MICROBATCHES)
+    ref_loss, _, ref_grads = ppeq.baseline_grads(build_model(device), input_ids, labels, microbatch_rows=micro_rows)
     log(f"[baseline:{FAMILY}] loss={ref_loss.item():.8f} over {len(ref_grads)} params")
 
     groups = ppeq.build_stage_groups(config)
