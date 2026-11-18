@@ -469,6 +469,12 @@ def _reject_mok(pc: ParallelismConfig) -> None:
             f"{lowp.backward_precision!r}, as MoK's only low-precision recipe is MXFP8 forward and backward "
             f"(lowp_precision fp8, lowp_backend native, lowp_backward_precision fp8)"
         )
+    if pc.is_racy_single_domain_multigroup_ep:
+        groups = pc.nvlink_domain_size // pc.ep_size
+        refusals.append(
+            f"{groups} concurrent EP groups on one {pc.nvlink_domain_size}-GPU NVLink domain, which no MoK test runs "
+            f"(set expert_parallel_size={pc.nvlink_domain_size}, or shrink the job to {pc.ep_size} GPUs)"
+        )
     if pc.ep_rows_per_device <= 0 or pc.ep_declared_max_length <= 0:
         refusals.append("no declared token budget (per_device_train_batch_size and max_length) to size its buffers")
     if refusals:
@@ -573,9 +579,9 @@ def reject_invalid_composition(pc: ParallelismConfig) -> None:
     _reject_tp(pc)
     _reject_expert_tp(pc)
     _reject_ep_cp(pc)
+    _reject_mok(pc)  # before the DeepEP topology refusals, whose remedies MoK does not take
     _reject_single_domain_multigroup_ep(pc)
     _reject_ep_buffer_backend(pc)
-    _reject_mok(pc)
     _reject_hsdp(pc)
     _reject_fsdp_settings(pc)
 

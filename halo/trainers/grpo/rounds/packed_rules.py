@@ -95,7 +95,16 @@ def resolve_dispatch_ceiling(parallelism_config) -> int | None:
 
 
 def reject_undispatchable_budget(parallelism_config, budget: int) -> None:
-    """Refuse a ``packed_microbatch_tokens`` whose arena the first dispatch would refuse, before the first rollout."""
+    """Refuse a ``packed_microbatch_tokens`` whose arena the first dispatch would refuse, or that MoK's buffers, sized
+    once to the batch's rows, cannot hold, before the first rollout."""
+    if parallelism_config.moe_backend == "mok":
+        capacity = parallelism_config.mok_token_capacity
+        if budget > capacity:
+            raise ValueError(
+                f"{PACKED_KNOB}={budget} exceeds the {capacity} tokens per rank moe_backend='mok' sized its buffers "
+                f"to (per_device_train_batch_size x the declared row length, or the eval batch's rows where an "
+                f"evaluation is scheduled). Lower {PACKED_KNOB} to {capacity}, or set moe_backend='deepep'."
+            )
     if parallelism_config.ep_size <= 1:
         return
     try:

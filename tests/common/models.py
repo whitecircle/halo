@@ -762,8 +762,10 @@ TINY_QWEN3_VL_VISION_CONFIG = {
     "out_hidden_size": TINY_QWEN3_CONFIG["hidden_size"],
     "deepstack_visual_indexes": [],
 }
-# Two vision blocks at the release's patch geometry.
+# Two vision blocks at the release's patch geometry. The release's config carries the empty ``deepstack_visual_indexes``
+# its server's vision tower reads, which the transformers class does not declare and keeps only when given.
 TINY_QWEN4_EXP_VISION_CONFIG = {
+    "deepstack_visual_indexes": [],
     "depth": 2,
     "hidden_size": 32,
     "intermediate_size": 64,

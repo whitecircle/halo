@@ -399,6 +399,11 @@ class ParallelismConfig:
             return dispatch_ep_rank * layout.num_groups + ep_group_idx
         return self.stage_local_rank // max(self.tp_size, self.cp_size)
 
+    @property
+    def mok_token_capacity(self) -> int:
+        """The padded per-rank tokens of every MoK forward, from the declared budget."""
+        return mok_token_capacity(self.ep_rows_per_device * self.ep_declared_max_length)
+
     def ep_config(self) -> "EPConfig":
         """COLLECTIVE on first call, which builds every EP process group."""
         if self._ep_config is None:
@@ -420,7 +425,7 @@ class ParallelismConfig:
                 experts_fsdp_managed=self.experts_fsdp_managed,
                 ep_buffer_backend=self.ep_buffer_backend,
                 moe_backend=self.moe_backend,
-                mok_token_capacity=mok_token_capacity(self.ep_rows_per_device * self.ep_declared_max_length),
+                mok_token_capacity=self.mok_token_capacity,
             )
         return self._ep_config
 

@@ -32,7 +32,7 @@ _mxfp8_cache = WeightVersionCache()  # expert bank -> its MXFP8 casts, re-quanti
 _COMM_SMS_BY_INTERMEDIATE = ((1024, 48), (2048, 42))
 _COMM_SMS_WIDE, _MAX_MINIBATCH = 36, 8192
 _EXPERT_PADDING = 256  # MoK's schedule rounds each local expert's rows up to this (csrc/scheduler.cuh)
-_BUILT_FOR = (10, 3)  # the image builds mok at its default arch, SM103, whose code an SM100 GPU cannot run
+_BUILT_FOR = (10, 3)  # the Dockerfile's MOK_ARCH=SM103, whose code an SM100 GPU cannot run
 # MoK's ring of routed rows, in a rank's even share of the group's: every routed activation is allocated at the
 # ring's size and saved for the backward, and a rank routed more than the ring holds replays it.
 _RING_SHARES = 2

@@ -9,7 +9,7 @@ Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert co
 every expert GEMM:
 [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
-EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
+EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP), or on B300 the opt-in [`moe_backend: mok`](#mixture-of-kittens-backend) — there is no NCCL fallback.
 Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router gradients
 sync via the EP layer's own backward hooks and expert gradients via the trainer's post-backward sweep,
 which takes the routers too when there is more than one EP group
@@ -84,7 +84,6 @@ EP surface. The table is pinned against the specs and classes by
 | Nemotron-H | RL weight sync — both pinned engines serve the release, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Nemotron-H | training the composite through the release's modeling file — its forward hands the text tower no `seq_idx` and reads no `image_grid_hw` | `FAMILY.remote_composite_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
-| Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and on SM100-family GPUs SGLang 0.5.22 caches a padded copy of each hyper-connection mix-up weight that an update leaves stale ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
@@ -286,15 +285,16 @@ replay and the family's shared expert stay on Halo's path.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
   TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, `use_grouped_gemm: false`, a non-default `ep_buffer_backend`,
   FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`), a run that declares no
-  token budget, and any low precision on the experts but MoK's MXFP8 recipe below. DeepEP's own layout rules still
-  apply (several EP groups in one NVLink domain among them); MoK has not been run past them.
+  token budget, and any low precision on the experts but MoK's MXFP8 recipe below. Several EP groups in one NVLink
+  domain are refused as under DeepEP: no MoK test runs them, and the remedy is one group (`expert_parallel_size` at
+  the domain's size, or a job of that many GPUs).
 - **MXFP8.** `lowp_precision: fp8`, `lowp_backend: native`, `lowp_backward_precision: fp8` (and
   `lowp_apply_dense_mlp: false`) run MoK's MXFP8 kernels for the forward, dgrad and wgrad: e4m3 with an e8m0 scale per
   32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. Any other low-precision
   setting on the experts is refused. Each bank is cast once per optimizer step, in the layer's own layout, whose
-  transposed cast is MoK's normal one: the same bits as casting MoK's layout, with no transpose first. The backward
-  reads the forward's cast from the per-step cache, which holds both layouts beside the bf16 bank, 2 bytes a parameter
-  together. Measured as below, with the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's
+  transposed cast is MoK's normal one: the same bits as casting MoK's layout, with no transpose first. The autograd
+  node carries the forward's backward-layout cast to the backward, which cannot ask the cache under saved-tensor
+  hooks; the per-step cache holds both layouts beside the bf16 bank, 2 bytes a parameter together. Measured as below, with the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's
   shapes, 0.93×, 1.02× and 1.15× on the gpt-oss-like one and 0.84×, 1.04× and 1.19× on DeepSeek-V3's.
 - **Memory.** On one layer of DeepSeek-V3's experts at EP 4 (64 local experts, 5.3 GiB of bf16 banks per rank) the
   MXFP8 cache adds 5.4 GiB. A step peaks at 23.0 GiB under MoK bf16 and 22.4 GiB under MoK MXFP8 at 4,096 tokens per
@@ -305,7 +305,8 @@ replay and the family's shared expert stay on Halo's path.
   batch when the config schedules an evaluation (`eval_strategy`, `eval_on_start`) and that is larger. Padding rows carry zero router weight and move no output or
   gradient, but they are dispatched and computed: a batch shorter than the budget pays for the whole of it, and a
   larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises, an
-  unscheduled `evaluate()` on a larger batch included.
+  unscheduled `evaluate()` on a larger batch included. A packed GRPO micro-batch carries several rows, so a
+  `packed_microbatch_tokens` past the budget is refused at construction.
 - **Schedule and ring.** A rank's schedule holds the most rows any routing can send it, each local expert's rounded
   up to 256 (`_schedule_capacity_multiplier`): MoK traps in its kernel past it, with no message, and its default
   holds half the group's rows. MoK allocates every routed activation at its ring's size and Halo saves them for the
@@ -321,7 +322,7 @@ replay and the family's shared expert stay on Halo's path.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
   Qwen3-30B-A3B's experts at 0.81×, 0.90× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
   block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.87× and 0.61-0.82×.
-- **Install.** The Blackwell image builds it at `f3a8bd2` for SM103, MoK's default and one arch per build, so `mok`
+- **Install.** The Blackwell image builds it at `f3a8bd2` for SM103 (`MOK_ARCH`, one arch per build), so `mok`
   is refused on B200 (SM100). Its build refuses an nvcc that is not torch's CUDA (13.0)
   while the image ships the 13.2 toolkit, so the Dockerfile installs the 13.0 compiler for that step and removes it
   again; `--no-deps` keeps the locked NCCL, which pip would replace with torch's metadata pin and DeepEP's build does
