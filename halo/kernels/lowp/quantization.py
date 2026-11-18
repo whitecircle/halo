@@ -14,7 +14,12 @@ from torch._dynamo.exc import TorchDynamoException
 from triton.runtime.jit import JITFunction
 
 from halo.env import env_flag
-from halo.kernels.lowp.fake_quant_triton import fake_quant_triton, mxfp4_fake_quant_kernel, mxfp8_fake_quant_kernel
+from halo.kernels.lowp.fake_quant_triton import (
+    fake_quant_triton,
+    mxfp4_fake_quant_kernel,
+    mxfp8_fake_quant_kernel,
+    nvfp4_fake_quant_kernel,
+)
 from halo.kernels.lowp.spec import QuantFormat
 
 logger = logging.getLogger(__name__)
@@ -41,27 +46,59 @@ _POW2_SCALE: dict[QuantFormat, bool] = {"mxfp8": True, "mxfp4": True, "nvfp4": F
 # Largest element magnitude per format, which a block's amax scales to. The eager cores and the fused kernels read it.
 _ELEMENT_MAX: dict[QuantFormat, float] = {"mxfp8": E4M3_MAX, "mxfp4": E2M1_MAX, "nvfp4": E2M1_MAX}
 # Only power-of-two scales survive compile's reciprocal-multiply exactly; compiled NVFP4 would not match
-# the eager checkpoint quantizer, so it stays eager.
+# the eager checkpoint quantizer, so its weights take the fused kernel instead.
 _COMPILABLE = tuple(fmt for fmt, pow2 in _POW2_SCALE.items() if pow2)
 
 
 @dataclass(frozen=True)
 class _FusedFakeQuant:
-    """A fused Triton round trip, bit-identical to eager: the kernel and the oldest compute capability whose Triton
-    backend compiles it."""
+    """A fused Triton round trip, bit-identical to eager on CUDA: the kernel, the oldest compute capability whose
+    Triton backend compiles it, and for a two-level format the largest block scale (NVFP4's ``E4M3_MAX``), which
+    also marks the tensor abs-max pass it needs first."""
 
     kernel: JITFunction
     min_capability: tuple[int, int]
+    scale_max: float | None = None
 
 
-# One entry per power-of-two-scale format (test_lowp_spec.py holds the two tables together). NVFP4's tensor-wide
-# global scale needs a pass over the whole tensor first, so it stays eager. The mxfp8 kernel rounds through Triton's
-# fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX converts
-# to from SM 8.0. Older GPUs keep the eager path.
+# One entry per format (test_lowp_spec.py holds the tables together). The mxfp8 and nvfp4 kernels round through
+# Triton's fp8 type, which Triton lowers only on SM 8.9 and newer. The mxfp4 kernel stores through bf16, which PTX
+# converts to from SM 8.0. Older GPUs keep the eager path.
 _FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
     "mxfp8": _FusedFakeQuant(mxfp8_fake_quant_kernel, min_capability=(8, 9)),
     "mxfp4": _FusedFakeQuant(mxfp4_fake_quant_kernel, min_capability=(8, 0)),
+    "nvfp4": _FusedFakeQuant(nvfp4_fake_quant_kernel, min_capability=(8, 9), scale_max=E4M3_MAX),
 }
+
+
+def _fused_entry(t: torch.Tensor, fmt: QuantFormat, axis: int) -> _FusedFakeQuant | None:
+    """The fused round trip for ``t`` when one applies: CUDA, real, ``axis`` divisible by the format's block size and a
+    GPU new enough for the kernel. Contiguity and the axis's position are the caller's to check."""
+    fused = _FUSED_FAKE_QUANT.get(fmt)
+    if (
+        fused is not None
+        and t.is_cuda
+        and not t.is_complex()  # Triton has no complex type
+        and t.shape[axis] % FORMAT_BLOCK_SIZE[fmt] == 0
+        and _device_capability(t.device.index) >= fused.min_capability
+    ):
+        return fused
+    return None
+
+
+def _fused_round_trip(
+    fused: _FusedFakeQuant, t: torch.Tensor, fmt: QuantFormat, out_dtype: torch.dtype | None = None
+) -> torch.Tensor:
+    return fake_quant_triton(
+        fused.kernel,
+        t,
+        FORMAT_BLOCK_SIZE[fmt],
+        _ELEMENT_MAX[fmt],
+        _AMAX_FLOOR,
+        scale_max=fused.scale_max,
+        out_dtype=out_dtype,
+    )
+
 
 _compiled_round_trip = None
 _compile_failed = False
@@ -126,34 +163,47 @@ def _e8m0_to_float(scales: torch.Tensor) -> torch.Tensor:
     return torch.exp2(scales.float() - _E8M0_BIAS).masked_fill(scales == _E8M0_NAN, float("nan"))
 
 
+def _e8m0_scale_down(blocks: torch.Tensor, scale_exp: torch.Tensor) -> torch.Tensor:
+    """``blocks x 2^-scale_exp``, rounded once, as the fused MX kernels compute it, for every ``e8m0`` exponent.
+
+    Never a divide by ``exp2(scale_exp)``: the exponent clamps to -127 for an all-zero or tiny block, and CUDA's
+    ``exp2(-127)`` is one ulp below 2^-127 (``0x3FFFFF``, exact on CPU), a subnormal that a flush-to-zero graph (the
+    compiled ``_round_trip`` on CUDA) turns into 0. ``exp2(-scale_exp)`` is an exact normal power of two up to exponent
+    126. Only a block holding an inf reaches 127, where ``exp2(-127)`` has both faults again, so such a block is halved
+    first and scaled by the normal 2^-126: halving a normal fp32 is exact, and a subnormal one gives 0 either way.
+    Dequantizing still multiplies by the stored scale, so under a flushing graph a block with scale 2^-127 round-trips
+    to 0."""
+    inf_block = scale_exp == _E8M0_BIAS
+    return blocks * torch.where(inf_block, 0.5, 1.0) * torch.exp2(inf_block.float() - scale_exp)
+
+
 def _mxfp8_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """``blocks`` → (``e4m3`` data, ``e8m0`` biased-exponent scale ``[*, n_block, 1]`` uint8)."""
     format_max = _ELEMENT_MAX["mxfp8"]
     scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), format_max)
-    # A multiply by exp2(-scale_exp), never a divide by exp2(scale_exp): the exponent clamps to -127 for an all-zero
-    # or tiny block, and exp2(-127) is an fp32 subnormal a flush-to-zero graph (the compiled _round_trip on CUDA)
-    # turns into 0, so the divide gave 0/0 = NaN. exp2(-scale_exp) is a normal power of two for every exponent a
-    # finite fp32 amax can reach, and the product equals the quotient bit for bit. Dequantizing still multiplies by the
-    # stored scale, so under such a graph a block with amax below ~2.6e-36 (scale 2^-127) round-trips to 0.
-    data = (blocks * torch.exp2(-scale_exp)).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
+    data = _e8m0_scale_down(blocks, scale_exp).clamp(-format_max, format_max).to(torch.float8_e4m3fn)
     return data, scales
 
 
-def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
-    """``uint8`` codes, ``sign << 3 | magnitude-level``. Only an exactly-zero divisor is substituted, as an epsilon
-    floor would corrupt every tensor whose real scales sit below it."""
-    scaled = blocks / divisor.masked_fill(divisor == 0, 1.0)
+def _e2m1_round(scaled: torch.Tensor) -> torch.Tensor:
+    """``uint8`` codes, ``sign << 3 | magnitude-level``, of block values already brought to ``e2m1``'s range."""
     sign = (scaled < 0).to(torch.uint8)
     mag = scaled.abs().clamp(max=E2M1_MAX)
-    codes = torch.bucketize(mag, _constant_tensor(_E2M1_BOUNDARIES, blocks.device, mag.dtype)).to(torch.uint8)
-    ties_up = torch.isin(mag, _constant_tensor(_E2M1_TIES_UP, blocks.device, mag.dtype))
+    codes = torch.bucketize(mag, _constant_tensor(_E2M1_BOUNDARIES, scaled.device, mag.dtype)).to(torch.uint8)
+    ties_up = torch.isin(mag, _constant_tensor(_E2M1_TIES_UP, scaled.device, mag.dtype))
     return (codes + ties_up.to(torch.uint8)) | (sign << 3)
+
+
+def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
+    """NVFP4's codes, ``blocks / divisor`` rounded, as its divisor is no power of two. Only an exactly-zero divisor is
+    substituted, as an epsilon floor would corrupt every tensor whose real scales sit below it."""
+    return _e2m1_round(blocks / divisor.masked_fill(divisor == 0, 1.0))
 
 
 def _mxfp4_core(blocks: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, None]:
     """``blocks`` → (e2m1 code uint8, ``e8m0`` scale ``[*, n_block, 1]`` uint8, no global scale)."""
     scale_exp, scales = _e8m0_scale(blocks.abs().amax(dim=-1, keepdim=True), _ELEMENT_MAX["mxfp4"])
-    return _e2m1_codes(blocks, torch.exp2(scale_exp)), scales, None
+    return _e2m1_round(_e8m0_scale_down(blocks, scale_exp)), scales, None
 
 
 def nvfp4_global_scale(amax: torch.Tensor) -> torch.Tensor:
@@ -264,9 +314,19 @@ def _warn_compile_disabled(exc: Exception) -> None:
 
 
 def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-    """Compiled for the power-of-two-scale formats (fixed-shape weights), eager otherwise."""
+    """Compiled for the power-of-two-scale formats (fixed-shape weights). NVFP4 cannot compile bit-exact, so on a GPU
+    that runs its kernel it moves ``axis`` last, takes the fused round trip and moves it back; eager otherwise."""
     global _compiled_round_trip, _compile_failed
-    if fmt not in _COMPILABLE or _compile_failed:
+    if fmt not in _COMPILABLE:
+        fused = _fused_entry(t, fmt, axis)
+        if fused is None:
+            return _block_round_trip(t, fmt, axis)
+        moved = t.movedim(axis, -1).contiguous()
+        # bf16 out, as eager's dequantize returns: an fp16 output would turn a value rounded past 65504 into inf.
+        out = _fused_round_trip(fused, moved, fmt, out_dtype=torch.bfloat16)
+        del moved  # Peak: the moved copy and the kernel output, then the output and the restored layout.
+        return out.movedim(-1, axis).contiguous()
+    if _compile_failed:
         return _block_round_trip(t, fmt, axis)
     if _compiled_round_trip is None:
         try:
@@ -289,18 +349,10 @@ class _FakeQuant(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-        fused = _FUSED_FAKE_QUANT.get(fmt)
-        if (
-            fused is not None
-            and t.is_cuda
-            and t.is_contiguous()
-            and not t.is_complex()  # Triton has no complex type
-            and axis in (-1, t.ndim - 1)
-            and t.shape[-1] % FORMAT_BLOCK_SIZE[fmt] == 0
-            and _device_capability(t.device.index) >= fused.min_capability
-        ):
-            return fake_quant_triton(fused.kernel, t, FORMAT_BLOCK_SIZE[fmt], _ELEMENT_MAX[fmt], _AMAX_FLOOR)
-        # Eager, as activation shapes vary and a compiled form would recompile constantly.
+        if axis in (-1, t.ndim - 1) and t.is_contiguous() and (fused := _fused_entry(t, fmt, -1)) is not None:
+            return _fused_round_trip(fused, t, fmt)
+        # Eager, as activation shapes vary and a compiled form would recompile constantly. A non-last axis (an ep1
+        # expert weight under FSDP2) stays eager for every format.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
     @staticmethod

@@ -44,10 +44,13 @@ def test_the_kernel_tables_are_keyed_on_the_quant_formats():
     assert set(DYNAMIC_ACTIVATION_FORMATS) <= set(get_args(QuantFormat))
 
 
-def test_the_fused_fake_quant_table_covers_the_pow2_scale_formats():
-    """A power-of-two block scale is what lets one kernel pass reproduce eager bit for bit, so each such format has
-    a fused round trip and no other format does."""
-    assert set(_FUSED_FAKE_QUANT) == {fmt for fmt, pow2 in _POW2_SCALE.items() if pow2}
+def test_every_quant_format_has_a_fused_round_trip():
+    """A format with no entry would run its eager round trip on every activation. The two-level format (an e4m3
+    block scale under a tensor-wide one) is the one that declares its largest block scale, for the abs-max pass."""
+    assert set(_FUSED_FAKE_QUANT) == set(get_args(QuantFormat))
+    assert {fmt for fmt, fused in _FUSED_FAKE_QUANT.items() if fused.scale_max is not None} == {
+        fmt for fmt, pow2 in _POW2_SCALE.items() if not pow2
+    }
 
 
 def test_every_peak_flops_key_is_a_peak_table_precision():

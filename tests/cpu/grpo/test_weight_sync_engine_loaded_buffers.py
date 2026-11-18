@@ -48,6 +48,13 @@ _LEFT_OUT_OF_THE_PUSH = {
     "glm5_next": {"model.language_model.layers.N.mlp.gate.e_score_correction_bias"},
     # vLLM maps the hub key onto the gate's ``e_score_correction_bias``.
     "lfm2_moe": {"model.layers.N.feed_forward.expert_bias"},
+    # The n-gram embedding's config-derived constants (head offsets, head vocab sizes, per-position multipliers): each
+    # engine rebuilds them from the config at launch, and the trainer never changes them.
+    "qwen4_exp_text": {
+        "model.layers.N.ple.ple_embedding.layer_multipliers",
+        "model.layers.N.ple.ple_embedding.ngram_heads_offsets",
+        "model.layers.N.ple.ple_embedding.ngram_heads_vocab_sizes",
+    },
     # ``router_bias`` on vLLM's block module, which holds no other direct tensor.
     "step3p7": {"model.layers.N.moe.router_bias"},
 }

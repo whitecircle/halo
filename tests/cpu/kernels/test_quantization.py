@@ -246,17 +246,36 @@ def test_an_all_zero_block_round_trips_to_zero_under_flushed_denormals(fmt):
     assert torch.equal(flushed, unflushed)
 
 
-def test_mxfp8_keeps_a_tiny_blocks_codes_and_scale_under_flushed_denormals():
-    """A block with amax below ~2.6e-36 takes scale 2^-127 too. The quantizer multiplies by the normal 2^127, so its
-    codes and scale match the unflushed ones; only the dequantize's 2^-127 multiply is left to the flush."""
+def _block_at_exponent(fmt: str, edge: str) -> torch.Tensor:
+    """Row 1's first block on an extreme ``e8m0`` exponent, its values normal fp32 so the flush leaves the input alone:
+    ``tiny`` clamps to -127 (amax below format max x 2^-127, about 2.6e-36 for mxfp8 and 3.5e-38 for mxfp4), ``inf``
+    reaches 127 with values large enough to keep codes once scaled by 2^-127."""
+    torch.manual_seed(0)
     x = torch.randn(4, 64)
-    x[1, :32] = 1e-37
-    unflushed = quantize_mxfp8(x, axis=-1)
+    if edge == "tiny":
+        x[1, :32] = (torch.rand(32) * 0.5 + 0.5) * 3e-38 * torch.where(torch.rand(32) < 0.5, -1.0, 1.0)
+    else:
+        x[1, :32] = torch.exp2(torch.rand(32) * 19 + 108) * torch.where(torch.rand(32) < 0.5, -1.0, 1.0)
+        x[1, 0] = float("inf")
+    return x
+
+
+@pytest.mark.parametrize("edge", ["tiny", "inf"])
+@pytest.mark.parametrize("fmt", ["mxfp8", "mxfp4"])
+def test_an_extreme_exponent_block_keeps_its_codes_and_scale_under_flushed_denormals(fmt, edge):
+    """Exponents -127 and 127 are where 2^-127 enters the scaling: CUDA's exp2(-127) is a subnormal, one ulp low, and a
+    flushing graph makes it 0. The quantizer scales those blocks by normal powers of two, so its codes and scale match
+    the unflushed ones. Before #185, mxfp4 divided a tiny block by the flushed 0 (all codes 0) and mxfp8 multiplied an
+    inf block by it (NaN codes). Only the dequantize's 2^-127 multiply is left to the flush."""
+    x = _block_at_exponent(fmt, edge)
+    unflushed = quantization.QUANTIZERS[fmt](x, axis=-1)
     with _flushed_denormals():
-        flushed = quantize_mxfp8(x, axis=-1)
+        flushed = quantization.QUANTIZERS[fmt](x, axis=-1)
     assert torch.equal(flushed.data.view(torch.uint8), unflushed.data.view(torch.uint8))
     assert torch.equal(flushed.scales, unflushed.scales)
-    assert unflushed.scales[1, 0].item() == 0 and unflushed.data[1, :32].float().abs().min() > 0
+    assert unflushed.scales[1, 0].item() == (0 if edge == "tiny" else 254)
+    # Past the inf's own element (byte), the block must keep nonzero codes, or it tests nothing.
+    assert unflushed.data[1, 1:16].float().abs().max() > 0
 
 
 @pytest.fixture
