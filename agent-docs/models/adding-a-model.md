@@ -51,6 +51,8 @@ A family that also declares `exports_source_config_schema` keeps transformers' o
 
 Guard each upstream signature a replacement is written for with `verify_upstream_parameters` (`halo/models/upstream/upstream_guard.py`), so a release that moved it fails at load. Where the forward calls a module-level helper, replace the helper instead of copying the forward, as `halo/models/families/nemotron_h.py` does for the Mamba scan. A forward walking a packed row reads `row_documents` (`halo/models/row_documents.py`), which gives each document's span and its unpadded tokens.
 
+Assign a class's `forward` only through `patch_layer_forward` (`halo/models/gradient_checkpointing.py`). transformers checkpoints a `GradientCheckpointingLayer` inside the wrapper it puts around the class's `forward`, so a bare `cls.forward = ...` on such a layer runs it unchecked with no error; the helper wraps the replacement the same way. `tests/cpu/conventions/test_class_forwards_through_helper.py` fails on a bare class-level assignment under `halo/`; a patch on one instance (`backbone.forward = ...`) is not affected.
+
 ## Declare the head transform
 
 The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`, as does the PP stage seam. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or the chunked path refuses the family.
