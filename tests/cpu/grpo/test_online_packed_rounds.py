@@ -203,7 +203,7 @@ def _configured(trainer_cls, **overrides):
     host.model = tiny_llama(_VOCAB, 0)
     host.model.config._attn_implementation = "flash_attention_2"
     host.accelerator = single_process_accelerator()
-    host.parallelism_config = types.SimpleNamespace(ep_size=1, requires_rdma=False)
+    host.parallelism_config = types.SimpleNamespace(ep_size=1, requires_rdma=False, moe_backend="deepep")
     for name, value in overrides.items():
         setattr(host, name, value)
     return host
