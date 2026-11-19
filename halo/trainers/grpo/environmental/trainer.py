@@ -23,6 +23,7 @@ from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
+    reject_negative_reward_terms_under_maxrl,
     reject_off_policy_mask_threshold,
     reject_open_ended_tool_turns,
     reject_straddling_eval_groups,
@@ -44,7 +45,11 @@ from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.tool_call_watch import ToolCallParserWatch, build_tool_call_watch
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
-from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
+from halo.trainers.grpo.grpo_rules import (
+    reject_conflicting_maxrl,
+    reject_inert_std_floor,
+    reject_unbalanceable_token_mass,
+)
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
@@ -180,6 +185,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
+        if cfg.use_maxrl:
+            # First, since a floor beside MaxRL would also trip the inert-floor check, with a less direct message.
+            reject_conflicting_maxrl(self.args.scale_rewards, cfg.scale_rewards_std_floor)
+            reject_negative_reward_terms_under_maxrl(cfg, price_on=self._reasoning_price_on)
         self._rollout_backend = cfg.rollout_backend
         self._rollout_weight_precision = cfg.rollout_weight_precision
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)

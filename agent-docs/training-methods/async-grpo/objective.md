@@ -90,7 +90,7 @@ A sampler that differs from the trainer (low-precision rollouts, a stale policy)
 - **Where it runs.** The loss forward scores the candidates beside the sampled token in one chunked head sweep and returns a surrogate log-prob whose value is the policy's and whose gradient is the term above, so TRL's coefficient, masks, normalizers and the packed loss scale apply unchanged. A sampler-certain token (a [forced close](#forced-reasoning-closes)) trains on its plain score. The head costs `1 + K` log-probs per position and the batch carries 8 B per candidate per token.
 - **Metrics.** `score_centering/active_frac`, `score_centering/head_mass_mean` (trainer) and `sampler_head_mass_mean`, `tail_ratio_mean` (`ρ`), `weight_mean`, `weight_zero_frac` (tokens `mis` zeroed) and `correction_mean`, over the centered loss tokens of all ranks, once per generation round.
 - **Refused** at construction, and by the script before its server preflights: `rollout_backend: vllm`, `train_on_sampled_tokens: false`, a filtered sampler (`rollout_top_p < 1`, `rollout_top_k`, `rollout_min_p`, a `rollout_repetition_penalty` other than 1), `use_chunked_grpo_logprobs: false`, `loss_forward_importance_weights`, `balance_token_mass` and `isr_engine_reference`. At construction also `num_iterations > 1` or accumulation that straddles a generation round (TRL's PPO clip would replace the gradient), `beta != 0` and `importance_sampling_level` other than `token`. Online GRPO rolls out through vLLM only and offline GRPO has no sampler: neither has the knob.
-- **Advantage scale.** Group-std scaling composes, since the cancellation holds for any per-group detached scale; `scale_rewards: none` is the paper's setting.
+- **Advantage scale.** Group-std scaling composes, since the cancellation holds for any per-group detached scale; `scale_rewards: none` is the paper's setting. [MaxRL](#advantages) composes the same way: it changes only the detached per-trajectory advantage each token's centered term is multiplied by.
 
 ## Advantages
 
@@ -103,6 +103,8 @@ A trajectory's advantage is its total reward minus the mean over its group's val
 | `group` | Per-group std (TRL's default): a near-zero std on a sparse reward amplifies noise. |
 
 `scale_rewards_std_floor` (default `0`, `0.2` in the code-contests recipes) divides by `max(std, floor)`, so a degenerate batch cannot inflate its noise into full-scale advantages. Set it below the healthy batch std. A floor above `0` under `scale_rewards: none` is refused.
+
+`use_maxrl` (default off) divides by the group's valid mean instead, MaxRL's estimator ([arXiv:2602.02710](https://arxiv.org/abs/2602.02710)): `A = (r − r̂) / r̂`, and `A = 0` for a group whose mean `r̂` is 0. On a pass/fail reward its gradient is an unbiased estimate of the truncated maximum-likelihood objective `−Σ_{k<N} (1−p)^k / k` for group size `N` and per-prompt success rate `p`, which weighs hard prompts up: one success in 16 gets advantage 15, where mean-centering gives 0.94. The rewards must be non-negative, checked every step on every rank together. It is refused beside `scale_rewards` other than `none`, a std floor, RLRR, and here the [reasoning price or floor](reasoning.md#reasoning-length-reward), which subtract from the reward. `drop_degenerate_groups` and the token-mass balance compose with it. `sampling/maxrl_zero_mean_group_frac` is the share of groups with no success, which get no gradient. Online GRPO takes the same knob.
 
 A non-finite reward or advantage fails the step on every rank.
 

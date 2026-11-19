@@ -72,9 +72,10 @@ All off by default.
 | `drop_degenerate_groups` | Masks all-equal-reward groups out of the loss and normalizer | — |
 | `balance_token_mass` | Cancels each generation round's net token-weighted push ([Token-mass balance](../async-grpo/objective.md#token-mass-balance)) | `loss_type` `cispo`, `dapo` or `dr_grpo`; `top_entropy_quantile: 1.0`; no `off_policy_mask_threshold` |
 | `use_rlrr` | Intra-group ranking advantages ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) | Neither the std floor nor the drop |
+| `use_maxrl` | MaxRL advantages, divided by the group's mean reward ([MaxRL](../async-grpo/objective.md#advantages)) | `scale_rewards: none`, non-negative rewards; neither the std floor nor RLRR |
 | `use_sdpg` | [Online SDPG](../distillation/online-sdpg.md) | — |
 
-The std floor, the drop and RLRR also require `multi_objective_aggregation: sum_then_normalize`.
+The std floor, the drop, RLRR and MaxRL also require `multi_objective_aggregation: sum_then_normalize`.
 
 The `rlrr_*` tunables are range-validated always and refused at a non-default value with `use_rlrr` off. `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` runs RLRR at these defaults:
 
@@ -242,6 +243,7 @@ Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
+- `sampling/maxrl_zero_mean_group_frac`: under `use_maxrl`, share of groups whose mean reward is not positive, which get advantage 0 and so no gradient.
 - `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
 - `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
 - Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, which TRL counts while it builds the round; SDPG's teacher forward is not counted) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
