@@ -78,6 +78,12 @@ class ServerFlags(NamedTuple):
     instance_id: str | None = None
     # Pipeline stages of the engine; a group ranks workers by tensor-parallel rank alone, so stages would collide.
     pipeline_stages: int | None = None
+    # The image's named source patches; empty where the engine reports none.
+    patches: frozenset[str] = frozenset()
+    # A cap on the engine's waiting queue, which a pause that re-queues running requests can overflow.
+    queued_request_cap: int | None = None
+    # The engine's prefill/decode disaggregation role; "null" where it serves both.
+    disaggregation_mode: str | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
     extras: Mapping[str, object] = MappingProxyType({})
 
@@ -131,8 +137,6 @@ class WeightSyncClientBase(UpdateStream, ABC):
     PAUSE_REQUEST: Mapping[str, object] = {}
     RESUME_ENDPOINT: str
     RESUME_REQUEST: Mapping[str, object] = {}
-    # True when the pause drops in-flight requests, so every turn a sync lands on is re-issued (``max_retries``).
-    PAUSE_ABORTS_IN_FLIGHT: bool
     # The session the engine brackets an update with, inside the quiesce.
     SESSION_OPEN_ENDPOINT: str
     SESSION_CLOSE_ENDPOINT: str
@@ -141,6 +145,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     SESSION_REQUEST: Mapping[str, object] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
+    # ``model_type`` → the image patch (a name in ``ServerFlags.patches``) an update of the family needs.
+    REQUIRED_PATCHES: Mapping[str, str] = {}
     # Families whose exported router balancing bias the engine's loader drops at serve time.
     DROPPED_BALANCING_BIAS_MODEL_TYPES: frozenset[str] = frozenset()
     # ``model_type`` → why the engine accepts a thinking budget for the family that it can never enforce.

@@ -211,10 +211,11 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
     "laguna",
     "lfm2_moe",
     "qwen3_5_moe_text",
+    "qwen4_exp_text",
     "step3p7",
 )
 
-# Row family → its marker, on both engines but for the two SGLang refuses; each needs a fresh server on the family's
+# Row family → its marker, on both engines but for the ones SGLang refuses; each needs a fresh server on the family's
 # checkpoint (tests/common/weight_push_exact.py), so a tier pass on another checkpoint skips them.
 # Qwen3.6's text tower is past the tiny roster, on Qwen3.5's layer.
 _PUSH_EXACT_MOE_FAMILY_MARKERS = {
@@ -230,6 +231,7 @@ _PUSH_EXACT_MOE_FAMILY_MARKERS = {
         "qwen3_5_moe_text",
         "qwen3_6_moe_text",
         "qwen3_moe",
+        "qwen4_exp_text",
         "step3p7",
     )
 }
@@ -251,7 +253,13 @@ _PUSH_EXACT_REACH_ROWS = tuple(
         markers=("gpu", "full", "2gpu", "ep", "moe", _PUSH_EXACT_MOE_FAMILY_MARKERS[family], f"{backend}_server"),
         timeout=3600,
     )
-    for family, backend in (("laguna", "vllm"), ("gemma4_text", "vllm"), ("gemma4_text", "sglang"))
+    for family, backend in (
+        ("laguna", "vllm"),
+        ("gemma4_text", "vllm"),
+        ("gemma4_text", "sglang"),
+        ("qwen4_exp_text", "vllm"),
+        ("qwen4_exp_text", "sglang"),
+    )
 )
 _PUSH_EXACT_DENSE_ROWS = tuple(
     Row(
@@ -525,6 +533,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_masked_matmul_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
     ),
+    "kernels/test_block_sparse_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_gated_residual_kernels.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
+    "kernels/test_fla_l2norm_constant_nb.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=900),
     "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_reward_scorer_flex_sliding.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "gemma4"), timeout=900
@@ -782,6 +793,13 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--trainer dpo", "--trainer kto"),
         timeout=420,
     ),
+    # Before the fix the fp32 arm raised in the constructor's sweep at DeepEP's combine, so the arms are the assertion.
+    "parallelism/ep/test_ep_preference_reference_sweep_dtype.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--arm fp32_non_ep", "--arm bf16", "--arm no_precompute"),
+        timeout=420,
+    ),
     # The refusal phase raises on every rank together, so a rank-local raise surfaces as a hang against the timeout.
     "parallelism/ep/test_ep_preference_precompute_resume.py": TestSpec(
         nproc=2,
@@ -814,6 +832,7 @@ MANIFEST: dict[str, TestSpec] = {
                     ("dense", "hsdp", 4, ("gpu", "full", "4gpu", "hsdp", "qwen3")),
                     ("dense", "tp2dp2", 4, ("gpu", "full", "4gpu", "tp", "qwen3")),
                     ("qwen3_moe", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+                    ("qwen4_exp_text", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep1_unsharded", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2dp2", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
                     ("qwen3_moe", "ep2x2dom", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
@@ -991,9 +1010,29 @@ MANIFEST: dict[str, TestSpec] = {
     # Nemotron-H's level drop and per-expert banks.
     "parallelism/ep/test_lazy_load_converted.py": TestSpec(
         nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "nemotron", "step3p7"),
+        markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "gptoss", "nemotron", "step3p7"),
         timeout=900,
-        args_matrix=("--family glm5_next", "--family nemotron_h_omni", "--family step3p7"),
+        args_matrix=("--family glm5_next", "--family gpt_oss_mxfp4", "--family nemotron_h_omni", "--family step3p7"),
+    ),
+    # A tiny native MXFP4 gpt-oss through load, train, resume, gathered and sharded save, merge and a stock reload.
+    "parallelism/ep/test_native_mxfp4_roundtrip.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
+    ),
+    # The same life under the layouts with a load and save path of their own.
+    "parallelism/ep/test_native_mxfp4_layouts.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"),
+        timeout=1200,
+        args_matrix=(
+            Row("--layout pp2", nproc=4, markers=("gpu", "full", "4gpu", "pp", "moe", "gptoss")),
+            Row("--layout ep2_etp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss")),
+            Row("--layout ep1", nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss")),
+        ),
+    ),
+    # openai/gpt-oss-20b as released (MXFP4) at EP=8: the decoded layers and the loss against a dequantized
+    # from_pretrained on rank 0.
+    "parallelism/ep/test_gptoss_native_mxfp4_ep8.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=2400
     ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
@@ -1219,6 +1258,12 @@ MANIFEST: dict[str, TestSpec] = {
             "--mode packed",
             "--mode gc",
             "--family qwen3_5_moe_text --mode packed",
+            "--mode ep2 --gated-residual",
+            "--mode etp2 --gated-residual",
+            "--mode packed --gated-residual",
+            "--mode gc --gated-residual",
+            "--mode ep2 --qsa-kernel",
+            "--mode gc --qsa-kernel --gated-residual",
         ),
     ),
     "parallelism/pp/test_pp_qwen4_exp_resume.py": TestSpec(
@@ -1291,6 +1336,14 @@ MANIFEST: dict[str, TestSpec] = {
                 )
                 for family in _REENTRANT_SWEEP_FAMILIES
                 for layout, nproc in (("ep1", 2), ("ep_multi", 4))
+            ),
+            # The PLE layer recomputes from the first pass's n-gram rows, which ZeRO-3's reshard and an adapter run reach.
+            *(
+                Row(
+                    f"--family qwen4_exp_text --layout ep1 {flags}",
+                    markers=("gpu", "full", "2gpu", "ep", "moe", "lora", "qwen3"),
+                )
+                for flags in ("--adapter full --reshard-after-forward", "--adapter lora")
             ),
             *(
                 Row(
@@ -1365,6 +1418,9 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=900,
     ),
     "parallelism/tp/test_tp_correctness.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
+    ),
+    "parallelism/tp/test_tp_untied_bf16_step.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
     ),
     "parallelism/tp/test_tp_attention_norm_grad.py": TestSpec(
@@ -2836,6 +2892,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_attention_implementations.py",
     "profiling/benchmark_collators.py",
     "profiling/benchmark_convergence.py",
+    "profiling/benchmark_gated_residual.py",
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",
