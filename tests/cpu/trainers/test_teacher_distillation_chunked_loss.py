@@ -519,7 +519,7 @@ def free_memory(monkeypatch):
 def test_a_full_logits_plane_within_half_the_free_memory_stays_quiet(free_memory, caplog):
     asked = free_memory(3 * _GIB)
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
-        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+        DistributedTeacherDistillationTrainer._warn_if_full_logits_large(_memory_host())
     assert not caplog.records
     assert asked == ["cuda:3"], "free memory must be read on the trainer's own device"
 
@@ -532,7 +532,7 @@ def test_a_full_logits_plane_past_half_the_free_memory_warns(free_memory, caplog
     plane_gib = 1.5 * bytes_per_logit / 6
     free_memory(int(plane_gib / 0.75 * _GIB))
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
-        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host(precision=precision))
+        DistributedTeacherDistillationTrainer._warn_if_full_logits_large(_memory_host(precision=precision))
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 1 and "75%" in messages[0], messages
     assert f"× {bytes_per_logit} B = {plane_gib:.1f} GiB" in messages[0], messages
@@ -545,10 +545,13 @@ def test_a_full_logits_plane_past_the_free_memory_only_warns(free_memory, caplog
     free_memory(_GIB)
     monkeypatch.setattr(full_logits_memory, "rank_consensus", lambda ok: pytest.fail("a warning takes no collective"))
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
-        DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+        DistributedTeacherDistillationTrainer._warn_if_full_logits_large(_memory_host())
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 1 and "more than the 1.0 GiB" in messages[0], messages
     assert "use_chunked_distillation_loss: true" in messages[0]
+    assert messages[0].endswith(
+        "max_length is only an upper limit: a batch whose longest row is shorter builds a smaller plane."
+    )
 
 
 @pytest.mark.parametrize(
@@ -558,7 +561,7 @@ def test_the_larger_head_sets_the_weighed_vocabulary(free_memory, caplog, studen
     """Each model's forward returns all its head rows, more than the compared width when the two differ."""
     free_memory(2 * _GIB)
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
-        DistributedTeacherDistillationTrainer._verify_full_logits_fit(
+        DistributedTeacherDistillationTrainer._warn_if_full_logits_large(
             _memory_host(student_rows=student_rows, teacher_rows=teacher_rows)
         )
     messages = [record.getMessage() for record in caplog.records]
@@ -570,7 +573,7 @@ def test_the_larger_head_sets_the_weighed_vocabulary(free_memory, caplog, studen
 )
 def test_the_chunked_path_or_an_unbounded_width_skip_the_check(free_memory, host):
     free_memory(1)
-    DistributedTeacherDistillationTrainer._verify_full_logits_fit(host)
+    DistributedTeacherDistillationTrainer._warn_if_full_logits_large(host)
 
 
 def _call_lines(fn, name: str) -> list[int]:
@@ -584,7 +587,7 @@ def _call_lines(fn, name: str) -> list[int]:
 
 def test_construction_weighs_the_plane_after_the_teacher_is_placed():
     """The free memory read must already exclude the teacher's weights."""
-    checks = _call_lines(DistributedTeacherDistillationTrainer.__init__, "_verify_full_logits_fit")
+    checks = _call_lines(DistributedTeacherDistillationTrainer.__init__, "_warn_if_full_logits_large")
     placements = _call_lines(DistributedTeacherDistillationTrainer.__init__, "place_frozen_scorer")
     assert checks and placements and min(checks) > max(placements)
 

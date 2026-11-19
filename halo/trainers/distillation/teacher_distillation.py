@@ -47,7 +47,7 @@ from halo.trainers.distillation.divergences import (
     uses_hard_labels,
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.full_logits_memory import LogitsWidth, verify_full_logits_fit
+from halo.trainers.full_logits_memory import LogitsWidth, warn_if_full_logits_large
 from halo.trainers.head_projection import HeadProjector, OutputEmbedding, resolve_output_embedding
 from halo.trainers.hidden_state_forward import HiddenStateForwardMixin, reject_backbone_without_image_inputs
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
@@ -189,7 +189,7 @@ class DistributedTeacherDistillationTrainer(
         reject_topk_covering_vocab(self.args.distill_topk, self._vocab_width, self.model)
         if self.args.use_chunked_distillation_loss:
             self._reject_unchunkable_loss()
-        self._verify_full_logits_fit()
+        self._warn_if_full_logits_large()
         if is_global_main_process():
             logger.info(f"Teacher model moved to {device} and set to eval mode")
 
@@ -203,8 +203,8 @@ class DistributedTeacherDistillationTrainer(
             )
         self._resolve_chunked_loss_modules()
 
-    def _verify_full_logits_fit(self) -> None:
-        """Warn only, after the teacher is placed. Rows are padded to the longest row in the batch, so ``max_length``
+    def _warn_if_full_logits_large(self) -> None:
+        """Run after the teacher is placed. Rows are padded to the longest row in the batch, so ``max_length``
         (the context window when unset) is an upper limit the data may never reach. Skipped on the chunked path, with
         no CUDA device or with no ``max_length``."""
         args = self.args
@@ -215,7 +215,7 @@ class DistributedTeacherDistillationTrainer(
             model.config.get_text_config().vocab_size
             for model in (self.accelerator.unwrap_model(self.model), self.teacher_model)
         )
-        verify_full_logits_fit(
+        warn_if_full_logits_large(
             args,
             LogitsWidth(args.max_length, "max_length"),
             vocab,
@@ -223,7 +223,6 @@ class DistributedTeacherDistillationTrainer(
             bytes_per_logit=_FULL_LOGITS_PLANES * resolve_training_dtype(args).itemsize,
             loss="distillation loss",
             remedy="Set use_chunked_distillation_loss: true to project the logits a chunk of positions at a time",
-            refuses=False,
         )
 
     def _resolve_chunked_loss_modules(self) -> _ChunkedLossModules:
