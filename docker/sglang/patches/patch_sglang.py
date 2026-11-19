@@ -14,6 +14,15 @@ _GEMMA4_ROUTER_FILE = "srt/models/gemma4_causal.py"
 _PREFILL_RESULT_FILE = "srt/managers/scheduler_components/batch_result_processor.py"
 _FUNCTION_CALL_PARSER_FILE = "srt/function_call/function_call_parser.py"
 _SERVER_INFO_FILE = "srt/utils/common.py"
+_HYPERCONNECTION_FILE = "srt/layers/hyperconnection.py"
+
+# Reported on /server_info as ``halo_patches``; the trainer matches a family's required name against it.
+PATCH_NAMES = (
+    "gemma4_router_scale",
+    "prefill_result_skip",
+    "glm47_full_assistant_grammar",
+    "hyperconnection_mix_up",
+)
 
 _GLM_WEIGHT_AFTER = """        self.weight = nn.Parameter(
             torch.empty(
@@ -68,6 +77,27 @@ _GLM47_FULL_ASSISTANT_BEFORE = """        if isinstance(detector, Glm47MoeDetect
 _SERVER_INFO_BEFORE = """    result["launch_command"] = server_args.launch_command
 """
 
+_MIX_UP_PADDED_BEFORE = """            self._mix_up_weight_padded = None
+"""
+_MIX_UP_PADDED_AFTER = """            self._mix_up_weight_padded = None
+            self.input_mix_weight_up.weight.weight_loader = self._load_mix_up_weight
+"""
+_MIX_BEFORE = """        self._mix_compute = torch.compile(_mix_compute)
+        self._combine_compute = torch.compile(_combine_compute)
+
+"""
+_MIX_LOADER = """    def _load_mix_up_weight(self, param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        assert param.size() == loaded_weight.size()
+        param.data.copy_(loaded_weight)
+        # The small-batch kernel reads a padded, permuted copy built at its first use and never rebuilt:
+        # rewrite it in place, or an update never reaches it.
+        if self._mix_up_weight_padded is not None:
+            from sglang.kernels.ops.elementwise.hc_mix import permute_pad_up_weight
+
+            self._mix_up_weight_padded.copy_(permute_pad_up_weight(param, self.hc_count))
+
+"""
+
 EDITS = (
     # /update_weights_from_distributed ends in model.load_weights, but the Gemma 4 router folds
     # ``scale`` into its norm weight once, behind a latch: a pushed ``scale`` would never reach routing.
@@ -98,12 +128,17 @@ EDITS = (
     # unmasked distribution, so RL is off-policy and a malformed call can never be sampled. Off the detector's
     # flag, which every parser build re-reads, a tool_choice other than auto keeps its structural tag.
     Edit(_FUNCTION_CALL_PARSER_FILE, _GLM47_FULL_ASSISTANT_BEFORE, "", "glm47 full-assistant grammar"),
-    # Names this image on /server_info: upstream 0.5.22 takes the same routes, and the trainer refuses it, since it
-    # has none of the edits above.
+    # Qwen3.8-Flash-Next's hyper-connection GatedResidual mixes a batch of at most 24 tokens on SM100-family GPUs
+    # through a padded, permuted copy of ``input_mix_weight_up`` built at first use and never rebuilt, so a pushed
+    # weight never reached it. The weight's loader rewrites the copy in place.
+    Edit(_HYPERCONNECTION_FILE, _MIX_UP_PADDED_BEFORE, _MIX_UP_PADDED_AFTER, "hyper-connection mix-up loader hook"),
+    Edit(_HYPERCONNECTION_FILE, _MIX_BEFORE, _MIX_BEFORE + _MIX_LOADER, "hyper-connection mix-up loader"),
+    # Names this image and its patches on /server_info: upstream 0.5.22 takes the same routes, and the trainer
+    # refuses it, since it has none of the edits above.
     Edit(
         _SERVER_INFO_FILE,
         _SERVER_INFO_BEFORE,
-        _SERVER_INFO_BEFORE + '    result["halo_patches"] = True\n',
+        _SERVER_INFO_BEFORE + f'    result["halo_patches"] = {list(PATCH_NAMES)!r}\n',
         "server_info image identity",
     ),
 )

@@ -12,10 +12,12 @@ from transformers import Qwen3MoeConfig
 from transformers.models.inkling2.configuration_inkling2 import Inkling2Config, Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.callbacks.model_flops import estimate_rank_flops
 from halo.configs.parallelism_arguments import reject_frozen_experts_without_adapters
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
 from halo.entrypoints import script
+from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel import whole_model
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
@@ -137,6 +139,36 @@ def test_lora_over_a_frozen_bank_trains_as_over_the_bf16_base(quant_format):
             torch.testing.assert_close(actual, expected, rtol=3e-2, atol=3e-2)
 
 
+class _OneLayerModel(nn.Module):
+    def __init__(self, layer: nn.Module):
+        super().__init__()
+        self.mlp = layer
+        self.config = Inkling2TextConfig(
+            hidden_size=H, n_routed_experts=E, num_experts_per_tok=K, num_hidden_layers=1, vocab_size=32
+        )
+
+
+@pytest.mark.parametrize("quant_format", FORMATS)
+def test_frozen_banks_count_as_expert_weights_in_the_flops_model(quant_format):
+    """The banks are buffers, so a count over parameters alone leaves every expert GEMM out of MFU."""
+    spec = ExpertLoraSpec(r=8, alpha=16)
+    reference, frozen = _dequantized_and_frozen(quant_format, torch.bfloat16)
+    bf16_layer = EPInkling2MoELayer(reference, single_process_ep_config(E, expert_lora=spec))
+    frozen_layer = EPInkling2MoELayer(frozen, single_process_ep_config(E, expert_lora=spec))
+    assert frozen_layer.frozen_bank_weight_count() == E * (H * 2 * M + M * H)
+    assert bf16_layer.frozen_bank_weight_count() == 0
+
+    parallelism = make_parallelism_config(world_size=1, gpus_per_node=1)
+    expected, actual = (
+        estimate_rank_flops(_OneLayerModel(layer), seq_len=64, parallelism_config=parallelism, full_model_params=None)
+        for layer in (bf16_layer, frozen_layer)
+    )
+    assert expected.local_expert_params > 0
+    assert actual.local_expert_params == expected.local_expert_params
+    assert actual.model_flops_per_token == expected.model_flops_per_token
+    assert actual.active_model_flops_per_token == expected.active_model_flops_per_token
+
+
 @pytest.mark.parametrize("quant_format", FORMATS)
 def test_frozen_layer_refuses_every_expert_gather_and_keeps_banks_out_of_checkpoints(quant_format):
     """A merged save, weight sync or gathered export of a frozen layer would write no experts at all."""
@@ -196,6 +228,9 @@ def test_frozen_quantized_experts_builds_beside_an_ep_group(expert_lora):
         ({"expert_tp_size": 2}, "expert_tensor_parallel_size: 1"),
         ({"ep_lazy_loading": False}, "ep_lazy_loading: true"),
         ({"merge_expert_lora_on_save": True}, "merge_expert_lora_on_save: false"),
+        ({"lowp": LowpSpec(precision="fp8")}, "lowp_precision: bf16 or lowp_apply_moe_experts: false"),
+        ({"lowp": LowpSpec(precision="fp4")}, "lowp_precision: bf16 or lowp_apply_moe_experts: false"),
+        ({"lowp": LowpSpec(precision="mxfp4")}, "lowp_precision: bf16 or lowp_apply_moe_experts: false"),
     ],
 )
 def test_frozen_quantized_experts_names_each_missing_requirement(override, named):
@@ -235,6 +270,11 @@ def test_a_training_script_refuses_a_full_fine_tune_over_frozen_banks_before_it_
             script_prefix="sft",
             trainer_cls=object,
         )
+
+
+def test_frozen_quantized_experts_take_low_precision_on_the_dense_mlp_alone():
+    lowp = LowpSpec(precision="fp8", apply_moe_experts=False)
+    assert make_parallelism_config(world_size=2, gpus_per_node=2, **_FROZEN_OK, lowp=lowp).frozen_quantized_experts
 
 
 def test_the_frozen_bank_families_are_the_ep_layers_that_declare_them():

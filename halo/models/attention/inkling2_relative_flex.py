@@ -150,7 +150,12 @@ def inkling2_relative_flex_attention(
     ``sigmoid(lse - sink)``.
 
     A KV-cache decode step (fewer queries than keys) arrives with the eager mask and the dense relative bias, and runs
-    the eager attention."""
+    the eager attention. So does the composite's vision tower, whose config carries the same implementation name and
+    whose attention passes neither a relative bias nor sinks."""
+    if position_bias is None and sinks is None:
+        return inkling2_modeling.eager_attention_forward(
+            module, query, key, value, attention_mask, scaling, dropout=dropout, **kwargs
+        )
     batch, _, length, _ = query.shape
     if key.shape[2] != length:
         return inkling2_modeling.eager_attention_forward(
@@ -168,7 +173,8 @@ def inkling2_relative_flex_attention(
         raise ValueError(f"{INKLING2_RELATIVE_FLEX} takes no attention dropout, got {dropout}.")
     if position_bias is None or sinks is None:
         raise ValueError(
-            f"{INKLING2_RELATIVE_FLEX} serves Inkling 2's attention layers, which pass both a relative bias and sinks."
+            f"{INKLING2_RELATIVE_FLEX} serves Inkling 2's text attention layers, which pass both a relative bias and "
+            f"sinks; this call passes one of them."
         )
     extent = position_bias.shape[-1]
     if position_bias.shape != (batch, query.shape[1], length, extent):

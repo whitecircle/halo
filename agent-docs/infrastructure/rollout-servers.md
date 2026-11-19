@@ -132,12 +132,12 @@ pauses all servers together
 - **vLLM** is paused with `/pause?mode=keep`: in-flight generations (the prefetched rounds) freeze and
   resume under the new weights, the staleness the sampling-logprob IS ratio corrects. vLLM's
   default `abort` would hand every in-flight request back as a fragment with an ordinary stop reason.
-- **SGLang** is paused with `{"mode": "abort"}` (its post-update cache flush refuses while a request is
-  running), so in-flight generations drop. The rollout actor re-issues an aborted turn
-  (`finish_reason: abort`) against the same observation, up to `max_retries` times; an abort is never
-  charged as a length cut. A prefetch whose rounds span more syncs than `max_retries` is refused
-  ([Prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)). The refusal
-  reads the client's `PAUSE_ABORTS_IN_FLIGHT`, true only on SGLang's client.
+- **SGLang** is paused with `{"mode": "retract"}`: in-flight requests return to its queue with the
+  tokens they hold and resume with their KV rebuilt under the new weights; the post-update cache flush
+  skips that queue while paused. `abort` would drop them, and re-issuing them from scratch keeps the
+  turns that finished before the push, the short ones: on Qwen3-0.6B, one push per round left the mean
+  completion 5% shorter. A turn the engine aborts for any other reason is re-issued
+  ([Engine aborts](../training-methods/async-grpo/episodes.md#engine-aborts)).
 
 The paused window is charged to neither the episode nor the request: every rank credits the push to
 its in-flight episodes' `episode_timeout` and, through the Ray actors' clock, to their requests'
@@ -262,7 +262,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
   0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row. With `rollout_adapter_dir` set, rank 0 writes
   each version there as a PEFT directory (staged under a temporary name, then renamed) and the servers load it by path:
-  `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`.
+  `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`: the preflight refuses a vLLM server that reports the variable off, whose load route would answer 404.
   A version's directory is removed when the version leaves the servers: at its retirement, when a load fails on any
   server, and when the first sync of a `train()` retires the versions found loaded. A load a server refuses names
   `rollout_adapter_dir` and the mount beside the engine's answer.
@@ -526,9 +526,7 @@ model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
-  Inkling and Inkling 2 (no engine run has validated their sync), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
-  SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
-  [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)), Nemotron-H (no engine run has validated its sync)
+  Inkling and Inkling 2 (no engine run has validated their sync), Qwen3-Next, Nemotron-H (no engine run has validated its sync)
   and Cohere2 MoE carry on both engines. `rollout_adapter_sync` lifts it on the backends the spec lists in
   `adapter_sync_backends` ([Adapter sync](#adapter-sync)).
 - **A stock module tree no engine layout covers**, in three cases. A family with an EP layer but no live
@@ -571,12 +569,14 @@ server that does not answer is logged as unread.
 |---|---|
 | A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, or one naming a build neither vLLM tag pins; no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
 | A vLLM server on the other tag: Inkling 2 on `halo:vllm-0.32.0`, any other family on `halo:vllm-0.1.dev25249` (`FAMILY_IMAGES` on the client) | The release has no Inkling 2 model, and no other family has run on the Inkling 2 build. The refusal names the tag and the `make` target that serve the family |
+| A server whose image lacks a patch the served family needs (`REQUIRED_PATCHES` on the client against the `halo_patches` names; an image that reports only its identity has none) | A push is acknowledged and part of the model keeps serving launch weights |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
 | A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
 | Servers of a `single_group` run that serve different models or launch flags | One broadcast reaches all of them, and each would load it differently |
 | `VLLM_ENFORCE_STRICT_TOOL_CALLING` on, with a tool-bearing environment | A grammar the trainer's log-probs never see |
 | No tool parser, with a tool-bearing environment (`/server_info` on SGLang, the `400` a tool-bearing request gets on vLLM) | Calls stay text, and every episode scores alike with no error |
 | `routing_replay: rollout` with no `--enable-return-routed-experts`, or with `--enable-torch-compile` | No rows, or corrupt ones |
+| An SGLang server launched with `--max-queued-requests` or `--disaggregation-mode` | A push pauses by re-queuing every running request, which a full queue aborts with a `503`; a disaggregated prefill server keeps its chunked request through the pause, and the cache flush after the update fails |
 | No reasoning parser, with `reasoning_price`, `reasoning_floor`, `carry_reasoning` or a vLLM reasoning cap | A cap answers `400` on every rollout, the price charges nothing, the floor scores maximal under-use |
 | `train_on_sampled_tokens` and a vLLM server whose logprobs carry no `token_id:` entries | Every turn trains on a re-tokenized render |
 | `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |
@@ -637,11 +637,11 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Inkling, Inkling 2, Qwen3-Next, Qwen3.8-Flash-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
+Inkling, Inkling 2, Qwen3-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
 family spec ([construction gates](#construction-gates)); Inkling 2 runs on vLLM under [adapter sync](#adapter-sync)
 alone. These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
-GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE. A MoE with no family spec is refused on both. Per-family server
+GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE; Qwen3.8-Flash-Next ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)); on SGLang only through an image carrying the mix-up patch below. A MoE with no family spec is refused on both. Per-family server
 flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving), [GLM-5 Next](../models/glm5-next.md#rl-weight-sync).
 
 The vLLM column is `halo:vllm-0.32.0`. The Inkling 2 tag (`halo:vllm-0.1.dev25249`) serves Inkling 2 alone, as an
@@ -655,13 +655,19 @@ gpt-oss, Bailing, LFM-2): they `continue` before their `not found in params_dict
 update returns `200 OK`, so the engine keeps its launch experts under a synced router. The server
 tier's expert-only round catches it; the construction gate is the whole guard.
 
-Three SGLang 0.5.22 loader facts shape its image and client:
+Four SGLang 0.5.22 loader facts shape its image and client:
 
 - **Routers that cache a derived form.** Upstream, the Gemma 4 router folds `scale` into its norm once,
   behind a latch, so a synced `scale` never reaches routing. `docker/sglang/patches/patch_sglang.py`
   makes a load of `scale` release the latch, and asserts that the GLM-4 gates still read their fp32
   weight live. It checks its pre- and post-images at build and stays in the image (`/opt/halo/`) for
   `--verify`.
+- **A copy of the hyper-connection mix-up weight.** On SM100-family GPUs (B200, B300) each
+  Qwen3.8-Flash-Next `GatedResidual` builds a padded, permuted copy of `input_mix_weight_up` at its first mix of at
+  most 24 tokens (the CUDA-graph capture) and never rebuilds it, so an update does not reach it. The image gives the
+  weight a loader that writes it and rewrites the copy in place, since the copy is built at first use and never
+  rebuilt, and reports `hyperconnection_mix_up` among the `halo_patches` names on `/server_info`. The family's
+  `REQUIRED_PATCHES` entry makes the [startup preflight](#startup-preflight) refuse an image that lacks the name.
 - **Fused a-projection halves.** The MLA loaders (GLM-4 MoE Lite) concatenate `q_a_proj` and
   `kv_a_proj_with_mqa` from a cache local to one `load_weights` call and drop a half that arrives alone.
   The client declares the pair (`CO_LOADED_PARAM_GROUPS`) and the chunker keeps it in one chunk; a
@@ -791,8 +797,8 @@ it (the worst-case multi-turn budget only warns).
 `VLLM_USE_V2_MODEL_RUNNER` is an env var the compose file passes through bare, so unset keeps the
 image's `1`. `0` falls back to the V1 runner, where R3 refuses to start and the gpt-oss budget loses
 its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty key in `.env` counts)
-kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and refuses any value but `1` at
-startup.
+kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and no longer declares the variable; it checks the name itself and raises
+`ValueError` ("Model Runner V1 has been removed") at startup for any value but `1`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,
 `qa_search`, open-book `exam_qa`) a missing or wrong parser leaves calls as text with no `tool_calls`, so every
@@ -808,6 +814,7 @@ their recipes serve without a parser.
 |---|---|
 | Qwen3, the 2507 releases included; most others | `hermes` (JSON inside `<tool_call>` tags) |
 | Qwen3.5 / 3.6, Qwen3-Coder | `qwen3_xml` (hermes does not parse their XML `<function=…>` calls) |
+| Qwen3.8-Flash-Next | `qwen3_xml`, with `--reasoning-parser qwen3`; `qwen3_xml` and `qwen3_coder` are one parser class in 0.32.0 (same `<tool_call>` around `<function=…>`/`<parameter=…>` XML; the template opens `<think>` in the generation prompt) |
 | GPT-OSS | plugin `gpt_oss_text` via `VLLM_TOOL_PARSER_PLUGIN`; reasoning plugin `/opt/gpt_oss_reasoning_parser.py`, parser `openai_gptoss` ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) |
 | GLM-4.7-Flash | `glm47` |
 | Gemma 4 | `gemma4` (hermes leaves its `<\|tool_call>call:…<tool_call\|>` calls as text); with a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) also `VLLM_REASONING_PARSER=gemma4` |
@@ -896,12 +903,14 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 
 ### Tool parsers on SGLang
 
-`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5 and
-Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
+`--tool-call-parser auto` resolves where one of SGLang's template rules matches: gpt-oss (`gpt-oss`), Qwen3.5,
+Qwen3.6 and Qwen3.8-Flash-Next (`qwen3_coder`), Gemma 4 (`gemma4`), GLM-4.7-Flash (`glm47`), LFM-2 (`lfm2`). On a
 template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
 tool-call parser.`) and serves with no parser, which `/server_info` reports and the
 [preflight](#startup-preflight) refuses on a native-tool environment. Qwen3-30B-A3B-Instruct-2507 and
 Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
+Qwen3.8-Flash-Next also needs `--reasoning-parser qwen3` so its reasoning separates from the content: its template
+opens `<think>` in the generation prompt, and a parser that starts outside reasoning leaves `</think>` in the content.
 
 Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25`, which ran on Qwen3-30B-A3B-Instruct-2507 (0.5.22 logs it
 as the old spelling of `qwen`), and Ling-mini-2.0 with `SGLANG_TOOL_PARSER=hermes`, the parser its rows ran on.
@@ -1077,9 +1086,9 @@ What passed against a live server on this release, on one node with each server 
 A dash is a shape the code admits with no row on that engine.
 
 **Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
-log-prob bit-identical, on 2,010 positions (987 on Step-3.7's tiny checkpoint): dense Qwen3-0.6B plain and at TP=2;
+log-prob bit-identical: dense Qwen3-0.6B plain and at TP=2;
 gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2 (2,010 positions).
+family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.
