@@ -55,7 +55,7 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-15 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
+- **2026-11-19 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
   experts over the release's frozen NVFP4/MXFP8 experts, served to vLLM as an adapter
   ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
   - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
@@ -64,6 +64,15 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     quantized experts in fused Triton kernels. Every other family stays on `:vllm-0.32.0`.
   - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
     and train.
+  - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
+    faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
+    ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
+  - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer; an
+    export layout vLLM serves; and gpt-oss's native MXFP4 release loads through the lazy loaders.
+  - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
+    weight push, and Keenable as a web-search backend.
+  - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
+    Pull or build the 1.3.0rc2 tags.
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
   Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
   ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
