@@ -20,9 +20,16 @@ from halo.models.families.qwen4_exp.documents import (
     ngram_rows,
     reject_unmarked_documents,
 )
+from halo.models.families.qwen4_exp.gated_residual import (
+    inject_block,
+    patch_qwen4_exp_gated_residual,
+    uses_gated_residual_kernels,
+    warm_gated_residual,
+)
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
-from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward
-from halo.models.introspection.config_access import set_config_field_run_scoped
+from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, warm_qsa_kernels
+from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped
+from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
@@ -41,6 +48,9 @@ def apply_qwen4_exp_patches(model_config) -> None:
     """Stamps ``model_config`` (run-scoped) so its n-gram tables build in host memory."""
     patch_qwen4_exp_ngram_embedding()
     patch_qwen4_exp_document_forwards()
+    patch_qwen4_exp_gated_residual()
+    register_kernel_warmup(warm_qsa_kernels)
+    register_kernel_warmup(warm_gated_residual)
     set_config_field_run_scoped(model_config, EXTERNAL_TABLES_STAMP, True)
 
 
@@ -91,9 +101,15 @@ def patch_qwen4_exp_ngram_embedding() -> None:
                 f"{embedding_cls.__name__}.ngram_embedding is a {type(stock).__name__} in this transformers "
                 f"release, not the nn.Embedding the host n-gram table replaces."
             )
+        part_count = get_config_field(config, "split_ngram_parts")
+        if part_count is None:
+            raise ValueError(
+                f"{type(config).__name__} sets no split_ngram_parts, the number of shards the checkpoint stores the "
+                f"n-gram table in, which the host table attaches by: set it from the checkpoint's config.json."
+            )
         del self.ngram_embedding
         self.ngram_embedding = HostNGramTable(
-            stock.num_embeddings, stock.embedding_dim, config.split_ngram_parts, stock.weight.dtype
+            stock.num_embeddings, stock.embedding_dim, part_count, stock.weight.dtype
         )
 
     @functools.wraps(original_forward)
@@ -121,6 +137,38 @@ def patch_qwen4_exp_ngram_embedding() -> None:
 
 def document_forwards_installed() -> bool:
     return getattr(qwen4_exp_modeling.Qwen4ExpTextModel.forward, _DOCUMENT_FORWARDS_ATTR, False)
+
+
+def verify_qwen4_exp_patched(model: nn.Module) -> None:
+    """Raise when ``model`` holds Qwen3.8-Flash-Next modules the family patches did not shape. The patches change the
+    classes and stamp the config before the model builds, so a build that skipped either (a model made from an
+    unpatched config, or before the patches) keeps the stock n-gram table as a parameter and the stock forwards."""
+    if not any(isinstance(module, qwen4_exp_modeling.Qwen4ExpTextModel) for module in model.modules()):
+        return
+    stock_tables = [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, qwen4_exp_modeling.Qwen4ExpTextNGramEmbedding)
+        and not isinstance(module.ngram_embedding, HostNGramTable)
+    ]
+    problems = []
+    if stock_tables:
+        problems.append(
+            f"{stock_tables} hold the n-gram table as an nn.Embedding parameter, which every wrap, optimizer and "
+            f"save would carry in full and the optimizer would train, where the config's {EXTERNAL_TABLES_STAMP} "
+            f"stamp builds a host table"
+        )
+    if not document_forwards_installed():
+        problems.append(
+            "the model, decoder-layer and attention forwards are transformers' own, whose QSA scores every query in "
+            "a Python loop, builds a [B, 1, T, T] mask and lets packed documents leak through the per-layer embedding"
+        )
+    if problems:
+        raise RuntimeError(
+            f"{type(model).__name__} was built without the Qwen3.8-Flash-Next family patches: {'; '.join(problems)}. "
+            f"apply_family_patches must run on the model's config before the "
+            f"model class builds: load through a Halo loader, or call it on the config and build from that config."
+        )
 
 
 def _verify_upstream_mask_kinds(forward) -> None:
@@ -158,18 +206,19 @@ def _document_decoder_forward(
     layer: nn.Module, hidden_states, position_embeddings, attention_mask, conv_mask, ple_input_ids, **kwargs
 ) -> torch.Tensor:
     """Upstream's decoder layer for an uncached row, its PLE kept inside the ``seq_idx`` documents."""
-    hidden_states = hidden_states + document_ple_forward(
-        layer.ple, hidden_states, ple_input_ids, kwargs.get("seq_idx"), conv_mask
-    )
+    if layer.ple is not None:
+        hidden_states = hidden_states + document_ple_forward(
+            layer.ple, hidden_states, ple_input_ids, kwargs.get("seq_idx"), conv_mask
+        )
     hidden_states, hyper_input, injection_weights = layer.attn_hyper_connection(hidden_states)
     if layer.layer_type == "linear_attention":
         hidden_states = layer.linear_attn(hidden_states, cache_params=None, attention_mask=conv_mask, **kwargs)
     else:
         hidden_states, _ = layer.self_attn(hidden_states, position_embeddings, attention_mask=attention_mask, **kwargs)
-    hidden_states = hyper_input + (hidden_states.unsqueeze(-2) * injection_weights.unsqueeze(-1)).flatten(-2)
+    hidden_states = inject_block(hyper_input, hidden_states, injection_weights)
     hidden_states, hyper_input, injection_weights = layer.mlp_hyper_connection(hidden_states)
     hidden_states = layer.mlp(hidden_states)
-    return hyper_input + (hidden_states.unsqueeze(-2) * injection_weights.unsqueeze(-1)).flatten(-2)
+    return inject_block(hyper_input, hidden_states, injection_weights)
 
 
 def patch_qwen4_exp_document_forwards() -> None:
@@ -281,7 +330,10 @@ def patch_qwen4_exp_document_forwards() -> None:
         ple_input_ids=None,
         **kwargs,
     ):
-        if self.ple is None or not _is_document_call(attention_mask, past_key_values):
+        # A layer without PLE keeps upstream's body unless the kernels take its injections.
+        if (self.ple is None and not uses_gated_residual_kernels()) or not _is_document_call(
+            attention_mask, past_key_values
+        ):
             return original_layer(
                 self,
                 hidden_states,
