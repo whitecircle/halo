@@ -163,6 +163,13 @@ class DistributedTeacherDistillationTrainer(
                 f"({SINK_CARRYING_ATTN_HINT})."
             )
         reject_lowp_teacher(teacher_model)
+        if isinstance(student_model, str) and parallelism_config is not None and parallelism_config.lowp.enabled:
+            raise ValueError(
+                f"student_model is a path ({student_model!r}), and the trainer loads a path without "
+                f"lowp_precision={parallelism_config.lowp.precision!r}, so the student would train unquantized. Load it "
+                f"with load_distributed_model under this parallelism_config, as scripts/training/distillation/"
+                f"teacher_distill.py does, and pass the model."
+            )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
         student_model = resolve_trainer_model(student_model, args, parallelism_config=parallelism_config)

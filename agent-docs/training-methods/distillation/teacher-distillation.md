@@ -95,7 +95,7 @@ An image run maps through the shared `prepare_vlm_dataset` and forces `remove_un
 
 ## Quantization-aware distillation
 
-`lowp_precision` and the other `lowp_*` knobs apply to the **student** as under [SFT](../sft.md): it loads through the same loader, which fake-quantizes its dense MLP and MoE expert GEMMs over bf16/fp32 masters ([Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)). The teacher loads through `load_frozen_auxiliary_model`, which takes no parallelism config and never applies them, so it scores in the run's dtype. The trainer refuses a teacher that holds a converted module (`reject_lowp_teacher`).
+`lowp_precision` and the other `lowp_*` knobs apply to the **student** as under [SFT](../sft.md): it loads through the same loader, which fake-quantizes its dense MLP and MoE expert GEMMs over bf16/fp32 masters ([Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)). The teacher loads through `load_frozen_auxiliary_model`, which takes no parallelism config and never applies them, so it scores in the run's dtype. The trainer refuses a teacher that holds a converted module (`reject_lowp_teacher`), and a student passed as a path, which it would load without them.
 
 Pointing `teacher_model` at the student's own checkpoint fits the quantized student to the full-precision model's token distribution rather than to the dataset's labels:
 
@@ -107,7 +107,7 @@ distill_loss: kl_divergence
 distill_alpha: 1.0                           # distillation only; the CE stays logged as sft_loss
 ```
 
-With both models on one checkpoint and one attention backend, step 0's `distillation_loss` is the divergence the quantization alone causes. Native expert-LoRA adapters on the student compute in bf16, as under SFT. The teacher is not parallelized, so every rank holds a full copy beside its share of the EP student, and `moe_balancing: aux_loss` stays refused (this trainer adds no router aux loss).
+With both models on one checkpoint and one attention backend, step 0's `distillation_loss` is the divergence the quantization causes, plus any dropout in the student: this trainer keeps the student's dropout on, and the teacher runs in eval mode. Native expert-LoRA adapters on the student compute in bf16, as under SFT. The teacher is not parallelized, so every rank holds a full copy beside its share of the EP student, and `moe_balancing: aux_loss` stays refused (this trainer adds no router aux loss).
 
 ## Testing a setup
 

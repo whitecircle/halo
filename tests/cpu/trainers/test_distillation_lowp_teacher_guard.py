@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """``reject_lowp_teacher``: ``lowp_precision`` quantizes the distillation student only, so the trainer refuses a teacher
-that holds any module :func:`apply_lowp_compute` converted, a dense projection or an EP expert layer."""
+that holds any module :func:`apply_lowp_compute` converted, a dense projection or an EP expert layer. It also refuses a
+student passed as a path under ``lowp_precision``, which it would load unquantized."""
 
 from unittest.mock import MagicMock
 
@@ -9,6 +10,7 @@ import torch.nn as nn
 from transformers import PreTrainedTokenizerBase
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute, lowp_converted_modules
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer, reject_lowp_teacher
@@ -99,6 +101,20 @@ def test_the_trainer_constructor_refuses_a_converted_teacher():
             teacher_model=teacher,
             teacher_tokenizer=MagicMock(spec=PreTrainedTokenizerBase),
             processing_class=MagicMock(spec=PreTrainedTokenizerBase),
+        )
+
+
+@pytest.mark.parametrize("precision", ["fp8", "fp4", "mxfp4"])
+def test_a_student_path_under_lowp_is_refused_before_it_loads(precision):
+    """The trainer loads a path through ``resolve_trainer_model``, which applies no lowp, so the student would train
+    unquantized. The refusal comes before the load: the path does not exist."""
+    with pytest.raises(ValueError, match=rf"student_model is a path .* lowp_precision='{precision}'"):
+        DistributedTeacherDistillationTrainer(
+            student_model="/nonexistent/student",
+            teacher_model=_Stack(1),
+            teacher_tokenizer=MagicMock(spec=PreTrainedTokenizerBase),
+            processing_class=MagicMock(spec=PreTrainedTokenizerBase),
+            parallelism_config=ParallelismConfig(lowp=LowpSpec(precision=precision)),
         )
 
 
