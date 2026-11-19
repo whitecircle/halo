@@ -165,7 +165,7 @@ def reject_conflicting_advantage_hooks(
     drop_degenerate_groups: bool,
     balance_token_mass: bool,
     recomputes_from_gathered_rewards: bool,
-    use_maxrl: bool = False,
+    use_maxrl: bool,
 ) -> None:
     """Refuse the online advantage hooks the GRPO config or another hook cancels or diverges from."""
     # Ahead of the inert-floor check, which a floor beside MaxRL would also trip with a less direct message.

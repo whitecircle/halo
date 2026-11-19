@@ -3,7 +3,8 @@
 for a group whose mean is 0.
 - On a Bernoulli policy the per-sample gradient estimate is exactly unbiased for the truncated maximum-likelihood
   objective, by enumeration over every success count.
-- Hand values, with a placeholder that must not move the mean; an all-zero group gives 0; a negative reward raises.
+- Hand values, with a placeholder that must not move the mean; an all-zero group gives 0; a negative reward raises,
+  and so does a rank whose own rewards are fine when a peer holds one.
 - Online GRPO's hook reaches the advantages and the completions record; environmental GRPO's step uses the mean divisor.
 - Every conflicting knob is refused with its own message; score centering, the degenerate-group drop and the token-mass
   balance resolve beside it."""
@@ -18,6 +19,7 @@ import torch
 
 from halo.configs.grpo import RLRRConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.runtime.consensus import RankConsensus
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_negative_reward_terms_under_maxrl,
     reject_unsupported_score_centering,
@@ -25,6 +27,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
 from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks, reject_conflicting_maxrl
+from halo.trainers.grpo.objective import advantages as advantages_module
 from halo.trainers.grpo.objective.advantages import group_relative_advantages, maxrl_zero_mean_groups
 from halo.trainers.grpo.objective.loss_inputs import MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -104,6 +107,15 @@ def test_a_negative_reward_raises_but_not_on_a_placeholder():
     with pytest.raises(ValueError, match="use_maxrl needs non-negative rewards.*1 of 4"):
         _maxrl([1.0, -0.5, 0.0, 0.0], 4)
     _maxrl([1.0, -0.5, 0.0, 0.0], 4, valid=[True, False, True, True])
+
+
+def test_a_peer_ranks_negative_reward_raises_here_too(monkeypatch):
+    """The verdict is agreed across ranks. On the environmental path the rewards are still rank-local here, so a rank
+    whose own rewards are non-negative must raise with the peer that holds a negative one, or it heads into the next
+    collective alone and the peers hang."""
+    monkeypatch.setattr(advantages_module, "rank_consensus", lambda ok: RankConsensus(False, ok))
+    with pytest.raises(ValueError, match=r"use_maxrl needs non-negative rewards.*this rank: 0 of 4"):
+        _maxrl([1.0, 0.0, 0.5, 0.0], 4)
 
 
 def test_the_mean_divisor_refuses_a_std_scaling():

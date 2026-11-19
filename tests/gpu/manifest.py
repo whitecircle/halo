@@ -1763,6 +1763,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer environmental --mode full_world1 --servers 2",
                     "--trainer environmental --mode full_world1 --servers 2 --prefetch-depth 1",
                     "--trainer environmental --mode full_world1 --servers 2 --prefetch-depth 2",
+                    "--trainer online --mode full_world1 --maxrl",
+                    "--trainer environmental --mode full_world1 --maxrl",
                 ),
                 nproc=1,
                 markers=("gpu", "full", "1gpu", "lora", "qwen3", "vllm_server"),
