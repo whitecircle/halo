@@ -92,6 +92,8 @@ class ServerRequirements(NamedTuple):
     weight_precision: RolloutWeightPrecision = "bf16"
     candidate_logprobs: int = 0
     """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
+    patches: frozenset[str] = frozenset()
+    """Image patches the served model's updates need (``WeightSyncClientBase.REQUIRED_PATCHES``)."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -140,6 +142,11 @@ def _server_flag_refusals(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
             f"{client_cls.IMAGE_REMEDY}"
         )
+    if missing := sorted(needs.patches - flags.patches):
+        refusals.append(
+            f"its image lacks the {', '.join(missing)} patch, which the served model's updates need: without it a "
+            f"push is acknowledged and part of the model keeps serving launch weights. {client_cls.IMAGE_REMEDY}"
+        )
     refusals.extend(_quantization_refusals(flags, needs))
     if needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
@@ -160,6 +167,18 @@ def _server_flag_refusals(
         )
     if needs.captures_routing and flags.torch_compile:
         refusals.append("routing_replay: rollout under --enable-torch-compile returns corrupt rows. Turn it off.")
+    if flags.queued_request_cap is not None:
+        refusals.append(
+            f"it caps its waiting queue at {flags.queued_request_cap} (--max-queued-requests), and a weight push "
+            f"re-queues every running request, which the engine aborts with a 503 once the queue is full. Serve "
+            f"without the cap."
+        )
+    if flags.disaggregation_mode not in (None, "null"):
+        refusals.append(
+            f"it runs disaggregated as {flags.disaggregation_mode}, which the weight sync does not cover: a pause "
+            f"keeps a prefill server's chunked request live, and the cache flush after the update then fails. Serve "
+            f"without --disaggregation-mode."
+        )
     if needs.reasoning_consumers and flags.reasoning_parser == "":
         refusals.append(
             f"it has no reasoning parser and the run reads reasoning ({', '.join(needs.reasoning_consumers)}): a "

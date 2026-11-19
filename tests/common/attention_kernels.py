@@ -17,6 +17,7 @@ _ENTRY_POINTS = {
     "flash_attention_2": ("flash_attn", _FLASH_ENTRY_POINTS),
     "sdpa": ("torch.nn.functional", ("scaled_dot_product_attention",)),
     "sdpa_flex_sliding": ("halo.models.attention.sdpa_flex_sliding", ("_block_sparse_attention",)),
+    "qsa_block_sparse": ("halo.models.families.qwen4_exp.sparse_attention", ("block_sparse_attention",)),
 }
 
 
