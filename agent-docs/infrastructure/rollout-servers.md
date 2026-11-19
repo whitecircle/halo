@@ -700,7 +700,8 @@ only with `halo:vllm-0.32.0`: a row naming another build, the Inkling 2 tag's am
 join, and Inkling 2 forms no group. A server with no such row is read through `GET /version` first, and the client
 refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry (`packed`,
 `packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which older engines refuse.
-No other engine build is validated.
+No other engine build is validated. A toolkit image whose row names its patches and no build, as the 1.2.0 and
+1.3.0rc1 tags do, is refused with the image remedy: build or pull the current tags.
 
 ### Config-schema parity
 
