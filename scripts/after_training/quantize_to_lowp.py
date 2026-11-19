@@ -16,7 +16,9 @@ the forward left in bf16; all else is copied unchanged. The ``lowp_*`` scope kno
 back in, as the checkpoint does not carry them."""
 
 import argparse
+from typing import get_args
 
+from halo.checkpoint.tools.compressed_tensors_layout import DEFAULT_EXPORT_FORMAT, ExportFormat
 from halo.checkpoint.tools.lowp_export import DEFAULT_EXCLUDE, DEFAULT_INCLUDE, quantize_checkpoint
 from halo.kernels.lowp.quantization import QUANTIZERS
 from halo.kernels.lowp.spec import LowpSpec
@@ -60,6 +62,13 @@ def parse_args():
         help="Trailing transformer blocks training kept in bf16 (lowp_keep_last_blocks; default: %(default)s).",
     )
     p.add_argument(
+        "--export_format",
+        choices=list(get_args(ExportFormat)),
+        default=DEFAULT_EXPORT_FORMAT,
+        help="On-disk layout: Halo's own block_scaled manifest, or compressed-tensors, which vLLM loads "
+        "(per-expert MoE checkpoints only; default: %(default)s).",
+    )
+    p.add_argument(
         "--verify",
         action="store_true",
         help="Report the max round-trip dequant relerr, and fail when it exceeds the format's tolerance.",
@@ -81,6 +90,7 @@ def main() -> None:
         keep_first_blocks=a.lowp_keep_first_blocks,
         keep_last_blocks=a.lowp_keep_last_blocks,
         verify=a.verify,
+        export_format=a.export_format,
     )
 
 

@@ -27,9 +27,9 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 `frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base, with or without expert LoRA over it. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false` and `use_peft: true`. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false`, `use_peft: true`, and `lowp_precision: bf16` or `lowp_apply_moe_experts: false` (a bank's GEMM reads the packed weights, so the expert fake-quant would never run). MFU and S-MFU count the banks as frozen expert weights. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
 
-A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and have no merged export: `merge_peft_adapters.py` refuses a base whose `config.json` declares a `quantization_config`, as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
+A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and have no merged export: `merge_peft_adapters.py` refuses an adapter that rewrites a tensor the base stores packed (the release's `w13_weight` / `w2_weight`), as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
 The release layout, per layer and projection (`w13_weight` is the interleaved gate/up, `w2_weight` the down projection):
 

@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
+from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.chunking import resolve_sync_device
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from halo.weight_sync.pool import WeightSyncPool
@@ -61,6 +62,30 @@ def host(monkeypatch):
     )
     AsyncRolloutMixin._init_weight_sync_client(host)
     return host
+
+
+def test_a_base_no_push_carries_forms_no_group_and_binds_the_adapter_servers(monkeypatch):
+    """Inkling 2 under adapter sync: a group would pause the servers for a push that is never sent."""
+    _Client.built.clear()
+    monkeypatch.setattr(
+        "halo.trainers.grpo.environmental.async_rollouts.resolve_weight_sync_client", lambda backend: _Client
+    )
+    host = SimpleNamespace(
+        _weight_sync_client=None,
+        _adapter_sync=SimpleNamespace(servers=None),
+        _pushes_base=False,
+        accelerator=SimpleNamespace(is_main_process=True, device=torch.device("cpu")),
+        async_config=SimpleNamespace(
+            rollout_backend="vllm", rollout_connection_timeout=1.0, get_server_urls=lambda: [_URL]
+        ),
+    )
+
+    AsyncRolloutMixin._init_weight_sync_client(host)
+
+    assert host._weight_sync_client is None
+    assert isinstance(host._adapter_sync.servers, AdapterServers)
+    assert [client.base_url for client in _Client.built] == [_URL], "the HTTP-only adapter client alone"
+    host._adapter_sync.servers.close()
 
 
 def test_a_single_url_builds_the_pool(host):

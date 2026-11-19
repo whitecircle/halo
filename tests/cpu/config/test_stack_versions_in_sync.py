@@ -103,6 +103,7 @@ ALLOWED_EXCEPTIONS: dict[tuple[str, str], str] = {
     ("trl", "1.17.1"): "the TRL release the framework comparison benchmarked as a competitor",
     ("liger", "0.8.2"): "the Liger release the TRL arm of the framework comparison ran",
     ("transformers", "5.18.0"): "the transformers release NeMo AutoModel ran in the framework comparison",
+    ("peft", "0.21"): "the PEFT release whose adapter re-enable the trainable check guards against, ahead of the pin",
 }
 
 

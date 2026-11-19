@@ -13,6 +13,7 @@ from triton.runtime.autotuner import Autotuner
 from triton.runtime.errors import OutOfResources
 from triton.runtime.jit import JITFunction
 
+from halo.kernels.fla_launch import triton_autotuner
 from tests.common import fla_autotune
 
 _KERNEL = "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64"
@@ -30,7 +31,7 @@ _H, _K, _V = 4, 32, 32
 
 
 def _tuner() -> Autotuner:
-    return fla_autotune.triton_autotuner(getattr(chunk_delta_h, _KERNEL))
+    return triton_autotuner(getattr(chunk_delta_h, _KERNEL))
 
 
 def _launch_kernel() -> None:
@@ -138,7 +139,7 @@ def test_the_pin_reaches_every_fla_autotuner_the_process_holds(pinned):
         if issubclass(type(obj), Autotuner) and obj.base_fn.__module__.startswith("fla.")
     }
     decay = (cumsum.chunk_local_cumsum_scalar_kernel, cumsum.chunk_local_cumsum_vector_kernel)
-    assert {id(fla_autotune.triton_autotuner(kernel)) for kernel in decay} <= alive.keys()
+    assert {id(triton_autotuner(kernel)) for kernel in decay} <= alive.keys()
     unpinned = [
         tuner.base_fn.__name__
         for tuner in alive.values()

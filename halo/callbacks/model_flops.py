@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 
 from halo.callbacks.parameter_stats import count_model_parameters
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.attention.layout import AttentionLayout, attention_layout
 from halo.models.introspection.config_access import get_config_field, text_config
@@ -75,13 +76,18 @@ def _attention_term(model, seq_len: int, pp_size: int, tp_size: int) -> tuple[At
     return layout, share, layout.flops_per_token(seq_len) * share / max(tp_size, 1)
 
 
-def _moe_param_split(model, num_experts: int, top_k: int) -> tuple[float, float, float, float]:
+def _frozen_bank_weights(model) -> int:
+    """This rank's expert weights held in frozen banks, which run the same GEMMs as frozen expert parameters."""
+    return sum(layer.frozen_bank_weight_count() for _, layer in named_ep_layers(model))
+
+
+def _moe_param_split(model, num_experts: int, top_k: int, bank_weights: int) -> tuple[float, float, float, float]:
     """``(sparsity_factor, expert, trainable_expert, frozen_expert)`` local counts. A frozen expert still counts: a
     frozen LoRA base runs the expert forward and its input gradient."""
     if num_experts <= 0 or top_k <= 0:
         return 1.0, 0.0, 0.0, 0.0
     experts = [p for name, p in model.named_parameters() if _is_expert_param(name)]
-    expert_params = float(sum(local_numel(p) for p in experts))
+    expert_params = float(sum(local_numel(p) for p in experts) + bank_weights)
     trainable_expert_params = float(sum(local_numel(p) for p in experts if p.requires_grad))
     return (
         top_k / num_experts,
@@ -115,6 +121,8 @@ def estimate_rank_flops(
         model, seq_len, parallelism_config.pp_size, parallelism_config.tp_size
     )
     local_params, trainable_params = count_model_parameters(model)
+    bank_weights = _frozen_bank_weights(model)
+    local_params += bank_weights
     frozen_params = local_params - trainable_params
     linear_flops = _linear_flops_per_token(model, trainable_params, frozen_params)
 
@@ -126,7 +134,7 @@ def estimate_rank_flops(
     config = getattr(model, "config", None)
     num_experts, top_k = resolve_expert_count(config), resolve_router_topk(config)
     sparsity, expert_params, trainable_expert_params, frozen_expert_params = _moe_param_split(
-        model, num_experts, top_k
+        model, num_experts, top_k, bank_weights
     )
     # Sparsity applies inside the 6N and 4N buckets separately.
     trainable_active = trainable_params - trainable_expert_params * (1.0 - sparsity)
