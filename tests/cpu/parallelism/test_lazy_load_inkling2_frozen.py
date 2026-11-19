@@ -92,3 +92,7 @@ def test_every_other_tensor_loads_as_from_pretrained_loads_it(release):
     others = set(reference) - expert_keys
     assert others and others <= set(loaded)
     assert not [key for key in sorted(others) if not torch.equal(loaded[key].to(reference[key].dtype), reference[key])]
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))
