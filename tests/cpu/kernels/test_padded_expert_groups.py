@@ -6,12 +6,13 @@ weighted unpermute through the padded layout give the dense layout's outputs and
 import pytest
 import torch
 
+from halo.kernels import moe_route_sort
 from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_permute import (
     MoEExpertBiasGather,
     MoEGatherPermute,
     MoEWeightedUnpermute,
-    gather_padded_rows,
+    take_padded_rows,
 )
 from halo.kernels.moe_route_sort import sort_routing_by_expert
 from tests.common.route_sort_reference import pad_routing_groups
@@ -128,7 +129,7 @@ def test_the_padded_gather_gives_a_padding_row_zeros_and_copies_the_rest():
     tokens = torch.randn(3, 4)
     tokens[0, 0] = float("nan")  # the row a clamped -1 reads
     idx = torch.tensor([2, -1, 1, -1])
-    out = gather_padded_rows(tokens, idx)
+    out = take_padded_rows(tokens, idx)
     assert torch.equal(out[[0, 2]], tokens[[2, 1]]) and torch.equal(out[[1, 3]], torch.zeros(2, 4))
 
 
@@ -144,6 +145,15 @@ def test_a_padded_sort_off_cuda_is_refused():
     experts = torch.tensor([0] * 127 + [1] * 129).view(-1, 1)
     with pytest.raises(ValueError, match="placed by the CUDA counting sort"):
         sort_routing_by_expert(experts, torch.rand(256, 1), 2, (127, 129), GROUP_ROW_ALIGN)
+
+
+@pytest.mark.parametrize("stray", [-1, 4])
+def test_a_stray_expert_id_at_ep_size_1_raises_from_the_host_count(stray):
+    """The dense sort asserts it on the device; a padded sort sizes itself from this count first."""
+    experts = torch.tensor([[0, 3], [stray, 1]])
+    with pytest.raises(RuntimeError, match=moe_route_sort.NONLOCAL_EXPERT_ID_MESSAGE):
+        moe_route_sort.local_expert_counts(experts, 4)
+    assert moe_route_sort.local_expert_counts(torch.tensor([[0, 3], [3, 1]]), 4) == (1, 1, 0, 2)
 
 
 if __name__ == "__main__":

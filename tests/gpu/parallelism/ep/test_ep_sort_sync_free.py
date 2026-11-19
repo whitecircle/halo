@@ -21,9 +21,10 @@ from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.kernels import moe_route_sort
+from halo.kernels.lowp.deepgemm import seed_aligned_layout
 from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_permute import MoEExpertBiasGather, MoEGatherPermute, warm_permute_kernels
-from halo.kernels.moe_route_sort import sort_routing_by_expert, warm_route_sort_kernels
+from halo.kernels.moe_route_sort import padded_group_rows, sort_routing_by_expert, warm_route_sort_kernels
 from tests.common.ep_reference import (
     GroupedSortLayer,
     dispatched_receive_counts,
@@ -199,7 +200,15 @@ def trips_the_detector(fn) -> bool:
 
 
 def _padded_sort(experts, weights, local_experts, counts):
-    return sort_routing_by_expert(experts, weights, local_experts, counts, GROUP_ROW_ALIGN)
+    """The padded sort and what the layer runs on its result before the GEMMs: the seeded row layout, and the token
+    and bias gathers over the -1 padding rows."""
+    outputs = sort_routing_by_expert(experts, weights, local_experts, counts, GROUP_ROW_ALIGN)
+    token_idx, _, expert_ids, offs, inv_map = outputs
+    seed_aligned_layout(offs, padded_group_rows(counts, GROUP_ROW_ALIGN))
+    tokens = torch.zeros((experts.shape[0], LAZY_LOAD_HIDDEN), device=experts.device, dtype=torch.bfloat16)
+    MoEGatherPermute.apply(tokens, token_idx, inv_map, True)
+    MoEExpertBiasGather.apply(tokens.new_zeros((local_experts, LAZY_LOAD_HIDDEN)), expert_ids, True)
+    return outputs
 
 
 def check_counting_sort(device) -> dict[str, bool]:
@@ -239,6 +248,7 @@ def check_counting_sort(device) -> dict[str, bool]:
         padded_inputs = inputs._replace(upstream=torch.randn(rows, device=device, generator=generator))
         want = sort_with_grad(padded_argsort, case, padded_inputs)
         warm_route_sort_kernels(case.top_k, case.local_experts, device, pad_align=GROUP_ROW_ALIGN)
+        warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, case.top_k, device, torch.bfloat16, padded=True)
         warm = compiled_sort_binaries()
         torch.cuda.synchronize()
         requests = pinned_host_requests()
@@ -316,6 +326,11 @@ def lazy_load_findings(device) -> list[str]:
     for top_k, local_experts in LAZY_LOAD_SHAPES:
         warm_route_sort_kernels(top_k, local_experts, device)
         warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, top_k, device, torch.bfloat16)
+        # The padded groups' kernels, and the seeded layout as the layer's GEMM warm-up builds it.
+        warm_route_sort_kernels(top_k, local_experts, device, pad_align=GROUP_ROW_ALIGN)
+        warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, top_k, device, torch.bfloat16, padded=True)
+        segment_ends = torch.arange(1, local_experts + 1, device=device, dtype=torch.int32) * GROUP_ROW_ALIGN
+        seed_aligned_layout(segment_ends, [GROUP_ROW_ALIGN] * local_experts)
         biases = [
             torch.zeros((local_experts, LAZY_LOAD_HIDDEN), device=device, dtype=dtype)
             for dtype in (torch.bfloat16, torch.float32)
@@ -336,6 +351,14 @@ def lazy_load_findings(device) -> list[str]:
                 MoEGatherPermute.apply(tokens, token_idx, inv_map)
                 for bias in biases:
                     MoEExpertBiasGather.apply(bias, expert_ids)
+                if counts is not None:
+                    token_idx, _, expert_ids, offs, inv_map = sort_routing_by_expert(
+                        experts, weights, local_experts, counts, GROUP_ROW_ALIGN
+                    )
+                    seed_aligned_layout(offs, padded_group_rows(counts, GROUP_ROW_ALIGN))
+                    MoEGatherPermute.apply(tokens, token_idx, inv_map, True)
+                    for bias in biases:
+                        MoEExpertBiasGather.apply(bias, expert_ids, True)
 
         findings += [
             f"top_k {top_k}, {local_experts} local experts: CUDA loaded {name} past the warm-up"

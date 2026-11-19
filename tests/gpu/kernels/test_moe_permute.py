@@ -14,8 +14,8 @@ from halo.kernels.moe_permute import (
     MoEGatherPermute,
     MoEWeightedUnpermute,
     build_inv_map,
-    gather_padded_rows,
     gather_reduce_rows,
+    take_padded_rows,
 )
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import fro_rel_err, max_abs_rel_err
@@ -200,7 +200,7 @@ def test_the_padded_gather_copies_rows_bit_for_bit_and_zeros_the_padding():
                 [-0.0, float("inf"), float("-inf"), float("nan")], device="cuda", dtype=dtype
             )
             tokens = receive[:, :hidden]
-            out = gather_padded_rows(tokens, index)
+            out = take_padded_rows(tokens, index)
             real = index >= 0
             bits = torch.int16 if dtype == torch.bfloat16 else torch.int32
             assert torch.equal(out[real].view(bits), tokens[index[real]].contiguous().view(bits)), f"{dtype} {wire}"
@@ -253,12 +253,12 @@ def test_the_unpermute_backward_gives_a_padding_row_no_gradient():
 
 
 def test_one_padded_gather_compile_serves_every_row_stride_and_count():
-    kernel = moe_permute._gather_padded_rows_kernel
+    kernel = moe_permute._take_padded_rows_kernel
     generator = torch.Generator(device="cuda").manual_seed(0)
 
     def run(n_tokens: int, row_stride: int) -> None:
         receive = torch.randn(n_tokens, row_stride, generator=generator, device="cuda", dtype=torch.bfloat16)
-        gather_padded_rows(receive[:, :360], _padded_index(n_tokens, generator))
+        take_padded_rows(receive[:, :360], _padded_index(n_tokens, generator))
 
     kernel.device_caches.clear()
     run(14, 360)

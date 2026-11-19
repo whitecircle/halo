@@ -3,6 +3,8 @@ the dispatch's host-side receive counts or, at ``ep_size`` 1, by every slot; off
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -167,7 +169,7 @@ class _CountingSort(torch.autograd.Function):
         n_blocks = triton.cdiv(n_rows, rows)
         n_valid = n_rows * top_k if counts is None else sum(counts)
         align = 1 if pad_align is None else pad_align
-        groups = None if pad_align is None else [-(-c // align) * align for c in counts]
+        groups = None if pad_align is None else padded_group_rows(counts, pad_align)
         n_sorted = n_valid if groups is None else sum(groups)
         n_weighted = -1 if groups is None else sum(e * g for e, g in enumerate(groups, 1)) & _CHECKSUM_MASK
         experts, weights = experts.contiguous(), weights.contiguous()
@@ -281,10 +283,19 @@ def _argsort_routing(
     return sorted_token_idx, flat_weights[order], sorted_expert_ids, offs, inv_map
 
 
+def padded_group_rows(counts: Iterable[int], align: int) -> list[int]:
+    """Each group's rows rounded up to ``align``: the segments a padded sort places, which its caller's row layout
+    and the adapter's must match."""
+    return [-(-count // align) * align for count in counts]
+
+
 def local_expert_counts(experts: torch.Tensor, num_local_experts: int) -> tuple[int, ...]:
     """Each local expert's slot count, read back from the device: what sizes a padded sort where no receive counts
-    exist (``ep_size`` 1, every id local)."""
-    return tuple(torch.bincount(experts.flatten(), minlength=num_local_experts).tolist())
+    exist (``ep_size`` 1, every id local). Raises on an id outside them, as the dense sort's device assert does."""
+    counts = torch.bincount(experts.flatten().clamp(min=-1) + 1, minlength=num_local_experts + 1).tolist()
+    if counts[0] or len(counts) > num_local_experts + 1:
+        raise RuntimeError(NONLOCAL_EXPERT_ID_MESSAGE)
+    return tuple(counts[1:])
 
 
 def sort_routing_by_expert(

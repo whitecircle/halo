@@ -25,6 +25,7 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
 )
 from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import GROUP_ROW_ALIGN, LOWP_RECIPES, LowpSpec, QuantFormat
+from halo.kernels.moe_route_sort import padded_group_rows
 
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = tuple(r.quant_format for r in LOWP_RECIPES.values() if r.native)
 
@@ -124,7 +125,7 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
             f"at T={num_tokens}; got {ends}. Rows outside the covered span are never written and would be "
             f"returned uninitialized."
         )
-    segments = [_align_up(b - a, GROUP_ROW_ALIGN) for a, b in zip([0, *ends[:-1]], ends, strict=True)]
+    segments = padded_group_rows((b - a for a, b in zip([0, *ends[:-1]], ends, strict=True)), GROUP_ROW_ALIGN)
     counts = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
     segments_dev = _align_up(counts, GROUP_ROW_ALIGN)
     expert = torch.repeat_interleave(torch.arange(num_experts, device=offs.device), counts, output_size=num_tokens)

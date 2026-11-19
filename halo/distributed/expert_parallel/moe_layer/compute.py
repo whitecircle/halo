@@ -19,6 +19,7 @@ from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, war
 from halo.kernels.moe_route_sort import (
     RECEIVE_COUNTS_DISAGREE,
     local_expert_counts,
+    padded_group_rows,
     sort_routing_by_expert,
     warm_route_sort_kernels,
 )
@@ -212,6 +213,7 @@ class EPExpertComputeMixin:
                     expert_ids = torch.arange(rows, device=device) // rows_per_expert
                     if rows_per_expert == GROUP_ROW_ALIGN:
                         expert_ids[rows_per_expert - 1 :: rows_per_expert] = -1
+                        seed_aligned_layout(offs, [rows_per_expert] * experts)  # as the padded sort hands them over
                     with torch.amp.autocast("cuda", dtype=dtype):
                         out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
                     torch.autograd.grad(out.sum(), [tokens, *trainable], allow_unused=True)
@@ -306,7 +308,7 @@ class EPExpertComputeMixin:
             experts, weights, self.experts_per_rank, counts, pad_align
         )
         if pad_align is not None:
-            seed_aligned_layout(offs, [-(-count // pad_align) * pad_align for count in counts])
+            seed_aligned_layout(offs, padded_group_rows(counts, pad_align))
         # Atomic-free in both directions: the bf16 ``index_add_`` of the default gather backward and the
         # scatter-back is a CAS-loop atomic, ~1.5 ms per call on the gpt-oss-20b ep8 shape.
         sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map, self._uses_padded_groups)

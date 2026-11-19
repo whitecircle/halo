@@ -185,7 +185,7 @@ def test_the_warmup_draws_no_random_numbers():
         (moe_route_sort._scan_kernel, "align"),
         (moe_route_sort._place_kernel, "n_rows"),
         (moe_route_sort._place_kernel, "n_sorted"),
-        (moe_permute._gather_padded_rows_kernel, "src_stride"),
+        (moe_permute._take_padded_rows_kernel, "src_stride"),
     ),
 )
 def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_count):
