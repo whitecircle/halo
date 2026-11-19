@@ -17,6 +17,7 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
+    RUNTIME_ADAPTER_ROUTES_FACT,
     ServedBase,
     ServerFlags,
     WeightSyncClientBase,
@@ -40,6 +41,8 @@ _SERVER_INFO_TIMEOUT_S = 60.0
 _IDENTITY_KEY = "VLLM_HALO_PATCHES"
 # Listed on /server_info as the server reads it; this client never reads its own environment for it.
 _STRICT_TOOL_CALLING_KEY = "VLLM_ENFORCE_STRICT_TOOL_CALLING"
+# Without it the server registers no runtime adapter route, and a load answers 404.
+_RUNTIME_LORA_KEY = "VLLM_ALLOW_RUNTIME_LORA_UPDATING"
 _TOKEN_ID_PREFIX = "token_id:"
 
 
@@ -54,7 +57,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     # mode=keep resumes in-flight generations under the new weights (the staleness the IS ratio corrects);
     # vLLM's default abort returns each as a fragment with an ordinary stop reason.
     PAUSE_REQUEST = {"params": {"mode": "keep"}}
-    PAUSE_ABORTS_IN_FLIGHT = False
     RESUME_ENDPOINT = "/resume"
     SESSION_OPEN_ENDPOINT = "/start_weight_update"
     SESSION_CLOSE_ENDPOINT = "/finish_weight_update"
@@ -169,7 +171,11 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             quantization=(model["quantization"] or "") if "quantization" in model else None,
             instance_id=config.get("instance_id"),
             pipeline_stages=config.get("parallel_config", {}).get("pipeline_parallel_size"),
-            extras={**pick_launch_facts(config, self.LAUNCH_FACTS), "enable_lora": bool(config.get("lora_config"))},
+            extras={
+                **pick_launch_facts(config, self.LAUNCH_FACTS),
+                "enable_lora": bool(config.get("lora_config")),
+                **({RUNTIME_ADAPTER_ROUTES_FACT: bool(env[_RUNTIME_LORA_KEY])} if _RUNTIME_LORA_KEY in env else {}),
+            },
         )
 
     def reports_sampled_token_ids(self) -> bool | None:

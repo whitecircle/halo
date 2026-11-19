@@ -224,6 +224,19 @@ class FakeVLLMServer(FakeEngineServer):
         # Set to launch with --enable-lora (its lora_config); the adapters it then holds, name -> directory.
         self.lora: dict | None = None
         self.adapters: dict[str, str] = {}
+        # VLLM_ALLOW_RUNTIME_LORA_UPDATING, which registers the adapter routes; None leaves it out of the report.
+        self.runtime_lora_updating: bool | None = True
+        # The launch's --model and --revision, as /server_info reports them.
+        self.model_path = "/models/policy"
+        self.revision: str | None = None
+        # The ``model`` each prefill score request named.
+        self.score_models: list[str] = []
+
+    def restart(self) -> None:
+        """A process restart: the adapter registry is gone."""
+        self.adapters.clear()
+        self.paused = False
+        self.update_open = False
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
         if (method, path) == ("GET", "/is_paused"):
@@ -234,12 +247,19 @@ class FakeVLLMServer(FakeEngineServer):
             env = {"VLLM_ENFORCE_STRICT_TOOL_CALLING": self.strict_tool_calling}
             if self.toolkit_image:
                 env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
+            if self.runtime_lora_updating is not None:
+                env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = self.runtime_lora_updating
             config = {
                 **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
-                "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
+                "model_config": {
+                    "dtype": self.dtype,
+                    "quantization": self.quantization or None,
+                    "model": self.model_path,
+                    "revision": self.revision,
+                },
                 "parallel_config": {
                     "tensor_parallel_size": 8,
                     "data_parallel_size": 1,
@@ -268,6 +288,7 @@ class FakeVLLMServer(FakeEngineServer):
             return 200, {} if self.version is None else {"version": self.version}
         if method == "POST" and path == "/v1/completions" and "prompt_logprobs" in (body or {}):
             # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
+            self.score_models.append(body["model"])
             prompt = body["prompt"]
             shift = self.prefill_shift(len(prompt))
             echo = [None] + [{str(tok): {"logprob": self.prefill_logprob(tok, shift)}} for tok in prompt[1:]]
@@ -296,6 +317,8 @@ class FakeVLLMServer(FakeEngineServer):
 
     def _update_adapter(self, path: str, body: dict) -> tuple[int, dict]:
         """vLLM's runtime adapter routes: a load reads the PEFT directory at ``lora_path``."""
+        if not self.runtime_lora_updating:
+            return 404, {"detail": "Not Found"}
         name = body["lora_name"]
         if path == "/v1/unload_lora_adapter":
             if self.adapters.pop(name, None) is None:
@@ -365,9 +388,14 @@ class FakeSGLangServer(FakeEngineServer):
         self.tp_size = 1
         self.dp_size = 1
         self.pp_size = 1
+        # The patch names the image reports beside its identity.
+        self.image_patches: object = ["hyperconnection_mix_up"]
         # The message a weight update answers 400 with, as the engine does when its loader rejects a chunk.
         self.update_failure: str | None = None
         self.torch_compile = False
+        # --max-queued-requests and --disaggregation-mode as /server_info reports them, unset by default.
+        self.max_queued_requests: int | None = None
+        self.disaggregation_mode = "null"
         self.groups: set[str] = set()
         self.session_open = False
         # Set to launch the server with --enable-lora; the facts /server_info then reports.
@@ -437,6 +465,8 @@ class FakeSGLangServer(FakeEngineServer):
                 "tool_call_parser": self.tool_call_parser or None,
                 "enable_return_routed_experts": self.captures_routing,
                 "enable_torch_compile": self.torch_compile,
+                "max_queued_requests": self.max_queued_requests,
+                "disaggregation_mode": self.disaggregation_mode,
                 "dtype": self.dtype,
                 "quantization": self.quantization or None,
                 "max_running_requests": 256,
@@ -446,7 +476,7 @@ class FakeSGLangServer(FakeEngineServer):
                 "revision": self.revision,
             }
             if self.toolkit_image:
-                info["halo_patches"] = True
+                info["halo_patches"] = self.image_patches
             if self.lora is not None:
                 info.update(enable_lora=True, **self.lora)
             return 200, info

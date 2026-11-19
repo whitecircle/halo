@@ -38,7 +38,7 @@ from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
-from tests.common.fake_engines import FakeSGLangServer
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _LORA = {
@@ -528,6 +528,66 @@ def test_an_unpushable_base_refuses_a_server_on_another_base(launched_as, unpush
     assert foreign.url in str(raised.value) and base_pushes == []
 
 
+@pytest.fixture
+def vllm_unpushable(tmp_path):
+    """Inkling 2's shape: vLLM servers launched on the base, a base no push carries, versions read from a directory."""
+    fakes = [FakeVLLMServer(), FakeVLLMServer()]
+    for fake in fakes:
+        fake.lora = dict(_VLLM_LORA)
+    pool = AdapterServers([fake.url for fake in fakes], client_cls=VLLMWeightSyncClient, connection_timeout=5.0)
+    model = _peft_model()
+    launch_base = ServedBase(model_id="fake-model", path="/models/policy", revision=None)
+    sync = AdapterSync(
+        resolve_adapter_serving(model),
+        AdapterVersions(),
+        AdapterRoutes(VLLMWeightSyncClient.is_adapter_missing),
+        launch_base,
+        _BASE_REFUSAL,
+        str(tmp_path),
+    )
+    sync.servers = pool
+    yield sync, SimpleNamespace(model=model), fakes
+    pool.close()
+    for fake in fakes:
+        fake.close()
+
+
+def test_vllm_servers_load_each_version_from_its_directory_over_a_base_never_pushed(
+    vllm_unpushable, base_pushes, tmp_path
+):
+    sync, trainer, fakes = vllm_unpushable
+    sync.sync(trainer, None)
+    first = sync.versions.current
+    sync.sync(trainer, None)
+    current = sync.versions.current
+
+    assert base_pushes == [] and first != current
+    assert [dict(fake.adapters) for fake in fakes] == [{current: str(tmp_path / current)}] * 2
+    assert (tmp_path / current / "adapter_config.json").is_file() and not (tmp_path / first).exists()
+
+
+def test_a_restarted_vllm_server_on_the_launch_base_gets_the_adapter_back(vllm_unpushable, base_pushes):
+    sync, trainer, [kept, restarted] = vllm_unpushable
+    sync.sync(trainer, None)
+    restarted.restart()
+
+    sync.recover(None)
+
+    assert base_pushes == [] and list(restarted.adapters) == list(kept.adapters) == [sync.versions.current]
+
+
+@pytest.mark.parametrize("launched_as", [{"model_path": "/models/other"}, {"revision": "abc123"}])
+def test_a_vllm_server_on_another_base_is_refused_over_a_base_never_pushed(launched_as, vllm_unpushable, base_pushes):
+    sync, trainer, [_, foreign] = vllm_unpushable
+    for field, value in launched_as.items():
+        setattr(foreign, field, value)
+
+    with pytest.raises(Exception, match=_BASE_REFUSAL) as raised:
+        sync.sync(trainer, None)
+
+    assert foreign.url in str(raised.value) and base_pushes == [] and not foreign.adapters
+
+
 def _rebound(sync: AdapterSync, fakes) -> AdapterServers:
     """The servers a second ``train()`` binds after the first one's ``reset()`` closed its own."""
     sync.servers = AdapterServers(
@@ -948,6 +1008,24 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
         fake.lora = None if launch is None else {**_LORA, **launch}
         with pytest.raises(ValueError, match=reason):
             _verify(fake)
+    finally:
+        fake.close()
+
+
+_VLLM_LORA = {"max_lora_rank": 16, "max_loras": 2, "max_cpu_loras": 4}
+
+
+@pytest.mark.parametrize(("runtime_routes", "refused"), [(False, True), (True, False), (None, False)])
+def test_a_vllm_server_without_its_runtime_adapter_routes_is_refused_before_any_load(runtime_routes, refused):
+    """Its load route answers 404, which reads as a directory the server cannot see."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora, fake.runtime_lora_updating = dict(_VLLM_LORA), runtime_routes
+        if refused:
+            with pytest.raises(ValueError, match="VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.*answer 404"):
+                verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+        else:
+            verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
     finally:
         fake.close()
 

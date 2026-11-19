@@ -67,6 +67,10 @@ class EPInkling2MoELayer(EPGroupLimitedMoELayerBase):
         data, scales, global_scale = (getattr(self, f"{name}{part}", None) for part in _FROZEN_PARTS)
         return FrozenExpertBank(self._frozen_formats[name], data, scales, global_scale)
 
+    def frozen_bank_weight_count(self) -> int:
+        banks = (self.build_frozen_bank(name) for name in getattr(self, "_frozen_formats", ()))
+        return sum(bank.num_experts * bank.out_features * bank.in_features for bank in banks)
+
     def start_gather_expert_state_dict(self, **kwargs):
         if self.has_frozen_banks:
             raise ValueError(

@@ -31,6 +31,8 @@ from halo.model_loading.checkpoint_keys import build_key_plan
 from halo.model_loading.lazy_safetensors.conversion import (
     Concat,
     Deinterleave,
+    FanIn,
+    Mxfp4Decode,
     PermuteRope,
     TakeChunk,
     lazy_key_mapping,
@@ -124,6 +126,12 @@ def test_multi_source_entry_translates_to_a_fan_in():
     )
     with pytest.raises(ValueError, match="multi-source"):
         translate_converter(bad)
+
+
+def test_only_the_fan_in_ops_read_siblings():
+    """The materializer, ``WeightPlan.disk_keys`` and the planner tell a fan-in from a one-tensor op by ``FanIn``."""
+    assert isinstance(Concat(0, ("b",)), FanIn) and isinstance(Mxfp4Decode(("b_scales",)), FanIn)
+    assert not any(isinstance(op, FanIn) for op in (Deinterleave(1), TakeChunk(1, 0, 2), PermuteRope(4)))
 
 
 def test_chunk_then_permute_for_rope_lands_on_the_named_targets():
