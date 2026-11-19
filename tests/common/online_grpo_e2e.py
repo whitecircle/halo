@@ -478,6 +478,9 @@ def run_online_grpo_e2e(
     model_name: str,
     maxrl: bool = False,
 ) -> dict:
+    if resume and maxrl:
+        # Before any load: the resume body builds both phases' trainers without MaxRL and skips its metric check.
+        raise ValueError("maxrl has no resume row: the resume phases would train and pass without MaxRL")
     spec = MODES[mode]
     checks: dict[str, bool] = {}
     log(
