@@ -48,6 +48,7 @@ from halo.environments.sandbox.workspace import Entry, SessionPathError
 EXCHANGE_OVERHEAD_SECONDS = 30.0
 # The users programs run as, within the 16 bits a user-namespaced container maps.
 SESSION_UIDS = range(20_000, 60_000)
+LOST_FILES = "the sandbox was replaced and the files this session wrote are gone"
 MIB = 1024 * 1024
 
 _RUNNER_FILES = ("workspace.py", "runner_messages.py", "program_runner.py")
@@ -113,7 +114,8 @@ class Build:
 
 class RunnerSession(SandboxSession):
     """A working directory in a sandbox. A compiled program is built once and rebuilt only when its language, source
-    or files change, or when the sandbox lost the directory."""
+    or files change, or when the sandbox lost the directory. A session whose written files went with a lost directory
+    raises :class:`SandboxInfraError` from then on."""
 
     def __init__(self, workdir: str, *, uid: int, limits: ProgramLimits, interpreter: str):
         self.workdir = workdir
@@ -123,6 +125,8 @@ class RunnerSession(SandboxSession):
         self._build: Build | None = None
         self._prepared: list[Entry] | None = None
         self._reset_pending = False
+        self._wrote_files = False
+        self._lost_files = False
 
     @abstractmethod
     def exchange(self, request: Request, *, deadline: float) -> Reply:
@@ -185,6 +189,7 @@ class RunnerSession(SandboxSession):
         self._prepared = None
         if isinstance(result, Tampered):
             raise SessionPathError(result.reason)
+        self._wrote_files = True
 
     def read_file(self, path: str) -> str | None:
         self.reject_unsafe_path(path)
@@ -196,6 +201,8 @@ class RunnerSession(SandboxSession):
         return result.names if isinstance(result, FileList) else []
 
     def _send(self, operation, *, deadline: float = EXCHANGE_OVERHEAD_SECONDS):
+        if self._lost_files:
+            raise SandboxInfraError(LOST_FILES)
         request = Request(
             workdir=self.workdir,
             uid=self.uid,
@@ -208,6 +215,9 @@ class RunnerSession(SandboxSession):
         if reply.new_workspace:
             self._build = None
             self._prepared = None
+            if self._wrote_files:
+                self._lost_files = True
+                raise SandboxInfraError(LOST_FILES)
         return reply.result
 
     def _run_argv(self, spec: LanguageSpec) -> list[str]:

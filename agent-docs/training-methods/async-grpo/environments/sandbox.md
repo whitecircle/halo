@@ -108,7 +108,7 @@ World-writable directories of the image, such as `/tmp`, stay shared between ses
 | The connection drops after the program may have started | `error`; the call is not sent again |
 | The call passes its deadline (run timeout + compile timeout + 30 s) | `error` |
 
-After an `error` the executor starts a new sandbox, and open sessions continue with an empty directory.
+A new sandbox starts without the open sessions' directories. A session that only ran programs continues with an empty directory and rebuilds what it had compiled. A session that had written a file with `write_file` raises `SandboxInfraError` on every later call, so an episode that depended on its files is voided and not graded.
 
 **Cleanup**
 
