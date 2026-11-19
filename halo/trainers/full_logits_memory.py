@@ -56,10 +56,20 @@ def full_logits_verdict(
 
 
 def verify_full_logits_fit(
-    args, width: LogitsWidth, vocab: int, device, *, bytes_per_logit: int, loss: str, remedy: str
+    args,
+    width: LogitsWidth,
+    vocab: int,
+    device,
+    *,
+    bytes_per_logit: int,
+    loss: str,
+    remedy: str,
+    refuses: bool = True,
 ) -> None:
-    """COLLECTIVE. Raise on every rank when the full logits do not fit in the free memory of any rank's ``device``;
-    warn when they take a large share. Uses the larger of the train batch and, if the run evaluates, the eval batch."""
+    """COLLECTIVE when ``refuses`` is true: then raise on every rank when the full logits do not fit in the free memory
+    of any rank's ``device``. Warn when they take a large share. With ``refuses`` false, only warn and run no
+    collective; use it when ``width`` is an upper limit that real rows may never reach. Uses the larger of the train
+    batch and, if the run evaluates, the eval batch."""
     rows, rows_set_by = args.per_device_train_batch_size, "per_device_train_batch_size"
     if uses_evaluation(args) and args.per_device_eval_batch_size > rows:
         rows, rows_set_by = args.per_device_eval_batch_size, "per_device_eval_batch_size"
@@ -67,6 +77,10 @@ def verify_full_logits_fit(
     verdict = full_logits_verdict(
         rows, rows_set_by, width, vocab, free_bytes, bytes_per_logit=bytes_per_logit, loss=loss, remedy=remedy
     )
+    if not refuses:
+        if verdict is not None and is_global_main_process():
+            logger.warning(verdict[1])
+        return
     fatal = verdict is not None and verdict[0]
     if not rank_consensus(not fatal).all_ok:
         raise RuntimeError(

@@ -470,10 +470,25 @@ def test_a_batch_holding_no_image_is_refused_on_both_paths(monkeypatch):
 _GIB = 1024**3
 
 
-def _memory_host(*, chunked: bool = False, max_length: int | None = 1024, precision: str = "bf16"):
+def _with_head_rows(rows: int) -> types.SimpleNamespace:
+    return types.SimpleNamespace(
+        config=types.SimpleNamespace(get_text_config=lambda: types.SimpleNamespace(vocab_size=rows))
+    )
+
+
+def _memory_host(
+    *,
+    chunked: bool = False,
+    max_length: int | None = 1024,
+    precision: str = "bf16",
+    student_rows: int = 2**17,
+    teacher_rows: int = 2**17,
+):
     """A trainer's state the full-logits check reads: in bf16, 2 rows × 1024 tokens × 2**17 vocab × 3 planes × 2 B is
     1.5 GiB."""
     return types.SimpleNamespace(
+        model=_with_head_rows(student_rows),
+        teacher_model=_with_head_rows(teacher_rows),
         args=types.SimpleNamespace(
             use_chunked_distillation_loss=chunked,
             max_length=max_length,
@@ -484,8 +499,7 @@ def _memory_host(*, chunked: bool = False, max_length: int | None = 1024, precis
             eval_strategy="no",
             eval_on_start=False,
         ),
-        _vocab_width=2**17,
-        accelerator=types.SimpleNamespace(device="cuda:3"),
+        accelerator=types.SimpleNamespace(device="cuda:3", unwrap_model=lambda model: model),
     )
 
 
@@ -525,10 +539,30 @@ def test_a_full_logits_plane_past_half_the_free_memory_warns(free_memory, caplog
     assert "use_chunked_distillation_loss: true" in messages[0] and "max_length" in messages[0]
 
 
-def test_a_full_logits_plane_past_the_free_memory_refuses_the_run(free_memory):
+def test_a_full_logits_plane_past_the_free_memory_only_warns(free_memory, caplog, monkeypatch):
+    """``max_length`` is a cap: the context window when unset, while the rows pad only to the batch's longest. The
+    warning takes no collective."""
     free_memory(_GIB)
-    with pytest.raises(RuntimeError, match="use_chunked_distillation_loss: true"):
+    monkeypatch.setattr(full_logits_memory, "rank_consensus", lambda ok: pytest.fail("a warning takes no collective"))
+    with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
         DistributedTeacherDistillationTrainer._verify_full_logits_fit(_memory_host())
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1 and "more than the 1.0 GiB" in messages[0], messages
+    assert "use_chunked_distillation_loss: true" in messages[0]
+
+
+@pytest.mark.parametrize(
+    ("student_rows", "teacher_rows"), [(2**17, 2**16), (2**16, 2**17)], ids=["student", "teacher"]
+)
+def test_the_larger_head_sets_the_weighed_vocabulary(free_memory, caplog, student_rows, teacher_rows):
+    """Each model's forward returns all its head rows, more than the compared width when the two differ."""
+    free_memory(2 * _GIB)
+    with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
+        DistributedTeacherDistillationTrainer._verify_full_logits_fit(
+            _memory_host(student_rows=student_rows, teacher_rows=teacher_rows)
+        )
+    messages = [record.getMessage() for record in caplog.records]
+    assert len(messages) == 1 and f"× {2**17} vocab" in messages[0], messages
 
 
 @pytest.mark.parametrize(

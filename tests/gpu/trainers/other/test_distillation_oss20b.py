@@ -33,7 +33,6 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
-from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
 
 MODEL_NAME = GPT_OSS_20B
@@ -50,8 +49,9 @@ SEED = 42
 STEP1_KL_ATOL = 0.1
 # Past the live-sink noise, so a student whose updates never landed fails it.
 KL_MOVED_MIN = 0.05
-# The two paths differ only in the head GEMM's shape and the chunked reduction order.
-LOSS_PATHS_REL_TOL = TOL.exact_objective_rel
+# The two paths differ only in the head GEMM's shape and the chunked reduction order: they agree to six digits on
+# every mode, so this leaves about two orders of margin.
+LOSS_PATHS_REL_TOL = 1e-4
 # Live and frozen, on both models.
 RESET_SINKS = False
 # Resolved per GPU at run time (:func:`sink_carrying_attention`).
