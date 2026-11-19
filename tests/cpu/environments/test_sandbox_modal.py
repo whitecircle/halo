@@ -37,6 +37,7 @@ from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.sandbox.runner_messages import Limits, Outcome, RunProgram, decode
 from halo.environments.sandbox.runner_session import runner_source
 from halo.environments.tasks.coding.grading import run_solution_against_tests
+from tests.common.session_users import worker_session_uids
 
 _MIB = 1024 * 1024
 
@@ -183,6 +184,7 @@ def _fake_modal():
 def modal(monkeypatch):
     fake = _fake_modal()
     monkeypatch.setattr(ms, "require_modal", lambda: fake)
+    monkeypatch.setattr(ms, "SESSION_UIDS", worker_session_uids())
     for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
         monkeypatch.delenv(name)
     # Not tmp_path: a session's user must reach its directory, and pytest keeps its root 0700.
@@ -404,6 +406,20 @@ def test_compiled_session_rebuilds_when_a_file_op_reaches_the_replaced_sandbox_f
     assert modal.requests[-1].operation.build_requested is True
 
 
+def test_session_raises_once_the_sandbox_lost_the_files_it_wrote(modal, executor):
+    session = executor.open_session()
+    session.write_file("a.txt", "1")
+    modal.fail_next_streams = 1
+    assert session.run("print(1)").error
+    shutil.rmtree(session.workdir)  # the replacement sandbox starts without the session's directory
+    with pytest.raises(SandboxInfraError, match="files this session wrote are gone"):
+        session.list_files()
+    with pytest.raises(SandboxInfraError, match="files this session wrote are gone"):
+        session.read_file("a.txt")
+    assert "files this session wrote are gone" in session.run("print(1)").error
+    assert executor.open_session().run("print(2)").stdout == "2\n"
+
+
 @pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")
 def test_interpreted_run_drops_the_recorded_build(modal, executor):
     session = executor.open_session()
@@ -521,7 +537,7 @@ def _process_owners():
 
 
 def test_an_open_session_never_shares_its_user(modal, monkeypatch):
-    monkeypatch.setattr(ms, "SESSION_UIDS", range(20_000, 20_002))
+    monkeypatch.setattr(ms, "SESSION_UIDS", worker_session_uids()[:2])
     executor = ModalSandbox()
     long_lived, other = executor.open_session(), executor.open_session()
     with pytest.raises(SandboxInfraError, match="in use"):
@@ -538,7 +554,7 @@ def test_an_open_session_never_shares_its_user(modal, monkeypatch):
 
 
 def test_a_closed_sessions_user_stays_taken_while_its_directory_is_being_removed(modal, monkeypatch):
-    monkeypatch.setattr(ms, "SESSION_UIDS", range(20_000, 20_002))
+    monkeypatch.setattr(ms, "SESSION_UIDS", worker_session_uids()[:2])
     executor = ModalSandbox()
     long_lived, other = executor.open_session(), executor.open_session()
     other.run("print(1)")

@@ -823,7 +823,8 @@ def test_unknown_rollout_backend_is_refused_before_exec(tmp_path, monkeypatch):
         app, ["launch", "grpo/environmental", "config.yaml", "--halo-rollout-backend", "nope", "--root", str(tmp_path)]
     )
 
-    assert result.exit_code != 0 and argvs == []
+    assert result.exit_code == 2 and argvs == []
+    assert "unknown --halo-rollout-backend 'nope'" in " ".join(result.output.split())
 
 
 if __name__ == "__main__":
