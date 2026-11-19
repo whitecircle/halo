@@ -1420,6 +1420,9 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/tp/test_tp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
     ),
+    "parallelism/tp/test_tp_untied_bf16_step.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
+    ),
     "parallelism/tp/test_tp_attention_norm_grad.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "moe", "qwen3"), timeout=600
     ),
