@@ -1,6 +1,6 @@
 # Supervised Fine-Tuning (SFT)
 
-Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and is the only method that accepts `lowp_precision` QAT. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
+Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and accepts `lowp_precision` QAT, as does [teacher distillation](distillation/teacher-distillation.md#quantization-aware-distillation) on its student. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
 
 ## Dataset
 

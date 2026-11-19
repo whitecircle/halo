@@ -37,7 +37,7 @@ section before a verdict on any non-trivial combo:
 
 The code is the **ultimate** authority: `halo/distributed/parallelism_rules.py` (`reject_unsupported_axes`,
 then `reject_invalid_composition` and its `_reject_*`), and `parallelism_config_from_args`
-(`halo/configs/parallelism_arguments.py`: `lowp_*` or `init_from_scratch` outside SFT, a trainer's
+(`halo/configs/parallelism_arguments.py`: `lowp_*` on a trainer without `SUPPORTS_LOWP_PRECISION`, `init_from_scratch` outside SFT, a trainer's
 `SUPPORTS_CP` / `PP_REFUSAL`). When a doc, this skill or memory disagrees, read those files before
 advising.
 
