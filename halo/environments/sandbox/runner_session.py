@@ -200,9 +200,18 @@ class RunnerSession(SandboxSession):
         result = self._send(ListFiles())
         return result.names if isinstance(result, FileList) else []
 
-    def _send(self, operation, *, deadline: float = EXCHANGE_OVERHEAD_SECONDS):
+    def directory_lost(self) -> None:
+        """The sandbox no longer has this session's directory."""
+        self._build = None
+        self._prepared = None
+        self._lost_files = self._wrote_files
+
+    def raise_if_files_lost(self) -> None:
         if self._lost_files:
             raise SandboxInfraError(LOST_FILES)
+
+    def _send(self, operation, *, deadline: float = EXCHANGE_OVERHEAD_SECONDS):
+        self.raise_if_files_lost()
         request = Request(
             workdir=self.workdir,
             uid=self.uid,
@@ -213,11 +222,8 @@ class RunnerSession(SandboxSession):
         reply = self.exchange(request, deadline=deadline)
         self._reset_pending = False
         if reply.new_workspace:
-            self._build = None
-            self._prepared = None
-            if self._wrote_files:
-                self._lost_files = True
-                raise SandboxInfraError(LOST_FILES)
+            self.directory_lost()
+            self.raise_if_files_lost()
         return reply.result
 
     def _run_argv(self, spec: LanguageSpec) -> list[str]:
