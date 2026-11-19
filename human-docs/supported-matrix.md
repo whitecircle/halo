@@ -59,9 +59,9 @@ label, except for Bailing/Ling.
 
 `packing` is refused where a packed row's documents would mix: GPT-OSS and Ling
 2.0 / Ring off flash, and on every backend Ling 3.0, DeepSeek-V4 and flat rows of
-GLM-5 Next (tree packing keeps GLM-5 Next's documents apart). Ring, Inkling and Inkling 2
+GLM-5 Next (tree packing keeps GLM-5 Next's documents apart). Ring and Inkling
 mix documents on every kernel, so packing them takes
-`allow_cross_document_linear_attention: true`. `padding_free` needs a flash
+`allow_cross_document_linear_attention: true`; Inkling 2 keeps its documents apart and packs with no flag. `padding_free` needs a flash
 kernel, and Qwen3.5/3.6 refuse it
 ([Document isolation](../agent-docs/data/collators.md#document-isolation-under-packing) ↗).
 Per-family details:

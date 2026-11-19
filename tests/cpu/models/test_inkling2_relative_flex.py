@@ -24,6 +24,7 @@ from halo.models.attention.inkling2_relative_flex import (
 from halo.models.attention.selection import _TOOLKIT_ATTENTION_REGISTRARS, resolve_attn_implementation
 from halo.models.families.inkling2 import apply_inkling2_patches
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, find_moe_family_spec
+from tests.common.composite_rows import composite_model_and_rows
 from tests.common.flex_sliding import no_device_check
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -172,6 +173,24 @@ def test_a_padded_batch_matches_eager():
     assert len(calls) == 2 * model.config.num_hidden_layers, "one call per row and layer"
     real = attention_mask.bool()
     assert _gap(flex[real], eager[real]) < TOLERANCE
+
+
+def test_an_image_row_runs_its_vision_tower_on_the_eager_attention():
+    """The composite's vision config takes the kernel's name with the text config, and its attention passes no
+    relative bias or sinks."""
+    torch.manual_seed(0)
+    model, image_row, _ = composite_model_and_rows("inkling2")
+    model.eval()
+    row = {key: value for key, value in image_row.items() if key != "labels"}
+    input_ids = row.pop("input_ids")
+    eager = _logits(model, "eager", input_ids, **row)
+    assert model.config.vision_config._attn_implementation == "eager"
+    calls: list = []
+    with kernel_on_cpu(calls):
+        flex = _logits(model, INKLING2_RELATIVE_FLEX, input_ids, **row)
+    assert model.config.vision_config._attn_implementation == INKLING2_RELATIVE_FLEX
+    assert len(calls) == model.config.text_config.num_hidden_layers, "the text layers alone reach the kernel"
+    assert _gap(flex, eager) < TOLERANCE
 
 
 @pytest.mark.parametrize("attn_implementation", ["eager", INKLING2_RELATIVE_FLEX])

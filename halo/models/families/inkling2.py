@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import transformers.models.inkling2.modeling_inkling2 as inkling2_modeling
 
 from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.segment_markers import positions_restart
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
 
@@ -198,9 +199,9 @@ def apply_inkling2_patches() -> None:
         ("self", "hidden_states", "dynamic_input", "past_key_values", "conv_mask", "kwargs"),
         "_dynamic_short_convolution_forward",
     )
-    router.forward = _router_forward
-    inkling2_modeling.Inkling2RelativeLogits.forward = _relative_logits_forward
-    inkling2_modeling.Inkling2ShortConvolution.forward = _short_convolution_forward
-    inkling2_modeling.Inkling2DynamicShortConvolution.forward = _dynamic_short_convolution_forward
+    patch_layer_forward(router, _router_forward)
+    patch_layer_forward(inkling2_modeling.Inkling2RelativeLogits, _relative_logits_forward)
+    patch_layer_forward(inkling2_modeling.Inkling2ShortConvolution, _short_convolution_forward)
+    patch_layer_forward(inkling2_modeling.Inkling2DynamicShortConvolution, _dynamic_short_convolution_forward)
     for cls in _DECODER_LAYER_CLASSES:
-        cls.forward = _decoder_layer_forward(cls.forward)
+        patch_layer_forward(cls, _decoder_layer_forward(cls.forward))
