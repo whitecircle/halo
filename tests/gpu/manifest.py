@@ -1942,6 +1942,9 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/lora/test_lora_ep_experts_resume.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1800
     ),
+    "trainers/lora/test_lora_frozen_banks_resume.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "inkling2"), timeout=900
+    ),
     "trainers/lora/test_lora_ep1_fsdp_experts_resume.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1800
     ),

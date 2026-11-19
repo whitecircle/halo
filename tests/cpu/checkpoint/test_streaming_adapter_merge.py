@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -235,18 +236,47 @@ def test_a_merge_it_cannot_make_is_refused_before_anything_is_written(tmp_path, 
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
-def test_an_adapter_over_a_base_declaring_quantization_is_refused_by_name(tmp_path):
+def _declare_quantization(base) -> None:
+    config = json.loads((base / "config.json").read_text())
+    (base / "config.json").write_text(json.dumps({**config, "quantization_config": {"quant_method": "modelopt"}}))
+
+
+def test_an_adapter_over_a_tensor_the_base_stores_packed_is_refused_by_name(tmp_path):
     """The fold adds a delta to the stored values, which on a packed tensor are no weight."""
     base, adapter = tmp_path / "base", tmp_path / "adapter"
     _dense_base(base, torch.float32)
     _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
-    config = json.loads((base / "config.json").read_text())
-    (base / "config.json").write_text(json.dumps({**config, "quantization_config": {"quant_method": "modelopt"}}))
+    weights = base / "model.safetensors"
+    tensors = load_file(str(weights))
+    rewritten = sorted(key for key in tensors if key.endswith("q_proj.weight"))
+    tensors[rewritten[0]] = tensors[rewritten[0]].to(torch.uint8)
+    save_file(tensors, str(weights), metadata={"format": "pt"})
     out = tmp_path / "out"
 
-    with pytest.raises(ValueError, match="quantization_config.*'modelopt'.*no merged export"):
+    with pytest.raises(ValueError, match=rf"stores packed.*{re.escape(rewritten[0])} \(U8\).*no merged export"):
         merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
     assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_an_adapter_that_rewrites_no_packed_tensor_merges_over_a_quantized_base(tmp_path):
+    """gpt-oss's MXFP4 release packs its experts only: an attention adapter over it rewrites float tensors."""
+    base, adapter, plain = tmp_path / "base", tmp_path / "adapter", tmp_path / "plain"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    merge_peft_adapter(str(adapter), str(plain), streaming=True, verbose=False)
+    _declare_quantization(base)
+    weights = base / "model.safetensors"
+    tensors = load_file(str(weights))
+    packed = next(key for key in sorted(tensors) if key.endswith("mlp.down_proj.weight"))
+    tensors[packed] = tensors[packed].to(torch.uint8)
+    save_file(tensors, str(weights), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+
+    got, expected = safetensors_state_dict(out), safetensors_state_dict(plain)
+    assert got[packed].dtype == torch.uint8
+    assert all(torch.equal(got[key], expected[key]) for key in got if key != packed)
 
 
 def test_expert_adapters_over_the_packed_inkling2_release_are_refused_by_name(tmp_path):
@@ -272,7 +302,7 @@ def test_expert_adapters_over_the_packed_inkling2_release_are_refused_by_name(tm
         )
     )
 
-    with pytest.raises(ValueError, match="quantization_config.*frozen_quantized_experts"):
+    with pytest.raises(ValueError, match="stores packed.*frozen_quantized_experts"):
         merge_peft_adapter(str(adapter), str(out), verbose=False)
     assert not out.exists(), "a refused merge left an output directory behind"
 

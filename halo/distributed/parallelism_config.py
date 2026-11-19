@@ -164,6 +164,10 @@ class ParallelismConfig:
                 "ep_lazy_loading: true": self.ep_lazy_loading,
                 "the expert projections in lora_target_modules": self.expert_lora is not None,
                 "merge_expert_lora_on_save: false": not self.merge_expert_lora_on_save,
+                # A frozen bank's GEMM reads the packed weights, so the expert fake-quant would never run.
+                "lowp_precision: bf16 or lowp_apply_moe_experts: false": not (
+                    self.lowp.enabled and self.lowp.apply_moe_experts
+                ),
             }
             if missing := [need for need, met in needs.items() if not met]:
                 raise ValueError(

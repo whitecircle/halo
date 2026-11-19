@@ -12,6 +12,7 @@ import re
 import shutil
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import torch
 from peft.tuners.lora.layer import Linear as LoraLinear
@@ -38,7 +39,6 @@ from halo.checkpoint.reading import (
     detect_model_type,
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
-    read_checkpoint_config,
     reject_partial_checkpoint,
 )
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, copy_training_sidecars
@@ -70,6 +70,8 @@ _LORA_WEIGHT_KEY = re.compile(r"^(?P<module>.+)\.lora_(?P<half>[AB])\.(?P<param>
 _MAGNITUDE_KEY = re.compile(r"^(?P<module>.+)\.lora_magnitude_vector$")
 _EXPERT_KEY = re.compile(r"^(?P<layer>.+)\.experts\.(?P<attr>[^.]+)\.lora_(?P<half>[AB])$")
 _DELTA_BYTES_PER_ELEMENT = 4
+# Stored dtypes (safetensors names) whose values are the weight itself, so a delta adds to them.
+_FOLDABLE_DTYPES = frozenset({"F16", "BF16", "F32", "F64"})
 _LAYER_COPIES_IN_FLIGHT = 3
 
 # A key's fold: the merged tensor from the base's.
@@ -303,11 +305,17 @@ def _expert_spec(config: dict) -> ExpertLoraSpec:
     return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
 
 
-def _base_tensor_shapes(base_dir: str) -> dict[str, tuple[int, ...]]:
-    return {
-        key: tuple(reader.get_slice(key).get_shape())
-        for _shard, reader, key in iter_checkpoint_shard_entries(base_dir)
-    }
+class _StoredTensor(NamedTuple):
+    shape: tuple[int, ...]
+    dtype: str
+
+
+def _base_tensors(base_dir: str) -> dict[str, _StoredTensor]:
+    stored = {}
+    for _shard, reader, key in iter_checkpoint_shard_entries(base_dir):
+        view = reader.get_slice(key)
+        stored[key] = _StoredTensor(tuple(view.get_shape()), view.get_dtype())
+    return stored
 
 
 def _expert_layers(
@@ -327,6 +335,18 @@ def _expert_layers(
     return {name: _ExpertLayer(name, spec, scaling, attrs) for name, attrs in experts.items()}
 
 
+def _release_slot_dtypes(layers: dict[str, _ExpertLayer], base: dict[str, _StoredTensor]) -> dict[str, str]:
+    """The stored dtype of every tensor a family's packed release holds in place of an expert tensor the adapter
+    rewrites. The release spells the layer's prefix its own way, so the slots are found by their stem."""
+    stems = {
+        slot.hub_stem
+        for layer in layers.values()
+        for slot in layer.spec.frozen_expert_slots
+        if any(key.rpartition(".")[2] == slot.weight for key in layer.hub_shapes)
+    }
+    return {key: stored.dtype for key, stored in base.items() if key.rpartition(".")[2] in stems}
+
+
 def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
     path = find_adapter_weight_file(adapter_dir)
     if path is None:
@@ -342,8 +362,12 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
     layers = _expert_layers(experts, config, base_dir)
     by_key = {key: layer for layer in layers.values() for key in layer.hub_shapes}
 
-    base_shapes = _base_tensor_shapes(base_dir)
-    absent = sorted((set(folds) | set(by_key)) - set(base_shapes))
+    base = _base_tensors(base_dir)
+    rewritten = set(folds) | set(by_key)
+    stored_dtypes = {key: base[key].dtype for key in rewritten & set(base)} | _release_slot_dtypes(layers, base)
+    _reject_packed_tensors(base_dir, adapter_dir, stored_dtypes)
+    base_shapes = {key: stored.shape for key, stored in base.items()}
+    absent = sorted(rewritten - set(base_shapes))
     if absent:
         raise ValueError(
             f"The adapter at {adapter_dir} rewrites {len(absent)} tensor(s) the base at {base_dir} does not store "
@@ -401,18 +425,18 @@ def _reject_unreplayable_sidecars(adapter_dir: str) -> None:
         )
 
 
-def _reject_packed_base(base_dir: str, adapter_dir: str) -> None:
-    """A base whose config declares a ``quantization_config`` stores packed tensors (NVFP4 nibbles, MXFP8 or fp8 bytes
-    with their scales apart), and a fold adds its delta to the stored values at the stored dtype."""
-    quantization = (read_checkpoint_config(base_dir, missing_ok=True) or {}).get("quantization_config")
-    if not quantization:
+def _reject_packed_tensors(base_dir: str, adapter_dir: str, rewritten: dict[str, str]) -> None:
+    """``rewritten`` maps each base tensor the merge would rewrite to its stored dtype. A packed tensor (NVFP4
+    nibbles, MXFP8 or fp8 bytes with their scales apart) is no weight, and a fold adds its delta to the stored
+    values at the stored dtype. A quantized base whose rewritten tensors are all stored as floats merges."""
+    packed = sorted(f"{key} ({dtype})" for key, dtype in rewritten.items() if dtype not in _FOLDABLE_DTYPES)
+    if not packed:
         return
     raise ValueError(
-        f"The base at {base_dir} declares a quantization_config (quant_method "
-        f"{quantization.get('quant_method')!r}), so its weights are stored packed and a delta folded into the stored "
-        f"values gives no weight. The adapter at {adapter_dir} has no merged export. An adapter trained over a packed "
-        f"release (frozen_quantized_experts) resumes training from its adapter directory; any other adapter merges "
-        f"over the base's bf16 conversion."
+        f"The adapter at {adapter_dir} rewrites {len(packed)} tensor(s) that the base at {base_dir} stores packed "
+        f"(e.g. {packed[:3]}), and a delta folded into the stored values gives no weight. The adapter has no merged "
+        f"export. An adapter trained over a packed release (frozen_quantized_experts) resumes training from its "
+        f"adapter directory; any other adapter merges over the base's bf16 conversion."
     )
 
 
@@ -426,8 +450,8 @@ def merge_adapter_streaming(
 ) -> None:
     """Fold ``adapter_dir`` into its base and write ``output_dir``: tensors keep the base's stored dtype and key
     spelling, the base's config and tokenizer files are copied (the adapter's tokenizer replaces them), and the
-    adapter config lands in ``original_adapter_config/``. A packed (quantized) base is refused, and every key the
-    adapter rewrites is resolved against the base before the first write, so a refusal leaves no output."""
+    adapter config lands in ``original_adapter_config/``. A rewrite of a tensor the base stores packed is refused, and
+    every key the adapter rewrites is resolved against the base before the first write, so a refusal leaves no output."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
     _reject_unreplayable_sidecars(adapter_dir)
@@ -438,7 +462,6 @@ def merge_adapter_streaming(
     base_dir = resolve_checkpoint_source(base_path)
     reject_partial_checkpoint(base_dir)
     reject_in_place_conversion(base_dir, output_dir)
-    _reject_packed_base(base_dir, adapter_dir)
     plan = _plan_merge(adapter_dir, config, base_dir)
 
     shards = checkpoint_shard_files(base_dir)
