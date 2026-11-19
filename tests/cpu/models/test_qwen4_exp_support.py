@@ -211,17 +211,18 @@ def test_tree_packing_is_refused():
 
 @pytest.mark.parametrize("model_type", QWEN4_EXP.model_types)
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_weight_sync_is_refused_on_both_engines(backend, model_type):
-    with pytest.raises(ValueError, match="does not support weight sync"):
+def test_weight_sync_needs_the_live_ep_layers_on_both_engines(backend, model_type):
+    """Without them the push would forward the stock fused expert tensors, which both loaders drop with no error."""
+    with pytest.raises(ValueError, match="carries no live EP layer"):
         reject_unsyncable_model(StockModel(model_type), backend)
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_weight_sync_is_refused_with_live_ep_layers(backend):
+def test_weight_sync_is_admitted_with_live_ep_layers(backend):
+    """SGLang's need for the image's mix-up refresh is checked at the startup preflight, not at construction."""
     model = _tiny_model()
     _wrap_every_block(model)
-    with pytest.raises(ValueError, match="does not support weight sync"):
-        reject_unsyncable_model(model, backend)
+    reject_unsyncable_model(model, backend)
 
 
 if __name__ == "__main__":

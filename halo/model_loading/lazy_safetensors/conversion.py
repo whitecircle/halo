@@ -4,7 +4,10 @@ translation."""
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import partial
+from typing import Protocol, runtime_checkable
 
 import torch
 from transformers.core_model_loading import (
@@ -15,6 +18,7 @@ from transformers.core_model_loading import (
     WeightConverter,
     rename_source_key,
 )
+from transformers.integrations.mxfp4 import Mxfp4Dequantize, convert_moe_packed_tensors
 
 from halo.model_loading.checkpoint_keys import CheckpointKeyPlan, ConversionGroup, is_expert_bank_merge
 
@@ -61,19 +65,88 @@ class PermuteRope:
         return permuted.reshape(tensor.shape).contiguous()
 
 
+@runtime_checkable
+class FanIn(Protocol):
+    """An op that leads a multi-source pipeline: the materializer reads ``siblings`` (further disk keys, in declared
+    order) with the first source's read, whole or ranged, and the op combines them. Every other op is a callable on
+    one tensor."""
+
+    @property
+    def siblings(self) -> tuple[str, ...]: ...
+
+    @property
+    def dim(self) -> int:
+        """The first dim the op changes, which an expert-sharded read must not split."""
+        ...
+
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor: ...
+
+
 @dataclass(frozen=True)
 class Concat:
-    """Fan-in of a multi-source entry, mirroring transformers' ``Concatenate``: leads the first source's pipeline, with
-    ``siblings`` its further disk keys in declared order. The materializer resolves their reads; other ops are
-    callables."""
+    """Fan-in of a multi-source entry, mirroring transformers' ``Concatenate``."""
 
     dim: int
     siblings: tuple[str, ...]
 
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor:
+        return torch.cat([first, *siblings], dim=self.dim)
+
+
+# The projections a native MXFP4 gpt-oss checkpoint stores as ``<proj>_blocks`` and ``<proj>_scales``.
+MXFP4_PROJECTIONS = ("gate_up_proj", "down_proj")
+
+
+@dataclass(frozen=True)
+class Mxfp4Decode:
+    """Fan-in of a native MXFP4 expert tensor: leads the ``<proj>_blocks`` pipeline (uint8 ``[E, R, G, 16]``), with
+    ``siblings`` its ``<proj>_scales`` key (uint8 e8m0 ``[E, R, G]``), and decodes with transformers'
+    ``convert_moe_packed_tensors`` into gpt-oss's bf16 matmul layout ``[E, G * 32, R]``. The ranged read of the expert
+    dim stands, and it brings in the packed blocks and scales of every expert the rank owns. The decode takes one
+    expert at a time, so the unpacked values of a single expert are live at once."""
+
+    siblings: tuple[str, ...]
+
+    @property
+    def dim(self) -> int:
+        """It never touches the expert dim 0."""
+        return 1
+
+    def combine(self, first: torch.Tensor, siblings: Sequence[torch.Tensor]) -> torch.Tensor:
+        blocks, (scales,) = first, siblings
+        if blocks.dtype != torch.uint8 or scales.dtype != torch.uint8 or blocks.shape[:-1] != scales.shape:
+            raise ValueError(
+                f"MXFP4 expert tensor {self.siblings[0]!r}: expected uint8 blocks [E, R, G, 16] and uint8 scales "
+                f"[E, R, G], got {blocks.dtype} {tuple(blocks.shape)} and {scales.dtype} {tuple(scales.shape)}."
+            )
+        experts, rows, groups, width = blocks.shape
+        out = torch.empty(experts, groups * 2 * width, rows, dtype=torch.bfloat16, device=blocks.device)
+        for e in range(experts):
+            out[e] = convert_moe_packed_tensors(blocks[e : e + 1], scales[e : e + 1])[0]
+        return out
+
+
+def is_mxfp4_dequantize(entry) -> bool:
+    """Whether ``entry`` is transformers' MXFP4 dequantize: ``<proj>_blocks`` and ``<proj>_scales`` into ``<proj>``."""
+    return isinstance(entry, WeightConverter) and any(isinstance(op, Mxfp4Dequantize) for op in entry.operations)
+
+
+def mxfp4_dequantize_conversions() -> list[WeightConverter]:
+    """The entries ``from_pretrained`` plans a native MXFP4 checkpoint with under ``Mxfp4Config(dequantize=True)``, as
+    transformers' quantizer declares them. The op is a marker here: the lazy loaders decode with :class:`Mxfp4Decode`."""
+    return [
+        WeightConverter(
+            source_patterns=[f"{proj}_blocks", f"{proj}_scales"],
+            target_patterns=rf"{proj}$",
+            operations=[Mxfp4Dequantize(None)],
+        )
+        for proj in MXFP4_PROJECTIONS
+    ]
+
 
 _TensorOp = Deinterleave | TakeChunk | PermuteRope
 # A converted disk key's targets: (canonical key, op pipeline) per target.
-ConvertTargets = tuple[tuple[str, tuple[Concat | _TensorOp, ...]], ...]
+ConvertTargets = tuple[tuple[str, tuple[FanIn | _TensorOp, ...]], ...]
 
 
 def _op_kind(op) -> str:
@@ -144,10 +217,14 @@ def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tupl
 
 def _group_targets(group: ConversionGroup, config) -> dict[str, ConvertTargets]:
     """The disk keys of one live converter group → their targets with ops; a fan-in's on its first source."""
-    pipelines, concat_dim = translate_converter(group.converter, config)
-    if concat_dim is None:
-        targets = tuple(zip(group.targets, pipelines, strict=True))
-        return {key: targets for key, _ in group.parts}
+    if is_mxfp4_dequantize(group.converter):
+        fan_in = Mxfp4Decode
+    else:
+        pipelines, concat_dim = translate_converter(group.converter, config)
+        if concat_dim is None:
+            targets = tuple(zip(group.targets, pipelines, strict=True))
+            return {key: targets for key, _ in group.parts}
+        fan_in = partial(Concat, concat_dim)
     sources = group.converter.source_patterns
     by_source: dict[str, str] = {}
     for key, pattern in group.parts:
@@ -161,10 +238,10 @@ def _group_targets(group: ConversionGroup, config) -> dict[str, ConvertTargets]:
         raise ValueError(
             f"Multi-source conversion entry {sources} → {group.targets[0]!r}: the checkpoint carries "
             f"source(s) {sorted(map(sources.index, by_source))} of {list(range(len(sources)))}, so the "
-            f"concatenation would materialize a truncated tensor."
+            f"fan-in would materialize a truncated tensor, or for MXFP4 one it cannot decode."
         )
     first, *siblings = (by_source[pattern] for pattern in sources)
-    return {first: ((group.targets[0], (Concat(concat_dim, tuple(siblings)),)),)}
+    return {first: ((group.targets[0], (fan_in(tuple(siblings)),)),)}
 
 
 def lazy_key_mapping(plan: CheckpointKeyPlan, config) -> tuple[dict[str, str], dict[str, ConvertTargets]]:

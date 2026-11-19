@@ -44,6 +44,10 @@ make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
 
+The CPU tier needs the image's Triton build: on the PyPI `triton==3.6.0` a bare `uv.lock` install gets, the
+interpreted tests of kernels with a runtime loop bound fail, and `tests/cpu/kernels/test_triton_interpreter.py`
+names the cause in one failure.
+
 Point any run target at another image with `IMAGE=` (`make test-cpu IMAGE=halo:hopper`); the `build-*`
 and `push-*` targets name their own tags. What each image carries and how it builds:
 [Docker](../infrastructure/docker.md).
