@@ -8,7 +8,9 @@ from types import SimpleNamespace
 
 import pytest
 import torch.nn as nn
+from transformers import Qwen3Config
 
+import scripts.training.grpo.environmental as environmental_script
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import MoEFamilySpec
@@ -29,7 +31,6 @@ EXPECTED_UNSUPPORTED = {
     "EPInkling2MoELayer",
     "EPNemotronHMoELayer",
     "EPQwen3NextMoELayer",
-    "EPQwen4ExpMoELayer",
 }
 
 
@@ -164,6 +165,31 @@ def test_gate_still_rejects_an_unsupported_family_behind_a_peft_wrapper():
     model.mlp = _PeftStyleWrapper(_UnsupportedEPModuleStub())
     with pytest.raises(ValueError, match="does not support weight sync"):
         reject_unsyncable_model(model, "vllm")
+
+
+@pytest.mark.parametrize(("adapter_sync", "pushed"), [(True, False), (False, True)])
+def test_the_script_asks_servers_for_a_push_format_only_where_a_base_is_pushed(monkeypatch, adapter_sync, pushed):
+    """Over a base no push carries, a quantized server and a repacking MoE backend are what the run serves from."""
+    monkeypatch.setattr(environmental_script, "efforts_by_level", lambda environment, **caps: {})
+    model = nn.Module()
+    model.mlp = _AdapterValidatedEPModuleStub()
+    model.config = Qwen3Config()
+    async_config = SimpleNamespace(
+        rollout_backend="vllm",
+        rollout_adapter_sync=adapter_sync,
+        rollout_max_tokens=64,
+        rollout_max_thinking_tokens=None,
+        rollout_max_answer_tokens=None,
+        rollout_max_episode_tokens=None,
+        reasoning_floor=0.0,
+        routing_replay="off",
+        train_on_sampled_tokens=False,
+        rollout_weight_precision="bf16",
+        score_centering_top_k=None,
+    )
+    environment = SimpleNamespace(carry_reasoning=False, get_tools_schema=list, TOOLS_ARRIVE_ON_RESET=False)
+
+    assert environmental_script.server_requirements(async_config, environment, model).pushes_base is pushed
 
 
 if __name__ == "__main__":

@@ -22,7 +22,7 @@ from halo.environments.rollouts.engine_wire import build_payload, capture_genera
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
-from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
+from halo.weight_sync.clients.base import RUNTIME_ADAPTER_ROUTES_FACT, ServerFlags, WeightSyncClientBase
 from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -97,6 +97,8 @@ class ServerRequirements(NamedTuple):
     their format and MoE runner do not matter."""
     model_types: tuple[str, ...] = ()
     """The trained model's ``model_type`` spellings, which pick the toolkit image its family is served from."""
+    patches: frozenset[str] = frozenset()
+    """Image patches the served model's updates need (``WeightSyncClientBase.REQUIRED_PATCHES``)."""
 
 
 def _no_tool_parser(client_cls: type[WeightSyncClientBase]) -> str:
@@ -151,6 +153,11 @@ def _server_flag_refusals(
             f"it is the toolkit image of engine build {flags.engine_build!r}, and this model is served from "
             f"{image.tag} (engine build {image.build!r}) alone. {client_cls.image_remedy(needs.model_types)}"
         )
+    if missing := sorted(needs.patches - flags.patches):
+        refusals.append(
+            f"its image lacks the {', '.join(missing)} patch, which the served model's updates need: without it a "
+            f"push is acknowledged and part of the model keeps serving launch weights. {client_cls.IMAGE_REMEDY}"
+        )
     if needs.pushes_base:
         refusals.extend(_quantization_refusals(flags, needs))
     if needs.pushes_base and needs.is_moe and flags.moe_backend not in (None, "triton"):
@@ -172,6 +179,18 @@ def _server_flag_refusals(
         )
     if needs.captures_routing and flags.torch_compile:
         refusals.append("routing_replay: rollout under --enable-torch-compile returns corrupt rows. Turn it off.")
+    if flags.queued_request_cap is not None:
+        refusals.append(
+            f"it caps its waiting queue at {flags.queued_request_cap} (--max-queued-requests), and a weight push "
+            f"re-queues every running request, which the engine aborts with a 503 once the queue is full. Serve "
+            f"without the cap."
+        )
+    if flags.disaggregation_mode not in (None, "null"):
+        refusals.append(
+            f"it runs disaggregated as {flags.disaggregation_mode}, which the weight sync does not cover: a pause "
+            f"keeps a prefill server's chunked request live, and the cache flush after the update then fails. Serve "
+            f"without --disaggregation-mode."
+        )
     if needs.reasoning_consumers and flags.reasoning_parser == "":
         refusals.append(
             f"it has no reasoning parser and the run reads reasoning ({', '.join(needs.reasoning_consumers)}): a "
@@ -215,7 +234,14 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
         " Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service), or "
         "set rollout_adapter_sync: false."
     )
-    return [refusal + remedy for refusal in refusals]
+    refusals = [refusal + remedy for refusal in refusals]
+    if facts.get(RUNTIME_ADAPTER_ROUTES_FACT) is False:
+        refusals.append(
+            "it runs without VLLM_ALLOW_RUNTIME_LORA_UPDATING=True, so it registered no adapter load or unload route "
+            "and every load would answer 404. Set the variable in the server's environment, or set "
+            "rollout_adapter_sync: false."
+        )
+    return refusals
 
 
 def _verify_adapter_servers_on_rank0(

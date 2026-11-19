@@ -45,7 +45,8 @@ def _nvfp4_bank_kernel(
     tl.store(out_ptr + row * K + col0 + tl.arange(0, BLOCK_K), out.to(tl.bfloat16))
 
 
-@triton.jit
+# A one-expert slice's scales start at a multiple of 8 bytes, off 16-byte alignment at an odd row count.
+@triton.jit(do_not_specialize_on_alignment=["scales_ptr"])
 def _mxfp8_bank_kernel(data_ptr, scales_ptr, out_ptr, K: tl.constexpr, BLOCK_K: tl.constexpr):
     """Row ``row`` of ``[E * N, K]``: e4m3 elements times an e8m0 power-of-two scale per 32, NaN for code 255."""
     row = tl.program_id(0).to(tl.int64)
