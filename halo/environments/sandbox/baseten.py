@@ -48,6 +48,8 @@ IDEMPOTENT_METHODS = frozenset({"GET", "PUT", "DELETE"})
 RUNNER_PATH = "/tmp/halo_program_runner.py"
 REQUEST_PATH = "/tmp/halo_runner_request.json"
 SESSION_DIR = "/halo/session"
+# At interpreter exit a delete is sent once and waits this long, so an unreachable API does not hold the process.
+EXIT_DELETE_TIMEOUT = 5.0
 
 
 live_executors: "weakref.WeakSet[BasetenSandbox]" = weakref.WeakSet()
@@ -56,7 +58,7 @@ live_executors: "weakref.WeakSet[BasetenSandbox]" = weakref.WeakSet()
 @atexit.register
 def close_live_executors() -> None:
     for executor in list(live_executors):
-        executor.close()
+        executor.close(at_exit=True)
 
 
 class SandboxGone(SandboxInfraError):
@@ -131,6 +133,7 @@ class BasetenApi:
         # Minting a token and creating a named sandbox can be repeated, so every method is retried there.
         management_calls = HTTPAdapter(max_retries=self._retry(max_retries, backoff_factor, None))
         self.http.mount(f"{self.api_url}/", management_calls)
+        self.http_once = requests.Session()
         self._token_lock = threading.Lock()
         self._token: str | None = None
         self._token_refresh_at = 0.0
@@ -171,9 +174,13 @@ class BasetenApi:
             raise
         return Sandbox(name=record["name"], url=record["url"].rstrip("/"))
 
-    def delete_sandbox(self, name: str) -> None:
+    def delete_sandbox(self, name: str, *, at_exit: bool = False) -> None:
+        url = f"{self.api_url}/sandboxes/instances/{name}"
         with contextlib.suppress(SandboxGone):
-            self._send("DELETE", f"{self.api_url}/sandboxes/instances/{name}", timeout=self.request_timeout, json=None)
+            if at_exit:
+                self._send("DELETE", url, timeout=EXIT_DELETE_TIMEOUT, json=None, http=self.http_once)
+            else:
+                self._send("DELETE", url, timeout=self.request_timeout, json=None)
 
     def write_file(self, sandbox: Sandbox, path: str, content: str) -> None:
         # The filesystem API takes an absolute path with its leading slash encoded.
@@ -190,10 +197,12 @@ class BasetenApi:
             stderr=record.get("stderr") or "",
         )
 
-    def _send(self, method: str, url: str, *, timeout: float, json: dict | None) -> requests.Response:
+    def _send(
+        self, method: str, url: str, *, timeout: float, json: dict | None, http: requests.Session | None = None
+    ) -> requests.Response:
         try:
             headers = {"Authorization": f"Bearer {self._access_token()}"}
-            response = self.http.request(method, url, headers=headers, timeout=timeout, json=json)
+            response = (http or self.http).request(method, url, headers=headers, timeout=timeout, json=json)
             if response.status_code == 404:
                 raise SandboxGone(f"baseten sandbox: HTTP 404 from {method} {url}: {service_message(response)}")
             response.raise_for_status()
@@ -256,7 +265,7 @@ class BasetenSandbox(SandboxExecutor):
         if is_registry_reference(image):
             raise ValueError(
                 f"image={image!r} is a registry reference, which Baseten imports again for every sandbox. Import it "
-                f"once (baseten sandbox image push --name <name> --registry-image {image} --wait) and pass "
+                f"once (POST {api_url.rstrip('/')}/sandboxes/images with name=<name> and image={image!r}) and pass "
                 f"image='sandbox/<name>:<tag>'."
             )
         if not 1 <= max_concurrency <= BASETEN_SANDBOX_LIMIT:
@@ -291,12 +300,12 @@ class BasetenSandbox(SandboxExecutor):
         self._lock = threading.Lock()
         live_executors.add(self)
 
-    def close(self) -> None:
+    def close(self, *, at_exit: bool = False) -> None:
         """Delete every sandbox this executor still holds. Idempotent; never raises."""
         with self._lock:
             sandboxes, self._live_sandboxes = self._live_sandboxes, set()
         for sandbox in sandboxes:
-            self.delete_sandbox(sandbox)
+            self.delete_sandbox(sandbox, at_exit=at_exit)
         live_executors.discard(self)
 
     def take_slot(self) -> None:
@@ -324,19 +333,19 @@ class BasetenSandbox(SandboxExecutor):
             self._live_sandboxes.add(sandbox)
         return sandbox
 
-    def delete_sandbox(self, sandbox: Sandbox) -> None:
+    def delete_sandbox(self, sandbox: Sandbox, *, at_exit: bool = False) -> None:
         """Never raises: a sandbox that could not be deleted is removed by its idle expiration."""
         with self._lock:
             self._live_sandboxes.discard(sandbox)
         try:
-            self.api.delete_sandbox(sandbox.name)
+            self.api.delete_sandbox(sandbox.name, at_exit=at_exit)
         except SandboxInfraError as error:
             logger.debug("baseten sandbox %s was not deleted: %s", sandbox.name, error)
 
 
 class BasetenSession(RunnerSession):
-    """One sandbox, created on first use. If Baseten removed it, the next call creates another and the session
-    continues with an empty directory."""
+    """One sandbox, created on first use. If Baseten removed it, the next call creates another: a session that only
+    ran programs continues with an empty directory, and one that had written files raises from then on."""
 
     def __init__(self, executor: BasetenSandbox):
         # A sandbox holds one session, so every session can use the same user.
@@ -364,20 +373,24 @@ class BasetenSession(RunnerSession):
             return decode_reply(process.stdout)
         except SandboxGone:
             self._sandbox = None
+            self.directory_lost()
             raise
         except SandboxInfraError:
             # The sandbox may still hold the program: the next call gets a new one.
             self.executor.delete_sandbox(sandbox)
             self._sandbox = None
+            self.directory_lost()
             raise
 
     def read_file(self, path: str) -> str | None:
         self.reject_unsafe_path(path)
+        self.raise_if_files_lost()
         if self._sandbox is None:
             return None
         return super().read_file(path)
 
     def list_files(self) -> list[str]:
+        self.raise_if_files_lost()
         if self._sandbox is None:
             return []
         return super().list_files()

@@ -1,7 +1,7 @@
 """BasetenSandbox against a local fake of the Baseten Sandboxes API (token, instances, filesystem, process). Each fake
 sandbox runs the real in-sandbox runner under its own root directory, so these tests check the wire contract,
 per-session isolation and the compile/run/reset behavior offline, without Baseten credentials. The runner sets the
-session's user, so they need root."""
+session's user, so the tests that use the fake need root."""
 
 import contextlib
 import json
@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -33,12 +34,11 @@ from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.sandbox.runner_messages import Request, RunProgram, decode
 from halo.environments.sandbox.runner_session import runner_source
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from tests.common.session_users import worker_session_uids
 
 API_KEY = "bt-secret-key-0123456789"
 TOKEN = "sbx-token-1"
 UNKNOWN_IMAGE = "sandbox/never-pushed:latest"
-
-pytestmark = pytest.mark.skipif(os.geteuid() != 0, reason="the runner sets the session's user, which takes root")
 
 
 class FakeBaseten:
@@ -181,8 +181,12 @@ class FakeBaseten:
 
 @pytest.fixture
 def fake(monkeypatch):
+    if os.geteuid() != 0:
+        pytest.skip("the runner sets the session's user, which takes root")
     monkeypatch.setenv("BASETEN_API_KEY", API_KEY)
-    monkeypatch.delenv("HALO_SANDBOX_URL", raising=False)
+    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setattr(baseten, "SESSION_UIDS", worker_session_uids())
     server = FakeBaseten()
     yield server
     server.server.shutdown()
@@ -438,6 +442,32 @@ def test_exit_deletes_the_sandboxes_still_open(fake):
     assert sorted(fake.deleted) == ["sbx-1", "sbx-2"] and sandbox not in baseten.live_executors
 
 
+def test_interpreter_exit_deletes_the_sandboxes_still_open(fake):
+    program = (
+        "import sys\n"
+        "from halo.environments.sandbox import baseten\n"
+        "baseten.SESSION_UIDS = range(int(sys.argv[2]), int(sys.argv[2]) + 1)\n"
+        "sandbox = baseten.BasetenSandbox(api_url=sys.argv[1], backoff_factor=0)\n"
+        "print(sandbox.open_session().run('print(1)').stdout, end='')\n"
+    )
+    uid = str(worker_session_uids()[0])
+    done = subprocess.run(
+        [sys.executable, "-c", program, fake.api_url, uid], capture_output=True, text=True, timeout=120, check=False
+    )
+    assert done.returncode == 0 and done.stdout == "1\n", done
+    assert fake.deleted == ["sbx-1"]
+
+
+def test_exit_cleanup_sends_each_delete_once(fake):
+    sandbox = _sandbox(fake)
+    sandbox.open_session().run("print(1)")
+    fake.faults["/v1/sandboxes/instances/"] = [503, 503]
+
+    baseten.close_live_executors()
+
+    assert len(fake.calls("/v1/sandboxes/instances/", "DELETE")) == 1 and fake.deleted == []
+
+
 def test_backend_does_not_claim_to_confine(fake, caplog):
     with caplog.at_level(logging.WARNING):
         env = CodeContestsEnvironment(sandbox_backend="baseten", sandbox_options={"api_url": fake.api_url})
@@ -448,7 +478,6 @@ def test_backend_does_not_claim_to_confine(fake, caplog):
 def test_expired_sandbox_is_an_error_then_replaced(fake):
     sandbox = _sandbox(fake)
     with sandbox.open_session() as session:
-        session.write_file("note.txt", "kept only while the sandbox lives")
         assert session.run("print(1)").ok
         fake.deleted.append("sbx-1")  # the idle expiration removed it
 
@@ -462,6 +491,19 @@ def test_expired_sandbox_is_an_error_then_replaced(fake):
 
         assert again.ok and again.stdout == "['main.py']\n"
     assert sandbox.slots.acquire(timeout=1), "the session held one slot across its sandboxes"
+
+
+def test_session_raises_once_an_expired_sandbox_took_the_files_it_wrote(fake):
+    sandbox = _sandbox(fake)
+    with sandbox.open_session() as session:
+        session.write_file("note.txt", "kept only while the sandbox lives")
+        fake.deleted.append("sbx-1")
+        assert "404" in session.run("print(1)").error
+
+        with pytest.raises(SandboxInfraError, match="files this session wrote are gone"):
+            session.list_files()
+        assert "files this session wrote are gone" in session.run("print(2)").error
+    assert sandbox.slots.acquire(timeout=1)
 
 
 def test_failed_runner_upload_deletes_the_sandbox(fake):

@@ -172,11 +172,16 @@ The program runs as a different user from the process that supervises it.
 - For C and C++, or for an image that stays the same across runs, import a registry image once and name the tag Baseten gave it:
 
     ```bash
-    baseten sandbox image push --name halo-cpp --registry-image docker.io/library/python:3.12 --wait
-    baseten sandbox image list-tags --name halo-cpp
+    api=https://api.baseten.co/v1
+    token=$(curl -s -X POST $api/token -H "Authorization: Bearer $BASETEN_API_KEY" \
+        -H 'Content-Type: application/json' -d '{"scopes": ["sandboxes"]}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+    curl -s -X POST $api/sandboxes/images -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' -d '{"name": "halo-cpp", "image": "docker.io/library/python:3.12"}'
+    curl -s $api/sandboxes/images/halo-cpp -H "Authorization: Bearer $token"       # repeat until "status": "BUILT"
+    curl -s $api/sandboxes/images/halo-cpp/tags -H "Authorization: Bearer $token"  # the tag to pin
     ```
 
-    Then set `image: sandbox/halo-cpp:<tag>` in `sandbox_options`.
+    Then set `image: sandbox/halo-cpp:<tag>` in `sandbox_options`. Baseten's own `baseten` CLI, which the Halo images do not ship, makes the same calls (`baseten sandbox image push`, `list-tags`).
 - A registry reference (`docker.io/...`) as `image` raises at construction: Baseten would import it again for every sandbox and keep one stored image per sandbox.
 
 **Network**
@@ -190,13 +195,13 @@ A Baseten sandbox keeps its outbound network, so a program can fetch from the in
 | A connection error, 429 or 5xx on a call that runs no program | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
 | 429 or 5xx on the call that runs the program | `error`; the call is not sent again, so a program never runs twice |
 | The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
-| Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox and the session continues empty |
+| Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox. A session that only ran programs continues empty; one that had written a file with `write_file` raises `SandboxInfraError` on every later call |
 
 File calls raise `SandboxInfraError` where `run` returns `error`. After an `error` the sandbox is deleted and the next call creates a new one.
 
 **Cleanup**
 
-Closing a session deletes its sandbox, and an `atexit` hook deletes the ones still open. If the process is killed, Baseten deletes them after `idle_ttl`.
+Closing a session deletes its sandbox, and an `atexit` hook deletes the ones still open, each with one request that waits at most 5 s. If the process is killed, Baseten deletes them after `idle_ttl`.
 
 **Options** (`sandbox_options`)
 
