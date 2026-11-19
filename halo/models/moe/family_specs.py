@@ -112,6 +112,9 @@ class MoEFamilySpec:
     # A composite transformers' CausalLM mapping does not name: ``text_only_model`` builds its text sub-config's class.
     text_only_layout: CompositeTextLayout | None = None
     supports_lazy_loading: bool = True
+    # The release stores its experts in MXFP4 (``<proj>_blocks`` / ``<proj>_scales``), which the lazy loaders decode
+    # to bf16 while reading (``Mxfp4Decode``). Any other checkpoint-native quantization takes ``from_pretrained``.
+    lazy_decodes_mxfp4: bool = False
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
@@ -224,6 +227,7 @@ GPT_OSS = MoEFamilySpec(
     expert_weight_roots=INTERLEAVED_GLU_ROOTS,
     # Matmul convention [E, H, 2M] / [E, M, H]: nothing is transposed on the way out.
     fused_contraction_axis=1,
+    lazy_decodes_mxfp4=True,
 )
 INKLING = MoEFamilySpec(
     # The composite config spells it ``inkling_mm_model``; no bare ``inkling`` spelling exists.
@@ -334,11 +338,6 @@ QWEN4_EXP = MoEFamilySpec(
     model_types=("qwen4_exp", "qwen4_exp_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
-    weight_sync_refusal=(
-        "no online update into either pinned rollout engine has been validated end to end; on SGLang, each "
-        "hyper-connection GatedResidual also caches a padded copy of its mix-up weight on SM100-family GPUs that an "
-        "update leaves stale (agent-docs/models/qwen4_exp.md#rl-weight-sync)"
-    ),
 )
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),

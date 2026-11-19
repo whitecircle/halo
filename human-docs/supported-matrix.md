@@ -170,7 +170,7 @@ GRPO column states what the code admits. A family's own limits from
 | --- | :---: | :---: | :---: |
 | Resume | Ran | Ran | Ran |
 | Several servers | No, one server | Ran | Ran |
-| Prefetch | No | Ran (depth 1, 2) | Ran (depth 1); `max_retries` must cover the syncs a round spans |
+| Prefetch | No | Ran (depth 1, 2) | Ran (depth 1) |
 | `routing_replay: rollout` | No | Ran | Ran |
 | `routing_replay: recompute` | No | Ran | Ran |
 | `rollout_max_thinking_tokens` | No | Ran (GPT-OSS, Qwen3.6) | No |
@@ -241,7 +241,7 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 | LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B and Nemotron 3.5 Super VL and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
 | QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
-| FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
+| FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export; `--export_format compressed-tensors` writes the layout vLLM 0.32.0 serves, per-expert MoE layouts only ([Serving the export with vLLM](../agent-docs/optimization/low-precision-moe-kernels.md#serving-the-export-with-vllm) ↗) |
 | FP8 rollouts (`rollout_weight_precision: fp8_block`) | online GRPO on vLLM and async GRPO on either engine, on Qwen3.5/3.6 MoE only; ran on Qwen3.5-35B-A3B; refused beside adapter sync and QLoRA ([FP8 rollouts](../agent-docs/infrastructure/rollout-servers.md#fp8-rollouts) ↗) |
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |

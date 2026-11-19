@@ -545,11 +545,22 @@ stored packed, and a delta folded into the stored values gives no weight
 ([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.
 
+**Adapters must train.** Trainer construction runs `verify_adapters_trainable` (`halo/model_loading/parallel/peft_setup.py`)
+on the PEFT wrap before any mode wraps the model, so the check covers every mode alike. It raises when a tuner layer
+holds no trainable parameter for an adapter meant to train: an active adapter whose config is not `inference_mode`,
+counting every tensor in the layer's `adapter_layer_names` (`lora_A`/`lora_B`, `lora_embedding_*`,
+`lora_magnitude_vector`, other tuners' own). It reads live `requires_grad` and holds no collective; every rank builds
+the same wrap and raises alike. PEFT 0.21 and later re-enable adapters by matching `named_parameters()` names against
+`named_modules()` prefixes, so `UlyssesModel` (its names omit the `original_attention` level) would leave every CP
+adapter frozen; the pin `peft<0.19` keeps that path unreachable, and a bump needs a release that fixes
+[peft#4181](https://github.com/huggingface/peft/issues/4181).
+
 ## Tests and benchmarks
 
 ```bash
 # LoRA SFT under one shape (ep / ep_cp / etp / cp / fsdp, --qlora for a 4-bit base), the save
-# reloaded on a fresh base; LoRA under TP is refused at construction (tests/cpu/trainers/test_expert_lora_tp_gate.py)
+# reloaded on a fresh base; LoRA under TP is refused at construction (tests/cpu/trainers/test_expert_lora_tp_gate.py),
+# adapters that left the wrap frozen likewise (tests/cpu/peft/test_adapters_trainable_check.py)
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model gpt_oss_20b --mode ep --save-reload
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model qwen3_0_6b --mode cp --save-reload --resume
 # merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run
