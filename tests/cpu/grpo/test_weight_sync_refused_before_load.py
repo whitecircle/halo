@@ -11,7 +11,7 @@ from unittest import mock
 
 import pytest
 
-from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NEMOTRON_H
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NEMOTRON_H, QWEN4_EXP
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config, reject_unsyncable_model
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -69,6 +69,13 @@ def test_an_engine_fact_is_settled_off_the_config_too(backend):
     for model_type in client_cls.UNSERVABLE_MODEL_TYPES:
         with pytest.raises(ValueError, match=f"cannot serve model_type .*{model_type}"):
             reject_unsyncable_config(_config(model_type), backend)
+
+
+@pytest.mark.parametrize("model_type", QWEN4_EXP.model_types)
+@pytest.mark.parametrize("backend", rollout_backends())
+def test_flash_next_passes_the_construction_gate_on_both_engines(model_type, backend):
+    """SGLang's padded copy of the hyper-connection mix-up weight is refused by the server preflight, not here."""
+    reject_unsyncable_config(_config(model_type), backend)
 
 
 @pytest.mark.parametrize("backend", rollout_backends())

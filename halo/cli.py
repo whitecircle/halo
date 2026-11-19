@@ -17,9 +17,12 @@ from torch.numa.binding import AffinityMode
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path("scripts")
 TRAINING_ROOT = _SCRIPTS_ROOT / "training"
+# Benchmark harnesses, Halo's and other frameworks': their own launch scripts run them, each in its framework's
+# image, so none is a Halo tool.
+BENCHMARK_HARNESS_ROOT = _SCRIPTS_ROOT / "benchmarks"
 
-# ``training`` belongs to ``halo launch``.
-_NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name})
+# ``training`` belongs to ``halo launch``; the benchmark harnesses belong to neither command.
+_NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name, BENCHMARK_HARNESS_ROOT.name})
 
 _EXTRA_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 _LAUNCH_USAGE = "halo launch METHOD CONFIG [launcher flags] [--field=value ...]"
