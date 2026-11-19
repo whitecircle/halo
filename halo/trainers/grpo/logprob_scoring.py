@@ -5,7 +5,6 @@ import inspect
 import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
 from enum import IntEnum
 from typing import ClassVar
 
@@ -14,7 +13,6 @@ import torch.nn.functional as F
 from torch import nn
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_decorator
-from trl.models.utils import _ForwardRedirection
 
 from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
 from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
@@ -25,10 +23,8 @@ from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
-from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.module_tree import embedding_module, find_module_path, hidden_state_backbone
-from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.segment_markers import segment_markers_for
@@ -36,47 +32,15 @@ from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.construction.training_args_overrides import uses_evaluation
+from halo.trainers.full_logits_memory import LogitsWidth, verify_full_logits_fit
 from halo.trainers.grpo.packed_forward import build_packed_rows
+from halo.trainers.hidden_state_forward import HiddenStateForwardMixin
 
 logger = logging.getLogger(__name__)
 
 # Bytes per logit the full-logits loss forward holds at its peak: an fp32 plane, or the bf16 logits
 # plus the bf16 log-softmax TRL's selective_log_softmax saves for backward.
 _FULL_LOGITS_BYTES_PER_LOGIT = 4
-# Share of the device memory free at trainer init above which the full-logits plane warns. At init the
-# optimizer state, gradients and activations the same step needs are not allocated yet.
-_FULL_LOGITS_WARN_FRACTION = 0.5
-
-
-@dataclass(frozen=True)
-class LogitsWidth:
-    tokens: int
-    set_by: str
-
-
-def full_logits_verdict(
-    rows: int, rows_set_by: str, width: LogitsWidth, vocab: int, free_bytes: int
-) -> tuple[bool, str] | None:
-    """``(fatal, message)``: fatal when the plane cannot fit, a warning past :data:`_FULL_LOGITS_WARN_FRACTION`,
-    ``None`` when it fits comfortably."""
-    plane = rows * width.tokens * vocab * _FULL_LOGITS_BYTES_PER_LOGIT
-    if plane <= _FULL_LOGITS_WARN_FRACTION * free_bytes:
-        return None
-    gib = 1024**3
-    fatal = plane > free_bytes
-    share = (
-        f"more than the {free_bytes / gib:.1f} GiB this device has free"
-        if fatal
-        else f"{plane / free_bytes:.0%} of the {free_bytes / gib:.1f} GiB free before the optimizer state and "
-        f"activations are allocated"
-    )
-    return fatal, (
-        f"The GRPO loss forward materializes full logits: {rows} rows × {width.tokens} tokens × {vocab} vocab × "
-        f"{_FULL_LOGITS_BYTES_PER_LOGIT} B = {plane / gib:.1f} GiB, {share}. Set use_chunked_grpo_logprobs: true "
-        f"to compute the log-probs in vocab chunks instead, or lower {rows_set_by} ({rows}) or "
-        f"{width.set_by}, which sets the {width.tokens}-token width."
-    )
 
 
 class RowSpan(IntEnum):
@@ -161,7 +125,7 @@ def rows_forward_densely(model, batch_size: int) -> bool:
     )
 
 
-class LogprobScoringMixin:
+class LogprobScoringMixin(HiddenStateForwardMixin):
     """Hosts provide ``temperature``, ``accelerator``, ``args``, ``model``, ``ref_model`` and
     ``_use_chunked_grpo_logprobs``."""
 
@@ -216,23 +180,15 @@ class LogprobScoringMixin:
                 "GRPO scores completions through the model's output embedding, and this model reports none "
                 "(get_output_embeddings() is None)."
             )
-        vocab = head.weight.shape[0]
-        args = self.args
-        rows, rows_set_by = args.per_device_train_batch_size, "per_device_train_batch_size"
-        if uses_evaluation(args) and args.per_device_eval_batch_size > rows:
-            rows, rows_set_by = args.per_device_eval_batch_size, "per_device_eval_batch_size"
-        free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
-        verdict = full_logits_verdict(rows, rows_set_by, width, vocab, free_bytes)
-        fatal = verdict is not None and verdict[0]
-        if not rank_consensus(not fatal).all_ok:
-            raise RuntimeError(
-                verdict[1]
-                if fatal
-                else "Another rank's full-logits plane cannot fit in its free device memory "
-                "(its error states the size); set use_chunked_grpo_logprobs: true."
-            )
-        if verdict is not None and self.accelerator.is_main_process:
-            logger.warning(verdict[1])
+        verify_full_logits_fit(
+            self.args,
+            width,
+            head.weight.shape[0],
+            self.accelerator.device,
+            bytes_per_logit=_FULL_LOGITS_BYTES_PER_LOGIT,
+            loss="GRPO loss",
+            remedy="Set use_chunked_grpo_logprobs: true to compute the log-probs in vocab chunks instead",
+        )
 
     def _warm_scoring_pass(self, input_ids: torch.Tensor, logits_to_keep: int, *, compute_entropy: bool) -> None:
         """COLLECTIVE. One train-mode forward and backward of ``input_ids`` through the trainer's own scorer, so the
@@ -325,15 +281,6 @@ class LogprobScoringMixin:
         return self._chunked_forward_redirection(
             model, unwrapped, self._cp_chunked_logps_impl, wrapper, input_ids, attention_mask, labels
         )
-
-    @property
-    def _chunked_forward_redirection(self) -> _ForwardRedirection:
-        """Reuse TRL's ``_forward_redirection`` if built (only when ``use_liger_kernel``), else make one."""
-        fr = getattr(self, "_forward_redirection", None)
-        if fr is None:
-            fr = _ForwardRedirection()
-            self._forward_redirection = fr
-        return fr
 
     def _chunked_logps_impl(
         self, unwrapped_model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy
@@ -462,19 +409,6 @@ class LogprobScoringMixin:
         ]
         return torch.cat(rows), widths
 
-    def _backbone_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Open its own EP capacity scope: it enters the backbone directly, past the pre-hook that scopes the shared
-        DeepEP arena, and each dense row carries its own length."""
-        bump_forward_generation()
-        return self._get_last_hidden_state(unwrapped_model, input_ids, attention_mask, logits_to_keep)
-
-    def _get_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
-        """Forward the backbone, drop the final position (the causal next-token shift), keep the last
-        ``logits_to_keep``."""
-        backbone = hidden_state_backbone(unwrapped_model)
-        hidden = backbone(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).last_hidden_state
-        return hidden[:, :-1, :][:, -logits_to_keep:, :]  # (B, logits_to_keep, H)
-
     def _cp_chunked_logps_impl(self, unwrapped_model, input_ids, attention_mask, labels):
         if labels.shape != input_ids.shape:
             raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
@@ -528,16 +462,6 @@ class LogprobScoringMixin:
                 "Remove lm_head from the adapter's target_modules or disable use_chunked_grpo_logprobs."
             )
         self._lm_head_adapter_checked = True
-
-    def _head_transform(self, unwrapped_model) -> HeadTransform:
-        """Resolved once per model, since the verification builds a meta-device shell of the model's class."""
-        base = base_transformers_model(unwrapped_model)
-        transforms = getattr(self, "_head_transforms", None)
-        if transforms is None:
-            transforms = self._head_transforms = {}
-        if id(base) not in transforms:
-            transforms[id(base)] = resolve_head_transform(base)
-        return transforms[id(base)]
 
 
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:

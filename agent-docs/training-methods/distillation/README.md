@@ -20,7 +20,7 @@ Which to pick:
 
 All three take EP, TP, ETP, EP+TP and EP+ETP on the student. None takes CP or PP: each needs a second whole-model forward that neither the sequence split nor the stage split can reproduce.
 
-Every divergence, the gold-token gate and the hard-label cross-entropy score the logits one token chunk at a time under a checkpoint (`token_divergence` in `halo/trainers/distillation/divergences.py`), so backward holds each forward's logits and no fp32 `[tokens, vocab]` plane; the peak beyond the models is those logits planes.
+Every divergence, the gold-token gate and the hard-label cross-entropy score the logits one token chunk at a time under a checkpoint (`token_divergence` in `halo/trainers/distillation/divergences.py`), so backward holds each forward's logits and no fp32 `[tokens, vocab]` plane; the peak beyond the models is those logits planes. Teacher distillation's `use_chunked_distillation_loss` builds neither ([Chunked loss](teacher-distillation.md#chunked-loss)).
 
 ## Dataset
 
