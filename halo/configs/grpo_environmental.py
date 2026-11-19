@@ -311,8 +311,10 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
             "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
-            "name that new episodes select. SGLang launched with --enable-lora, and vLLM for Inkling 2 with "
-            "rollout_adapter_dir; attention and dense-MLP projections only. A model it cannot serve is refused at "
+            "name that new episodes select. A family whose base no push carries (Inkling 2) is never pushed: its "
+            "servers keep the base they launched with. SGLang launched with --enable-lora, and vLLM for Inkling 2 "
+            "with rollout_adapter_dir and VLLM_ALLOW_RUNTIME_LORA_UPDATING=True; attention and dense-MLP "
+            "projections only. A model it cannot serve is refused at "
             "startup with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
         },
     )
@@ -462,8 +464,7 @@ class AsyncRolloutConfig(
             "per optimizer step at the default steps_per_generation), which the sampling-logprob IS ratio corrects. "
             "Raise it when the trainer waits on rollouts every step while the engines drain at each round's tail. "
             "Costs staleness, engine KV for every round in flight, and this many cold rounds when a run starts. "
-            "An int >= 1; above 1 it needs a run that prefetches. On SGLang, whose every sync aborts the turns in "
-            "flight, a round may span at most max_retries syncs (refused before the model load). "
+            "An int >= 1; above 1 it needs a run that prefetches. "
             "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."
         },
     )

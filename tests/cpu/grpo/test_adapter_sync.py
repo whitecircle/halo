@@ -13,14 +13,19 @@ import requests
 import torch
 from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.rollouts.engine_wire import build_payload
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,
@@ -39,7 +44,8 @@ from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
-from tests.common.fake_engines import FakeSGLangServer
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
+from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _LORA = {
@@ -529,6 +535,117 @@ def test_an_unpushable_base_refuses_a_server_on_another_base(launched_as, unpush
     assert foreign.url in str(raised.value) and base_pushes == []
 
 
+@pytest.fixture
+def vllm_unpushable(tmp_path):
+    """Inkling 2's shape: vLLM servers launched on the base, a base no push carries, versions read from a directory."""
+    fakes = [FakeVLLMServer(), FakeVLLMServer()]
+    for fake in fakes:
+        fake.lora = dict(_VLLM_LORA)
+    pool = AdapterServers([fake.url for fake in fakes], client_cls=VLLMWeightSyncClient, connection_timeout=5.0)
+    model = _peft_model()
+    launch_base = ServedBase(model_id="fake-model", path="/models/policy", revision=None)
+    sync = AdapterSync(
+        resolve_adapter_serving(model),
+        AdapterVersions(),
+        AdapterRoutes(VLLMWeightSyncClient.is_adapter_missing),
+        launch_base,
+        _BASE_REFUSAL,
+        str(tmp_path),
+    )
+    sync.servers = pool
+    yield sync, SimpleNamespace(model=model), fakes
+    pool.close()
+    for fake in fakes:
+        fake.close()
+
+
+def test_vllm_servers_load_each_version_from_its_directory_over_a_base_never_pushed(
+    vllm_unpushable, base_pushes, tmp_path
+):
+    sync, trainer, fakes = vllm_unpushable
+    sync.sync(trainer, None)
+    first = sync.versions.current
+    sync.sync(trainer, None)
+    current = sync.versions.current
+
+    assert base_pushes == [] and first != current
+    assert [dict(fake.adapters) for fake in fakes] == [{current: str(tmp_path / current)}] * 2
+    assert (tmp_path / current / "adapter_config.json").is_file() and not (tmp_path / first).exists()
+
+
+def test_a_restarted_vllm_server_on_the_launch_base_gets_the_adapter_back(vllm_unpushable, base_pushes):
+    sync, trainer, [kept, restarted] = vllm_unpushable
+    sync.sync(trainer, None)
+    restarted.restart()
+
+    sync.recover(None)
+
+    assert base_pushes == [] and list(restarted.adapters) == list(kept.adapters) == [sync.versions.current]
+
+
+@pytest.mark.parametrize("launched_as", [{"model_path": "/models/other"}, {"revision": "abc123"}])
+def test_a_vllm_server_on_another_base_is_refused_over_a_base_never_pushed(launched_as, vllm_unpushable, base_pushes):
+    sync, trainer, [_, foreign] = vllm_unpushable
+    for field, value in launched_as.items():
+        setattr(foreign, field, value)
+
+    with pytest.raises(Exception, match=_BASE_REFUSAL) as raised:
+        sync.sync(trainer, None)
+
+    assert foreign.url in str(raised.value) and base_pushes == [] and not foreign.adapters
+
+
+_EXPERTS, _EXPERT_HIDDEN, _EXPERT_WIDTH = 4, 32, 16
+
+
+def _with_expert_lora(model: torch.nn.Module) -> EPInkling2MoELayer:
+    """An Inkling 2 EP layer with native expert LoRA, in place of the first decoder layer's MLP."""
+    torch.manual_seed(1)
+    block = Inkling2SparseMoeBlock(
+        Inkling2TextConfig(
+            hidden_size=_EXPERT_HIDDEN,
+            moe_intermediate_size=_EXPERT_WIDTH,
+            n_routed_experts=_EXPERTS,
+            num_experts_per_tok=2,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            vocab_size=32,
+        )
+    ).to(torch.bfloat16)
+    layer = EPInkling2MoELayer(block, single_process_ep_config(_EXPERTS, expert_lora=ExpertLoraSpec(r=8, alpha=24)))
+    for name, param in layer.named_parameters():
+        if "_lora_" in name:
+            torch.nn.init.normal_(param, std=0.05)
+    model.base_model.model.model.layers[0].mlp = layer
+    return layer
+
+
+def test_expert_adapters_reach_the_engine_as_deltas_of_the_w13_and_w2_weights(vllm_unpushable, base_pushes, tmp_path):
+    """The engine adds ``B @ A`` to each expert's ``w13_weight`` (rows alternating gate and up) and ``w2_weight``; the
+    trainer's grouped adapters hold the same delta in matmul convention, gate and up side by side."""
+    sync, trainer, _ = vllm_unpushable
+    layer = _with_expert_lora(trainer.model)
+    scaling = 24 / 8
+
+    sync.sync(trainer, None)
+
+    wire = load_file(str(tmp_path / sync.versions.current / "adapter_model.safetensors"))
+    prefix = "base_model.model.model.layers.0.mlp.experts"
+    assert {key for key in wire if ".experts." in key} == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    for attr, weight in (("gate_up_proj", "w13_weight"), ("down_proj", "w2_weight")):
+        a, b = (getattr(layer, f"{attr}_lora_{side}").detach().float() for side in "AB")
+        trained = (a @ b).transpose(1, 2) * scaling
+        if attr == "gate_up_proj":
+            gate, up = trained.chunk(2, dim=1)
+            trained = torch.stack((gate, up), dim=2).flatten(1, 2)
+        engine_a, engine_b = (wire[f"{prefix}.{weight}.lora_{side}.weight"].float() for side in "AB")
+        assert trained.abs().max() > 1e-3
+        torch.testing.assert_close(engine_b @ engine_a, trained, rtol=2e-2, atol=1e-3)
+
+
 def _rebound(sync: AdapterSync, fakes) -> AdapterServers:
     """The servers a second ``train()`` binds after the first one's ``reset()`` closed its own."""
     sync.servers = AdapterServers(
@@ -945,6 +1062,24 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
         fake.lora = None if launch is None else {**_LORA, **launch}
         with pytest.raises(ValueError, match=reason):
             _verify(fake)
+    finally:
+        fake.close()
+
+
+_VLLM_LORA = {"max_lora_rank": 16, "max_loras": 2, "max_cpu_loras": 4}
+
+
+@pytest.mark.parametrize(("runtime_routes", "refused"), [(False, True), (True, False), (None, False)])
+def test_a_vllm_server_without_its_runtime_adapter_routes_is_refused_before_any_load(runtime_routes, refused):
+    """Its load route answers 404, which reads as a directory the server cannot see."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora, fake.runtime_lora_updating = dict(_VLLM_LORA), runtime_routes
+        if refused:
+            with pytest.raises(ValueError, match="VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.*answer 404"):
+                verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+        else:
+            verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
     finally:
         fake.close()
 

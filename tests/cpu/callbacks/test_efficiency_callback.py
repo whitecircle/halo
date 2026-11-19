@@ -45,6 +45,9 @@ class MockModel:
     def parameters(self):
         return iter([p for _, p in self._named_params])
 
+    def named_modules(self):
+        return iter(())
+
     def named_parameters(self):
         return iter(self._named_params)
 

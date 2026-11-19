@@ -90,6 +90,10 @@ class EPMoELayerBase(
         experts = cls._find_experts_container(layer)
         return len(experts) if isinstance(experts, nn.ModuleList) else experts.num_experts
 
+    def frozen_bank_weight_count(self) -> int:
+        """Weights of this rank's experts held in frozen banks: buffers, so no parameter count includes them."""
+        return 0
+
     def expert_named_params(self) -> list:
         """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters; a family's layout is
         declared in ``FAMILY.expert_weight_roots``, not overridden here."""

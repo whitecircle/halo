@@ -6,7 +6,7 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `entropy` climbing for tens of steps, reasoning shrinking, `sampling/logratio_mean` widening until `sampling/update_skipped` holds at 1 | A KL-free run (`beta: 0`) whose failures outlast its solves (`advantage/net_token_mass` stays negative) | `balance_token_mass: true` ([Token-mass balance](objective.md#token-mass-balance)); arm the [early stop](monitoring.md#early-stop); resume from the last checkpoint before the drift |
+| `entropy` climbing for tens of steps, reasoning shrinking, `sampling/logratio_mean` widening until `sampling/update_skipped` holds at 1 | A KL-free run (`beta: 0`) whose failures outlast its solves (`advantage/net_token_mass` stays negative) | Arm the [early stop](monitoring.md#early-stop); resume from the last checkpoint before the drift. `balance_token_mass: true` cancels the net push, whose measured entropy effect is small ([Token-mass balance](objective.md#token-mass-balance)) |
 
 ## Servers and weight sync
 
@@ -18,7 +18,6 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 | `vLLM server … is PAUSED for a weight update` | A trainer died without lifting its `/pause` | `POST /resume`, or restart the server if that sync had opened its update session, which unloads the model: `/resume` then takes the engine down |
 | `Prefetch off: 1 rollout server …` (info) | The single-server default: each round rolls out, then trains | `enable_prefetch: true` overlaps the next round with the update, one round stale ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
 | `prefetch_depth=N sets how many rounds prefetch holds, but …` | A depth above 1 on a run that does not prefetch: `enable_prefetch: false`, or unset on one server | `enable_prefetch: true` (one server included), or drop `prefetch_depth` ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
-| `Every SGLang weight sync aborts the turns in flight, and at prefetch_depth=N …` | A prefetched round spans more syncs than `max_retries`, so a long turn aborted at each fails its episode | Sync less often, lower `prefetch_depth`, `steps_per_generation` or `num_iterations`, or raise `max_retries` to the span with `(1 + max_retries) × request_timeout` within `episode_timeout` ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |
 | `404 … "The model <path> does not exist"` on every rollout | `model_name` is unset, so the checkpoint path (`model_name_or_path`) is sent as the id | Set `model_name` to the id at `/v1/models`, or serve with `--served-model-name` |
 
 ## Rollouts

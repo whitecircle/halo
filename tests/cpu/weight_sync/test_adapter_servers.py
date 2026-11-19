@@ -9,8 +9,10 @@ import torch
 from halo.weight_sync.adapter_payload import build_adapter_config, serialize_adapter_tensors, wire_adapter_tensors
 from halo.weight_sync.adapter_servers import AdapterServers
 from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
-from tests.common.fake_engines import FakeSGLangServer
+from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
 
 _LORA = {
     "max_lora_rank": 16,
@@ -166,6 +168,43 @@ def test_a_score_request_names_the_adapter_it_is_served_through():
         client.adapter_source = lambda: None
         client.score_completion_logprobs([1, 2, 3], [4, 5])
         assert fake.generate_lora_paths == [None, "v7", None]
+    finally:
+        fake.close()
+
+
+def test_a_vllm_score_request_names_the_adapter_as_its_model():
+    """vLLM serves a loaded adapter under its own name, so a score naming the base would read the frozen weights."""
+    fake = FakeVLLMServer()
+    try:
+        client = VLLMWeightSyncClient(base_url=fake.url, connection_timeout=5.0)
+        client.score_completion_logprobs([1, 2, 3], [4, 5])
+        client.adapter_source = lambda: "v7"
+        client.score_completion_logprobs([1, 2, 3], [4, 5])
+        client.adapter_source = lambda: None
+        client.score_completion_logprobs([1, 2, 3], [4, 5])
+        assert fake.score_models == ["fake-model", "v7", "fake-model"]
+    finally:
+        fake.close()
+
+
+@pytest.mark.parametrize(
+    ("launched", "expected"),
+    [
+        ({}, ServedBase("fake-model", "/models/policy", None)),
+        (
+            {"model_path": "/models/policy/", "revision": "abc123"},
+            ServedBase("fake-model", "/models/policy", "abc123"),
+        ),
+        ({"model_path": ""}, ServedBase("fake-model", None, None)),
+    ],
+    ids=["path", "trailing-slash-and-revision", "unreported"],
+)
+def test_vllm_reports_the_base_it_launched_with(launched, expected):
+    fake = FakeVLLMServer()
+    try:
+        for field, value in launched.items():
+            setattr(fake, field, value)
+        assert VLLMWeightSyncClient(base_url=fake.url, connection_timeout=5.0).served_base() == expected
     finally:
         fake.close()
 

@@ -20,6 +20,8 @@ from tests.common.rank_log import log
 DEV = "cuda"
 # Inkling-2-Small's expert projections: gate/up [2I, H] and down [H, I], H 4608, I 2304.
 SHAPES = ((4608, 4608), (4608, 2304))
+# An odd row count at one block of columns: a one-expert slice's MXFP8 scales start off 16-byte alignment.
+ODD_ROWS_SHAPE = (3, 256)
 
 
 def _eager(data, scales, global_scale, quant_format) -> torch.Tensor:
@@ -109,13 +111,14 @@ def _compiled_binaries() -> int:
 
 def check_warm_up_leaves_no_compile() -> None:
     """The load-time warm-up launches one expert per format and ``K``; a whole bank and every one-expert slice, whose
-    global scale sits off 16-byte alignment, run on those binaries."""
+    global scale (NVFP4) or block scales (MXFP8 at an odd row count) sit off 16-byte alignment, run on those
+    binaries."""
     generator = torch.Generator(device=DEV).manual_seed(3)
     experts = 5
     banks = [
         FrozenExpertBank(quant_format, *_bank(quant_format, experts, n, k, generator))
         for quant_format in ("nvfp4", "mxfp8")
-        for n, k in SHAPES
+        for n, k in (*SHAPES, ODD_ROWS_SHAPE)
     ]
     for kernel in (_nvfp4_bank_kernel, _mxfp8_bank_kernel):
         kernel.device_caches.clear()
