@@ -93,6 +93,8 @@ class MoEFamilySpec:
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
+    # Its routed experts are the bias-free SwiGLU ``moe_backend: mok`` computes, proven by a GPU equivalence row.
+    supports_mok: bool = False
     # The special token that ends a rendered tool call, declared where it is no eos of the family's own
     # ``generation_config``, so a served turn runs past the call unless a request stops on it.
     tool_call_terminator: str | None = None
@@ -270,6 +272,7 @@ NEMOTRON_H = MoEFamilySpec(
 QWEN3 = MoEFamilySpec(
     model_types=("qwen3_moe",),
     expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
+    supports_mok=True,
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(
@@ -277,6 +280,7 @@ QWEN3_5 = MoEFamilySpec(
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
     fp8_rollout_refusal=None,
+    supports_mok=True,
 )
 # Qwen3.5-MoE's block with a router that renormalizes only under ``norm_topk_prob``; the hub stores the experts
 # one tensor per expert, which transformers fuses on load.

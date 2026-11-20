@@ -12,6 +12,7 @@ from halo.distributed.expert_parallel.deepep.capacity import (
     ep_dispatch_capacity,
     reject_oversized_dispatch,
 )
+from halo.distributed.expert_parallel.mok import require_mok
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import reject_custom_parallelism_under_accelerate
 from halo.distributed.tensor_parallel.parallelize_attention import (
@@ -32,7 +33,7 @@ from halo.models.moe.config_fields import (
     resolve_expert_count,
     resolve_expert_ffn_width,
 )
-from halo.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.models.moe.family_specs import MOE_FAMILY_SPECS, find_moe_family_spec_for_config
 
 
 def _divisors_up_to(value: int, ceiling: int) -> list[int]:
@@ -178,7 +179,21 @@ def reject_unsupported_model(
 
 def reject_ep_without_family(pc: ParallelismConfig, model_config, *, wraps_experts: bool) -> None:
     """Refuse an EP group on a model no EP layer wraps, before ``pc.ep_config()`` builds its process groups. Past here
-    only ``apply_ep_layers`` notices, after the load and with a message written for a family with no layer."""
+    only ``apply_ep_layers`` notices, after the load and with a message written for a family with no layer. ``moe_backend:
+    mok`` is refused at any EP size on a model whose experts it would not run, and where its package is absent."""
+    if pc.moe_backend == "mok":
+        if not wraps_experts:
+            raise ValueError(
+                f"moe_backend='mok' runs the routed experts of a MoE block Halo wraps, and "
+                f"{model_config.model_type!r} has none, so the setting would be ignored. Remove moe_backend."
+            )
+        if not find_moe_family_spec_for_config(model_config).supports_mok:
+            supported = sorted(s.model_types[0] for s in MOE_FAMILY_SPECS if s.supports_mok)
+            raise ValueError(
+                f"moe_backend='mok' cannot compute {model_config.model_type!r}'s experts: its family does not "
+                f"declare supports_mok ({', '.join(supported)} do). Use moe_backend='deepep'."
+            )
+        require_mok()
     if not pc.has_ep_group:
         return
     axes = f"expert_parallel_size={pc.ep_size}, expert_tensor_parallel_size={pc.expert_tp_size}"

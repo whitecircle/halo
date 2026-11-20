@@ -680,5 +680,5 @@ class DistributedTrainerMixin(
         # Layers already collected freed nothing (a finalizer must not run a collective); swept here instead.
         freed = free_unclaimed_ep_buffers()
         if (count > 0 or freed > 0) and is_global_main_process():
-            logger.info(f"✓ Released {count} DeepEP layers, freed {freed} buffers")
+            logger.info(f"✓ Released {count} EP layers, freed {freed} buffers")
         barrier()
