@@ -6,6 +6,7 @@ from collections.abc import Hashable
 
 from halo.env import env_str
 from halo.environments.sandbox.base import SandboxExecutor
+from halo.environments.sandbox.baseten import BasetenSandbox
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.modal_sandbox import ModalSandbox
@@ -22,6 +23,7 @@ BACKENDS: dict[str, type[SandboxExecutor]] = {
     "bubblewrap": BubblewrapSandbox,
     "remote": RemoteSandbox,
     "modal": ModalSandbox,
+    "baseten": BasetenSandbox,
 }
 
 

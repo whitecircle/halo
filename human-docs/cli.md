@@ -21,7 +21,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 | `--accelerate <yaml>` | `-a` | launch with `accelerate launch` and this config (plain FSDP) |
 | `--port P` | `-p` | rendezvous port for a multi-process launch; set it when two jobs share a host |
 | `--numa-binding <mode>` | | `torchrun`'s NUMA binding (`node` runs each rank on its GPU's NUMA node); `torchrun` launches only, refused with `--accelerate` or one process ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗) |
-| `--halo-rollout-backend <name>` | | run the RL environments' code execution on a hosted sandbox (`modal`) ([Code Execution Sandboxes](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗) |
+| `--halo-rollout-backend <name>` | | run the RL environments' code execution on a hosted sandbox (`modal`, `baseten`) ([Code Execution Sandboxes](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗) |
 | `--list` | | print every method and its script |
 | `--dry_run` | | print the command instead of running it |
 | `--root <dir>` | | repository root (defaults to the checkout the CLI lives in); the script imports `halo` and `scripts` from it |
