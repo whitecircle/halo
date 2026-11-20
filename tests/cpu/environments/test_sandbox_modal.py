@@ -35,7 +35,7 @@ from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.modal_sandbox import ModalSandbox
 from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.sandbox.runner_messages import Limits, Outcome, RunProgram, decode
-from halo.environments.sandbox.runner_session import runner_source
+from halo.environments.sandbox.runner_session import SESSION_UIDS, runner_source
 from halo.environments.tasks.coding.grading import run_solution_against_tests
 from tests.common.session_users import worker_session_uids
 
@@ -418,6 +418,30 @@ def test_session_raises_once_the_sandbox_lost_the_files_it_wrote(modal, executor
         session.read_file("a.txt")
     assert "files this session wrote are gone" in session.run("print(1)").error
     assert executor.open_session().run("print(2)").stdout == "2\n"
+
+
+def test_session_holding_only_files_a_program_made_continues_without_them(modal, executor):
+    session = executor.open_session()
+    assert session.run("open('made.txt', 'w').write('1')").ok
+    assert "made.txt" in session.list_files()
+    modal.fail_next_streams = 1
+    assert session.run("print(1)").error
+    shutil.rmtree(session.workdir)  # the replacement sandbox starts without the session's directory
+    res = session.run("import os\nprint(os.path.exists('made.txt'))")
+    assert res.ok and res.stdout == "False\n"
+
+
+@pytest.mark.parametrize("workers", [1, 8, 40, 56, 200])
+def test_xdist_workers_draw_session_users_from_disjoint_slices(monkeypatch, workers):
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(workers))
+    slices = []
+    for index in range(workers):
+        monkeypatch.setenv("PYTEST_XDIST_WORKER", f"gw{index}")
+        slices.append(worker_session_uids())
+    users = [uid for uids in slices for uid in uids]
+    assert len(set(users)) == len(users)
+    assert set(users) <= set(SESSION_UIDS)
+    assert min(len(uids) for uids in slices) >= 2
 
 
 @pytest.mark.skipif(shutil.which("gcc") is None, reason="gcc not installed")

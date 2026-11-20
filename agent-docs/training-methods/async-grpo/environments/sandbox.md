@@ -108,7 +108,7 @@ World-writable directories of the image, such as `/tmp`, stay shared between ses
 | The connection drops after the program may have started | `error`; the call is not sent again |
 | The call passes its deadline (run timeout + compile timeout + 30 s) | `error` |
 
-A new sandbox starts without the open sessions' directories. A session that only ran programs continues with an empty directory and rebuilds what it had compiled. A session that had written a file with `write_file` raises `SandboxInfraError` on every later call, so an episode that depended on its files is voided and not graded.
+A new sandbox starts without the open sessions' directories. A session that had written a file with `write_file` raises `SandboxInfraError` on every later call, so an episode that depended on its files is voided and not graded. Any other session continues with an empty directory and rebuilds what it had compiled. Files a program created or changed while it ran are not tracked: a session that holds only such files continues without them, and its next call returns an ordinary result. An environment whose programs edit files the episode depends on must put at least one of them there with `write_file`.
 
 **Cleanup**
 
