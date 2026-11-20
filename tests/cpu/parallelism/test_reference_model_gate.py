@@ -90,6 +90,7 @@ def _self_distillation(config, reference_kl_coef):
         ),
         mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes"),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids"),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_warn_if_full_logits_large"),
         mock.patch.object(
             self_distillation, "place_frozen_scorer", lambda *a: setup_calls.append(True) or (None, None)
         ),
