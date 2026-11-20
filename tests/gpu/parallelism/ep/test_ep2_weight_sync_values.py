@@ -17,12 +17,12 @@ from trl import SFTConfig
 
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.trainers.grpo.rollout.weight_push import FORWARDING_RANK, gather_and_send_weights
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
 from tests.common.rank_log import log
-from tests.common.weight_sync import RecordingSender
+from tests.common.weight_sync import ForwardedParam, RecordingSender
 
 EP_SIZE = 2
 SEQ_LEN = 64
@@ -90,14 +90,26 @@ def local_expert_weights(model) -> dict[str, torch.Tensor]:
 
 
 def gather_on_all_ranks(model) -> RecordingSender:
-    """COLLECTIVE, recording so the per-rank views can be compared."""
+    """COLLECTIVE. Record the forwarding rank's push and share its tiny expert oracle for rank-offset checks."""
     recorder = RecordingSender(keep_values=True)
-    gather_and_send_weights(model, recorder)
+    forwarding = dist.get_rank() == FORWARDING_RANK
+    gather_and_send_weights(model, recorder if forwarding else None)
+    payload = [
+        [
+            ForwardedParam(
+                param.name,
+                param.shape,
+                param.is_dtensor,
+                param.value.cpu() if param.name.endswith(EXPERT_KEYS) else None,
+            )
+            for param in recorder.params
+        ]
+        if forwarding
+        else None
+    ]
+    dist.broadcast_object_list(payload, src=FORWARDING_RANK)
+    recorder.params = payload[0]
     return recorder
-
-
-def flat_signature(tensors: dict[str, torch.Tensor]) -> torch.Tensor:
-    return torch.cat([tensors[name].flatten() for name in sorted(tensors)])
 
 
 @gpu_test_main(exact_world_size=2, prefix="ep2_weight_sync_values")
@@ -202,12 +214,6 @@ def run(ctx):
     # Under grouped-mm the fused gate_up_proj exists only as the pair; probing it alone reduces the checks to
     # down_proj.
     checks["local_shards_cover_all_expert_keys"] = len(shards) == N_LAYERS * len(EXPERT_KEYS)
-
-    # COLLECTIVE: every rank must end up with the same global tensor.
-    signature = flat_signature(trained_gathered).to(ctx.device)
-    peers = [torch.zeros_like(signature) for _ in range(ctx.world_size)]
-    dist.all_gather(peers, signature)
-    checks["gathered_experts_identical_across_ranks"] = all(torch.equal(signature, peer) for peer in peers)
 
     metrics["forwarded_params"] = len(trained_recorder.names)
     metrics["gathered_expert_tensors"] = len(trained_gathered)

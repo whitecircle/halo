@@ -141,7 +141,7 @@ def has_head_dim_beyond_flash(model_config) -> bool:
 
 
 def has_attention_logit_softcap(model_config) -> bool:
-    """Gemma 2's softcap, which transformers' SDPA path drops without a word."""
+    """Gemma 2's softcap, which transformers' SDPA path refuses."""
     return bool(get_config_field(model_config, "attn_logit_softcapping", per_layer_reduce=max))
 
 
@@ -171,7 +171,7 @@ def fa4_varlen_refusal(model_config) -> str | None:
 
 
 def flash_attention_2_in_place_of_fa4(reason: str) -> str:
-    """Raises without an FA2 build, as the rest either drops a softcap (SDPA) or cannot compile under EP (flex)."""
+    """Raises without an FA2 build, as the rest either refuses a softcap (SDPA) or cannot compile under EP (flex)."""
     if not is_flash_attn_2_available():
         raise ValueError(
             f"{reason}, and no FlashAttention-2 build imports to run it instead. Install flash-attn, or set "
@@ -265,7 +265,7 @@ def select_supported_attn_implementation(
     supports_sdpa = getattr(resolved_class, "_supports_sdpa", True)
     supports_flash = declares_flash_attention(model_config)
 
-    # sdpa drops sinks and the softcap, so it is valid only without either, or once the sinks were reset.
+    # sdpa drops sinks and refuses the softcap, so it is valid only without either, or once the sinks were reset.
     softcapped = has_attention_logit_softcap(model_config)
     sdpa_ok = supports_sdpa and not softcapped and (not has_sinks or recorded_reset is True)
 
@@ -395,7 +395,7 @@ def resolve_attn_implementation(
     attn_implementation = attn_implementation or _detect_attention_impl()
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
-        # flex carries the sinks and the softcap SDPA drops.
+        # flex carries the sinks SDPA drops and the softcap it refuses.
         needs_flex = uses_gpt_oss_sinks(model_config) or has_attention_logit_softcap(model_config)
         fp32_fallback = "flex_attention" if needs_flex else "sdpa"
         if is_global_main_process():

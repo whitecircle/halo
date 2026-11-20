@@ -1,8 +1,10 @@
 #!/usr/bin/env python
-"""FLA's GatedDeltaNet op, after the post-load restriction, is exact and repeatable on packed rows on Blackwell.
+"""FLA's GatedDeltaNet op is exact and repeatable on packed rows on Blackwell, where fla keeps the state kernel on
+``num_warps=2``.
 
 On sm_10x under Triton 3.6 ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` varies run to run with ``num_warps=4``,
-which the stock autotuner picks at Qwen3.5/3.6 shapes. Once the forced control stops missing, the restriction can go.
+which an unrestricted autotuner picks at Qwen3.5/3.6 shapes. Once the forced control stops missing, fla's restriction
+can go.
 """
 
 import os
@@ -15,7 +17,6 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 
 from halo.kernels.fla_launch import triton_autotuner
-from halo.model_loading.finalization import finalize_loaded_model
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import cos_sim, max_abs_rel_err
 from tests.common.rank_log import log
@@ -105,7 +106,6 @@ def _fwd_h_autotuner():
 
 
 def _check_restricted(leaves, reference) -> None:
-    finalize_loaded_model(torch.nn.Module())
     warps = {config.num_warps for config in _fwd_h_autotuner().configs}
     assert warps == {2}, f"the state kernel still autotunes num_warps {sorted(warps)} on Blackwell"
     stable, worst_rel, worst_cos = _repeat_and_score(leaves, reference, REPEATS)
@@ -129,7 +129,7 @@ def _check_control(leaves, reference) -> None:
     log(f"  control {CONTROL_CONFIG}: stable={stable} o max-rel={worst_rel:.2e} worst grad cos={worst_cos:.6f}")
     assert not (stable and worst_rel < TOL_O_MAXREL), (
         f"the num_warps=4 control was repeatable and within {TOL_O_MAXREL:.0e} over {CONTROL_REPEATS} calls: the "
-        f"race no longer reproduces here, so the Blackwell restriction in halo/kernels/fla_launch.py may be obsolete"
+        f"race no longer reproduces here, so fla's Blackwell restriction may be obsolete"
     )
 
 
@@ -141,7 +141,7 @@ def run(ctx) -> dict:
     torch.cuda.set_device(ctx.device)
     leaves = _inputs(ctx.device)
     reference = _reference(leaves)
-    log("\n--- after finalize_loaded_model's restriction ---")
+    log("\n--- fla's restricted state kernel ---")
     record_check(checks, "restricted_op_exact_and_repeatable", lambda: _check_restricted(leaves, reference))
     log("\n--- num_warps=4 control ---")
     record_check(checks, "num_warps_4_control_misses", lambda: _check_control(leaves, reference))

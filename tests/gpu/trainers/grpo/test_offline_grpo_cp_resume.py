@@ -13,6 +13,7 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
+from halo.checkpoint.config_export import restore_model_type
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.checkpoint.reading import load_full_state_dict
@@ -124,6 +125,8 @@ def _save_tiny_model(path, family="qwen3"):
         )
     )
     model.to(torch.bfloat16).save_pretrained(path)
+    # As a real export does: Bailing's remote config class leaves ``model_type`` unset, so the save drops it.
+    restore_model_type(model.config, path)
     fast.save_pretrained(path)
 
 

@@ -89,7 +89,7 @@ docker run -d --rm --name <job> \
 |-----------|--------|-----------|
 | Base NGC `nvcr.io/nvidia/pytorch:26.03-py3` (Ubuntu 24.04, Python 3.12, CUDA 13.2) | Yes | Yes |
 | PyTorch 2.11.0+cu130 (reinstalled from the cu130 index over the base's build) | Yes | Yes |
-| Transformers 5.20.2 · TRL 1.14.2 · Accelerate 1.11.0 · PEFT 0.18.1 · sentence-transformers 6.1.0 · Liger 0.8.4 (`uv.lock`) | Yes | Yes |
+| Transformers 5.23.0 · TRL 1.14.2 · Accelerate 1.11.0 · PEFT 0.18.1 · sentence-transformers 6.1.0 · Liger 0.8.4 (`uv.lock`) | Yes | Yes |
 | Flash Attention 2 | Built from tag `v2.8.3.post1`, split-K kernels stubbed | Inherited from `BASE_IMAGE`, which is the pin; the build asserts it imports |
 | Flash Attention 3 (SM90) | Yes | No |
 | Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b37`, `flash_attn.cute`) | No | Yes |
@@ -99,7 +99,7 @@ docker run -d --rm --name <job> \
 | cuBLAS `nvidia-cublas` 13.8.0.4 (CUDA 13.4.3), overriding torch's locked 13.1.0.3; asserted at build | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
 | `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
-| `flash-linear-attention` 0.4.2 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
+| `flash-linear-attention` 0.6.0 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
 | DeepGEMM (commit `559d79f`, native fp8/fp4 grouped MoE GEMM behind `HALO_DEEPGEMM_NATIVE=1`; JIT-compiles at runtime) | No | Yes |
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |

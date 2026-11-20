@@ -14,7 +14,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_tensor
-from transformers.distributed.tensor_parallel import _get_parameter_plan
+from transformers.distributed.parallel_utils import _get_parameter_plan
 
 from halo.distributed.grad_reduce import SumAcrossGroup, SumGradAcrossGroup
 from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear

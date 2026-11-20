@@ -246,7 +246,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | Ling 3.0 | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
 | Laguna | through remote code → SDPA with a warning, and a pinned flash label raises: its flash call never receives the sliding window (`remote_code_flash_loses_window`). In-library classes: FA4 on Blackwell, FA3 on Hopper |
 | LFM2-VL | → SDPA (its SigLIP2 tower declares no flash support, and `declares_flash_attention` reads each sub-model's class) |
-| DeepSeek-V4 | → eager |
+| DeepSeek-V4 | → eager (the family spec's `eager_only_attention`) |
 | GLM-5 Next · Inkling | → SDPA (upstream declares no flash support) |
 | Step-3.7 Flash | → SDPA (upstream declares no flash support), built as `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers and on the full layers' packed or padded rows |
 | Qwen3.8-Flash-Next | → SDPA (upstream declares no flash support); its sparse layers run the block-sparse kernel (`HALO_QSA_KERNEL=auto`) where it can run, the tiled QSA elsewhere (`full_determinism`, non-CUDA, unsupported dtype or shape) |

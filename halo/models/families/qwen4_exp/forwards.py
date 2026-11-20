@@ -28,6 +28,7 @@ from halo.models.families.qwen4_exp.gated_residual import (
 )
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, warm_qsa_kernels
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped
 from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
@@ -358,7 +359,7 @@ def patch_qwen4_exp_document_forwards() -> None:
 
     setattr(model_forward, _DOCUMENT_FORWARDS_ATTR, True)
     model_cls.forward = model_forward
-    layer_cls.forward = layer_forward
+    patch_layer_forward(layer_cls, layer_forward)
     attention_cls.forward = attention_forward
     if is_global_main_process():
         logger.info("Patched the Qwen4ExpText model, decoder layer and attention forwards for per-document rows")

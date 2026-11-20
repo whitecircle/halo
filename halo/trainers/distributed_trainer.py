@@ -90,7 +90,7 @@ from halo.trainers.parallelism.adapter_rules import (
     reject_unrealized_expert_lora,
     reject_unsaved_grown_vocabulary,
 )
-from halo.trainers.parallelism.ep_layers import EPLayersMixin, resolve_use_reentrant
+from halo.trainers.parallelism.ep_layers import EPLayersMixin, apply_checkpointing_args, resolve_use_reentrant
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin, reject_unsynced_trainable_params
@@ -349,7 +349,7 @@ class DistributedTrainerMixin(
             configured = gc_kwargs.get("use_reentrant")
             use_reentrant = resolve_use_reentrant(config, model_config, configured)
             if use_reentrant != configured:
-                training_args.gradient_checkpointing_kwargs = {**gc_kwargs, "use_reentrant": use_reentrant}
+                apply_checkpointing_args(training_args, {**gc_kwargs, "use_reentrant": use_reentrant})
 
     def _configure_distributed_modes(self) -> None:
         """COLLECTIVE. Wrap the model for its parallel mode and run the post-wrap gates; call after

@@ -91,7 +91,7 @@ def deepseek_v4_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``DeepseekV4Model.forward`` (transformers ~5.20) minus the embedding widen."""
+    """``DeepseekV4Model.forward`` (transformers ~5.23) minus the embedding widen."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
     )
@@ -136,7 +136,7 @@ def glm5_next_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``Glm5NextTextModel.forward`` (transformers ~5.20) minus the embedding widen. Each layer's mask is keyed by its
+    """``Glm5NextTextModel.forward`` (transformers ~5.23) minus the embedding widen. Each layer's mask is keyed by its
     own ``block_type``, since ``config.layer_types[i]`` at loop position ``i`` re-bases on a sliced list."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
@@ -188,7 +188,7 @@ def qwen4_exp_stream_forward(
     ple_input_ids: torch.LongTensor | None = None,
     **kwargs,
 ) -> BaseModelOutputWithPast:
-    """``Qwen4ExpTextModel.forward`` (transformers ~5.20) under the toolkit's document forward, minus the embedding
+    """``Qwen4ExpTextModel.forward`` (transformers ~5.23) under the toolkit's document forward, minus the embedding
     widen; ``ple_input_ids`` feed the per-layer embeddings. Uncached rows only."""
     config = self.config
     if past_key_values is not None or use_cache:

@@ -13,7 +13,9 @@ import torch
 import torch.distributed as dist
 from torch.distributed.device_mesh import init_device_mesh
 from torch.testing._internal.distributed.fake_pg import FakeStore as TorchFakeStore
-from transformers import AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoTokenizer, DistributedConfig
+from transformers.distributed.mixin import DistributedMixin
+from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
@@ -88,6 +90,27 @@ def fake_process_group_mesh(rank: int, world_size: int):
     rank's shard with no collective."""
     with fake_process_group(rank, world_size):
         yield init_device_mesh("cpu", (world_size,))
+
+
+def apply_hf_tensor_parallelism(model, tp_mesh, tp_plan: dict[str, str] | None = None):
+    """transformers' own TP sharding of ``model`` over ``tp_mesh``. ``tp_plan`` holds wildcard rules as a model
+    declares them, expanded to the concrete names transformers shards; by default the plan ``from_pretrained``
+    resolves for the model. Raises on a model whose planned parameter is already tied: ``from_pretrained`` shards
+    before it ties."""
+    if tp_plan is None:
+        tp_plan, _ep_plan, _fsdp_plan = model._resolve_parallel_plans(DistributedConfig(tp_size=tp_mesh.size()))
+    else:
+        tp_plan = DistributedMixin._expand_parallel_plan(model, tp_plan)
+    every_name = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+    tied_aliases = sorted(set(tp_plan) & (every_name - {name for name, _ in model.named_parameters()}))
+    if tied_aliases:
+        raise ValueError(
+            f"The TP plan names {tied_aliases}, which share a tied parameter with another name: "
+            f"apply_tensor_parallelism finds a planned parameter through named_parameters(), which lists a tied "
+            f"parameter once, and fails with KeyError on the other name. Build the model untied "
+            f"(tie_word_embeddings=False), or load it with from_pretrained, which shards before it ties."
+        )
+    return apply_tensor_parallelism(model, tp_mesh, tp_plan)
 
 
 def init_distributed() -> tuple[int, int, int]:

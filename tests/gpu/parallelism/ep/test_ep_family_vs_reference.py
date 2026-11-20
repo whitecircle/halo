@@ -21,6 +21,7 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS
 from tests.common.distributed import world_spread
@@ -254,6 +255,8 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1, *, ove
     log(f"{family}: {pc.mode_string} {overrides or ''}")
     torch.manual_seed(SEED)
     reference = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(ctx.device, torch.bfloat16)
+    # Match the family patches every production load applies.
+    apply_family_patches(reference.config, None)
     if family in FP32_BIAS_FAMILIES:
         fill_release_scale_bias(reference)
         reference.to(ctx.device)

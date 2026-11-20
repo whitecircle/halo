@@ -19,12 +19,9 @@ Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` 
 
 ## Packing
 
-Packed documents stay isolated on both paths, but flash needs a toolkit patch:
-`Mistral4Attention.forward` takes `position_ids` as an explicit parameter and forwards only
-`**kwargs` to the attention interface, so the varlen detection never sees them.
-`patch_mistral4_flash_packed_position_ids` (`halo/models/families/mistral4.py`) re-injects them
-and is applied at load whenever the resolved implementation is a flash one. The dense path builds the
-packed mask itself and is clean to grouped-GEMM reduction noise.
+Packed documents stay isolated on both paths. `Mistral4Attention.forward` hands `position_ids` to the
+attention interface, so flash takes the varlen path per document. The dense path builds the packed mask itself
+and is clean to grouped-GEMM reduction noise.
 
 ## CP wrapper
 

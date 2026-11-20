@@ -96,7 +96,7 @@ tok/s/GPU (peak GiB); † marks an nvidia-smi peak.
 | Qwen3.5-122B-A10B, 64k | **8,933** (188.7) | 4,781 (254.0†) | 5,936 (194.5) | 5,397 (219.3) |
 | Qwen3.5-122B-A10B, 128k | **8,943** (188.7) | does not fit | 5,951 (194.5) | 4,683 (227.1) |
 
-Versions: Halo 1.2.0 (its released `blackwell` image); TRL 1.17.1 with Transformers 5.20.2, Liger 0.8.2 and FA4 4.0.0b37 on that
+Versions: Halo 1.2.0 (its released `blackwell` image); TRL 1.17.1, benchmarked with Transformers 5.20.2, Liger 0.8.2 and FA4 4.0.0b37 on that
 image; NeMo AutoModel 0.7.0 (container 26.10.00, Transformers 5.18.0); Megatron Bridge from the NeMo 26.10 container, a
 0.7.0 release-candidate commit with Megatron Core 0.20.0.
 
@@ -127,8 +127,9 @@ Conditions that decide how to read the table:
   main parameters in a distributed optimizer, except the 122B rows (fp16 master, bf16 moments).
 - **Two machines.** Halo and TRL ran on one 8× B300 node, NeMo and Megatron on another of the same type. The difference
   between the two nodes was not measured, so read small gaps between those groups with care.
-- **Measured steps differ.** After warm-up, Halo averages 9 steps, TRL 7, NeMo and Megatron 6. TRL runs with Halo's FLA
-  launch options, because stock FLA 0.4.2 is not deterministic on packed rows.
+- **Measured steps differ.** After warm-up, Halo averages 9 steps, TRL 7, NeMo and Megatron 6. The TRL rows
+  ran with Halo 1.2.0's FLA launch options, the Blackwell `num_warps=2` restriction on the delta rule's state kernel
+  that fla itself applies from 0.5.2: fla 0.4.2, the 1.2.0 image's pin, is not deterministic on packed rows without it.
 - **Peak memory has different sources.** Halo, TRL and NeMo report torch's allocated peak. Megatron's come from
   nvidia-smi, which includes allocator cache and reads 10–20% higher, so do not compare them directly. NeMo's 122B 64k row
   holds 266.1 of 267.7 GiB by nvidia-smi.

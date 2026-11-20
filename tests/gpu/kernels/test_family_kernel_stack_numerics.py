@@ -64,6 +64,7 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.models.introspection.config_access import text_config
+from halo.models.introspection.param_roles import fp32_pin_matches
 from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
@@ -120,9 +121,20 @@ def _hf_named_grads(model_type: str, model_cls: type, config, grads: dict[str, t
 
 
 def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
+    """At ``dtype`` with ``_keep_in_fp32_modules_strict`` at ``state``'s fp32 values, as ``from_pretrained(dtype=bf16)``
+    builds it."""
     model = model_cls(copy.deepcopy(config)).cuda()
     model.load_state_dict(state)
-    return model.to(dtype)
+    model.to(dtype)
+    strict = {
+        pin for module in model.modules() for pin in getattr(type(module), "_keep_in_fp32_modules_strict", None) or []
+    }
+    pinned = fp32_pin_matches((name for name, _ in model.named_parameters()), strict)
+    for name, param in model.named_parameters():
+        if name in pinned:
+            # A copy: widening the cast parameter would keep its rounding, and the round-off probe writes in place.
+            param.data = state[name].to(device=param.device, dtype=torch.float32, copy=True)
+    return model
 
 
 def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):

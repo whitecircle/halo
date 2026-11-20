@@ -95,16 +95,21 @@ one decoder layer of bf16 weights. ZeRO-3 (`fsdp_reshard_after_forward: true`) k
 FSDP2 holds the running group and the one its prefetch gathers, so units of two would gather four layers at the
 backward's peak instead of two, the memory ZeRO-3 is chosen to save.
 
-torch starts a multi-module group at whichever module runs first, and a per-layer reentrant checkpoint
-recomputes a unit's last layer first: the unit would reduce and reshard before its other layers ran their
-backward. The wrap replaces torch's hooks with its own at the unit's two ends (`_install_unit_hooks`,
-`halo/distributed/fsdp.py`), under which a unit reduces from its post-backward hook inside the backward as a
-one-layer group does, with checkpointing off, non-reentrant or reentrant, on every layer or every
-`every_n_layers`, and each layer casts its inputs as its own group would. `tests/cpu/parallelism/test_fsdp2_layer_units.py`
-holds unit sizes 2 and 3 bit for bit to one-layer groups across those shapes, several forwards per backward,
-both ZeRO modes, LoRA, ep1 EP layers, a pipeline stage, HSDP and TP, and pins the FSDP2 members the hooks drive. One
-combination is equal only to rounding: with some layers checkpointed and several forwards per backward, a unit
-reduces each forward's gradients inside the backward where a one-layer group folds the later ones into one
+The wrap replaces torch's hooks with its own at the unit's two ends (`_install_unit_hooks`,
+`halo/distributed/fsdp.py`): the first layer's pre-forward and the last layer's post-forward bracket the unit's
+forward, and each later layer casts its inputs as its own group would. transformers' `GradientCheckpointingLayer`
+checkpoints `forward`, inside these hooks, so a recompute runs none of them. A decoder loop that checkpoints the
+layer's `__call__` instead (the Bailing/Ling remote code) runs them in the recompute. There torch's hooks would
+start the group at the unit's last layer, which a per-layer reentrant checkpoint recomputes first, and reduce and
+reshard the unit before its other layers ran their backward. The unit hooks instead register the post-backward
+hook in the first layer's recompute, which a reentrant forward under `no_grad` could not, and each later layer
+re-gathers what a reshard after forward freed. Under either placement a unit reduces from its post-backward hook
+inside the backward as a one-layer group does, with checkpointing off, non-reentrant or reentrant, on every layer
+or every `every_n_layers`. `tests/cpu/parallelism/test_fsdp2_layer_units.py` holds unit sizes 2 and 3 bit for bit
+to one-layer groups across those shapes and both placements, several forwards per backward, both ZeRO modes, LoRA,
+ep1 EP layers, a pipeline stage, HSDP and TP, and pins the FSDP2 members the hooks drive. One combination is equal
+only to rounding: under the `__call__` placement, with some layers checkpointed and several forwards per backward,
+a unit reduces each forward's gradients inside the backward where a one-layer group folds the later ones into one
 reduce after it, the same sum added in another order.
 
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
@@ -343,11 +348,11 @@ accelerate launch \
 ```
 
 The two FSDP v2 configs differ in `fsdp_reshard_after_forward`; the full config also sets
-`fsdp_cpu_ram_efficient_loading: true`. With it, `from_pretrained` reads the checkpoint on every rank and then
-zero-fills the weights off each node's local rank 0, leaving them to the broadcast at `accelerator.prepare`, which a
-frozen reference or teacher never gets and which the policy gets only once training starts. The toolkit's loads
-therefore keep the full weights on every rank (`full_weights_on_every_rank` in
-`halo/model_loading/checkpoint_coverage.py`), as under the gradop config, at the same host memory.
+`fsdp_cpu_ram_efficient_loading: true`; every rank still loads the full weights and buffers, so a frozen reference
+or teacher computes the same before and after `accelerator.prepare`. Under that flag transformers leaves a tensor the
+checkpoint lacks (a classification or reward head on a base checkpoint) on the meta device off each node's local
+rank 0, so the toolkit's loads turn it off for the load (`full_weights_on_every_rank` in
+`halo/model_loading/checkpoint_coverage.py`) and every rank initializes the head.
 
 Neither config has a hybrid-shard option; for that use `torchrun` FSDP2 with
 [`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).
@@ -394,39 +399,31 @@ The tower's gradient on an image rank then reaches the reduce through the [agree
 
 ### Layers recomputed more than once per backward
 
-Reentrant gradient checkpointing, forced for EP, CP and every MoE
-([rule](../optimization/flash-attention.md#usage)), wraps each decoder layer's `__call__`, so FSDP2's
-hooks run inside the checkpoint. A loss that runs a layer more than once before one backward recomputes
-it once per run: env-GRPO scores each turn row in its own forward, and the GRPO log-prob scorers run one
-backbone call per row or chunk. torch's FSDP2 hooks only the first recompute the backward reaches. The
-others find the layer's state mid-backward, re-gather its parameters and accumulate into their
-unsharded gradients, and the root's final callback skips a one-layer group as already reduced. Left alone,
-those contributions never reach the sharded gradients the clip and the optimizer read, the group stays
-gathered past the optimizer step (the next forward reads pre-step weights), and its sharded gradient
-survives HF's `model.zero_grad()` into the next step. A ZeRO-2 [unit](#shard-groups) of two layers sits
-in the callback's state list once per layer, so its later visit finds the group idle and reduces the
-leftovers itself; the one-layer groups left are every decoder-layer group under ZeRO-3, a ZeRO-2 unit cut
-short to one layer (at the end of an odd layer count, or where the next layer's trainable dtype differs), and
-the nested dtype groups.
+A loss that runs a layer more than once before one backward recomputes it once per run under gradient
+checkpointing: env-GRPO scores each turn row in its own forward, and the GRPO log-prob scorers run one
+backbone call per row or chunk. transformers' `GradientCheckpointingLayer` checkpoints the layer's `forward`,
+inside FSDP2's hooks, so every forward registers its own post-backward hook and each run's gradient is
+reduce-scattered inside the backward: one reduce-scatter per forward per layer group, overlapping the
+backward, or one per window under `fsdp_defer_grad_sync`.
 
-After every microstep's backward, `training_step` runs `complete_fsdp2_post_backward`
+A group whose hooks run inside a reentrant checkpoint, a nested dtype group inside a checkpointed layer
+or a module whose call the checkpoint wraps, is hooked in only the first recompute the backward reaches. The others find the group mid-backward, re-gather its parameters and
+accumulate into their unsharded gradients, and the root's final callback skips a one-layer group as
+already reduced. So after every microstep's backward, `training_step` runs `complete_fsdp2_post_backward`
 (`halo/distributed/fsdp.py`) over every shard group: FSDP2's own `post_backward` on each group left
 gathered or holding an unsharded gradient, then the compute stream waits on the reductions it issued,
 as the root's final callback does. It reads each group's window flags: a `fsdp_defer_grad_sync`
 microstep folds the leftovers into the deferred accumulator with no collective, and a
-`fsdp_reshard_after_backward: false` microstep keeps the group gathered. A layer run once per
-backward leaves nothing to complete, and the step is bit-identical. The cost is one extra
-reduce-scatter per recomputed layer group per backward, or per window under `fsdp_defer_grad_sync`,
-issued after the backward with no compute left to overlap it. Memory inside the backward is torch's:
-from its second recompute until the backward returns, each recomputed group holds its gathered
-parameters and an unsharded gradient, under ZeRO-3 too. `reject_unfinished_fsdp2_backward` then raises
+`fsdp_reshard_after_backward: false` microstep keeps the group gathered. Where every forward was hooked
+it finds nothing, and the step is bit-identical. `reject_unfinished_fsdp2_backward` then raises
 if a group whose reduce is armed still holds an unsharded gradient, or one whose reshard is armed is
 still gathered. Which groups reduce is read off each rank's own gradients, so every rank must run each
 layer the same number of times per backward (env-GRPO pads its row count across ranks).
 
 The completion reads FSDP2 internals (`FSDPParamGroup`); `tests/cpu/parallelism/test_fsdp2_post_backward_internals.py`
-pins every member it touches, and the defect, against the installed torch. Non-reentrant checkpointing,
-and a checkpoint inside the module's `forward` (FSDP2's hooks outside it), are unaffected.
+pins every member it touches, and the defect, against the installed torch.
+`tests/cpu/parallelism/test_fsdp2_reentrant_recompute.py` holds K-forward steps of transformers layers to
+an unsharded reference and pins their per-forward reduce-scatter count.
 
 `use_grouped_gemm` does not count as custom parallelism; it only activates for MoE models during
 loading, and an MoE under `accelerate launch` is rejected at load ([Two launchers](#two-launchers)).

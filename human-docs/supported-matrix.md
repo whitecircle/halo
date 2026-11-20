@@ -9,14 +9,14 @@ truth; where a recipe disagrees with this page, this page wins.
 | --- | --- |
 | Python | 3.12, installed with uv into the system interpreter |
 | PyTorch | 2.11.0, `cu130` wheel (CUDA 13.2 toolkit) |
-| Transformers | 5.20.2 |
+| Transformers | 5.23.0 |
 | TRL | 1.14.2 |
 | Accelerate | 1.11.0 |
 | PEFT | 0.18.1 |
 | sentence-transformers | 6.1.0 |
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
-| flash-linear-attention | 0.4.2 |
+| flash-linear-attention | 0.6.0 |
 | vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 

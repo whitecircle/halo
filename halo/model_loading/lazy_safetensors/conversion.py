@@ -137,7 +137,7 @@ def mxfp4_dequantize_conversions() -> list[WeightConverter]:
     return [
         WeightConverter(
             source_patterns=[f"{proj}_blocks", f"{proj}_scales"],
-            target_patterns=rf"{proj}$",
+            target_patterns=proj,
             operations=[Mxfp4Dequantize(None)],
         )
         for proj in MXFP4_PROJECTIONS

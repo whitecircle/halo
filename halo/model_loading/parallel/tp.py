@@ -11,7 +11,7 @@ from transformers import DistributedConfig, PreTrainedModel
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
+from halo.distributed.tensor_parallel.hf_plan import finish_hf_tp_load, toolkit_tp_plan
 from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from halo.hardware import current_device
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -87,7 +87,7 @@ def load_tp_model(
     # DTensors is an all-reduce on the default group, which a rank-serialized region deadlocks. Each
     # rank's shard streams straight onto its GPU anyway, so host RAM never holds the model.
     with (
-        consistent_tied_tp_plan(model_class, from_pretrained_kwargs["config"]),
+        toolkit_tp_plan(model_class, from_pretrained_kwargs["config"]),
         _toolkit_tp_mesh(device_mesh, tp_mesh),
     ):
         model = from_pretrained_verified(
