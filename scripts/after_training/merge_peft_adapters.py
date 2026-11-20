@@ -76,6 +76,14 @@ Examples:
     add_max_shard_size_arg(parser)
     add_trust_remote_code_arg(parser, default=None)
     parser.add_argument(
+        "--base_revision",
+        type=str,
+        default=None,
+        help="Hub revision to read the base at, in place of the commit adapter_config.json records. For an adapter "
+        "that records none (stock PEFT writes none unless asked) whose run did not train on the base's default "
+        "branch; ignored for a local base.",
+    )
+    parser.add_argument(
         "--fp32_norms",
         action="store_true",
         help="Write every normalization leaf in fp32 instead of --dtype (convert_to_bf16.py's layout)",
@@ -108,6 +116,7 @@ Examples:
         trust_remote_code=args.trust_remote_code,
         fp32_norms=args.fp32_norms,
         streaming=args.streaming,
+        base_revision=args.base_revision,
         verbose=not args.quiet,
     )
 
