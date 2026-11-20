@@ -157,7 +157,7 @@ class ParallelismArguments(ValidatedConfig):
         default=ParallelismConfig.frozen_quantized_experts,
         metadata={
             "help": "Keep a block-scaled release's routed experts in their shipped NVFP4/MXFP8 layout as a frozen "
-            "base under expert LoRA, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
+            "base, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
             "See agent-docs/models/inkling2.md#frozen-quantized-experts."
         },
     )
@@ -347,6 +347,17 @@ def _declared_forward_budget(trainer_cls, training_config, row_sources: tuple) -
         batch_sizes.append(int(getattr(training_config, "per_device_eval_batch_size", 0) or 0))
     rows = trainer_cls.FORWARD_ROWS_PER_EXAMPLE * max(batch_sizes)
     return rows, trainer_cls.declared_row_length(training_config, *row_sources) or 0
+
+
+def reject_frozen_experts_without_adapters(dist_args, model_config) -> None:
+    """``frozen_quantized_experts`` trains adapters alone: no save exports the frozen banks, so a full fine-tune over
+    them would fail at its first checkpoint."""
+    if dist_args.frozen_quantized_experts and not getattr(model_config, "use_peft", False):
+        raise ValueError(
+            "frozen_quantized_experts needs use_peft: true with LoRA targets: the frozen expert banks are exported by "
+            "no save, so a full fine-tune over them fails at its first checkpoint, while an adapter run saves its "
+            "adapters alone."
+        )
 
 
 def parallelism_config_from_args(

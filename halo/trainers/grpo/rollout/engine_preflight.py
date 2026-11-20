@@ -22,7 +22,7 @@ from halo.environments.rollouts.engine_wire import build_payload, capture_genera
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
-from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
+from halo.weight_sync.clients.base import RUNTIME_ADAPTER_ROUTES_FACT, ServerFlags, WeightSyncClientBase
 from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -92,6 +92,9 @@ class ServerRequirements(NamedTuple):
     weight_precision: RolloutWeightPrecision = "bf16"
     candidate_logprobs: int = 0
     """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
+    pushes_base: bool = True
+    """``False`` for an adapter-synced policy over a base no push may carry: the served weights are never written, so
+    their format and MoE runner do not matter."""
     patches: frozenset[str] = frozenset()
     """Image patches the served model's updates need (``WeightSyncClientBase.REQUIRED_PATCHES``)."""
 
@@ -147,8 +150,9 @@ def _server_flag_refusals(
             f"its image lacks the {', '.join(missing)} patch, which the served model's updates need: without it a "
             f"push is acknowledged and part of the model keeps serving launch weights. {client_cls.IMAGE_REMEDY}"
         )
-    refusals.extend(_quantization_refusals(flags, needs))
-    if needs.is_moe and flags.moe_backend not in (None, "triton"):
+    if needs.pushes_base:
+        refusals.extend(_quantization_refusals(flags, needs))
+    if needs.pushes_base and needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
             f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "
             f"them behind a 200. Serve with {client_cls.MOE_BACKEND_FLAG}."
@@ -222,7 +226,14 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
         " Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service), or "
         "set rollout_adapter_sync: false."
     )
-    return [refusal + remedy for refusal in refusals]
+    refusals = [refusal + remedy for refusal in refusals]
+    if facts.get(RUNTIME_ADAPTER_ROUTES_FACT) is False:
+        refusals.append(
+            "it runs without VLLM_ALLOW_RUNTIME_LORA_UPDATING=True, so it registered no adapter load or unload route "
+            "and every load would answer 404. Set the variable in the server's environment, or set "
+            "rollout_adapter_sync: false."
+        )
+    return refusals
 
 
 def _verify_adapter_servers_on_rank0(

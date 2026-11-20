@@ -78,7 +78,7 @@ EP surface. The table is pinned against the specs and classes by
 | Gemma 4 MoE | routing replay | `FAMILY.supports_routing_replay` |
 | Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `FAMILY.supports_fp32_non_ep_params` |
 | Inkling | RL weight sync — no sync into either pinned engine's Inkling loader validated | `FAMILY.weight_sync_refusal` |
-| Inkling 2 | RL weight sync — no sync into either pinned engine's Inkling 2 loader validated | `FAMILY.weight_sync_refusal` |
+| Inkling 2 | RL weight sync — no sync into either pinned engine's Inkling 2 loader validated; `rollout_adapter_sync` on vLLM pushes none ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)) | `FAMILY.weight_sync_refusal` |
 | Zaya | gradient checkpointing | `FAMILY.supports_gradient_checkpointing` |
 | Zaya | routing replay | `FAMILY.supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |

@@ -66,7 +66,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
 
-¹⁶ The release ships its routed experts only as NVFP4/MXFP8, so it trains as expert LoRA over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)), where ETP is refused; full fine-tuning and ETP run on tiny bf16 models only.
+¹⁶ The release ships its routed experts only as NVFP4/MXFP8, so it trains as LoRA (attention, expert or both) over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)), where ETP is refused; full fine-tuning and ETP run on tiny bf16 models only.
 
 ## MoE knobs
 
@@ -132,7 +132,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
 - [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's, differing in the top-k weight default and the hub↔module key spellings.
 - [Inkling](inkling.md) — Thinking Machines multimodal MoE; joint routed+shared router normalization forces a standalone wrapper, and its shipped config runs multi-node EP16.
-- [Inkling 2](inkling2.md) — Thinking Machines multimodal MoE, 384 sigmoid-routed experts, eager attention; the quantized-only release trains as expert LoRA over frozen NVFP4/MXFP8 experts.
+- [Inkling 2](inkling2.md) — Thinking Machines multimodal MoE, 384 sigmoid-routed experts, eager attention; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts.
 - [Gemma 4 MoE](gemma4.md) — router outside the EP-wrapped module.
 - [Bailing MoE / Ling](bailing.md) — softmax GQA + shared experts; needs `trust_remote_code`.
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.

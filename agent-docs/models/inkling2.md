@@ -2,7 +2,7 @@
 
 Thinking Machines' `Inkling2ForConditionalGeneration` (`thinkingmachines/Inkling-2-Small`, NVFP4 experts; `-MXFP8`, MXFP8 experts) — a multimodal MoE whose text tower routes every one of its 48 layers to 384 experts with top-8 selection and no shared expert, at hidden 4608.
 
-The hub ships no bf16 release. Its `config.json` declares `quant_method: modelopt`, which transformers 5.23 cannot load, so the release trains only through [frozen quantized experts](#frozen-quantized-experts): expert LoRA over the shipped NVFP4/MXFP8 experts under EP ≥ 2.
+The hub ships no bf16 release. Its `config.json` declares `quant_method: modelopt`, which transformers 5.23 cannot load, so the release trains only through [frozen quantized experts](#frozen-quantized-experts): LoRA over the shipped NVFP4/MXFP8 experts under EP ≥ 2.
 
 `transformers.models.inkling2` exists from transformers 5.23.0 (the version the image pins). The composite config's `model_type` is `inkling2`, the text config's `inkling2_text`.
 
@@ -25,9 +25,9 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 ## Frozen quantized experts
 
-`frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base under expert LoRA. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
+`frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base, with or without expert LoRA over it. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, the expert projections in `lora_target_modules`, `merge_expert_lora_on_save: false`, and `lowp_precision: bf16` or `lowp_apply_moe_experts: false` (a bank's GEMM reads the packed weights, so the expert fake-quant would never run). MFU and S-MFU count the banks as frozen expert weights. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false`, `use_peft: true`, and `lowp_precision: bf16` or `lowp_apply_moe_experts: false` (a bank's GEMM reads the packed weights, so the expert fake-quant would never run). MFU and S-MFU count the banks as frozen expert weights. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
 
 A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and have no merged export: `merge_peft_adapters.py` refuses an adapter that rewrites a tensor the base stores packed (the release's `w13_weight` / `w2_weight`), as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
@@ -50,7 +50,8 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **PP.** No pipeline spec covers the family.
 - **Packing.** The convolutions read no document boundary, so `packing` is refused unless `allow_cross_document_linear_attention: true` accepts the crossing ([Document isolation](../data/collators.md#document-isolation-under-packing)). Eager attention has no varlen kernel, so `padding_free` is refused.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
-- **Online and async GRPO.** The spec's `weight_sync_refusal`: no weight sync into either pinned engine has been validated. Offline GRPO needs no server.
+- **Full fine-tuning of the release.** No save exports the frozen banks, so `frozen_quantized_experts` requires `use_peft: true`.
+- **Online GRPO, and async GRPO with a weight push.** The spec's `weight_sync_refusal`: no weight sync into either pinned engine has been validated. Async GRPO runs on vLLM with `rollout_adapter_sync`, which serves attention LoRA adapters beside the launch base and pushes no weights ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)); SGLang is refused. Offline GRPO needs no server.
 
 ## LoRA
 

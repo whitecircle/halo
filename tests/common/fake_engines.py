@@ -4,6 +4,7 @@ failure keeps its state change."""
 import base64
 import io
 import json
+import pathlib
 import pickle
 import re
 import threading
@@ -14,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 import torch
+from safetensors.torch import load_file
 from torch.distributed import TCPStore
 
 from halo.weight_sync.clients.base import WeightSyncClientBase
@@ -219,6 +221,22 @@ class FakeVLLMServer(FakeEngineServer):
         self.returns_token_ids = True
         # Held so the workers' store connections live until close(), as an engine's workers stay joined.
         self.joined_stores: list[TCPStore] = []
+        # Set to launch with --enable-lora (its lora_config); the adapters it then holds, name -> directory.
+        self.lora: dict | None = None
+        self.adapters: dict[str, str] = {}
+        # VLLM_ALLOW_RUNTIME_LORA_UPDATING, which registers the adapter routes; None leaves it out of the report.
+        self.runtime_lora_updating: bool | None = True
+        # The launch's --model and --revision, as /server_info reports them.
+        self.model_path = "/models/policy"
+        self.revision: str | None = None
+        # The ``model`` each prefill score request named.
+        self.score_models: list[str] = []
+
+    def restart(self) -> None:
+        """A process restart: the adapter registry is gone."""
+        self.adapters.clear()
+        self.paused = False
+        self.update_open = False
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
         if (method, path) == ("GET", "/is_paused"):
@@ -229,12 +247,19 @@ class FakeVLLMServer(FakeEngineServer):
             env = {"VLLM_ENFORCE_STRICT_TOOL_CALLING": self.strict_tool_calling}
             if self.toolkit_image:
                 env["VLLM_HALO_PATCHES"] = "vllm_layerwise_reload_patch"
+            if self.runtime_lora_updating is not None:
+                env["VLLM_ALLOW_RUNTIME_LORA_UPDATING"] = self.runtime_lora_updating
             config = {
                 **({} if self.instance_id is None else {"instance_id": self.instance_id}),
                 "kernel_config": {"moe_backend": self.moe_backend},
                 "structured_outputs_config": {"reasoning_parser": self.reasoning_parser},
                 "aux_output_config": {"enable_return_routed_experts": self.captures_routing},
-                "model_config": {"dtype": self.dtype, "quantization": self.quantization or None},
+                "model_config": {
+                    "dtype": self.dtype,
+                    "quantization": self.quantization or None,
+                    "model": self.model_path,
+                    "revision": self.revision,
+                },
                 "parallel_config": {
                     "tensor_parallel_size": 8,
                     "data_parallel_size": 1,
@@ -244,8 +269,15 @@ class FakeVLLMServer(FakeEngineServer):
                 "scheduler_config": {"max_num_seqs": 256, "max_num_batched_tokens": 16384},
                 "attention_config": {"backend": "FLASH_ATTN"},
                 "compilation_config": {"mode": "VLLM_COMPILE", "cudagraph_mode": "FULL_AND_PIECEWISE"},
+                **({} if self.lora is None else {"lora_config": self.lora}),
             }
             return 200, {"vllm_env": env, "vllm_config": config}
+        if (method, path) == ("GET", "/v1/models"):
+            _, reply = super().answer(method, path, body)
+            reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
+            return 200, reply
+        if method == "POST" and path in ("/v1/load_lora_adapter", "/v1/unload_lora_adapter"):
+            return self._update_adapter(path, body)
         if (method, path) == ("POST", "/v1/chat/completions"):
             if body.get("tools") and not self.tool_call_parser:
                 return 400, {"error": '"auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser'}
@@ -256,6 +288,7 @@ class FakeVLLMServer(FakeEngineServer):
             return 200, {} if self.version is None else {"version": self.version}
         if method == "POST" and path == "/v1/completions" and "prompt_logprobs" in (body or {}):
             # Prefill echo: one entry per prompt token (None for the first), keyed by token id.
+            self.score_models.append(body["model"])
             prompt = body["prompt"]
             shift = self.prefill_shift(len(prompt))
             echo = [None] + [{str(tok): {"logprob": self.prefill_logprob(tok, shift)}} for tok in prompt[1:]]
@@ -281,6 +314,24 @@ class FakeVLLMServer(FakeEngineServer):
                 return 500, {"error": f"update_info carries fields the engine does not declare: {sorted(unknown)}"}
             return 200, {}
         return super().answer(method, path, body)
+
+    def _update_adapter(self, path: str, body: dict) -> tuple[int, dict]:
+        """vLLM's runtime adapter routes: a load reads the PEFT directory at ``lora_path``."""
+        if not self.runtime_lora_updating:
+            return 404, {"detail": "Not Found"}
+        name = body["lora_name"]
+        if path == "/v1/unload_lora_adapter":
+            if self.adapters.pop(name, None) is None:
+                return 404, {"error": {"message": f"The lora adapter '{name}' cannot be found."}}
+            return 200, {}
+        if self.lora is None:
+            return 400, {"error": {"message": "LoRA is not enabled"}}
+        if name in self.adapters:
+            return 400, {"error": {"message": f"The lora adapter '{name}' has already been loaded."}}
+        if not (pathlib.Path(body["lora_path"]) / "adapter_config.json").is_file():
+            return 400, {"error": {"message": f"No adapter found for {body['lora_path']}"}}
+        self.adapters[name] = body["lora_path"]
+        return 200, {}
 
     def _join_store(self, host: str, port: int, world_size: int) -> None:
         store = TCPStore(
@@ -369,17 +420,26 @@ class FakeSGLangServer(FakeEngineServer):
         self.paused = False
 
     def _load_adapter(self, body: dict) -> tuple[int, dict]:
+        """Both load routes: the tensors of the request body, or the PEFT directory at ``lora_path``."""
         if self.lora is None:
             return 400, {"success": False, "error_message": "LoRA is not enabled. Please set `--enable-lora`."}
         if body["lora_name"] in self.adapters:
             return 400, {"success": False, "error_message": f"{body['lora_name']} is already loaded"}
-        if len(body["serialized_named_tensors"]) < self.tp_size:
-            return 500, {"success": False, "error_message": "one serialized copy per tensor-parallel rank is needed"}
-        raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
-        tensors = _TensorUnpickler(io.BytesIO(raw)).load()
-        if body["config_dict"]["r"] > self.lora["max_lora_rank"]:
+        if "lora_path" in body:
+            directory = pathlib.Path(body["lora_path"])
+            if not (directory / "adapter_config.json").is_file():
+                return 400, {"success": False, "error_message": f"Can't find 'adapter_config.json' at '{directory}'"}
+            config = json.loads((directory / "adapter_config.json").read_text())
+            tensors = load_file(directory / "adapter_model.safetensors")
+        else:
+            if len(body["serialized_named_tensors"]) < self.tp_size:
+                reason = "one serialized copy per tensor-parallel rank is needed"
+                return 500, {"success": False, "error_message": reason}
+            raw = base64.b64decode(body["serialized_named_tensors"][self.tp_size - 1], validate=True)
+            config, tensors = body["config_dict"], _TensorUnpickler(io.BytesIO(raw)).load()
+        if config["r"] > self.lora["max_lora_rank"]:
             return 400, {"success": False, "error_message": "incompatible with the current LoRA memory pool"}
-        self.adapters[body["lora_name"]] = (body["config_dict"], tensors)
+        self.adapters[body["lora_name"]] = (config, tensors)
         return 200, {"success": True}
 
     def answer(self, method: str, path: str, body: dict | None) -> tuple[int, dict] | None:
@@ -387,7 +447,7 @@ class FakeSGLangServer(FakeEngineServer):
             _, reply = super().answer(method, path, body)
             reply["data"] += [{"id": name, "parent": "fake-model"} for name in self.adapters]
             return 200, reply
-        if (method, path) == ("POST", "/load_lora_adapter_from_tensors"):
+        if method == "POST" and path in ("/load_lora_adapter", "/load_lora_adapter_from_tensors"):
             return self._load_adapter(body)
         if (method, path) == ("POST", "/unload_lora_adapter"):
             if body["lora_name"] not in self.adapters:

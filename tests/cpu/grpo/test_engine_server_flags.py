@@ -149,6 +149,16 @@ def test_a_quantized_server_is_refused_on_every_model(engine):
 
 
 @_ENGINES_FIXTURE
+def test_a_server_whose_weights_are_never_written_may_be_quantized_on_any_moe_runner(engine):
+    """An adapter-synced policy over a base no push carries: the served release is only read."""
+    server, client_cls = engine
+    server.quantization, server.moe_backend = "modelopt_fp4", "auto"
+    _verify(server, client_cls, is_moe=True, pushes_base=False)
+    with pytest.raises(ValueError, match=r"weights are quantized \(modelopt_fp4\)"):
+        _verify(server, client_cls, is_moe=True)
+
+
+@_ENGINES_FIXTURE
 def test_a_bf16_run_names_the_fp8_remedy_when_it_meets_a_quantized_server(engine):
     server, client_cls = engine
     server.quantization = "fp8"
@@ -370,6 +380,8 @@ _LAUNCH_FACTS = {
         "attention_backend": "FLASH_ATTN",
         "compilation_mode": "VLLM_COMPILE",
         "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "enable_lora": False,
+        "runtime_adapter_routes": True,
     },
     FakeSGLangServer: {
         "tp_size": 1,

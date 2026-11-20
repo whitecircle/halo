@@ -1,5 +1,6 @@
-"""The wire form of a LoRA adapter for an engine's load-from-tensors route: the PEFT config the engine validates,
-the tensors with the scaling folded into B, and the serialized payload."""
+"""The wire form of a LoRA adapter for an engine: the PEFT config the engine validates, the tensors with the scaling
+folded into B, and the serialized payload of a load-from-tensors route. A load-by-path route reads the same config and
+tensors from :mod:`~halo.weight_sync.adapter_directory`."""
 
 import base64
 import pickle
