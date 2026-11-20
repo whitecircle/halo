@@ -10,6 +10,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
+from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.optimizers.adamw_bf16 import AdamWBF16
@@ -70,6 +71,7 @@ def run(ctx):
         train_dataset=create_sft_dataset(16, tokenizer, seed=SEED),
         processing_class=tokenizer,
         parallelism_config=pc,
+        callbacks=[EfficiencyCallback(pc, n_warmup_steps=1)],
     )
     embedding = trainer.model.get_input_embeddings().weight
     head = trainer.model.get_output_embeddings().weight
@@ -89,7 +91,7 @@ def run(ctx):
     cross_rank = group_max_abs_diff(_local(embedding))
     log(f"  embedding max |diff| across the TP group after {NUM_STEPS} steps: {cross_rank:.3e}")
     checks["embedding_identical_across_tp_ranks"] = cross_rank == 0.0
-    return {"checks": checks, "metrics": {"final_train_loss": result.training_loss}}
+    return {"checks": checks, "metrics": {**ctx.metrics(trainer), "final_train_loss": result.training_loss}}
 
 
 if __name__ == "__main__":
