@@ -32,7 +32,7 @@ from halo.checkpoint import config_export
 from halo.checkpoint.config_export import export_source_config_schema, save_model_config
 from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
-from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.model_loading.model_preparation import auto_load_model
@@ -343,31 +343,64 @@ def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
 
 
-def test_a_hub_source_is_read_at_the_revision_the_writer_names(tmp_path, monkeypatch):
-    """The repo's default branch dropped its remote code after the run: an export pinned to the commit the weights
-    were read at still carries that commit's schema and modules."""
+_MOVED_REPO = "halo-test/source-schema"
+_TRAINED_COMMIT, _MOVED_COMMIT = "1" * 40, "2" * 40
+
+
+@pytest.fixture
+def moved_source(tmp_path, monkeypatch) -> _SourceFamily:
+    """:data:`_MOVED_REPO` in an offline Hub cache: Step-3.7's source at the commit a run loaded, and a default branch
+    that has since dropped its remote code."""
     family = FIXTURES[EPStep3p7MoELayer]
-    repo, trained, moved = "halo-test/source-schema", "1" * 40, "2" * 40
-    storage = tmp_path / "hub" / f"models--{repo.replace('/', '--')}"
-    _write_source(storage / "snapshots" / trained, family.source_config, family.modules)
+    storage = tmp_path / "hub" / f"models--{_MOVED_REPO.replace('/', '--')}"
+    _write_source(storage / "snapshots" / _TRAINED_COMMIT, family.source_config, family.modules)
     _write_source(
-        storage / "snapshots" / moved, {k: v for k, v in family.source_config.items() if k != "auto_map"}, {}
+        storage / "snapshots" / _MOVED_COMMIT,
+        {key: value for key, value in family.source_config.items() if key != "auto_map"},
+        {},
     )
     os.makedirs(storage / "refs")
-    (storage / "refs" / "main").write_text(moved)
+    (storage / "refs" / "main").write_text(_MOVED_COMMIT)
     monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
     monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
-    model = _model_from(EPStep3p7MoELayer, str(storage / "snapshots" / trained))
-    export = str(tmp_path / "export")
+    return family
 
-    save_full_checkpoint(model, export, source_dir=repo, source_revision=trained)
 
+def _loaded_at_the_trained_commit(tmp_path):
+    """A Step-3.7 model stamped as ``load_distributed_model`` stamps a Hub load of :data:`_MOVED_REPO`."""
+    snapshot = tmp_path / "hub" / f"models--{_MOVED_REPO.replace('/', '--')}" / "snapshots" / _TRAINED_COMMIT
+    model = _model_from(EPStep3p7MoELayer, str(snapshot))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, _MOVED_REPO)
+    setattr(model, LOADED_WEIGHTS_REVISION_ATTR, _TRAINED_COMMIT)
+    return model
+
+
+def _assert_the_trained_commits_schema(export: str, family: _SourceFamily) -> None:
     with open(os.path.join(export, "config.json")) as handle:
         payload = json.load(handle)
-    assert payload["auto_map"] == family.source_config["auto_map"]
+    assert payload.get("auto_map") == family.source_config["auto_map"]
     assert all(key in family.spelled(payload) for key in family.source_spellings)
     assert all(os.path.isfile(os.path.join(export, name)) for name in family.modules)
+
+
+def test_a_hub_source_is_read_at_the_revision_the_writer_names(tmp_path, moved_source):
+    export = str(tmp_path / "export")
+
+    save_full_checkpoint(
+        _loaded_at_the_trained_commit(tmp_path), export, source_dir=_MOVED_REPO, source_revision=_TRAINED_COMMIT
+    )
+
+    _assert_the_trained_commits_schema(export, moved_source)
+
+
+def test_a_training_save_reads_its_hub_source_at_the_commit_the_weights_were_read_at(tmp_path, moved_source):
+    export = str(tmp_path / "export")
+    os.makedirs(export)
+
+    save_model_config(_loaded_at_the_trained_commit(tmp_path), export)
+
+    _assert_the_trained_commits_schema(export, moved_source)
 
 
 def test_a_change_the_source_schema_swallows_is_refused(tmp_path):

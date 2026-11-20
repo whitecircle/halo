@@ -2207,6 +2207,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--method preference/smpo",
             "--method reward/reward-model",
             "--method sft",
+            Row("--method sft --cp-size 2", markers=("gpu", "core", "2gpu", "cp", "qwen3")),
             *_rows(
                 ("--method grpo/environmental", "--method grpo/online"),
                 markers=("gpu", "full", "2gpu", "vllm_server", "qwen3"),
