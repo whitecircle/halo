@@ -111,6 +111,7 @@ def test_the_roster_routing_this_way_is_exactly_the_families_that_do():
         "EPLagunaMoELayer",
         "EPMistral4MoELayer",
         "EPGlm5NextMoELayer",
+        "EPInkling2MoELayer",
         "EPNemotronHMoELayer",
         "EPStep3p7MoELayer",
     }

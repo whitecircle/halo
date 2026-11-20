@@ -19,6 +19,7 @@ from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
+from halo.model_loading.parallel.frozen_experts import install_frozen_bank_slots
 from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
@@ -51,6 +52,33 @@ def _check_fused_experts_mapped(base: LazyLoadPlan) -> None:
         )
 
 
+def _meta_shell(
+    model_name_or_path: str,
+    model_class,
+    config,
+    *,
+    dtype,
+    trust_remote_code: bool,
+    frozen_quantized_experts: bool,
+    **model_kwargs,
+) -> nn.Module:
+    """The meta shell the lazy plan targets; frozen experts trade their bf16 weights for the release's packed slots.
+    That shell is built from the config alone: a meta ``from_pretrained`` checks the packed release tensors against the
+    bf16 expert shapes and refuses them."""
+    shell = instantiate_on_meta(
+        model_name_or_path,
+        model_class,
+        config,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        config_only=frozen_quantized_experts,
+        **model_kwargs,
+    )
+    if frozen_quantized_experts:
+        install_frozen_bank_slots(shell, model_name_or_path)
+    return shell
+
+
 def load_ep_model_lazy(
     model_name_or_path: str,
     ep_config: EPConfig,
@@ -60,10 +88,12 @@ def load_ep_model_lazy(
     model_class=None,
     keep_fp32_params: bool = False,
     preserve_checkpoint_precision: bool = False,
+    frozen_quantized_experts: bool = False,
     **model_kwargs,
 ) -> nn.Module:
     """COLLECTIVE: stream a MoE from safetensors, each rank reading only its expert slice or fusing only its experts,
-    then EP-patch. ``preserve_checkpoint_precision`` (a resume) requires every fp32 master restored."""
+    then EP-patch. ``preserve_checkpoint_precision`` (a resume) requires every fp32 master restored;
+    ``frozen_quantized_experts`` keeps the release's packed experts as frozen banks."""
     model_class = model_class or AutoModelForCausalLM
     rank = get_global_rank()
     logger.info(f"[Rank {rank}] EP lazy loader: {model_name_or_path}")
@@ -74,8 +104,14 @@ def load_ep_model_lazy(
         ep_config,
         dtype=dtype,
         meta_init_phase="ep_lazy_meta_init",
-        build_meta_shell=lambda _incomplete: instantiate_on_meta(
-            model_name_or_path, model_class, config, dtype=dtype, trust_remote_code=trust_remote_code, **model_kwargs
+        build_meta_shell=lambda _incomplete: _meta_shell(
+            model_name_or_path,
+            model_class,
+            config,
+            dtype=dtype,
+            trust_remote_code=trust_remote_code,
+            frozen_quantized_experts=frozen_quantized_experts,
+            **model_kwargs,
         ),
     )
     # Before the absent-module sweep, which would otherwise re-initialize the whole model first.
@@ -176,7 +212,7 @@ def load_ep_model(
                 "(higher CPU RAM than lazy safetensors path)"
             )
         method = "huggingface_ep_lazy_disabled"
-    elif agree_lazy_load(source):
+    elif agree_lazy_load(source, frozen_quantized_experts=pc.frozen_quantized_experts):
         if main:
             logger.info(f"[Rank 0] Using lazy safetensors loader from {source.local_dir}")
         return timed_global_load(
@@ -188,8 +224,14 @@ def load_ep_model(
                 model_class=model_class,
                 keep_fp32_params=pc.fp32_non_ep_params,
                 preserve_checkpoint_precision=preserve_checkpoint_precision,
+                frozen_quantized_experts=pc.frozen_quantized_experts,
                 **from_pretrained_kwargs,
             ),
+        )
+    elif pc.frozen_quantized_experts:
+        reason = lazy_load_blocker(source.local_dir, frozen_quantized_experts=True) or LAZY_NESTED_EXPERT_KEYS
+        raise ValueError(
+            f"frozen_quantized_experts needs the lazy safetensors loader, which {source.local_dir} cannot take ({reason})."
         )
     else:
         # A declared blocker is the checkpoint's property (from_pretrained is its route); missing safetensors is an

@@ -25,6 +25,9 @@ from tests.common.repo import REPO_ROOT
 _SAME_NAME_FIELDS = {f.name for f in fields(ParallelismArguments)} & {
     f.name for f in fields(ParallelismConfig) if f.init
 }
+# Valid only beside an EP group and expert LoRA, which this one-process sweep cannot build; its rules are tested in
+# tests/cpu/models/test_inkling2_frozen_experts.py.
+_SWEPT_FIELDS = _SAME_NAME_FIELDS - {"frozen_quantized_experts"}
 
 _LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 
@@ -133,7 +136,7 @@ def _non_default_value(arg_field: str):
     raise AssertionError(f"no non-default value rule for ParallelismArguments.{arg_field}: {annotation}")
 
 
-@pytest.mark.parametrize("arg_field", sorted(_SAME_NAME_FIELDS))
+@pytest.mark.parametrize("arg_field", sorted(_SWEPT_FIELDS))
 def test_every_same_name_knob_lands_on_the_built_config(arg_field):
     """A forward that goes missing leaves the runtime default standing, which is the value the user overrode."""
     requested = _non_default_value(arg_field)

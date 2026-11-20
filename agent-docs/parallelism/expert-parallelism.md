@@ -37,6 +37,7 @@ the gather and in `merge_ep_shards.py` alike. Callers reach the layers through `
 | GLM-4 MoE Lite | `Glm4MoeLiteMoE` | `EPGlm4MoELayer` | [glm4.md](../models/glm4.md) |
 | Laguna | `LagunaSparseMoeBlock` | `EPLagunaMoELayer` (subclasses `EPGlm4MoELayer`) | [laguna.md](../models/laguna.md) |
 | Inkling | `InklingMoE` | `EPInklingMoELayer` | [inkling.md](../models/inkling.md) |
+| Inkling 2 | `Inkling2SparseMoeBlock` | `EPInkling2MoELayer` | [inkling2.md](../models/inkling2.md) |
 | Bailing MoE / Ling | `BailingMoeV2SparseMoeBlock`, `BailingMoeV3SparseMoeBlock` (Ling 3.0) | `EPBailingMoELayer` | [bailing.md](../models/bailing.md) |
 | LFM-2 MoE | `Lfm2MoeSparseMoeBlock` | `EPLfm2MoELayer` | [lfm2.md](../models/lfm2.md) |
 | Gemma 4 MoE | `Gemma4TextExperts` | `EPGemma4MoELayer` | [gemma4.md](../models/gemma4.md) |
@@ -77,6 +78,7 @@ EP surface. The table is pinned against the specs and classes by
 | Gemma 4 MoE | routing replay | `FAMILY.supports_routing_replay` |
 | Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `FAMILY.supports_fp32_non_ep_params` |
 | Inkling | RL weight sync — no sync into either pinned engine's Inkling loader validated | `FAMILY.weight_sync_refusal` |
+| Inkling 2 | RL weight sync — no sync into either pinned engine's Inkling 2 loader validated | `FAMILY.weight_sync_refusal` |
 | Zaya | gradient checkpointing | `FAMILY.supports_gradient_checkpointing` |
 | Zaya | routing replay | `FAMILY.supports_routing_replay` |
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |

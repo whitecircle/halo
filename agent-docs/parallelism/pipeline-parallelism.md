@@ -138,6 +138,7 @@ MTP-carrying checkpoint names that reason first.
 | Nemotron-H text class (`NemotronHModel`) | registered | any split offset, as its blocks follow no period and each reads its mask by its own `block_type`; without a cache every Mamba layer scans from a zero state. `text_only_model: true`, since the composite keeps its head below its root and is refused. `auto` resolves to `bias_update` on the EP layers. The hub's `num_nextn_predict_layers: 1` is metadata and passes |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
+| Inkling 2 (`Inkling2TextModel`) | refused | each decoder layer reads a learned mix of every completed residual block before it (`block_states`), a stack the loop grows layer by layer, which one activation at a stage boundary does not carry |
 | Any other backbone (Bailing, Mistral 4, LFM-2, Cohere2 MoE, Qwen3-Next, …) | not registered | refused by name |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second

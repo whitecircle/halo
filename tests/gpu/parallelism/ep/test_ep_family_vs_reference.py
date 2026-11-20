@@ -255,7 +255,7 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1, *, ove
     log(f"{family}: {pc.mode_string} {overrides or ''}")
     torch.manual_seed(SEED)
     reference = tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides).to(ctx.device, torch.bfloat16)
-    # Match the family patches every production load applies.
+    # The patches every production load applies: Inkling 2's stock router cannot run its bf16-cast weight.
     apply_family_patches(reference.config, None)
     if family in FP32_BIAS_FAMILIES:
         fill_release_scale_bias(reference)

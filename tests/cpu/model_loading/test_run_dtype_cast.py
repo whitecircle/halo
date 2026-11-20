@@ -105,6 +105,8 @@ NON_MODEL_BUILDERS = frozenset(
 # A lazy loader plans against ``from_pretrained``'s meta shell or, for ``config_shell``, the config-built one; PP loads
 # the single stage of a one-stage split.
 FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
+# The pinned families whose text model a declared PP refusal claims, as their pipeline load refuses before the pins.
+_PP_REFUSED_FAMILIES = {"inkling2_text"}
 
 
 class _Mixed(nn.Module):
@@ -432,6 +434,8 @@ def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, mon
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
+    if loader.startswith("pp_stage") and family in _PP_REFUSED_FAMILIES:
+        pytest.skip(f"{family} is refused for pipeline parallelism")
     path = stored_fp32_checkpoints[family]
     pinned, stored = stored_fp32_pins(family, path)
 
