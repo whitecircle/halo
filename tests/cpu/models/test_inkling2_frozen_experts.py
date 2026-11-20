@@ -1,6 +1,7 @@
 """Inkling 2's EP layer over frozen NVFP4/MXFP8 expert banks: the same function as the upstream block on the
 dequantized weights, LoRA adapters that train exactly as over a bf16 base, and no expert weight left to train."""
 
+import contextlib
 import copy
 from types import SimpleNamespace
 
@@ -17,6 +18,7 @@ from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELaye
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
 from halo.entrypoints import script
 from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.parallel import whole_model
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -178,6 +180,35 @@ def test_frozen_layer_refuses_every_expert_gather_and_keeps_banks_out_of_checkpo
         layer.gather_expert_state_dict()
     assert not [key for key in layer.state_dict() if "_frozen_" in key]
     assert {f"{slot.weight}_lora_{side}" for slot in FROZEN_SLOTS for side in "AB"} <= set(layer.state_dict())
+
+
+@pytest.mark.parametrize("quant_format", FORMATS)
+def test_the_load_warms_every_frozen_bank_behind_the_fence(quant_format, monkeypatch):
+    """The load's warm-up reads the banks of each EP layer in the model, frozen or not, inside the join's barrier."""
+    _reference, frozen = _dequantized_and_frozen(quant_format, torch.float32)
+    frozen_layer = EPInkling2MoELayer(frozen, single_process_ep_config(E))
+    bf16_layer = EPInkling2MoELayer(_block(torch.float32), single_process_ep_config(E))
+    assert bf16_layer.frozen_expert_banks() == ()
+    events = []
+
+    @contextlib.contextmanager
+    def fence(_what):
+        events.append("enter")
+        yield
+        events.append("exit")
+
+    monkeypatch.setattr(whole_model, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(whole_model, "barrier_on_exit", fence)
+    for attention_warm_up in ("warm_fa4_kernels", "warm_flex_sliding_kernels", "warm_masked_matmul_kernels"):
+        monkeypatch.setattr(whole_model, attention_warm_up, lambda *a, **k: None)
+    monkeypatch.setattr(whole_model, "warm_fused_dequant_kernels", lambda banks: events.append(list(banks)))
+    whole_model.warm_attention_kernels(nn.ModuleList([bf16_layer, frozen_layer]), dtype=torch.bfloat16)
+
+    entered, banks, left = events
+    assert (entered, left) == ("enter", "exit")
+    assert [bank.quant_format for bank in banks] == [quant_format] * len(FROZEN_SLOTS)
+    for bank, slot in zip(banks, FROZEN_SLOTS, strict=True):
+        assert bank.data is getattr(frozen_layer, f"{slot.weight}_frozen_data")
 
 
 _FROZEN_OK = {"ep_size": 2, "frozen_quantized_experts": True}

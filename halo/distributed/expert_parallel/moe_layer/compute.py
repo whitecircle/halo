@@ -13,6 +13,7 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
+from halo.kernels.lowp.frozen_bank import FrozenExpertBank
 from halo.kernels.lowp.spec import QuantFormat
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
@@ -56,6 +57,10 @@ class EPExpertComputeMixin:
         self._lowp_quant_format = quant_format
         self._lowp_weight_cacheable = weight_cacheable
         return self._use_grouped_mm
+
+    def frozen_expert_banks(self) -> tuple[FrozenExpertBank, ...]:
+        """The frozen quantized banks this layer computes its experts from: none where its experts are parameters."""
+        return ()
 
     def _resolve_activation(self, source: nn.Module, *, original_layer: nn.Module) -> None:
         """Set ``act_fn`` from ``source``, else by name off ``original_layer`` or its config, and latch the fused combine

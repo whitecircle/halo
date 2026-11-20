@@ -113,6 +113,12 @@ It is never auto-selected. With `HALO_DEEPGEMM_NATIVE=1`, every grouped expert G
 
 The native path requires the `deep_gemm` wheel, built into the **Blackwell** image only (its kernels are the SM100 block-scaled grouped ones). On Hopper `HALO_DEEPGEMM_NATIVE=1` cannot be honored; `use_deepgemm` says so once and the simulated path runs. DeepGEMM officially targets SM90 (Hopper) and SM100 (B200/GB200); on **B300 (sm_103a)** it runs through JIT sm_100f forward-compat (no sm_103-specific path).
 
+## Frozen expert banks
+
+Under `frozen_quantized_experts` an EP layer keeps a release's NVFP4/MXFP8 experts packed and dequantizes each bank to bf16 for every expert GEMM (`FrozenExpertBank`, `halo/kernels/lowp/frozen_bank.py`; [Inkling 2 → Frozen quantized experts](../models/inkling2.md#frozen-quantized-experts)). This is the release's own precision, not QAT.
+
+On CUDA a bank whose input width `K` is a multiple of 256 dequantizes in one fused Triton kernel, `dequantize_bank_triton` (`halo/kernels/lowp/dequant_triton.py`), bit-identical to the eager `dequantize`. `supports_fused_dequant` is the rule; a CUDA bank at any other `K` takes the eager path and logs one warning per format and `K`, and a CPU bank is always eager. The kernel has one binary per format and `K`, which the load-time warm-up (`warm_attention_kernels`) compiles on every rank behind its barrier, so no rank compiles between a dispatch and its combine. Timing: [Inkling 2 → Measured](../models/inkling2.md#measured).
+
 ## Formats — MX vs NV
 
 A block-scaled format is defined by element type, scale type, and block size. MX (OCP Microscaling) uses a power-of-two `e8m0` shared exponent per 32-element block — coarse but cheap and exact, so the simulated weight round-trip compiles bit-identically. NV (`nvfp4`) uses a finer `e4m3` scale per 16-element block — more accurate, but the non-power-of-two divide does not compile bit-identically, so its weight round-trip takes the fused kernel instead of a compiled one.

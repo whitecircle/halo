@@ -110,6 +110,10 @@ The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.
 
 ## Measured
 
-Inkling-2-Small, LoRA r16 on attention q/k/v/o and the experts, 4× B300 at EP4 with `frozen_quantized_experts`: the load takes ~17 s per rank from local disk; a steady step takes 14.5 s at ~760 tokens/GPU/step, with 86–90% of GPU time in the bf16 decode of the frozen banks, the bottleneck. Over 150 steps GSM8K held-out loss goes 0.549 → 0.136, ARC-Challenge `acc_norm` 0.777 → 0.779 and HellaSwag (1k) `acc_norm` 0.752 → 0.756.
+Each frozen bank dequantizes in one [fused Triton kernel](../optimization/low-precision-moe-kernels.md#frozen-expert-banks), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
 
-CPU coverage: `tests/cpu/models/test_inkling2_frozen_experts.py`, `tests/cpu/kernels/test_frozen_bank.py`. GPU gates: `test_ep_family_vs_reference.py --family inkling2_text` (with and without `--expert-tp-size 2`), `test_lazy_load_inkling2_frozen.py`, `test_lora_merged_save_resume.py --family inkling2_text`.
+Inkling-2-Small, LoRA r16 on attention q/k/v/o and the experts, 4× B300 at EP4 with `frozen_quantized_experts`: the load takes ~17 s per rank from local disk. Over 150 steps GSM8K held-out loss goes 0.549 → 0.136, ARC-Challenge `acc_norm` 0.777 → 0.779 and HellaSwag (1k) `acc_norm` 0.752 → 0.756.
+
+Environmental GRPO with the expert example's settings (LoRA r8 on `o_proj` and the routed experts, EP2 on two B300s beside a two-B300 server, one micro-batch per pass, importance weights from the loss forward): a step takes 14–26 s at 8 rollouts of about 300 tokens. The forward and backward take 2.3–4.3 s of it, and the adapter sync, which publishes the 4.8 GB adapter and loads it on the server, 8–18 s.
+
+CPU coverage: `tests/cpu/models/test_inkling2_frozen_experts.py`, `tests/cpu/kernels/test_frozen_bank.py`. GPU gates: `test_ep_family_vs_reference.py --family inkling2_text` (with and without `--expert-tp-size 2`), `test_lazy_load_inkling2_frozen.py`, `test_lora_merged_save_resume.py --family inkling2_text`, `test_frozen_bank_fused_dequant.py`.
