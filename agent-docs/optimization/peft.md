@@ -493,7 +493,8 @@ A Hub base is read at the commit `adapter_config.json` records
 `convert_to_bf16.py --check_inference` alike, so a default branch that moved after the run does not change what the
 adapter is folded into, nor the config schema and remote-code modules a source-schema family's merge carries. An
 adapter that records none (stock PEFT writes none unless asked) merges into the default branch with a warning;
-`--base_revision` names the commit for it, and overrides a recorded one with a warning.
+`--base_revision` names the commit for it, and overrides a recorded one with a warning. It takes a commit hash; a
+branch name is resolved again by each read of the base.
 
 A run whose `added_special_tokens` outgrew the checkpoint's embedding trained on rows no base holds. The merge (and
 `convert_to_bf16.py --check_inference`'s adapter load) grows the base to the adapter directory's tokenizer under the

@@ -153,8 +153,9 @@ weights:
 
 For a LoRA run, upload the adapter directory, or merge it with
 `merge-peft-adapters` for a standalone model. The adapter records the Hub commit
-of its base, and the merge reads the base at that commit. Load an uploaded
-adapter with `PeftModel.from_pretrained`.
+of its base, and the merge reads the base at that commit; `--base_revision`
+names it for an adapter that records none. Load an uploaded adapter with
+`PeftModel.from_pretrained`.
 
 The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It
 pushes `log/run.log` and, for online or async GRPO, the `completions/` prompts

@@ -81,7 +81,8 @@ Examples:
         default=None,
         help="Hub revision to read the base at, in place of the commit adapter_config.json records. For an adapter "
         "that records none (stock PEFT writes none unless asked) whose run did not train on the base's default "
-        "branch; ignored for a local base.",
+        "branch; ignored for a local base. Give a commit hash: a branch name is resolved again by each read of the "
+        "base.",
     )
     parser.add_argument(
         "--fp32_norms",
