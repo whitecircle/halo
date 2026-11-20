@@ -29,7 +29,7 @@ from halo.kernels.moe_permute import MoEWeightedUnpermute, padded_gather_reduce
 HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 2816, 704, 128, 8
 
 # What ``_sort_tokens_for_grouped_mm`` reads off the layer: one EP rank holding every expert.
-_LAYER = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS)
+_LAYER = SimpleNamespace(ep_size=1, experts_per_rank=EXPERTS, _uses_padded_groups=False)
 
 
 def time_ms(fn, warmup: int = 5, iters: int = 25) -> float:
@@ -70,14 +70,14 @@ class _PaddedGatherPermute(torch.autograd.Function):
     """``tokens[sorted_token_idx]``, with the padded gather-sum as its backward."""
 
     @staticmethod
-    def forward(ctx, tokens, sorted_token_idx, inv_map):
+    def forward(ctx, tokens, sorted_token_idx, inv_map, padded=False):
         ctx.save_for_backward(inv_map)
         return tokens.index_select(0, sorted_token_idx)
 
     @staticmethod
     def backward(ctx, grad_sorted):
         (inv_map,) = ctx.saved_tensors
-        return padded_gather_reduce(grad_sorted, inv_map), None, None
+        return padded_gather_reduce(grad_sorted, inv_map), None, None, None
 
 
 class _PaddedGatherUnpermute(torch.autograd.Function):

@@ -156,7 +156,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         out = self._expert_proj(x, weight_attr, offs, out_dtype)
         bias = getattr(self, f"{weight_attr}_bias", None)
         # MoEExpertBiasGather's backward is an atomic-free GEMM: index_add's value, no bf16 atomic.
-        return out if bias is None else out + MoEExpertBiasGather.apply(bias, eids)
+        return out if bias is None else out + MoEExpertBiasGather.apply(bias, eids, self._uses_padded_groups)
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Every path runs the same Triton kernel and differs only in how the halves reach it: grouped-GEMM and ETP

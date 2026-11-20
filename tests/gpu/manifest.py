@@ -1057,6 +1057,26 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    "parallelism/ep/test_deepgemm_padded_groups.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3", "gptoss"),
+        # Each argument set at EP 4 and at EP 1, where the padded sort is sized by a count readback.
+        args_matrix=tuple(
+            row
+            for args in (
+                "--family qwen3",
+                "--family qwen3_5",
+                "--family gpt_oss",
+                "--family qwen3 --precision mxfp4",
+                "--family qwen3 --backward bf16",
+            )
+            for row in (
+                args,
+                Row(f"{args} --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3", "gptoss")),
+            )
+        ),
+        timeout=900,
+    ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1500
