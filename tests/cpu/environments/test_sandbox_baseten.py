@@ -484,6 +484,7 @@ def test_expired_sandbox_is_an_error_then_replaced(fake):
         gone = session.run("print(2)")
         assert gone.error is not None and "404" in gone.error and gone.returncode is None
         assert "Resource 'sbx-1' is currently not available." in gone.error
+        assert sandbox._live_sandboxes == set(), "closing has no delete to send for a sandbox that is gone"
         with pytest.raises(SandboxInfraError):
             fake.deleted.append("sbx-2")
             session.write_file("a.txt", "1")

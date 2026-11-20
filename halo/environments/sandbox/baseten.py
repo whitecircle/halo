@@ -333,10 +333,14 @@ class BasetenSandbox(SandboxExecutor):
             self._live_sandboxes.add(sandbox)
         return sandbox
 
-    def delete_sandbox(self, sandbox: Sandbox, *, at_exit: bool = False) -> None:
-        """Never raises: a sandbox that could not be deleted is removed by its idle expiration."""
+    def forget_sandbox(self, sandbox: Sandbox) -> None:
+        """Baseten no longer has ``sandbox``, so closing has nothing to delete."""
         with self._lock:
             self._live_sandboxes.discard(sandbox)
+
+    def delete_sandbox(self, sandbox: Sandbox, *, at_exit: bool = False) -> None:
+        """Never raises: a sandbox that could not be deleted is removed by its idle expiration."""
+        self.forget_sandbox(sandbox)
         try:
             self.api.delete_sandbox(sandbox.name, at_exit=at_exit)
         except SandboxInfraError as error:
@@ -372,6 +376,7 @@ class BasetenSession(RunnerSession):
                 )
             return decode_reply(process.stdout)
         except SandboxGone:
+            self.executor.forget_sandbox(sandbox)
             self._sandbox = None
             self.directory_lost()
             raise
