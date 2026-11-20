@@ -13,7 +13,8 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
-from halo.kernels.lowp.spec import QuantFormat
+from halo.kernels.lowp.deepgemm import warm_fp8_wgrad
+from halo.kernels.lowp.spec import LowpSpec
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
 from halo.models.moe.expert_layout import ExpertLayoutKind
@@ -40,7 +41,7 @@ class EPExpertComputeMixin:
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     _use_grouped_mm: bool
     _expert_kernels_warmed: bool
-    _lowp_quant_format: QuantFormat | None
+    _lowp: LowpSpec | None
     _lowp_weight_cacheable: bool
     _expert_lora_attrs: frozenset[str]
     _expert_adapters_enabled: bool
@@ -50,11 +51,10 @@ class EPExpertComputeMixin:
     # Fused GLU-combine kernel, derived from the resolved activation by ``_resolve_activation``; None = eager.
     _fused_glu_mul: Callable[[torch.Tensor, torch.Tensor], torch.Tensor] | None = None
 
-    def set_lowp_compute(self, quant_format: QuantFormat, *, weight_cacheable: bool) -> bool:
-        """Set this layer's expert-compute quantization format; return whether it applies, False on the
+    def set_lowp_compute(self, lowp: LowpSpec, *, weight_cacheable: bool) -> bool:
+        """Set this layer's expert-compute precision from ``lowp``; return whether it applies, False on the
         per-expert loop, where the grouped kernels and their fake-quant never run."""
-        self._lowp_quant_format = quant_format
-        self._lowp_weight_cacheable = weight_cacheable
+        self._lowp, self._lowp_weight_cacheable = lowp, weight_cacheable
         return self._use_grouped_mm
 
     def _resolve_activation(self, source: nn.Module, *, original_layer: nn.Module) -> None:
@@ -179,7 +179,8 @@ class EPExpertComputeMixin:
         one past :data:`GROUPED_MM_SMALL_TILE_DIM`: torch's bf16 grouped GEMM picks its tile by mean rows per group,
         which change with every receive. The backward also covers the expert-bias gather, whose one-hot GEMM cuBLAS
         picks by receive length. The RNG is restored, since expert-LoRA dropout draws; adapters run even if the first
-        forward has them off, as training does."""
+        forward has them off, as training does. Under the native fp8 backward each trainable bank's weight gradient
+        also has a kernel for long groups, which these few rows per expert never reach."""
         experts, adapters_enabled = self.experts_per_rank, self._expert_adapters_enabled
         self._expert_adapters_enabled = True
         try:
@@ -193,6 +194,10 @@ class EPExpertComputeMixin:
                     with torch.amp.autocast("cuda", dtype=dtype):
                         out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
                     torch.autograd.grad(out.sum(), [tokens, *trainable], allow_unused=True)
+            if self._lowp is not None and self._lowp.native and self._lowp.backward_precision == "fp8":
+                for _, bank in self._base_expert_named_params():
+                    if bank.ndim == 3 and bank.requires_grad:  # [E, K, N]; a bias has no GEMM of its own
+                        warm_fp8_wgrad(*bank.shape, dtype, device)
         finally:
             self._expert_adapters_enabled = adapters_enabled
 
@@ -307,7 +312,7 @@ class EPExpertComputeMixin:
             mat_a,
             mat_b,
             offs=offs,
-            quant_format=self._lowp_quant_format if lowp else None,
+            lowp=self._lowp if lowp else None,
             weight_cacheable=self._lowp_weight_cacheable,
         )
 

@@ -16,7 +16,7 @@ _AMAX_CHUNK = 8192
 
 
 @triton.jit
-def _mul_rn(a, b):
+def mul_rn(a, b):
     """IEEE fp32 multiply with subnormals preserved. Triton compiles arithmetic/libdevice with
     flush-to-zero; PyTorch's CUDA kernels don't, so the scaling path must be explicit PTX."""
     return tl.inline_asm_elementwise(
@@ -69,7 +69,7 @@ def _e8m0_exponent(x, FMAX: tl.constexpr, TINY: tl.constexpr):
     e8m0's [-127, 127]. Torch on CUDA divides by a Python scalar as a multiply by its fp32 reciprocal, which can land
     one ulp from a true division and move the exponent, so the kernel does the same."""
     amax = tl.max(tl.abs(x), axis=1)
-    y = _mul_rn(tl.maximum(amax, TINY), tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX))
+    y = mul_rn(tl.maximum(amax, TINY), tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX))
     se = libdevice.ceil(libdevice.log2(y))
     return tl.minimum(tl.maximum(se, -127.0), 127.0).to(tl.int32)
 
@@ -82,8 +82,8 @@ def _e2m1_level(scaled, FMAX: tl.constexpr):
     ``scaled < 0`` as in eager, applied by a multiply: Triton lowers a float negation to ``0 - x``, which loses -0.0."""
     mag = tl.minimum(tl.abs(scaled), FMAX)
     e = tl.maximum(((mag.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127, 0)
-    level = _mul_rn(libdevice.rint(_mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
-    return _mul_rn(level, tl.where(scaled < 0, -1.0, 1.0))
+    level = mul_rn(libdevice.rint(mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
+    return mul_rn(level, tl.where(scaled < 0, -1.0, 1.0))
 
 
 @triton.jit
@@ -92,7 +92,7 @@ def _nvfp4_global_scale(amax, FMAX: tl.constexpr, SMAX: tl.constexpr, TINY: tl.c
     divide is a multiply by its fp32 reciprocal, and a NaN amax gives a NaN scale, as ``clamp`` keeps it. The quotient
     is subnormal below a tensor amax of about 3.2e-35, which libdevice's ``log2`` handles as PyTorch's does."""
     floored = tl.where(amax != amax, amax, tl.maximum(amax, TINY))
-    y = _mul_rn(floored, tl.math.div_rn(tl.full([], 1.0, tl.float32), SMAX * FMAX))
+    y = mul_rn(floored, tl.math.div_rn(tl.full([], 1.0, tl.float32), SMAX * FMAX))
     # CUDA's inexact exp2(-127) stays, unlike an MX scale, which is the divisor itself and can be exact: nvfp4 divides by
     # the e4m3 block scale times this one, so only copying CUDA keeps the kernel bit-identical to eager.
     return _cuda_exp2_of_integer(libdevice.ceil(libdevice.log2(y)))
@@ -109,10 +109,10 @@ def mxfp8_fake_quant_kernel(
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     se_i = _e8m0_exponent(x, FMAX, TINY)
 
-    v = _mul_rn(x, _pow2(-se_i)[:, None])
+    v = mul_rn(x, _pow2(-se_i)[:, None])
     v = tl.minimum(tl.maximum(v, -FMAX), FMAX)
     q = v.to(tl.float8e4nv).to(tl.float32)
-    out = _mul_rn(q, _pow2(se_i)[:, None])
+    out = mul_rn(q, _pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
@@ -127,8 +127,8 @@ def mxfp4_fake_quant_kernel(
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     se_i = _e8m0_exponent(x, FMAX, TINY)
 
-    q = _e2m1_level(_mul_rn(x, _pow2(-se_i)[:, None]), FMAX)
-    out = _mul_rn(q, _pow2(se_i)[:, None])
+    q = _e2m1_level(mul_rn(x, _pow2(-se_i)[:, None]), FMAX)
+    out = mul_rn(q, _pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
@@ -168,13 +168,13 @@ def nvfp4_fake_quant_kernel(
     amax = tl.max(tl.abs(x), axis=1)
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     amax = tl.where(has_nan, float("nan"), amax)  # Triton's max drops a NaN, eager's amax keeps it
-    scale = _div_rn(_mul_rn(amax, tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX)), global_scale)
+    scale = _div_rn(mul_rn(amax, tl.math.div_rn(tl.full([], 1.0, tl.float32), FMAX)), global_scale)
     scale = tl.minimum(scale, SMAX, propagate_nan=tl.PropagateNan.ALL)
-    scale_f = _mul_rn(scale.to(tl.float8e4nv).to(tl.float32), global_scale)
+    scale_f = mul_rn(scale.to(tl.float8e4nv).to(tl.float32), global_scale)
     divisor = tl.where(scale_f == 0.0, 1.0, scale_f)
 
     q = _e2m1_level(_div_rn(x, divisor[:, None]), FMAX)
-    out = _mul_rn(q, scale_f[:, None])
+    out = mul_rn(q, scale_f[:, None])
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
 

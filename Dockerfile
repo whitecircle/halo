@@ -244,15 +244,16 @@ RUN NCCL_V=$(python /tmp/nccl_pin.py /tmp/uv.lock) \
     && pip install --no-build-isolation . \
     && rm -rf /tmp/DeepEP
 
-# DeepGEMM (Blackwell only): the native fp8/fp4 grouped MoE GEMM, opt-in via HALO_DEEPGEMM_NATIVE=1.
-# Pinned for reproducibility; JIT-compiles at runtime like DeepEP V2.
+# DeepGEMM (Blackwell only): the native fp8/fp4 grouped MoE GEMM, opt-in via lowp_backend: native.
+# Pinned for reproducibility; JIT-compiles at runtime like DeepEP V2. Its build includes elfutils' libdwfl.h.
 RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Installing DeepGEMM (native fp8/fp4 grouped MoE GEMM, SM100) ===" \
+      && apt-get update && apt-get install -y --no-install-recommends libdw-dev && rm -rf /var/lib/apt/lists/* \
       && export TORCH_CUDA_ARCH_LIST="10.0+PTX" \
       && export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:${CPATH} \
       && git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git /tmp/DeepGEMM \
       && cd /tmp/DeepGEMM \
-      && git checkout 559d79f \
+      && git checkout 5081f85 \
       && git submodule update --init --recursive \
       && pip install --no-build-isolation . \
       && cd / && rm -rf /tmp/DeepGEMM; \

@@ -15,6 +15,7 @@ from halo.distributed.expert_parallel.families import gpt_oss as gpt_oss_layer
 from halo.distributed.expert_parallel.moe_layer import compute
 from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.kernels import fused_glu, moe_permute, moe_route_sort
+from halo.kernels.lowp.spec import LowpSpec
 from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.grouped_gemm_layers import (
@@ -59,7 +60,7 @@ class _RecordingLayer(StubEPLayerBase):
         self._capture_routing = False
         self._expert_kernels_warmed = False
         self._use_grouped_mm = True
-        self._lowp_quant_format = None
+        self._lowp = None
         self._lowp_weight_cacheable = True
         self._expert_adapters_enabled = True
         self._perf = lambda _label: contextlib.nullcontext()
@@ -464,6 +465,30 @@ def test_the_rng_check_fails_its_negative_control(monkeypatch):
     before = torch.random.get_rng_state()
     _warm_up_launches(layer)
     assert not torch.equal(torch.random.get_rng_state(), before)
+
+
+@pytest.mark.parametrize("family", tuple(GEMM_FAMILIES))
+def test_the_native_fp8_backward_warms_each_trainable_banks_long_group_wgrad(monkeypatch, family):
+    """DeepGEMM compiles a second weight-gradient kernel for long groups, which the few rows per expert of the FFN
+    warm-up never reach: each trainable ``[E, K, N]`` bank warms it, a frozen bank and a bias do not, and neither does
+    a bf16 backward."""
+    warmed = []
+    monkeypatch.setattr(compute, "warm_fp8_wgrad", lambda *args: warmed.append(args))
+    layer = gemm_layer(family, "ep2", "defaults")
+    # The FFN itself needs the DeepGEMM wheel; its warm-up is the launch tests' above.
+    monkeypatch.setattr(type(layer), "_grouped_expert_ffn", lambda self, tokens, offs, expert_ids, dtype: tokens)
+    banks = [(name, bank) for name, bank in layer._base_expert_named_params() if bank.ndim == 3]
+    assert len(banks) >= 2 and all(bank.requires_grad for _, bank in banks)
+    banks[0][1].requires_grad_(False)
+    device = torch.device("cpu")
+
+    layer._lowp = LowpSpec(precision="fp8", backend="native")
+    layer._warm_expert_gemm(device, torch.bfloat16, layer.hidden_dim)
+    assert warmed == [], "a bf16 backward runs no DeepGEMM weight gradient"
+
+    layer._lowp = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
+    layer._warm_expert_gemm(device, torch.bfloat16, layer.hidden_dim)
+    assert warmed == [(*bank.shape, torch.bfloat16, device) for _, bank in banks[1:]]
 
 
 class _ScopeCachingDispatcher(_RecordingDispatcher):

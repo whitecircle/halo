@@ -11,6 +11,7 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_p
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
 from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, install_local_forward
+from halo.kernels.lowp.deepgemm import deepgemm_available
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
@@ -160,6 +161,11 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
     if not lowp.enabled:
         return {"precision": "bf16", "moe_layers": 0, "dense_linears": 0, "kept_blocks": []}
     precision, quant_format = lowp.precision, LOWP_RECIPES[lowp.precision].quant_format
+    if lowp.native and not deepgemm_available():
+        raise RuntimeError(
+            "lowp_backend='native' needs the deep_gemm package, built into the Blackwell image only (its kernels are "
+            "SM100 block-scaled). Run on that image, or set lowp_backend='simulated'."
+        )
 
     backbone_prefix = _text_backbone_prefix(model)
     block_indices = {
@@ -173,7 +179,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         for name, module in model.named_modules():
             if isinstance(module, EPMoELayerBase) and decoder_layer_index(name, backbone_prefix) not in kept:
                 moe_count += 1
-                if module.set_lowp_compute(quant_format, weight_cacheable=expert_weight_cacheable):
+                if module.set_lowp_compute(lowp, weight_cacheable=expert_weight_cacheable):
                     _verify_block_aligned_experts(name, module, precision, quant_format)
                 else:
                     loop_path_layers += 1
@@ -215,9 +221,11 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         )
 
     logger.info(
-        "Mixed-precision compute enabled: precision=%s (fake-quant) | MoE layers=%d, dense MLP linears=%d, "
+        "Mixed-precision compute enabled: precision=%s backend=%s backward=%s | MoE layers=%d, dense MLP linears=%d, "
         "blocks kept in bf16=%s (master weights remain bf16/fp32)",
         precision,
+        lowp.backend,
+        lowp.backward_precision,
         moe_count,
         dense_count,
         sorted(kept),

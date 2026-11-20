@@ -1,26 +1,60 @@
 #!/usr/bin/env python
-"""The opt-in native DeepGEMM fp8 / mxfp4 path: correctness of its forward, backward and per-step weight cache.
+"""The native DeepGEMM fp8 / mxfp4 path: correctness of its forward, its bf16 and fp8 backward and its per-step weight
+cache, and the warm-up of the weight-gradient kernel DeepGEMM compiles for long groups. mxfp4 also exercises the
+K-not-÷256 zero-pad (K=2880 → 3072)."""
 
-``deepgemm_available`` swallows every import error, so a broken ``deep_gemm`` must be told apart from an absent one, or
-both kernel checks vanish while the node exits 0. mxfp4 also exercises the K-not-÷256 zero-pad (K=2880 → 3072).
-"""
-
-import importlib
+import contextlib
 import os
+import subprocess
 import sys
+import tempfile
 
 import torch
 import torch.nn.functional as F
 
 from halo.kernels.lowp import deepgemm
-from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS, deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
+from halo.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from tests.common.numerics import fro_rel_err
 from tests.common.tolerances import TOL
 
 DEV = "cuda"
 
 # Lower bound > 0, so a silent bf16 fallback (relerr ≈ 0) fails.
-_BANDS = {"mxfp8": (0.005, 0.10), "mxfp4": (0.03, 0.30)}
+_FP8_BACKWARD = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
+_BANDS = {"fp8": (0.005, 0.10), "mxfp4": (0.03, 0.30)}
+_FP8_GRAD_BAND = (0.005, 0.10)
+_SHAPES = [
+    ("even", 8, 2880, 2880, [256] * 8),
+    ("uneven+empty", 8, 2880, 2880, [100, 245, 0, 156, 203, 0, 134, 90]),
+    # The narrow and few-row shapes a gate on width or rows per expert would divert.
+    ("one row", 4, 2048, 1024, [1] * 4),
+    ("narrow gate_up", 4, 256, 256, [64] * 4),
+    ("narrow down", 4, 128, 256, [64] * 4),
+    # Past the wgrad kernel's 128 experts per call.
+    ("130 experts", 130, 256, 512, [3, 0, 130] * 43 + [7]),
+    # A mean of 2048 rows per expert and more: the weight gradient's one-store-stage kernel, with an empty expert.
+    ("long groups", 4, 256, 256, [4096, 0, 4096, 2048]),
+]
+# A mean-reduced loss's scale: every gradient tile's largest element far under the reference cast's 1e-4 floor.
+_SMALL_GRADIENT = 1e-9
+
+
+@contextlib.contextmanager
+def _wgrad_output_poisoned():
+    """NaN in the weight-gradient kernel's unfilled output before each launch, so a block it skips reads as NaN."""
+    kernels, _ = deepgemm._deep_gemm()
+    real = kernels.k_grouped_fp8_gemm_tn_contiguous
+
+    def poisoned(a, b, d, *args, **kwargs):
+        d.fill_(float("nan"))
+        return real(a, b, d, *args, **kwargs)
+
+    kernels.k_grouped_fp8_gemm_tn_contiguous = poisoned
+    try:
+        yield
+    finally:
+        kernels.k_grouped_fp8_gemm_tn_contiguous = real
 
 
 def _bf16_ref(x, w, offs):
@@ -36,21 +70,13 @@ def _bf16_ref(x, w, offs):
 
 def test_deepgemm_forward_backward():
     torch.manual_seed(0)
-    for precision in DEEPGEMM_FORMATS:
-        lo, hi = _BANDS[precision]
-        for name, E, K, N, counts in [
-            ("even", 8, 2880, 2880, [256] * 8),
-            ("uneven+empty", 8, 2880, 2880, [100, 245, 0, 156, 203, 0, 134, 90]),
-            # The narrow and few-row shapes a gate on width or rows per expert would divert.
-            ("one row", 4, 2048, 1024, [1] * 4),
-            ("narrow gate_up", 4, 256, 256, [64] * 4),
-            ("narrow down", 4, 128, 256, [64] * 4),
-        ]:
+    for precision, (lo, hi) in _BANDS.items():
+        for name, E, K, N, counts in _SHAPES:
             T = sum(counts)
             x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
             w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * (K**-0.5)).requires_grad_(True)
             offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
-            out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision)
+            out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native"))
             ref = _bf16_ref(x.detach(), w.detach(), offs)
             rel = fro_rel_err(out.detach(), ref)
             assert lo < rel < hi, (
@@ -74,6 +100,37 @@ def test_deepgemm_forward_backward():
             )
 
 
+def test_deepgemm_fp8_backward():
+    """Both gradients within fp8's band of the bf16 ones, at a unit-scale gradient and at a mean-reduced loss's; the
+    lower bound fails a silent bf16 backward."""
+    torch.manual_seed(0)
+    lo, hi = _FP8_GRAD_BAND
+    cases = [(*s, torch.bfloat16, 1.0) for s in _SHAPES]
+    # An fp32 master takes its gradient in fp32, which the kernel accumulates into directly.
+    cases += [(*_SHAPES[1], torch.float32, 1.0), (*_SHAPES[1], torch.bfloat16, _SMALL_GRADIENT)]
+    for name, E, K, N, counts, w_dtype, grad_scale in cases:
+        T = sum(counts)
+        x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
+        w = (torch.randn(E, K, N, device=DEV, dtype=w_dtype) * (K**-0.5)).requires_grad_(True)
+        offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
+        g = torch.randn(T, N, device=DEV, dtype=torch.bfloat16) * grad_scale
+        out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=_FP8_BACKWARD)
+        with _wgrad_output_poisoned():
+            out.backward(g)
+        gx_ref = F.grouped_mm(g, w.detach().to(torch.bfloat16).transpose(-2, -1), offs=offs)
+        gw_ref = F.grouped_mm(x.detach().transpose(-2, -1), g, offs=offs)
+        assert w.grad.shape == w.shape and w.grad.dtype == w.dtype
+        rels = {"grad_x": fro_rel_err(x.grad, gx_ref), "grad_w": fro_rel_err(w.grad, gw_ref)}
+        for grad, rel in rels.items():
+            assert lo < rel < hi, f"fp8 {name}: {grad} rel-vs-bf16 {rel:.4f} outside band {lo}-{hi}"
+        empty = [e for e, c in enumerate(counts) if c == 0]
+        assert not w.grad[empty].any(), f"fp8 {name}: an expert routed no token got a weight gradient"
+        print(
+            f"  fp8 backward {name:14s} {str(w_dtype)[6:]:8s} T={T:5d} grad x{grad_scale:g} "
+            f"grad_x {rels['grad_x']:.4f} grad_w {rels['grad_w']:.4f} — OK"
+        )
+
+
 def _same_cast(a: tuple, b: tuple) -> bool:
     """As floats, the one read of fp8 elements the production path itself runs on CUDA."""
     return all(torch.equal(x.float(), y.float()) for x, y in zip(a, b, strict=True))
@@ -85,18 +142,19 @@ def test_weight_cache_across_steps():
     rows moves no block's largest element and so no scale."""
     E, K, N = 8, 2048, 2048
     offs = torch.cumsum(torch.full((E,), 256, device=DEV, dtype=torch.int32), 0).to(torch.int32)
-    for precision in DEEPGEMM_FORMATS:
+    for precision in _BANDS:
         torch.manual_seed(0)
         w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * (K**-0.5)).requires_grad_(True)
         opt = torch.optim.SGD([w], lr=1e-3)
         previous = None
         for step in range(3):
             x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
-            out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision)
-            served = deepgemm._weight_cache.get(w, (w._version, precision))
+            out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native"))
+            fmt = LOWP_RECIPES[precision].quant_format
+            served = deepgemm._weight_cache.get(w, (w._version, fmt))
             assert served is not None, f"{precision} step {step}: the forward left no entry for this version"
             with torch.no_grad():
-                fresh = deepgemm._quant_weight(w, precision, K, cacheable=False)
+                fresh = deepgemm._quant_weight(w, fmt, cacheable=False)
             assert _same_cast(served, fresh), f"{precision} step {step}: the cached cast is not of the current weight"
             if previous is not None:
                 assert not torch.equal(previous, served[0].float()), f"{precision} step {step}: the cast did not move"
@@ -109,66 +167,81 @@ def test_weight_cache_across_steps():
         print(f"  {precision} weight cache across 3 opt steps tracks the weight — OK")
 
 
-def test_gate():
-    """Off by default; once opted in the decision reads the format and the package, never a shape."""
-    assert not any(use_deepgemm(fmt) for fmt in ("mxfp8", "mxfp4", "nvfp4")), "default must not route to DeepGEMM"
-    prev = os.environ.get("HALO_DEEPGEMM_NATIVE")
-    os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
-    try:
-        for fmt in DEEPGEMM_FORMATS:
-            assert use_deepgemm(fmt) == deepgemm_available(), f"opted in: {fmt} follows the package"
-        assert not use_deepgemm("nvfp4"), "no native kernel takes nvfp4"
-    finally:
-        if prev is None:
-            os.environ.pop("HALO_DEEPGEMM_NATIVE", None)
-        else:
-            os.environ["HALO_DEEPGEMM_NATIVE"] = prev
-    print("  use_deepgemm gate: OFF by default; opt-in follows the format and the package — OK")
+# A child of its own, as DeepGEMM reads its JIT cache directory once per process. Each line: rows per expert, then the
+# kernels that forward and backward compiled.
+_WGRAD_COMPILE_PROBE = """
+import os, sys, torch
+from halo.kernels.lowp import deepgemm
+from halo.kernels.lowp.spec import LowpSpec
+
+LOWP = LowpSpec(precision=sys.argv[3], backend="native", backward_precision=sys.argv[4])
+
+def compiled():
+    return sum(len(dirs) for _, dirs, _ in os.walk(os.environ["DG_JIT_CACHE_DIR"]))
+
+E, K, N = 4, 256, 512
+w_dtype = getattr(torch, sys.argv[2])
+w = (torch.randn(E, K, N, device="cuda", dtype=w_dtype) * K**-0.5).requires_grad_(True)
+
+def step(rows):
+    x = torch.randn(E * rows, K, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    offs = torch.arange(1, E + 1, device="cuda", dtype=torch.int32) * rows
+    before = compiled()
+    out = deepgemm.deepgemm_grouped_gemm(x, w, offs=offs, lowp=LOWP)
+    out.backward(torch.randn_like(out))
+    torch.cuda.synchronize()
+    return compiled() - before
+
+step(1)
+if sys.argv[1] == "warm":
+    deepgemm.warm_fp8_wgrad(E, K, N, w_dtype, torch.device("cuda"))
+for rows in (3, 129, 1024, 2048, 4096, 8192):
+    print(rows, step(rows))
+"""
 
 
-def test_availability_gate_is_honest():
-    """The only acceptable reason for False is the package being absent: a missing symbol or CUDA ABI mismatch reads
-    the same, and would silently delete both kernel tests from the suite."""
-    try:
-        importlib.import_module("deep_gemm")
-        error = None
-    except BaseException as exc:
-        error = exc
-
-    assert deepgemm_available() == (error is None), (
-        f"deepgemm_available() says {deepgemm_available()} but `import deep_gemm` "
-        f"{'raised ' + type(error).__name__ if error else 'succeeded'} — the gate misreports the runtime"
-    )
-
-    if error is not None:
-        # Absence is a supported state (agent-docs/optimization/low-precision-moe-kernels.md); anything else must be
-        # loud.
-        absent = isinstance(error, ModuleNotFoundError) and error.name == "deep_gemm"
-        assert absent, (
-            f"deep_gemm is installed but does not import: {type(error).__name__}: {error}. "
-            "That is a regression, not the package being absent — the fp8/mxfp4 kernel tests "
-            "below would otherwise be skipped silently."
+def _wgrad_compiles(mode: str, w_dtype: str, precision: str = "fp8", backward: str = "fp8") -> dict[int, int]:
+    with tempfile.TemporaryDirectory() as cache:
+        out = subprocess.run(
+            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype, precision, backward],
+            env={**os.environ, "DG_JIT_CACHE_DIR": cache},
+            capture_output=True,
+            text=True,
+            check=False,
         )
-        print("  deep_gemm not installed; the gate reports unavailable and the fp8/mxfp4 tests are skipped — OK")
-    else:
-        print("  deep_gemm imports and the gate reports available — OK")
-    return error is None
+    assert out.returncode == 0, f"the {mode} {w_dtype} probe failed:\n{out.stderr[-2000:]}"
+    return {int(rows): int(count) for rows, count in (line.split() for line in out.stdout.splitlines())}
+
+
+def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
+    """On an empty JIT cache, a forward and backward past one step and ``warm_fp8_wgrad`` compile nothing at any rows
+    per expert. Without the warm-up the first long receive compiles a kernel mid-step, which stalls every EP peer: the control, and what tells
+    a DeepGEMM pin whose heuristic no longer needs the warm-up."""
+    for w_dtype in ("bfloat16", "float32"):
+        cold = _wgrad_compiles("cold", w_dtype)
+        assert sum(cold.values()) > 0, f"{w_dtype}: no long-group kernel to warm, {cold}"
+        warm = _wgrad_compiles("warm", w_dtype)
+        assert not any(warm.values()), f"{w_dtype}: a step compiled a kernel after the warm-up, {warm}"
+        print(f"  {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
+    # mxfp4's backward is bf16: no weight-gradient kernel, so nothing to warm.
+    cold = _wgrad_compiles("cold", "bfloat16", "mxfp4", "bf16")
+    assert not any(cold.values()), f"mxfp4: a step past the first compiled a kernel, {cold}"
+    print("  mxfp4 compiles nothing past the first step — OK")
 
 
 if __name__ == "__main__":
     if not torch.cuda.is_available():
         print("SKIP: no CUDA")
         sys.exit(0)
-    print("test_gate")
-    test_gate()
-    print("test_availability_gate_is_honest")
-    installed = test_availability_gate_is_honest()
-    if not installed:
-        # The Hopper image ships no deep_gemm. A SKIP, since the fp8/mxfp4 kernel tests below never ran.
-        print("SKIP: deep_gemm absent; the gate is verified, the fp8/mxfp4 kernel tests are not")
+    if not deepgemm_available():  # the Hopper image ships no deep_gemm; a broken install raises here
+        print("SKIP: deep_gemm absent")
         sys.exit(0)
     print("test_deepgemm_forward_backward")
     test_deepgemm_forward_backward()
+    print("test_deepgemm_fp8_backward")
+    test_deepgemm_fp8_backward()
     print("test_weight_cache_across_steps")
     test_weight_cache_across_steps()
+    print("test_the_wgrad_warm_up_compiles_the_long_group_kernel")
+    test_the_wgrad_warm_up_compiles_the_long_group_kernel()
     print("ALL PASS")
