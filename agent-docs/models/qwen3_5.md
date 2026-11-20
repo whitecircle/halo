@@ -32,6 +32,17 @@ The imports reach the layer through transformers' hub-kernel funnel, whose packa
 
 On Blackwell fla autotunes the delta rule's state kernel (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`, shared by the gated delta rule and KDA) only over its `num_warps=2` configs (fla #953, from 0.5.2), whether the kernel is reached through this funnel or a remote-code module's own `fla` import. Under the image's Triton 3.6 its `num_warps=4` configs give run-to-run different, at some positions wrong, outputs and gradients on packed (`cu_seqlens`) rows, and on B300 also on larger unpacked batches. `tests/gpu/kernels/test_fla_blackwell_autotune.py` pins the restriction, with a `num_warps=4` control that must still miss.
 
+fla 0.6 forms the gradient of the decay `g` as the difference of two separately rounded dot products, so the gradient carries their rounding where the two nearly cancel. That is under strong decay, which a random-init tiny model has throughout (`g` down to -21): there the fp32 `A_log` and `dt_bias` gradients sit 1 to 4 times their own norm from an fp64 recurrence and move by percents for a 1e-7 change of the input. On released weights the effect is inside the dtype's rounding. One step of Qwen3.5-4B on 2,048 tokens of text, each of its 24 layers' calls replayed on a B300 against the fp64 recurrence, worst layer:
+
+| Gradient | bf16 | fp32 |
+|---|---|---|
+| decay `g` | 2.4e-2 | 2.0e-3 |
+| `A_log` | 1.2e-2 | 4.4e-2 |
+| `dt_bias` | 1.6e-2 | 3.5e-2 |
+| `q` / `k` / `v` | 6.5e-3 / 8.4e-3 / 6.2e-3 | 1.4e-3 / 2.2e-3 / 1.6e-3 |
+
+A test that compares fp32 gradients of two runs of a tiny model bounds `A_log`, `dt_bias` and `in_proj_a` apart from the rest (`tests/gpu/kernels/test_gated_residual_kernels.py`).
+
 FLA's kernels for the q/k l2norm inside the delta rule and for the gated output norm (which the Liger spec installs) take `NB = cdiv(tokens × heads, 65536)` as an autotune-key constexpr their bodies never read, so each new value compiles and benchmarks every autotune config: one every 2,048 tokens at Qwen3.5-35B-A3B's 32 value heads, to which q/k are repeated. The binaries and FLA's autotune picks (`FLA_CACHE_RESULTS`, default on) persist in the Triton disk cache anchored on `HF_HOME`, so this is paid once per value per volume, as for [Bailing's KDA kernels](bailing.md#remote-code-compatibility). Picks differ across fresh caches, and so does bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)). `HALO_FLA_L2NORM_FIXED_NB=1` ([Configuration Reference](../reference/configuration-reference.md#environment-variables)) holds `NB` out of the l2norm kernels' key and launches them with a constant one, so one binary and one tuned config per width and dtype serve every row count; `finalize_loaded_model` then compiles and tunes it at the `head_k_dim` of each gated-delta-rule module of the model, on 65,536 rows. It leaves the gated output norm as it is, and a launch's reduction order can differ from the per-bucket pick, not its value beyond fp32 rounding.
 
 The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
