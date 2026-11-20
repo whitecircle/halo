@@ -132,7 +132,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
 - [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's, differing in the top-k weight default and the hub↔module key spellings.
 - [Inkling](inkling.md) — Thinking Machines multimodal MoE; joint routed+shared router normalization forces a standalone wrapper, and its shipped config runs multi-node EP16.
-- [Inkling 2](inkling2.md) — Thinking Machines multimodal MoE, 384 sigmoid-routed experts, eager attention; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts.
+- [Inkling 2](inkling2.md) — Thinking Machines multimodal MoE, 384 sigmoid-routed experts, relative-logits attention on the toolkit's FlexAttention kernel; the quantized-only release trains as LoRA over frozen NVFP4/MXFP8 experts.
 - [Gemma 4 MoE](gemma4.md) — router outside the EP-wrapped module.
 - [Bailing MoE / Ling](bailing.md) — softmax GQA + shared experts; needs `trust_remote_code`.
 - [LFM-2 MoE](lfm2.md) — sigmoid routing with optional expert-bias buffer.

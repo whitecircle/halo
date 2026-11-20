@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
+from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
 from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_layout import (
@@ -139,6 +140,8 @@ class MoEFamilySpec:
     ep_layer_needs_remote_code: str | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
+    # The toolkit's attention implementation the family runs on CUDA in place of the requested one (eager elsewhere).
+    toolkit_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
@@ -254,11 +257,10 @@ INKLING2 = MoEFamilySpec(
     hub_conversion_keys=("inkling2",),
     # ``w13_weight`` is the interleaved gate/up, ``w2_weight`` the down projection.
     frozen_expert_slots=(FrozenExpertSlot("gate_up_proj", "w13_weight"), FrozenExpertSlot("down_proj", "w2_weight")),
-    unmarked_sequence_mixer="depthwise causal short convolutions (on the projected K/V and around each sublayer)",
-    eager_only_attention=(
-        "every attention layer adds a learned relative-logits bias and a query-conditioned sink, and the class "
-        "declares no SDPA, flash or flex support"
-    ),
+    # Every attention layer adds a learned relative-logits bias and a query-conditioned sink, which only the eager
+    # path and this kernel carry. The short convolutions read the document starts of a packed row through the
+    # family's patches (halo/models/families/inkling2.py).
+    toolkit_attention=INKLING2_RELATIVE_FLEX,
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),

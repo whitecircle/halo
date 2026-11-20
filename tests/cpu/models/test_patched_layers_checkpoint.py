@@ -8,9 +8,11 @@ import pytest
 import torch
 import transformers.models.deepseek_v4.modeling_deepseek_v4 as deepseek_v4_modeling
 import transformers.models.glm5_next.modeling_glm5_next as glm5_next_modeling
+import transformers.models.inkling2.modeling_inkling2 as inkling2_modeling
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from transformers.modeling_layers import GradientCheckpointingLayer
 
+from halo.models.families.inkling2 import apply_inkling2_patches
 from halo.models.families.qwen4_exp.forwards import patch_qwen4_exp_document_forwards
 from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.hyper_connections import _PATCHED_ATTR, apply_hyper_connection_patches
@@ -25,6 +27,11 @@ _PATCHED_LAYERS = {
         lambda _config: patch_qwen4_exp_document_forwards(),
         qwen4_exp_modeling.Qwen4ExpTextDecoderLayer,
         "attn_hyper_connection",
+    ),
+    "inkling2_text": (
+        lambda _config: apply_inkling2_patches(),
+        (inkling2_modeling.Inkling2SlidingDecoderLayer, inkling2_modeling.Inkling2FullDecoderLayer),
+        "self_attn",
     ),
 }
 

@@ -13,7 +13,6 @@
 
 # --- Model ---
 model_name_or_path: thinkingmachines/Inkling-2-Small  # at launch, the local release directory the server serves
-attn_implementation: eager
 pad_token: "<|endoftext|>"  # the release's tokenizer names no pad (nor eos) token; padded batch rows need one
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
 

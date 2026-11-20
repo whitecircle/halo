@@ -23,6 +23,7 @@ from halo.models.attention.gpt_oss_sinks import (
     install_sdpa_for_reset_sinks,
     uses_gpt_oss_sinks,
 )
+from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX, register_inkling2_relative_flex
 from halo.models.attention.layout import (
     declares_attention_heads,
     has_latent_attention,
@@ -63,8 +64,18 @@ _KERNELS_DROPPING_ATTENTION_DROPOUT = ("flash_attention_3", "flash_attention_4")
 _ATTENTION_CLASS_TABLE_SUFFIX = "_ATTENTION_CLASSES"
 
 
+# The toolkit's own attention implementations a family spec names (``toolkit_attention``), each registered on first use.
+_TOOLKIT_ATTENTION_REGISTRARS = {INKLING2_RELATIVE_FLEX: register_inkling2_relative_flex}
+# Beside the varlen flash kernels, the implementations that read a packed row's documents off its position_ids.
+DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS = (*VARLEN_ATTN_IMPLEMENTATIONS, INKLING2_RELATIVE_FLEX)
+
+
 def is_flash_attn_implementation(attn_impl: str | None) -> bool:
     return attn_impl in VARLEN_ATTN_IMPLEMENTATIONS
+
+
+def is_document_isolating_attn_implementation(attn_impl: str | None) -> bool:
+    return attn_impl in DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS
 
 
 def flash_kernel(attn_impl: str, *, varlen: bool = True):
@@ -437,8 +448,19 @@ def resolve_attn_implementation(
             )
         attn_implementation = fa4_fallback
 
-    # Force eager before from_pretrained rejects the auto-detected FA default.
+    # A family with its own kernel runs it on CUDA unless the run pins eager.
     spec = find_moe_family_spec_for_config(model_config)
+    if spec is not None and spec.toolkit_attention and pinned != "eager" and torch.cuda.is_available():
+        if pinned not in (None, spec.toolkit_attention) and is_global_main_process():
+            logger.warning(
+                f"{spec.model_types[0]} runs attn_implementation='{spec.toolkit_attention}' (its attention adds terms "
+                f"no stock kernel takes); ignoring attn_implementation='{pinned}'."
+            )
+        attn_implementation = _TOOLKIT_ATTENTION_REGISTRARS[spec.toolkit_attention]()
+    elif spec is not None and spec.toolkit_attention:
+        attn_implementation = "eager"
+
+    # Force eager before from_pretrained rejects the auto-detected FA default.
     if attn_implementation != "eager" and spec is not None and spec.eager_only_attention:
         if is_global_main_process():
             logger.warning(
