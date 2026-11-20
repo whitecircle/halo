@@ -9,7 +9,6 @@ expert_parallel_size: 2
 
 dataset: data/baxbench/train.jsonl
 test_size: 0.01
-prompt_field: prompt
 
 rewards:
   - source: whitecircle

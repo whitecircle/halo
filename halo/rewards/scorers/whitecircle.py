@@ -98,13 +98,13 @@ class WhiteCircleScorer(Scorer):
             await client.aclose()
 
     async def score_one(self, sample: ScoringSample) -> ScoreResult:
-        events, policy_ids = conversation_events(sample, self.term.view)
-        if not policy_ids:
-            # No text and no call: nothing of the policy's to check, so nothing it could violate.
-            return ScoreResult(1.0, {self._key(_FLAGGED): 0.0})
         session = uuid.uuid4().hex
         results: dict[str, Mapping[str, Any]] = {}
         try:
+            events, policy_ids = conversation_events(sample, self.term.view)
+            if not policy_ids:
+                # No text and no call violates nothing, and full credit for it would teach the policy to say nothing.
+                return ScoreResult(0.0, {self._key(_FLAGGED): 0.0}, detail="empty completion")
             for start in range(0, len(events), MAX_EVENTS_PER_REQUEST):
                 chunk = events[start : start + MAX_EVENTS_PER_REQUEST]
                 body = {"environment_id": self.term.environment_id, "external_session_id": session, "events": chunk}

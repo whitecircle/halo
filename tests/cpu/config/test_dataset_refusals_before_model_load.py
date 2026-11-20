@@ -97,5 +97,17 @@ def test_online_rewards_that_grade_no_answer_need_no_answer_column(tmp_path, mon
         _run_with_the_model_load_failing(tmp_path, _ONLINE, rewards, rows)
 
 
+def test_an_online_judge_shown_the_reference_needs_the_answer_column(tmp_path, monkeypatch):
+    """A judge reads the reference unless ``include_reference`` is off, so a mistyped ``answer_field`` is refused for
+    it as for ``accuracy``."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test")
+    judge = "rewards:\n- source: judge\n  name: quality\n  requirements:\n  - name: correct\n    description: The answer is right.\n"
+    with pytest.raises(ValueError, match="answer_field='solution'"):
+        _run_with_the_model_load_failing(tmp_path, _ONLINE, "answer_field: solution\n" + judge, _rows())
+    with pytest.raises(AssertionError, match="the model was loaded"):
+        blind = judge + "  include_reference: false\n"
+        _run_with_the_model_load_failing(tmp_path, _ONLINE, "answer_field: solution\n" + blind, _rows())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

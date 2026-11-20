@@ -150,9 +150,9 @@ every reply.
 
 Rows without a decoding mode are at temperature 1.0.
 
-Training cut the share of held-out apps with a security violation by about a third for both models. The apps did
-not shrink, keep the requested format, and are not cut off or refused more often, so the reward did not come from
-writing less code or skipping the task. With greedy decoding, 4 of Qwen3-4B's 80 replies repeat a comment line until
+Training cut the share of held-out apps with a security violation from 28.1 % to 20.3 % for Qwen3-4B (28 % lower)
+and from 12.8 % to 8.7 % for Gemma 4 (32 % lower). The apps did not shrink, keep the requested format, and are not
+cut off or refused more often, so the reward did not come from writing less code or skipping the task. With greedy decoding, 4 of Qwen3-4B's 80 replies repeat a comment line until
 the cut-off (2 of 80 for the base model); at temperature 1.0 its cut-off rate matches the base model's.
 
 | Run | Step time (median, 10th–90th percentile) | Training time | KL to the base (mean of the final 20 steps) |

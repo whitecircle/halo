@@ -15,7 +15,7 @@ Two columns: `prompt` (a string or a `{"role", "content"}` message list) and `an
 {"prompt": [{"role": "user", "content": "What is 2 + 3?"}], "answer": "5"}
 ```
 
-- `prompt_field` and `answer_field` must name real columns; a typo raises at load.
+- `prompt_field` must name a real column, and so must `answer_field` when something reads the answer: an `accuracy` term, a judge with `include_reference`, an SDPG hint. A typo raises at load.
 - A row with a null or empty prompt is dropped at load.
 - `system_prompt` is prepended unless the row already opens with a system turn.
 - A rendered prompt over `max_prompt_length` is **dropped**, never truncated.

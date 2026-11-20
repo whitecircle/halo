@@ -37,7 +37,7 @@ flagged verdict on the prompt or on a tool output does not lower the score.
 - With `policies` or `checklist`, verdicts of policies outside the list do not affect the score, so several terms
   can share one environment, each with its own policies.
 - A term lists `policies` or `checklist`, not both.
-- A completion with no text and no tool call scores 1, and Halo sends no request.
+- A completion with no text and no tool call scores 0, and Halo sends no request: it violates nothing, and full credit for it would reward an empty reply.
 
 ### Checklist
 

@@ -153,8 +153,6 @@ class RewardTerm:
     by; a negative ``weight`` makes a penalty, an ``exponent`` above 1 convex credit."""
 
     source: ClassVar[str]
-    # The term grades against the row's answer column, so a run with it needs that column.
-    reads_answer: ClassVar[bool] = False
 
     name: str
     weight: float = 1.0
@@ -168,6 +166,11 @@ class RewardTerm:
     @property
     def owner(self) -> str:
         return f"{self.source} reward term {self.name!r}"
+
+    @property
+    def reads_answer(self) -> bool:
+        """The term reads the row's answer column, so a run with it needs that column."""
+        return False
 
     def shape(self, score: float) -> float:
         """The shaped score before the weight, what a TRL reward function returns."""
@@ -343,6 +346,10 @@ class JudgeTerm(ScoredTerm):
     @property
     def is_veto(self) -> bool:
         return bool(self.checks)
+
+    @property
+    def reads_answer(self) -> bool:
+        return self.include_reference
 
     @classmethod
     def from_config(cls, spec: Mapping[str, Any]) -> Self:

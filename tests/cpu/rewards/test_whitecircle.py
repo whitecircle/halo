@@ -18,7 +18,7 @@ from halo.rewards.scorers import whitecircle
 from halo.rewards.scorers.whitecircle import WhiteCircleScorer
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, WhiteCircleTerm, parse_reward_terms, scored_metric_key
 from halo.rewards.trl_reward_functions import ScorerRewardFunction
-from scripts.before_training.create_whitecircle_policies import policy_specs
+from scripts.before_training.create_whitecircle_policies import CONDITION_NAME, SyncPlan, policy_specs, sync
 
 KEY = "wc-test-secret-key"
 TERM = WhiteCircleTerm(name="policy", environment_id="env_test", retry_wait=0.0)
@@ -326,6 +326,120 @@ def test_a_checklist_set_expands_into_items_named_under_it():
     assert policy_specs(policies) is policies
 
 
+class _PolicyApi:
+    """The policy and condition endpoints over dicts, recording each write as ``(path, body)``."""
+
+    def __init__(self, policies: dict[str, dict], conditions: list[dict], fail_create_of: str | None = None):
+        self.policies = policies
+        self.conditions = conditions
+        self.fail_create_of = fail_create_of
+        self.writes: list[tuple[str, dict]] = []
+
+    def call(self, method: str, path: str, body: dict | None = None):
+        if method == "GET":
+            if path == "/api/condition/list":
+                return [dict(condition) for condition in self.conditions]
+            if path == "/api/policy/list":
+                return [{"id": policy_id, "name": policy["name"]} for policy_id, policy in self.policies.items()]
+            return self.policies[path.split("id=")[1]]
+        self.writes.append((path, body))
+        if path == "/api/policy/delete":
+            del self.policies[body["id"]]
+        elif path == "/api/policy/create":
+            if body["name"] == self.fail_create_of:
+                raise SystemExit("POST /api/policy/create answered 500")
+            policy_id = f"new_{len(self.policies)}"
+            self.policies[policy_id] = {"name": body["name"], "rules": body["rules"]}
+            return {"id": policy_id}
+        elif path == "/api/condition/update":
+            condition = next(c for c in self.conditions if c["id"] == body["id"])
+            condition.update(body)
+        else:
+            self.conditions.append({"id": "condition_new", **body})
+        return {}
+
+    def selected_policies_exist(self) -> bool:
+        return all(policy_id in self.policies for c in self.conditions for policy_id in c["policy_ids"])
+
+
+def _policy(name: str, flagged: str) -> dict:
+    return {"name": name, "rules": [{"flagged_content": flagged}]}
+
+
+def _halo_condition(*policy_ids: str) -> dict:
+    return {"id": "condition_halo", "name": CONDITION_NAME, "environment_ids": ["env_a"], "policy_ids": [*policy_ids]}
+
+
+_SETS = {
+    "security": [
+        {"name": "SQL injection", "flagged_content": ["S2"]},
+        {"name": "Command injection", "flagged_content": ["C"]},
+    ],
+    "privacy": [{"name": "Leaked secrets", "flagged_content": ["L2"]}],
+}
+
+
+def test_sync_replaces_its_own_policies_and_never_selects_a_deleted_one():
+    api = _PolicyApi(
+        {"p_sql": _policy("SQL injection", "S1"), "p_cmd": _policy("Command injection", "C")},
+        [_halo_condition("p_sql", "p_cmd")],
+    )
+    states = []
+    record = api.call
+
+    def call(method, path, body=None):
+        answer = record(method, path, body)
+        states.append(api.selected_policies_exist())
+        return answer
+
+    api.call = call
+    ids = sync(api, "env_b", _SETS, dry_run=False)
+    assert all(states)
+    assert ids["security"][1] == "p_cmd" and "p_sql" not in api.policies
+    assert api.policies[ids["security"][0]]["rules"] == [{"flagged_content": "S2"}]
+    [condition] = api.conditions
+    assert condition["policy_ids"] == [*ids["security"], *ids["privacy"]]
+    assert condition["environment_ids"] == ["env_a", "env_b"]
+
+
+def test_sync_that_fails_midway_leaves_the_condition_on_existing_policies():
+    api = _PolicyApi(
+        {"p_sql": _policy("SQL injection", "S1"), "p_cmd": _policy("Command injection", "C")},
+        [_halo_condition("p_sql", "p_cmd")],
+        fail_create_of="Leaked secrets",
+    )
+    with pytest.raises(SystemExit, match="500"):
+        sync(api, "env_a", _SETS, dry_run=False)
+    assert api.selected_policies_exist()
+    assert api.conditions[0]["policy_ids"] == ["p_cmd"]
+
+
+def test_sync_refuses_every_policy_it_does_not_own_before_any_write():
+    other = {"id": "condition_other", "name": "production", "environment_ids": ["env_p"], "policy_ids": ["p_cmd"]}
+    api = _PolicyApi(
+        {
+            "p_sql": _policy("SQL injection", "S1"),
+            "p_cmd": _policy("Command injection", "other rules"),
+            "p_leak": _policy("Leaked secrets", "L1"),
+        },
+        # p_cmd is selected by halo-grpo and by another condition, p_leak by none: neither is this tool's to replace.
+        [_halo_condition("p_sql", "p_cmd"), other],
+    )
+    with pytest.raises(SystemExit, match=r"\['Command injection', 'Leaked secrets'\]"):
+        sync(api, "env_a", _SETS, dry_run=False)
+    assert api.writes == []
+
+
+def test_a_dry_run_reports_the_plan_and_writes_nothing():
+    api = _PolicyApi(
+        {"p_sql": _policy("SQL injection", "S1"), "p_cmd": _policy("Command injection", "C")},
+        [_halo_condition("p_sql", "p_cmd")],
+    )
+    plan = sync(api, "env_a", _SETS, dry_run=True)
+    assert plan == SyncPlan({"Command injection": "p_cmd"}, {"SQL injection": "p_sql"}, ("Leaked secrets",))
+    assert api.writes == []
+
+
 @pytest.mark.parametrize(
     ("verdict", "reason"),
     [
@@ -336,6 +450,8 @@ def test_a_checklist_set_expands_into_items_named_under_it():
         ),
         ({"flagged": None, "note": "no verdict"}, "no verdict"),
         ({"status": "failed", "flagged": None, "note": "validation failed"}, "validation failed"),
+        # A verdict field on an event the API did not finish checking is not a verdict.
+        ({"status": "failed", "flagged": False, "note": "check interrupted"}, "check interrupted"),
     ],
 )
 def test_no_verdict_is_a_failed_check(server, verdict, reason):
@@ -372,10 +488,23 @@ def test_full_view_sends_calls_and_results_and_scores_the_calls(server):
     ]
 
 
-def test_an_empty_completion_scores_one_without_a_request(server):
+def test_an_empty_completion_scores_zero_without_a_request(server):
     requests = server()
     [result] = _score(TERM, [_sample("")])
-    assert result.score == 1.0 and requests == []
+    assert result.score == 0.0 and result.error is None and requests == []
+
+
+def test_a_malformed_tool_call_fails_its_own_sample_only(server):
+    server()
+    broken = ScoringSample(
+        prompt=[{"role": "user", "content": "2+2?"}],
+        completion=[{"role": "assistant", "content": "4", "tool_calls": [None]}],
+        final_answer="4",
+    )
+    term = WhiteCircleTerm(name="policy", environment_id="env_test", view="full", retry_wait=0.0)
+    failed, scored = _score(term, [broken, _sample()])
+    assert failed.score is None and "check" in failed.error
+    assert scored.score == 1.0
 
 
 def test_missing_key_or_environment_fails_at_construction(monkeypatch):
@@ -414,15 +543,11 @@ def _online(term, completions, logged):
 
 
 def test_online_reward_function_and_failure_behavior(server):
-    server(_assistant({"flagged": True}))
+    server(_verdicts(lambda event: {"flagged": event.get("content") == "4"}))
     term = WhiteCircleTerm(name="policy", environment_id="env_test", exponent=2.0)
     logged = {}
-    assert _online(
-        term, [[{"role": "assistant", "content": "4"}], [{"role": "assistant", "content": ""}]], logged
-    ) == [
-        0.0,
-        1.0,
-    ]
+    replies = [[{"role": "assistant", "content": text}] for text in ("4", "5", "")]
+    assert _online(term, replies, logged) == [0.0, 1.0, 0.0]
     assert logged[scored_metric_key(term)] == 1.0
 
     server(lambda request: httpx.Response(401))
