@@ -182,11 +182,11 @@ def _env_compute_advantages(rewards, num_generations, valid=None):
     """The per-trajectory advantages of the real ``_step_advantages``: ``scale_rewards='none'``, no std floor."""
     me = types.SimpleNamespace(
         args=types.SimpleNamespace(scale_rewards="none"),
-        async_config=types.SimpleNamespace(scale_rewards_std_floor=0.0),
+        async_config=types.SimpleNamespace(scale_rewards_std_floor=0.0, use_maxrl=False),
     )
     rows = TrajectoryRowMap(_rollouts([False] * len(rewards), rewards.tolist(), valid), [1] * len(rewards), 0, False)
     _state, traj_advantages, _rows = DistributedAsyncEnvironmentalGRPOTrainer._step_advantages(
-        me, rewards, rows, 0, num_generations
+        me, rewards, rows, 0, num_generations, "train"
     )
     return traj_advantages
 

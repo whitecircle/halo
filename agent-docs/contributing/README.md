@@ -44,6 +44,10 @@ make seed-hf-cache            # configs + tokenizers the CPU tests read into HF_
 make test-cpu                 # sanity check; needs Docker, not a GPU
 ```
 
+The CPU tier needs the image's Triton build: on the PyPI `triton==3.6.0` a bare `uv.lock` install gets, the
+interpreted tests of kernels with a runtime loop bound fail, and `tests/cpu/kernels/test_triton_interpreter.py`
+names the cause in one failure.
+
 Point any run target at another image with `IMAGE=` (`make test-cpu IMAGE=halo:hopper`); the `build-*`
 and `push-*` targets name their own tags. What each image carries and how it builds:
 [Docker](../infrastructure/docker.md).
@@ -556,8 +560,16 @@ deliberate perturbation, and the verdict fails when that record matches its base
 
 Update the owning doc page in the same PR when you change `halo/` (`skills/docs/docs-ownership.md` is the
 map), following the style charter of the `docs` skill (`skills/docs/style.md`). `make docs` runs the
-link, anchor and code-reference check that blocks a merge; editing a `scripts/diagrams/gen_*.py`
-generator owes `make diagrams` and the regenerated figure in the same commit
+link, anchor and code-reference check that blocks a merge
+([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)). Each figure under
+`agent-docs/assets/` is rendered from the HTML page beside it, which holds its data and draws it in the
+`visuals` skill's style (`skills/visuals/SKILL.md`). Every page links the skill's shared kit
+(`skills/visuals/kit/`: the colour tokens, type scale and page skeleton, and the element, arrow and axis
+helpers), so a change there reaches every figure on the next render. Edit the page or the kit, run
+`make diagrams` on a host with Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG,
+`agent-docs/assets/figures.sha256` and any alt-text change together. Every render is optimized
+losslessly with OptiPNG. CI does not re-render the figures, since the fonts are licensed and stay off
+the runners; it fails a figure left stale against what it is rendered from
 ([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)).
 
 ## Proof of Value

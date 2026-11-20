@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>MTP head step cost</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 240px;
+    --panel-gap: 64px;
+    --bar-h: 82px;
+    --row-gap: 48px;
+  }
+
+  body { width: 1600px; }
+
+  /* One grid holds both panels, so a row's two bars share its label. */
+  .chart {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr var(--panel-gap) 1fr;
+    align-items: center;
+  }
+
+  .head {
+    align-self: end;
+    margin-bottom: var(--heading-gap);
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.05;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .head p {
+    margin-top: 8px;
+    font-size: 20px;
+    line-height: 1.3;
+    color: var(--secondary);
+  }
+
+  .label {
+    grid-column: 1;
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .row-gap { height: var(--row-gap); grid-column: 1 / -1; }
+
+  .track i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    border-radius: 6px;
+    background: var(--hue);
+  }
+
+  /* The quartile range: a line across the bar's end with a cap at each quartile. */
+  .track s {
+    position: absolute;
+    top: 50%;
+    height: 18px;
+    transform: translateY(-50%);
+    border-left: 2px solid var(--text);
+    border-right: 2px solid var(--text);
+  }
+
+  .track s::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 8px;
+    border-top: 2px solid var(--text);
+  }
+
+  .track b {
+    position: absolute;
+    top: 50%;
+    margin-left: 14px;
+    transform: translateY(-50%);
+    font-weight: 400;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .track b em {
+    font-style: normal;
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  /* The axis: a line along the plot's bottom edge, a short mark under it at each tick, and the tick's value below. */
+  .ticks {
+    position: relative;
+    align-self: start;
+    height: 38px;
+    margin-top: 16px;
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ticks i {
+    position: absolute;
+    top: 0;
+    height: 8px;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticks span { position: absolute; top: 12px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span:first-of-type { transform: none; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>A joint MTP head adds <span id="joint-cost"></span> to a step</h1>
+  </header>
+
+  <div class="figure">
+    <div class="chart" id="chart"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [arm, median seconds per step, lower quartile, upper quartile, peak allocated GiB]
+  const ARMS = [
+    ["No head", 2.062, 1.962, 2.093, 85.8],
+    ["Joint, hard", 2.189, 2.126, 2.263, 86.2],
+    ["Joint, soft", 2.209, 2.143, 2.260, 87.0],
+    ["Head only, soft", 0.762, 0.761, 0.763, 25.3],
+  ];
+  const PANELS = [
+    { head: "Seconds per step", sub: "Median, with a line over the quartiles", tick: (v, axis) => (v === 0 ? "0 s" : v.toFixed(axis.digits)) },
+    { head: "Peak allocated memory", sub: "GiB on the fullest GPU", tick: (v, axis) => v.toFixed(axis.digits) },
+  ];
+  const BASE = ARMS[0][1];
+
+  const joint = ARMS.filter(([name]) => name.startsWith("Joint")).map(([, median]) => Math.round((median / BASE - 1) * 100));
+  const [least, most] = [Math.min(...joint), Math.max(...joint)];
+  document.getElementById("joint-cost").textContent = least === most ? `${least}%` : `${least}–${most}%`;
+
+  const chart = document.getElementById("chart");
+  const pct = (value, max) => `${(value / max) * 100}%`;
+  const column = (panel) => String(2 + panel * 2);
+  // Per panel, each row's track, the label that must stay inside it, how far its marks reach, and how they place on an axis's end.
+  const tracks = PANELS.map(() => []);
+  let row = 1;
+
+  PANELS.forEach((panel, p) => {
+    const head = el("div", "head");
+    head.style.gridColumn = column(p);
+    head.style.gridRow = String(row);
+    head.append(el("h2", undefined, panel.head), el("p", undefined, panel.sub));
+    chart.append(head);
+  });
+
+  row += 1;
+
+  ARMS.forEach(([name, median, low, high, gib], i) => {
+    if (i > 0) {
+      const gap = el("div", "row-gap");
+      gap.style.gridRow = String(row);
+      chart.append(gap);
+      row += 1;
+    }
+
+    const label = el("div", "label", name);
+    label.style.gridRow = String(row);
+    chart.append(label);
+    const hue = i === 0 ? "var(--tertiary)" : "var(--halo-blue)";
+
+    const seconds = el("div", "track");
+    seconds.style.gridColumn = column(0);
+    seconds.style.gridRow = String(row);
+    const bar = el("i");
+    bar.style.setProperty("--hue", hue);
+    const range = el("s");
+    range.style.marginLeft = "-1px";
+    const value = el("b");
+    value.append(`${median.toFixed(2)} s`);
+
+    if (i > 0) {
+      value.append(" · ", el("em", undefined, `${(median / BASE).toFixed(2)}×`));
+    }
+
+    seconds.append(bar, range, value);
+    tracks[0].push({
+      track: seconds,
+      label: value,
+      reach: Math.max(median, high),
+      place: (max) => {
+        bar.style.width = pct(median, max);
+        range.style.left = pct(low, max);
+        range.style.width = `calc(${pct(high - low, max)} + 2px)`;
+        value.style.left = pct(high, max);
+      },
+    });
+
+    const memory = el("div", "track");
+    memory.style.gridColumn = column(1);
+    memory.style.gridRow = String(row);
+    const fill = el("i");
+    fill.style.setProperty("--hue", hue);
+    const amount = el("b", undefined, `${gib.toFixed(1)} GiB`);
+    memory.append(fill, amount);
+    tracks[1].push({
+      track: memory,
+      label: amount,
+      reach: gib,
+      place: (max) => {
+        fill.style.width = pct(gib, max);
+        amount.style.left = pct(gib, max);
+      },
+    });
+
+    chart.append(seconds, memory);
+    row += 1;
+  });
+
+  PANELS.forEach((panel, p) => {
+    const axis = niceAxis(Math.max(...tracks[p].map((t) => t.reach)), (max) => {
+      tracks[p].forEach((t) => t.place(max));
+
+      return tracks[p].every((t) => t.label.getBoundingClientRect().right <= t.track.getBoundingClientRect().right);
+    });
+    const ticks = el("div", "ticks");
+    ticks.style.gridColumn = column(p);
+    ticks.style.gridRow = String(row);
+    chart.append(ticks);
+    drawAxis(ticks, axis, (tick) => panel.tick(tick, axis));
+  });
+
+  console.log(ARMS.slice(1).map(([name, median]) => `${name} ${((median / BASE - 1) * 100).toFixed(1)}%`).join(", "));
+</script>
+</body>
+</html>

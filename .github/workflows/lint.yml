@@ -57,6 +57,7 @@ jobs:
           tests/cpu/conventions/test_bench_band.py
           tests/cpu/conventions/test_docs_link_check.py
           tests/cpu/conventions/test_env_var_catalogue.py
+          tests/cpu/conventions/test_figure_manifest.py
           tests/cpu/conventions/test_gpu_harness_conventions.py
           tests/cpu/conventions/test_hosted_conventions_are_stdlib.py
           tests/cpu/conventions/test_import_layering.py

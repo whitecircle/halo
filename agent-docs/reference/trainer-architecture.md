@@ -574,7 +574,7 @@ constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase sp
 `DistributedTrainerMixin`; `rounds/packed_rounds.py` (`PackedRoundMixin`, the packed micro-batches' plan, slot layout and bin-by-bin
 scoring), `rounds/packed_rules.py` (their refusals), `rounds/microbatch_plan.py` and `rounds/row_order.py` (the row permutation and the loss types
 that admit a regrouping of rows), which both on-policy trainers share; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
-`halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
+`halo/kernels/head_logprobs.py`, the full-logits memory guard on the shared `halo/trainers/full_logits_memory.py`, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
 (`weight_push.py`, the push and its construction gate; `engine_preflight.py`, the COLLECTIVE rollout-server

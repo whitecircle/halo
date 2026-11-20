@@ -2,16 +2,16 @@
 
 Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp4) matmul compute**. The parameter, checkpoint, and optimizer state are never stored in low precision; only the GEMM operands are cast to a block-scaled format for the forward, and the gradient flows back to the bf16/fp32 master (straight-through estimator). This is quantization-aware training (QAT): it answers *"does this model converge in fp8/fp4?"* and pairs with a block-scaled weight export.
 
-**Train in bf16; it stays the default.** Neither low-precision path Halo ships beats it. As whole training steps at ep8 the simulated fake-quant path (the QAT oracle) runs at 0.10–0.45× bf16 and the opt-in DeepGEMM adapter, an FP8 forward over a bf16 backward, at 0.37–0.54× ([Why bf16 is the default](#why-bf16-is-the-default)). The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
+**Train in bf16; it stays the default.** Neither low-precision path Halo ships beats it. As whole training steps at ep8 on 8× B300 the simulated fake-quant path (the QAT oracle) ran at 0.10–0.45× bf16 with an eager activation round trip, and the opt-in DeepGEMM adapter, an FP8 forward over a bf16 backward, at 0.37–0.54× ([Why bf16 is the default](#why-bf16-is-the-default)). mxfp8 and mxfp4 round-trip activations in one fused kernel, and simulated mxfp4 runs at 0.93–0.99× bf16 on 8× H200 (ep8, [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed)). nvfp4 takes a fused round trip too, with no whole step measured on it yet. The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
 
-`scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them; serving engines do not load the manifest as-is. The roofline argument: [GPU Training Theory §7](../reference/gpu-training-theory.md#when-low-precision-compute-helps).
+`scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them. Serving engines do not load Halo's manifest as-is, so `--export_format compressed-tensors` writes the layout vLLM loads ([Serving the export with vLLM](#serving-the-export-with-vllm)). The roofline argument: [GPU Training Theory §7](../reference/gpu-training-theory.md#when-low-precision-compute-helps).
 
 ## The three paths
 
 | Path | What it is | Speed | When used |
 |------|-----------|-------|-----------|
 | **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | Baseline | Default; all production training |
-| **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Whole step 0.10–0.45× bf16 (fp8, mxfp4) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
+| **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Whole step 0.10–0.45× bf16 with the eager activation round trip (fp8, mxfp4, 8× B300); mxfp4 with the fused round trip 0.93–0.99× (8× H200) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
 | **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Whole step 0.37–0.54× bf16 | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
 
 The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores its native path against; the EP layers, the dense linear and the export tool all read it.
@@ -24,7 +24,7 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 
 ## Why bf16 is the default
 
-**Whole steps.** tok/s/GPU on 8× B300 at 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build, with each arm as a ratio to bf16 on its shape:
+**Whole steps.** tok/s/GPU on 8× B300 at 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build, with each arm as a ratio to bf16 on its shape. The simulated columns time the eager activation round trip, not the fused one. mxfp8 and mxfp4 take the fused round trip, whose mxfp4 whole step on H200 is under [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed):
 
 | Shape | bf16 | simulated fp8 | simulated mxfp4 | native fp8 | native mxfp4 |
 |---|---:|---:|---:|---:|---:|
@@ -32,7 +32,7 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 | Qwen3-30B-A3B ep8 b8 | 14,063 | 0.294× | 0.098× | 0.425× | 0.369× |
 | Qwen3.5-35B-A3B ep8 b8 | 16,536 | 0.442× | 0.171× | 0.533× | 0.373× |
 
-![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes: simulated fp8 and mxfp4 at 0.10–0.45× and native fp8 and mxfp4 at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
+![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes on 8× B300: simulated fp8 and mxfp4 with the eager activation round trip at 0.10–0.45× (simulated mxfp4 with the fused round trip runs at 0.93–0.99× on 8× H200, not charted) and native fp8 and mxfp4 at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
 
 **Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated and adapter paths are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
 
@@ -79,7 +79,7 @@ Cost is dominated by quantizing the weight (eagerly, 2.5 ms for a 133 MB expert 
 
 **Per-step weight cache.** The expert weight is invariant within an optimizer step, so it is quantized once per step (keyed on `weight._version`) and reused across gradient-accumulation microbatches. The fixed-shape weight round-trip is also `torch.compile`d (~6× faster, bit-identical for the power-of-two-scale formats mxfp8/mxfp4).
 
-**nvfp4's weight stays eager**: its e4m3 scale is not a power of two, so the compiler's reciprocal-multiply flips ~0.18% of elements at block boundaries, desyncing the QAT forward from the eager checkpoint quantizer (QAT→inference relerr 0 holds only eager).
+**nvfp4's weight does not compile**: its e4m3 scale is not a power of two, so the compiler's reciprocal-multiply flips ~0.18% of elements at block boundaries, desyncing the QAT forward from the eager checkpoint quantizer (QAT→inference relerr 0 holds only eager). It takes the fused kernel below instead.
 
 The cache covers expert weights the optimizer writes directly (plain EP params, `ep_size>1`); every shipped optimizer advances `_version` on its raw-pointer stores to keep it honest.
 
@@ -87,9 +87,13 @@ FSDP2-managed experts (the `ep_size==1` + `fsdp_shard_ep1_experts` default) quan
 
 `HALO_LOWP_WEIGHT_CACHE=0` disables it; the cache holds a dequantized copy per expert weight for the step, which costs memory under gradient checkpointing.
 
-**Eager activation.** The activation quant runs eager: after EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. With weight cached+compiled and activation eager, the median over the 94 cells above is 7× a bf16 expert GEMM forward for simulated mxfp8 (21× uncached) and 22–23× for the fp4 formats, floored by the fp4 activation quant (pack + bucketize), which is identical for mxfp4 and nvfp4.
+**Activation quant.** After EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. All three formats quantize activations with the fused kernels below, which need no compile. The eager activation quant is what made simulated expert GEMMs slow: with the weight cached and compiled and the activation quant eager, the median over the 94 cells above is 7× a bf16 expert GEMM forward for mxfp8 (21× uncached) and 22–23× for both fp4 formats. The fused kernels below replace that eager quant.
 
-**Fused mxfp8 round trip.** An mxfp8 fake-quant of a CUDA, contiguous tensor blocked along its last axis (every activation, and both operands of a dense lowp linear) runs as one Triton kernel, `fake_quant_mxfp8_triton`, instead of the eager chain: it reads the tensor once and writes it once, whatever the token count, so it needs no compile. It needs SM 8.9 or newer for Triton's fp8 type, and older GPUs stay eager. Its output is bit-identical to the eager quantizer, NaN blocks and subnormal scales included, so there is no switch; fp4 formats and other layouts stay eager. The figures above predate it.
+**Fused round trip.** An mxfp8, mxfp4 or nvfp4 fake-quant of a CUDA, contiguous tensor blocked along its last axis (every activation, and both operands of a dense lowp linear) runs through `fake_quant_triton` with the format's kernel from `_FUSED_FAKE_QUANT`, instead of the eager chain: it reads the tensor once and writes it once, whatever the token count, so it needs no compile. The fp4 kernels never pack, rounding to e2m1 in registers. nvfp4's global scale needs the whole tensor, so it takes two launches: a tensor abs-max into a device scalar, then the block kernel, which derives the global scale from it with no host sync. nvfp4's EP expert weights, which cannot compile bit-identically, take the same kernel through `_round_trip`, with the quantized axis moved last and back, one extra copy of the weight at peak. mxfp8 and nvfp4 need SM 8.9 or newer for Triton's fp8 type and mxfp4 needs SM 8.0 for the bf16 store, so older GPUs run them eager. The output is bit-identical to the eager quantizer on CUDA (CPU eager divides exactly, so it can differ), NaN, inf, signed zeros and subnormal scales included, so there is no switch. For that, eager MX scales a block by an exact power of two at every exponent, as the kernels do: CUDA's `exp2(-127)` is one ulp below 2^-127, so a tiny block (exponent -127) is multiplied by 2^127 rather than divided by `exp2(-127)`, and a block holding an inf (exponent 127) is halved and multiplied by 2^-126 rather than by `exp2(-127)`. Other layouts stay eager, the axis-1 weights of the FSDP2-managed ep1 path among them.
+
+The block exponent is `ceil(log2(amax / format_max))`. On CUDA, torch divides by the Python-scalar `format_max` as a multiply by its fp32 reciprocal, and the kernels do the same. On CPU, torch divides exactly, so for the few amax values where the two land on either side of a power of two, a CPU run (a CPU `quantize_to_lowp.py` export among them) picks the other exponent for that block.
+
+Whole step, simulated mxfp4 as a ratio to bf16 on 8× H200 (ep8, 4,096-token rows, 3 runs each): gpt-oss-20b at batch 4 0.99×, Qwen3-30B-A3B at batch 8 0.94× (the eager activation quant runs out of memory there in the first step on 140 GiB), Qwen3.5-35B-A3B at batch 4 0.93×.
 
 The simulated path is a convergence-validation tool — run a few hundred steps to confirm the loss tracks bf16, not a production run. For bf16 throughput leave low precision off (`lowp_precision: bf16`).
 
@@ -111,7 +115,7 @@ The native path requires the `deep_gemm` wheel, built into the **Blackwell** ima
 
 ## Formats — MX vs NV
 
-A block-scaled format is defined by element type, scale type, and block size. MX (OCP Microscaling) uses a power-of-two `e8m0` shared exponent per 32-element block — coarse but cheap and exact, so the simulated weight round-trip compiles bit-identically. NV (`nvfp4`) uses a finer `e4m3` scale per 16-element block — more accurate, but the non-power-of-two divide does not compile bit-identically, so its weight round-trip stays eager.
+A block-scaled format is defined by element type, scale type, and block size. MX (OCP Microscaling) uses a power-of-two `e8m0` shared exponent per 32-element block — coarse but cheap and exact, so the simulated weight round-trip compiles bit-identically. NV (`nvfp4`) uses a finer `e4m3` scale per 16-element block — more accurate, but the non-power-of-two divide does not compile bit-identically, so its weight round-trip takes the fused kernel instead of a compiled one.
 
 A NaN weight stays NaN through every simulated format. An MX block whose amax is NaN takes `e8m0`'s spec `0xFF` NaN code; without it, `e2m1` (which has no NaN encoding) would decode the poison as a finite `format_max × 2^-127` block and a diverged run would be reported as near-zero weights.
 
@@ -127,17 +131,17 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 |--------|---------|-------|-------|----------|--------------|
 | **mxfp8** (OCP MX) | e4m3 | e8m0 (pow-2) | 1×32 | best (fp8) | compiled |
 | **mxfp4** (OCP MX) | e2m1 | e8m0 (pow-2) | 1×32 | coarsest fp4 | compiled |
-| **nvfp4** (NVIDIA) | e2m1 | e4m3 + per-tensor fp32 | 1×16 | best fp4 | eager |
+| **nvfp4** (NVIDIA) | e2m1 | e4m3 + per-tensor fp32 | 1×16 | best fp4 | fused kernel |
 | DeepGEMM native fp8 | e4m3 | UE8M0 (pow-2) | act 1×128, weight 128×128 | — | (native kernel) |
 | DeepGEMM native mxfp4 | e2m1 (act fp8) | UE8M0 | act 1×128, weight 1×32 | — | (native kernel) |
 
-`lowp_precision` exposes three formats (`LOWP_RECIPES`): **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically (~6× cheaper than nvfp4's eager weight quant, helps at low gradient-accumulation). Pick by deployment target.
+`lowp_precision` exposes three formats (`LOWP_RECIPES`): **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically. Pick by deployment target.
 
-In the cache-hit steady state both fp4 formats are bounded by the eager activation quant, so their per-microbatch cost is similar; fp8 is cheaper because its activation quant is lighter. DeepGEMM's native recipes (UE8M0 scales over 1×128 activation groups, and 128×128 blocks for the fp8 weight) are coarser still; use the simulated path when you need exact mx/nv numerics.
+In the cache-hit steady state all three formats quantize activations with the fused kernels, so none pays the eager activation quant: a simulated mxfp4 step runs at 0.93–0.99× of bf16 throughput on 8× H200 (the ep8 rows under [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed)). DeepGEMM's native recipes (UE8M0 scales over 1×128 activation groups, and 128×128 blocks for the fp8 weight) are coarser still; use the simulated path when you need exact mx/nv numerics.
 
 Published end-to-end gains over bf16: MXFP8 1.13× on DeepSeek-V3 (256 GB300, Megatron Bridge), 1.22× on DeepSeek-V3 671B (TorchAO #4798) and 1.22× on GPT-OSS 120B (64 B300, across containers); MXFP8 on the attention projections alone 1.19× on DeepSeek-V3 671B (64 GB300, TorchTitan). NVFP4 adds about 3% over MXFP8 on Nemotron 3 Super and reaches 1.34–1.37× on DeepSeek-V3 with MXFP8 attention projections. NVFP4 pretraining keeps about the last 15% of blocks in bf16 ([arXiv 2509.25149](https://arxiv.org/abs/2509.25149)).
 
-The gpt-oss release stores its experts in MXFP4; Halo fine-tunes from the BF16 mirror (`unsloth/gpt-oss-*-BF16`). bf16 with stochastic-rounding master weights is the floor — see [BF16 Optimizer](bf16-optimizer.md).
+The gpt-oss release stores its experts in MXFP4; Halo decodes them to bf16 at load, in the lazy EP and PP loaders, or fine-tunes from the BF16 mirror (`unsloth/gpt-oss-*-BF16`) ([GPT-OSS](../models/gpt-oss.md#configs)). bf16 with stochastic-rounding master weights is the floor — see [BF16 Optimizer](bf16-optimizer.md).
 
 ## QAT → low-precision inference
 
@@ -185,9 +189,21 @@ Consuming the result — per quantized weight `<name>`:
 - `<name>.weight_packed` (`float8_e4m3fn` for mxfp8, `uint8` with two `e2m1` nibbles per byte for fp4), `<name>.weight_scale` (one per block), `<name>.weight_shape` (the original shape — packed fp4 data halves the contraction axis).
 - `<name>.weight_global_scale` — **nvfp4 only**, in compressed-tensors' convention: shape `[1]`, `E4M3_MAX × E2M1_MAX / amax` (rounded to a power of two), and an element is `code × weight_scale / weight_global_scale`. A loader that drops it reads the tensor rescaled by up to `E4M3_MAX × E2M1_MAX`. An all-zero weight stores `1.0`, compressed-tensors' own value for it, never the `+inf` its amax implies, which vLLM's max over a fused layer's partitions would spread to every partition; a nonzero weight too small for the scale's fp32 range is refused.
 - The contraction axis is **per weight**, from `quantization_config.json`'s `weight_axes` map — fused 3-D experts differ by family (gpt-oss contracts on axis 1, the rest on the last), so the manifest's single `contraction_axis` is only the fallback for names absent from that map.
-- `quantization_config.json` also carries a `scope` block recording what this export reproduced: `apply_dense_mlp`, `apply_moe_experts`, `keep_first_blocks`, `keep_last_blocks` (the flags, minus the `lowp_` prefix) plus the resolved `kept_blocks` indices. The whole manifest is stamped into the output `config.json` under `quantization_config` as well.
+- `quantization_config.json` also carries a `scope` block recording what this export reproduced: `apply_dense_mlp`, `apply_moe_experts`, `keep_first_blocks`, `keep_last_blocks` (the flags, minus the `lowp_` prefix) plus the resolved `kept_blocks` indices. Under `block_scaled` the whole manifest is also stamped into the output `config.json` under `quantization_config`. Under compressed-tensors `config.json` carries compressed-tensors' own config instead, and the manifest is only in the sidecar.
 
 For a bf16 source the dequantized weight reproduces the simulated QAT forward exactly (relerr 0); `halo.kernels.lowp.quantization.dequantize` is the reference reader (its nvfp4 `global_scale` is the reciprocal of the stored one). Serving engines do not load this manifest as-is.
+
+### Serving the export with vLLM
+
+`--export_format compressed-tensors` writes the same weights in the layout compressed-tensors' compressors read, which vLLM loads through its `compressed-tensors` quantization method. The default stays `block_scaled`, since a checkpoint with fused 3-D expert banks, which this layout refuses, would otherwise fail by default.
+
+- mxfp8 keeps unpacked `e4m3` data under `<name>.weight`. mxfp4 and nvfp4 pack it under `<name>.weight_packed`. Every format stores `<name>.weight_scale`, nvfp4 adds `<name>.weight_global_scale`, and no format writes `weight_shape`.
+- `config.json` carries the `quantization_config` compressed-tensors serializes for its MXFP8, MXFP4 and NVFP4A16 presets, with `re:` targets that match exactly the quantized modules. MX declares dynamic input activations, as QAT quantized both GEMM operands. nvfp4 is weight-only, since an engine's W4A4 needs a calibrated static input scale. `config.json` no longer carries Halo's manifest, which stays in the `quantization_config.json` sidecar every export writes.
+- vLLM reads a MoE expert as one Linear per `<experts>.<i>.<proj>`, so a fused 3-D bank is refused before any write. Un-fuse it first with `scripts/after_training/unfuse_moe_experts.py`.
+- vLLM takes one scheme per fused layer, a dense MLP's `gate_proj` with its `up_proj` and all three projections of an expert, so an `--include` or `--exclude` that quantizes only part of one is refused before any write. A dense `down_proj` stands alone.
+- vLLM loads `gate_proj` and `up_proj` (an expert's `w1` and `w3`) into one merged layer and can decode nvfp4 under one global scale for it: a dense `gate_up_proj` takes the largest stored divisor, and most MoE backends take the gate's. QAT quantizes each projection with its own power-of-two global scale, so the two can differ. The export writes each pair under the larger of its two global scales and steps the other projection's `e4m3` block scales down by the same power of two. That is exact unless a stepped-down scale falls below `e4m3`'s smallest normal (2^-6) and rounds to a subnormal, which moves a served weight by at most half a subnormal step times the `e2m1` max, about 2e-6 of the layer's largest weight, far inside nvfp4's own error. Those scales are written rounded, the largest change is logged before the write, and the export refuses only if it passes the `--verify` tolerance.
+
+The layout targets vLLM 0.32.0, the release in `halo:vllm-0.32.0`. On Hopper its kernels for these formats run weight-only, so served logprobs track the quantized weights, not the QAT forward, whose activations are fake-quantized too.
 
 ## Usage
 

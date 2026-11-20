@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Native fp8 step</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 340px;
+    --bar-h: 48px;
+  }
+
+  body { width: 1600px; }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    margin-left: var(--label-col);
+    margin-bottom: 36px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+  }
+
+  .row + .row { margin-top: 24px; }
+
+  .label {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .row.total .label { color: var(--text); }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .track i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    border-radius: 6px;
+    background: var(--hue);
+  }
+
+  .track b {
+    position: absolute;
+    top: 50%;
+    padding-left: 12px;
+    transform: translateY(-50%);
+    font-weight: 400;
+    font-size: 23px;
+    font-variant-numeric: tabular-nums;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .row.total .track b { font-weight: 500; color: var(--text); }
+
+  /* The axis, under the bar column: a line along the plot's bottom edge, a short mark under it at each tick, and
+     the tick's value below. */
+  .ticks {
+    position: relative;
+    height: 38px;
+    margin: 20px 0 0 var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ticks i {
+    position: absolute;
+    top: 0;
+    height: 8px;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticks span { position: absolute; top: 12px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span:first-of-type { transform: none; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Native fp8 adds <span id="title-added"></span> to a <span id="title-bf16"></span> step</h1>
+  </header>
+
+  <div class="figure">
+    <div class="key">
+      <span style="--hue: var(--tertiary)"><i></i>bf16</span>
+      <span style="--hue: var(--halo-blue)"><i></i>Native fp8 and what it adds</span>
+      <span style="--hue: var(--success)"><i></i>What it saves</span>
+    </div>
+    <div id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const BF16_MS = 1311;
+  const NATIVE_MS = 2424;
+  // [part, milliseconds native fp8 adds (negative: saves) over the bf16 step]
+  const DELTAS = [
+    ["Activation cast", 392],
+    ["Weight cast", 63],
+    ["Padding and un-padding", 59],
+    ["Expert kernel", -37],
+    ["Combine wait", 309],
+    ["Rest of the step", 327],
+  ];
+
+  const sum = BF16_MS + DELTAS.reduce((acc, [, ms]) => acc + ms, 0);
+
+  if (sum !== NATIVE_MS) {
+    throw new Error(`the parts sum to ${sum} ms, not the measured ${NATIVE_MS} ms`);
+  }
+
+  const plot = document.getElementById("plot");
+  const ticks = document.getElementById("ticks");
+  const ms = (value) => value.toLocaleString("en-US");
+  const signed = (value) => `${value < 0 ? "−" : "+"}${ms(Math.abs(value))}`;
+  const marks = [];
+
+  function row(name, start, end, hue, text, total) {
+    const node = el("div", total ? "row total" : "row");
+    const track = el("div", "track");
+    const fill = el("i");
+    fill.style.setProperty("--hue", hue);
+    const value = el("b", undefined, text);
+    track.append(fill, value);
+    node.append(el("div", "label", name), track);
+    plot.append(node);
+    marks.push({ track, fill, value, start, end });
+  }
+
+  row("bf16 step", 0, BF16_MS, "var(--tertiary)", `${ms(BF16_MS)} ms`, true);
+  let running = BF16_MS;
+
+  for (const [name, delta] of DELTAS) {
+    const start = Math.min(running, running + delta);
+    row(name, start, start + Math.abs(delta), delta < 0 ? "var(--success)" : "var(--halo-blue)", signed(delta), false);
+    running += delta;
+  }
+
+  row("Native fp8 step", 0, NATIVE_MS, "var(--halo-blue)", `${ms(NATIVE_MS)} ms`, true);
+
+  const axis = niceAxis(Math.max(...marks.map(({ end }) => end)), (max) => {
+    const pct = (at) => `${(at / max) * 100}%`;
+
+    for (const { fill, value, start, end } of marks) {
+      fill.style.left = pct(start);
+      fill.style.width = pct(end - start);
+      value.style.left = pct(end);
+    }
+
+    return marks.every(({ track, value }) => value.getBoundingClientRect().right <= track.getBoundingClientRect().right);
+  });
+
+  drawAxis(ticks, axis, (tick) => (tick === 0 ? "0 ms" : ms(tick)));
+
+  document.getElementById("title-added").textContent = `${ms(NATIVE_MS - BF16_MS)} ms`;
+  document.getElementById("title-bf16").textContent = `${ms(BF16_MS)} ms`;
+  console.log(`net ${signed(NATIVE_MS - BF16_MS)} ms, ${(NATIVE_MS / BF16_MS).toFixed(3)}× the bf16 step`);
+</script>
+</body>
+</html>

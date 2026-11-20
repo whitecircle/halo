@@ -128,9 +128,20 @@ class RLRRArguments(_RLRRTunables, ValidatedConfig):
 
 @dataclass
 class AdvantageShapingArguments(ValidatedConfig):
-    """Reward scaling, the degenerate-group drop and token-mass balance of the online and environmental GRPO
+    """Reward scaling, MaxRL, the degenerate-group drop and token-mass balance of the online and environmental GRPO
     advantages; the environmental config re-declares ``drop_degenerate_groups`` on by default."""
 
+    use_maxrl: bool = field(
+        default=False,
+        metadata={
+            "help": "MaxRL advantages (arXiv:2602.02710): divide each reward minus its group mean by that mean, in "
+            "place of a std, and give a group whose mean is 0 advantage 0. On a pass/fail reward this is an unbiased "
+            "gradient of a truncated maximum-likelihood objective, which weighs hard prompts up: one success in 16 "
+            "gets advantage 15. Needs non-negative rewards (checked every step on every rank) and scale_rewards: "
+            "none. Logged as sampling/maxrl_zero_mean_group_frac. "
+            "See agent-docs/training-methods/async-grpo/objective.md#advantages."
+        },
+    )
     scale_rewards_std_floor: float = field(
         default=0.0,
         metadata={
@@ -263,9 +274,10 @@ class ScoreCenteringArguments(ValidatedConfig):
         default=None,
         metadata={
             "help": "Candidates the SGLang rollout server returns per generated token for score centering, which "
-            "subtracts their score-function mean from each token's gradient, so on a constant reward most of the "
-            "drift a sampler-vs-trainer mismatch causes cancels at 16 to 32 candidates (all of it at the full "
-            "vocabulary). Unset = off; 16 to 32 suits most runs. Refused at construction beside the settings it "
+            "subtracts their score-function mean from each token's gradient, so on a constant reward the drift a "
+            "sampler-vs-trainer mismatch causes cancels where the candidates hold nearly all of the sampler's mass "
+            "on the mismatched tokens (all of it at the full vocabulary). Unset = off; raise it until "
+            "score_centering/sampler_head_mass_mean is near 1. Refused at construction beside the settings it "
             "cannot run with, each named; see agent-docs/training-methods/async-grpo/objective.md#score-centering."
         },
     )

@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>1.2.0 against 1.1.0</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 440px;
+    --panel-gap: 56px;
+    --mem-col: 360px;
+    --row-h: 34px;
+    --row-gap: 16px;
+    --axis-gap: 14px;
+    --tick: 6px;
+    --link: color-mix(in oklab, var(--halo-blue) 45%, var(--bg));
+  }
+
+  body { width: 1600px; }
+
+  .row,
+  .head,
+  .ticks {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr var(--panel-gap) var(--mem-col);
+    align-items: center;
+  }
+
+  /* Under the panel names, a heading gap plus the room the release names take above the top row's dots. */
+  .head { margin-bottom: calc(var(--heading-gap) + 27px); }
+
+  .panel-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .panel-name i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--halo-violet);
+  }
+
+  .plot { position: relative; }
+
+  .row + .row { margin-top: var(--row-gap); }
+
+  .label {
+    font-size: 25px;
+    line-height: 1;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    z-index: 2;
+    height: var(--row-h);
+  }
+
+  .track svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .link { stroke: var(--link); stroke-width: 3; }
+
+  .before { fill: var(--bg); stroke: var(--tertiary); stroke-width: 3; }
+
+  .after { fill: var(--halo-blue); }
+
+  /* A release's name above its dot on the top row. */
+  .release {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    transform: translateX(-50%);
+    font-size: 21px;
+    line-height: 1;
+    white-space: nowrap;
+    color: var(--body);
+  }
+
+  .release.now { color: var(--halo-blue); }
+
+  .value {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 23px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .track > i {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    border-radius: 5px;
+    background: var(--halo-violet);
+  }
+
+  /* Memory's zero runs from the top bar through the axis line to the end of its tick, behind the bars. */
+  .zero {
+    position: absolute;
+    z-index: 1;
+    bottom: calc(-1 * (var(--axis-gap) + var(--tick)));
+    border-left: 1px solid var(--tertiary);
+  }
+
+  /* Each panel's axis line runs under its plot, a tick mark hanging below it at each label. */
+  .ticks {
+    margin-top: var(--axis-gap);
+    height: 34px;
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks > div { position: relative; height: 100%; }
+
+  .ticks .axis { position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: var(--tick); border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: calc(var(--tick) + 4px); transform: translateX(-50%); white-space: nowrap; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>1.2.0 runs every shape <span id="gain-range"></span> faster</h1>
+  </header>
+
+  <div class="figure">
+    <div class="head" id="head"></div>
+    <div class="plot" id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // [shape, 1.1.0 tokens/s/GPU, 1.2.0 tokens/s/GPU, 1.1.0 peak GiB, 1.2.0 peak GiB]
+  const SHAPES = [
+    ["Qwen3-8B FSDP2", 13935, 15490, 26.02, 26.38],
+    ["Qwen3-8B CP2", 7635, 8748, 25.07, 24.00],
+    ["Qwen3-8B TP2", 3861, 7013, 22.53, 22.53],
+    ["gpt-oss-20b EP1", 11114, 14304, 60.29, 61.83],
+    ["gpt-oss-20b EP2", 12121, 14107, 78.97, 77.32],
+    ["gpt-oss-20b EP8, gathered save", 10349, 11896, 26.87, 26.47],
+    ["gpt-oss-20b EP8, DeepEP legacy", 8801, 9826, 26.67, 26.24],
+    ["gpt-oss-20b EP8 × TP2", 4749, 6013, 31.11, 31.16],
+    ["gpt-oss-20b EP8 × CP2", 7501, 9085, 25.18, 23.58],
+    ["gpt-oss-20b EP4 × ETP2", 4589, 9521, 26.14, 25.75],
+    ["Qwen3.5-35B-A3B EP8, 4,096 tokens", 7893, 8974, 43.03, 41.63],
+    ["Qwen3.5-35B-A3B EP8, 16,384 tokens", 11618, 14275, 74.89, 74.96],
+  ];
+  /** The largest gains labelled at the top, beside the smallest at the bottom. */
+  const LEAD_LABELS = 2;
+  /** The 1.2.0 dot's radius, and the 1.1.0 ring's to the middle of its stroke. */
+  const R_AFTER = 9;
+  const R_BEFORE = 8;
+  /** Distance from a dot's or bar's end to its label. */
+  const LABEL_GAP = 10;
+
+  const signed = (value) => `${value < 0 ? "−" : "+"}${Math.abs(value).toFixed(2)}`;
+  const gain = (row) => row[2] / row[1];
+  const rows = [...SHAPES].sort((a, b) => gain(b) - gain(a));
+  const gains = rows.map(gain);
+  const deltas = rows.map((row) => row[4] - row[3]);
+  const gainLabelled = new Set(rows.map((_, i) => i).filter((i) => i < LEAD_LABELS || i === rows.length - 1));
+  const deltaLabelled = new Set([deltas.indexOf(Math.max(...deltas)), deltas.indexOf(Math.min(...deltas))]);
+
+  document.getElementById("gain-range").textContent = `${Math.min(...gains).toFixed(2)}–${Math.max(...gains).toFixed(2)}×`;
+
+  // Panel names: the rate panel's releases are named on its top row, the memory panel's colour beside its name.
+  const head = document.getElementById("head");
+  const memName = el("div", "panel-name");
+  memName.append(el("i"), "Peak memory change");
+  head.append(el("div"), el("div", "panel-name", "Tokens/s per GPU"), el("div"), memName);
+
+  // Rows.
+  const plot = document.getElementById("plot");
+  const tracks = [];
+
+  rows.forEach((row, i) => {
+    const line = el("div", "row");
+    const rate = el("div", "track");
+    const memory = el("div", "track");
+    line.append(el("div", "label", row[0]), rate, el("div"), memory);
+    plot.append(line);
+    tracks.push({ row, rate, memory, delta: deltas[i], gainLabel: gainLabelled.has(i), deltaLabel: deltaLabelled.has(i) });
+  });
+
+  // Marks are placed in pixels once the grid has sized its columns, each panel's axis under it.
+  const rateWidth = tracks[0].rate.clientWidth;
+  const memWidth = tracks[0].memory.clientWidth;
+  const plotBox = plot.getBoundingClientRect();
+  const memBox = tracks[0].memory.getBoundingClientRect();
+  const tickRow = document.getElementById("ticks");
+  const rateTicks = el("div");
+  const memTicks = el("div");
+  tickRow.append(el("div"), rateTicks, el("div"), memTicks);
+  const zero = el("div", "zero");
+  zero.style.top = `${memBox.top - plotBox.top}px`;
+  plot.append(zero);
+
+  /** Draws one panel's axis into its tick cell: a line across its `width` pixels, a tick mark and label at each offset in `xs`. */
+  function drawPanelAxis(cell, width, xs, texts) {
+    const axis = el("div", "axis");
+    axis.style.left = "0px";
+    axis.style.width = `${width}px`;
+    cell.replaceChildren(axis);
+
+    xs.forEach((x, i) => {
+      const mark = el("i");
+      // A mark is drawn 1px wide right of its offset, so one at the panel's end steps back onto the line.
+      mark.style.left = `${Math.min(x, width - 1)}px`;
+      const label = el("span", undefined, texts[i]);
+      label.style.left = `${x}px`;
+      cell.append(mark, label);
+    });
+  }
+
+  /**
+   * Draws each row's dumbbell on a rate axis to `max`: a line from the 1.1.0 ring to the 1.2.0 dot, a labelled row's
+   * gain beside its 1.2.0 dot on the side away from the ring, and the releases named above the top row's dots.
+   */
+  function drawRates(max) {
+    const x = (value) => (value / max) * rateWidth;
+
+    tracks.forEach(({ row, rate, gainLabel }, i) => {
+      const [, before, after] = row;
+      const cy = rate.clientHeight / 2;
+      const way = Math.sign(after - before) || 1;
+      const svg = svgEl("svg", {});
+      rate.replaceChildren(svg);
+
+      if (Math.abs(x(after) - x(before)) > R_BEFORE + R_AFTER) {
+        svg.append(svgEl("line", { class: "link", x1: x(before) + way * R_BEFORE, x2: x(after) - way * R_AFTER, y1: cy, y2: cy }));
+      }
+
+      svg.append(
+        svgEl("circle", { class: "before", cx: x(before), cy, r: R_BEFORE }),
+        svgEl("circle", { class: "after", cx: x(after), cy, r: R_AFTER }),
+      );
+
+      if (gainLabel) {
+        const value = el("div", "value", `${gain(row).toFixed(2)}×`);
+        rate.append(value);
+        const edge = x(after) + way * (R_AFTER + LABEL_GAP);
+        value.style.left = `${way > 0 ? edge : edge - value.offsetWidth}px`;
+      }
+
+      if (i === 0) {
+        rate.append(el("div", "release", "1.1.0"), el("div", "release now", "1.2.0"));
+        const [old, now] = rate.querySelectorAll(".release");
+        old.style.left = `${x(before)}px`;
+        now.style.left = `${x(after)}px`;
+      }
+    });
+  }
+
+  // The rate axis ends at the smallest maximum that holds every dot, gain and release name inside the panel.
+  const rateAxis = niceAxis(Math.max(...SHAPES.flatMap((row) => [row[1], row[2]])), (max) => {
+    drawRates(max);
+    const right = tracks[0].rate.getBoundingClientRect().right;
+
+    return tracks.every(({ rate }) => [...rate.querySelectorAll("circle, .value, .release")].every((node) => node.getBoundingClientRect().right <= right));
+  });
+  const [oldName, newName] = tracks[0].rate.querySelectorAll(".release");
+
+  if (oldName.getBoundingClientRect().right + 12 > newName.getBoundingClientRect().left && newName.getBoundingClientRect().right + 12 > oldName.getBoundingClientRect().left) {
+    throw new Error("The release names above the top row's dots meet: the top row's gain is too small to name the releases on its dots.");
+  }
+
+  drawAxis(rateTicks, rateAxis, (tick) => (tick === 0 ? "0" : `${tick / 1000}k`));
+
+  /** Draws the memory panel symmetric about zero, `span` GiB either side, with ticks at ± each of `half`. */
+  function drawMemory(span, half) {
+    const ticks = [...half.slice(1).reverse().map((tick) => -tick), ...half];
+    const memX = (value) => memWidth / 2 + (value / span) * (memWidth / 2);
+
+    for (const { memory, delta, deltaLabel } of tracks) {
+      memory.replaceChildren();
+
+      if (Math.abs(delta) >= 0.005) {
+        const fill = el("i");
+        const x0 = memX(Math.min(0, delta));
+        const x1 = memX(Math.max(0, delta));
+        fill.style.left = `${x0}px`;
+        fill.style.width = `${x1 - x0}px`;
+        memory.append(fill);
+      }
+
+      // The number sits off the bar end, on the side away from zero, so it never meets the zero line.
+      if (deltaLabel) {
+        const value = el("div", "value", signed(delta));
+
+        if (delta < 0) {
+          value.style.right = `${memWidth - memX(delta) + LABEL_GAP}px`;
+        } else {
+          value.style.left = `${memX(delta) + LABEL_GAP}px`;
+        }
+
+        memory.append(value);
+      }
+    }
+
+    zero.style.left = `${memBox.left - plotBox.left + memX(0)}px`;
+    // The unit rides on zero: on an outer tick its width would hold the axis off the data.
+    const texts = ticks.map((tick) => (tick === 0 ? "0 GiB" : `${tick < 0 ? "−" : "+"}${Math.abs(tick)}`));
+    drawPanelAxis(memTicks, memWidth, ticks.map(memX), texts);
+  }
+
+  // The memory axis reaches the largest change either side of zero, widened until every change label and tick label
+  // stays inside the memory column, with at most two steps either side of zero.
+  niceAxis(Math.max(...deltas.map(Math.abs)), (span, half) => {
+    drawMemory(span, half);
+
+    return [...tracks.flatMap(({ memory }) => [...memory.querySelectorAll(".value")]), ...memTicks.querySelectorAll("span")].every((node) => {
+      const box = node.getBoundingClientRect();
+
+      return box.left >= memBox.left && box.right <= memBox.right;
+    });
+  }, { most: 2 });
+
+  console.log(`gains ${gains.map((g) => g.toFixed(2)).join(" ")} · memory moves ${deltas.map(signed).join(" ")}`);
+</script>
+</body>
+</html>
