@@ -82,6 +82,7 @@ parser.add_argument("--ep", type=int, default=2)
 parser.add_argument("--world", type=int, default=None, help="ranks (default: the mode's own)")
 parser.add_argument("--gpus-per-node", type=int, default=0, help="simulated NVLink domain width (0: the launch's)")
 parser.add_argument("--per-rank-adapters", action="store_true", help="redraw each rank's lora_B from its own stream")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
 ARGS = parser.parse_args()
 FAMILY, ADAPTER, FIELDS_FOR, DEFAULT_WORLD = MODES[ARGS.mode]
 WORLD_SIZE = ARGS.world or DEFAULT_WORLD
@@ -232,6 +233,7 @@ def run(ctx) -> dict:
         reference_kl_loss="unnormalized_kl",
         confidence_weight_opd=True,
         opd_exclude_eos=True,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
     ctx.on_teardown(trainer.cleanup_ep)
 

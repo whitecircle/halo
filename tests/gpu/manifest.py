@@ -2074,6 +2074,7 @@ MANIFEST: dict[str, TestSpec] = {
                     "zero3",
                 )
             ),
+            *(f"--mode {mode} --chunked" for mode in ("lora", "lora_ep", "lora_etp", "full_tp2", "zero3")),
             *_rows(
                 (
                     "--mode lora_ep_etp",
@@ -2652,10 +2653,10 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=900,
     ),
     "trainers/other/test_self_distillation_vlm.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900
+        nproc=1, markers=("gpu", "core", "1gpu", "vlm"), args_matrix=("", "--chunked"), timeout=900
     ),
     "trainers/other/test_self_distillation_text.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600
+        nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), args_matrix=("", "--chunked"), timeout=600
     ),
     "trainers/sft/test_sft_hsdp.py": TestSpec(
         nproc=4,

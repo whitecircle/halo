@@ -100,6 +100,7 @@ def _self_distillation(config, reference_kl_coef):
             reference_kl_loss="unnormalized_kl",
             confidence_weight_opd=True,
             opd_exclude_eos=True,
+            use_chunked_distillation_loss=False,
             sdpg_beta_base=0.0,
         )
     return setup_calls
