@@ -301,7 +301,9 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
 Refused at construction, with the reason in the message: vLLM for any family but Inkling 2, vLLM without
 `rollout_adapter_dir`, a `weight_sync_refusal` family on a backend outside its `adapter_sync_backends`,
 `routing_replay: rollout`, a
-`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA, DoRA, `lora_bias`,
+`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA (served on Inkling 2's experts
+alone, by `halo:vllm-0.1.dev25249`, at the attention adapters' rank and scaling:
+[Inkling 2](../models/inkling2.md#rollouts)), DoRA, `lora_bias`,
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
@@ -420,11 +422,13 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
 - **Split top-p guard** (`vllm_topp_split_guard_patch.py`) adds the monolithic kernel's logit-space
   no-mask check to the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at most 64.
   Without it a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the whole row,
-  and the engine samples token 0 and reports a NaN log-prob.
+  and the engine samples token 0 and reports a NaN log-prob. It ships on `halo:vllm-0.32.0` alone: the Inkling 2
+  build's pipeline keeps the forced token, which that tag's build asserts.
 
-- **Image identity** (`vllm_image_identity_patch.py`) lists these patches as `VLLM_HALO_PATCHES` on `/server_info`,
-  where the trainer refuses a server without it ([Startup preflight](#startup-preflight)). It lands only where
-  `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
+- **Image identity** (`vllm_image_identity_patch.py`) lists the engine build and these patches as `VLLM_HALO_PATCHES`
+  on `/server_info` (`<vllm.__version__>|<patch>,<patch>,...`), where the trainer refuses a server without it, or
+  with a build other than the one its family's tag pins ([Startup preflight](#startup-preflight)). It lands only
+  where `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
 
 **Build-time source edits** (`docker/vllm/patches/patch_vllm_source.py`, through
 `docker/engine_source_patch.py`, the patcher the SGLang image shares) turn vLLM's harmony pipeline off
@@ -432,18 +436,22 @@ for gpt-oss, point the server log at stderr and move FlashInfer CUTLASS to the b
 MoE backends. Each edit asserts its pre- and post-image; `python3 /opt/halo/patch_vllm_source.py
 --verify` re-checks a running container.
 
-**Model Runner V2** is pinned (`VLLM_USE_V2_MODEL_RUNNER=1`): it enforces thinking budgets, is the only
+**Model Runner V2** is pinned on `halo:vllm-0.32.0` (`VLLM_USE_V2_MODEL_RUNNER=1`) and is the only runner the
+Inkling 2 build ships: it enforces thinking budgets, is the only
 runner R3 capture starts on, and computes prompt log-probs before the drafter under speculative
 decoding (the V1 runner's drafter graph overwrites the target's hidden states, so prompt log-probs come
 back garbage, [vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). The
 `isr_engine_reference` startup probe refuses a server whose prompt log-probs do not follow from its
 tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py`,
-`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the patches, the transformers/tokenizers pins,
+**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py` on
+`halo:vllm-0.32.0` and `docker/vllm/verify_topp_budget_cut.py` on the Inkling 2 tag,
+`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the engine build each tag pins (`vllm.__version__`), that
+Model Runner V2 is the runner the engine starts (the switch on `halo:vllm-0.32.0`; no V1 runner on the Inkling 2
+tag), the patches, the transformers/tokenizers pins,
 the `ncclUniqueId` pickle shim, the weight-transfer wire (init and update request fields, the packed
 chunk boundary, the routes), that `/pause` accepts `mode=keep` and resets the prefix cache under it,
-that the split top-p guard keeps a budget-cut row whole while masking an ordinary row as upstream does,
+that split top-p keeps a budget-cut row whole while masking an ordinary row as upstream does,
 that the gpt-oss parser plugins drive Model Runner V2's budget, that `EngineArgs` carries
 `weight_transfer_config` / `enable_return_routed_experts` and `KernelConfig.moe_backend`, and the
 per-family [config-schema parity](#config-schema-parity). A green build is what proves the server can
@@ -559,7 +567,8 @@ server that does not answer is logged as unread.
 
 | Refused | Because |
 |---|---|
-| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` names on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, or one naming a build neither vLLM tag pins; no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A vLLM server on the other tag: Inkling 2 on `halo:vllm-0.32.0`, any other family on `halo:vllm-0.1.dev25249` (`FAMILY_IMAGES` on the client) | The release has no Inkling 2 model, and no other family has run on the Inkling 2 build. The refusal names the tag and the `make` target that serve the family |
 | A server whose image lacks a patch the served family needs (`REQUIRED_PATCHES` on the client against the `halo_patches` names; an image that reports only its identity has none) | A push is acknowledged and part of the model keeps serving launch weights |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
 | A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
@@ -635,6 +644,10 @@ dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Q
 GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE; Qwen3.8-Flash-Next ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)); on SGLang only through an image carrying the mix-up patch below. A MoE with no family spec is refused on both. Per-family server
 flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving), [GLM-5 Next](../models/glm5-next.md#rl-weight-sync).
 
+The vLLM column is `halo:vllm-0.32.0`. The Inkling 2 tag (`halo:vllm-0.1.dev25249`) serves Inkling 2 alone, as an
+adapter over its release ([Inkling 2](../models/inkling2.md#rollouts)): no other family has run on it, and none
+is served from it.
+
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that
 mapping does not cover leaves **no server-side signal** in most MoE loaders (Qwen3 MoE, GLM-4,
@@ -674,13 +687,25 @@ a process resolves, and `VLLM_NCCL_SO_PATH` points pynccl at that wheel so the b
 system copy never wins. A skew fails or hangs `ncclCommInitRank` at `/init_weight_transfer_engine`;
 rebuild the image after any bump of the pin.
 
-The client reads `GET /version` and refuses a server older than 0.32.0 or one that reports no version:
-the packed-transfer geometry (`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) rides
-`/init_weight_transfer_engine`, which older engines refuse. No newer release is validated.
+The same Dockerfile builds a second tag, `halo:vllm-0.1.dev25249` (`make build-vllm-inkling2`,
+`--build-arg VLLM_ENGINE=inkling2`), from vLLM's Inkling 2 build
+([Rollout server images](docker.md#rollout-server-images)). It adds Inkling 2's source edits
+(`docker/vllm/patches/patch_vllm_inkling2.py`: its tensor-parallel all-reduce, its `config.json` as the release
+ships it, LoRA on its NVFP4/MXFP8 experts) and sets `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`; it carries no split
+top-p guard and no runner pin. Every other family is served from `halo:vllm-0.32.0`.
+
+The client takes a server as the toolkit's image where its identity row names the engine build one of the two tags
+pins (`IMAGE`, `FAMILY_IMAGES` on `VLLMWeightSyncClient`; each build asserts its own). A weight-sync group forms
+only with `halo:vllm-0.32.0`: a row naming another build, the Inkling 2 tag's among them, is refused before any
+join, and Inkling 2 forms no group. A server with no such row is read through `GET /version` first, and the client
+refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry (`packed`,
+`packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which older engines refuse.
+No other engine build is validated. A toolkit image whose row names its patches and no build, as the 1.2.0 and
+1.3.0rc1 tags do, is refused with the image remedy: build or pull the current tags.
 
 ### Config-schema parity
 
-The server parses every checkpoint with its own transformers, the base image's 5.19.0
+The server parses every checkpoint with its own transformers, the base image's 5.19.0 (5.22.2 on the Inkling 2 tag)
 (`Dockerfile.vllm` asserts it sits inside vLLM's declared range). `docker/vllm/parity/check.py` runs at
 image build: vLLM's `ModelConfig` must resolve what the toolkit exports, to a per-layer attention
 geometry, for every family whose EP layer admits weight sync and the vLLM client does not list as
@@ -726,7 +751,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0` |
+| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0`, or to `halo:vllm-0.1.dev25249` for Inkling 2 (`make up-vllm-inkling2` sets it) |
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host; drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the Makefile's |
 | `VLLM_CUDA_DEVICES` | `7` | Server GPUs, disjoint from `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`; a rank cannot broadcast to itself). Selected via `CUDA_VISIBLE_DEVICES` in a container that sees every GPU: hiding devices instead (`--gpus device=N`) breaks the cross-container P2P import and `/init_weight_transfer_engine` fails with `unhandled cuda error` |
@@ -773,7 +798,8 @@ it (the worst-case multi-turn budget only warns).
 `VLLM_USE_V2_MODEL_RUNNER` is an env var the compose file passes through bare, so unset keeps the
 image's `1`. `0` falls back to the V1 runner, where R3 refuses to start and the gpt-oss budget loses
 its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty key in `.env` counts)
-kills the server with a bare `ValueError`.
+kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and no longer declares the variable; it checks the name itself and raises
+`ValueError` ("Model Runner V1 has been removed") at startup for any value but `1`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,
 `qa_search`, open-book `exam_qa`) a missing or wrong parser leaves calls as text with no `tool_calls`, so every

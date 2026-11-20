@@ -337,16 +337,14 @@ def test_a_reply_missing_a_flag_passes_with_it_unread(engine, monkeypatch):
     def bare(method, path, body):
         if path != "/server_info":
             return original(method, path, body)
-        identity = {"vllm_env": {_IDENTITY_KEY: "x"}} if client_cls is VLLMWeightSyncClient else {"halo_patches": True}
+        if client_cls is VLLMWeightSyncClient:
+            identity = {"vllm_env": {_IDENTITY_KEY: server.identity}}
+        else:
+            identity = {"halo_patches": True}
         return 200, {"tp_size": 1, **identity}
 
     monkeypatch.setattr(server, "answer", bare)
     _verify(server, client_cls, is_moe=True, reasoning_consumers=("reasoning_floor",), sends_tools=True)
-
-
-def test_the_identity_key_is_the_one_the_image_declares():
-    patch = load_script_module("docker/vllm/patches/vllm_image_identity_patch.py")
-    assert patch.IDENTITY_KEY == _IDENTITY_KEY
 
 
 @pytest.mark.parametrize("script", [_ENV_SCRIPT, _ONLINE_SCRIPT], ids=["environmental", "online"])

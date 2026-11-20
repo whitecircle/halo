@@ -6,9 +6,10 @@ anything that executes runs inside one.
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
 - `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).
 - `halo:vllm-0.32.0` — the vLLM rollout server (separate container).
+- `halo:vllm-0.1.dev25249` — the vLLM rollout server for Inkling 2, the only family it serves.
 - `halo:sglang-0.5.22` — the SGLang rollout server (separate container).
 
-All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` with the same tags
+All five are published to Amazon ECR Public under `public.ecr.aws/whitecircle/halo` with the same tags
 (anonymous pulls, no AWS account; [Registry](#registry)), or build credential-free from source
 ([Building](#building)) under these local names. The images are x86_64-only: Grace-based GB200/GB300
 hosts (aarch64) need an arm64 build the Dockerfile does not provide.
@@ -123,6 +124,7 @@ The build needs no GPU (it cross-compiles via `TORCH_CUDA_ARCH_LIST`) and no cre
 make build-hopper
 make build-blackwell
 make build-vllm      # halo:vllm-0.32.0
+make build-vllm-inkling2   # halo:vllm-0.1.dev25249, Dockerfile.vllm with --build-arg VLLM_ENGINE=inkling2
 make build-sglang    # halo:sglang-0.5.22
 
 # Raw equivalent; pass the stamps `make` adds yourself
@@ -131,7 +133,8 @@ docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
 ```
 
 A bare `docker build` targets Hopper (`ARG TARGET_GPU=hopper`). The server tags carry the engine
-release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `ARG SGLANG_VERSION`).
+release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `ARG VLLM_INKLING2_VERSION`,
+`ARG SGLANG_VERSION`).
 
 - **uv, not Poetry.** Dependencies install into the system interpreter: `uv export --locked` (the dev
   group plus the `gigatoken` and `flash-optimizers` extras) into a requirements file, then
@@ -140,7 +143,7 @@ release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `A
   (`causal-conv1d`, `flash-linear-attention`) take it too, so their dependencies come from the lock.
   `make check-lock` replays this install in a throwaway container and fails on a stale lock.
 - **`SOURCE_REVISION`** busts the source-COPY cache: `make build-*` stamps the short git SHA, so a
-  code-only change reruns only the COPY and the editable reinstall. All four images carry it as
+  code-only change reruns only the COPY and the editable reinstall. All five images carry it as
   `org.opencontainers.image.revision`, with `VERSION` and `BUILD_DATE` as `.version` and `.created`
   (a raw build without them labels `dev` and an empty date), so
   `docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' halo:blackwell`
@@ -238,7 +241,12 @@ job, so there is no separate `-efa` tag. The launch env per fabric:
 
 `halo:vllm-0.32.0` is upstream `vllm/vllm-openai:v0.32.0` and `halo:sglang-0.5.22` upstream
 `lmsysorg/sglang:v0.5.22`, each with the `uv.lock` NCCL, the EFA userspace and the weight-sync patches
-asserted at build. Each pins its own torch and transformers, so the trainer never imports either
+asserted at build. `halo:vllm-0.1.dev25249` is the same `Dockerfile.vllm` over vLLM's Inkling 2 build, vLLM main
+with the Inkling 2 model ([vllm-project/vllm#67325](https://github.com/vllm-project/vllm/pull/67325)); it serves
+Inkling 2 and no other family ([Inkling 2](../models/inkling2.md#rollouts)). Its base is upstream's
+`vllm/vllm-openai:inkling-2-small`, a moving tag, pinned by digest, and the build asserts the engine reports
+`0.1.dev25249+gb974b306f`. Each pins its own torch and
+transformers, so the trainer never imports either
 engine. Their compose files require one host path each, with no fallback: `HALO_SCRATCH` for
 `docker-compose.vllm.yml` (even to start the server alone) and `SGLANG_MODEL_DIR` for
 `docker-compose.sglang.yml`; set them in the shell or the repo-root `.env`. Build gates, patches,
@@ -251,11 +259,12 @@ Prebuilt images live on Amazon ECR Public:
 ```bash
 docker pull public.ecr.aws/whitecircle/halo:blackwell     # or :hopper
 docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0
+docker pull public.ecr.aws/whitecircle/halo:vllm-0.1.dev25249   # Inkling 2 only
 docker pull public.ecr.aws/whitecircle/halo:sglang-0.5.22
 ```
 
 Each moving tag has an immutable release pin: `blackwell-1.3.0rc1`, `hopper-1.3.0rc1`, `vllm-0.32.0-1.3.0rc1`,
-`sglang-0.5.22-1.3.0rc1`. There is deliberately no `latest`, which would let a Hopper host pull a
+`vllm-0.1.dev25249-1.3.0rc1`, `sglang-0.5.22-1.3.0rc1`. There is deliberately no `latest`, which would let a Hopper host pull a
 Blackwell image. Pair a trainer with the server images of the same release: the vLLM image unpickles
 the trainer's `ncclUniqueId` through a shim at the trainer's module path. Pin a release by pulling its
 tag and retagging it under the local name the `make` targets use:
@@ -269,7 +278,7 @@ The compose files take the server images from `VLLM_IMAGE` / `SGLANG_IMAGE` (def
 `halo:vllm-0.32.0` / `halo:sglang-0.5.22`) and build nothing, so a pulled server image needs no
 retag: `export VLLM_IMAGE=public.ecr.aws/whitecircle/halo:vllm-0.32.0`.
 
-Maintainers publish with `make push-public-all` (`ecr-public-login` plus the four `push-public-*`
+Maintainers publish with `make push-public-all` (`ecr-public-login` plus the five `push-public-*`
 targets). To host the images elsewhere, `docker tag` and `docker push` the local builds; nothing
 sensitive rides along. `tests/cpu/config/test_release_version_in_sync.py` holds every statement of the
 release to `pyproject.toml`'s `version`: the `uv.lock` entry, the `Makefile` `VERSION`, each Dockerfile's

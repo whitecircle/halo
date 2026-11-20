@@ -52,6 +52,8 @@ the local name. They default to `halo:blackwell`. On Hopper, pass
   mistake.
 - The RL rollout servers are in the same repository, as `:vllm-0.32.0` and
   `:sglang-0.5.22`, pinned as `:vllm-0.32.0-1.3.0rc1` and `:sglang-0.5.22-1.3.0rc1`.
+  Inkling 2 is served from its own vLLM tag, `:vllm-0.1.dev25249`, pinned as
+  `:vllm-0.1.dev25249-1.3.0rc1`.
 
 To build from source instead (no token or registry login):
 

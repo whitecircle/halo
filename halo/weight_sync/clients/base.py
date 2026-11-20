@@ -6,7 +6,7 @@ import logging
 import socket
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, NamedTuple, NoReturn
@@ -73,6 +73,8 @@ class ServerFlags(NamedTuple):
     as unread, not as wrong."""
 
     toolkit_image: bool
+    # The engine build a toolkit image names in its identity, where the engine's identity carries one.
+    engine_build: str | None = None
     moe_backend: str | None = None
     # Empty when the server runs without one.
     reasoning_parser: str | None = None
@@ -94,6 +96,15 @@ class ServerFlags(NamedTuple):
     disaggregation_mode: str | None = None
     # The engine's own launch facts (parallel sizes, batch caps, attention and graph modes), logged and never compared.
     extras: Mapping[str, object] = MappingProxyType({})
+
+
+class EngineImage(NamedTuple):
+    """One toolkit server image: its local tag, the engine build its identity names on ``/server_info``, and the make
+    target that builds it."""
+
+    tag: str
+    build: str
+    make_target: str
 
 
 class ServedBase(NamedTuple):
@@ -151,6 +162,10 @@ class WeightSyncClientBase(UpdateStream, ABC):
     # The open takes the weights away until a close restores them, so a session no close can end leaves no model.
     SESSION_OPEN_UNLOADS_MODEL: bool = False
     SESSION_REQUEST: Mapping[str, object] = {}
+    # The toolkit image every family is served from, ``None`` where the engine's identity names no build, and
+    # ``model_type`` → the image of each family that is served from another engine build.
+    IMAGE: EngineImage | None = None
+    FAMILY_IMAGES: Mapping[str, EngineImage] = {}
     # ``model_type`` → why the pinned release cannot take an online update of the family (the gate quotes it).
     UNSERVABLE_MODEL_TYPES: Mapping[str, str] = {}
     # ``model_type`` → the image patch (a name in ``ServerFlags.patches``) an update of the family needs.
@@ -168,6 +183,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
     # Whether the engine loads an adapter only from a directory it reads (rollout_adapter_dir).
     ADAPTER_NEEDS_DIRECTORY = False
+    # The model types whose routed experts the engine serves an adapter on, as 3D per-expert tensors.
+    ADAPTER_EXPERT_MODEL_TYPES: frozenset[str] = frozenset()
     # The engine's routes for a load from a published directory and for an unload; ``None`` where it serves no adapter.
     ADAPTER_DIRECTORY_LOAD_ROUTE: str | None = None
     ADAPTER_UNLOAD_ROUTE: str | None = None
@@ -519,6 +536,16 @@ class WeightSyncClientBase(UpdateStream, ABC):
     def accepts_tool_requests(self) -> bool | None:
         """Whether a request carrying tools is served, ``None`` where the server reports its parser instead."""
         return None
+
+    @classmethod
+    def image_for(cls, model_types: Iterable[str]) -> EngineImage | None:
+        """The toolkit image a model of these types is served from."""
+        return next((cls.FAMILY_IMAGES[each] for each in model_types if each in cls.FAMILY_IMAGES), cls.IMAGE)
+
+    @classmethod
+    def image_remedy(cls, model_types: Iterable[str]) -> str:
+        """The launch a refusal names for a model of these types."""
+        return cls.IMAGE_REMEDY
 
     def _require_toolkit_image(self, flags: ServerFlags) -> None:
         """Refuse a server off the toolkit's image: its routes answer, and its update lands wrong behind a ``200``."""

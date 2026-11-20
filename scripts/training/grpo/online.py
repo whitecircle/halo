@@ -40,6 +40,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.introspection.config_access import config_model_types
 from halo.models.moe.config_fields import has_routed_experts
 from halo.rewards.graders.verifiable import RLVR_GRADERS
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
@@ -221,7 +222,11 @@ def main():
     )
     verify_server_flags(
         [vllm_base_url],
-        ServerRequirements(is_moe=has_routed_experts(model.config), weight_precision=args.rollout_weight_precision),
+        ServerRequirements(
+            is_moe=has_routed_experts(model.config),
+            weight_precision=args.rollout_weight_precision,
+            model_types=config_model_types(model.config),
+        ),
         backend=VLLM_BACKEND,
         connection_timeout=grpo_config.vllm_server_timeout,
     )

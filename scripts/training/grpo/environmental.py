@@ -164,6 +164,7 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         weight_precision=async_config.rollout_weight_precision,
         candidate_logprobs=async_config.score_centering_top_k or 0,
         pushes_base=pushes_base(model, adapter_sync=async_config.rollout_adapter_sync),
+        model_types=config_model_types(model.config),
         patches=frozenset(required_patches[t] for t in config_model_types(model.config) if t in required_patches),
     )
 

@@ -13,13 +13,19 @@ import requests
 import torch
 from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.rollouts.engine_wire import build_payload
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     ADAPTER_NAME_PREFIX,
@@ -39,6 +45,7 @@ from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
+from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _LORA = {
@@ -588,6 +595,57 @@ def test_a_vllm_server_on_another_base_is_refused_over_a_base_never_pushed(launc
     assert foreign.url in str(raised.value) and base_pushes == [] and not foreign.adapters
 
 
+_EXPERTS, _EXPERT_HIDDEN, _EXPERT_WIDTH = 4, 32, 16
+
+
+def _with_expert_lora(model: torch.nn.Module) -> EPInkling2MoELayer:
+    """An Inkling 2 EP layer with native expert LoRA, in place of the first decoder layer's MLP."""
+    torch.manual_seed(1)
+    block = Inkling2SparseMoeBlock(
+        Inkling2TextConfig(
+            hidden_size=_EXPERT_HIDDEN,
+            moe_intermediate_size=_EXPERT_WIDTH,
+            n_routed_experts=_EXPERTS,
+            num_experts_per_tok=2,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            vocab_size=32,
+        )
+    ).to(torch.bfloat16)
+    layer = EPInkling2MoELayer(block, single_process_ep_config(_EXPERTS, expert_lora=ExpertLoraSpec(r=8, alpha=24)))
+    for name, param in layer.named_parameters():
+        if "_lora_" in name:
+            torch.nn.init.normal_(param, std=0.05)
+    model.base_model.model.model.layers[0].mlp = layer
+    return layer
+
+
+def test_expert_adapters_reach_the_engine_as_deltas_of_the_w13_and_w2_weights(vllm_unpushable, base_pushes, tmp_path):
+    """The engine adds ``B @ A`` to each expert's ``w13_weight`` (rows alternating gate and up) and ``w2_weight``; the
+    trainer's grouped adapters hold the same delta in matmul convention, gate and up side by side."""
+    sync, trainer, _ = vllm_unpushable
+    layer = _with_expert_lora(trainer.model)
+    scaling = 24 / 8
+
+    sync.sync(trainer, None)
+
+    wire = load_file(str(tmp_path / sync.versions.current / "adapter_model.safetensors"))
+    prefix = "base_model.model.model.layers.0.mlp.experts"
+    assert {key for key in wire if ".experts." in key} == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    for attr, weight in (("gate_up_proj", "w13_weight"), ("down_proj", "w2_weight")):
+        a, b = (getattr(layer, f"{attr}_lora_{side}").detach().float() for side in "AB")
+        trained = (a @ b).transpose(1, 2) * scaling
+        if attr == "gate_up_proj":
+            gate, up = trained.chunk(2, dim=1)
+            trained = torch.stack((gate, up), dim=2).flatten(1, 2)
+        engine_a, engine_b = (wire[f"{prefix}.{weight}.lora_{side}.weight"].float() for side in "AB")
+        assert trained.abs().max() > 1e-3
+        torch.testing.assert_close(engine_b @ engine_a, trained, rtol=2e-2, atol=1e-3)
+
+
 def _rebound(sync: AdapterSync, fakes) -> AdapterServers:
     """The servers a second ``train()`` binds after the first one's ``reset()`` closed its own."""
     sync.servers = AdapterServers(
@@ -880,10 +938,6 @@ def _refusal_cases():
         "grown vocabulary": (grown, "grown vocabulary"),
         "other trainable parameters": (trainable_norm, "trainable parameters other than the adapters"),
         "qlora": (patched(lambda m: m.setattr(adapter_sync, "has_packed_quantized_params", lambda _: True)), "QLoRA"),
-        "expert lora": (
-            patched(lambda m: m.setattr(adapter_sync, "model_has_expert_lora", lambda _: True)),
-            "native expert LoRA",
-        ),
     }
 
 
@@ -1091,6 +1145,64 @@ def test_inkling2_attention_adapters_reach_the_release_names_vllm_packs(family):
     layer0 = {key.split(".attn.")[1].split(".")[0] for key in hub if ".layers.0.attn." in key}
     assert layer0 == {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud"}
     assert all(".model.llm.layers." in key for key in hub), "the release's layer path"
+
+
+class _ExpertLoraLayer:
+    """An EP layer with native expert LoRA at rank 8 and the given scaling."""
+
+    def __init__(self, scaling: float):
+        self.ep_config = SimpleNamespace(expert_lora=SimpleNamespace(r=8))
+        self.expert_lora_scaling = scaling
+
+
+@pytest.mark.parametrize(
+    ("family", "client_cls", "scaling", "reason"),
+    [
+        ("inkling2_text", VLLMWeightSyncClient, 2.0, None),
+        ("inkling2_text", VLLMWeightSyncClient, 1.0, "another rank or scaling"),
+        ("inkling2_text", SGLangWeightSyncClient, 2.0, "serves no routed-expert adapter"),
+        ("qwen3_moe", VLLMWeightSyncClient, 2.0, "serves no routed-expert adapter"),
+    ],
+)
+def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, client_cls, scaling, reason, monkeypatch):
+    """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank."""
+    model = _inkling2_peft(family, ("q_proj", "o_proj"))
+    monkeypatch.setattr(adapter_sync, "expert_lora_layers", lambda _: [("mlp", _ExpertLoraLayer(scaling))])
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
+    if reason is None:
+        assert reasons == []
+    else:
+        assert any(reason in each for each in reasons), reasons
+
+
+def test_expert_adapters_reach_vllm_per_expert_with_gate_and_up_interleaved():
+    """Halo's grouped ``[E, in, r]`` / ``[E, r, out]`` adapters become vLLM's ``[E, r, in]`` / ``[E, out, r]`` on
+    ``w13_weight`` / ``w2_weight`` under the release's layer path, the w13 B rows alternating gate and up."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["inkling2"])
+    layer = next(name for name, _ in model.named_modules() if name.endswith("layers.0.mlp"))
+    experts, hidden, width, rank = 4, 8, 6, 2
+    gate_up_a, gate_up_b = torch.randn(experts, hidden, rank), torch.randn(experts, rank, 2 * width)
+    down_a, down_b = torch.randn(experts, width, rank), torch.randn(experts, rank, hidden)
+    gathered = {
+        f"{layer}.experts.gate_up_proj.lora_A": gate_up_a,
+        f"{layer}.experts.gate_up_proj.lora_B": gate_up_b,
+        f"{layer}.experts.down_proj.lora_A": down_a,
+        f"{layer}.experts.down_proj.lora_B": down_b,
+    }
+
+    engine = adapter_sync._engine_expert_adapters(model, gathered)
+
+    prefix = f"{PEFT_BASE_MODEL_PREFIX}model.llm.layers.0.mlp.experts"
+    assert engine.keys() == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    assert torch.equal(engine[f"{prefix}.w13_weight.lora_A.weight"], gate_up_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_A.weight"], down_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_B.weight"], down_b.transpose(1, 2))
+    # The engine's w13 delta, rows (g0, u0, g1, u1, ...), against the layer's [gate | up] one.
+    delta = engine[f"{prefix}.w13_weight.lora_B.weight"][1] @ engine[f"{prefix}.w13_weight.lora_A.weight"][1]
+    halo_delta = (gate_up_a[1] @ gate_up_b[1]).T
+    assert torch.allclose(delta[0::2], halo_delta[:width]) and torch.allclose(delta[1::2], halo_delta[width:])
 
 
 if __name__ == "__main__":

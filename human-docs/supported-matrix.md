@@ -17,7 +17,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
 | flash-linear-attention | 0.6.0 |
-| vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods |
+| vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods. Inkling 2 is served from a second tag, on vLLM's Inkling 2 build (0.1.dev25249) |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
 | Hardware | Image | Status |
