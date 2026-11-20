@@ -107,9 +107,9 @@ distill_loss: kl_divergence
 distill_alpha: 1.0                           # distillation only; the CE stays logged as sft_loss
 ```
 
-With both models on one checkpoint and one attention backend, step 0's `distillation_loss` is the divergence the quantization causes, plus any dropout in the student: this trainer keeps the student's dropout on, and the teacher runs in eval mode. `use_chunked_distillation_loss` runs the same converted layers, and the output embedding stays bf16 on both paths. Native expert-LoRA adapters on the student compute in bf16, as under SFT. The teacher is not parallelized, so every rank holds a full copy beside its share of the EP student, and `moe_balancing: aux_loss` stays refused (this trainer adds no router aux loss).
+With both models on one checkpoint and one attention backend, step 0's `distillation_loss` is the divergence the quantization causes, plus any dropout in the student: this trainer keeps the student's dropout on, and the teacher runs in eval mode. `use_chunked_distillation_loss` runs the same converted layers, and lowp never converts the output embedding, so it keeps the run's dtype on both paths. Native expert-LoRA adapters on the student compute in bf16, as under SFT. The teacher is not parallelized, so every rank holds a full copy beside its share of the EP student, and `moe_balancing: aux_loss` stays refused (this trainer adds no router aux loss).
 
-To export the trained student, pass the run's four `lowp_*` scope flags to [`quantize_to_lowp.py`](../../optimization/low-precision-moe-kernels.md#qat--low-precision-inference) (`--lowp_apply_dense_mlp`, `--lowp_apply_moe_experts`, `--lowp_keep_first_blocks`, `--lowp_keep_last_blocks`): the weights do not carry them.
+To export the trained student, pass the run's four `lowp_*` scope flags to [`quantize_to_lowp.py`](../../optimization/low-precision-moe-kernels.md#qat--low-precision-inference) (`--lowp_apply_dense_mlp`, `--lowp_apply_moe_experts`, `--lowp_keep_first_blocks`, `--lowp_keep_last_blocks`): the weights do not carry them. An adapter run (`use_peft` or native expert LoRA) saves the adapter alone unless it [merges on save](../../reference/checkpoints.md#merge-on-save-checkpoints), so fold it into its base with `scripts/after_training/merge_peft_adapters.py` first and export the merged directory.
 
 ## Testing a setup
 
