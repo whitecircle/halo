@@ -16,7 +16,7 @@ from transformers import DataCollatorForSeq2Seq, Qwen3_5ForCausalLM
 from transformers.models.qwen3_5 import modeling_qwen3_5
 from trl import SFTConfig
 
-from halo.distributed.context_parallel import families, ulysses_attention
+from halo.distributed.context_parallel import gated_delta, ulysses_attention
 from halo.distributed.context_parallel.families import Qwen3_5UlyssesGatedDelta
 from halo.distributed.context_parallel.sequence_chunks import cp_local_targets
 from halo.distributed.fsdp import reshard_fsdp2_modules
@@ -110,12 +110,12 @@ def _gdn_blocks(ctx, batch, checkpointing):
         _check_tensor(checks, metrics, f"gdn_mask_gradient/{name}", reference[2][name], expected, gradient=True)
 
     if batch > 1:
-        original_inverse = families.heads_to_sequence
+        original_inverse = gated_delta.heads_to_sequence
 
         def mixed_rows(core, group):
             return original_inverse(core, group).roll(1, dims=0)
 
-        with torch.no_grad(), patch.object(families, "heads_to_sequence", mixed_rows):
+        with torch.no_grad(), patch.object(gated_delta, "heads_to_sequence", mixed_rows):
             changed = wrapped(hidden[:, part])
         real = mask[:, part, None].expand_as(changed)
         agrees, _ = hybrid_tensor_agreement(changed[real], reference[0][:, part][real])

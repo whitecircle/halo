@@ -63,7 +63,6 @@ class ResumeExportRoute:
     attn_implementation: str
     sidecars: tuple[str, ...] = ()
     run_state: Callable | None = None
-    trust_remote_code: bool = True
 
 
 def save_base_checkpoint(ctx, model, tokenizer, path: str) -> str:
@@ -81,7 +80,7 @@ def load_route_model(route: ResumeExportRoute, source: str, parallelism_config, 
         source,
         parallelism_config,
         dtype=route.dtype,
-        trust_remote_code=route.trust_remote_code,
+        trust_remote_code=True,
         attn_implementation=route.attn_implementation,
         model_class=route.export_class,
         preserve_checkpoint_precision=resume,

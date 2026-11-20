@@ -83,6 +83,8 @@ def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
         class_name = module.__class__.__name__
         hybrid_wrapper = ULYSSES_GATED_DELTA_MAP.get(class_name)
         if hybrid_wrapper is not None:
+            # The distributed loader calls this before a trainer exists, so its hybrid refusals cannot rely on the
+            # SFT trainer rule.
             if config_declares_multimodality(config):
                 raise CPConfigError(
                     "Hybrid CP supports text-only models. Load the text tower with text_only_model: true, or disable context_parallel_size."

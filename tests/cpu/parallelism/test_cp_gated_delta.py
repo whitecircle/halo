@@ -12,14 +12,14 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.checkpoint import checkpoint
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
-from halo.distributed.context_parallel import families, ulysses_attention
+from halo.distributed.context_parallel import ulysses_attention
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP, Qwen3_5UlyssesGatedDelta
+from halo.distributed.context_parallel.gated_delta import heads_to_sequence
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.models.introspection.unwrapping import find_peft_model, strip_cp_attention_level
 from halo.trainers.construction.trainer_rules import reject_hybrid_cp_training
-from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.equivalence.cp_equivalence import reference_flash_attn
@@ -31,6 +31,7 @@ from tests.common.hybrid_cp import (
     hybrid_text_config,
     hybrid_token_batch,
 )
+from tests.common.tiny_models import config_only_module, unknown_hybrid_config
 
 
 def _capture(layer, hidden, mask, targets, *, checkpointing=False):
@@ -84,6 +85,8 @@ def _layer_worker(rank):
             ):
                 with pytest.raises(CPConfigError):
                     wrapped(local_hidden, **kwargs)
+            with pytest.raises(TypeError, match="Unsupported GatedDeltaNet forward arguments"):
+                wrapped(local_hidden, unsupported=True)
             assert observed.call_count == 0
 
     native = modeling_qwen3_5.Qwen3_5GatedDeltaNet(hybrid_text_config(), 0)
@@ -102,7 +105,7 @@ def _layer_worker(rank):
             with torch.no_grad():
                 parameter.copy_(parameter.roll(native.num_v_heads // 2))
         original_conv = modeling_qwen3_5.causal_conv1d_fn
-        original_inverse = families.heads_to_sequence
+        original_inverse = heads_to_sequence
 
         def broken_conv(inputs, weight, *args, **kwargs):
             """Corrupt channel ownership or sever the causal convolution at the CP boundary."""
@@ -122,7 +125,7 @@ def _layer_worker(rank):
                 broken_conv if fault in ("boundary", "conv_channels") else original_conv,
             ),
             patch(
-                "halo.distributed.context_parallel.families.heads_to_sequence",
+                "halo.distributed.context_parallel.gated_delta.heads_to_sequence",
                 broken_inverse if fault == "inverse" else original_inverse,
             ),
         ):
@@ -144,6 +147,10 @@ def _model_worker(rank):
         candidate.config._attn_implementation = "flash_attention_2"
         cp_config = CPConfig(2, stage_world_size=2, stage_base_rank=0, nvlink_domain_size=2)
         wrapped = UlyssesModel(candidate, cp_config)
+        gate_config = SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False)
+        reject_hybrid_cp_training(wrapped, SimpleNamespace(), gate_config, supported=True)
+        with pytest.raises(CPConfigError, match="SFT only"):
+            reject_hybrid_cp_training(wrapped, SimpleNamespace(), gate_config, supported=False)
         if checkpointing:
             baseline.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
             candidate.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
@@ -214,30 +221,77 @@ def test_validator_and_patcher_share_dense_hybrid_claim():
     assert set(ULYSSES_GATED_DELTA_MAP) == {"Qwen3_5GatedDeltaNet"}
 
 
-def test_hybrid_multimodal_config_is_rejected_at_validation_and_adoption():
+def test_hybrid_multimodal_config_is_rejected_at_validation_and_training_gate():
     model = build_hybrid_model()
     model.config.vision_config = SimpleNamespace()
     model.config._attn_implementation = "flash_attention_2"
     with pytest.raises(CPConfigError, match="text-only"):
         reject_unsupported_ulysses_model(model, 2)
-    trainer = DistributedSFTTrainer.__new__(DistributedSFTTrainer)
-    trainer.model = model
-    trainer.args = SimpleNamespace()
-    trainer.parallelism_config = SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False)
     with pytest.raises(CPConfigError, match="text-only"):
-        trainer._adopt_cp_wrapper()
-
-
-@pytest.mark.parametrize("supported,peft,packing", ((False, None, False), (True, object(), False), (True, None, True)))
-def test_hybrid_training_gate_rejects_other_trainers_adapters_and_packing(supported, peft, packing):
-    with pytest.raises(CPConfigError):
         reject_hybrid_cp_training(
-            build_hybrid_model(),
-            SimpleNamespace(packing=packing),
+            model,
+            SimpleNamespace(),
             SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
-            supported=supported,
-            peft_config=peft,
+            supported=True,
         )
+
+
+def test_hybrid_routed_experts_are_rejected_before_a_trainer_exists():
+    model = build_hybrid_model()
+    model.config.is_moe = True
+    model.config.num_experts = 2
+    with pytest.raises(CPConfigError, match="dense models only"):
+        reject_unsupported_ulysses_model(model, 2)
+
+
+@pytest.mark.parametrize(
+    "case,match",
+    (
+        ("other_trainer", "SFT only"),
+        ("cp4", "context_parallel_size: 2"),
+        ("routed", "dense models"),
+        ("peft", "full fine-tuning"),
+        ("expert_lora", "full fine-tuning"),
+        ("quantized", "full fine-tuning"),
+        ("packing", "document-boundary"),
+        ("padding_free", "document-boundary"),
+    ),
+)
+def test_hybrid_training_gate_refuses_each_unsupported_branch(case, match):
+    model = build_hybrid_model()
+    args = SimpleNamespace(packing=case == "packing", padding_free=case == "padding_free")
+    config = SimpleNamespace(is_cp_mode=True, cp_size=4 if case == "cp4" else 2, expert_lora=case == "expert_lora")
+    if case == "routed":
+        model.config.is_moe = True
+        model.config.num_experts = 2
+    elif case == "quantized":
+        packed_codes = torch.nn.Parameter(torch.ones(1, dtype=torch.int8), requires_grad=False)
+        model.register_parameter("packed_codes", packed_codes)
+    with pytest.raises(CPConfigError, match=match):
+        reject_hybrid_cp_training(
+            model,
+            args,
+            config,
+            supported=case != "other_trainer",
+            peft_config=object() if case == "peft" else None,
+        )
+
+
+def test_hybrid_training_gate_admits_dense_unpacked_cp2_sft():
+    reject_hybrid_cp_training(
+        build_hybrid_model(),
+        SimpleNamespace(packing=False, padding_free=False),
+        SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+        supported=True,
+    )
+
+
+def test_unregistered_hybrid_keeps_its_family_refusal():
+    model = config_only_module(unknown_hybrid_config())
+    config = SimpleNamespace(is_cp_mode=True, cp_size=4, expert_lora=False)
+    reject_hybrid_cp_training(model, SimpleNamespace(), config, supported=False)
+    with pytest.raises(CPConfigError, match="linear_attention"):
+        reject_unsupported_ulysses_model(model, 4)
 
 
 @pytest.mark.parametrize(
@@ -293,34 +347,6 @@ def test_hybrid_training_gate_leaves_non_cp_and_attention_only_cp_unchanged(is_c
     )
 
 
-@pytest.mark.parametrize("model", [None, "tiny/checkpoint"])
-def test_hybrid_training_gate_leaves_unmaterialized_models_for_hf_setup(model):
-    reject_hybrid_cp_training(
-        model,
-        SimpleNamespace(),
-        SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
-        supported=False,
-    )
-
-
-@pytest.mark.parametrize("missing_layer_metadata", [False, True])
-def test_adoption_gate_executes_for_a_cp_capable_non_sft_trainer(missing_layer_metadata):
-    """Reject unsupported hybrid trainers before CP wrapper adoption, regardless of layer metadata."""
-    model = build_hybrid_model()
-    if missing_layer_metadata:
-        del model.config.layer_types
-    trainer = SimpleNamespace(
-        args=SimpleNamespace(),
-        parallelism_config=SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
-        SUPPORTS_HYBRID_CP=False,
-        _top_level_model=lambda: model,
-    )
-    with patch("halo.trainers.parallelism.mode_setup.require_ulysses_model") as wrapper_lookup:
-        with pytest.raises(CPConfigError, match="SFT only"):
-            ModeSetupMixin._adopt_cp_wrapper(trainer)
-        wrapper_lookup.assert_not_called()
-
-
 @pytest.mark.parametrize("missing_layer_metadata", [False, True])
 @pytest.mark.parametrize(
     "trainer_class,peft,match",
@@ -331,7 +357,7 @@ def test_hybrid_trainer_initialization_refuses_before_hf_setup(trainer_class, pe
     kwargs = {
         "model": build_hybrid_model(),
         "args": SimpleNamespace(),
-        "parallelism_config": SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+        "parallelism_config": SimpleNamespace(is_cp_mode=True, cp_size=2, pp_size=1, expert_lora=False),
     }
     if missing_layer_metadata:
         del kwargs["model"].config.layer_types
@@ -346,16 +372,18 @@ def test_hybrid_trainer_initialization_refuses_before_hf_setup(trainer_class, pe
 
 def test_sft_subclasses_must_declare_hybrid_support_on_the_concrete_trainer():
     class UnqualifiedSFT(DistributedSFTTrainer):
-        def _top_level_model(self):
-            return self.model
+        pass
 
     trainer = UnqualifiedSFT.__new__(UnqualifiedSFT)
-    trainer.args = SimpleNamespace()
-    trainer.parallelism_config = SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False)
-    trainer.model = build_hybrid_model()
     assert trainer.SUPPORTS_HYBRID_CP
     with pytest.raises(CPConfigError, match="SFT only"):
-        trainer._adopt_cp_wrapper()
+        trainer._init_distributed_config(
+            {
+                "model": build_hybrid_model(),
+                "args": SimpleNamespace(),
+                "parallelism_config": SimpleNamespace(is_cp_mode=True, cp_size=2, pp_size=1, expert_lora=False),
+            }
+        )
 
 
 def test_gpu_oracle_gradient_bars_keep_expected_zero_and_small_parameters_observable():

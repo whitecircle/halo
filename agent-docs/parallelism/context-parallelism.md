@@ -184,22 +184,12 @@ on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ### Dense hybrid SFT
 
-Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. Both linear-attention
+Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. For a released
+multimodal checkpoint, set `text_only_model: true` to load its text tower. Both linear-attention
 key and value head counts must be divisible by CP2, and value heads must be a multiple of key heads.
+Use right-padded rows; the path does not pass a padding mask into each linear-attention layer.
 MoE, adapters, quantized weights, packed rows, multimodal models, cache use and other trainers
 remain refused for this hybrid path.
-
-`ULYSSES_GATED_DELTA_MAP` installs `Qwen3_5UlyssesGatedDelta` separately from the softmax-attention
-wrappers. One existing fused all-to-all redistributes Q/K/V and decay/beta inputs from sequence
-shards to head shards. Each head shard runs the native causal convolution and gated delta rule
-over the full row; Q/K expand to value heads after convolution. The inverse restores local sequence
-order before the native gated norm and output projection. Parameter slices stay attached to the
-original module, and the existing export key stripping restores native checkpoint names.
-
-The dense path passes no layer padding mask. Use right-padded rows: causal real-token outputs
-do not depend on trailing padding, and ignored labels exclude it from the loss. CPU Gloo tests
-compare native Torch-dispatched GatedDeltaNet outputs and every gradient; they do not qualify
-CUDA kernels, NCCL or the FSDP2 training lifecycle.
 
 ## CP with EP
 

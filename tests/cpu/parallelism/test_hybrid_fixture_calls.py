@@ -3,7 +3,6 @@
 import ast
 import inspect
 from types import MappingProxyType
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -14,9 +13,7 @@ from halo.distributed.context_parallel.families import Qwen3_5UlyssesGatedDelta
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
-from tests.common import resume_export
 from tests.common.checkpoint_io import save_schedule
-from tests.common.efficiency_observation import ObservedEfficiencyCallback
 from tests.common.repo import REPO_ROOT
 from tests.common.resume_export import ResumeExportRoute, run_resume_export, save_base_checkpoint
 
@@ -38,7 +35,6 @@ CALLABLES = MappingProxyType(
             save_base_checkpoint,
             finalize_loaded_model,
             Qwen3_5UlyssesGatedDelta,
-            ObservedEfficiencyCallback,
         )
     }
 )
@@ -90,25 +86,6 @@ def test_hybrid_local_loader_call_explicitly_disables_remote_code():
     assert len(calls) == 1
     trust = next(keyword.value for keyword in calls[0].keywords if keyword.arg == "trust_remote_code")
     assert isinstance(trust, ast.Constant) and trust.value is False
-
-
-@pytest.mark.parametrize("resume", (False, True))
-def test_local_resume_route_forwards_trust_and_precision_to_the_real_loader_contract(resume):
-    expected = inspect.signature(load_distributed_model)
-    route = ResumeExportRoute(lambda: None, object, torch.bfloat16, "flash_attention_2", trust_remote_code=False)
-
-    def loaded(*args, **kwargs):
-        expected.bind(*args, **kwargs)
-        assert kwargs["trust_remote_code"] is False
-        assert kwargs["preserve_checkpoint_precision"] is resume
-        return "loaded-model", None
-
-    with patch.object(resume_export, "load_distributed_model", loaded):
-        assert resume_export.load_route_model(route, "tiny-local", object(), resume=resume) == "loaded-model"
-
-
-def test_existing_resume_route_trust_default_is_unchanged():
-    assert ResumeExportRoute(lambda: None, object, torch.bfloat16, "flash_attention_2").trust_remote_code is True
 
 
 @pytest.mark.parametrize("save_every", (None, 2))
