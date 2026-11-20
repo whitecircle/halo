@@ -434,7 +434,8 @@ def _reject_ep_buffer_backend(pc: ParallelismConfig) -> None:
 
 
 def _reject_mok(pc: ParallelismConfig) -> None:
-    """MoK runs pure EP over NVLink symmetric memory with bf16 experts, on buffers sized once from the token budget."""
+    """MoK runs pure EP over NVLink symmetric memory with bf16 or MXFP8 experts, on buffers sized once from the token
+    budget."""
     if pc.moe_backend != "mok":
         return
     refusals = []
@@ -459,8 +460,15 @@ def _reject_mok(pc: ParallelismConfig) -> None:
             "FSDP2-managed experts at expert_parallel_size=1, which no MoK test trains (set "
             "fsdp_shard_ep1_experts: false)"
         )
-    if pc.lowp.enabled:
-        refusals.append(f"lowp_precision={pc.lowp.precision!r}, as MoK runs its own kernels on the experts")
+    lowp = pc.lowp
+    # A low precision kept off the experts (simulated, on the dense MLPs alone) leaves MoK's bf16 kernels untouched.
+    on_experts = lowp.enabled and lowp.apply_moe_experts
+    if on_experts and (lowp.precision, lowp.backend, lowp.backward_precision) != ("fp8", "native", "fp8"):
+        refusals.append(
+            f"lowp_precision={lowp.precision!r} lowp_backend={lowp.backend!r} lowp_backward_precision="
+            f"{lowp.backward_precision!r}, as MoK's only low-precision recipe is MXFP8 forward and backward "
+            f"(lowp_precision fp8, lowp_backend native, lowp_backward_precision fp8)"
+        )
     if pc.is_racy_single_domain_multigroup_ep:
         groups = pc.nvlink_domain_size // pc.ep_size
         refusals.append(

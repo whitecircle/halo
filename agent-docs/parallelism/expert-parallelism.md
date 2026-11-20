@@ -283,10 +283,23 @@ replay and the family's shared expert stay on Halo's path.
   before the checkpoint loads; experts whose hidden or intermediate size is not a multiple of 256 or whose activation
   is not SiLU are refused when the layer is built.
 - **Refused at config time:** `expert_parallel_size` outside 1, 4, 8, 16, 32, 64, an EP group spanning NVLink domains,
-  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, low precision, `use_grouped_gemm: false`, a non-default
-  `ep_buffer_backend`, FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`) and a
-  run that declares no token budget. Several EP groups in one NVLink domain are refused as under DeepEP: no MoK test
-  runs them, and the remedy is one group (`expert_parallel_size` at the domain's size, or a job of that many GPUs).
+  TP, expert TP, CP, PP, expert LoRA, `fp32_experts`, `use_grouped_gemm: false`, a non-default `ep_buffer_backend`,
+  FSDP2-managed experts (`expert_parallel_size: 1` needs `fsdp_shard_ep1_experts: false`), a run that declares no
+  token budget, and any low precision on the experts but MoK's MXFP8 recipe below. Several EP groups in one NVLink
+  domain are refused as under DeepEP: no MoK test runs them, and the remedy is one group (`expert_parallel_size` at
+  the domain's size, or a job of that many GPUs).
+- **MXFP8.** `lowp_precision: fp8`, `lowp_backend: native`, `lowp_backward_precision: fp8` (and
+  `lowp_apply_dense_mlp: false`) run MoK's MXFP8 kernels for the forward, dgrad and wgrad: e4m3 with an e8m0 scale per
+  32 elements, the format the simulated `fp8` trains and `quantize_to_lowp.py` exports. Any other low-precision
+  setting on the experts is refused. Each bank is cast once per optimizer step, in the layer's own layout, whose
+  transposed cast is MoK's normal one: the same bits as casting MoK's layout, with no transpose first. The autograd
+  node carries the forward's backward-layout cast to the backward, which cannot ask the cache under saved-tensor
+  hooks; the per-step cache holds both layouts beside the bf16 bank, 2 bytes a parameter together. Measured as below, with the cast redone every step: 0.84×, 0.98× and 1.08× DeepEP bf16 on Qwen3-30B-A3B's
+  shapes, 0.93×, 1.02× and 1.15× on the gpt-oss-like one and 0.84×, 1.04× and 1.19× on DeepSeek-V3's.
+- **Memory.** On one layer of DeepSeek-V3's experts at EP 4 (64 local experts, 5.3 GiB of bf16 banks per rank) the
+  MXFP8 cache adds 5.4 GiB. A step peaks at 23.0 GiB under MoK bf16 and 22.4 GiB under MoK MXFP8 at 4,096 tokens per
+  GPU, against 12.0 GiB on DeepEP bf16, and at 33.8, 35.1 and 16.5 GiB at 16,384: MoK's ring holds every routed
+  activation, and the bf16 path transposes every bank on each call.
 - **Fixed buffers.** MoK sizes its buffers once and needs the same token count on every rank, so each forward is padded
   to the run's budget rounded up to 512: `max_length` times the rows of the training batch, or of the evaluation
   batch when the config schedules an evaluation (`eval_strategy`, `eval_on_start`) and that is larger. Padding rows carry zero router weight and move no output or
@@ -309,8 +322,6 @@ replay and the family's shared expert stay on Halo's path.
 - **Measured** in Halo's EP4 layer on B300 (one MoE layer forward and backward, DeepEP bf16 as the baseline): MoK bf16 runs
   Qwen3-30B-A3B's experts at 0.81×, 0.90× and 0.98× DeepEP bf16 at 4,096, 8,192 and 16,384 tokens per GPU; on a Qwen3
   block at a gpt-oss-like (3072/3072, 32 experts) and DeepSeek-V3's shape it runs 0.78-0.87× and 0.61-0.82×.
-  One layer at DeepSeek-V3's shape peaks at 23.0 and 33.8 GiB per rank at 4,096 and 16,384 tokens per GPU, against
-  DeepEP bf16's 12.0 and 16.5.
 - **Install.** The Blackwell image builds it at `f3a8bd2` for SM103 (`MOK_ARCH`, one arch per build), so `mok`
   is refused on B200 (SM100). Its build refuses an nvcc that is not torch's CUDA (13.0)
   while the image ships the 13.2 toolkit, so the Dockerfile installs the 13.0 compiler for that step and removes it

@@ -1,18 +1,20 @@
 """Mixture-of-Kittens (``moe_backend: mok``): one megakernel per direction runs the EP routing exchange, every routed
-SwiGLU expert and the weighted combine over NVLink symmetric memory, in place of DeepEP plus the grouped GEMMs. Each
-forward is padded to one fixed token count, as MoK sizes its buffers once and requires the same shape on every rank."""
+SwiGLU expert and the weighted combine over NVLink symmetric memory, in place of DeepEP plus the grouped GEMMs, in bf16
+or MXFP8 (forward, dgrad and wgrad). Each forward is padded to one fixed token count, as MoK sizes its buffers once and
+requires the same shape on every rank."""
 
 from __future__ import annotations
 
 import dataclasses
 import functools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
 import torch.distributed as dist
 from torch.autograd.function import once_differentiable
 
 from halo.kernels.batched_transpose import transpose_last_two
+from halo.kernels.lowp.quantization import WeightVersionCache
 
 if TYPE_CHECKING:
     from halo.distributed.expert_parallel.config import EPConfig
@@ -32,6 +34,8 @@ _BUILT_FOR = (10, 3)  # the Dockerfile's MOK_ARCH=SM103, whose code an SM100 GPU
 # MoK's ring of routed rows, in a rank's even share of the group's: every routed activation is allocated at the
 # ring's size and saved for the backward, and a rank routed more than the ring holds replays it.
 _RING_SHARES = 2
+
+_mxfp8_cache = WeightVersionCache()  # expert bank -> its MXFP8 casts, re-quantized once per optimizer step
 
 
 @functools.lru_cache(maxsize=1)
@@ -112,16 +116,71 @@ def _zero_shared_expert(intermediate: int, hidden: int, device: torch.device) ->
     return up, up, torch.zeros(hidden, intermediate, device=device, dtype=torch.bfloat16)
 
 
-def _mok_weights(weights: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """MoK's ``F.linear``-layout ``gate``/``up`` ``[E, I, H]`` and ``down`` ``[E, H, I]`` from the layer's
-    matmul-layout ``gate_up_proj`` ``[E, H, 2I]`` (gate first) or ``gate_proj``/``up_proj`` ``[E, H, I]``."""
+class _Banks(NamedTuple):
+    """MoK's gate, up and down operands of a layer's banks, as its forward and its backward take them."""
+
+    forward: tuple
+    backward: tuple
+
+
+def _layer_banks(weights: tuple[torch.Tensor, ...]) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``gate``, ``up`` ``[E, H, I]`` and ``down`` ``[E, I, H]`` from the layer's ``gate_up_proj`` ``[E, H, 2I]`` (gate
+    first) or ``gate_proj``/``up_proj``."""
     *glu, down = weights
-    halves = glu[0].chunk(2, dim=2) if len(glu) == 1 else glu
-    return tuple(transpose_last_two(w.to(torch.bfloat16)) for w in (*halves, down))
+    return (*(glu[0].chunk(2, dim=2) if len(glu) == 1 else glu), down)
 
 
-def _field_values(record) -> list:
-    return [getattr(record, field.name) for field in dataclasses.fields(record)]
+def _bf16_banks(weights: tuple[torch.Tensor, ...]) -> _Banks:
+    """MoK's ``F.linear`` layout, ``gate``/``up`` ``[E, I, H]`` and ``down`` ``[E, H, I]``. Transposed on each call:
+    the backward redoes it rather than hold a second copy of every bank until then."""
+    banks = tuple(transpose_last_two(w.to(torch.bfloat16)) for w in _layer_banks(weights))
+    return _Banks(banks, banks)
+
+
+def _mxfp8_quantize():
+    from mok.ops import mxfp8_quantize  # noqa: PLC0415
+
+    return mxfp8_quantize
+
+
+def _mxfp8_layer_cast(w: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    """MoK's ``(data, scales, data_t, scales_t)`` of a layer-layout bank: cast in the layer's layout, whose transposed
+    cast is MoK's normal one and back, so no bank is transposed first and the bits are those of casting MoK's layout."""
+    data, scales, data_t, scales_t = _mxfp8_quantize()(w.to(torch.bfloat16).contiguous(), True, True)
+    return data_t, scales_t, data, scales
+
+
+def _mxfp8_banks(weights: tuple[torch.Tensor, ...]) -> _Banks:
+    """Each bank cast to MXFP8 in both layouts, ``(data, scales, data_t, scales_t)``: the forward reads the first
+    pair, the backward gate/up all four and down the transposed pair. Cached per optimizer step, keyed on the first
+    bank and every bank's identity and version."""
+    fingerprint = tuple((id(w), w._version) for w in weights)
+    casts = _mxfp8_cache.get(weights[0], fingerprint)
+    if casts is None:
+        casts = tuple(_mxfp8_layer_cast(w) for w in _layer_banks(weights))
+        _mxfp8_cache.put(weights[0], fingerprint, casts)
+    gate, up, down = casts
+    return _Banks(tuple(cast[:2] for cast in casts), (gate, up, down[2:]))
+
+
+def _flatten(record) -> tuple[list[torch.Tensor], list[int]]:
+    """``record``'s tensors in field order and each field's arity (0 for a bare tensor), for ``save_for_backward``:
+    MoK's MXFP8 context holds tuples of tensors."""
+    tensors, arity = [], []
+    for field in dataclasses.fields(record):
+        value = getattr(record, field.name)
+        tensors += value if isinstance(value, tuple) else [value]
+        arity.append(len(value) if isinstance(value, tuple) else 0)
+    return tensors, arity
+
+
+def _unflatten(cls, tensors: list[torch.Tensor], arity: list[int]):
+    """The record :func:`_flatten` took apart, and the tensors past it."""
+    values, start = [], 0
+    for count in arity:
+        values.append(tuple(tensors[start : start + count]) if count else tensors[start])
+        start += count or 1
+    return cls(*values), tensors[start:]
 
 
 def _layer_grads(fused: bool, d_gate, d_up, d_down) -> tuple[torch.Tensor, ...]:
@@ -138,7 +197,7 @@ def _layer_grads(fused: bool, d_gate, d_up, d_down) -> tuple[torch.Tensor, ...]:
 
 class _MoKFn(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, router_weights, top_experts, capacity, group, num_experts, *weights):
+    def forward(ctx, x, router_weights, top_experts, capacity, group, num_experts, mxfp8, *weights):
         functional = _mok()
         tokens, hidden = x.shape
         top_k = top_experts.shape[1]
@@ -156,40 +215,39 @@ class _MoKFn(torch.autograd.Function):
         workspace = functional.get_workspace(
             config, group, device=x.device, num_local_tokens=capacity, hidden_size=hidden, topk=top_k
         )
-        gate, up, down = _mok_weights(weights)
-        schedule = functional.build_schedule(workspace, config, experts_pad, num_local_experts=gate.shape[0])
-        shared = _zero_shared_expert(gate.shape[1], hidden, x.device)
-        out, context = functional.forward(config, workspace, schedule, x_pad, weights_pad, *shared, gate, up, down)
+        banks = (_mxfp8_banks if mxfp8 else _bf16_banks)(weights)
+        schedule = functional.build_schedule(workspace, config, experts_pad, num_local_experts=local_experts)
+        shared = _zero_shared_expert(intermediate, hidden, x.device)
+        out, context = functional.forward(config, workspace, schedule, x_pad, weights_pad, *shared, *banks.forward)
 
-        schedule_fields, context_fields = _field_values(schedule), _field_values(context)
-        ctx.mok = (config, workspace, group, tokens, len(weights) == 2, len(schedule_fields), len(context_fields))
-        ctx.save_for_backward(x_pad, weights_pad, *schedule_fields, *context_fields, *weights)
+        schedule_fields, context_fields = _flatten(schedule), _flatten(context)
+        # The MXFP8 backward reads the forward's casts from here, which the cache holds for the step anyway: under
+        # saved-tensor hooks (a non-reentrant checkpoint) its saved weights are other objects and would miss the cache.
+        mxfp8_backward = banks.backward if mxfp8 else None
+        ctx.mok = (config, workspace, group, tokens, mxfp8_backward, schedule_fields[1], context_fields[1])
+        ctx.save_for_backward(x_pad, weights_pad, *schedule_fields[0], *context_fields[0], *weights)
         return out[:tokens].to(x.dtype)
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_output):
         functional = _mok()
-        config, workspace, group, tokens, fused, n_schedule, n_context = ctx.mok
+        config, workspace, group, tokens, mxfp8_backward, schedule_arity, context_arity = ctx.mok
         x_pad, weights_pad, *saved = ctx.saved_tensors
-        schedule = functional.MoKSchedule(*saved[:n_schedule])
-        context = functional.MoKForwardContext(*saved[n_schedule : n_schedule + n_context])
-        weights = saved[n_schedule + n_context :]
+        schedule, saved = _unflatten(functional.MoKSchedule, saved, schedule_arity)
+        context, weights = _unflatten(functional.MoKForwardContext, saved, context_arity)
         grad_pad = grad_output.new_zeros(x_pad.shape, dtype=torch.bfloat16)
         grad_pad[:tokens] = grad_output
-        gate, up, down = _mok_weights(weights)
-        shared = _zero_shared_expert(gate.shape[1], x_pad.shape[1], x_pad.device)
+        banks = mxfp8_backward or _bf16_banks(weights).backward
+        shared = _zero_shared_expert(weights[-1].shape[1], x_pad.shape[1], x_pad.device)
         d_x, d_router, d_gate, d_up, d_down, *_ = functional.backward(
-            config, workspace, schedule, context, grad_pad, x_pad, weights_pad, *shared, gate, up, down
+            config, workspace, schedule, context, grad_pad, x_pad, weights_pad, *shared, *banks
         )
-        grads = _layer_grads(fused, d_gate, d_up, d_down)
+        grads = _layer_grads(len(weights) == 2, d_gate, d_up, d_down)
         return (
             d_x[:tokens].to(grad_output.dtype),
             d_router[:tokens],
-            None,
-            None,
-            None,
-            None,
+            *(None,) * 5,
             *(g.to(w.dtype) for g, w in zip(grads, weights, strict=True)),
         )
 
@@ -206,10 +264,12 @@ class MoKExperts:
         top_experts: torch.Tensor,
         router_weights: torch.Tensor,
         banks: tuple[torch.Tensor, ...],
+        mxfp8: bool = False,
     ) -> torch.Tensor:
         """COLLECTIVE over the EP group. ``x`` ``[T, H]``'s routed-expert output ``[T, H]``, each token's
         ``top_experts`` (global ids, ``[T, k]``) weighted by ``router_weights``; ``banks`` are this rank's expert
-        weights in the layer's layout. Raises when ``T`` exceeds the token count every rank's buffers were sized to."""
+        weights in the layer's layout. ``mxfp8`` runs the forward, dgrad and wgrad in MXFP8. Raises when ``T`` exceeds
+        the token count every rank's buffers were sized to."""
         capacity = self._ep_config.mok_token_capacity
         if x.shape[0] > capacity:
             raise RuntimeError(
@@ -219,9 +279,9 @@ class MoKExperts:
                 f"the run feeds, and keep an unscheduled evaluation's batch within the training batch's rows."
             )
         group = self._ep_config.dispatch_ep_group
-        return _MoKFn.apply(x, router_weights, top_experts, capacity, group, self._num_experts, *banks)
+        return _MoKFn.apply(x, router_weights, top_experts, capacity, group, self._num_experts, mxfp8, *banks)
 
-    def warm(self, banks: tuple[torch.Tensor, ...], top_k: int) -> None:
+    def warm(self, banks: tuple[torch.Tensor, ...], top_k: int, mxfp8: bool = False) -> None:
         """COLLECTIVE over the EP group. One forward and backward over a zero token, so the bank transposes compile and
         MoK's kernels load before the first step's span."""
         device = banks[0].device
@@ -231,7 +291,7 @@ class MoKExperts:
         with torch.inference_mode(False), torch.enable_grad(), identity_hooks:
             x = torch.zeros(1, self._hidden_dim, device=device, dtype=torch.bfloat16, requires_grad=True)
             experts = torch.arange(top_k, device=device).view(1, top_k) % self._num_experts
-            out = self(x, experts, torch.zeros(1, top_k, device=device), banks)
+            out = self(x, experts, torch.zeros(1, top_k, device=device), banks, mxfp8)
             torch.autograd.grad(out.sum(), x)
 
     def destroy(self) -> None:
