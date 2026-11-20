@@ -309,24 +309,18 @@ class ParallelismArguments(ValidatedConfig):
             require_int(type(self).__name__, pipeline_split=layers)
 
 
-# The entry scripts whose trainers set ``SUPPORTS_LOWP_PRECISION``, named in the refusal.
-_LOWP_SCRIPTS = "scripts/training/sft.py, scripts/training/distillation/teacher_distill.py"
-
-
 def _reject_unsupported_lowp(lowp: LowpSpec, trainer_cls) -> None:
     """Refuse a low-precision setting a trainer without ``SUPPORTS_LOWP_PRECISION`` would parse and ignore."""
     if lowp.precision != "bf16":
         raise ValueError(
             f"lowp_precision={lowp.precision!r} is not supported by {trainer_cls.__name__}, which would train in "
-            f"bf16. Remove lowp_precision from the config, or run a script whose trainer sets "
-            f"SUPPORTS_LOWP_PRECISION ({_LOWP_SCRIPTS})."
+            f"bf16. Remove lowp_precision from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
         )
     ignored = lowp.non_default_shape_fields()
     if ignored:
         raise ValueError(
             f"{', '.join(ignored)} are not supported by {trainer_cls.__name__} and would be silently dropped. "
-            f"Remove them from the config, or run a script whose trainer sets SUPPORTS_LOWP_PRECISION "
-            f"({_LOWP_SCRIPTS})."
+            "Remove them from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
         )
 
 

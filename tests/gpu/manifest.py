@@ -2181,6 +2181,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--family qwen3_moe --precision mxfp4 --ep 2",
             "--family qwen3_moe --precision fp4 --ep 2",
             "--family qwen3_moe --precision mxfp4 --ep 1",
+            "--family qwen3_moe --precision fp4 --ep 2 --chunked",
+            "--family qwen3_moe --precision mxfp4 --ep 1 --chunked",
             Row("--family lfm2_moe --precision fp4 --ep 2", markers=("gpu", "full", "2gpu", "ep", "moe", "lfm2")),
             Row("--family lfm2_moe --precision mxfp4 --ep 1", markers=("gpu", "full", "2gpu", "ep", "moe", "lfm2")),
             Row(

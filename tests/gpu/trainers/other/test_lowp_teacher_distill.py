@@ -8,7 +8,10 @@ first Adam step moves every bf16 weight by about the learning rate whatever its 
 the teacher. The distillation check is that the steps after it pull the student back. ``--ep 1`` puts the experts under FSDP2, which pins their version counter,
 so the weight round trip runs uncached; ``--ep 2`` keeps them EP-sharded, where it is cached per optimizer step and the
 cached entry must quantize the current weight. ``--expert_lora`` trains native expert adapters over frozen
-fake-quantized experts.
+fake-quantized experts. ``--chunked`` scores the loss with ``use_chunked_distillation_loss``, which projects both
+models' output embeddings from their last hidden states. Every row pins the first step's logged ``distillation_loss``
+to the KL of both models' full logits on that batch, so a chunked row matches its full-logits row through the same
+reference, and a chunked student forward that skipped the fake-quant would log a KL near 0.
 """
 
 import argparse
@@ -24,21 +27,24 @@ from halo.configs.distillation import TeacherDistillationConfig
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels import expert_gemm
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.kernels.lowp import quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.lowp_compute import lowp_converted_modules
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.distillation.divergences import logits_forward_inputs
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
+from tests.common.distributed import pin_deterministic_ep_dispatch, world_all, world_mean
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
+from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
 
 # Numerically identical to the compiled path, without a per-rank compile warm-up.
@@ -59,6 +65,7 @@ parser.add_argument("--family", choices=("qwen3_moe", "lfm2_moe"), required=True
 parser.add_argument("--precision", choices=("fp4", "mxfp4"), required=True)
 parser.add_argument("--ep", type=int, choices=(1, 2), required=True)
 parser.add_argument("--expert_lora", action="store_true", help="Native expert-LoRA adapters over frozen experts")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -138,6 +145,18 @@ class _KlAfterFirstStep(TrainerCallback):
             self.kl = _kl(self.teacher_logits, _probe(self.model, self.batch), self.mask)
 
 
+@torch.no_grad()
+def _full_logits_kl(trainer, inputs) -> float:
+    """``KL(teacher || student)`` at temperature 1, the token mean over the batch's supervised positions, from both
+    models' full logits: what the trainer's first ``distillation_loss`` must equal on either loss path. The student
+    runs in train mode, as the trainer's forward does. Collective, so every rank runs it."""
+    forward_inputs = logits_forward_inputs(inputs)
+    student_logits = trainer.model(**forward_inputs).logits[..., :-1, :].float()
+    teacher_logits = trainer.teacher_model(**forward_inputs).logits[..., :-1, :].float()
+    supervised = (inputs["labels"][..., 1:] != LABEL_IGNORE_INDEX).float()
+    return _kl(teacher_logits, student_logits, supervised)
+
+
 def _adapter_params(model) -> dict[str, torch.Tensor]:
     return {
         f"{index}.{attr}_lora_{which}": getattr(layer, f"{attr}_lora_{which}")
@@ -153,7 +172,8 @@ def _local_snapshot(params) -> list[torch.Tensor]:
 
 @gpu_test_main(
     exact_world_size=2,
-    prefix=f"lowp_teacher_distill_{ARGS.family}_{ARGS.precision}_ep{ARGS.ep}{'_expert_lora' if ARGS.expert_lora else ''}",
+    prefix=f"lowp_teacher_distill_{ARGS.family}_{ARGS.precision}_ep{ARGS.ep}"
+    f"{'_expert_lora' if ARGS.expert_lora else ''}{'_chunked' if ARGS.chunked else ''}",
 )
 def run(ctx):
     torch.cuda.set_device(ctx.device)
@@ -214,6 +234,7 @@ def run(ctx):
             seed=SEED,
             distill_loss="kl_divergence",
             distill_alpha=1.0,
+            use_chunked_distillation_loss=ARGS.chunked,
         ),
         train_dataset=dataset,
         data_collator=collator,
@@ -244,6 +265,16 @@ def run(ctx):
     trainer.add_callback(cache_check)
     first_step = _KlAfterFirstStep(trainer.model, teacher_logits, batch, mask)
     trainer.add_callback(first_step)
+    first_batch_kl: list[float] = []
+    real_compute_loss = trainer.compute_loss
+
+    def spying_compute_loss(model, inputs, *args, **kwargs):
+        # The first step's batch, before the trainer's own forward and any optimizer write.
+        if not first_batch_kl:
+            first_batch_kl.append(_full_logits_kl(trainer, inputs))
+        return real_compute_loss(model, inputs, *args, **kwargs)
+
+    trainer.compute_loss = spying_compute_loss
     trainable = [p for p in trainer.model.parameters() if p.requires_grad]
     adapters_before = _local_snapshot(_adapter_params(trainer.model).values()) if ARGS.expert_lora else []
     experts_before = _local_snapshot(cache_check.weights)
@@ -255,6 +286,14 @@ def run(ctx):
     kl_after = _kl(teacher_logits, student_after, mask)
     checks["ran_every_step_finite"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     kl_step1 = first_step.kl
+    # The logged metric is the world mean of each rank's token mean, so the reference is reduced the same way.
+    logged_step0 = next((e.get("distillation_loss") for e in trainer.state.log_history if "loss" in e), None)
+    reference_step0 = world_mean(first_batch_kl[0], ctx.device) if first_batch_kl else float("nan")
+    checks["step0_loss_is_the_full_logits_kl"] = (
+        logged_step0 is not None
+        and reference_step0 > 0.0
+        and abs(logged_step0 - reference_step0) <= TOL.exact_objective_rel * reference_step0
+    )
     checks["kl_fell_after_the_first_step"] = world_all(kl_step1 is not None and kl_after < kl_step1)
     # The weight round trip took the path the layout requires on every rank.
     if expect_cacheable:
@@ -278,8 +317,9 @@ def run(ctx):
 
     step1_text = "missing" if kl_step1 is None else f"{kl_step1:.3g}"
     log(
-        f"  {ARGS.family} {ARGS.precision} ep{ARGS.ep}{' expert_lora' if ARGS.expert_lora else ''}: "
-        f"KL step 0 {kl_before:.3g}, step 1 {step1_text}, step {TOTAL_STEPS} {kl_after:.3g}; max |logit - bf16|: teacher {teacher_diff:.4g}, student "
+        f"  {ARGS.family} {ARGS.precision} ep{ARGS.ep}{' expert_lora' if ARGS.expert_lora else ''}"
+        f"{' chunked' if ARGS.chunked else ''}: logged step-0 distillation_loss {logged_step0!r}, full-logits KL "
+        f"{reference_step0:.6g}; KL step 0 {kl_before:.3g}, step 1 {step1_text}, step {TOTAL_STEPS} {kl_after:.3g}; max |logit - bf16|: teacher {teacher_diff:.4g}, student "
         f"{student_diff:.4g}; losses {losses}; cached calls {cache_calls[0]}, fake_quant calls {uncached_calls[0]}, "
         f"cache entries compared {cache_check.compared}, stale {cache_check.stale}"
     )
@@ -287,6 +327,8 @@ def run(ctx):
         "checks": checks,
         "metrics": {
             "kl_before": kl_before,
+            "logged_step0_distillation_loss": float("nan") if logged_step0 is None else logged_step0,
+            "full_logits_step0_kl": reference_step0,
             "kl_step1": kl_step1,
             "kl_after": kl_after,
             "teacher_logit_diff": teacher_diff,
