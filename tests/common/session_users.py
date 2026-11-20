@@ -5,10 +5,10 @@ import os
 
 from halo.environments.sandbox.runner_session import SESSION_UIDS
 
-USERS_PER_WORKER = 1000
-
 
 def worker_session_uids() -> range:
+    workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
     index = int(os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw"))
-    start = SESSION_UIDS.start + index % (len(SESSION_UIDS) // USERS_PER_WORKER) * USERS_PER_WORKER
-    return range(start, start + USERS_PER_WORKER)
+    users = len(SESSION_UIDS) // workers
+    start = SESSION_UIDS.start + index * users
+    return range(start, start + users)
