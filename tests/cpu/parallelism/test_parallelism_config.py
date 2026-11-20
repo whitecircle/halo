@@ -386,6 +386,7 @@ def test_lowp_valid_combos_accepted():
         LowpSpec(precision="fp8", apply_moe_experts=False),
         LowpSpec(precision="mxfp4", backend="native", apply_dense_mlp=False),
         LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False),
+        LowpSpec(precision="mxfp4", backend="native", backward_precision="fp8", apply_dense_mlp=False),
     ):
         cfg = create_config(world_size=8, gpus_per_node=8, lowp=lowp)
         assert cfg.lowp == lowp

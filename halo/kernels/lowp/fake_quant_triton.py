@@ -75,15 +75,20 @@ def _e8m0_exponent(x, FMAX: tl.constexpr, TINY: tl.constexpr):
 
 
 @triton.jit
-def _e2m1_level(scaled, FMAX: tl.constexpr):
-    """``scaled`` rounded to a signed ``e2m1`` level, as eager's ``bucketize`` with its ties-up table. e2m1 has one
-    mantissa bit, so a magnitude in ``[2^e, 2^(e+1))`` (``e >= 0``, and everything below 1 with ``e = 0``) sits on a
-    grid of step ``2^(e-1)``: ``rint`` of the magnitude over that step is round-to-nearest-even. The sign comes from
-    ``scaled < 0`` as in eager, applied by a multiply: Triton lowers a float negation to ``0 - x``, which loses -0.0."""
-    mag = tl.minimum(tl.abs(scaled), FMAX)
+def e2m1_round(mag):
+    """The e2m1 level nearest ``mag`` in ``[0, 6]``, ties to even. e2m1 has one mantissa bit, so a magnitude in
+    ``[2^e, 2^(e+1))`` (``e >= 0``, and everything below 1 with ``e = 0``) sits on a grid of step ``2^(e-1)``, and
+    ``rint`` of the magnitude over that step is round-to-nearest-even."""
     e = tl.maximum(((mag.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127, 0)
-    level = mul_rn(libdevice.rint(mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
-    return mul_rn(level, tl.where(scaled < 0, -1.0, 1.0))
+    return mul_rn(libdevice.rint(mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
+
+
+@triton.jit
+def _e2m1_level(scaled, FMAX: tl.constexpr):
+    """``scaled`` rounded to a signed ``e2m1`` level (:func:`e2m1_round`), as eager's ``bucketize`` with its ties-up
+    table. The sign comes from ``scaled < 0`` as in eager, applied by a multiply: Triton lowers a float negation to
+    ``0 - x``, which loses -0.0."""
+    return mul_rn(e2m1_round(tl.minimum(tl.abs(scaled), FMAX)), tl.where(scaled < 0, -1.0, 1.0))
 
 
 @triton.jit

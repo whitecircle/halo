@@ -20,6 +20,7 @@ from halo.hardware import is_blackwell_gpu
 from halo.kernels import expert_gemm
 from halo.kernels.lowp import deepgemm, quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
+from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.trainers.sft import DistributedSFTTrainer
@@ -63,7 +64,7 @@ def _simulated_entry_is_current(weight: torch.Tensor) -> bool | None:
 
 
 def _native_entry_is_current(weight: torch.Tensor) -> bool | None:
-    entry = deepgemm._weight_cache.get(weight, (weight._version, QUANT_FORMAT))
+    entry = deepgemm._weight_caches[QUANT_FORMAT].get(weight, weight._version)
     if entry is None:
         return None
     fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, cacheable=False)
@@ -115,6 +116,16 @@ class _CallsBeforeTheLastStep(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         self.count = self.calls[0]
+
+
+class _ModelForwards(TrainerCallback):
+    """How many forwards the trained model ran."""
+
+    def __init__(self):
+        self.count = 0
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        model.register_forward_hook(lambda *_: setattr(self, "count", self.count + 1))
 
 
 def _train(
@@ -221,17 +232,22 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     native_calls = _count_calls(deepgemm, "_deepgemm_forward")
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
-    warmed = _CallsBeforeTheLastStep(wgrad_calls)
+    flag_reads = _count_calls(lowp_compute, "verify_finite_mxfp4_weights")
+    warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _ModelForwards()
     losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed,)
+        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed, forwards)
     )
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
-    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM; the cache itself must stay empty.
+    # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward, and none under fp8.
+    checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
+        forwards.count >= 2 * TOTAL_STEPS and flag_reads[0] == (forwards.count if ARGS.precision == "mxfp4" else 0)
+    )
+    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM; the caches themselves must stay empty.
     checks["fsdp2_managed_experts_cache_no_cast"] = world_all(
-        (len(deepgemm._weight_cache) == 0) == (ARGS.ep_size == 1)
+        (sum(map(len, deepgemm._weight_caches.values())) == 0) == (ARGS.ep_size == 1)
     )
     checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(

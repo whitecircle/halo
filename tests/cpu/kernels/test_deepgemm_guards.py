@@ -484,10 +484,10 @@ def test_a_chunk_is_copied_out_and_freed_before_the_next_is_cast(native, monkeyp
     assert live_at_each_cast == [0, 0, 0, 0]
 
 
-def _fp8_backward(native, x, w, offs):
+def _fp8_backward(native, x, w, offs, quant_format="mxfp8"):
     x.requires_grad_(True)
     w.requires_grad_(True)
-    expert_gemm(x, w, offs=offs, lowp=_native("mxfp8", "fp8")).sum().backward()
+    expert_gemm(x, w, offs=offs, lowp=_native(quant_format, "fp8")).sum().backward()
 
 
 def test_the_fp8_dgrad_runs_on_the_forward_weight_operand(native):
@@ -635,6 +635,23 @@ def test_the_fp8_wgrad_takes_128_experts_per_call_on_whole_token_tiles(native):
     assert w.grad.shape == (experts, 64, 32)
 
 
+def test_the_mxfp4_dgrad_runs_on_an_fp8_block_cast_kept_beside_the_forward_cast(native):
+    """FP8 x FP4 issues at the FP8 rate, so an FP8 weight costs the dgrad nothing over a transposed FP4 cast and is the
+    finer of the two. Each format keeps its own cache entry, or every microbatch would evict the other's."""
+    x, w, offs = _operands(8, 256, 256)
+    w = nn.Parameter(_spread_weight(2, 256, 256))
+    operands = []
+    for _ in range(2):
+        native.kernel_calls.clear()
+        _fp8_backward(native, x, w, offs, quant_format="mxfp4")
+        forward, dgrad = native.kernel_calls
+        assert forward["recipe_b"] == (1, 32) and forward["b"][0].shape == (2, 256, 128), "MXFP4, two e2m1 per byte"
+        assert dgrad["b"][0].shape == (2, 256, 256) and dgrad["b"][1].shape == (2, 2, 2), "FP8 in 128x128 blocks"
+        operands.append((forward["b"], dgrad["b"]))
+    assert operands[1][0] is operands[0][0] and operands[1][1] is operands[0][1], "the second microbatch recast"
+    assert w.grad.shape == w.shape
+
+
 def test_a_bf16_backward_holds_no_fp8_operand_in_the_graph(native):
     x, w, offs = _operands(8, 128, 256)
     w.requires_grad_(True)
@@ -642,16 +659,26 @@ def test_a_bf16_backward_holds_no_fp8_operand_in_the_graph(native):
     assert node.tiles is None and node.w_fp8 is None
 
 
-@pytest.mark.parametrize(("precision", "backward"), [("fp4", "bf16"), ("mxfp4", "fp8")])
-def test_a_spec_no_kernel_takes_is_refused_at_the_entry(native, precision, backward):
-    """A direct caller's spec has not been validated: nvfp4 would run as FP8 on the wrong weight layout, and an fp8
-    backward of mxfp4 on a weight the forward never used."""
+def test_a_format_no_kernel_takes_is_refused_at_the_entry(native):
+    """A direct caller's spec has not been validated: nvfp4 would run as FP8 on the wrong weight layout."""
     x, w, offs = _operands(8, 128, 256)
     with pytest.raises(ValueError, match="deepgemm_grouped_gemm takes"):
-        deepgemm.deepgemm_grouped_gemm(
-            x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native", backward_precision=backward)
-        )
+        deepgemm.deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision="fp4", backend="native"))
     assert not native.kernel_calls
+
+
+def test_the_non_finite_flag_raises_once_at_its_one_read_and_drops_the_cached_casts():
+    """A caller that catches the raise must not find the non-finite weight's cast in the cache at its next forward."""
+    flag = deepgemm._nonfinite_weight.setdefault(torch.device("cpu"), torch.zeros(1, dtype=torch.int32))
+    weight = nn.Parameter(torch.zeros(1, 32, 32))
+    deepgemm._weight_caches["mxfp4"].put(weight, weight._version, object())
+    deepgemm.verify_finite_mxfp4_weights()
+    assert len(deepgemm._weight_caches["mxfp4"]) == 1
+    flag.fill_(1)
+    with pytest.raises(ValueError, match="Non-finite expert weight bad: "):
+        deepgemm.verify_finite_mxfp4_weights([("bad", torch.tensor(float("inf"))), ("fine", torch.zeros(1))])
+    assert len(deepgemm._weight_caches["mxfp4"]) == 0
+    deepgemm.verify_finite_mxfp4_weights()
 
 
 if __name__ == "__main__":

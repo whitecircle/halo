@@ -77,11 +77,6 @@ class LowpSpec:
                     "lowp_backend='native' runs the MoE expert GEMMs only, and dense MLP projections have no native "
                     "kernel: set lowp_apply_dense_mlp: false and keep lowp_apply_moe_experts: true."
                 )
-        if self.backward_precision == "fp8" and self.precision != "fp8":
-            raise ValueError(
-                f"lowp_backward_precision='fp8' reuses the forward's FP8 weight, which lowp_precision="
-                f"{self.precision!r} does not cast; set lowp_precision='fp8'."
-            )
         if self.backward_precision == "fp8" and not self.native:
             raise ValueError(
                 "lowp_backward_precision='fp8' needs lowp_backend='native' and a low lowp_precision: the simulated "

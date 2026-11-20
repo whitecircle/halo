@@ -11,7 +11,7 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_p
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
 from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, install_local_forward
-from halo.kernels.lowp.deepgemm import deepgemm_available
+from halo.kernels.lowp.deepgemm import deepgemm_available, verify_finite_mxfp4_weights
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
@@ -175,12 +175,14 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
     kept = kept_block_indices(n_blocks, lowp.keep_first_blocks, lowp.keep_last_blocks)
 
     moe_count = loop_path_layers = 0
+    grouped: list[tuple[str, EPMoELayerBase]] = []
     if lowp.apply_moe_experts:
         for name, module in model.named_modules():
             if isinstance(module, EPMoELayerBase) and decoder_layer_index(name, backbone_prefix) not in kept:
                 moe_count += 1
                 if module.set_lowp_compute(lowp, weight_cacheable=expert_weight_cacheable):
                     _verify_block_aligned_experts(name, module, precision, quant_format)
+                    grouped.append((name, module))
                 else:
                     loop_path_layers += 1
         if loop_path_layers:
@@ -219,6 +221,20 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
             f"The run would silently train in bf16. For MoE experts, EP layers with the grouped-GEMM "
             f"path are required (use_grouped_gemm: true)."
         )
+
+    if lowp.native and quant_format == "mxfp4":
+        # The MXFP4 weight cast flags a NaN or inf weight on the device, and this is its one host read per forward. It
+        # hooks the last converted layer, not the model: a PEFT wrapper calls the model's ``forward`` past its hooks.
+        def verify(*_hook_args) -> None:
+            verify_finite_mxfp4_weights(
+                (f"{name}.{param_name}", param)
+                for name, layer in grouped
+                for param_name, param in layer.expert_named_params()
+            )
+
+        if (installed := getattr(model, "_lowp_finite_weight_hook", None)) is not None:
+            installed.remove()
+        model._lowp_finite_weight_hook = grouped[-1][1].register_forward_hook(verify)
 
     logger.info(
         "Mixed-precision compute enabled: precision=%s backend=%s backward=%s | MoE layers=%d, dense MLP linears=%d, "

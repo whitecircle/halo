@@ -3,8 +3,9 @@
 - each is bitwise DeepGEMM's own reference cast (``per_token_cast_to_fp8`` 1x128 rows, ``per_channel_cast_to_fp8``
   128x1 tiles, UE8M0 scales) of the gathered, zero-padded operand, on random data, a width not a multiple of 128, a
   zero-padded contraction, all-zero and all-padding tiles, subnormals, powers of two and bf16's largest values,
-- the weight cast is bitwise ``per_block_cast_to_fp8`` (128x128) of each expert's weight, on widths off the block
-  grid, one expert, a strided half of a fused bank and an fp32 master,
+- the weight casts are bitwise ``per_block_cast_to_fp8`` (128x128) of each expert's weight and ``per_token_cast_to_fp4``
+  (1x32 MXFP4) of its transposed, zero-padded weight, on widths off the block grid, one expert, a strided half of a
+  fused bank, an fp32 master, and for MXFP4 every e2m1 rounding midpoint, each tie going to the even code,
 - the gradient casts, which drop the reference's 1e-4 floor on a group's largest element, keep a gradient of a
   mean-reduced loss's scale to fp8's rounding, where the floor would zero most of it,
 - a new token count never compiles a new kernel variant, which under EP would stall the other ranks.
@@ -15,6 +16,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_deepgemm_cast_triton.py
 import sys
 
 import torch
+import torch.nn.functional as F
 import triton
 
 from halo.kernels.lowp import deepgemm
@@ -26,6 +28,7 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
     cast_rows_to_fp8,
     cast_tiles_to_fp8,
     cast_weight_blocks_to_fp8,
+    cast_weight_rows_to_mxfp4,
 )
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
@@ -110,6 +113,56 @@ def test_weight_cast_bitwise_deepgemm_reference():
         print(f"  {name:11s} weight blocks bitwise DeepGEMM's reference — OK")
 
 
+def _midpoints(experts: int, k: int, n: int) -> torch.Tensor:
+    """Each 32-group's amax is 6 (scale 1), the rest are e2m1 midpoints of either sign, and zeros of either sign."""
+    values = torch.tensor(
+        [0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, -0.25, -0.75, -1.25, -1.75, -2.5, -3.5, -5.0, 0.0, -0.0]
+    )
+    w = values[torch.arange(experts * k * n) % len(values)].view(experts, k, n)
+    w[:, ::32, :] = 6.0
+    return w.to(DEV, torch.bfloat16)
+
+
+def test_mxfp4_weight_cast_bitwise_deepgemm_reference():
+    _, utils = deepgemm._deep_gemm()
+    cases = [*_weight_cases(), ("midpoints", _midpoints(2, 256, 192))]
+    for name, w in cases:
+        if name == "zeros":
+            continue
+        k_pad = -(-w.shape[1] // 256) * 256
+        reference = [
+            utils.per_token_cast_to_fp4(
+                F.pad(w[e].t().contiguous(), (0, k_pad - w.shape[1])), use_ue8m0=True, gran_k=32
+            )
+            for e in range(len(w))
+        ]
+        ref = tuple(torch.stack(parts) for parts in zip(*reference, strict=True))
+        flag = torch.zeros(1, device=DEV, dtype=torch.int32)
+        _assert_bits_equal(cast_weight_rows_to_mxfp4(w, k_pad, flag), ref, f"{name} mxfp4 rows")
+        assert not flag.item(), f"{name}: a finite weight set the non-finite flag"
+        print(f"  {name:11s} mxfp4 weight rows bitwise DeepGEMM's reference — OK")
+
+
+def test_mxfp4_weight_cast_flags_a_non_finite_weight():
+    """e2m1 has no NaN code: a NaN or inf anywhere in the bank, the last row and column of an off-grid one included,
+    sets the cast's flag, with no separate pass over the weight. The flag is the only guard: a NaN element among
+    finite ones keeps its group's scale and takes a finite non-zero code."""
+    for poison in (float("nan"), float("inf"), float("-inf")):
+        for e, k, n in ((0, 0, 0), (2, 199, 99), (1, 37, 64)):
+            w = torch.zeros(3, 200, 100, device=DEV, dtype=torch.bfloat16)
+            w[e, k, n] = poison
+            flag = torch.zeros(1, device=DEV, dtype=torch.int32)
+            cast_weight_rows_to_mxfp4(w, 256, flag)
+            assert flag.item() == 1, f"{poison} at {(e, k, n)} was cast without setting the flag"
+    w = torch.full((1, 32, 1), 0.5, device=DEV, dtype=torch.bfloat16)
+    clean = cast_weight_rows_to_mxfp4(w, 32, flag)
+    w[0, 0, 0] = float("nan")
+    data, scale = cast_weight_rows_to_mxfp4(w, 32, flag)
+    assert torch.equal(scale, clean[1]) and data[0, 0, 0] & 0xF, "premise: the cast alone hides a NaN element"
+    assert torch.equal(data[0, 0, 1:], clean[0][0, 0, 1:])
+    print("  mxfp4 weight cast flags NaN / +-inf anywhere in the bank — OK")
+
+
 def test_gradient_casts_scale_by_the_groups_own_amax():
     """Unit-scale data casts as the reference does, in every group the floor leaves alone. At 1e-9 every group's scale
     is the power of two just holding its own largest element over 448 and next to no nonzero element rounds to zero;
@@ -184,6 +237,12 @@ def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "bitwise_deepgemm_reference", test_bitwise_deepgemm_reference)
     record_check(checks, "weight_cast_bitwise_deepgemm_reference", test_weight_cast_bitwise_deepgemm_reference)
+    record_check(
+        checks, "mxfp4_weight_cast_bitwise_deepgemm_reference", test_mxfp4_weight_cast_bitwise_deepgemm_reference
+    )
+    record_check(
+        checks, "mxfp4_weight_cast_flags_a_non_finite_weight", test_mxfp4_weight_cast_flags_a_non_finite_weight
+    )
     record_check(
         checks, "gradient_casts_scale_by_the_groups_own_amax", test_gradient_casts_scale_by_the_groups_own_amax
     )

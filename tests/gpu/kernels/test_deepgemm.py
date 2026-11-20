@@ -4,6 +4,7 @@ cache, and the warm-up of the weight-gradient kernel DeepGEMM compiles for long 
 K-not-÷256 zero-pad (K=2880 → 3072)."""
 
 import contextlib
+import itertools
 import os
 import subprocess
 import sys
@@ -21,7 +22,6 @@ from tests.common.tolerances import TOL
 DEV = "cuda"
 
 # Lower bound > 0, so a silent bf16 fallback (relerr ≈ 0) fails.
-_FP8_BACKWARD = LowpSpec(precision="fp8", backend="native", backward_precision="fp8")
 _BANDS = {"fp8": (0.005, 0.10), "mxfp4": (0.03, 0.30)}
 _FP8_GRAD_BAND = (0.005, 0.10)
 _SHAPES = [
@@ -101,20 +101,23 @@ def test_deepgemm_forward_backward():
 
 
 def test_deepgemm_fp8_backward():
-    """Both gradients within fp8's band of the bf16 ones, at a unit-scale gradient and at a mean-reduced loss's; the
-    lower bound fails a silent bf16 backward."""
+    """Both gradients within fp8's band of the bf16 ones, for either forward weight format, as the MXFP4 forward's
+    dgrad runs on an FP8 weight too, at a unit-scale gradient and at a mean-reduced loss's; the lower bound fails a
+    silent bf16 backward."""
     torch.manual_seed(0)
     lo, hi = _FP8_GRAD_BAND
     cases = [(*s, torch.bfloat16, 1.0) for s in _SHAPES]
     # An fp32 master takes its gradient in fp32, which the kernel accumulates into directly.
     cases += [(*_SHAPES[1], torch.float32, 1.0), (*_SHAPES[1], torch.bfloat16, _SMALL_GRADIENT)]
-    for name, E, K, N, counts, w_dtype, grad_scale in cases:
+    for precision, (name, E, K, N, counts, w_dtype, grad_scale) in itertools.product(_BANDS, cases):
         T = sum(counts)
         x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=w_dtype) * (K**-0.5)).requires_grad_(True)
         offs = torch.cumsum(torch.tensor(counts, device=DEV, dtype=torch.int32), 0).to(torch.int32)
         g = torch.randn(T, N, device=DEV, dtype=torch.bfloat16) * grad_scale
-        out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=_FP8_BACKWARD)
+        out = deepgemm_grouped_gemm(
+            x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native", backward_precision="fp8")
+        )
         with _wgrad_output_poisoned():
             out.backward(g)
         gx_ref = F.grouped_mm(g, w.detach().to(torch.bfloat16).transpose(-2, -1), offs=offs)
@@ -122,11 +125,11 @@ def test_deepgemm_fp8_backward():
         assert w.grad.shape == w.shape and w.grad.dtype == w.dtype
         rels = {"grad_x": fro_rel_err(x.grad, gx_ref), "grad_w": fro_rel_err(w.grad, gw_ref)}
         for grad, rel in rels.items():
-            assert lo < rel < hi, f"fp8 {name}: {grad} rel-vs-bf16 {rel:.4f} outside band {lo}-{hi}"
+            assert lo < rel < hi, f"{precision} {name}: {grad} rel-vs-bf16 {rel:.4f} outside band {lo}-{hi}"
         empty = [e for e, c in enumerate(counts) if c == 0]
-        assert not w.grad[empty].any(), f"fp8 {name}: an expert routed no token got a weight gradient"
+        assert not w.grad[empty].any(), f"{precision} {name}: an expert routed no token got a weight gradient"
         print(
-            f"  fp8 backward {name:14s} {str(w_dtype)[6:]:8s} T={T:5d} grad x{grad_scale:g} "
+            f"  {precision} fp8 backward {name:14s} {str(w_dtype)[6:]:8s} T={T:5d} grad x{grad_scale:g} "
             f"grad_x {rels['grad_x']:.4f} grad_w {rels['grad_w']:.4f} — OK"
         )
 
@@ -151,7 +154,7 @@ def test_weight_cache_across_steps():
             x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
             out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=LowpSpec(precision=precision, backend="native"))
             fmt = LOWP_RECIPES[precision].quant_format
-            served = deepgemm._weight_cache.get(w, (w._version, fmt))
+            served = deepgemm._weight_caches[fmt].get(w, w._version)
             assert served is not None, f"{precision} step {step}: the forward left no entry for this version"
             with torch.no_grad():
                 fresh = deepgemm._quant_weight(w, fmt, cacheable=False)
@@ -174,7 +177,7 @@ import os, sys, torch
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 
-LOWP = LowpSpec(precision=sys.argv[3], backend="native", backward_precision=sys.argv[4])
+LOWP = LowpSpec(precision=sys.argv[3], backend="native", backward_precision="fp8")
 
 def compiled():
     return sum(len(dirs) for _, dirs, _ in os.walk(os.environ["DG_JIT_CACHE_DIR"]))
@@ -200,10 +203,10 @@ for rows in (3, 129, 1024, 2048, 4096, 8192):
 """
 
 
-def _wgrad_compiles(mode: str, w_dtype: str, precision: str = "fp8", backward: str = "fp8") -> dict[int, int]:
+def _wgrad_compiles(mode: str, w_dtype: str, precision: str) -> dict[int, int]:
     with tempfile.TemporaryDirectory() as cache:
         out = subprocess.run(
-            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype, precision, backward],
+            [sys.executable, "-c", _WGRAD_COMPILE_PROBE, mode, w_dtype, precision],
             env={**os.environ, "DG_JIT_CACHE_DIR": cache},
             capture_output=True,
             text=True,
@@ -217,16 +220,37 @@ def test_the_wgrad_warm_up_compiles_the_long_group_kernel():
     """On an empty JIT cache, a forward and backward past one step and ``warm_fp8_wgrad`` compile nothing at any rows
     per expert. Without the warm-up the first long receive compiles a kernel mid-step, which stalls every EP peer: the control, and what tells
     a DeepGEMM pin whose heuristic no longer needs the warm-up."""
-    for w_dtype in ("bfloat16", "float32"):
-        cold = _wgrad_compiles("cold", w_dtype)
-        assert sum(cold.values()) > 0, f"{w_dtype}: no long-group kernel to warm, {cold}"
-        warm = _wgrad_compiles("warm", w_dtype)
-        assert not any(warm.values()), f"{w_dtype}: a step compiled a kernel after the warm-up, {warm}"
-        print(f"  {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
-    # mxfp4's backward is bf16: no weight-gradient kernel, so nothing to warm.
-    cold = _wgrad_compiles("cold", "bfloat16", "mxfp4", "bf16")
-    assert not any(cold.values()), f"mxfp4: a step past the first compiled a kernel, {cold}"
-    print("  mxfp4 compiles nothing past the first step — OK")
+    for precision, w_dtype in (("fp8", "bfloat16"), ("fp8", "float32"), ("mxfp4", "bfloat16")):
+        cold = _wgrad_compiles("cold", w_dtype, precision)
+        assert sum(cold.values()) > 0, f"{precision} {w_dtype}: no long-group kernel to warm, {cold}"
+        warm = _wgrad_compiles("warm", w_dtype, precision)
+        assert not any(warm.values()), f"{precision} {w_dtype}: a step compiled a kernel after the warm-up, {warm}"
+        print(f"  {precision:5s} {w_dtype:8s} cold compiles {cold}, none after the warm-up — OK")
+
+
+def test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read():
+    """The cast gives a NaN weight a finite code and flags it on the device; the read raises, cached weight or not,
+    and again at the next forward of a cached one."""
+    lowp = LowpSpec(precision="mxfp4", backend="native")
+    generator = torch.Generator(device=DEV).manual_seed(0)
+    x = torch.randn(256, 256, device=DEV, generator=generator).to(torch.bfloat16)
+    offs = torch.tensor([128, 256], device=DEV, dtype=torch.int32)
+    for cacheable in (True, False):
+        w = (torch.randn(2, 256, 256, device=DEV, generator=generator) / 16).to(torch.bfloat16)
+        deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
+        deepgemm.verify_finite_mxfp4_weights()
+        w[1, 3, 5] = float("nan")
+        for forward in ("first", "caught and run again"):
+            out = deepgemm_grouped_gemm(x, w, offs=offs, lowp=lowp, weight_cacheable=cacheable)
+            assert out.isfinite().all(), "premise: the output hides the NaN weight"
+            try:
+                deepgemm.verify_finite_mxfp4_weights([("bank", w)])
+            except ValueError as exc:
+                assert "Non-finite expert weight bank: " in str(exc)
+            else:
+                raise AssertionError(f"a NaN weight (cacheable={cacheable}, {forward}) passed the flag read")
+            deepgemm.verify_finite_mxfp4_weights()  # the raise cleared the flag
+    print("  mxfp4 NaN weight: finite output, raised at every flag read, cached and uncached — OK")
 
 
 if __name__ == "__main__":
@@ -244,4 +268,6 @@ if __name__ == "__main__":
     test_weight_cache_across_steps()
     print("test_the_wgrad_warm_up_compiles_the_long_group_kernel")
     test_the_wgrad_warm_up_compiles_the_long_group_kernel()
+    print("test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read")
+    test_a_non_finite_mxfp4_weight_raises_at_the_one_flag_read()
     print("ALL PASS")
