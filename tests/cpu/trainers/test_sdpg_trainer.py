@@ -481,9 +481,11 @@ def test_a_batch_without_a_positive_advantage_projects_nothing(monkeypatch):
     torch.testing.assert_close(loss, grpo.detach())
 
 
-def test_an_evaluation_step_matches_the_full_logits_path():
-    """Rows past the split's own (2 of 3) leave the OPD mean on both paths, with no grad-accum division."""
+def test_an_evaluation_step_leaves_the_padding_rows_out_on_both_paths():
+    """Row 2 pads the eval split's final round (2 of 3 rows are the split's own). Its advantage is positive, so the gate
+    keeps it and only the eval split cuts it; eval has no grad-accum division."""
     model = _tiny_qwen3().eval()
+    inputs = {**_real_inputs(), "advantages": torch.tensor([0.7, 0.2, 0.4])}
     results = []
     for chunked in (False, True):
         trainer = _real_loss_trainer(model, chunked=chunked, batch_size=3)
@@ -491,11 +493,16 @@ def test_an_evaluation_step_matches_the_full_logits_path():
         stored = {}
         trainer.store_metrics = lambda metrics, train_eval, rows=1: stored.update(metrics, train_eval=train_eval)
         with torch.no_grad():
-            results.append((trainer._compute_loss(model, _real_inputs()), stored))
+            results.append((trainer._compute_loss(model, dict(inputs)), stored))
     (full, full_metrics), (chunked, chunked_metrics) = results
+    per_token = _per_token_opd(_real_loss_trainer(model, chunked=False, batch_size=3), model, inputs)
+    split = inputs["completion_mask"][:2].bool()
+    expected = per_token[:2][split].mean()
+    assert not torch.isclose(expected, per_token[inputs["completion_mask"].bool()].mean()), "row 2 must move the mean"
+    for metrics in (full_metrics, chunked_metrics):
+        torch.testing.assert_close(metrics["opd_loss"], expected, rtol=_RTOL, atol=0.0)
+        assert metrics["train_eval"] == "eval"
     torch.testing.assert_close(chunked, full, rtol=_RTOL, atol=_RTOL * full.abs())
-    torch.testing.assert_close(chunked_metrics["opd_loss"], full_metrics["opd_loss"], rtol=_RTOL, atol=0.0)
-    assert chunked_metrics["train_eval"] == "eval"
 
 
 def test_the_chunked_term_builds_no_batch_by_completion_by_vocab_plane(monkeypatch):
