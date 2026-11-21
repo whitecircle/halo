@@ -13,9 +13,10 @@ from torch.utils.checkpoint import checkpoint
 from transformers.models.qwen3_5 import modeling_qwen3_5
 
 from halo.distributed.context_parallel import ulysses_attention
+from halo.distributed.context_parallel.all_to_all import heads_to_sequence
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
-from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP, Qwen3_5UlyssesGatedDelta
-from halo.distributed.context_parallel.gated_delta import heads_to_sequence
+from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP
+from halo.distributed.context_parallel.gated_delta import Qwen3_5UlyssesGatedDelta
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.models.introspection.unwrapping import find_peft_model, strip_cp_attention_level

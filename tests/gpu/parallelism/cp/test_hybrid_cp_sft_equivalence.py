@@ -17,7 +17,7 @@ from transformers.models.qwen3_5 import modeling_qwen3_5
 from trl import SFTConfig
 
 from halo.distributed.context_parallel import gated_delta, ulysses_attention
-from halo.distributed.context_parallel.families import Qwen3_5UlyssesGatedDelta
+from halo.distributed.context_parallel.gated_delta import Qwen3_5UlyssesGatedDelta
 from halo.distributed.context_parallel.sequence_chunks import cp_local_targets
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig

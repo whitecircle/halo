@@ -9,7 +9,7 @@ import torch
 from transformers import DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer
 
-from halo.distributed.context_parallel.families import Qwen3_5UlyssesGatedDelta
+from halo.distributed.context_parallel.gated_delta import Qwen3_5UlyssesGatedDelta
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
