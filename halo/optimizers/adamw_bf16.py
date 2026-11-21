@@ -50,13 +50,18 @@ _ROW_STEP_SIZE = tl.constexpr(2)
 _ROW_BC2_SQRT = tl.constexpr(3)
 _ROW_EPS = tl.constexpr(4)
 _ROW_WD_FACTOR = tl.constexpr(5)
+# 1 - beta from the float64 betas, as the eager step and the bias corrections take it: 1 minus the fp32-rounded beta
+# is off by that rounding over 1 - beta (1.3e-5 relative at beta2 0.999), which the bias correction does not cancel.
+_ROW_ONE_MINUS_BETA1 = tl.constexpr(6)
+_ROW_ONE_MINUS_BETA2 = tl.constexpr(7)
 # Each program binary-searches its launch's first-program row, one probe per halving: 8 probes at this cap.
 _MAX_TENSORS_PER_LAUNCH = 256
 # B200 and B300, where the multi-tensor launch is measured. Elsewhere each launch steps one tensor at TABLE_SIZE 1,
 # which compiles to a lone tensor's per-element code.
 _MULTI_TENSOR_LAUNCH_CAPABILITIES = frozenset({(10, 0), (10, 3)})
-# A program's lookup and table reads run once for all its blocks, so a block costs about what a lone launch's program
-# does; more would leave a launch of small tensors too few programs to fill the GPU.
+# A program's lookup and table reads run once for all its blocks (the two 1 - beta reads run per block), so a block
+# costs about what a lone launch's program does; more would leave a launch of small tensors too few programs to fill
+# the GPU.
 _BLOCKS_PER_PROGRAM = 16
 # 64K registers over 2,048 threads, a lone tensor's launch's count. Uncapped, the per-tensor scalars a program holds
 # across its blocks take 48, and an SM fits 5 programs instead of 8.
@@ -166,8 +171,11 @@ def _adam_bf16_sr_kernel(
         ea = tl.load(ea_base + ea_off + offsets, mask=mask).to(tl.float32)
         easq = tl.load(easq_base + easq_off + offsets, mask=mask).to(tl.float32)
 
-        ea = beta1 * ea + (1.0 - beta1) * grad
-        easq = beta2 * easq + (1.0 - beta2) * grad * grad
+        # Read here: hoisted, they change sm_100/sm_103's f32x2 pairing against the per-parameter kernel.
+        one_minus_beta1 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA1 * num_tensors + tensor)
+        one_minus_beta2 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA2 * num_tensors + tensor)
+        ea = beta1 * ea + one_minus_beta1 * grad
+        easq = beta2 * easq + one_minus_beta2 * grad * grad
 
         # exp_avg is a signed ~zero-mean EMA, so nearest rounding is already unbiased.
         tl.store(ea_base + ea_off + offsets, ea.to(tl.bfloat16), mask=mask)
@@ -190,7 +198,7 @@ def _adam_bf16_sr_kernel(
 class _FusedUpdate(NamedTuple):
     param: Tensor
     tensors: tuple[Tensor, Tensor, Tensor, Tensor]  # local p, grad, exp_avg, exp_avg_sq
-    hparams: tuple[float, float, float, float, float, float]  # in _ROW_BETA1 .. _ROW_WD_FACTOR order
+    hparams: tuple[float, float, float, float, float, float, float, float]  # _ROW_BETA1 .. _ROW_ONE_MINUS_BETA2
     seed: int
     divisible: tuple[bool, bool, bool, bool, bool]  # _divisibility(tensors)
 
@@ -242,7 +250,9 @@ def _fused_update(p: Tensor, name: str, state: dict, group: dict) -> _FusedUpdat
     step = state["step"]
     # The kernel derives both noise streams from the first seed.
     seed = sr_seed_pair(_SR_KEY, step, sr_param_index(name))[0]
-    return _FusedUpdate(p, tensors, _step_hparams(group, step), seed, _divisibility(tensors))
+    beta1, beta2 = group["betas"]
+    hparams = (*_step_hparams(group, step), 1.0 - beta1, 1.0 - beta2)
+    return _FusedUpdate(p, tensors, hparams, seed, _divisibility(tensors))
 
 
 def _launch_tables(updates: Sequence[_FusedUpdate]) -> tuple[Tensor, Tensor, int]:
