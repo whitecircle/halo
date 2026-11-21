@@ -174,8 +174,8 @@ def _adam_bf16_sr_kernel(
         # Read here: hoisted, they change sm_100/sm_103's f32x2 pairing against the per-parameter kernel.
         one_minus_beta1 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA1 * num_tensors + tensor)
         one_minus_beta2 = tl.load(hparam_table + _ROW_ONE_MINUS_BETA2 * num_tensors + tensor)
-        ea = beta1 * ea + one_minus_beta1 * grad
-        easq = beta2 * easq + one_minus_beta2 * grad * grad
+        ea = tl.fma(one_minus_beta1, grad, beta1 * ea)
+        easq = tl.fma(one_minus_beta2 * grad, grad, beta2 * easq)
 
         # exp_avg is a signed ~zero-mean EMA, so nearest rounding is already unbiased.
         tl.store(ea_base + ea_off + offsets, ea.to(tl.bfloat16), mask=mask)

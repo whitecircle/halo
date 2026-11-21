@@ -92,8 +92,8 @@ def _per_parameter_kernel(
     ea = tl.load(ea_ptr + offsets, mask=mask).to(tl.float32)
     easq = tl.load(easq_ptr + offsets, mask=mask).to(tl.float32)
 
-    ea = beta1 * ea + one_minus_beta1 * grad
-    easq = beta2 * easq + one_minus_beta2 * grad * grad
+    ea = tl.fma(one_minus_beta1, grad, beta1 * ea)
+    easq = tl.fma(one_minus_beta2 * grad, grad, beta2 * easq)
 
     tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
 
