@@ -83,7 +83,7 @@ torchrun --nproc_per_node=2 scripts/training/distillation/self_distill.py <confi
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/data/test_self_distill_collator.py -m cpu`, and the GPU scripts `tests/gpu/trainers/other/test_self_distillation_text.py`, `test_self_distillation_vlm.py` and `tests/gpu/trainers/lora/test_lora_self_distill.py`, each also run with `--chunked` for the chunked loss.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/data/test_self_distill_collator.py -m cpu`, and the GPU scripts `tests/gpu/trainers/other/test_self_distillation_text.py`, `test_self_distillation_vlm.py` and `tests/gpu/trainers/lora/test_lora_self_distill.py`, each also run with `--chunked` for the chunked loss; under `--chunked` the last one also checks that the first step's loss equals the full-logits loss of the same batch.
 
 ## What to watch
 

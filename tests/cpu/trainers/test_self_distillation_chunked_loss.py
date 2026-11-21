@@ -3,23 +3,27 @@
 the loss, every trainable gradient and every metric agree, for each OPD loss, with and without the frozen reference,
 the EOS exclusion and the confidence weights, with a LoRA adapter (and its dropout) on ``lm_head``, a
 ``modules_to_save`` head, a reference with padded vocabulary rows, a composite's image rows (LFM2-VL replaying its
-image features on the teacher pass) and in eval mode. The default path's logits planes are weighed at construction."""
+image features on the teacher pass) and in eval mode. Construction refuses what the chunked path cannot serve and
+weighs the default path's logits planes."""
 
 import logging
 import types
+from unittest import mock
 
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from torch import nn
+from trl import SFTTrainer
 
 import halo.kernels.logprobs as logprob_kernels
 import halo.trainers.full_logits_memory as full_logits_memory
 from halo.configs.distillation import SDPGArguments
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.distillation.divergences import require_divergence
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from halo.trainers.hidden_state_forward import reject_metrics_reading_logits
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.composite_rows import composite_model_and_rows
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tiny_models import TINY_DENSE_FAMILY, tiny_family_model
@@ -361,12 +365,6 @@ def test_lfm2_vl_replays_the_student_s_image_features_on_the_teacher_pass():
     assert len(calls) == 2, f"one image-feature pass per step expected, saw {len(calls)} over two steps"
 
 
-def test_metrics_reading_evaluation_logits_are_refused():
-    with pytest.raises(ValueError, match="compute_metrics / preprocess_logits_for_metrics"):
-        reject_metrics_reading_logits(lambda prediction: {}, None)
-    reject_metrics_reading_logits(None, None)
-
-
 _GIB = 1024**3
 
 
@@ -433,6 +431,74 @@ def test_the_warning_stays_quiet_when_nothing_is_large(free_memory, caplog, host
     with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
         DistributedSelfDistillationTrainer._warn_if_full_logits_large(host)
     assert not caplog.records
+
+
+def _constructed(model, *, chunked: bool, compute_metrics=None) -> DistributedSelfDistillationTrainer:
+    """The real ``__init__`` over a stubbed ``SFTTrainer.__init__`` and distributed setup."""
+
+    def init_config(self, kwargs, **_):
+        self.parallelism_config = ParallelismConfig()
+        return kwargs
+
+    def sft_init(self, *args, **kwargs):
+        self.model, self.args = model, kwargs["args"]
+        self.data_collator = types.SimpleNamespace(builds_teacher_branch=True)
+        self.processing_class = None
+        self.compute_metrics, self.preprocess_logits_for_metrics = compute_metrics, None
+        self.accelerator = types.SimpleNamespace(device="cuda:0", unwrap_model=lambda model: model)
+
+    args = types.SimpleNamespace(
+        max_length=4096,
+        bf16=True,
+        fp16=False,
+        per_device_train_batch_size=2,
+        per_device_eval_batch_size=1,
+        eval_strategy="no",
+        eval_on_start=False,
+    )
+    with (
+        mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", init_config),
+        mock.patch.object(SFTTrainer, "__init__", sft_init),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes"),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids"),
+    ):
+        return DistributedSelfDistillationTrainer(
+            args=args,
+            reference_model=None,
+            reference_kl_coef=0.0,
+            reference_kl_loss="unnormalized_kl",
+            confidence_weight_opd=True,
+            opd_exclude_eos=True,
+            use_chunked_distillation_loss=chunked,
+            sdpg_beta_base=BETA,
+        )
+
+
+def test_construction_refuses_metrics_reading_evaluation_logits():
+    with pytest.raises(ValueError, match="compute_metrics / preprocess_logits_for_metrics"):
+        _constructed(_student(peft=True), chunked=True, compute_metrics=lambda prediction: {})
+    _constructed(_student(peft=True), chunked=False, compute_metrics=lambda prediction: {})
+
+
+def test_construction_resolves_the_student_head():
+    """A head the chunked path cannot project raises at construction, not at the first step."""
+    assert _constructed(_student(peft=True), chunked=True)._chunked_loss_modules is not None
+    torch.manual_seed(0)
+    model = get_peft_model(
+        tiny_family_model(TINY_DENSE_FAMILY, overrides=TINY),
+        LoraConfig(r=4, use_dora=True, target_modules=["lm_head"]),
+    )
+    with pytest.raises(ValueError, match="carry a variant"):
+        _constructed(model, chunked=True)
+    assert _constructed(model, chunked=False)._chunked_loss_modules is None
+
+
+@pytest.mark.parametrize(("chunked", "warnings"), [(False, 1), (True, 0)], ids=["full_logits", "chunked"])
+def test_construction_weighs_the_full_logits_planes(free_memory, caplog, chunked, warnings):
+    free_memory(1024)
+    with caplog.at_level(logging.WARNING, logger=full_logits_memory.__name__):
+        _constructed(_student(peft=True), chunked=chunked)
+    assert len(caplog.records) == warnings, [record.getMessage() for record in caplog.records]
 
 
 if __name__ == "__main__":
