@@ -1,0 +1,54 @@
+# WHITECIRCLE_API_KEY=wc-... CUDA_VISIBLE_DEVICES=1 halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-code-whitecircle.yaml
+
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+
+dataset: data/baxbench/train.jsonl
+test_size: 0.01
+
+rewards:
+  - source: whitecircle
+    name: security
+    environment_id: your_environment_id
+    policies: [policy_a, policy_b, policy_c]
+    weight: 1.0
+    max_concurrency: 16
+  - source: whitecircle
+    name: quality
+    environment_id: your_environment_id
+    policies: [policy_d, policy_e]
+    weight: 0.5
+    max_concurrency: 16
+  - source: whitecircle
+    name: repetition
+    environment_id: your_environment_id
+    policies: [policy_f]
+    weight: 1.0
+    max_concurrency: 16
+
+beta: 0.04
+num_iterations: 1
+epsilon: 0.2
+scale_rewards: group
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 4
+max_steps: 200
+learning_rate: 1.0e-06
+lr_scheduler_type: constant
+
+max_prompt_length: 2560
+max_completion_length: 4096
+
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 127.0.0.1
+
+output_dir: checkpoints/online-grpo-qwen3-4b-code-whitecircle
+save_strategy: "no"
+logging_steps: 1
+logging_first_step: true
+report_to: []
+log_completions: true

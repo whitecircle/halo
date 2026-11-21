@@ -152,6 +152,17 @@ def _convert_dense_mlps(
     return converted
 
 
+def lowp_converted_modules(model: nn.Module) -> list[str]:
+    """Names of the modules :func:`apply_lowp_compute` converted: retyped dense projections and EP layers carrying a
+    quantization format, loop-path layers included, as they carry it too."""
+    return [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, LowPrecisionLinear)
+        or (isinstance(module, EPMoELayerBase) and module._lowp_quant_format is not None)
+    ]
+
+
 def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cacheable: bool) -> dict:
     """Enable ``lowp`` on ``model`` in place and return ``{precision, moe_layers, dense_linears,
     kept_blocks}``. ``expert_weight_cacheable`` is False when FSDP2 manages the experts: it pins the

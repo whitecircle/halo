@@ -19,6 +19,7 @@ from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sin
 from halo.models.introspection.unwrapping import strip_peft_adapter_segment
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.trainers.grpo.objective.loss_inputs import MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
 from tests.common.adapters import (
     LORA_ALPHA,
     LORA_R,
@@ -390,6 +391,15 @@ def record_step_losses(trainer, checks: dict[str, bool]) -> tuple[list[float], b
     trained = any(value != 0.0 for value in losses)
     log(f"  per-step losses: {losses} (non-zero gradient: {trained})")
     return losses, trained
+
+
+def record_maxrl_logged(trainer, checks: dict[str, bool]) -> None:
+    """Under ``use_maxrl`` the training steps log the share of groups whose mean reward is not positive. A missing key
+    means the mean divisor never ran."""
+    key = MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
+    fractions = [float(entry[key]) for entry in trainer.state.log_history if key in entry]
+    checks["maxrl_zero_mean_group_frac_logged"] = bool(fractions) and all(0.0 <= v <= 1.0 for v in fractions)
+    log(f"  {key}: {fractions}")
 
 
 def record_adapter_training(

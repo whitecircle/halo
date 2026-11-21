@@ -303,6 +303,14 @@ class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, Traini
             "gold-token weight."
         },
     )
+    use_chunked_distillation_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Project both models' output embeddings from their last hidden states a chunk of supervised "
+            "positions at a time, so neither model's full [tokens, vocab] logits are built. Saves about three "
+            "logits planes of memory for a few percent of speed; a plain LoRA on lm_head trains through it."
+        },
+    )
     max_length: int | None = field(
         default=2048,
         metadata={

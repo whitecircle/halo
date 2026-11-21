@@ -32,11 +32,8 @@ from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnviro
 from halo.environments.protocols.react import ReActEnvironment
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
-from halo.environments.sandbox.local import (
-    LOCAL_FSIZE_LIMIT,
-    TAMPERED_WORKDIR_RETURNCODE,
-    LocalSubprocessSandbox,
-)
+from halo.environments.sandbox.limits import LOCAL_FSIZE_LIMIT, TAMPERED_WORKDIR_RETURNCODE
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult

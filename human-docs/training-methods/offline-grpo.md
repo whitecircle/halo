@@ -19,7 +19,10 @@ trains nothing).
 `completions` holds one message list per completion (usually 4–16) and `rewards` one float per
 completion, in the same order. The method is text-only. No dataset yet?
 `halo run inference/reward-model/rejection-sample --output_format offline_grpo` generates candidates
-against a served model, scores them with a reward model, and writes this shape.
+against a served model, scores them with a reward model, and writes this shape. Rows with completions
+but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl` prices
+them with the YAML's `rewards` list, a `whitecircle` policy check included
+([White Circle](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
 
 ## Run
 
