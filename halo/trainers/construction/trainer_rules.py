@@ -7,6 +7,8 @@ from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
+from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.parallel.lowp_compute import lowp_converted_modules
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.external_tables import named_external_tables
@@ -236,6 +238,26 @@ def reject_reference_sinks_mismatch(model, ref_model, alternatives: str) -> None
         "with the policy's reset_sinks, as the training scripts do; a reference TRL builds itself keeps "
         f"the pretrained sinks live. Or hold none: {alternatives}"
     )
+
+
+def verify_lowp_conversion(model, lowp: LowpSpec) -> None:
+    """The model holds low-precision modules exactly when ``lowp`` is enabled. The loader keeps that in both directions
+    (``apply_lowp_compute`` returns early when lowp is off and raises when it converts nothing), so a model that breaks
+    it was built outside the loader: it would train unquantized, or fake-quantized under a config that says bf16."""
+    converted = lowp_converted_modules(model)
+    if lowp.enabled and not converted:
+        raise ValueError(
+            f"lowp_precision={lowp.precision!r}, but the model holds no low-precision module, so it would train "
+            f"unquantized. A trainer applies no lowp to the model it is handed, nor to a model id it loads. Load the "
+            f"model with load_distributed_model under this parallelism_config, as the training scripts do, and pass it."
+        )
+    if not lowp.enabled and converted:
+        shown = ", ".join(converted[:3]) + (f" and {len(converted) - 3} more" if len(converted) > 3 else "")
+        raise ValueError(
+            f"The model holds {len(converted)} low-precision module(s) ({shown}), but lowp_precision={lowp.precision!r}, "
+            f"so it would train fake-quantized under a config that says it does not. Set lowp_precision to the "
+            f"precision it was converted to, or load it without one."
+        )
 
 
 def reject_inert_aux_loss_balancing(trainer_name: str, moe_balancing: str) -> None:

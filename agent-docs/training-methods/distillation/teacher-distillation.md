@@ -95,7 +95,7 @@ An image run maps through the shared `prepare_vlm_dataset` and forces `remove_un
 
 ## Quantization-aware distillation
 
-`lowp_precision` and the other `lowp_*` knobs apply to the **student** as under [SFT](../sft.md): it loads through the same loader, which fake-quantizes its dense MLP and MoE expert GEMMs over bf16/fp32 masters ([Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)). The teacher loads through `load_frozen_auxiliary_model`, which takes no parallelism config and never applies them, so it scores in the run's dtype. The trainer refuses a teacher that holds a converted module (`reject_lowp_teacher`), and a student passed as a path, which it would load without them.
+`lowp_precision` and the other `lowp_*` knobs apply to the **student** as under [SFT](../sft.md): it loads through the same loader, which fake-quantizes its dense MLP and MoE expert GEMMs over bf16/fp32 masters ([Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)). The teacher loads through `load_frozen_auxiliary_model`, which takes no parallelism config and never applies them, so it scores in the run's dtype. The trainer refuses a teacher that holds a converted module (`reject_lowp_teacher`), and a student passed as a path, which it would load without them. Every trainer's setup then checks the student it holds against the config (`verify_lowp_conversion`, [Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)), so a module loaded elsewhere and passed in unconverted is refused too.
 
 Pointing `teacher_model` at the student's own checkpoint fits the quantized student to the full-precision model's token distribution rather than to the dataset's labels:
 

@@ -71,6 +71,7 @@ from halo.trainers.construction.trainer_rules import (
     reject_unreachable_mtp_term,
     reject_unreloadable_best_model,
     reject_unsaveable_external_tables,
+    verify_lowp_conversion,
 )
 from halo.trainers.construction.training_args_overrides import (
     align_save_on_each_node,
@@ -385,6 +386,8 @@ class DistributedTrainerMixin(
             eval_rows_per_forward=self.args.per_device_eval_batch_size if uses_evaluation(self.args) else 1,
         )
         verify_qwen4_exp_patched(self._top_level_model())
+        # A model handed in, or built from an id, never passed the loader's lowp step.
+        verify_lowp_conversion(self._top_level_model(), config.lowp)
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp
