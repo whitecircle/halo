@@ -12,6 +12,10 @@ The hint (`sdpg_hint_template`) is appended to the rendered generation prompt fo
 
 OPD runs on the tokens the GRPO loss trains, so tool-output tokens are excluded. The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero and the template names `{answer}`, and a loss batch without the teacher prompts raises rather than training plain GRPO.
 
+## Chunked OPD term
+
+`use_chunked_grpo_logprobs: true` builds no `[B, C, V]` plane for either side of the OPD term. The no-grad teacher forward runs first and keeps its hidden states only. The GRPO loss forward then hands the term the student's hidden states, and the term projects both sides through the head the GRPO sweep gathered, a chunk of positions at a time under a checkpoint: the student's with a gradient to the head, the teacher's without. Only the positions the gate keeps are projected, so a micro-batch with no positive advantage projects none, while the head is gathered on every rank as GRPO needs it. The term's values are outputs of that forward, so under ZeRO-3 FSDP2 gathers the head again before the backward recomputes them.
+
 ## Refusals
 
 - **`packed_microbatch_tokens`**: a packed slot cannot pair the student's per-row logits with the teacher pass ([Packed micro-batches](../async-grpo/performance.md#packed-micro-batches)).
@@ -45,7 +49,7 @@ trainer = DistributedSDPGTrainer(
 
 ## Testing a setup
 
-Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the dense and MoE `--trainer sdpg` rows of `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py`.
+Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the dense and MoE `--trainer sdpg` rows of `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py`, whose `--chunked` rows also check the first step's `opd_loss` against the same forward with the term projected unchunked and against the full-logits path.
 
 ## What to watch
 
@@ -54,7 +58,7 @@ Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, pr
 Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online.md#what-to-watch)).
 
 - **`opd_loss` is exactly 0** — under `opd_positive_advantage_only: true`, no rollout in the batch earned a positive advantage, so the gate masked every token. Expected on easy or fully-failed batches; persistent zeros mean the verifier never separates a group.
-- **OOM the online trainer did not hit** — OPD reads the student's `[B, C, V]` completion logits off the GRPO loss forward and keeps that plane alive until backward (where the forward takes `logits_to_keep`, the prompt rows stay out of it; the divergence itself chunks, [memory](README.md)). With `use_chunked_grpo_logprobs` the no-grad teacher forward on the longer prompt+hint+completion sequence yields hidden states only, and the head projects them in token chunks inside the divergence, so no teacher plane exists. Without it the teacher forward still builds its `[B, C, V]` plane, as the full-logits scorer holds the student's anyway (the head transform of a family is verified only for the chunked scorer). Size the batch against the student plane.
+- **OOM the online trainer did not hit** — with `use_chunked_grpo_logprobs: false`, OPD reads the student's `[B, C, V]` completion logits off the GRPO loss forward, and the no-grad teacher forward on the prompt+hint+completion sequence builds a second `[B, C, V]` plane, so the step holds both (the divergence itself chunks, [memory](README.md)). Construction weighs the teacher's plane beside GRPO's while `sdpg_beta_base` is non-zero ([the logits wall](../async-grpo/performance.md#the-logits-wall)). Set `use_chunked_grpo_logprobs: true` ([Chunked OPD term](#chunked-opd-term)).
 - **Missing-answer warning** — a row whose answer is blank gets no hint, so it distills toward an unprivileged teacher. Fix the `answer_field` mapping.
 
 TRL's `use_liger_kernel` is off, as on every online GRPO run ([Forced and refused settings](../grpo/online.md#forced-and-refused-settings)).

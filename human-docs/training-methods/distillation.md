@@ -61,8 +61,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
     --use_sdpg=true --sdpg_beta_base=1.0
 ```
 
-SDPG adds a no-grad teacher forward on the longer hinted sequence and keeps the student's and the
-teacher's logits alive until backward, so it runs out of memory at batch sizes Online GRPO survives.
+SDPG adds a no-grad teacher forward on the longer hinted sequence. By default it keeps the student's
+and the teacher's logits alive until backward, so it runs out of memory at batch sizes Online GRPO
+survives. Set `use_chunked_grpo_logprobs: true` and neither is built.
 
 ## What to watch
 
