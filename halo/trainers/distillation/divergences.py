@@ -263,21 +263,27 @@ def token_divergence(
     return map_token_chunks(per_token, student_logits, teacher_logits, *labels)
 
 
-def projected_token_divergence(
+def projected_divergence(
     loss_fn: Callable,
-    student_logits: torch.Tensor,
-    teacher_hidden: torch.Tensor,
-    project: Callable[[torch.Tensor], torch.Tensor],
+    student_logits: Callable[[torch.Tensor], torch.Tensor],
+    student_rows: torch.Tensor,
+    teacher_logits: Callable[[torch.Tensor], torch.Tensor],
+    teacher_rows: torch.Tensor,
     temperature: float,
+    *,
+    vocab: int,
 ) -> torch.Tensor:
-    """:func:`token_divergence` with the teacher's logits projected from its ``[B, T, H]`` hidden states one token chunk
-    at a time, so no teacher ``[B, T, V]`` plane exists. ``project`` runs again when backward recomputes a chunk, so it
-    must be valid then and take no gradient."""
+    """``[N]`` vocab-summed divergence of aligned ``[N, H]`` hidden states, one row per token. Each callable projects
+    its rows to ``[rows, vocab]`` logits one chunk at a time under a non-reentrant checkpoint, the teacher's with no
+    gradient, so no ``[N, vocab]`` plane outlives its chunk; both run again in the backward's recompute."""
 
-    def per_token(student: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
-        return _vocab_summed_divergence(loss_fn, student, project(hidden), temperature)
+    def per_token(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            target = teacher_logits(teacher)
+        return _vocab_summed_divergence(loss_fn, student_logits(student), target, temperature)
 
-    return map_token_chunks(per_token, student_logits, teacher_hidden)
+    chunks = checkpointed_chunks(per_token, student_rows, teacher_rows, chunk_rows=logit_chunk_rows(vocab))
+    return torch.cat(list(chunks))
 
 
 def token_divergence_and_cross_entropy(
