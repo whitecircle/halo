@@ -61,7 +61,7 @@ label, except for Bailing/Ling.
 GLM-5 Next (tree packing keeps GLM-5 Next's documents apart). Ring and Inkling mix
 documents on every kernel, so packing them takes
 `allow_cross_document_linear_attention: true`. `padding_free` needs a flash
-kernel, and Qwen3.5/3.6 refuse it
+kernel; on Blackwell Qwen3.5/3.6 take FA2 for it unless you pin FA4
 ([Document isolation](../agent-docs/data/collators.md#document-isolation-under-packing) ↗).
 Per-family details:
 [Flash Attention](../agent-docs/optimization/flash-attention.md#model-specific-handling) ↗.
@@ -95,12 +95,12 @@ uses vLLM by default; `rollout_backend: sglang` switches engines. The engines
 differ in which families they can take an online weight update for. The scripts
 refuse an unsupported pair at startup, naming the family and the reason.
 
-The last column is what passed on this release: async GRPO, full fine-tuning on
+The last column is what passed on Halo 1.2.0 (1.3.0rc1 where a row says so): async GRPO, full fine-tuning on
 a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says
 otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 `tensor_parallel_size: 2`, and replay is `routing_replay: rollout`.
 
-| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on this release |
+| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on 1.2.0 |
 | --- | :---: | :---: | :---: | --- |
 | Dense families | Yes | Yes | No, MoE only | vLLM: online GRPO, SDPG and async GRPO on Qwen3-0.6B. SGLang: a weight push on Qwen3-0.6B, no training loop |
 | GPT-OSS | Yes | Yes | Yes | `unsloth/gpt-oss-20b-BF16`. SGLang: every SGLang mode marked Ran below. vLLM: `ep4`, `ep2` with `tp2` or ETP2, `tp2` and `ep2` at DP2, HSDP, online GRPO at `ep2` |
@@ -113,7 +113,7 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
-| GLM-5 Next | Yes | Yes | Not run | A tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
+| GLM-5 Next | Yes | Yes | Not run | On 1.3.0rc1, a tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
 | Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
@@ -209,7 +209,7 @@ advanced parallelism. What each family is for:
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP on tiny models and one 20-step Qwen3-30B-A3B run at `pp2` × `ep4`, with `moe_balancing: none` |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text rows only; SFT and SMPO refuse an image run under CP |
-| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B image recipes train on plain FSDP with `flash_attention_2`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower, with `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | tiny models only |
 | Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental, text rows: EP8 trains the release cut to four layers, PP ran the whole text tower for 13 steps with checkpointing on, the rest runs on tiny models; full fine-tuning or LoRA; PP takes the text tower, full fine-tuning with `moe_balancing: none`; the 95 GiB n-gram table stays in host memory; `ep_size: 1` loads about 246 GiB on every GPU ([details](../agent-docs/models/qwen4_exp.md) ↗) |

@@ -103,7 +103,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 The other configs in `examples/grpo/environmental/qwen3_5/vllm/` change the environment, the adapter or
 the EP size. The full fine-tune ep1 code-contests recipe is a curriculum: run `-stage1-codeforces`,
-`-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
+`-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint. Their headers give
+the launch: six trainer GPUs, two TP=1 servers on GPUs 6 and 7, `DIST_NCCL_TIMEOUT_MINUTES=120`. Stages 2 and 3
+name a placeholder checkpoint of the previous stage under `checkpoints/`: pass `--model_name_or_path` with your
+own run's checkpoint.
 
 The `sglang/` configs (ep1) run on SGLang. The full fine-tune expects two TP=1 servers on GPUs 6 and 7
 and a six-GPU trainer:
@@ -127,7 +130,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 ## Settings that matter
 
-- **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
+- **Attention.** The SFT recipe pins `flash_attention_2`, and so do the GRPO recipes. Unpinned,
   Blackwell runs FA4, and FA2 on packed SFT rows
   ([Attention backends](../supported-matrix.md#attention-backends)).
 - **Packing or padding-free.** Both pack documents without cross-document attention on this family. An unset

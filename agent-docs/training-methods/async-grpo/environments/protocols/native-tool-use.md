@@ -34,7 +34,7 @@ The [common knobs](../README.md#common-knobs) apply too.
 - `web_search` — `query` and optional `max_results` (default 5).
 - `read_file`, `write_file`, `list_files` — a simulated per-episode file store.
 
-The builders in `halo/environments/tools/toolsets.py` return registries: `build_math_tools`, `build_code_tools`, `build_python_tools`, `build_search_tools`, `build_simulated_file_tools` and `build_combined_tools` stateless, `build_session_{code,bash,file}_tools` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
+The builders in `halo/environments/tools/toolsets.py` return registries: `build_math_tools`, `build_code_tools`, `build_python_tools`, `build_search_tools`, `build_simulated_file_tools` and `build_combined_tools` with no sandbox session, `build_session_{code,bash,file}_tools` bound to the episode's persistent [sandbox session](../sandbox.md). `NativeToolRegistry.combine(a, b)` composes two. Pass `sandbox=` a `SandboxExecutor` to run code in a real interpreter with imports ([Choosing a backend](../sandbox.md#choosing-a-backend)).
 
 ## Reward
 

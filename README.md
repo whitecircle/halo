@@ -289,7 +289,7 @@ These rows have no 1.2.0 measurement; read each as a 1.1.0 number.
 |---|---|
 | **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off: ~230k tok/s across 8 GPUs. |
 | **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2, SDPA: the highest achieved TFLOPS of any EP>1 run benchmarked on 1.1.0. |
-| **25–76 GiB/GPU on the same 16k workload** | EP8+CP8: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1: 75.8 GiB at 20,690 tok/s/GPU. |
+| **25–76 GiB/GPU at 16k tokens** | EP8+CP8, one 16k row over 8 GPUs: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1, 4 × 4k per GPU: 75.8 GiB at 23,590 tok/s/GPU. |
 | **256k context** | gpt-oss-20b, dense EP1 ZeRO-3 with fused linear cross-entropy: 5,728 tok/s/GPU at 112 GiB (measured on Halo 1.0.0). |
 | **2.45× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.10× at batch 1. |
 | **3.6–3.9× FA4 kernel throughput** | FA4 vs FA2 on the isolated kernel (B2×S8192, head_dim 128); up to 2.3× end-to-end on dense Qwen3-4B at 32k (1× B300). |
@@ -339,7 +339,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 
 ## Optimizations
 
-Enabled by default where supported:
+Built in. Most apply by default where supported; QAT, the Muon and FlashAdamW optimizers, LoRA and QLoRA, and the packing modes are set per run in the config:
 
 - **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
   CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4 and Nemotron-H take torch's fused RMSNorm instead),
