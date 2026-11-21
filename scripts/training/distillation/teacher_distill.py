@@ -134,8 +134,9 @@ def _text_distill_collator(args, tokenizer, model_config):
 
 
 def _teacher_is_student_checkpoint(args, model_config) -> bool:
-    """Spelled alike after path normalization. A hub id normalizes to itself."""
-    return os.path.normpath(args.teacher_model) == os.path.normpath(model_config.model_name_or_path)
+    """The same path once both resolve against the working directory, so ``ckpt`` and its absolute spelling match. Two
+    hub ids resolve alike only when spelled alike."""
+    return os.path.abspath(args.teacher_model) == os.path.abspath(model_config.model_name_or_path)
 
 
 def main():

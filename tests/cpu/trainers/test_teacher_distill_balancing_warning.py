@@ -136,5 +136,15 @@ def test_the_script_compares_the_two_checkpoints_after_normalizing_paths(teacher
     assert module._teacher_is_student_checkpoint(args, model_config) is same
 
 
+def test_a_relative_student_path_matches_its_absolute_teacher_spelling(tmp_path, monkeypatch):
+    module = load_script_module(
+        "scripts/training/distillation/teacher_distill.py", "halo_test_teacher_distill_balancing_warning"
+    )
+    monkeypatch.chdir(tmp_path)
+    args = SimpleNamespace(teacher_model=str(tmp_path / "ckpt"))
+    model_config = SimpleNamespace(model_name_or_path="ckpt")
+    assert module._teacher_is_student_checkpoint(args, model_config) is True
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
