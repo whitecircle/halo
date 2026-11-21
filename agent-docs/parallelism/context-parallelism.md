@@ -160,12 +160,11 @@ Offline GRPO's CP collator right-pads each joined prompt+completion row
 
 ### Supported model architectures
 
-Source of truth: `ULYSSES_ATTENTION_MAP` in `halo/distributed/context_parallel/families.py`, built
-by walking the `UlyssesAttention` subclass tree and reading each wrapper's `HF_MODULE_NAMES` (a
-duplicate HF name raises). The validator and the patcher both read that map — there is no separate
-accept list to keep in sync.
+The validator and patcher share two class-claim maps: `ULYSSES_ATTENTION_MAP` for
+`UlyssesAttention` subclasses and `ULYSSES_GATED_DELTA_MAP` for `UlyssesSequenceLayerBase`
+subclasses. Both read `HF_MODULE_NAMES` from registered wrappers; duplicate HF names raise.
 
-| Attention class | Wrapper | Family specifics | Page |
+| Layer class | Wrapper | Family specifics | Page |
 |---|---|---|---|
 | `GptOssAttention` | `GptOssUlyssesAttention` | split-halves RoPE; sinks must be reset | [gpt-oss.md](../models/gpt-oss.md) |
 | `Qwen3MoeAttention` (Qwen3 MoE) | `Qwen3MoeUlyssesAttention` | Q/K RMSNorm | [qwen3.md](../models/qwen3.md#qwen3-moe) |
@@ -174,13 +173,23 @@ accept list to keep in sync.
 | `Glm4MoeLiteAttention` | `Glm4MoeLiteUlyssesAttention` | DeepSeek-V3 MLA: separate qk/v head dims | [glm4.md](../models/glm4.md) |
 | `Mistral4Attention` | `Mistral4UlyssesAttention` | MLA: separate qk/v head dims, llama-4 scaling | [mistral4.md](../models/mistral4.md) |
 | `Qwen3_5MoeAttention` / `Qwen3_5Attention` | `Qwen3_5MoeUlyssesAttention` | post-attention sigmoid gate + partial RoPE | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
+| `Qwen3_5GatedDeltaNet` (dense sequence layer) | `Qwen3_5UlyssesGatedDelta` | full-row head redistribution before convolution and recurrence; CP2 only | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
 | `BailingMoeV2Attention` / `…FlashAttention2` / `…SdpaAttention` (Ling 2.0) | `BailingMoeV2UlyssesAttention` | fused `query_key_value`, `dense` output projection, Q/K norm before partial RoPE | [bailing.md](../models/bailing.md#cp-wrapper) |
 | `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE | [cohere2-moe.md](../models/cohere2-moe.md) |
 
 Every other attention class raises `CPConfigError`, and a model carrying state along the sequence
-axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name even
-where its attention is wrapped — Qwen3.5/3.6 on every released checkpoint. Per family, with the reason
+axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name unless
+its sequence layer has a CP implementation. Per family, with the reason
 on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
+
+### Dense hybrid SFT
+
+Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. For a released
+multimodal checkpoint, set `text_only_model: true` to load its text tower. Both linear-attention
+key and value head counts must be divisible by CP2, and value heads must be a multiple of key heads.
+Use right-padded rows; the path does not pass a padding mask into each linear-attention layer.
+MoE, adapters, quantized weights, packed rows, multimodal models, cache use and other trainers
+remain refused for this hybrid path.
 
 ## CP with EP
 
@@ -271,8 +280,8 @@ inspects a trainer's loss for CP-safety, so a new trainer must verify its own ob
 declaring the flag.
 
 **Models.** Only the wrappers in the [table above](#supported-model-architectures); anything else
-raises `CPConfigError`. Linear-attention, sequence-axis convolution and window-pooling blocks
-are rejected by class name even when the surrounding attention is wrapped.
+raises `CPConfigError`. Unregistered linear-attention, sequence-axis convolution and window-pooling
+blocks are rejected even when the surrounding attention is wrapped.
 
 **Generation.** `UlyssesModel.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
