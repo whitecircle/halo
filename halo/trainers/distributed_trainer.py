@@ -269,7 +269,6 @@ class DistributedTrainerMixin(
         model, ctor_training_args = get_ctor_model_and_config(ctor_args, kwargs, ctor_positions)
         if training_args is None:
             training_args = ctor_training_args
-        type(self).reject_undeclared_axes(cp_size=parallelism_config.cp_size, pp_size=parallelism_config.pp_size)
         # A subclass must opt in itself: inheriting SFT's flag does not verify its loss under hybrid CP.
         reject_hybrid_cp_training(
             model,
@@ -300,6 +299,7 @@ class DistributedTrainerMixin(
         self._warned_empty_labels = False
         self._memory_margin_checked = False
 
+        type(self).reject_undeclared_axes(cp_size=parallelism_config.cp_size, pp_size=parallelism_config.pp_size)
         reject_pp_named_optimizer(training_args, parallelism_config)
         reject_custom_parallelism_under_accelerate(parallelism_config)
         full_determinism = getattr(training_args, "full_determinism", False)

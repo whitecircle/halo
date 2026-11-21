@@ -215,6 +215,21 @@ def test_gated_delta_geometry_refusals_before_group_lookup(overrides, cp_size, m
         Qwen3_5UlyssesGatedDelta(layer, None, cp_size)
 
 
+def test_validator_checks_gated_delta_geometry_before_wrapper_installation():
+    # Attention heads must themselves admit CP4, so only the sequence-layer check can refuse it.
+    model = build_hybrid_model(num_key_value_heads=4)
+    model.config._attn_implementation = "flash_attention_2"
+    with pytest.raises(CPConfigError, match="CP2"):
+        reject_unsupported_ulysses_model(model, 4)
+
+
+def test_gated_delta_refuses_biased_convolution_before_group_lookup():
+    layer = modeling_qwen3_5.Qwen3_5GatedDeltaNet(hybrid_text_config(), 0)
+    layer.conv1d.bias = torch.nn.Parameter(torch.ones(layer.conv1d.out_channels))
+    with pytest.raises(CPConfigError, match="bias-free"):
+        Qwen3_5UlyssesGatedDelta(layer, None, 2)
+
+
 def test_validator_and_patcher_share_dense_hybrid_claim():
     model = build_hybrid_model()
     model.config._attn_implementation = "flash_attention_2"
@@ -284,6 +299,15 @@ def test_hybrid_training_gate_admits_dense_unpacked_cp2_sft():
         SimpleNamespace(packing=False, padding_free=False),
         SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
         supported=True,
+    )
+
+
+def test_hybrid_training_gate_defers_model_id_until_loading():
+    reject_hybrid_cp_training(
+        "org/qwen3.5",
+        SimpleNamespace(),
+        SimpleNamespace(is_cp_mode=True, cp_size=2, expert_lora=False),
+        supported=False,
     )
 
 

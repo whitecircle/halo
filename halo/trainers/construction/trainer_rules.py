@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch.nn as nn
+
 from halo.config_validation import differs_from_default
 from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
@@ -119,7 +121,7 @@ def reject_cp_trainer_args(
 
 def reject_hybrid_cp_training(model, training_args, config, *, supported: bool, peft_config=None) -> None:
     """Refuse hybrid CP outside dense, unpacked, adapter-free CP2 SFT; existing attention-only CP is unchanged."""
-    if not config.is_cp_mode:
+    if not config.is_cp_mode or not isinstance(model, nn.Module):
         return
     model_config = model.config
     if not any(

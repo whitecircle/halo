@@ -76,6 +76,11 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
+Dense `Qwen3_5GatedDeltaNet` is claimed by `ULYSSES_GATED_DELTA_MAP` through
+`Qwen3_5UlyssesGatedDelta` in `halo/distributed/context_parallel/gated_delta.py`. It redistributes
+projected head groups before the causal convolution and delta recurrence, then returns each rank's
+sequence chunk. Its admitted scope is [dense hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft).
+
 ## Why MoE hybrid CP is refused
 
 MoE checkpoints ship hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
