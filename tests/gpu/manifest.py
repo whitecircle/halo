@@ -2174,6 +2174,25 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=600,
     ),
+    # QAD: both expert weight round trips (uncached under FSDP2 at ep 1, cached at ep 2), two families, one adapter row.
+    "trainers/other/test_lowp_teacher_distill.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=(
+            "--family qwen3_moe --precision mxfp4 --ep 2",
+            "--family qwen3_moe --precision fp4 --ep 2",
+            "--family qwen3_moe --precision mxfp4 --ep 1",
+            "--family qwen3_moe --precision fp4 --ep 2 --chunked",
+            "--family qwen3_moe --precision mxfp4 --ep 1 --chunked",
+            Row("--family lfm2_moe --precision fp4 --ep 2", markers=("gpu", "full", "2gpu", "ep", "moe", "lfm2")),
+            Row("--family lfm2_moe --precision mxfp4 --ep 1", markers=("gpu", "full", "2gpu", "ep", "moe", "lfm2")),
+            Row(
+                "--family qwen3_moe --precision fp4 --ep 2 --expert_lora",
+                markers=("gpu", "full", "2gpu", "ep", "moe", "lora", "qwen3"),
+            ),
+        ),
+        timeout=900,
+    ),
     "trainers/other/test_distillation_oss20b.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "tp", "etp", "moe", "gptoss"),

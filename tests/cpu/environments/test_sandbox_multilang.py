@@ -18,7 +18,8 @@ from halo.environments.sandbox import local as local_sandbox
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import LANGUAGES, find_language
-from halo.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
+from halo.environments.sandbox.limits import TAMPERED_WORKDIR_RETURNCODE
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.tools.toolsets import build_session_bash_tools

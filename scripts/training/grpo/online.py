@@ -140,8 +140,11 @@ def main():
         conversation_knob="prompt_field",
     )
     reject_image_columns(ds, "RLVR Online GRPO")
-    # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
-    if args.answer_field:
+    # Read with .get, so a mistyped answer_field would yield empty answers: all-zero verifiable rewards, a judge shown
+    # an empty reference, an SDPG hint with no answer. A run none of whose terms reads the answer (a reward model,
+    # White Circle, a judge with include_reference off) needs no answer column.
+    hints_answer = args.use_sdpg and args.sdpg_beta_base != 0.0
+    if args.answer_field and (hints_answer or any(term.reads_answer for term in args.reward_terms)):
         reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
 
     # Prompts and completions are collated into padded batches.

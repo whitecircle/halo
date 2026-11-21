@@ -22,6 +22,7 @@ from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.parallel.lowp_compute import lowp_converted_modules
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
@@ -81,6 +82,19 @@ def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
     return loss_fn
 
 
+def reject_lowp_teacher(teacher_model: nn.Module) -> None:
+    """Refuse a teacher holding low-precision modules. ``lowp_precision`` fake-quantizes the student only: the
+    teacher's logits are the target, and a quantized target would train the student toward its own rounding."""
+    converted = lowp_converted_modules(teacher_model)
+    if converted:
+        shown = ", ".join(converted[:3]) + (f" and {len(converted) - 3} more" if len(converted) > 3 else "")
+        raise ValueError(
+            f"The teacher holds {len(converted)} low-precision module(s) ({shown}). lowp_precision applies to the "
+            f"student only, so the teacher must compute in its load dtype. Load it through "
+            f"load_frozen_auxiliary_model, which applies no lowp_precision."
+        )
+
+
 class DistributedTeacherDistillationTrainer(
     HiddenStateForwardMixin, StoredMetricsMixin, DistributedTrainerMixin, Trainer
 ):
@@ -90,6 +104,9 @@ class DistributedTeacherDistillationTrainer(
     _tag_names = ["trl", "distillation", "knowledge-distillation"]
     LOSS_IS_OWN_MEAN = True
     _chunked_loss_modules: _ChunkedLossModules | None = None
+    # Quantization-aware distillation: the student loads through the SFT loader, which applies lowp; the teacher loads
+    # frozen through a path that never does, and the constructor refuses one that holds a converted module.
+    SUPPORTS_LOWP_PRECISION = True
 
     PP_REFUSAL = (
         "each microbatch needs a second forward through a distinct frozen teacher network whose "
@@ -141,6 +158,14 @@ class DistributedTeacherDistillationTrainer(
                 f"{NEUTRALIZED_TEACHER_SINKS_COST}, so the student would fit a degenerate target. Load the teacher with "
                 f"reset_sinks=False (load_frozen_auxiliary_model), on a sink-carrying attention implementation "
                 f"({SINK_CARRYING_ATTN_HINT})."
+            )
+        reject_lowp_teacher(teacher_model)
+        if isinstance(student_model, str) and parallelism_config is not None and parallelism_config.lowp.enabled:
+            raise ValueError(
+                f"student_model is a path ({student_model!r}), and the trainer loads a path without "
+                f"lowp_precision={parallelism_config.lowp.precision!r}, so the student would train unquantized. Load it "
+                f"with load_distributed_model under this parallelism_config, as scripts/training/distillation/"
+                f"teacher_distill.py does, and pass the model."
             )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
