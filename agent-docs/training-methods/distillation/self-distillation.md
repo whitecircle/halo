@@ -72,7 +72,7 @@ A VLM run drops at prep the rows whose hinted teacher text alone is over `max_le
 - One forward call of the student runs its backbone, then the privileged teacher pass through the same backbone, in eval mode and with no gradient. The student pass comes first, so the [image-feature reuse](#vision-language) still works: the teacher pass replays the features the student pass cached. One read of the output embedding projects both, the teacher's rows with the adapter dropout off.
 - The k-th supervised position of the student branch pairs with the k-th of the teacher's, the pairing of the full-logits path; a row whose branches supervise different counts raises the same error. `opd_exclude_eos` masks the EOS and stop positions out of the OPD mean, not the cross-entropy's.
 - The reference runs no-grad before that call and is projected at the student's positions at its compared width.
-- Each term keeps its per-sample token mean and its confidence weight.
+- Each term keeps its per-sample token mean. SFT keeps its confidence weight, and OPD keeps it when `confidence_weight_opd` is set. The reference term takes no confidence weight.
 
 With the flag off, construction weighs `rows × max_length × vocab` against the device memory free once the reference is placed, at one plane for the student's logits, one for their gradient, one for the teacher's while `sdpg_beta_base > 0` and one for the reference's while `reference_kl_coef > 0`, each in the run's precision, and warns past half of it. `max_length` bounds the teacher branch too, as no branch is truncated.
 
