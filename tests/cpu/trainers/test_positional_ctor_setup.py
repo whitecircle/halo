@@ -41,6 +41,7 @@ REQUIRED_KWARGS = {
         "reference_kl_loss": "unnormalized_kl",
         "confidence_weight_opd": True,
         "opd_exclude_eos": True,
+        "use_chunked_distillation_loss": False,
     },
     DistributedSDPGTrainer: {"sdpg_answer_field": "answer", "opd_positive_advantage_only": True},
 }

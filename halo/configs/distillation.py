@@ -30,6 +30,20 @@ TOPK_DISTILL_LOSSES = frozenset({"kl_divergence", "soft_cross_entropy"})
 
 
 @dataclass
+class ChunkedDistillationArguments:
+    """The chunked-loss switch shared by the teacher- and self-distillation trainers."""
+
+    use_chunked_distillation_loss: bool = field(
+        default=False,
+        metadata={
+            "help": "Project every compared model's output embedding from its last hidden state a chunk of "
+            "supervised positions at a time, so no model's full [tokens, vocab] logits are built. Saves the logits "
+            "planes of memory for a few percent of speed; a plain LoRA on lm_head trains through it."
+        },
+    )
+
+
+@dataclass
 class SDPGArguments(ValidatedConfig):
     """Privileged-teacher OPD term (SDPG, arXiv:2606.04036), shared by offline self-distillation SFT and online RLVR
     GRPO. The hint field is not declared here: self-distillation reads a configurable column, RLVR's
@@ -130,7 +144,11 @@ class SDPGArguments(ValidatedConfig):
 
 @dataclass
 class SelfDistillScriptArguments(
-    VisionTrainingArguments, ConversationRenderArguments, CommonScriptArguments, SDPGArguments
+    VisionTrainingArguments,
+    ConversationRenderArguments,
+    CommonScriptArguments,
+    ChunkedDistillationArguments,
+    SDPGArguments,
 ):
     """Offline privileged-context self-distillation SFT (SDPG-style, text or VLM): one model is student (prompt only)
     and teacher (plus a gold-answer hint), whose full-vocab distribution supervises shared response tokens."""
@@ -255,7 +273,9 @@ class TeacherDistillScriptArguments(VisionTrainingArguments, ConversationRenderA
 
 
 @dataclass
-class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
+class TeacherDistillationConfig(
+    DatasetNumProcArguments, ChunkedDistillationArguments, ValidatedConfig, TrainingArguments
+):
     distill_loss: Literal[
         "kl_divergence", "reverse_kl", "mse", "soft_cross_entropy", "cosine_similarity", "jensen_shannon", "slim"
     ] = field(
@@ -301,14 +321,6 @@ class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, Traini
             "help": "Scale the distillation term per token by the detached gold-token gate "
             "(1 - student_prob[label]) * teacher_prob[label]. Refused under slim, which applies its own "
             "gold-token weight."
-        },
-    )
-    use_chunked_distillation_loss: bool = field(
-        default=False,
-        metadata={
-            "help": "Project both models' output embeddings from their last hidden states a chunk of supervised "
-            "positions at a time, so neither model's full [tokens, vocab] logits are built. Saves about three "
-            "logits planes of memory for a few percent of speed; a plain LoRA on lm_head trains through it."
         },
     )
     max_length: int | None = field(
