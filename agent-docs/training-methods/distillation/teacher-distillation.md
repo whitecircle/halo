@@ -2,7 +2,7 @@
 
 Fit a student to a separate, frozen teacher's token-level distribution over a fixed dataset. Use it when a stronger model of the same tokenizer family is available; without one, distill the model against its own hinted forward with [self-distillation](self-distillation.md).
 
-Trainer `DistributedTeacherDistillationTrainer`, script `scripts/training/distillation/teacher_distill.py` (text or VLM). EP, TP and ETP apply to the **student**; CP and PP are rejected, since every loss reads the teacher's whole `[tokens, vocab]` plane and no stage or sequence shard holds it ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedTeacherDistillationTrainer`, script `scripts/training/distillation/teacher_distill.py` (text or VLM). EP, TP and ETP apply to the **student**; CP and PP are rejected, since every loss needs a second whole-model forward through the teacher, which no stage or sequence shard holds ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
 
 Both models sit on every rank — the student with its optimizer states, the teacher weights-only under `torch.no_grad()` in `eval()` mode. Before any teacher weight loads, the script reads the teacher repo's tokenizer and config (at `teacher_model_revision`) and raises unless the two tokenizers map every token to the same id — tokens added to the student only (`added_special_tokens`) count as a mismatch. The two `vocab_size`s may differ only in embedding padding past the tokenizer; both logit rows are then compared over the tokenizer's ids. The trainer repeats the check at construction.
 

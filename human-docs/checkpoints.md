@@ -22,8 +22,10 @@ Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without it.
 | PP | one part set per stage plus the full index | yes; on per-node storage, merge the nodes' directories first |
 | LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as an adapter, or merge into the base |
 
-EP expert LoRA cannot be merged afterwards: train it with
-`merge_expert_lora_on_save: true` to save the merged model.
+EP expert LoRA merges with the same tool, which streams it into the base's shards. On GPT-OSS
+that takes a BF16 base and a run with live sinks (`reset_sinks: false`); a run with neutralized
+sinks, the SFT default, is refused. `merge_expert_lora_on_save: true` saves the merged model
+at each save instead.
 
 ## Sharded EP saves
 

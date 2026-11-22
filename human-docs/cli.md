@@ -82,6 +82,7 @@ tool's help, not the launcher's.
 | `prepare-dataset` / `s3` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then build prompts, pack tests and checker, and publish rating bands |
 | `deduplicate-dataset` | deduplicate generated or collected data |
+| `score-offline-grpo` / `create-whitecircle-policies` / `prepare-baxbench-prompts` | write an offline-GRPO dataset's `rewards` with a training YAML's reward terms; create a policy file's sets in a White Circle environment and print the matching `rewards:` block; write BaxBench's backend tasks as GRPO prompts; see the [White Circle cookbook](cookbooks/halo-whitecircle-cookbook.md) |
 | `openai-batched-generation` | batched generation against a vLLM or OpenAI-compatible endpoint |
 | `inference/reward-model/score` | generate one response per prompt against an endpoint and score it with a reward model |
 | `inference/reward-model/rejection-sample` | generate N responses per prompt, score them, and keep the best and worst as preference pairs or offline GRPO data |
