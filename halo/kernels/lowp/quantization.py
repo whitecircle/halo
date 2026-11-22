@@ -73,7 +73,7 @@ _FUSED_FAKE_QUANT: dict[QuantFormat, _FusedFakeQuant] = {
 
 def _fused_entry(t: torch.Tensor, fmt: QuantFormat, axis: int) -> _FusedFakeQuant | None:
     """The fused round trip for ``t`` when one applies: CUDA, real, ``axis`` divisible by the format's block size and a
-    GPU new enough for the kernel. Contiguity and the axis's position are the caller's to check."""
+    GPU new enough for the kernel. :func:`_fused_along` handles the axis's position and contiguity."""
     fused = _FUSED_FAKE_QUANT.get(fmt)
     if (
         fused is not None
@@ -98,6 +98,23 @@ def _fused_round_trip(
         scale_max=fused.scale_max,
         out_dtype=out_dtype,
     )
+
+
+def _fused_along(
+    t: torch.Tensor, fmt: QuantFormat, axis: int, out_dtype: torch.dtype | None = None
+) -> torch.Tensor | None:
+    """The fused round trip of ``t`` blocked along ``axis``, or None when no kernel applies. A contiguous tensor blocked
+    along its last axis goes straight in. Any other layout, such as an ``[E, K, N]`` expert weight on axis 1, moves
+    ``axis`` last into a contiguous copy, takes the kernel and moves back, one extra copy of ``t`` at peak."""
+    fused = _fused_entry(t, fmt, axis)
+    if fused is None:
+        return None
+    if axis % t.ndim == t.ndim - 1 and t.is_contiguous():
+        return _fused_round_trip(fused, t, fmt, out_dtype)
+    moved = t.movedim(axis, -1).contiguous()
+    out = _fused_round_trip(fused, moved, fmt, out_dtype)
+    del moved  # Peak: the moved copy and the kernel output, then the output and the restored layout.
+    return out.movedim(-1, axis).contiguous()
 
 
 _compiled_round_trip = None
@@ -314,18 +331,13 @@ def _warn_compile_disabled(exc: Exception) -> None:
 
 
 def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-    """Compiled for the power-of-two-scale formats (fixed-shape weights). NVFP4 cannot compile bit-exact, so on a GPU
-    that runs its kernel it moves ``axis`` last, takes the fused round trip and moves it back; eager otherwise."""
+    """Compiled for the power-of-two-scale formats (fixed-shape weights). NVFP4 cannot compile bit-exact, so it takes
+    :func:`_fused_along` on a GPU that runs its kernel, and eager otherwise."""
     global _compiled_round_trip, _compile_failed
     if fmt not in _COMPILABLE:
-        fused = _fused_entry(t, fmt, axis)
-        if fused is None:
-            return _block_round_trip(t, fmt, axis)
-        moved = t.movedim(axis, -1).contiguous()
         # bf16 out, as eager's dequantize returns: an fp16 output would turn a value rounded past 65504 into inf.
-        out = _fused_round_trip(fused, moved, fmt, out_dtype=torch.bfloat16)
-        del moved  # Peak: the moved copy and the kernel output, then the output and the restored layout.
-        return out.movedim(-1, axis).contiguous()
+        out = _fused_along(t, fmt, axis, out_dtype=torch.bfloat16)
+        return _block_round_trip(t, fmt, axis) if out is None else out
     if _compile_failed:
         return _block_round_trip(t, fmt, axis)
     if _compiled_round_trip is None:
@@ -349,10 +361,11 @@ class _FakeQuant(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
-        if axis in (-1, t.ndim - 1) and t.is_contiguous() and (fused := _fused_entry(t, fmt, -1)) is not None:
-            return _fused_round_trip(fused, t, fmt)
-        # Eager, as activation shapes vary and a compiled form would recompile constantly. A non-last axis (an ep1
-        # expert weight under FSDP2) stays eager for every format.
+        # The FSDP2-managed ep1 expert weights, quantized on axis 1 every forward, take the kernel here too.
+        out = _fused_along(t, fmt, axis)
+        if out is not None:
+            return out
+        # Eager, as activation shapes vary and a compiled form would recompile constantly.
         return _block_round_trip(t, fmt, axis).to(t.dtype)
 
     @staticmethod

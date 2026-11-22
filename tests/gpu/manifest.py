@@ -591,6 +591,10 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=900,
     ),
     "kernels/test_lowp_fsdp2_weight_cache.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
+    # Tiny Qwen3-MoE and gpt-oss checkpoints at ep1 under FSDP2, one step per lowp precision.
+    "kernels/test_lowp_ep1_fused_weight.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3", "gptoss"), timeout=900
+    ),
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stage_once.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
