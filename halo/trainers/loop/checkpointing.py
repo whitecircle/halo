@@ -10,7 +10,7 @@ from functools import partial
 import torch.nn as nn
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, SaveStrategy, rotate_checkpoints
 
-from halo.callbacks.moe_metrics import MoELoadMetricsBase
+from halo.callbacks.moe_metrics import MoELoadMetricsBase, read_run_counts
 from halo.checkpoint.atomic import apply_umask_mode, staged_file
 from halo.checkpoint.config_export import finalize_exported_config
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MOE_EXPERT_TOKEN_COUNTS_FILE
@@ -44,11 +44,6 @@ from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-
-def _read_json(path: str):
-    with open(path) as handle:
-        return json.load(handle)
 
 
 class CheckpointingMixin:
@@ -135,9 +130,10 @@ class CheckpointingMixin:
             return
         record, _ = consensus_read(
             os.path.join(checkpoint, MOE_EXPERT_TOKEN_COUNTS_FILE),
-            _read_json,
+            read_run_counts,
             what=MOE_EXPERT_TOKEN_COUNTS_FILE,
             checkpoint=checkpoint,
+            remedy=f" Or delete {MOE_EXPERT_TOKEN_COUNTS_FILE} to count from the resume instead.",
         )
         callback.restore_run_counts(record)
 

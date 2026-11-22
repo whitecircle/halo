@@ -4,6 +4,7 @@ or group-limited routing moves it away from ``topk(router_logits)``. Asking for 
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Sequence
 from functools import partial
@@ -140,6 +141,19 @@ def combine_stage_counts(
     ]
 
 
+def read_run_counts(path: str) -> dict:
+    """Parse a saved ``moe_expert_token_counts.json`` and refuse a format this release does not read. The resume runs
+    it inside its joined read, so a copy one node cannot read fails every rank, like a torn file."""
+    with open(path) as handle:
+        record = json.load(handle)
+    version = record.get("format_version") if isinstance(record, dict) else None
+    if version != RUN_COUNTS_FORMAT or not isinstance(record.get("counts"), list):
+        raise ValueError(
+            f"{MOE_EXPERT_TOKEN_COUNTS_FILE} has format_version {version!r}, and this release reads {RUN_COUNTS_FORMAT}."
+        )
+    return record
+
+
 class MoELoadMetricsBase(TrainerCallback):
     """Base for callbacks deriving ``moe/*`` from per-expert load counters; a summary waits in ``_pending`` until the
     next ``on_log``. ``reduce_group`` (``None`` = world) narrows to the stage under PP, where a world reduce would
@@ -226,15 +240,8 @@ class MoELoadMetricsBase(TrainerCallback):
         }
 
     def restore_run_counts(self, record: dict | None) -> None:
-        """Continue from a resumed checkpoint's record, or, where it holds none, count from the first step after the
-        resume."""
-        if record is not None:
-            version = record.get("format_version") if isinstance(record, dict) else None
-            if version != RUN_COUNTS_FORMAT or not isinstance(record.get("counts"), list):
-                raise ValueError(
-                    f"{MOE_EXPERT_TOKEN_COUNTS_FILE} has format_version {version!r}, and this release reads "
-                    f"{RUN_COUNTS_FORMAT}. Delete the file from the checkpoint to count from the resume instead."
-                )
+        """Continue from a resumed checkpoint's record, as :func:`read_run_counts` checked it, or, where it holds none,
+        count from the first step after the resume."""
         self._resumed = record
         self._run_counts = []
         self._first_counted_step = None

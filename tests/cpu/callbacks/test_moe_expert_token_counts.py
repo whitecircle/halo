@@ -16,10 +16,11 @@ from transformers import GptOssConfig, GptOssForCausalLM
 
 import halo.callbacks.balancing as balancing
 from halo.callbacks.balancing import BalancingBiasCallback
-from halo.callbacks.moe_metrics import MoEMetricsCallback, combine_stage_counts
+from halo.callbacks.moe_metrics import MoEMetricsCallback, combine_stage_counts, read_run_counts
 from halo.checkpoint.format import MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.loop.checkpointing import CheckpointingMixin
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_GPTOSS_CONFIG
 
 TOP_K = TINY_GPTOSS_CONFIG["num_experts_per_tok"]
@@ -227,9 +228,31 @@ def test_a_run_that_counted_nothing_writes_no_file(tmp_path):
     assert not os.path.exists(tmp_path / MOE_EXPERT_TOKEN_COUNTS_FILE)
 
 
-def test_a_record_of_another_format_is_refused():
+def _write_record(directory: str, format_version: int) -> None:
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, MOE_EXPERT_TOKEN_COUNTS_FILE), "w") as handle:
+        json.dump({"format_version": format_version, "first_step": 1, "last_step": 2, "counts": [[1, 2]]}, handle)
+
+
+def test_a_record_of_another_format_is_refused(tmp_path):
+    _write_record(str(tmp_path), 2)
     with pytest.raises(ValueError, match="format_version 2"):
-        MoEMetricsCallback().restore_run_counts({"format_version": 2, "counts": []})
+        read_run_counts(str(tmp_path / MOE_EXPERT_TOKEN_COUNTS_FILE))
+
+
+def _resume_from_this_nodes_copy(rank: int, root: str) -> None:
+    """Each rank reads its own node's copy, and only rank 1's is of another format."""
+    callback = MoEMetricsCallback(topk=2)
+    with pytest.raises(RuntimeError, match=f"delete {MOE_EXPERT_TOKEN_COUNTS_FILE}") as refused:
+        _Host([callback])._restore_trainer_sidecars(os.path.join(root, f"node{rank}"))
+    assert ("format_version 2" in str(refused.value.__cause__)) == (rank == 1)
+    assert callback._resumed is None
+
+
+def test_a_record_one_node_cannot_read_fails_every_rank(tmp_path):
+    _write_record(str(tmp_path / "node0"), 1)
+    _write_record(str(tmp_path / "node1"), 2)
+    run_gloo_ranks(_resume_from_this_nodes_copy, 2, str(tmp_path))
 
 
 def test_two_expert_load_callbacks_are_refused(tmp_path):
