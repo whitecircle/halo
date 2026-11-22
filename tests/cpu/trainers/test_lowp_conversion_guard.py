@@ -23,6 +23,7 @@ PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 PRECISIONS = ("fp8", "fp4", "mxfp4")
 UNCONVERTED = r"lowp_precision='{}', but the model holds no low-precision module"
 CONVERTED_UNDER_BF16 = r"The model holds {} low-precision module\(s\) \({}\), but lowp_precision='bf16'"
+LOOP_PATH_ONLY = r"lowp_precision='{}', but the model's only low-precision modules are {} EP layer\(s\) \({}\) on the"
 
 
 class _MLPBlock(nn.Module):
@@ -42,10 +43,10 @@ class _EPStub(EPMoELayerBase):
     """A real subclass, since the check identifies EP layers by ``isinstance``; ``__init__`` needs a wrapped HF layer
     and DeepEP, so it is bypassed for the two attributes ``set_lowp_compute`` reads and writes."""
 
-    def __init__(self):
+    def __init__(self, grouped: bool = True):
         nn.Module.__init__(self)
         self._lowp_quant_format = None
-        self._use_grouped_mm = True
+        self._use_grouped_mm = grouped
 
     def forward(self, hidden_states):  # Abstract on the base; never called here.
         raise NotImplementedError
@@ -87,6 +88,19 @@ def test_an_expert_layer_carrying_a_format_counts_in_both_directions():
     verify_lowp_conversion(model, LowpSpec(precision="fp4"))
     with pytest.raises(ValueError, match=CONVERTED_UNDER_BF16.format(1, "moe")):
         verify_lowp_conversion(model, LowpSpec(precision="bf16"))
+
+
+def test_an_expert_layer_on_the_loop_path_computes_in_bf16():
+    """``set_lowp_compute`` stores the format on a loop-path layer too, but only the grouped path applies it, so the
+    check counts the layer as the loader does: no conversion under lowp, nothing to refuse under bf16."""
+    model = nn.ModuleDict({"moe": _EPStub(grouped=False)})
+    assert not model["moe"].set_lowp_compute("nvfp4", weight_cacheable=True)
+    with pytest.raises(ValueError, match=LOOP_PATH_ONLY.format("fp4", 1, "moe")):
+        verify_lowp_conversion(model, LowpSpec(precision="fp4"))
+    verify_lowp_conversion(model, LowpSpec(precision="bf16"))
+
+    model["dense"] = _converted("fp4", n_layers=1)
+    verify_lowp_conversion(model, LowpSpec(precision="fp4"))  # The dense projections compute in fp4.
 
 
 class _PastTheCheck(Exception):
