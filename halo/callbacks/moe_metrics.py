@@ -22,6 +22,7 @@ from halo.models.introspection.config_access import (
     get_config_field,
     set_config_field_run_scoped,
 )
+from halo.models.moe.balancing import resolve_expert_load_weights
 from halo.models.moe.router_logits import ROUTER_LOGITS_KEY, DeclaredRouter, declared_routers, router_logits_forced_off
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import rank_max
@@ -373,7 +374,8 @@ class MoEMetricsCallback(MoELoadMetricsBase):
 
     def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
         """Re-rank logits only if the router returns no selection. A checkpoint recompute re-runs the router, and the
-        running totals are raw counts, so only the pass :func:`counts_toward_expert_load` names counts."""
+        running totals are raw counts, so only the pass :func:`counts_toward_expert_load` names counts. A tree-packed
+        row's shared token counts once per example holding it, as the bias path's load recorder counts it."""
         if not module.training or not counts_toward_expert_load():
             return
         with torch.no_grad():
@@ -396,7 +398,9 @@ class MoEMetricsCallback(MoELoadMetricsBase):
                 )
             if indices is None:
                 indices = torch.topk(logits, self.topk, dim=-1).indices
-            self._counters[position] = accumulate_bincount(self._counters[position], indices, logits.shape[-1])
+            self._counters[position] = accumulate_bincount(
+                self._counters[position], indices, logits.shape[-1], weights=resolve_expert_load_weights(indices)
+            )
 
     def _model_output_hook(self, module, inputs, output):
         """Fallback: per-layer logits off the model output, for a modeling declaring no router."""
@@ -410,7 +414,9 @@ class MoEMetricsCallback(MoELoadMetricsBase):
                 self._counters = [None] * len(router_logits)
             for i, logits in enumerate(router_logits):
                 _, top_idx = torch.topk(logits, self.topk, dim=-1)
-                self._counters[i] = accumulate_bincount(self._counters[i], top_idx, logits.shape[-1])
+                self._counters[i] = accumulate_bincount(
+                    self._counters[i], top_idx, logits.shape[-1], weights=resolve_expert_load_weights(top_idx)
+                )
 
     def _remove_hooks(self) -> None:
         for handle in self._hook_handles:

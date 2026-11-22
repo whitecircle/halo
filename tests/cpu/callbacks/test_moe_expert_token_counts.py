@@ -20,6 +20,7 @@ from halo.callbacks.balancing import BalancingBiasCallback
 from halo.callbacks.moe_metrics import MoEMetricsCallback, merge_stage_counts, read_run_counts
 from halo.checkpoint.format import MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.models.moe.balancing import expert_load_token_weights
 from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_GPTOSS_CONFIG
@@ -134,6 +135,22 @@ def test_a_model_declaring_no_router_counts_off_its_output_once(monkeypatch):
         model(input_ids=_input_ids())
     model(input_ids=_input_ids()).logits.sum().backward()
     assert _layer_totals(callback, 1) == [BATCH * SEQ * TOP_K] * NUM_LAYERS
+
+
+@pytest.mark.parametrize("hook", ["router", "model output"])
+def test_a_tree_packed_token_counts_once_per_example(monkeypatch, hook):
+    """SFT routes a tree-packed row under its leaf counts, and both hooks weigh each token by them, as the bias path's
+    load recorder does."""
+    if hook == "model output":
+        monkeypatch.setattr(moe_metrics, "declared_routers", lambda model: [])
+    model = _tiny_gptoss()
+    callback = MoEMetricsCallback(topk=TOP_K, enable_router_logits=True)
+    callback.on_train_begin(args=None, state=None, control=None, model=model)
+    leaf_count = torch.ones(BATCH * SEQ)
+    leaf_count[: SEQ // 2] = 3
+    with expert_load_token_weights(leaf_count):
+        model(input_ids=_input_ids()).logits.sum().backward()
+    assert _layer_totals(callback, 1) == [int(leaf_count.sum()) * TOP_K] * NUM_LAYERS
 
 
 def _reduce_two_ranks_counts(rank: int) -> None:
