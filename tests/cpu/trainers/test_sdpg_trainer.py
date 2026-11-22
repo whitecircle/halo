@@ -547,9 +547,9 @@ def test_the_chunked_term_builds_no_batch_by_completion_by_vocab_plane(monkeypat
     assert sum(shape[0] for shape in shapes) == 2 * gated
 
 
-def _term_alone(model, inputs) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(OPD values, head gradient)`` of a backward through the armed term alone, the GRPO log-probs left out of it,
-    against a fixed teacher."""
+def _term_alone(model, inputs) -> tuple[torch.Tensor, torch.Tensor, DistributedSDPGTrainer]:
+    """``(OPD values, head gradient, trainer)`` of a backward through the armed term alone, the GRPO log-probs left out
+    of it, against a fixed teacher."""
     trainer = _real_loss_trainer(model, chunked=True, batch_size=3)
     trainer.sdpg = SDPGArguments(sdpg_beta_base=0.5, sdpg_temperature=1.3)
     completion = inputs["completion_ids"]
@@ -568,7 +568,7 @@ def _term_alone(model, inputs) -> tuple[torch.Tensor, torch.Tensor]:
         )
     (values,) = term.per_token
     values.sum().backward()
-    return values.detach(), model.lm_head.weight.grad
+    return values.detach(), model.lm_head.weight.grad, trainer
 
 
 def _zero3_worker(rank: int, nprocs: int) -> None:
@@ -577,7 +577,7 @@ def _zero3_worker(rank: int, nprocs: int) -> None:
     inputs = _real_inputs()
     reference = _tiny_qwen3()
     expected_loss, expected_grads, _ = _sdpg_step(reference, inputs, chunked=True)
-    expected_values, expected_head = _term_alone(reference, inputs)
+    expected_values, expected_head, _ = _term_alone(reference, inputs)
     model = _tiny_qwen3()
     policy = mixed_precision_policy(torch.float32, fp32_reduce=True, cast_forward_inputs=True)
     apply_fsdp2_per_layer(model, init_device_mesh("cpu", (nprocs,)), policy, True, IdentityParamSet())
@@ -592,12 +592,14 @@ def _zero3_worker(rank: int, nprocs: int) -> None:
         "_head_sweep",
         lambda self, unwrapped: (sweep := head_sweep(self, unwrapped), sweeps.append(weakref.ref(sweep)))[0],
     ):
-        values, head = _term_alone(model, inputs)
+        values, head, trainer = _term_alone(model, inputs)
     torch.testing.assert_close(values, expected_values, rtol=_RTOL, atol=0.0)
     torch.testing.assert_close(head.full_tensor(), expected_head, rtol=_RTOL, atol=1e-6)
+    # The trainer stays alive across the check, as it does for a whole run.
     gc.collect()
     assert sweeps and all(sweep() is None for sweep in sweeps), "the gathered head outlived the term's backward"
     assert isinstance(model.lm_head.weight, DTensor), "the head was left gathered after the backward"
+    del trainer
 
 
 def test_the_chunked_term_backward_regathers_a_resharded_head():
