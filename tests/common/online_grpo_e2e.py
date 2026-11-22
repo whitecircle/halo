@@ -640,7 +640,7 @@ def run_online_grpo_e2e(
             # The logged metric is the world mean of each rank's value, so the reference is reduced the same way.
             reference = world_mean(first_step.references[name], ctx.device)
             checks[f"sdpg_step0_opd_matches_{name}"] = (
-                chunked_opd is not None and abs(chunked_opd - reference) <= rtol * reference
+                chunked_opd is not None and reference > 0 and abs(chunked_opd - reference) <= rtol * reference
             )
             log(f"  step-0 opd_loss: chunked {chunked_opd!r}, {name} {reference!r}")
     if spec.beta:

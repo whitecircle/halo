@@ -72,6 +72,8 @@ survives. Set `use_chunked_grpo_logprobs: true` and neither is built.
   first, then cut `max_length` or move the student to LoRA.
 - **Self-distillation and SDPG:** watch `opd_loss` with the live coefficient `opd_beta`. A coefficient
   pinned at zero means the schedule never ramped.
+- **Self-distillation:** an OOM on the first step means the student's logits, the hinted teacher's and
+  the reference's did not fit. Set `use_chunked_distillation_loss: true` first, then cut `max_length`.
 - **SDPG:** an `opd_loss` of exactly zero means no rollout in the batch earned a positive advantage.
   That is expected now and then, and a broken verifier if it persists.
 

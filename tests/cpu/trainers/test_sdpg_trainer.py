@@ -5,7 +5,9 @@ none is cached.
 """
 
 import functools
+import gc
 import types
+import weakref
 from collections import defaultdict
 from typing import get_args
 from unittest import mock
@@ -16,6 +18,7 @@ from datasets import Dataset
 from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 import halo.trainers.distillation.sdpg as sdpg_module
@@ -481,6 +484,24 @@ def test_a_batch_without_a_positive_advantage_projects_nothing(monkeypatch):
     torch.testing.assert_close(loss, grpo.detach())
 
 
+def test_the_teacher_side_projects_with_grad_disabled(monkeypatch):
+    """The teacher's logits keep no graph, in the forward and in the backward's recompute, so its side holds no
+    ``[chunk, V]`` activations for the backward."""
+    modes = []
+    divergence = sdpg_module.projected_divergence
+
+    def recording(loss_fn, student, student_rows, teacher, *args, **kwargs):
+        def project(rows):
+            modes.append(torch.is_grad_enabled())
+            return teacher(rows)
+
+        return divergence(loss_fn, student, student_rows, project, *args, **kwargs)
+
+    monkeypatch.setattr(sdpg_module, "projected_divergence", recording)
+    _sdpg_step(_tiny_qwen3(), _real_inputs(), chunked=True)
+    assert len(modes) >= 2 and not any(modes), modes
+
+
 def test_an_evaluation_step_leaves_the_padding_rows_out_on_both_paths():
     """Row 2 pads the eval split's final round (2 of 3 rows are the split's own). Its advantage is positive, so the gate
     keeps it and only the eval split cuts it; eval has no grad-accum division."""
@@ -564,9 +585,19 @@ def _zero3_worker(rank: int, nprocs: int) -> None:
     torch.testing.assert_close(loss, expected_loss, rtol=_RTOL, atol=0.0)
     for name in ("lm_head.weight", "model.embed_tokens.weight"):
         torch.testing.assert_close(grads[name].full_tensor(), expected_grads[name], rtol=_RTOL, atol=1e-6, msg=name)
-    values, head = _term_alone(model, inputs)
+    sweeps = []
+    head_sweep = DistributedSDPGTrainer._head_sweep
+    with mock.patch.object(
+        DistributedSDPGTrainer,
+        "_head_sweep",
+        lambda self, unwrapped: (sweep := head_sweep(self, unwrapped), sweeps.append(weakref.ref(sweep)))[0],
+    ):
+        values, head = _term_alone(model, inputs)
     torch.testing.assert_close(values, expected_values, rtol=_RTOL, atol=0.0)
     torch.testing.assert_close(head.full_tensor(), expected_head, rtol=_RTOL, atol=1e-6)
+    gc.collect()
+    assert sweeps and all(sweep() is None for sweep in sweeps), "the gathered head outlived the term's backward"
+    assert isinstance(model.lm_head.weight, DTensor), "the head was left gathered after the backward"
 
 
 def test_the_chunked_term_backward_regathers_a_resharded_head():

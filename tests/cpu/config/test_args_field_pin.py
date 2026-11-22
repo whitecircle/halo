@@ -207,6 +207,7 @@ _EXPECTED = {
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
         "train_on_completions_only": "True",
+        "use_chunked_distillation_loss": "False",
     },
     "TeacherDistillScriptArguments": {
         "freeze_vision_tower": "False",
