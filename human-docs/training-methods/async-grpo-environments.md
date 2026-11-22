@@ -138,6 +138,10 @@ failed episode that reasons under its budget. Neither is charged in a group wher
 unless `reasoning_terms_in_failed_groups: true`
 ([Reasoning length reward](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ↗).
 
+`rollout_thinking: false` trains with no reasoning step and refuses these caps and budgets. The code-contests notes
+curriculum runs this way, starting from a notes SFT checkpoint
+([Thinking off](../../agent-docs/training-methods/async-grpo/reasoning.md#thinking-off) ↗).
+
 ### One server or several
 
 ![One rollout server: trainer ranks on GPUs 0-6, the engine on GPU 7 in the trainer's NCCL group, the push pausing it, prefetch off by default, step time = sync + round + update](../../agent-docs/assets/diagrams/environmental_grpo_single_server.png)

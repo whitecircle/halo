@@ -62,7 +62,7 @@ SGLang's hyper-connection path reads `hc_attn_fn`/`hc_ffn_fn` live on every forw
 
 Serving flags for the two engines (set through `SGLANG_EXTRA_ARGS` / `VLLM_EXTRA_ARGS` in [Rollout Servers](../infrastructure/rollout-servers.md)):
 
-- **SGLang: `--mamba-track-interval 1024`.** The checkpoint's `index_kpool` of 16 makes the engine's DSA page 64 x 16 = 1,024 tokens, and the hybrid-linear radix cache the family resolves to (`extra_buffer`) asserts that `mamba_track_interval` (default 256) is a multiple of the page size, so a launch without the flag exits at argument resolution. Any multiple of 1,024 passes.
+- **SGLang: `--mamba-track-interval 1024`** (for an `index_kpool` above 4). The engine's DSA page is 64 x `index_kpool` tokens, and the hybrid-linear radix cache the family resolves to (`extra_buffer`) asserts that `mamba_track_interval` (default 256) is a multiple of the page size, so such a launch without the flag exits at argument resolution. The release's `index_kpool` of 4 makes a 256-token page, which the default tiles; transformers' default of 16, which the tiny `--write-checkpoint` checkpoint keeps, makes it 1,024. Any multiple of 1,024 passes both.
 - **SGLang: `--skip-server-warmup` (optional).** For any model it advertises as image-capable, the server's startup warmup is a chat request with a 32x32 PNG, so a text-only launch still runs the vision tower once; a vision config the engine cannot run kills the scheduler there, in the prefill graph path. The tiny checkpoint's vision tower carries the release's patch, merge, image and head sizes, so the warmup passes; the flag skips it for a checkpoint whose tower is not release-sized.
 - **vLLM: `--limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0`** (optional; the same as `--limit-mm-per-prompt '{"image":0,"video":0}'`). RL feeds the text tower only, and the flag skips the vision-encoder profiling, which fails on a vision tower whose patch size differs from the 14 px the processor cuts (`shape '[32000, -1, 2, 4, 4]'`).
 
@@ -80,6 +80,8 @@ A DSA query reads about 1,800 to 1,900 keys, at most 2,051, under a mask as wide
 
 On a 7-layer cut at `ep1` and 32,752 tokens, the per-token gap to an fp32 reference reads 0.0195 with both kernels on and 0.0232 with neither, and top-k disagreement 1.00% against 1.34%. With hyper-connection kernels off, the DSA kernel's forward is bit-identical to SDPA's.
 
+On a padded row the DSA indexer scores a bounded number of one row's queries per call (`patch_glm5_next_indexer`, `halo/models/attention/dsa_indexer.py`). Upstream scores every query against every key pool at once: three `[B, S, 32, S / 4]` tensors, fp32 outside autocast, as an SFT step runs (96 bytes a squared token), and bf16 under bf16 autocast, where a B300 measured a 12.4 GiB peak at 16,384 tokens and four times that at 32,768, against 3.0 and 10.4 GiB chunked; past one row it also copies the pool keys across the queries, 128 more bytes a squared token. The chunked selection returns the same keys, bit for bit at the release's indexer sizes: for one row on a B300, for padded batches on CPU. What is left grows with the square of the row as well: upstream's visibility mask and its tail count, 9 bytes a squared token, then 5 in the mask the attention reads. A forward with a cache keeps upstream's indexer.
+
 ## Throughput
 
 Both kernels on, with torch's general kernel and upstream's hyper-connections in parentheses: B300, reentrant checkpointing (non-reentrant on `pp2 × ep8`, which refuses reentrant), padded rows of real text, one run per arm.
@@ -92,6 +94,7 @@ Both kernels on, with torch's general kernel and upstream's hyper-connections in
 | | `pp2 × ep8`, 8,192 | 2,423 (about 1,060) | 12.82 (29.29) | 218.0–218.7 / 197.5–197.9 |
 
 - The PP rate counts attended tokens ([how a PP rate is counted](../parallelism/pipeline-parallelism.md#measured-throughput)). PP leads `ep16` by 1.61×, 1.16× on the general kernels.
+- A LoRA row at `ep8` (r=64 on every adaptable linear, bf16 base, one row a GPU) peaks at 110 GiB at 2k tokens, 136 at 8k, 170 at 16k, 205 at 24.5k, 228 at 28.7k and 243 at 32.7k of 267.7. The 32.7k rows fit only under `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; the default allocator runs out at them. It runs 16.6k to 21.1k tokens/s across the 8 GPUs between 2k and 16k tokens a row and 12.5k at 32.7k, the ranks of a micro-step holding rows of one length: a micro-step runs at its longest row on every rank.
 - `ep8` with DP runs out of memory in the first optimizer step, about 3 minutes in, since no gate refuses it first. At 40.2B trainable per rank, AdamWBF16's state takes the allocation to 243–250 GiB of 267.7.
 - The LoRA rows are long real-text rows averaging about 7,760 and 15,520 tokens, rendered with `glm-chat.jinja`. The shipped recipe reads `ultrachat_200k` at about 1,140 tokens a row under `glm5-chat.jinja`; it ran 5 steps on a cold cache with no steady rate to read, and its loss and rate do not compare with these rows.
 - Raising `max_length` still costs tok/s, 16% from 8k to 16k against 30% on the general kernels: a query's keys are capped at 2,051, while each tile's forward still scores its crop up to its last selected key.
@@ -131,5 +134,9 @@ assistant_message_template: "<|assistant|>"
 `merge_expert_lora_on_save` takes about 8 minutes and 612 GiB on disk. It renders with
 `glm5-chat.jinja`, GLM-5's own non-thinking turn ([Tree packing](#tree-packing)); GLM-4's `glm-chat.jinja`
 writes a lone `</think>` GLM-5 never does.
+
+Tool-use data renders with the hub template (leave `chat_template` unset, `assistant_message_template: "<|assistant|>"`):
+it keeps the `Reasoning Effort` line and each turn's `<think>` block as served, its generation prompt is the engines'
+own, and the row maps close the last assistant turn it leaves open ([Collators](../data/collators.md#eos-pad-and-the-response-template)).
 
 The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes two 8-GPU machines ([rates](#throughput)), through `pp2 × ep8` on padded rows or cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

@@ -4,7 +4,6 @@ submits through ``submit_solution``, which grades 1 when the submission passes e
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import replace
 from typing import Any
 
 from halo.config_validation import require_finite, require_int
@@ -18,14 +17,13 @@ from halo.environments.episodes.episode_keys import (
     SOLVE_RATE_KEY,
 )
 from halo.environments.episodes.episode_scoring import EpisodeGrade
-from halo.environments.episodes.messages import TRUNCATION_MARKER, StepOutcome, Trajectory
+from halo.environments.episodes.messages import TRUNCATION_MARKER, Message, StepOutcome, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from halo.environments.sandbox.languages import LanguageSpec, require_language
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.tasks.coding.code_contests_prompts import (
-    AUDIT_CHECKS,
     IDENTICAL_RESUBMISSION_NOTE,
     MISLABELLED_LANGUAGE_REPLY,
     NO_STDIN_NOTE,
@@ -33,6 +31,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
     SUBMISSION_AFTER_ACCEPT_REPLY,
     SUBMIT_TOOL,
     UNSTATED_TIME_LIMIT_NOTE,
+    audit_checks,
     build_contest_tools,
     default_system_prompt,
 )
@@ -65,10 +64,23 @@ from halo.environments.tools.definitions import (
     ToolArgumentError,
     ToolCallRefused,
 )
+from halo.environments.tools.notes import (
+    NOTES_TOOL,
+    NotesConfig,
+    build_notes_tool,
+    notes_after_call,
+    notes_saved_reply,
+    notes_size,
+    notes_view,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REASONING_EFFORT = "medium"
+
+# The notes harness's per-episode stamps: the notes as the episode's calls leave them, and turns of text alone.
+NOTES_KEY = "notes"
+TEXT_TURNS_KEY = "text_turns"
 
 # Used when neither a run's config nor its protocol sets the knob.
 EVAL_PROTOCOL_KNOB_DEFAULTS: dict[str, int] = {"max_submissions": 2, "max_test_calls": 5}
@@ -129,10 +141,24 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         "nothing was recorded, and only a solution sent with submit_solution is graded. Make the call again, "
         "keeping your reasoning out of the program's comments."
     )
+    LENGTH_CUTOFF_IN_CALL_NUDGE_NO_REASONING = (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
+        "nothing was recorded, and only a solution sent with submit_solution is graded. Make the call again, "
+        "keeping your working out of the program's comments."
+    )
     EMPTY_TURN_NUDGE = (
         "Your previous turn ended without a tool call (one written inside your reasoning is not run), so "
         "nothing was recorded, and only a solution sent with submit_solution is graded. Make your tool call "
         "now with the best solution you have."
+    )
+    EMPTY_TURN_NUDGE_NO_REASONING = (
+        "Your previous turn ended without a tool call, so nothing was recorded, and only a solution sent with "
+        "submit_solution is graded. Make your tool call now with the best solution you have."
+    )
+    # Under notes, after a turn of text alone: the turn was working, so the episode goes on.
+    TEXT_TURN_NUDGE = (
+        "Your turn made no tool call, so nothing ran. Go on: update your notes if they need it and make your next tool "
+        "call; only a solution sent with submit_solution is graded."
     )
 
     # The task's own profile keys over the base's: per-episode interaction budgets, so effort buys iteration as well as
@@ -162,6 +188,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
+        notes: dict[str, Any] | None = None,
         **kwargs,
     ):
         if kwargs.get("tool_budgets"):
@@ -217,13 +244,16 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         )
         test_tool, submit_tool = build_contest_tools(specs, self.sandbox, run_test=self._run_test, submit=self._submit)
         self.test_tool_name = test_tool.name
-        # What a veto judge listing ``checks: environment`` audits with.
-        self.JUDGE_CHECKS = tuple(
-            replace(check, description=check.description.format(test_tool=test_tool.name)) for check in AUDIT_CHECKS
-        )
+        self.notes = None if notes is None else NotesConfig(**notes)
+        self.JUDGE_CHECKS = audit_checks(test_tool.name, notes=self.notes is not None)
+        registry = NativeToolRegistry().register(test_tool).register(submit_tool)
+        if self.notes is not None:
+            registry.register(build_notes_tool(self._update_notes))
+            self.rewrites_history_in_view = True
         super().__init__(
-            tool_registry=NativeToolRegistry().register(test_tool).register(submit_tool),
-            system_prompt=system_prompt or default_system_prompt(specs, self.test_tool_name, self.grading_spec),
+            tool_registry=registry,
+            system_prompt=system_prompt
+            or default_system_prompt(specs, self.test_tool_name, self.grading_spec, notes=self.notes is not None),
             reasoning_effort=reasoning_effort,
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
@@ -407,6 +437,40 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             output = self._truncate_observation(output, max(1, cap - len(tail) - marker))
         return output + tail
 
+    def _update_notes(self, text: str, mode: str | None = None) -> str:
+        """Applies one notes call to the episode's notes, which persist across turns as the base every later call
+        applies to. They equal the view's replay of the history, since both apply the saved calls in call order."""
+        trajectory = self.active_trajectory()
+        if trajectory is None:
+            raise ValueError("notes called outside an active episode.")
+        updated = notes_after_call(trajectory.info.get(NOTES_KEY, {}), text, mode, self.notes.max_chars)
+        trajectory.info[NOTES_KEY] = updated
+        return notes_saved_reply(updated)
+
+    def reject_settings_without_thinking(self) -> None:
+        super().reject_settings_without_thinking()
+        if self.notes is None:
+            raise ValueError(
+                "code contests with rollout_thinking: false needs the notes harness (environment_kwargs.notes): without "
+                "it the reply rule allows a brief summary only and the audit vetoes working-out in the visible reply, so "
+                "a policy with no reasoning step has nowhere to work. Set notes: {}, or rollout_thinking: true."
+            )
+
+    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
+        view = super().observation_view(messages)
+        return view if self.notes is None else notes_view(view, self.notes, self.registry.get(NOTES_TOOL))
+
+    def _finalize_text_response(self, trajectory: Trajectory, action: str, *, last_turn: bool) -> StepOutcome:
+        """With notes, a turn of text alone is working, not a final answer: the episode goes on, nudged to act, within
+        ``max_turns``."""
+        if self.notes is None:
+            return super()._finalize_text_response(trajectory, action, last_turn=last_turn)
+        trajectory.info[TEXT_TURNS_KEY] = trajectory.info.get(TEXT_TURNS_KEY, 0) + 1
+        ended = last_turn or trajectory.num_turns >= self.max_turns
+        if not ended:
+            trajectory.add_message(Message.user(self.TEXT_TURN_NUDGE))
+        return StepOutcome(trajectory=trajectory, reward=0.0, done=ended, truncated=ended, info={})
+
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade against the episode's tests. The protocol keeps the ``max_submissions`` count and increments it
         before this runs, so the first admitted call is submission one. A program identical to one already graded
@@ -557,6 +621,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             fracs = info.get(SUBMISSION_PASS_FRACS_KEY, [])
             improved = sum(1 for i in range(1, len(fracs)) if fracs[i] > max(fracs[:i]))
             metrics["episode/resubmission_improved"] = improved / (submissions - 1)
+        if self.notes is not None:
+            metrics["episode/notes_calls"] = float(self._tool_calls_made(trajectory, NOTES_TOOL))
+            metrics["episode/notes_chars"] = float(notes_size(info.get(NOTES_KEY, {})))
+            metrics["episode/text_turns"] = float(info.get(TEXT_TURNS_KEY, 0))
         if self.chooses_language:
             metrics["episode/language_switches"] = float(info.get("language_switches", 0))
         if graded:

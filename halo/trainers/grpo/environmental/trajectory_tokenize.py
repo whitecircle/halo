@@ -14,7 +14,6 @@ from halo.environments.episodes.episode_keys import (
     EPISODE_INVALID_KEY,
     EPISODE_INVALID_REASON_KEY,
 )
-from halo.environments.episodes.messages import engine_view
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.environments.rollouts.episode_loop import RolloutResult
@@ -138,15 +137,16 @@ class TrajectoryTokenizeMixin:
         return per_trajectory
 
     def _tokenize_trajectory_turns(self, result: RolloutResult) -> list[TurnRow]:
-        """Falls back to the re-tokenized row when ids are missing and to one masked row when no turn yields a row. Per
-        turn since a template may drop prior-turn CoT, and a spliced later turn would be scored under a context it
-        never saw."""
+        """Falls back to the re-tokenized row when ids are missing (drops the episode where the view rewrites earlier
+        turns) and to one masked row when no turn yields a row. Per turn since a template may drop prior-turn CoT, and
+        a spliced later turn would be scored under a context it never saw."""
         traj = result.trajectory
         if not traj or not any(m.role == "assistant" for m in traj.messages):
             return single_trajectory_row(self._tokenize_trajectory(result))
         messages = traj.messages
         # One always-trained turn without captured ids falls the whole trajectory back rather than silently
-        # dropping it (an empty capture is a zero-token turn, not a missing one).
+        # dropping it (an empty capture is a zero-token turn, not a missing one), unless the view rewrites earlier
+        # turns, where no whole-trajectory render is what the engine saw.
         if any(m.token_ids is None for m in messages if m.role == "assistant" and not m.untrainable):
             remedy = (
                 "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
@@ -154,6 +154,13 @@ class TrajectoryTokenizeMixin:
                 else "SGLang needs no server flag for this — the ids are requested per call, so a "
                 "rollout that returned none usually means the engine errored or was killed mid-turn."
             )
+            if self._rollout_env.rewrites_history_in_view:
+                self._invalidate_unrenderable_episode(
+                    result,
+                    "a turn came back without sampled token ids, and the environment's view rewrites earlier turns, "
+                    f"so no render of the whole trajectory matches what the engine saw. {remedy}",
+                )
+                return single_trajectory_row(self._masked_trajectory_tensors())
             warn_once(
                 logger,
                 self._warned_once,
@@ -177,7 +184,7 @@ class TrajectoryTokenizeMixin:
                 # A template that rejects this prefix fails on one rank only: the episode is dropped, never raised.
                 try:
                     prompt_ids = self._render_messages_to_ids(
-                        engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
+                        self._rollout_env.observation_view(messages[:idx]), True, template_kwargs
                     )
                 except Exception as e:
                     if m.untrainable:  # its row only ever adds a penalty; losing it costs no other turn

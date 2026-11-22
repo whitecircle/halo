@@ -176,6 +176,7 @@ changes.
 | `halo/kernels/fp32_matmul.py` | `agent-docs/models/glm5-next.md`, `agent-docs/optimization/flash-attention.md` |
 | `halo/models/attention/masked_matmul.py`, `halo/kernels/masked_softmax.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/glm5-next.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/reference/troubleshooting.md`, `human-docs/environment-variables.md` |
 | `halo/kernels/block_sparse_attention.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/qwen4_exp.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/models/attention/dsa_indexer.py` | `agent-docs/models/glm5-next.md` |
 | `halo/models/attention/{selection,backend_setup,fa4_entry_points}.py` | `agent-docs/optimization/flash-attention.md` |
 | `halo/models/attention/prefix_lm.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/training-methods/sft.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/jit_cache.py` | `agent-docs/optimization/flash-attention.md`; the Liger implementation pin also `agent-docs/optimization/liger-kernels.md`; the cache and CuTe DSL variables also `agent-docs/infrastructure/docker.md`, `agent-docs/reference/configuration-reference.md` |
@@ -208,8 +209,9 @@ changes.
 | `halo/environments/sandbox/` | `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 | `halo/environments/tools/` | `agent-docs/training-methods/async-grpo/environments/protocols/native-tool-use.md`, `agent-docs/training-methods/async-grpo/environments/tasks/swe.md` |
 | `halo/environments/rollouts/engine_wire.py`, `halo/environments/episodes/candidate_logprobs.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/training-methods/async-grpo/{episodes,reasoning}.md` |
-| `halo/environments/rollout_config.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
+| `halo/environments/rollout_config.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/training-methods/async-grpo/reasoning.md` |
 | `halo/environments/rollouts/eval_runner.py` | `agent-docs/training-methods/async-grpo/evaluation.md`, `agent-docs/reference/scripts-reference.md` |
+| `halo/environments/tools/notes.py` | `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/tools.md` |
 | `halo/environments/tools/web_search.py` | `agent-docs/training-methods/async-grpo/environments/tasks/qa-benchmarks.md`, `agent-docs/reference/configuration-reference.md` |
 
 ## Config & args

@@ -13,6 +13,11 @@ per-turn reasoning cap is run-wide and the same at every level. No budget, price
 
 - `random` draws one level per generation group, so a group shares its conditioning. An eval round draws it from the
   problem's text, so every checkpoint scores a problem at the same level.
+- A row's own level reaches its episode as a `reasoning_effort` column named in `context_fields` and takes
+  precedence over the environment's `reasoning_effort`; a null cell keeps the environment's, and under `random` the
+  trainer stamps the group's draw over the row's. The [reasoning length terms](#reasoning-length-reward) switch on
+  from the levels the environment draws alone ([Construction checks](#construction-checks)), so a row's other level
+  is priced only while one of those is.
 - A profile takes `reasoning_budget` (int ≥ 0) and `reasoning_price` (≥ 0), the
   [reasoning length terms](#reasoning-length-reward). Environment classes add keys, such as code contests' tool
   budgets ([Reasoning effort](environments/tasks/code-contests/README.md#reasoning-effort)).
@@ -21,11 +26,13 @@ per-turn reasoning cap is run-wide and the same at every level. No budget, price
 
 ## Effort templates
 
-- gpt-oss's harmony template renders the level natively.
+- gpt-oss's harmony template renders the level natively, `medium` when none is passed.
 - The stock Qwen3.x and Gemma 4 templates have no effort variable. The code-contests recipes pin
   `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` and `jinja-templates/gemma4/gemma4-reasoning-effort.jinja`: the hub
-  template cut to text only with thinking always on, plus one system-block line read off `reasoning_effort`.
-- The Gemma 4 file opens every system turn with `<|think|>`, so it needs no `enable_thinking` variable.
+  template cut to text only, plus one system-block line read off `reasoning_effort`.
+- The Qwen3.6 file thinks unless `enable_thinking` is false, which closes the block in the generation prompt as the
+  hub template does ([Thinking off](#thinking-off)).
+- The Gemma 4 file opens every system turn with `<|think|>`: thinking is always on.
 
 | Level | Line |
 |---|---|
@@ -33,13 +40,44 @@ per-turn reasoning cap is run-wide and the same at every level. No budget, price
 | `medium` | `Reasoning effort: medium. Reason as far as the problem needs, without exhaustive exploration.` |
 | `high` | `Reasoning effort: high. Reason thoroughly: weigh alternatives and check your work before you act.` |
 
-Any other level renders `Reasoning effort: <level>.` alone, and an episode with no level gets no line.
+Any other level renders `Reasoning effort: <level>.` alone, and a render with no level gets no line.
 
 Pin either with `chat_template:` + `force_chat_template: true` and serve the same file (`VLLM_CHAT_TEMPLATE` /
 `SGLANG_CHAT_TEMPLATE` in the compose files; [Chat template](episodes.md#chat-template)).
 
 `reasoning_effort` travels as the request's top-level field (copied into `chat_template_kwargs` on SGLang). The
 trainer's own renders carry it too, and `rollout_chat_template_kwargs` refuses it.
+
+## Thinking off
+
+`rollout_thinking: false` samples the policy with no reasoning block, so it works in its visible messages and tool
+calls; thinking is the default ([AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig)).
+Effort levels still apply: the template states the level, and a profile's non-reasoning keys (code contests' tool
+budgets) still bind.
+
+- The config adds `enable_thinking: false` to `rollout_chat_template_kwargs`, which then reaches every request and the
+  trainer's renders alike. vLLM derives `enable_thinking` from the top-level level unless the request's own kwargs
+  carry it, and its qwen3 reasoning parser reads a turn under `enable_thinking: false` as content.
+- The chat template must read the switch. The training script renders a generation prompt with `enable_thinking`
+  false and true before any server check and refuses a template that renders both alike.
+  `qwen3/qwen3.6-reasoning-effort.jinja` reads it; the Gemma 4 file does not, so it is refused.
+- Serve the same file, the server's other flags unchanged (`--reasoning-parser` included). The
+  [startup probe](episodes.md#chat-template) refuses a server whose generation prompt differs from the trainer's at
+  all: the request carries the switch, so no derived toggle explains a difference.
+
+Refused when the config is parsed, each reading reasoning no turn has:
+
+- `reasoning_floor` above 0: an episode with no reasoning falls short of its whole budget, so every failed episode
+  would pay the full weight, a gradient back toward reasoning;
+- `reasoning_price_cap` off its default, and `reasoning_terms_in_failed_groups`;
+- `rollout_max_thinking_tokens` and `rollout_max_answer_tokens`: a cap counts a turn's sampled tokens as reasoning up
+  to a close the turn never writes;
+- `enable_thinking` in `rollout_chat_template_kwargs`, which `rollout_thinking` writes.
+
+Refused at startup (by the training script and again by the trainer's constructor), and when an eval loads the training
+config, by the environment's `reject_settings_without_thinking`: `carry_reasoning`, a `reasoning_budget` or `reasoning_price` in any level's
+profile, and code contests without the [notes harness](environments/tasks/code-contests/tools.md#notes), whose reply
+rule otherwise leaves a policy with no reasoning nowhere to work.
 
 ## Reasoning cap
 

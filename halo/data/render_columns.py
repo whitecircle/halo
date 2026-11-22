@@ -20,7 +20,7 @@ def missing_render_column_splits(dataset: DatasetDict, column: str) -> list[str]
 
 def reject_missing_render_column(dataset: DatasetDict, path: str, knob: str, column: str) -> None:
     """Refuse a declared render column a raw dataset lacks: a typo otherwise surfaces as a map worker's bare
-    ``KeyError`` after the model load, or, for ``tools_field``, not at all."""
+    ``KeyError`` after the model load, or, for an optional template column, not at all."""
     missing = missing_render_column_splits(dataset, column)
     if not missing:
         return

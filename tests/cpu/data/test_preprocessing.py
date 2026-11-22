@@ -27,6 +27,7 @@ from halo.data.preprocessed.shard_index import (
 )
 from halo.data.preprocessed.tokenization import tokenize_dataset
 from halo.data.sources.paths import hub_repo_id
+from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
 from tests.common.tokenizers import load_cached_tokenizer
 
 
@@ -105,6 +106,24 @@ def test_tokenize_dataset():
     assert len(row["input_ids"]) == len(row["attention_mask"])
 
     print("  tokenize_dataset: PASSED")
+
+
+def test_the_bake_renders_each_rows_level():
+    """The offline bake renders through the training renderer's knobs, so a declared level column reaches the
+    template; undeclared, no row states one."""
+    turns = [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]
+    dataset = Dataset.from_dict({"prompt": [turns, turns], "effort": ["high", None]})
+    tokenizer = load_cached_tokenizer("Qwen/Qwen3-0.6B")
+    tokenizer.chat_template = QWEN3_6_EFFORT_TEMPLATE.read_text()
+
+    def baked(**config_overrides) -> list[str]:
+        config = PreprocessingConfig(model_name_or_path="Qwen/Qwen3-0.6B", max_length=512, **config_overrides)
+        return [tokenizer.decode(ids) for ids in tokenize_dataset(dataset, tokenizer, config)["input_ids"]]
+
+    high, null = baked(reasoning_effort_field="effort")
+    assert LEVEL_LINES["high"] in high
+    assert "Reasoning effort" not in null
+    assert all("Reasoning effort" not in text for text in baked())
 
 
 def test_tokenize_dataset_completion_only():
@@ -226,6 +245,8 @@ def test_mode_inapplicable_knobs_rejected_both_directions():
         PreprocessingConfig(model_name_or_path="m", mode="text", system_prompt="you are helpful")
     with pytest.raises(ValueError, match="tools_field"):
         PreprocessingConfig(model_name_or_path="m", mode="text", tools_field="tools")
+    with pytest.raises(ValueError, match="reasoning_effort_field"):
+        PreprocessingConfig(model_name_or_path="m", mode="text", reasoning_effort_field="effort")
     with pytest.raises(ValueError, match="text_field"):
         PreprocessingConfig(model_name_or_path="m", mode="chat", text_field="body")
 
@@ -408,6 +429,7 @@ class _RenderArgs:
             "system_prompt": None,
             "model_supports_system_role": True,
             "tools_field": None,
+            "reasoning_effort_field": None,
             "interleaved_thinking": False,
             "assistant_message_template": None,
             "pad_token": None,
@@ -447,6 +469,35 @@ def test_matching_render_knobs_pass():
         required_max_length=4096,
         render_args=_RenderArgs(system_prompt="sys", tools_field="tools"),
     )
+
+
+def test_a_level_column_the_artifact_was_baked_without_raises():
+    """The levels are baked into the ids, so a run stating another column than the artifact recorded trains on rows
+    rendered differently from what it says."""
+    plain = _metadata_with_recorded_config()
+    assert plain.config["reasoning_effort_field"] is None
+    with pytest.raises(ValueError, match="reasoning_effort_field: prepared=None vs run='effort'"):
+        verify_preprocessed_dataset(
+            plain, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+        )
+    labelled = _metadata_with_recorded_config(reasoning_effort_field="effort")
+    verify_preprocessed_dataset(
+        labelled, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+    )
+
+
+def test_a_stamp_predating_the_level_column_reads_as_baked_without_one(caplog):
+    """No bake before the knob existed could render a level, so a run stating one is refused, and one leaving it unset
+    is not warned about a knob the stamp could not record."""
+    legacy = _metadata_with_recorded_config()
+    del legacy.config["reasoning_effort_field"]
+    with pytest.raises(ValueError, match="reasoning_effort_field: prepared=None vs run='effort'"):
+        verify_preprocessed_dataset(
+            legacy, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+        )
+    with caplog.at_level(logging.WARNING):
+        verify_preprocessed_dataset(legacy, required_max_length=4096, render_args=_RenderArgs())
+    assert "reasoning_effort_field" not in caplog.text, caplog.text
 
 
 def test_assistant_template_only_checked_when_labels_are_masked():
@@ -513,6 +564,7 @@ def test_render_check_set_is_derived_from_the_config_dataclass():
         "system_prompt",
         "model_supports_system_role",
         "tools_field",
+        "reasoning_effort_field",
         "interleaved_thinking",
         # The images column merged into the conversation: it expands vision placeholders into the
         # baked ids, so an artifact prepared without it is a different tokenization.

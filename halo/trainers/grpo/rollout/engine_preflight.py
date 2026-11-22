@@ -279,11 +279,21 @@ def _verify_server_chat_template_on_rank0(
         if engine[0] != trainer[0]:
             shared = min(len(engine[0]), len(trainer[0]))
             at = next((i for i in range(shared) if engine[0][i] != trainer[0][i]), shared)
-            logger.warning(
+            differs = (
                 f"Rollout server {url} renders this prompt differently from the trainer, first at token {at} of "
-                f"{len(engine[0])}/{len(trainer[0])}. Rows train on the engine's ids, so this is harmless where the "
-                f"engine only derives a thinking toggle, and a re-rendered path scores a prompt never generated "
-                f"where the templates differ: check {client_cls.CHAT_TEMPLATE_FLAG} against chat_template:."
+                f"{len(engine[0])}/{len(trainer[0])}."
+            )
+            if not rollout.thinking:
+                raise ValueError(
+                    f"{differs} The run samples without reasoning and the request carries the switch, so no derived "
+                    f"toggle explains it: the server's template differs, and one that ignores enable_thinking opens "
+                    f"the reasoning block the trainer's render closes. Serve the file chat_template: pins "
+                    f"({client_cls.CHAT_TEMPLATE_FLAG})."
+                )
+            logger.warning(
+                f"{differs} Rows train on the engine's ids, so this is harmless where the engine only derives a "
+                f"thinking toggle, and a re-rendered path scores a prompt never generated where the templates differ: "
+                f"check {client_cls.CHAT_TEMPLATE_FLAG} against chat_template:."
             )
 
 
@@ -762,9 +772,9 @@ def verify_server_chat_template(
     connection_timeout: float,
 ) -> None:
     """COLLECTIVE. Refuses a server whose chat template ignores the level the run draws, which rows on the engine's
-    prompt ids would never show, and warns where a render differs at all. ``messages`` carry no tools, as a client-side
-    schema render drifts on correct setups, and only the refusal is certain: an engine derives toggles the trainer's
-    lack. ``efforts`` are the two contracts compared, ``None`` for no level."""
+    prompt ids would never show, or whose render differs at all when thinking is off; else a differing render warns.
+    ``messages`` carry no tools, as a client-side schema render drifts on correct setups, and with thinking on an engine
+    derives toggles the trainer's render lacks. ``efforts`` are the two contracts compared, ``None`` for no level."""
     probe_config = replace(
         rollout, capture_token_ids=True, capture_routed_experts=False, max_tokens=1, max_thinking_tokens=None
     )

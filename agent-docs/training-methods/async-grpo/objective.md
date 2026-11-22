@@ -24,13 +24,13 @@ A tagged row needs the turn's sampled ids; without them, or on the single-row pa
 
 ### Single-row fallback
 
-- **Lost completion ids** on any untagged turn drop the whole trajectory to one re-tokenized row, warned once with the remedy.
+- **Lost completion ids** on any untagged turn drop the whole trajectory to one re-tokenized row, warned once with the remedy. Under an environment whose view rewrites earlier turns (the code-contests [notes harness](environments/tasks/code-contests/tools.md#notes)) no one render matches what the engine saw, so the episode is invalidated instead.
 - **Lost prompt ids** alone re-render that prompt through the serving template, silently. A prefix the template rejects invalidates the episode (on an untrainable turn, only that row).
 - **A span boundary** the single-row path cannot pin **invalidates the episode** rather than training a guessed span.
 
 The single-row path locates every assistant span inside one full-conversation render, because chat templates are not prefix-monotone (harmony rewrites an archived turn's terminator and drops its reasoning; Qwen3 drops reasoning once a later user message arrives). A boundary is a prefix render verified to be an exact prefix, or the block's own length, measured by re-rendering with the message duplicated. The trained span starts where the engine's generation prompt stops agreeing with the render. No boundary carries across turns, since BPE merges a role header with each turn's first token differently.
 
-`train_on_sampled_tokens: false` forces the single-row path and disables the importance-sampling correction (batches train uncorrected, with a warning), so it is refused wherever [forced reasoning closes](#forced-reasoning-closes) need the correction.
+`train_on_sampled_tokens: false` forces the single-row path and disables the importance-sampling correction (batches train uncorrected, with a warning), so it is refused wherever [forced reasoning closes](#forced-reasoning-closes) need the correction, and under an environment whose view rewrites earlier turns (at construction, and by the script before the model load).
 
 ## Importance sampling correction
 

@@ -13,6 +13,7 @@ GPT_OSS_20B = "unsloth/gpt-oss-20b-BF16"
 GPT_OSS_120B = "unsloth/gpt-oss-120b-BF16"
 QWEN3_30B_A3B = "Qwen/Qwen3-30B-A3B-Instruct-2507"
 GLM4_FLASH = "zai-org/GLM-4.7-Flash"
+GLM5_3_FLASH = "zai-org/GLM-5.3-Flash"
 LFM2_24B_A2B = "LiquidAI/LFM2-24B-A2B"
 QWEN3_5_MOE = "Qwen/Qwen3.5-397B-A17B"
 QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
@@ -561,6 +562,7 @@ TINY_ZAYA_CONFIG = {
 # and qk_rope_head_dim 0. pad_token_id None: the default 154820 exceeds a tiny vocab.
 # The release's attention, indexer and linear-attention dims, which the serving kernels gate: vLLM's FlashInfer no-rope
 # sparse MLA takes only qk_nope 256 / kv_lora 512, FlashMLA and SGLang's indexer cache take index_head_dim 128.
+# index_kpool is transformers' default of 16; the release's is 4.
 GLM5_ENGINE_GATED_DIMS = {
     "num_attention_heads": 64,
     "num_key_value_heads": 64,
@@ -936,6 +938,7 @@ QWEN3_VL_2B = "Qwen/Qwen3-VL-2B-Instruct"
 
 # Pinned because hub main can drift the files a test reads (a chat template, the set of processor configs).
 PINNED_REVISIONS = {
+    GLM5_3_FLASH: "46a050bec13002ad29ee795c16e61cf4fa3c4a9c",
     QWEN2_5_VL_3B: "66285546d2b821cf421d4f5eb2576359d3770cd3",
     QWEN3_VL_2B: "89644892e4d85e24eaac8bacfd4f463576704203",
     STEP3P7_FLASH: "5f6244077ac62e04eec3f320501ff8c2b293373a",

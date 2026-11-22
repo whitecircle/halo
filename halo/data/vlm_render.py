@@ -10,6 +10,7 @@ from typing import Any, get_type_hints
 from datasets import Features, Sequence, Value
 from PIL import Image
 
+from halo.data.chat_render import has_open_final_assistant_turn
 from halo.data.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_SOURCE_KEYS,
@@ -37,16 +38,35 @@ VLM_OUTPUT_FEATURES = Features(
 SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"})
 
 
-def vlm_row_tools(row: dict[str, Any]) -> list | None:
-    tools_json = row.get("tools_json")
-    return json.loads(tools_json) if tools_json else None
-
-
-def render_vlm_text(processor, history: list[dict[str, Any]], *, tools: list | None = None) -> str:
-    """Every VLM path renders here, so an artifact, a runtime batch and a preference pair tokenize alike."""
+def vlm_row_template_kwargs(row: dict[str, Any]) -> dict[str, Any]:
+    """The template variables a mapped VLM row carries, each only when it has one."""
+    template_kwargs = {}
+    tools = json.loads(row["tools_json"]) if row.get("tools_json") else None
     # ``is None``, not truthiness: a row declaring ``tools: []`` renders under ``tools is defined``.
-    template_kwargs = {} if tools is None else {"tools": tools}
+    if tools is not None:
+        template_kwargs["tools"] = tools
+    if row.get("reasoning_effort") is not None:
+        template_kwargs["reasoning_effort"] = row["reasoning_effort"]
+    return template_kwargs
+
+
+def render_vlm_text(processor, history: list[dict[str, Any]], **template_kwargs) -> str:
+    """Every VLM path renders here, so an artifact, a runtime batch and a preference pair tokenize alike."""
     return processor.apply_chat_template(history, tokenize=False, add_generation_prompt=False, **template_kwargs)
+
+
+def render_vlm_training_text(
+    processor, tokenizer, history: list[dict[str, Any]], eos_token_ids: frozenset[int], **template_kwargs
+) -> str:
+    """A training row's render, the tokenizer's eos token appended where the row ends on an assistant turn the template
+    leaves open (:func:`~halo.data.chat_render.has_open_final_assistant_turn`). The text takes it, not the ids: a
+    processor tokenizes and pads in one call, so only there does the eos reach every per-token column it builds."""
+    text = render_vlm_text(processor, history, **template_kwargs)
+    # The verdict the processor's ids would give: expanding a placeholder changes no token after it.
+    input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+    if has_open_final_assistant_turn(input_ids, history, tokenizer, eos_token_ids):
+        text += tokenizer.eos_token
+    return text
 
 
 def apply_image_pixel_bounds(processor, min_pixels: int | None, max_pixels: int | None) -> None:

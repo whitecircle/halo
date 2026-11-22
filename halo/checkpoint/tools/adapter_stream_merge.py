@@ -10,7 +10,7 @@ import math
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 
 import torch
@@ -38,6 +38,7 @@ from halo.checkpoint.reading import (
     detect_model_type,
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
+    read_checkpoint_config,
     reject_partial_checkpoint,
 )
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, copy_training_sidecars
@@ -48,9 +49,12 @@ from halo.checkpoint.tools.offline_export import (
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter
+from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, instantiate_on_meta
+from halo.model_loading.model_preparation import resolve_auto_model_class, resolve_build_config
 from halo.model_loading.tokenizer_setup import load_processing_class
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX, plain_module_name
 from halo.models.moe.expert_layout import (
     SEPARATE_GLU_PROJECTIONS,
     SEPARATE_MLP_PROJECTIONS,
@@ -248,6 +252,16 @@ class _MergePlan:
         return tensor if fold is None else fold(tensor)
 
 
+def _unmergeable_remedy(holds_expert_lora: bool) -> str:
+    """Where an adapter the streaming merge refuses folds instead; the in-memory merge drops native expert deltas."""
+    if holds_expert_lora:
+        return (
+            "an adapter holding native expert LoRA has no in-memory merge, which would drop its expert deltas: train "
+            "with merge_expert_lora_on_save: true, whose gathered save folds both halves"
+        )
+    return "a dense adapter merges in memory with merge_peft_adapters.py without --streaming"
+
+
 def _classify_adapter_tensors(
     tensors: dict[str, torch.Tensor],
 ) -> tuple[dict[str, _LinearAdapter], dict[str, dict[str, dict[str, torch.Tensor]]], dict[str, torch.Tensor]]:
@@ -258,7 +272,9 @@ def _classify_adapter_tensors(
     replacements: dict[str, torch.Tensor] = {}
     unsupported = []
     for key, tensor in tensors.items():
-        if is_expert_lora_key(key) and (match := _EXPERT_KEY.match(key)):
+        # A mixed run's saver walks from the PeftModel, so its expert keys carry the prefix, and under CP the wrapper's
+        # level too.
+        if is_expert_lora_key(key) and (match := _EXPERT_KEY.match(plain_module_name(key))):
             experts.setdefault(match["layer"], {}).setdefault(match["attr"], {})[match["half"]] = tensor
             continue
         name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
@@ -287,8 +303,8 @@ def _classify_adapter_tensors(
         raise ValueError(
             f"The adapter holds LoRA tensors the streaming merge does not fold: {sorted(unsupported)[:4]} "
             f"(only linear LoRA, its DoRA magnitude and bias, and native expert LoRA are supported), modules missing "
-            f"an A or B half {incomplete[:4]}, expert weights missing one {half_experts[:4]}. Merge it in memory with "
-            f"merge_peft_adapters.py without --streaming."
+            f"an A or B half {incomplete[:4]}, expert weights missing one {half_experts[:4]}; "
+            f"{_unmergeable_remedy(any(map(is_expert_lora_key, tensors)))}."
         )
     return linear, experts, replacements
 
@@ -326,7 +342,41 @@ def _expert_layers(
     return {name: _ExpertLayer(name, spec, scaling, attrs) for name, attrs in experts.items()}
 
 
-def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
+def _stored_keys_by_live_name(
+    base_dir: str, base_keys: Iterable[str], trust_remote_code: bool, remedy: str
+) -> dict[str, str]:
+    """Each tensor name of the base's module tree → the key ``base_dir`` stores it under, planned as ``from_pretrained``
+    renames the checkpoint onto the config's widest class, built without weights. A name the load fuses or splits out
+    of other keys, or that no stored key supplies, has no entry. Raises for a remote-code config (an ``auto_map``)
+    under ``trust_remote_code=False``, and, naming ``remedy``, for a class the meta device cannot build."""
+    try:
+        config = resolve_build_config(base_dir, revision=None, trust_remote_code=trust_remote_code)
+    except ValueError as e:
+        if trust_remote_code or "auto_map" not in (read_checkpoint_config(base_dir, missing_ok=True) or {}):
+            raise
+        raise ValueError(
+            f"{e} The streaming merge reads the base's config to build its class without weights and find the key "
+            f"each adapter target is stored under: pass --trust_remote_code for a remote-code base you trust."
+        ) from e
+    try:
+        shell = instantiate_on_meta(
+            base_dir, resolve_auto_model_class(config), config, trust_remote_code=trust_remote_code, config_only=True
+        )
+    except MetaShellBuildError as e:
+        raise ValueError(
+            f"{e} The streaming merge reads the base's module names off this shell to find the key each adapter "
+            f"target is stored under; {remedy}."
+        ) from e
+    plan = build_key_plan(
+        base_keys,
+        shell.state_dict(),
+        resolve_model_conversions(shell, add_legacy=True),
+        getattr(shell, "base_model_prefix", None) or None,
+    )
+    return plan.live_renames()
+
+
+def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code: bool) -> _MergePlan:
     path = find_adapter_weight_file(adapter_dir)
     if path is None:
         raise FileNotFoundError(
@@ -334,26 +384,31 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
             f"saved adapter directory."
         )
     linear, experts, replacements = _classify_adapter_tensors(read_adapter_file(path))
-    folds: dict[str, Fold] = {}
+    by_live_name: dict[str, Fold] = {}
     for module, adapter in linear.items():
-        folds.update(_linear_folds(config, module, adapter))
-    folds.update({key: _replacement(saved) for key, saved in replacements.items()})
+        by_live_name.update(_linear_folds(config, module, adapter))
+    by_live_name.update({name: _replacement(saved) for name, saved in replacements.items()})
     layers = _expert_layers(experts, config, base_dir)
     by_key = {key: layer for layer in layers.values() for key in layer.hub_shapes}
 
     base_shapes = _base_tensor_shapes(base_dir)
-    absent = sorted((set(folds) | set(by_key)) - set(base_shapes))
+    remedy = _unmergeable_remedy(bool(experts))
+    stored = _stored_keys_by_live_name(base_dir, base_shapes, trust_remote_code, remedy) if by_live_name else {}
+    absent = sorted((set(by_live_name) - set(stored)) | (set(by_key) - set(base_shapes)))
     if absent:
         raise ValueError(
             f"The adapter at {adapter_dir} rewrites {len(absent)} tensor(s) the base at {base_dir} does not store "
-            f"under that name (e.g. {absent[:3]}): the base spells them another way (a text-only class's keys, a "
-            f"fused or renamed layout, a tied head) or the adapter belongs to another base. The streaming merge folds "
-            f"by stored key; a dense adapter merges in memory with merge_peft_adapters.py without --streaming."
+            f"under a key of their own (e.g. {absent[:3]}): its load fuses or splits them out of other keys, its "
+            f"class builds no such module (a text-only class's keys), they are tied to another tensor (a tied head), "
+            f"its hub layout respells an expert layer's path, or the adapter belongs to another base. The streaming "
+            f"merge folds a module's tensor under the key the base's load reads it from and an expert tensor under "
+            f"its layer's module path; {remedy}."
         )
+    folds = {stored[name]: fold for name, fold in by_live_name.items()}
     resized = [
-        f"{key}: base {base_shapes[key]}, adapter {tuple(saved.shape)}"
-        for key, saved in replacements.items()
-        if base_shapes[key] != tuple(saved.shape)
+        f"{stored[name]}: base {base_shapes[stored[name]]}, adapter {tuple(saved.shape)}"
+        for name, saved in replacements.items()
+        if base_shapes[stored[name]] != tuple(saved.shape)
     ]
     if resized:
         raise ValueError(
@@ -422,7 +477,7 @@ def merge_adapter_streaming(
     base_dir = resolve_checkpoint_source(base_path)
     reject_partial_checkpoint(base_dir)
     reject_in_place_conversion(base_dir, output_dir)
-    plan = _plan_merge(adapter_dir, config, base_dir)
+    plan = _plan_merge(adapter_dir, config, base_dir, trust_remote_code)
 
     shards = checkpoint_shard_files(base_dir)
     with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:

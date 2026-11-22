@@ -7,7 +7,7 @@ from halo.callbacks.generate_examples import GenerateExamplesCallback
 from halo.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.conversation import chat_template_kwargs, reject_image_content
+from halo.data.conversation import chat_template_kwargs, reject_image_content, template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.prompt_completion import render_prompt_completions
 from halo.data.pipeline.text_rows import prepare_generative_row
@@ -36,11 +36,13 @@ from halo.trainers.grpo.offline.offline_rules import reject_unsupported_referenc
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 
 
-def render_offline_grpo_row(row, tokenizer, tools_field: str | None):
+def render_offline_grpo_row(row, tokenizer, tools_field: str | None, reasoning_effort_field: str | None):
     reject_image_content(row["prompt"], "offline GRPO field 'prompt'")
     for completion in row["completions"]:
         reject_image_content(completion, "offline GRPO field 'completions'")
-    template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field)
+    template_kwargs = chat_template_kwargs(
+        row, interleaved_thinking=False, tools_field=tools_field, reasoning_effort_field=reasoning_effort_field
+    )
     row["prompt"], row["completions"] = render_prompt_completions(
         partial(tokenizer.apply_chat_template, tokenize=False, **template_kwargs),
         row["prompt"],
@@ -148,7 +150,7 @@ def main():
 
     ds_processed = coordinated_map(
         ds,
-        partial(render_offline_grpo_row, tokenizer=tokenizer, tools_field=args.tools_field),
+        partial(render_offline_grpo_row, tokenizer=tokenizer, **template_column_kwargs(args)),
         desc="Applying chat templates",
         **map_kwargs,
     )
@@ -161,7 +163,7 @@ def main():
                 prepare_generative_row,
                 tokenizer=tokenizer,
                 max_length=offline_grpo_config.max_prompt_length,
-                tools_field=args.tools_field,
+                **template_column_kwargs(args),
             ),
             desc="Preparing generation dataset",
             **map_kwargs,

@@ -19,9 +19,10 @@ from halo.data.vlm_render import (
     VLM_OUTPUT_FEATURES,
     reject_over_length_vlm_batch,
     render_vlm_text,
+    render_vlm_training_text,
     resolve_image_token_ids,
     run_vlm_processor,
-    vlm_row_tools,
+    vlm_row_template_kwargs,
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.log import warn_once
@@ -116,7 +117,9 @@ class VLMDataCollator:
         return batch
 
     def _render(self, history: list[dict[str, Any]], example: dict[str, Any]) -> str:
-        return render_vlm_text(self.processor, history, tools=vlm_row_tools(example))
+        return render_vlm_training_text(
+            self.processor, self.tokenizer, history, self.eos_token_ids, **vlm_row_template_kwargs(example)
+        )
 
     def _mask_appended_newline(self, batch) -> None:
         """Mask the newline a prefix-LM processor appends to the text (PaliGemma's prefix/suffix separator), which

@@ -123,7 +123,10 @@ def _tokenize_splits(
 ) -> dict[str, Dataset]:
     tokenize = tokenize_vlm_dataset if config.is_vlm else tokenize_dataset
     # Before any tokenization pass: the set reads the model config, and an unreadable one would surface only later.
-    eos_token_ids = resolve_label_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
+    # Every chat render, the VLM one included, closes a row's last assistant turn against the terminators,
+    # completion-only labels or not.
+    renders_chat = config.is_vlm or config.mode != "text"
+    eos_token_ids = resolve_label_eos_token_ids(config, tokenizer) if renders_chat else None
     tokenized = {}
     for split, split_data in splits.items():
         if split_data is None:

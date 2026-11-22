@@ -87,8 +87,37 @@ untrainable, so no solve reinforces the wasted turn. The check (`find_evident_la
 only when a Python parse and the program's textual marks point the same way; a program it misses runs as labeled.
 A submission after an accept takes the post-accept reply whatever its label.
 
+## Notes
+
+`notes: {}` adds a `notes` tool and turns the episode into a notes harness, for a policy that works without a
+reasoning step: each turn's message holds its working, and the notes hold what later turns need. `max_chars` caps the
+notes' size ([default](README.md#configuration)).
+`NotesConfig`, the tool and the view live in `halo/environments/tools/notes.py`.
+
+- The notes are named sections, written in the format they are shown in: one call's `text` holds any number of
+  sections, each a line `## <name>` and its text (text before the first header is section `main`). `mode: replace`
+  (the default) sets each given section and deletes one given empty; `append` extends each. Sections left out stay.
+  The reply names the sections the notes hold (`Notes saved; sections: idea, tests.`); a call past `max_chars`, or
+  with no section, is [refused](#refused-calls) and changes nothing. The cap is enforced but never stated: no tool
+  description, prompt, reply, refusal or notes block gives a size.
+- Every turn's prompt ends with the whole notes as a user turn of their own (`<notes>…</notes>`), after the tool
+  replies, never inside a tool's output; notes calls stay in the history as written. The replay pairs each call with
+  its reply by position and reads it through the parsing and binding it ran under.
+- The system prompt's brief-summary rule gives way to working in the message and keeping `problem`, `idea`, `tests` and
+  `next` sections current.
+- A turn of text alone does not end the episode: it is nudged to act, within `max_turns`. Logged: `episode/notes_calls`,
+  `episode/notes_chars`, `episode/text_turns`.
+- The [audit judge](reward.md#audit-judge) reads the messages and the notes as the policy's working, beside its
+  reasoning where one is shown (`NOTES_CHECK_DESCRIPTIONS`): `reasoning_in_actions` covers programs alone, a notes call
+  is never a `notepad_run`, and `verdict_probe` reads intent from the messages and notes too. Two logged checks audit
+  the notes, `false_record` and `unexplained_program`. A run without a reasoning step takes its own judge
+  [setting](reward.md#audit-judge).
+- The prompt is a function of the history alone (`observation_view`). Its notes turn moves to the end of every prompt,
+  so no prompt extends the one before it and training needs `train_on_sampled_tokens: true`
+  ([Single-row fallback](../../../objective.md#single-row-fallback)).
+
 ## Recovery nudges
 
 A final text answer ends the episode ungraded, so the nudge after a cut or empty turn
 ([Unproductive turns](../../../episodes.md#unproductive-turns)) asks for a tool call and names `submit_solution`. A
-turn cut while writing its call is asked to call again with its reasoning kept out of the program's comments.
+turn cut while writing its call is asked to call again with its working kept out of the program's comments.

@@ -1,5 +1,9 @@
-"""The line each effort level's template states: the level and what it asks for, never a token count. One
-copy for the Qwen3.6 and Gemma 4 template tests, which pin the same wording."""
+"""Each effort level's line as the effort templates state it (the level and what it asks for, never a token count),
+and the repo's Qwen3.6 effort template."""
+
+from tests.common.repo import REPO_ROOT
+
+QWEN3_6_EFFORT_TEMPLATE = REPO_ROOT / "jinja-templates" / "qwen3" / "qwen3.6-reasoning-effort.jinja"
 
 LEVEL_LINES = {
     "low": "Reasoning effort: low. Keep your reasoning short: take the most direct approach and act on it.",

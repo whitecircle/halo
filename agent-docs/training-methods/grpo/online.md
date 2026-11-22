@@ -65,7 +65,7 @@ learning_rate: 1.0e-06
 
 - `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
 - The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
-- `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it.
+- `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it. `reasoning_effort_field` gives each prompt its row's own level instead; setting both raises.
 - Learning rate: `1e-6` to `5e-6` in the recipes, all full fine-tunes; LoRA takes more ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
 ### Optional objective changes

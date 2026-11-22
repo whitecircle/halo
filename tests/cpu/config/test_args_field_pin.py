@@ -61,6 +61,7 @@ _EXPECTED = {
         "profiler_wait": "5",
         "profiler_warmup": "1",
         "project_name": "'default-project'",
+        "reasoning_effort_field": "None",
         "report_mfu_diagnostics": "False",
         "reset_sinks": "True",
         "router_balancing_rate": "0.001",

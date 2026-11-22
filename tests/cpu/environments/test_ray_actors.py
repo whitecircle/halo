@@ -681,6 +681,48 @@ async def test_a_call_cut_at_the_cap_reaches_the_judge_as_the_policy_wrote_it():
     assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [written]
 
 
+async def test_without_thinking_a_cut_call_is_decoded_from_its_first_sampled_id():
+    """A run sampling with no reasoning block writes nothing before the call and has no reasoning close to split at:
+    every sampled id is what the policy wrote."""
+    actor = _make_actor("native_math")
+    session = _FakeEngineSession(_cut_turn_body({"finish_reason": "tool_calls"}), decoded=_WRITTEN)
+    config = RolloutConfig(
+        max_retries=0,
+        max_tokens=len(_CUT_IDS),
+        capture_token_ids=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    generation = await actor._generate(session, "server:8000", [{"role": "user", "content": "2+2?"}], config)
+
+    assert session.decoded == [_CUT_IDS]
+    written = {**_PARTIAL_CALL, "function": {"name": "calculate", "arguments": _WRITTEN}}
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [written]
+
+
+async def test_without_thinking_a_cut_turn_s_text_goes_to_the_call_being_written():
+    """A notes-harness turn is a message, then calls: the decoded text, less that message, is the last call's, the one
+    the cut caught; the calls before it keep what the parser read of them."""
+    notes = {"id": "n1", "type": "function", "function": {"name": "notes", "arguments": '{"text": "## idea\\nscan"}'}}
+    body = _cut_turn_body({"finish_reason": "tool_calls"})
+    body["choices"][0]["message"] = {"content": "The idea is a scan.", "tool_calls": [notes, _PARTIAL_CALL]}
+    session = _FakeEngineSession(body, decoded="The idea is a scan.\n\n<tool_call>notes</tool_call>\n" + _WRITTEN)
+    config = RolloutConfig(
+        max_retries=0,
+        max_tokens=len(_CUT_IDS),
+        capture_token_ids=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    generation = await _make_actor("native_math")._generate(
+        session, "server:8000", [{"role": "user", "content": "?"}], config
+    )
+
+    cut = {
+        **_PARTIAL_CALL,
+        "function": {"name": "calculate", "arguments": "<tool_call>notes</tool_call>\n" + _WRITTEN},
+    }
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [notes, cut]
+
+
 @pytest.mark.parametrize(
     ("backend", "choice", "decode_status", "end"),
     [

@@ -10,7 +10,12 @@ from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.chat_render import render_generation_prompt
-from halo.data.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
+from halo.data.conversation import (
+    as_conversation,
+    chat_template_kwargs,
+    fold_system_into_conversation,
+    template_column_kwargs,
+)
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import reject_missing_render_column
@@ -71,8 +76,9 @@ def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
             list(prompt_data), args.system_prompt, model_supports_system_role=True
         )
 
-        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
-        # "random" samples a level per prompt, the single-turn analogue of the env-GRPO per-episode steer.
+        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, **template_column_kwargs(args))
+        # The run-wide steer, refused beside a per-row level; "random" samples a level per prompt, shared by its
+        # generations like env GRPO's per-group draw.
         effort = resolve_reasoning_effort(args.reasoning_effort)
         if effort is not None:
             template_kwargs["reasoning_effort"] = effort
@@ -183,7 +189,7 @@ def main():
         desc="Processing dataset for RLVR Online GRPO",
         cache_key_extras={
             "system_prompt": args.system_prompt,
-            "tools_field": args.tools_field,
+            **template_column_kwargs(args),
             "prompt_field": args.prompt_field,
             "answer_field": args.answer_field,
             "max_prompt_length": args.max_prompt_length,

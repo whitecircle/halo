@@ -18,23 +18,23 @@ from halo.data.completion_spans import (
     build_training_labels,
     mask_batch_to_completion_spans,
 )
-from halo.data.conversation import reject_unsupported_media_parts, resolve_json_value
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS, reject_unsupported_media_parts, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.rejected_rows import is_valid_example, report_rejected_rows
-from halo.data.pipeline.text_rows import build_chat_row_processor, build_text_row_processor
+from halo.data.pipeline.text_rows import build_chat_row_processor, build_text_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import build_vlm_history
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 from halo.data.vlm_render import (
     VLM_GRID_COLUMNS,
     VLM_OUTPUT_FEATURES,
-    render_vlm_text,
+    render_vlm_training_text,
     resolve_image_token_ids,
     run_vlm_processor,
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.tokenizer_backend import install_processor_backend, resolve_tokenizer_backend
-from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.model_loading.tokenizer_setup import record_special_token_id, resolve_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -81,9 +81,13 @@ def _completion_only_labels(
 
 
 def resolve_label_eos_token_ids(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> frozenset[int]:
-    """The label bake's turn terminators: the model config's ``eos_token_id`` list folded with the tokenizer's, as
-    the runtime collator masks. An unreadable config raises: GLM-4's turn terminators are listed only there."""
+    """The bake's turn terminators, which close a row's last assistant turn and end a completion span: the model
+    config's ``eos_token_id`` list folded with the tokenizer's, as the runtime collator reads them once the run has
+    recorded an ``eos_token`` override on its config. An unreadable config raises: GLM-4's turn terminators are listed
+    only there."""
     hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
+    if config.eos_token:
+        record_special_token_id(hf_config, "eos_token_id", tokenizer.eos_token_id)
     return resolve_eos_token_ids(tokenizer, hf_config)
 
 
@@ -136,7 +140,9 @@ def _reject_fully_masked_labels(tokenized: Dataset, split_name: str) -> None:
         )
 
 
-def _row_processor(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> Callable:
+def _row_processor(
+    config: PreprocessingConfig, tokenizer: PreTrainedTokenizer, eos_token_ids: frozenset[int] | None
+) -> Callable:
     """A packed raw-text artifact leaves the overflow to the strategy."""
     if config.mode == "text":
         return build_text_row_processor(
@@ -149,12 +155,9 @@ def _row_processor(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) 
     return build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=config.max_length,
-        conversation_field=config.conversation_field,
-        system_prompt=config.system_prompt,
-        model_supports_system_role=config.model_supports_system_role,
         add_generation_prompt=False,
-        interleaved_thinking=config.interleaved_thinking,
-        tools_field=config.tools_field,
+        eos_token_ids=eos_token_ids,
+        **text_render_kwargs(config),
     )
 
 
@@ -207,13 +210,13 @@ def tokenize_dataset(
 ) -> Dataset:
     """Input_ids and attention_mask, plus labels under ``train_on_completions_only``; resolves unset terminators."""
     tokenizer = resolve_tokenizer_backend(tokenizer, config.tokenizer_backend)
-    if config.train_on_completions_only and eos_token_ids is None:
+    if config.mode != "text" and eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)
 
     logger.info(f"Tokenizing {split_name} split ({len(dataset)} examples)...")
     tokenized = coordinated_map(
         dataset,
-        _row_processor(config, tokenizer),
+        _row_processor(config, tokenizer, eos_token_ids),
         desc=f"tokenizing {split_name}",
         num_proc=resolve_map_num_proc(config.num_proc),
         # Every source column goes, as at runtime: a source `labels` column would otherwise be baked as targets.
@@ -261,7 +264,7 @@ def _vlm_labels(
     config: PreprocessingConfig,
     response_token_ids: list[int] | None,
     image_token_ids: tuple[int, ...],
-    eos_token_ids: frozenset[int] | None,
+    eos_token_ids: frozenset[int],
 ) -> list[int]:
     if config.train_on_completions_only:
         return _completion_only_labels(
@@ -291,12 +294,12 @@ def tokenize_vlm_row(
     tokenizer: PreTrainedTokenizer,
     response_token_ids: list[int] | None,
     image_token_ids: tuple[int, ...],
-    eos_token_ids: frozenset[int] | None,
+    eos_token_ids: frozenset[int],
 ) -> dict[str, Any]:
-    """Through the runtime VLM path's own builder and renderer, so it tokenizes as an untouched run renders it. An
-    empty, over-length or bad-data row becomes the all-None row, Arrow-safe because the map pins
-    ``VLM_OUTPUT_FEATURES``. A media part no collator feeds raises instead: dropping it would leave an artifact looking
-    whole with those rows gone."""
+    """Through the runtime VLM path's own builder and renderer, so it tokenizes as an untouched run renders it, its
+    last assistant turn closed against ``eos_token_ids`` alike. An empty, over-length or bad-data row becomes the
+    all-None row, Arrow-safe because the map pins ``VLM_OUTPUT_FEATURES``. A media part no collator feeds raises
+    instead: dropping it would leave an artifact looking whole with those rows gone."""
     reject_unsupported_media_parts(example.get(config.conversation_field), "A row of this VLM bake")
     try:
         raw_conversation = resolve_json_value(example.get(config.conversation_field))
@@ -309,9 +312,8 @@ def tokenize_vlm_row(
             model_supports_system_role=config.model_supports_system_role,
         )
         # No truncation: cutting expanded image placeholders desyncs text from vision.
-        result = run_vlm_processor(
-            processor, [render_vlm_text(processor, history)], [images], padding=False, truncation=False
-        )
+        text = render_vlm_training_text(processor, tokenizer, history, eos_token_ids)
+        result = run_vlm_processor(processor, [text], [images], padding=False, truncation=False)
         # Text-only rows may drop such extras, being derivable from input_ids alone.
         unsupported = set(result) - set(VLM_OUTPUT_FEATURES)
         if unsupported and images:
@@ -353,18 +355,19 @@ def tokenize_vlm_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Input_ids with expanded placeholders, attention_mask, labels, fp16 ``pixel_values`` and their patch grid."""
-    if config.tools_field or config.interleaved_thinking:
+    """Input_ids with expanded placeholders, attention_mask, labels, fp16 ``pixel_values`` and their patch grid;
+    resolves unset terminators."""
+    unrendered = [knob for knob in (*TEMPLATE_COLUMN_KNOBS, "interleaved_thinking") if getattr(config, knob)]
+    if unrendered:
         raise NotImplementedError(
-            "VLM offline preprocessing does not render tools_field / interleaved_thinking — the "
-            "preprocessed tokenization would silently diverge from the runtime render. Train these "
-            "datasets through the runtime VLM path instead."
+            f"VLM offline preprocessing does not render {unrendered} — the preprocessed tokenization would silently "
+            f"diverge from the runtime render. Train these datasets through the runtime VLM path instead."
         )
     logger.info(f"Tokenizing VLM {split_name} split ({len(dataset)} examples)...")
 
     processor = install_processor_backend(processor, config.tokenizer_backend)
     tokenizer = resolve_tokenizer(processor)
-    if config.train_on_completions_only and eos_token_ids is None:
+    if eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)
     tokenize_row = functools.partial(
         tokenize_vlm_row,
@@ -397,7 +400,7 @@ def tokenize_vlm_dataset(
             "images_field": config.images_field,
             "train_on_completions_only": config.train_on_completions_only,
             "assistant_template": config.assistant_message_template,
-            "eos_token_ids": sorted(eos_token_ids) if eos_token_ids else None,
+            "eos_token_ids": sorted(eos_token_ids),
             "min_pixels": config.min_pixels,
             "max_pixels": config.max_pixels,
         },

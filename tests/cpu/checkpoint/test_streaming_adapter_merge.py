@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The streaming adapter merge reproduces the in-memory merge tensor for tensor: PEFT's own fold for linear and DoRA
-adapters (dense and composite bases), and the gather's merge-on-save fold for native expert LoRA on every expert
-layout. A refusal leaves no output."""
+adapters (dense and composite bases, and ones whose hub layout respells the module tree), and the gather's
+merge-on-save fold for native expert LoRA on every expert layout. A refusal leaves no output."""
 
 from __future__ import annotations
 
@@ -15,16 +15,20 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3_5Config, Qwen3_5ForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from halo.checkpoint.adapters import write_mixed_adapter_config
+from halo.checkpoint.adapters import is_expert_lora_key
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, MERGED_ADAPTER_CONFIG_DIR, TRAINING_PROVENANCE_FILE
-from halo.checkpoint.parallel.adapters import save_expert_lora_adapters
+from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
 from halo.checkpoint.tools.adapter_stream_merge import _FUSED_GATE_UP_KINDS, _required_attrs
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
@@ -137,6 +141,32 @@ def test_a_composite_base_merge_equals_the_in_memory_merge(tmp_path):
     _assert_same_checkpoint(streamed, reference, changed=targets)
 
 
+@pytest.mark.parametrize(
+    ("family", "target_modules"),
+    [
+        # The hub spells the KDA forget gate's projections without their ``forget_gate`` level, q_proj as the tree does.
+        ("glm5_next", ["q_proj", "f_a_proj", "f_b_proj"]),
+        # The hub's root is ``backbone``, the tree's ``model``.
+        ("nemotron_h", ["q_proj", "in_proj"]),
+        # The hub's ``attn.wq_a`` is the tree's ``self_attn.q_a_proj``.
+        ("deepseek_v4", ["q_a_proj", "o_b_proj"]),
+    ],
+)
+def test_a_module_the_base_stores_under_another_name_folds_into_that_key(tmp_path, family, target_modules):
+    torch.manual_seed(0)
+    tiny = TINY_MOE_FAMILIES[family]
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    tiny_family_model(tiny).save_pretrained(base)
+    targets = _save_peft_adapter(tiny.load_class, base, adapter, torch.float32, target_modules=target_modules)
+    streamed, reference = _merge_both(adapter, tmp_path, torch.float32)
+
+    stored = safetensors_state_dict(base)
+    moved = {key for key, tensor in safetensors_state_dict(reference).items() if not torch.equal(tensor, stored[key])}
+    assert len(moved) == len(targets), f"premise: the in-memory merge moves every target, got {sorted(moved)}"
+    assert moved - targets, "premise: the base stores a target under a key the adapter's module path does not spell"
+    _assert_same_checkpoint(streamed, reference, changed=moved)
+
+
 def _expert_run(tmp_path: Path, family: str, projections) -> tuple[Path, Path, Path]:
     """``(base, adapter, merged-on-save reference)`` of a tiny EP family with native expert LoRA."""
     torch.manual_seed(0)
@@ -172,39 +202,83 @@ def test_a_native_expert_lora_merge_equals_the_merge_on_save(tmp_path, family, p
     _assert_same_checkpoint(streamed, reference, changed=moved)
 
 
-def test_a_mixed_attention_and_expert_adapter_folds_both_halves(tmp_path):
-    base, expert_adapter, reference = _expert_run(tmp_path, "qwen3_moe", None)
-    peft_dir = tmp_path / "attention"
-    from_base = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"]).to(torch.bfloat16)
-    stored = {
-        key: tensor for key, tensor in load_file(str(base / "model.safetensors")).items() if ".experts." not in key
-    }
-    assert not from_base.load_state_dict(stored, strict=False).unexpected_keys
+@pytest.mark.parametrize("cp_size", [1, 2], ids=["no-cp", "cp"])
+def test_a_mixed_run_adapter_folds_both_halves(tmp_path, cp_size):
+    """The adapter the run's own saver writes: it walks from the PeftModel, so the expert keys carry its prefix, and
+    under CP the wrapper's level too."""
+    torch.manual_seed(0)
+    spec = ExpertLoraSpec(r=EXPERT_LORA_RANK_MULTIPLE, alpha=2 * EXPERT_LORA_RANK_MULTIPLE)
+    model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"]).to(torch.bfloat16)
+    model = apply_ep_layers(model, single_process_ep_config(expert_lora=spec))
+    plain = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=spec)
+    shape = {"world_size": cp_size, "gpus_per_node": cp_size, "cp_size": cp_size, "expert_lora": spec}
+    run = make_parallelism_config(**shape)
+    merging = make_parallelism_config(**shape, merge_expert_lora_on_save=True)
+    base, adapter, reference, streamed = (tmp_path / name for name in ("base", "adapter", "reference", "streamed"))
+    save_ep_gathered_checkpoint(save_context(model, plain, has_ep_layers=True), str(base))
+    model.name_or_path = str(base)  # as from_pretrained leaves it, where get_peft_model reads the base's path
+    if run.is_cp_mode:
+        model.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
+        model = UlyssesModel(model, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     peft_model = get_peft_model(
-        from_base, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM")
+        model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"], task_type="CAUSAL_LM")
     )
     _randomize_lora_b(peft_model)
-    peft_model.save_pretrained(peft_dir)
-    attention = load_file(str(peft_dir / ADAPTER_SAFETENSORS_FILE))
-    mixed = tmp_path / "mixed"
-    mixed.mkdir()
-    save_file(
-        {**attention, **load_file(str(expert_adapter / ADAPTER_SAFETENSORS_FILE))},
-        str(mixed / ADAPTER_SAFETENSORS_FILE),
-    )
-    spec = ExpertLoraSpec(r=EXPERT_LORA_RANK_MULTIPLE, alpha=2 * EXPERT_LORA_RANK_MULTIPLE)
-    peft_model.peft_config["default"].base_model_name_or_path = str(base)
-    write_mixed_adapter_config(peft_model.peft_config["default"], spec, str(mixed))
+    # A training checkpoint keeps the adapters' live dtype, so both references fold the tensors the file holds.
+    mixed_run = {"has_ep_layers": True, "has_expert_lora": True, "training_checkpoint": True}
+    save_peft_adapters(save_context(peft_model, run, **mixed_run), str(adapter))
+    save_ep_gathered_checkpoint(save_context(peft_model, merging, **mixed_run), str(reference))
+    saved = load_file(str(adapter / ADAPTER_SAFETENSORS_FILE))
+    expert_keys = [key for key in saved if is_expert_lora_key(key)]
+    prefix = f"{PEFT_BASE_MODEL_PREFIX}model.model." if run.is_cp_mode else PEFT_BASE_MODEL_PREFIX
+    assert expert_keys and all(key.startswith(prefix) for key in expert_keys), sorted(saved)[:4]
 
-    streamed = tmp_path / "streamed"
-    merge_peft_adapter(str(mixed), str(streamed), verbose=False)
+    merge_peft_adapter(str(adapter), str(streamed), verbose=False)
 
+    got, stored = safetensors_state_dict(streamed), safetensors_state_dict(base)
+    expert_reference = safetensors_state_dict(reference)
     merged_attention = peft_model.merge_and_unload().state_dict()
-    got, expert_reference = safetensors_state_dict(streamed), safetensors_state_dict(reference)
-    for key in (k for k in got if k.endswith(("q_proj.weight", "v_proj.weight"))):
-        assert torch.equal(got[key], merged_attention[key]), f"{key} lost its attention delta"
-    for key in (k for k in got if ".experts." in k):
-        assert torch.equal(got[key], expert_reference[key]), f"{key} lost its expert delta"
+    assert set(got) == set(stored)
+    moved = {key for key in got if not torch.equal(got[key], stored[key])}
+    attention = {key for key in got if key.endswith(("q_proj.weight", "v_proj.weight"))}
+    experts = {key for key in got if ".experts." in key}
+    assert attention and experts and moved == attention | experts, sorted(moved ^ (attention | experts))[:6]
+    for key in attention:
+        assert torch.equal(got[key], merged_attention[key]), f"{key} differs from PEFT's merge"
+    for key in experts:
+        assert torch.equal(got[key], expert_reference[key]), f"{key} differs from the merge-on-save"
+
+
+def test_an_expert_adapter_the_stream_cannot_fold_is_sent_to_the_merge_on_save(tmp_path):
+    """DeepSeek-V4's hub layout respells the expert layer's path, and the in-memory merge would drop expert deltas."""
+    _, adapter, _ = _expert_run(tmp_path, "deepseek_v4", None)
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="does not store") as refusal:
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    assert "merge_expert_lora_on_save" in str(refusal.value), refusal.value
+    assert "merges in memory" not in str(refusal.value), refusal.value
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+@pytest.mark.parametrize("remote_code", [True, False], ids=["auto-map", "unknown-type"])
+def test_a_remote_code_base_is_refused_with_the_flag_that_trusts_it(tmp_path, remote_code):
+    """The dense merge builds the base's class, so a config only the base's own code reads needs that code trusted; a
+    config transformers cannot read for another reason gets no such remedy."""
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    config = json.loads((base / "config.json").read_text())
+    config["model_type"] = "halo_unregistered_probe"
+    if remote_code:
+        config["auto_map"] = {"AutoConfig": "configuration_probe.ProbeConfig"}
+    (base / "config.json").write_text(json.dumps(config))
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError) as refusal:
+        merge_peft_adapter(str(adapter), str(out), streaming=True, trust_remote_code=False, verbose=False)
+    assert ("--trust_remote_code" in str(refusal.value)) is remote_code, refusal.value
+    assert not out.exists(), "a refused merge left an output directory behind"
 
 
 @pytest.mark.parametrize(

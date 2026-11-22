@@ -26,6 +26,7 @@ from halo.models.attention.backend_setup import (
     patch_transformers_flash_varlen_int_seqlen,
     patch_transformers_packed_sequence_probe,
 )
+from halo.models.attention.dsa_indexer import patch_glm5_next_indexer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.masked_matmul import dsa_matmul_enabled, install_glm5_next_masked_matmul
 from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
@@ -189,6 +190,9 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # of a long step, and cuDNN on Hopper.
     if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
         install_glm5_next_masked_matmul()
+    # Else a padded row's DSA indexer scores every query against every pool in one call, 96 fp32 bytes a squared token.
+    if model_type_matches(model_config, "glm5_next"):
+        patch_glm5_next_indexer()
     # Else each hyper-connection and its mix launch some 450 kernels a forward and backward, most of them on a Sinkhorn
     # matrix of 64 bytes a token, and copy the residual streams into fp32 several times over.
     apply_hyper_connection_patches(model_config)

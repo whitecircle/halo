@@ -17,7 +17,12 @@ from halo.configs.classification import ClassificationConfig, ClassificationScri
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.chat_render import tokenize_rendered
-from halo.data.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
+from halo.data.conversation import (
+    chat_template_kwargs,
+    reject_image_content,
+    resolve_json_value,
+    template_column_kwargs,
+)
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.sources.paths import EVAL_SPLIT_NAMES
 from halo.data.vlm_detection import reject_image_columns
@@ -70,6 +75,7 @@ def tokenize_classification_row(
     is_multi_label: bool,
     text_field: str | None = None,
     tools_field: str | None = None,
+    reasoning_effort_field: str | None = None,
 ) -> dict:
     """Reads a pre-built ``prompt`` or a raw ``text_field``. Module-level with every tunable in the signature, so the
     map's state rides in ``fn_kwargs``, which the cache key fingerprints. Rows over ``max_length`` are truncated,
@@ -84,7 +90,9 @@ def tokenize_classification_row(
         prompt,
         tokenize=False,
         add_generation_prompt=False,
-        **chat_template_kwargs(example, interleaved_thinking=False, tools_field=tools_field),
+        **chat_template_kwargs(
+            example, interleaved_thinking=False, tools_field=tools_field, reasoning_effort_field=reasoning_effort_field
+        ),
     )
     # tokenize_rendered handles the special tokens: a bare tokenizer() call re-adds the
     # post-processor's BOS on top of the template's (gemma-3 / Zaya / LFM2 all double it).
@@ -300,7 +308,7 @@ def main():
             "label_to_id": label_to_id,
             "is_multi_label": is_multi_label,
             "text_field": args.text_field,
-            "tools_field": args.tools_field,
+            **template_column_kwargs(args),
         },
         # With presharded data the ids change with world size, and a stale cache would keep the old ones.
         cache_key_extras={"label_list": label_list},

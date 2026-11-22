@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Rows train on the engine's prompt ids, so a server left on the checkpoint's template fails nothing, and the reasoning
-terms then charge for a contract the model never read. Byte-comparing renders cannot refuse, as an engine derives toggles
-the trainer's render lacks; a prompt that ignores the level can be read off the server alone."""
+terms then charge for a contract the model never read. With thinking on, byte-comparing renders cannot refuse, as an
+engine derives toggles the trainer's render lacks; a prompt that ignores the level can be read off the server alone."""
 
 import logging
 from types import SimpleNamespace
@@ -39,13 +39,14 @@ def engine(request):
     server.close()
 
 
-def _verify(server, client_cls, trainer=_trainer_ids, efforts=(_LOW, _HIGH)) -> None:
+def _verify(server, client_cls, trainer=_trainer_ids, efforts=(_LOW, _HIGH), template_kwargs=None) -> None:
     rollout = RolloutConfig(
         model_name="m",
         backend=client_cls.BACKEND_KEY,
         capture_routed_experts=True,
         max_tokens=4096,
         max_thinking_tokens=2048,
+        chat_template_kwargs=template_kwargs or {},
     )
     verify_server_chat_template([server.url], trainer, _MESSAGES, list(efforts), rollout, connection_timeout=5.0)
 
@@ -85,6 +86,26 @@ def test_a_render_that_differs_only_warns_since_an_engine_derives_a_toggle(engin
     with caplog.at_level(logging.WARNING):
         _verify(server, client_cls)
     assert "first at token 3 of 4/3" in caplog.text
+
+
+def test_with_thinking_off_a_render_that_differs_is_refused(engine):
+    """The request carries enable_thinking, so nothing derived explains a difference: a server template that ignores
+    the switch samples an open reasoning block the trainer's render closes."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2, 99]
+    with pytest.raises(ValueError, match="first at token 3 of 4/3.*enable_thinking") as refused:
+        _verify(server, client_cls, template_kwargs={"enable_thinking": False})
+    assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
+    bodies = [body for path, body in server.posted if path == "/v1/chat/completions"]
+    assert all(body["chat_template_kwargs"]["enable_thinking"] is False for body in bodies)
+
+
+def test_with_thinking_off_a_matching_server_passes(engine, caplog):
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2]
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls, template_kwargs={"enable_thinking": False})
+    assert "differently" not in caplog.text
 
 
 def test_a_trainer_template_with_no_level_cannot_refuse(engine):

@@ -12,6 +12,7 @@ from typing import Any, Literal, get_args
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError, RepositoryNotFoundError
 
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from halo.data.preprocessed.shard_index import (
     PREPROCESSING_VERSION,
     IncompatiblePreprocessedDataset,
@@ -37,7 +38,7 @@ _KNOB_MODES = {
             "conversation_field",
             "system_prompt",
             "model_supports_system_role",
-            "tools_field",
+            *TEMPLATE_COLUMN_KNOBS,
             "interleaved_thinking",
             "images_field",
             "train_on_completions_only",
@@ -70,6 +71,9 @@ _UNCOMPARED_FIELDS = frozenset(
     }
 )
 
+# Render knobs a stamp may not record: a stamp lacking one was baked at its default.
+_DEFAULTED_WHEN_UNRECORDED = ("reasoning_effort_field",)
+
 _PreprocessingMode = Literal["chat", "text"]
 _PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
 _DEFAULT_PACKING_STRATEGY = "bfd"
@@ -94,6 +98,10 @@ class PreprocessingConfig:
     )
     tools_field: str | None = field(
         default=None, metadata={"help": "Column holding a tool list for the chat template, as in training."}
+    )
+    reasoning_effort_field: str | None = field(
+        default=None,
+        metadata={"help": "Column holding each row's reasoning-effort level for the chat template, as in training."},
     )
     interleaved_thinking: bool = field(
         default=False, metadata={"help": "Keep thinking in non-final assistant turns (clear_thinking=False)."}
@@ -380,6 +388,7 @@ def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any
     if recorded.get("mode") == "text":
         # Raw-text artifacts render no chat template, so no knob was baked.
         return
+    recorded = {**{name: getattr(PreprocessingConfig, name) for name in _DEFAULTED_WHEN_UNRECORDED}, **recorded}
 
     unrecorded = [name for name in _RENDER_CHECKED_FIELDS if name not in recorded and hasattr(render_args, name)]
     if unrecorded:

@@ -44,7 +44,7 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRP
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
 from halo.data.chat_render import render_generation_prompt
-from halo.data.conversation import as_conversation
+from halo.data.conversation import as_conversation, template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
@@ -69,7 +69,7 @@ from halo.entrypoints.script import (
 from halo.environments.episodes.episode_keys import ANSWER_KEY
 from halo.environments.episodes.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_cap
 from halo.environments.registry import build_environment
-from halo.environments.rollout_config import VLLM_BACKEND
+from halo.environments.rollout_config import VLLM_BACKEND, verify_template_closes_thinking
 from halo.model_loading.parallel.frozen_models import (
     load_reference_model_for_on_policy_grpo,
     reject_unfit_on_policy_reference,
@@ -81,7 +81,10 @@ from halo.models.introspection.context_window import resolve_model_context_windo
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_score_centering
+from halo.trainers.grpo.environmental.environmental_rules import (
+    reject_unsupported_score_centering,
+    reject_whole_trajectory_render_of_rewritten_view,
+)
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
@@ -301,10 +304,14 @@ def main():
         ParallelismArguments,
     )
 
-    # The environment's registry supplies the schema, so a dataset tool column never reaches the template. The weight
-    # sync forwards names verbatim, and the text-only sibling's model.layers.* would miss the multimodal server's
-    # model.language_model.layers.* on first sync.
-    reject_unsupported_args("Environmental GRPO", tools_field=args.tools_field, text_only_model=args.text_only_model)
+    reject_unsupported_args(
+        "Environmental GRPO (the environment renders every episode; a row's own level reaches it as a "
+        "reasoning_effort column named in context_fields)",
+        **template_column_kwargs(args),
+    )
+    # The weight sync forwards names verbatim: a text-only sibling's model.layers.* would miss a multimodal server's
+    # model.language_model.layers.*.
+    reject_unsupported_args("Environmental GRPO", text_only_model=args.text_only_model)
     # The script pins max_completion_length to rollout_max_tokens below, so any other value is discarded.
     if grpo_config.max_completion_length not in (GRPOConfig.max_completion_length, async_config.rollout_max_tokens):
         raise ValueError(
@@ -321,6 +328,9 @@ def main():
     # environment_kwargs fails here.
     env_settings = env_config.to_env_config()
     probe_env = build_environment(env_config.environment_type, env_settings)
+    if not async_config.rollout_thinking:
+        probe_env.reject_settings_without_thinking()
+    reject_whole_trajectory_render_of_rewritten_view(probe_env, async_config.train_on_sampled_tokens)
 
     context = init_training_script(
         args,
@@ -386,6 +396,8 @@ def main():
     # has to fit; the multi-turn worst case is advisory.
     max_turns = probe_env.max_turns
     template_kwargs = probe_template_kwargs(async_config, probe_env)
+    if not async_config.rollout_thinking:
+        verify_template_closes_thinking(tokenizer, template_kwargs)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     full_trajectory_tokens = prompt_budget + worst_case_generation(async_config, max_turns)
     verify_context_window(

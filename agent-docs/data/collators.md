@@ -301,6 +301,9 @@ ends at the first token in the union of the model config's `eos_token_id` (scala
 (`resolve_eos_token_ids`, `halo/data/turn_markers.py`). This is required for templates that delimit
 turns with role markers instead of a per-turn `<|endoftext|>` — GLM-4 ends an assistant turn with
 `<|user|>` or `<|observation|>` and lists both in `config.eos_token_id`.
+An `eos_token` setting that names an id the config already lists keeps that list (`sync_special_token_id`), so
+GLM's role markers stay terminators and stay in the exported generation config; an id outside the
+list replaces it. A [pre-processed](dataset-preparation.md) bake with the same `eos_token` resolves the same set.
 
 A distinct pad token is deliberately **not** a terminator: on a right-padded row whose turn lacks a
 real terminator, the first trailing pad would close the span and train the model to predict pad.
@@ -319,6 +322,21 @@ rather than borrowing a later turn's terminator.
 The packed and padding-free routes add a global end-of-sequence fallback, where the last position
 substitutes only when the sequence has **no** terminator at all. The padded route has no fallback: on
 a padded row the last position is pad, so a terminator-less turn is masked out entirely.
+
+**A row's last assistant turn is closed at tokenization.** A template that ends a turn only at the next
+role marker (GLM's native ones, tool data included) writes nothing after the last turn of a row. Every
+render that trains that turn therefore appends the tokenizer's eos to a row that ends on an assistant turn
+with no terminator from the resolved set. The text row maps (flat SFT and teacher-distillation rows, tree
+rows, the offline text bake) and both self-distillation branches append it to
+the token ids (`close_final_assistant_turn`, `halo/data/chat_render.py`). The VLM renders (the runtime
+collators, their over-length filter and the offline VLM bake) append it to the text
+(`render_vlm_training_text`, `halo/data/vlm_render.py`), since a processor tokenizes and pads in one call;
+on a prefix LM it lands ahead of the newline the processor appends. Left open, that turn is masked under
+the padded and packed policies, since an earlier turn's role marker keeps the end-of-sequence fallback
+from firing, and trains with no stop under the self-distillation policy or without completion masking.
+A turn the template terminates stays as rendered, and a row ending on a user or tool turn, like a
+generation prompt, takes nothing. A tool-call turn a template ends with a stop only the generation config
+lists (gpt-oss's `<|call|>`, Gemma 4's `<|tool_response>`) is closed as well, its eos following that stop.
 
 **One span resolver, three named policies.** Every completion mask locates its spans with
 `resolve_completion_spans` in `halo/data/completion_spans.py`, under one of three declared policies:

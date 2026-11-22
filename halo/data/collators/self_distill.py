@@ -9,7 +9,7 @@ from typing import Any
 import torch
 from trl.trainer.utils import pad
 
-from halo.data.chat_render import render_conversation, tokenize_rendered
+from halo.data.chat_render import close_final_assistant_turn, render_conversation, tokenize_rendered
 from halo.data.collators.vlm import VLMDataCollator
 from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
@@ -194,6 +194,7 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         system_prompt: str | None = None,
         model_supports_system_role: bool = True,
         tools_field: str | None = None,
+        reasoning_effort_field: str | None = None,
         interleaved_thinking: bool = False,
         model_config=None,
     ):
@@ -209,6 +210,7 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.system_prompt = system_prompt
         self.model_supports_system_role = model_supports_system_role
         self.tools_field = tools_field
+        self.reasoning_effort_field = reasoning_effort_field
         self.interleaved_thinking = interleaved_thinking
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
@@ -302,8 +304,9 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
 def _encode_branch(
     collator: SelfDistillTextCollator, conversation: list[dict[str, Any]], row: dict[str, Any], branch: str
 ) -> tuple[list[int], list[int]]:
-    """Token ids, refused rather than truncated past ``max_length``, and labels masked outside completions with
-    ``train_on_completions_only``."""
+    """Token ids, the last assistant turn closed where the template leaves it open and the row refused rather than
+    truncated past ``max_length``, and labels masked outside completions with ``train_on_completions_only``. Both
+    branches end on the same turn, so both take the closing eos and stay response-aligned."""
     rendered = render_conversation(
         collator.tokenizer,
         conversation,
@@ -313,9 +316,12 @@ def _encode_branch(
         model_supports_system_role=collator.model_supports_system_role,
         interleaved_thinking=collator.interleaved_thinking,
         tools_field=collator.tools_field,
+        reasoning_effort_field=collator.reasoning_effort_field,
     )
     # tokenize_rendered single-sources the specials: add_special_tokens=True double-BOSes templates emitting BOS.
-    input_ids = torch.tensor([tokenize_rendered(collator.tokenizer, rendered)["input_ids"]])
+    encoded = tokenize_rendered(collator.tokenizer, rendered)
+    close_final_assistant_turn(encoded, conversation, collator.tokenizer, collator.eos_token_ids)
+    input_ids = torch.tensor([encoded["input_ids"]])
     if input_ids.size(1) > collator.max_length:
         raise ValueError(
             f"Self-distillation {branch} branch contains a {input_ids.size(1)}-token sequence, "

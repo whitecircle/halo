@@ -528,20 +528,28 @@ and with `save_sharded_ep: true`.
 ### Streaming merge
 
 `merge_peft_adapters.py --streaming` (automatic for an adapter holding native expert LoRA, whose in-memory merge is
-refused) loads no model: it reads each tensor of the base's safetensors shards, folds the adapter into the ones it
-targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
+refused) loads no weights into a model: it reads each tensor of the base's safetensors shards, folds the adapter into
+the ones it targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
 fp32 expert deltas of the layer being folded and the writer's parts: about one expert layer's fp32 delta times a small
 factor (the preflight budgets 3x), which at 397B scale is tens of GB per layer. Linear LoRA (rslora,
 rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
 merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
 arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
-the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` is ignored (logged) and `--device_map`,
-`--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
-first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
-a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
-grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
-those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
-the adapter config lands in `original_adapter_config/`.
+the base's. A linear adapter's module path and a `modules_to_save` name reach the key the base stores them under as
+`from_pretrained` renames it, planned on a weightless shell of the class the base's config names, so a module the hub
+layout spells another way folds into its hub key (GLM-5 Next's `forget_gate.f_a_proj`, stored as `f_a_proj`). Expert
+tensors are matched under the layer's module path. Tensors keep the base's stored dtype and key spelling, so `--dtype`
+is ignored (logged) and `--device_map`, `--fp32_norms` and `--task classification` are refused. The tool resolves
+every tensor the adapter rewrites against the base before the first write and raises, with no output, when one has no
+stored key of its own (a text-only class's spelling, a tensor the load fuses or splits out of other keys, a tied head,
+expert tensors of a family whose hub layout respells the layer path: DeepSeek-V4, Nemotron-H, Step-3.7 Flash and the
+multimodal classes of Inkling and Mistral Small 4), when the
+base's experts are not in the family's export layout, when a stored tensor was resized (a
+grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks. A dense
+adapter it refuses merges in memory; one holding expert LoRA folds only through `merge_expert_lora_on_save: true`. The
+shell's class comes from the base's config, so a remote-code base needs `--trust_remote_code`, off by default for an
+adapter on a Hub base. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them,
+and the adapter config lands in `original_adapter_config/`.
 
 **Adapters must train.** Trainer construction runs `verify_adapters_trainable` (`halo/model_loading/parallel/peft_setup.py`)
 on the PEFT wrap before any mode wraps the model, so the check covers every mode alike. It raises when a tuner layer

@@ -747,21 +747,39 @@ def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
     assert function_cache_id(caller) != before
 
 
-def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
-    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
-    processor = build_tree_row_processor(
+def _tree_row_processor(tokenizer, eos_token_ids):
+    return build_tree_row_processor(
         tokenizer,
         64,
         conversation_field="conversation",
         share_markers=("<tool_response>",),
         share_requires=None,
-        eos_token_ids=frozenset({tokenizer.eos_token_id}),
+        eos_token_ids=eos_token_ids,
         assistant_message_template="<|im_start|>assistant\n",
         train_on_last_assistant_only=False,
     )
+
+
+def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    processor = _tree_row_processor(tokenizer, frozenset({tokenizer.eos_token_id}))
     before = function_cache_id(processor)
     _edit_source_of(serialize_tree, monkeypatch)
     assert function_cache_id(processor) != before
+
+
+def test_the_tree_map_key_covers_the_terminators():
+    """They decide which rows the map closes and where a trained span ends, so two models on one tokenizer that
+    list different ones build different trees."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    eos, role_marker = tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|im_start|>")
+    ds = _make_dataset(4)
+
+    def name_for(eos_token_ids):
+        return map_cache_file_name("map", _tree_row_processor(tokenizer, eos_token_ids), ds, "trees", {})
+
+    assert name_for(frozenset({eos})) != name_for(frozenset({eos, role_marker}))
+    assert name_for(frozenset({eos})) == name_for(frozenset({eos}))
 
 
 def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():

@@ -109,7 +109,9 @@ def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, last_only=True)
 
 def _flat_examples(tokenizer, conversations, *, last_only=True) -> list[tuple[list[int], list[int]]]:
     """(tokens, labels) of every row by the flat packed pipeline."""
-    tokenize = build_chat_row_processor(tokenizer, MAX_LENGTH, conversation_field="conversation")
+    tokenize = build_chat_row_processor(
+        tokenizer, MAX_LENGTH, conversation_field="conversation", eos_token_ids=resolve_eos_token_ids(tokenizer)
+    )
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE,
         tokenizer=tokenizer,
@@ -529,6 +531,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             model_supports_system_role=False,
             interleaved_thinking=False,
             tools_field=None,
+            reasoning_effort_field=None,
             train_on_completions_only=True,
             assistant_message_template=template,
             train_on_last_assistant_only=True,

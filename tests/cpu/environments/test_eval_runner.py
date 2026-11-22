@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import types
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -152,6 +153,48 @@ async def test_an_episode_that_raises_records_its_exception_type(monkeypatch):
     assert row["samples"][0]["error"] == "TimeoutError"
 
 
+@pytest.mark.parametrize(
+    ("raw", "refusal"),
+    [("{not json", "HALO_EVAL_EXTRA_BODY is not JSON"), ("[1]", "HALO_EVAL_EXTRA_BODY must be a JSON object")],
+)
+async def test_an_extra_body_that_is_no_json_object_refuses_the_eval(monkeypatch, raw, refusal):
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", raw)
+    with pytest.raises(ValueError, match=refusal):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING)
+
+
+async def test_an_extra_body_over_a_field_the_eval_writes_refuses_the_eval(monkeypatch):
+    """Laid over last, it would replace the run's own field: a thinking-off contract's enable_thinking, say."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"chat_template_kwargs": {}}))
+    rollout = replace(_RETRYING, chat_template_kwargs={"enable_thinking": False})
+    with pytest.raises(ValueError, match=r"HALO_EVAL_EXTRA_BODY sets \['chat_template_kwargs'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=rollout)
+
+
+@pytest.mark.parametrize("field", ["temperature", "top_p", "max_tokens", "model", "messages", "tools"])
+async def test_an_extra_body_over_a_field_the_sdk_takes_as_a_keyword_refuses_the_eval(monkeypatch, field):
+    """The SDK lays extra_body over the whole body, keyword fields included: ``{"temperature": 0}`` would sample the
+    whole eval greedily under the run's name."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({field: 0}))
+    with pytest.raises(ValueError, match=rf"HALO_EVAL_EXTRA_BODY sets \['{field}'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING)
+
+
+async def test_an_extra_body_set_before_the_run_reaches_every_request(monkeypatch):
+    sent = []
+    replies = iter([_tool_call_response(), chat_reply("done")])
+
+    async def _chat(client, **request):
+        sent.append(request)
+        return next(replies)
+
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"provider": {"order": ["a"]}}))
+    monkeypatch.setattr(eval_runner, "chat_completion", _chat)
+    rollout = RolloutConfig(model_name="m", max_tokens=16)
+    await collect_results(_tooled_env(), [{"prompt": "task", "context": {}}], client=object(), rollout=rollout)
+    assert len(sent) == 2 and all(request["extra_body"]["provider"] == {"order": ["a"]} for request in sent)
+
+
 def _tooled_env(**kw) -> NativeToolUseEnvironment:
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
@@ -173,7 +216,12 @@ def _tool_call_response():
 async def _run_scripted_episode(env, script, monkeypatch):
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat(script))
     return await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
 
 
@@ -274,6 +322,7 @@ async def test_the_eval_keeps_a_cut_call_on_its_turn_and_in_the_record_without_r
         {},
         client=object(),
         rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
 
     salvaged = {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"x": "# still re'}}
@@ -325,7 +374,12 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
     monkeypatch.setattr(env, "get_tools_schema", _schema)
     monkeypatch.setattr(eval_runner, "chat_completion", _generate)
     await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
     assert seen["tools"], "the generation ran without the tools the environment registers on reset"
 
@@ -353,7 +407,7 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
     problems = [f"problem {i}" for i in range(12)]
     for _ in range(2):
         for problem in problems:
-            await run_episode(env, problem, {}, client=object(), rollout=rollout)
+            await run_episode(env, problem, {}, client=object(), rollout=rollout, extra_body={})
     stable = [stable_reasoning_effort(problem) for problem in problems]
     assert len(set(stable)) > 1, "every problem draws one level, so matching it proves nothing"
     assert levels == stable * 2
@@ -378,7 +432,7 @@ async def test_a_captured_turn_records_the_reasoning_it_sampled(monkeypatch):
     rollout = RolloutConfig(
         model_name="m", max_tokens=16, max_thinking_tokens=8, capture_token_ids=True, reasoning_end_token_id=end
     )
-    traj = await run_episode(_tooled_env(), "task", {}, client=object(), rollout=rollout)
+    traj = await run_episode(_tooled_env(), "task", {}, client=object(), rollout=rollout, extra_body={})
     turn = next(m for m in serialize_trajectory(traj)["messages"] if m["role"] == "assistant")
     assert (turn["reasoning_tokens"], turn["thinking_cap"]) == (4, 8)
     assert sent[0]["extra_body"]["logprobs"] is True and sent[0]["extra_body"]["return_token_ids"] is True
@@ -400,7 +454,7 @@ async def test_a_call_cut_at_the_cap_is_recorded_as_the_policy_wrote_it(monkeypa
 
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([cut, chat_reply("done")]))
     rollout = RolloutConfig(model_name="m", max_tokens=len(ids), capture_token_ids=True, reasoning_end_token_id=end)
-    traj = await run_episode(_tooled_env(), "task", {}, client=_Client(), rollout=rollout)
+    traj = await run_episode(_tooled_env(), "task", {}, client=_Client(), rollout=rollout, extra_body={})
     turn = next(m for m in traj.messages if m.role == "assistant")
     assert decoded == [("http://x:8000/detokenize", [21, 22, 23])]
     assert turn.cut_tool_calls[0]["function"]["arguments"] == "<call>echo 1+ # cut"
@@ -417,7 +471,12 @@ async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     monkeypatch.setattr(env, "finalize_truncated", lambda eids: (_ for _ in ()).throw(RuntimeError("finalize boom")))
     with pytest.raises(RuntimeError, match="finalize boom"):
         await run_episode(
-            env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+            env,
+            "task",
+            {},
+            client=object(),
+            rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+            extra_body={},
         )
     assert env._trajectories == {}
 
@@ -576,7 +635,12 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
         ),
     )
     traj = await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
     observations = [m.content for m in traj.messages if m.role == "tool"]
     assert observations[-1] == "persisted", observations
@@ -625,7 +689,7 @@ async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
         return await scripted(client, **request)
 
     monkeypatch.setattr(eval_runner, "chat_completion", _counting)
-    traj = await run_episode(env, "task", {}, client=object(), rollout=rollout)
+    traj = await run_episode(env, "task", {}, client=object(), rollout=rollout, extra_body={})
     return traj, len(calls)
 
 

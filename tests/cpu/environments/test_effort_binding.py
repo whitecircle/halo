@@ -115,6 +115,7 @@ async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
         dict(context or {}),
         None,
         rollout=config or ray_actors.RolloutConfig(model_name="m", temperature=0.7, max_tokens=_MAX_TOKENS),
+        extra_body={},
     )
     return calls, traj
 

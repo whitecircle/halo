@@ -119,7 +119,8 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
   no document markers, so leave it unset. `text_only_model: true` builds transformers' class either way.
 - Pipeline parallelism takes the text tower only and passes tiny-model GPU tests only.
 - `save_sharded_ep` and `merge-ep-shards` are refused. Gathered saves stream one layer at a time.
-- `merge-peft-adapters` streams the merge of expert adapters; `merge_expert_lora_on_save` folds them at training time instead.
+- `merge-peft-adapters` merges attention and Mamba adapters but refuses expert adapters: the release stores the
+  experts under another layer path. Fold them at training time with `merge_expert_lora_on_save: true`.
 
 ## Export and serve
 

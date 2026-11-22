@@ -179,6 +179,7 @@ def render_preference_row(
     row: dict[str, Any],
     tokenizer: PreTrainedTokenizer,
     tools_field: str | None = None,
+    reasoning_effort_field: str | None = None,
 ) -> dict[str, str]:
     row = normalize_preference_row(row)
 
@@ -186,7 +187,9 @@ def render_preference_row(
     for field in ("prompt", "chosen", "rejected"):
         reject_image_content(row[field], f"preference field '{field}'")
 
-    template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=tools_field)
+    template_kwargs = chat_template_kwargs(
+        row, interleaved_thinking=False, tools_field=tools_field, reasoning_effort_field=reasoning_effort_field
+    )
     row["prompt"], (row["chosen"], row["rejected"]) = render_prompt_completions(
         partial(tokenizer.apply_chat_template, tokenize=False, **template_kwargs),
         row["prompt"],
@@ -201,8 +204,14 @@ def prepare_preference_datasets(
     tokenizer: PreTrainedTokenizer,
     num_proc: int = DATASET_NUM_PROC,
     tools_field: str | None = None,
+    reasoning_effort_field: str | None = None,
 ):
-    process_fn = partial(render_preference_row, tokenizer=tokenizer, tools_field=tools_field)
+    process_fn = partial(
+        render_preference_row,
+        tokenizer=tokenizer,
+        tools_field=tools_field,
+        reasoning_effort_field=reasoning_effort_field,
+    )
     train_dataset = coordinated_map(
         train_dataset, process_fn, desc="Applying chat template to train dataset", num_proc=num_proc
     )
@@ -212,10 +221,14 @@ def prepare_preference_datasets(
     return train_dataset, eval_dataset
 
 
-def _normalized_generative_row(row, tokenizer, max_length, tools_field=None):
+def _normalized_generative_row(row, tokenizer, max_length, tools_field=None, reasoning_effort_field=None):
     """Normalized first: the raw test split still carries hub shapes :func:`prepare_generative_row` cannot template."""
     return prepare_generative_row(
-        normalize_preference_row(row), tokenizer=tokenizer, max_length=max_length, tools_field=tools_field
+        normalize_preference_row(row),
+        tokenizer=tokenizer,
+        max_length=max_length,
+        tools_field=tools_field,
+        reasoning_effort_field=reasoning_effort_field,
     )
 
 
@@ -225,6 +238,7 @@ def prepare_generative_dataset(
     max_prompt_length: int,
     num_proc: int = DATASET_NUM_PROC,
     tools_field: str | None = None,
+    reasoning_effort_field: str | None = None,
 ):
     return coordinated_map(
         dataset,
@@ -233,6 +247,7 @@ def prepare_generative_dataset(
             tokenizer=tokenizer,
             max_length=max_prompt_length,
             tools_field=tools_field,
+            reasoning_effort_field=reasoning_effort_field,
         ),
         num_proc=num_proc,
         desc="Preparing dataset for generation",

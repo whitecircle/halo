@@ -42,7 +42,7 @@ python scripts/environments/inference/eval_env.py --env_type qa_search \
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config, which may not carry an option a flag sets (`max_turns`) |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: [Generation budget](environments/tasks/code-contests/evaluation.md#generation-budget)) / 180 s | Sampling, HTTP timeout |
 
-Every request also sends `top_k`, `min_p` and `repetition_penalty` (the run's `rollout_*` values under `--training_config`, else off), so a served model's `generation_config.json` never filters the eval.
+Every request also sends `top_k`, `min_p` and `repetition_penalty` (the run's `rollout_*` values under `--training_config`, else off), so a served model's `generation_config.json` never filters the eval. [`HALO_EVAL_EXTRA_BODY`](../../reference/configuration-reference.md#environment-variables) adds an endpoint's own options, such as OpenRouter's provider routing.
 
 A message-list `prompt` reaches the environment as its last `user` turn, as in training; a row with no `user` turn, or a non-text content part in it, is refused before any episode runs.
 
@@ -56,7 +56,7 @@ A message-list `prompt` reaches the environment as its last `user` turn, as in t
 
 `--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/eval_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, reasoning cap and episode output budget, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
 
-- It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a reasoning cap the served model type cannot enforce (Mistral 4; `reject_unenforceable_thinking_budget`).
+- It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), under vLLM a reasoning cap the served model type cannot enforce (Mistral 4; `reject_unenforceable_thinking_budget`), and under `rollout_thinking: false` an environment setting that needs reasoning (`reject_settings_without_thinking`; [Thinking off](reasoning.md#thinking-off)).
 - The YAML's dataset keys (`dataset`, `prompt_field`, `answer_field`, `context_fields`) are not read: pass the matching flags.
 - A relative path in the YAML, a judge's `context_file` included, resolves against the cwd: run from the repo root, where `halo launch` runs training.
 - The eval joins no process group, so a recipe whose `episode_timeout` needs a raised `DIST_NCCL_TIMEOUT_MINUTES` in training evaluates without it.

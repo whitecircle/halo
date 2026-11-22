@@ -42,10 +42,11 @@ test together: a column missing from any dataset, or whose feature type differs 
 dropped, with no fixed allowlist.
 
 The **declared** render columns are the exception. A declared `conversation_field` must be in every
-entry: a source without it raises, naming that source. `tools_field` may be missing from some entries,
-which get a null-filled column of the carrying entry's type, so a mixed corpus keeps its tools. A
-declared column the intersection loses anyway (a type mismatch across the entries, which no fill can
-bridge) raises rather than rendering the whole corpus without it.
+entry: a source without it raises, naming that source. `tools_field` and `reasoning_effort_field` may be
+missing from some entries, or held as nulls only (Arrow's `null` type), which get a null-filled column of
+the carrying entry's type, so a mixed corpus keeps its tools and levels. A declared column typed differently
+across the datasets (two entries, or one entry's train and test) raises as a type mismatch naming them, rather
+than rendering the whole corpus without it.
 
 **Which rows a ratio keeps** is drawn without replacement from `numpy.random.default_rng(seed)`
 (PCG64) — seed `42`, `+1` for the `test` split and stepped per list entry, so every rank selects the
@@ -89,10 +90,13 @@ its own default (`messages` for teacher distillation, `prompt` elsewhere), so a 
 raises whether or not the YAML names one. Scripts that render no conversation (preference, reward,
 classification, embedding) declare none and skip the check.
 
-`tools_field` is checked the same way for a single dataset. Across a `dataset:` list it raises only
-when **no** source carries the column and warns per source otherwise — a tool-use corpus concatenated
-with plain chat is a legitimate shape, and only the rows of the sources without the column render
-toolless. Pre-processed datasets skip both checks; their rows are already tokenized.
+`tools_field` and `reasoning_effort_field` (each row's own level, rendered as the template's
+`reasoning_effort`: [Configuration Reference](../reference/configuration-reference.md#commonscriptarguments))
+are checked the same way for a single dataset. Across a `dataset:` list each raises only when **no**
+source carries its column and warns per source otherwise — a tool-use or effort-labelled corpus
+concatenated with plain chat is a legitimate shape, and only the rows of the sources without the column
+render toolless or with no level. Pre-processed datasets skip these checks; their rows are already
+tokenized.
 
 ## SFT
 
@@ -101,6 +105,19 @@ toolless. Pre-processed datasets skip both checks; their rows are already tokeni
 ```
 
 Multi-turn: include all turns in the single `prompt` list.
+
+Tool-use rows keep the OpenAI message shape: an assistant turn carries `tool_calls`, a `tool` turn its
+result, and `tools_field` names the column of tool schemas. A call's `arguments` is a mapping or its JSON
+text (the wire form). Chat templates take the mapping: one that writes a block per argument (Qwen3.5/3.6,
+Gemma 4, GLM native) raises on the text, and one that applies `tojson` to it writes a quoted, escaped
+string. Under those the text SFT render (`conversation_field` rows, self-distillation
+included) and the online and environmental GRPO prompt render parse the text first, as a serving engine
+parses a request's, and raise on text that is not a JSON object. A template that writes the text as stored
+(the bundled `qwen3-native.jinja` and `gpt-oss-harmony.jinja`) keeps the row's spelling.
+`resolve_template_conversation` (`halo/data/chat_render.py`) decides per template, and separately for a render
+that declares tools and one that does not: a tokenizer holding named templates renders the first with its
+`tool_use` one. SFT-VLM rows and the preference, offline GRPO, reward and classification renderers hand a call to
+the template as stored.
 
 ```yaml
 conversation_field: "prompt"             # conversation column (default "prompt")

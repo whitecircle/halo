@@ -24,6 +24,9 @@ class _Processor:
 
 
 class _Tokenizer:
+    # No eos: the over-length filter then measures every row as rendered.
+    eos_token_id = None
+
     def __call__(self, text, add_special_tokens=False):
         return {"input_ids": text.split()}
 
@@ -47,6 +50,7 @@ def _args() -> SimpleNamespace:
         system_prompt=None,
         model_supports_system_role=True,
         tools_field=None,
+        reasoning_effort_field=None,
         interleaved_thinking=False,
         assistant_message_template=None,
         train_on_completions_only=False,

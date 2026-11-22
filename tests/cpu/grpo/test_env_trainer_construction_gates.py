@@ -48,6 +48,8 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
 # site would leave those tests green and the gate dead.
 _INIT_GATES = (
     "reject_unverified_carried_reasoning",
+    "reject_settings_without_thinking",
+    "reject_whole_trajectory_render_of_rewritten_view",
     "reject_straddling_train_groups",
     "reject_straddling_eval_groups",
     "keep_all_dataset_columns",

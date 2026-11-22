@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Offline-GRPO text prep: completions render as ``template(prompt + completion)`` minus the rendered-prompt prefix
-(standalone raises on strict templates and injects a mid-sequence BOS), and the eval-generation prompt's null cap
-means no cap."""
+(standalone raises on strict templates and injects a mid-sequence BOS) at the row's level, and the eval-generation
+prompt's null cap means no cap."""
 
 from functools import partial
+from types import SimpleNamespace
 
 import pytest
 from accelerate import PartialState
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 
 PartialState()
 
+import scripts.training.grpo.offline as offline_script
+from halo.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
+from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.data.pipeline.text_rows import prepare_generative_row
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
-from scripts.training.grpo.offline import render_offline_grpo_row
 
 
 class StrictTemplateTokenizer:
@@ -48,17 +52,75 @@ ROW = {
 
 
 def test_offline_grpo_render_survives_strict_template():
-    out = render_offline_grpo_row(
-        {**ROW, "completions": [list(c) for c in ROW["completions"]]}, StrictTemplateTokenizer(), None
+    out = offline_script.render_offline_grpo_row(
+        {**ROW, "completions": [list(c) for c in ROW["completions"]]}, StrictTemplateTokenizer(), None, None
     )
     assert out["prompt"] == "<|user|>What is 2+2?<|end|>"
     assert out["completions"] == ["<|assistant|>4<|end|>", "<|assistant|>five<|end|>"]
 
 
+class EffortTemplateTokenizer(StrictTemplateTokenizer):
+    """Writes the row's level ahead of the conversation, as an effort template's system block does."""
+
+    def apply_chat_template(self, messages, tokenize=False, reasoning_effort=None, **kwargs):
+        return f"<|effort|>{reasoning_effort}<|end|>" + super().apply_chat_template(messages, tokenize, **kwargs)
+
+
+def test_offline_grpo_render_carries_the_row_level():
+    """The prompt states the row's level, and each completion still splits off the prompt rendered at that level."""
+    row = {**ROW, "completions": [list(c) for c in ROW["completions"]], "effort": "high"}
+    out = offline_script.render_offline_grpo_row(row, EffortTemplateTokenizer(), None, "effort")
+    assert out["prompt"] == "<|effort|>high<|end|><|user|>What is 2+2?<|end|>"
+    assert out["completions"] == ["<|assistant|>4<|end|>", "<|assistant|>five<|end|>"]
+
+
+class _RenderMapReached(Exception):
+    """Raised by the stand-in chat-template map, carrying the row function ``main()`` handed it."""
+
+
+def test_main_renders_each_rows_level(monkeypatch, tmp_path):
+    """``main()``'s map is the one path from the configured level column to the template."""
+    args = OfflineGRPOScriptArguments(dataset="org/offline", reasoning_effort_field="effort")
+    config = OfflineGRPOConfig(output_dir=str(tmp_path), use_cpu=True, bf16=False, report_to="none")
+    splits = DatasetDict(train=Dataset.from_list([ROW]), test=Dataset.from_list([ROW]))
+    tokenizer = EffortTemplateTokenizer()
+
+    def reach(dataset, function, **_kwargs):
+        raise _RenderMapReached(function)
+
+    stubs = {
+        "parse_script_args": lambda *_: (args, config, ModelArguments(model_name_or_path="local"), SimpleNamespace()),
+        "init_training_script": lambda *a, **k: SimpleNamespace(parallelism_config=ParallelismConfig()),
+        "load_script_datasets": lambda *a, **k: (splits, False),
+        "default_padded_attn_implementation": lambda *a, **k: "sdpa",
+        "load_model_and_tokenizer": lambda *a, **k: (None, tokenizer),
+        "apply_prompt_completion_window": lambda *a, **k: (tokenizer, None),
+        "configure_adapter_training": lambda *a, **k: None,
+        "_load_kl_reference": lambda *a, **k: None,
+        "log_model_info": lambda *a, **k: None,
+        "coordinated_map": reach,
+    }
+    for name, stub in stubs.items():
+        monkeypatch.setattr(offline_script, name, stub)
+    with pytest.raises(_RenderMapReached) as reached:
+        offline_script.main()
+
+    render = reached.value.args[0]
+    row = {**ROW, "completions": [list(c) for c in ROW["completions"]], "effort": "high"}
+    assert render(row)["prompt"] == "<|effort|>high<|end|><|user|>What is 2+2?<|end|>"
+
+
 def test_offline_grpo_rendered_supplied_references_are_refused_by_the_trainer():
     scores = [[-0.5, -0.75], [-1.25]]
     raw = Dataset.from_list([{**ROW, REF_PER_TOKEN_LOGPS_COLUMN: scores}])
-    rendered = raw.map(partial(render_offline_grpo_row, tokenizer=StrictTemplateTokenizer(), tools_field=None))
+    rendered = raw.map(
+        partial(
+            offline_script.render_offline_grpo_row,
+            tokenizer=StrictTemplateTokenizer(),
+            tools_field=None,
+            reasoning_effort_field=None,
+        )
+    )
     assert rendered["completions"][0] == ["<|assistant|>4<|end|>", "<|assistant|>five<|end|>"]
     with pytest.raises(ValueError, match="Supplied ref_per_token_logps"):
         reject_unsupported_reference_input(rendered, None)
@@ -66,7 +128,9 @@ def test_offline_grpo_rendered_supplied_references_are_refused_by_the_trainer():
 
 def test_offline_grpo_render_no_mid_sequence_bos():
     tok = BosTemplateTokenizer()
-    out = render_offline_grpo_row({**ROW, "completions": [list(c) for c in ROW["completions"]]}, tok, None)
+    out = offline_script.render_offline_grpo_row(
+        {**ROW, "completions": [list(c) for c in ROW["completions"]]}, tok, None, None
+    )
     for completion in out["completions"]:
         assert tok.bos_token not in completion, f"mid-sequence BOS in completion: {completion!r}"
         # The prefix-strip invariant: prompt + completion reconstructs the full rendered conversation.

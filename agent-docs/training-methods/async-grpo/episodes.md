@@ -87,6 +87,8 @@ What follows:
 - A cut or empty turn is nudged and retried within `max_turns` and `max_length_cutoff_recoveries` (`null` = no cap
   beyond `max_turns`), a cap the two kinds share. A rejected turn is answered with the refusals and spends a turn, not
   the cap.
+- A nudge names the reasoning (a call written inside it is not run) only when the turn it answers carried some; a
+  turn with none gets the same fact without it.
 - Every cut turn counts under `episode/length_cutoff_turns` and every empty one under `episode/empty_turns`, the one
   that ends the episode included. Under the native protocol, a turn cut at its token cap with a tool call the
   server's parser salvaged also counts under `episode/length_cutoff_in_call_turns`.
@@ -130,7 +132,7 @@ Rows train on the engine's prompt ids, so a mismatch shows in no loss. The start
 of a no-tool prompt under two of the run's contracts: a server whose prompt does not move with the level, where the
 trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
 difference warns with the first differing token, since an engine also derives a thinking toggle the trainer's render
-lacks.
+lacks; with [thinking off](reasoning.md#thinking-off) the request carries that toggle, so it refuses.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
 it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
@@ -138,4 +140,5 @@ it, and no `--chat-template` on the server, the two sides diverge silently. The 
 per-turn rows take the engine's ids and cannot drift.
 
 `rollout_chat_template_kwargs` applies template variables to every request **and** the trainer's own renders. It
-refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)).
+refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)), and
+`enable_thinking`, which `rollout_thinking` writes ([Thinking off](reasoning.md#thinking-off)).

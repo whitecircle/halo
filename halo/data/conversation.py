@@ -16,6 +16,8 @@ UNSUPPORTED_MEDIA_PART_TYPES = frozenset(
 # What a template can write as text. ``thinking`` is a real part of the assistant turn on Mistral Small 4 and Command A+,
 # whose templates render it as their reasoning block; ``None`` is a part with no type.
 _TEXT_PART_TYPES = (None, "text", "thinking")
+# The config knobs naming a dataset column whose per-row cell a chat template reads.
+TEMPLATE_COLUMN_KNOBS = ("tools_field", "reasoning_effort_field")
 
 
 def resolve_json_value(value):
@@ -34,6 +36,60 @@ def as_conversation(prompt: Any) -> Any:
     if isinstance(prompt, str):
         return [{"role": "user", "content": prompt}]
     return prompt
+
+
+def _call_function(call: Any) -> Any:
+    """What holds a call's name and arguments: its ``function``, or the call itself in the flat form."""
+    function = call.get("function") if isinstance(call, dict) else None
+    return function if isinstance(function, dict) else call
+
+
+def _message_tool_calls(message: Any) -> list:
+    calls = message.get("tool_calls") if isinstance(message, dict) else None
+    return calls if isinstance(calls, list) else []
+
+
+def has_wire_form_arguments(conversation: Any) -> bool:
+    """Whether a tool call carries its ``arguments`` as text, the OpenAI wire form, where a chat template that writes
+    one block per argument takes a mapping."""
+    if not isinstance(conversation, list):
+        return False
+    functions = (_call_function(call) for message in conversation for call in _message_tool_calls(message))
+    return any(isinstance(function, dict) and isinstance(function.get("arguments"), str) for function in functions)
+
+
+def _parse_call_arguments(call: Any) -> Any:
+    function = _call_function(call)
+    if not isinstance(function, dict) or not isinstance(function.get("arguments"), str):
+        return call
+    text = function["arguments"]
+    try:
+        arguments = json.loads(text) if text.strip() else {}
+    except json.JSONDecodeError:
+        arguments = None
+    if not isinstance(arguments, dict):
+        shown = text if len(text) <= 200 else f"{text[:200]}… (+{len(text) - 200} more characters)"
+        raise ValueError(
+            f"Tool call '{function.get('name')}' carries arguments that are not a JSON object ({shown!r}), and the "
+            f"chat template renders a call's arguments as a mapping, one pair at a time. Store the arguments as a JSON "
+            f"object or its text, or drop the row."
+        )
+    parsed = {**function, "arguments": arguments}
+    return parsed if function is call else {**call, "function": parsed}
+
+
+def parse_tool_call_arguments(conversation: Any) -> Any:
+    """``conversation`` with every tool call's wire-form ``arguments`` (JSON text) parsed into a mapping, an empty
+    string as no arguments, the way a serving engine parses a request's before it renders; the input is left as it
+    was. Raises on text that is not a JSON object."""
+    if not isinstance(conversation, list):
+        return conversation
+    return [
+        {**message, "tool_calls": [_parse_call_arguments(call) for call in _message_tool_calls(message)]}
+        if _message_tool_calls(message)
+        else message
+        for message in conversation
+    ]
 
 
 def _content_parts(conversation: Any) -> Iterator[dict]:
@@ -96,12 +152,40 @@ def reject_image_content(conversation: Any, source: str) -> None:
         )
 
 
-def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None) -> dict:
+def template_column_kwargs(config: Any) -> dict[str, str | None]:
+    """``config``'s template columns by knob, one dict for a renderer and its map-cache key."""
+    return {knob: getattr(config, knob) for knob in TEMPLATE_COLUMN_KNOBS}
+
+
+def resolve_row_reasoning_effort(row: dict[str, Any], reasoning_effort_field: str | None) -> str | None:
+    """The row's level, or ``None`` for a null cell or an unset field; raises on a cell that is not a non-blank
+    string, which a template would render as a level (gpt-oss writes ``Reasoning: `` for an empty one)."""
+    if not reasoning_effort_field or row.get(reasoning_effort_field) is None:
+        return None
+    level = row[reasoning_effort_field]
+    if not isinstance(level, str) or not level.strip():
+        raise ValueError(
+            f"reasoning_effort_field='{reasoning_effort_field}' holds the cell {level!r}, while the chat template takes "
+            f"reasoning_effort as a level string. Store each level as a string such as 'low', 'medium' or 'high' (a "
+            f"null cell passes no level, so the template's own default applies), or point reasoning_effort_field at "
+            f"the column holding them."
+        )
+    return level
+
+
+def chat_template_kwargs(
+    row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None, reasoning_effort_field: str | None
+) -> dict:
+    """The template variables for ``row``: ``clear_thinking`` under interleaved thinking, then the row's tools and
+    reasoning-effort level, each only when it has one."""
     template_kwargs = {"clear_thinking": False} if interleaved_thinking else {}
     if tools_field and tools_field in row:
         tools = resolve_json_value(row[tools_field])
         if tools is not None:
             template_kwargs["tools"] = tools
+    level = resolve_row_reasoning_effort(row, reasoning_effort_field)
+    if level is not None:
+        template_kwargs["reasoning_effort"] = level
     return template_kwargs
 
 

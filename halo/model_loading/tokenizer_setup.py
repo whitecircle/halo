@@ -12,7 +12,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrain
 from transformers.utils import cached_file
 
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
-from halo.models.introspection.config_access import set_config_field
+from halo.models.introspection.config_access import configs_declaring
 from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.models.mtp.head import find_mtp_head
@@ -128,13 +128,30 @@ def reject_dropped_chat_template(args: CommonScriptArguments, tokenizer: PreTrai
     )
 
 
+def _record_token_id(level, field: str, token_id) -> None:
+    """A level that lists several ids, ``token_id`` among them, keeps its list: GLM names the role markers that end a
+    turn beside its eos, and a scalar there would end no span at them and export a model that stops at none."""
+    listed = getattr(level, field, None)
+    if not (isinstance(listed, (list, tuple)) and token_id in listed):
+        setattr(level, field, token_id)
+
+
+def record_special_token_id(config, field: str, token_id) -> list:
+    """Record ``token_id`` on every level of ``config`` declaring ``field``, a level whose list holds it keeping the
+    list; returns those levels."""
+    levels = configs_declaring(config, field)
+    for level in levels:
+        _record_token_id(level, field, token_id)
+    return levels
+
+
 def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -> None:
     """Record a special-token id on every config level declaring ``field`` and the generation config. Composite
     families need the per-level write: pooling keys on ``get_text_config().pad_token_id``, so a top-level-only write
     leaves the decoder's id unset (batch > 1 raises) or stale (pooling picks the wrong last token)."""
     if model is None:
         return
-    recorded = set_config_field(model.config, field, token_id, only_declared=True)
+    recorded = record_special_token_id(model.config, field, token_id)
     if not recorded and is_global_main_process():
         logger.warning(
             f"{type(model.config).__name__} declares no '{field}' at either the top level or on its "
@@ -143,7 +160,7 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
         )
     generation_config = getattr(model, "generation_config", None)
     if generation_config is not None:
-        setattr(generation_config, field, token_id)
+        _record_token_id(generation_config, field, token_id)
 
 
 def reject_stale_eos_copies(model: PreTrainedModel | None, eos_token_id) -> None:

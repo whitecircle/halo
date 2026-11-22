@@ -8,13 +8,20 @@ import datasets
 from datasets.features import Json
 from PIL import Image
 
-from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, is_image_placeholder, resolve_json_value
+from halo.data.conversation import (
+    IMAGE_PART_PAYLOAD_KEY,
+    IMAGE_PART_TYPE,
+    is_image_placeholder,
+    resolve_json_value,
+    resolve_row_reasoning_effort,
+    template_column_kwargs,
+)
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
 from halo.data.render_columns import reject_missing_render_column
 from halo.data.turn_markers import reject_missing_response_marker
 from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
-from halo.data.vlm_render import extract_conversation_images, render_vlm_text, vlm_row_tools
+from halo.data.vlm_render import extract_conversation_images, render_vlm_training_text, vlm_row_template_kwargs
 from halo.runtime.consensus import agree_probe_across_ranks
 
 # A row's history to the longest conversation its collator renders from it, for the over-length filter.
@@ -99,6 +106,7 @@ def build_vlm_row_processor(
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
     tools_field: str | None = None,
+    reasoning_effort_field: str | None = None,
     images_field: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
     """Images extracted, the conversation reshaped into history. No tokenizer: the render runs later in
@@ -118,19 +126,26 @@ def build_vlm_row_processor(
             raw = row[tools_field]
             tools_json = raw if isinstance(raw, str) else json.dumps(raw)
 
-        return {"history": history, "images": images, "tools_json": tools_json}
+        return {
+            "history": history,
+            "images": images,
+            "tools_json": tools_json,
+            "reasoning_effort": resolve_row_reasoning_effort(row, reasoning_effort_field),
+        }
 
     return process_row
 
 
 def vlm_map_features() -> datasets.Features:
-    """Pinned because shard-wise inference disagrees on a mixed dataset (text-only ``content`` infers ``List(struct)``,
-    image parts ``Json``, no images ``List(null)``), failing a multiprocess map's shard alignment."""
+    """Pinned because inference per shard or writer batch disagrees on a mixed dataset (text-only ``content`` infers
+    ``List(struct)``, image parts ``Json``, no images ``List(null)``, no tools or level ``null``), failing a
+    multiprocess map's shard alignment or a later batch's cast."""
     return datasets.Features(
         {
             "history": [{"role": datasets.Value("string"), "content": Json()}],
             "images": datasets.Sequence(datasets.Image()),
             "tools_json": datasets.Value("string"),
+            "reasoning_effort": datasets.Value("string"),
         }
     )
 
@@ -140,15 +155,22 @@ _VLM_SIGNATURE_COLUMNS = ("input_ids", "labels", "attention_mask", *vlm_map_feat
 
 
 def _filter_vlm_over_length(
-    ds, processor, tokenizer, max_length: int, num_proc: int, measured_history: _MeasuredHistory | None
+    ds,
+    processor,
+    tokenizer,
+    max_length: int,
+    num_proc: int,
+    measured_history: _MeasuredHistory | None,
+    eos_token_ids: frozenset[int],
 ):
     """Drop rows whose rendered text alone exceeds ``max_length``; vision tokens stay uncounted, the collator being the
     exact backstop. The all-dropped refusal is world-agreed, since a presharded corpus counts per rank."""
 
     def fits(row) -> bool:
-        # The collator's own render, tools included, so the filter measures the sequence it collates.
+        # The collator's own render, template variables and the closed last turn included, so the filter measures the
+        # sequence it collates.
         history = row["history"] if measured_history is None else measured_history(row["history"], row)
-        text = render_vlm_text(processor, history, tools=vlm_row_tools(row))
+        text = render_vlm_training_text(processor, tokenizer, history, eos_token_ids, **vlm_row_template_kwargs(row))
         return len(tokenizer(text, add_special_tokens=False)["input_ids"]) <= max_length
 
     before = dataset_total_size(ds)
@@ -176,13 +198,14 @@ def prepare_vlm_dataset(
     max_length: int,
     num_proc: int,
     *,
+    eos_token_ids: frozenset[int],
     keep: tuple[str, ...] = (),
-    features: datasets.Features | None = None,
     desc: str = "Processing VLM dataset",
     measured_history: _MeasuredHistory | None = None,
 ):
-    """Map every split, dropping columns outside the collator signature but ``keep``, then over-length rows.
-    ``measured_history`` must be a module-level function or a partial of one, for the filter's cache key."""
+    """Map every split, dropping columns outside the collator signature but ``keep``, then over-length rows, measured
+    as the collator closes them against ``eos_token_ids``, the model's terminators. ``measured_history`` must be a
+    module-level function or a partial of one, for the filter's cache key."""
     # Before the map: the collator is built after it, so a missing marker would cost the whole tokenization.
     reject_missing_response_marker(args.assistant_message_template, args.train_on_completions_only, "VLM training")
     if args.interleaved_thinking:
@@ -190,14 +213,6 @@ def prepare_vlm_dataset(
             "interleaved_thinking is text-only: no supported VLM family's chat template renders a "
             "clear_thinking kwarg, so on the VLM path the flag would silently do nothing."
         )
-    if features is not None and keep:
-        raise ValueError(
-            f"prepare_vlm_dataset got both a pinned Arrow schema and keep={list(keep)}: the schema "
-            f"declares exactly the mapped columns, so the kept ones have no slot in it and the map "
-            f"would die on an Arrow cast inside a worker. Pass one or the other."
-        )
-    if features is None and not keep:
-        features = vlm_map_features()
     # Here, not per script: every consumer would otherwise train text-only on a mistyped column in silence.
     if args.images_field:
         reject_missing_render_column(ds, str(args.dataset), "images_field", args.images_field)
@@ -205,19 +220,27 @@ def prepare_vlm_dataset(
         "conversation_field": args.conversation_field,
         "system_prompt": args.system_prompt,
         "model_supports_system_role": args.model_supports_system_role,
-        "tools_field": args.tools_field,
+        **template_column_kwargs(args),
         # The run dispatch takes such a column as image data without images_field, so the map has to read it too.
         "images_field": args.images_field
         or next((column for column in VLM_RAW_IMAGE_COLUMNS if column in ds["train"].column_names), None),
     }
-    ds = coordinated_map(
-        ds,
-        build_vlm_row_processor(**cache_key_extras),
-        num_proc=num_proc,
+    process_row = build_vlm_row_processor(**cache_key_extras)
+    mapped = {}
+    for name, split in ds.items():
         # Sorted: the list feeds the cache key, and set order is hash-randomized per process.
-        remove_columns=sorted(set(ds["train"].column_names) - set(_VLM_SIGNATURE_COLUMNS) - set(keep)),
-        desc=desc,
-        cache_key_extras=cache_key_extras,
-        **({"features": features} if features is not None else {}),
+        dropped = sorted(set(split.column_names) - set(_VLM_SIGNATURE_COLUMNS) - set(keep))
+        # Split by split: the pinned schema names every output column, and splits may type a passed-through one apart.
+        passed = {column: split.features[column] for column in split.column_names if column not in dropped}
+        mapped[name] = coordinated_map(
+            datasets.DatasetDict({name: split}),
+            process_row,
+            num_proc=num_proc,
+            remove_columns=dropped,
+            desc=desc,
+            cache_key_extras=cache_key_extras,
+            features=datasets.Features({**passed, **vlm_map_features()}),
+        )[name]
+    return _filter_vlm_over_length(
+        datasets.DatasetDict(mapped), processor, tokenizer, max_length, num_proc, measured_history, eos_token_ids
     )
-    return _filter_vlm_over_length(ds, processor, tokenizer, max_length, num_proc, measured_history)

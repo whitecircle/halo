@@ -12,6 +12,7 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import KTOScriptArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
 from halo.data.vlm_detection import dataset_declares_images_across_ranks, reject_unsupported_media_across_ranks
@@ -81,8 +82,11 @@ def main():
         KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments
     )
 
-    # TRL templates and tokenizes the raw columns itself: it passes no `tools=`, and its rows have no input_ids.
-    reject_unsupported_args("KTO training", tools_field=args.tools_field, log_decoded_samples=args.log_decoded_samples)
+    # TRL templates and tokenizes the raw columns itself, reading template variables only from its own `tools` and
+    # `chat_template_kwargs` columns, and its rows have no input_ids.
+    reject_unsupported_args(
+        "KTO training", **template_column_kwargs(args), log_decoded_samples=args.log_decoded_samples
+    )
 
     context = init_training_script(
         args,

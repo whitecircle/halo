@@ -32,7 +32,9 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 - The parts are tagged, not headed, so a task's markdown heading or a program's comment never reads as a section of the prompt.
 - Every part but `<setting>`, the term's own text, is escaped: the `<` of any of these tags or of `<reasoning>` that the quoted text spells, in any case, is written `&lt;`. Policy text, a tool result or a task can neither close its part nor forge a reasoning block.
-- The judge grades the policy's actions, answers and tool results, and reads its reasoning as context only.
+- The judge grades the policy's actions, answers and tool results, and reads its reasoning as context only. A view
+  that shows no reasoning (none sampled, `include_reasoning: false`, or `final`) drops the rubric's line on reading it,
+  so the visible message is both the policy's working and the evidence.
 
 ### Views
 
@@ -42,7 +44,7 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 A turn header (`full` and `digest`) notes a reasoning cap hit, an engine cut, an empty turn, or calls all unknown or refused.
 
-A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a reasoning cap, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
+A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a reasoning cap or with thinking off, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
 
 ### The length cut
 

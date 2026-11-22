@@ -31,6 +31,7 @@ from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_
 from halo.data.pipeline.text_rows import text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.render_columns import reject_missing_render_column
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.entrypoints.data_setup import (
     apply_vision_options,
     disable_trl_dataset_prep,
@@ -174,6 +175,7 @@ def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, 
         tokenizer,
         max_length,
         num_proc,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, model_config),
         keep=privileged,
         desc="Processing VLM self-distillation dataset",
         measured_history=measured_history,

@@ -127,6 +127,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
                 tokenizer=tokenizer,
                 max_length=sft_config.max_length,
                 add_generation_prompt=True,
+                eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
                 **render_kwargs,
             ),
             desc="Processing generate dataset",
@@ -139,7 +140,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, sft_config, desc="Processing dataset"
+            ds, tokenizer, args, sft_config, hf_config, desc="Processing dataset"
         )
     _reject_empty_split(train_dataset, "training", sft_config.max_length)
     if sft_config.packing:

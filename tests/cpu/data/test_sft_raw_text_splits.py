@@ -32,6 +32,7 @@ def _args(generate_eval_examples: bool) -> SimpleNamespace:
         model_supports_system_role=True,
         interleaved_thinking=False,
         tools_field=None,
+        reasoning_effort_field=None,
         train_on_completions_only=False,
         assistant_message_template=None,
         train_on_last_assistant_only=False,

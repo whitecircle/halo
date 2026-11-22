@@ -26,8 +26,9 @@ nothing about the artifact, and the prepared value is what trained. The rendered
 still applies.
 
 Two groups are compared. The chat-render knobs are `--conversation_field`, `--system_prompt`,
-`--model_supports_system_role false`, `--tools_field`, `--interleaved_thinking`, `--images_field`, and, under
-completion masking, `--assistant_message_template`. The tokenizer mutations — `--pad_token`,
+`--model_supports_system_role false`, `--tools_field`, `--reasoning_effort_field`, `--interleaved_thinking`,
+`--images_field`, and, under completion masking, `--assistant_message_template`. A stamp that predates
+`--reasoning_effort_field` reads as baked without one. The tokenizer mutations — `--pad_token`,
 `--eos_token`, `--bos_token`, `--chat_template` — change the ids themselves: an EOS override moves
 the completion-mask boundaries, and a template override re-renders every turn. `--chat_template` is
 recorded as resolved template *text*, so a path and the text it names compare equal.
@@ -119,10 +120,10 @@ vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to
 A row carrying a video or audio part raises rather than drops, since no collator feeds one and a dropped
 row would leave an artifact that looks whole.
 
-Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
-`--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
-emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids` and the like —
-the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8-27B, Qwen3.8-Flash-Next and Gemma 4 processors all emit it, so
+Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field`,
+`--reasoning_effort_field` or `--interleaved_thinking` (the offline render would diverge from the runtime
+one), and a processor emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids`
+and the like — the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8-27B, Qwen3.8-Flash-Next and Gemma 4 processors all emit it, so
 their image rows train through the runtime VLM path and `--is_vlm` bakes only their text rows.
 
 VLM sequences are never truncated, since cutting expanded placeholders while `pixel_values` keeps
@@ -148,7 +149,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 |-----------|---------|-------------|
 | `--input` | *required* | Input: S3 URI, Hub ID, or local path |
 | `--output` | *required* | Output: S3 URI, `hf://org/name`, or local path |
-| `--model_name_or_path` | *required* | Model name/path for the tokenizer; completion-only masking also reads its `config.json` for the turn-terminator ids, so it must be the model checkpoint, not a bare tokenizer |
+| `--model_name_or_path` | *required* | Model name/path for the tokenizer; a chat or VLM bake also reads its `config.json` for the turn-terminator ids, which close a row's last assistant turn ([Collators](collators.md#eos-pad-and-the-response-template)) and end each completion span, so it must be the model checkpoint, not a bare tokenizer |
 | `--max_length` | `8192` | Maximum sequence length |
 | `--trust_remote_code` / `--no-trust_remote_code` | `False` | Execute the checkpoint's own tokenizer/processor and config code when loading them — off, since `--model_name_or_path` may be a Hub repo; pass it for a remote-code family (Bailing/Ling, Laguna) you trust ([Scripts](../reference/scripts-reference.md#input-guards)) |
 | `--mode` | `chat` | `chat` = apply chat template to `--conversation_field` (SFT); `text` = raw-text causal-LM for (continued) pre-training (tokenize `--text_field`, append EOS per document). See [Pre-training](../training-methods/pretraining.md). |
@@ -157,6 +158,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--conversation_field` | `prompt` | Conversation field name (mode=chat). Matches the training-side default |
 | `--system_prompt` | `None` | System prompt to prepend |
 | `--tools_field` | `None` | Dataset field holding a tool list (list of dicts or JSON string), forwarded into `apply_chat_template` — must match the `tools_field` used at training time. Rejected with `--is_vlm` |
+| `--reasoning_effort_field` | `None` | Dataset field holding each row's reasoning-effort level, forwarded into `apply_chat_template` as `reasoning_effort` — must match the `reasoning_effort_field` used at training time. Rejected with `--is_vlm` |
 | `--interleaved_thinking` | off | Keep thinking blocks in non-final assistant turns (`clear_thinking=False`), matching the live path's `interleaved_thinking`. Rejected with `--is_vlm` |
 | `--model_supports_system_role` | `True` | `false` merges the system prompt into the first user message (models without a system role) |
 | `--train_on_completions_only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant_message_template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |

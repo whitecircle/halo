@@ -207,7 +207,7 @@ def main():
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, training_config, desc="Processing distillation dataset"
+            ds, tokenizer, args, training_config, student_model.config, desc="Processing distillation dataset"
         )
         data_collator = _text_distill_collator(args, tokenizer, student_model.config)
 
